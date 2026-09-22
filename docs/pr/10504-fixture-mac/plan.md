@@ -1,16 +1,16 @@
 # DRAFT v4 — Fix the 183-red descriptor-enforcement baseline on the fixture-MAC gate (#10504)
 
-- Status: DRAFT v4 (plan only; no production code, no test changes in this lane).
-- Base: `7dcdd7383` (`sessions: share protocol filter contract across REST/gRPC/CLI (#10486)`), branch `fix/10504-fixture-mac`.
+- Status: DRAFT v4 (approved implementation plan; post-rebase evidence refreshed; no production code in this document).
+- Base: `5049e78c9000c042edcf2dd217c0b5a26a1abcac` (`show: annotate quarantined zone text (#10489)`), branch `fix/10504-fixture-mac`.
 - Pinned research base: `b71c52d6` (issue body; our HEAD is newer — see STEP-0 drift note).
 - Date: 2026-09-22.
 - Sequencing: implementation starts after PR #10544 landed (blocked-by note quoted in §10).
 
 ## 1. Problem
 
-The live full release run on this lane and the cited research baseline agree:
-`FAILED. 6392 passed; 183 failed; 6 ignored` (6581 total). The cited family
-splits are revocation 8/58, embedded-filter 28/36, fragment 45/19,
+The current rebased full release run reports `6399 passed; 183 failed; 6
+ignored` (6588 total); the cited research baseline was 6392/183/6. The cited
+family splits remain revocation 8/58, embedded-filter 28/36, fragment 45/19,
 session_hit_authority 0/10; sibling filter-revocation control 6/0.
 
 Root cause (single mechanism, three fixture/frame shapes): the AF_XDP poll boundary
@@ -47,31 +47,33 @@ witness, so a packet that never reaches L3 satisfies them. Two other survivors a
 genuine (NAT64 with phase-1 `tx==1` + two-session + phase-2 hit witnesses; the
 type-constrained-predicate direct forwarding-state check).
 
-Separately, the only Make gate is blocked before Rust: `Makefile:99` orders
-`test-go test-rust`, `:271` runs `pkg/refactoraudit` uncached, and
-`TestStructMetricIsTypesNotFields6937` fails (Go calibration). That half is owned by
-PR #10544 (#10496/#10497), not by this issue.
+At the pre-rebase baseline, the only Make gate was blocked before Rust:
+`Makefile:99` ordered `test-go test-rust`, `:271` ran `pkg/refactoraudit`
+uncached, and `TestStructMetricIsTypesNotFields6937` failed (Go calibration).
+That half was owned by PR #10544 (#10496/#10497); the post-rebase Go proof is
+green in §2.1 and remains out of scope for this issue.
 
 ## 2. STEP-0 evidence
 
-### 2.1 What was RUN on this base vs CITED (honesty boundary)
+### 2.1 What was RUN on the rebased base vs CITED (honesty boundary)
 
-RUN (this lane, HEAD `7dcdd7383`, isolated `GOCACHE=/dev/shm/Eng10504/gocache`,
-`GOTMPDIR=/dev/shm/Eng10504/gotmpdir`, Rust `CARGO_TARGET_DIR=/dev/shm/Eng10504/cargo-target`):
+RUN (this lane, rebased HEAD `5049e78c9000c042edcf2dd217c0b5a26a1abcac`,
+isolated `GOCACHE=/dev/shm/Eng10504-v4/gocache`,
+`GOTMPDIR=/dev/shm/Eng10504-v4/gotmpdir`, Rust
+`CARGO_TARGET_DIR=/dev/shm/Eng10504-v4/cargo-target`):
 
 - Full release suite:
   `cargo +1.98.1 test --manifest-path userspace-dp/Cargo.toml --release --bin xpf-userspace-dp -- --test-threads=1`
-  → `test result: FAILED. 6392 passed; 183 failed; 6 ignored; 0 measured; 0 filtered out; finished in 55.09s`.
+  → `test result: FAILED. 6399 passed; 183 failed; 6 ignored; 0 measured; 0 filtered out`.
   This is the full release suite, not a narrowed sample. The complete failure artifact
-  is `artifact://59670`; its 183 distinct failure blocks were parsed for §3.
-- Revocation family (part of that same full suite): 66 cells, 8 passed and 58
-  failed. The eight names are enumerated in §5; subtraction from the 66 test
-  declarations was checked against the 58 failure blocks in `artifact://59670`.
+  is `artifact://60681`; its 183 distinct failure blocks were parsed for §3.
+- Revocation family (part of the same full suite): 66 cells, 8 passed and 58
+  failed. The targeted recount artifact is `artifact://60697`; the eight names
+  are enumerated in §5.
 - Go calibration gate:
   `go test -count=1 -run TestStructMetricIsTypesNotFields6937 ./pkg/refactoraudit/`
-  → `--- FAIL: TestStructMetricIsTypesNotFields6937 (2.70s)` /
-  `structs_6937_test.go:95: CompileResult (32 fields, 21 types) flags; it is the
-  just-UNDER calibration point for a floor of 20`. Make gate is blocked before Rust.
+  → `ok github.com/psaab/xpf/pkg/refactoraudit 0.004s`. The post-rebase Make
+  gate can reach Rust; its Make/Go changes remain out of scope.
 - Static census and component review (RUN): `poll_descriptor/mod.rs:276-289`,
   `forwarding/fabric.rs:198-238`, `test_fixtures.rs:674-822,951-1021`,
   `tests_support.rs` frame builders, revocation/authority/fragment/embedded drivers.
@@ -88,8 +90,9 @@ CITED (not re-run in this lane; retained as causality and provenance):
 - PR #10544 validation records `GO=false make test` reaching Rust and observing
   6392 passed / 183 failed / 6 ignored; its Make/Go changes remain out of scope.
 
-The live full run exactly matches the cited 6392/183/6 baseline on this HEAD, so
-the STEP-0 census is closed before implementation.
+The post-rebase full run retains the 183-failure/6-ignored census while adding
+seven passing tests from merged master: 6588 total, 6399 passed, 183 failed,
+6 ignored. The STEP-0 census is therefore stable for implementation.
 
 ### 2.2 Gate and symbol map (exact paths on this HEAD)
 
@@ -117,11 +120,12 @@ listed in §5 and independently obtained by subtracting the 58 failure names in
 
 ### 2.4 Base/provenance note
 
-The issue cites research pinned to `b71c52d6`; this lane's HEAD is `7dcdd7383`.
-The live full run on this HEAD nevertheless reproduces the exact cited denominator
-and result: 6581 total, 6392 passed, 183 failed, 6 ignored. Therefore the plan's
-STEP-0 census is live on the current lane, not a stale citation; implementation
-still starts with a recount after rebasing onto #10544 as required by §10.
+The issue cites research pinned to `b71c52d6`; this lane's rebased HEAD is
+`5049e78c9000c042edcf2dd217c0b5a26a1abcac`. The live run is 6588 total, 6399
+passed, 183 failed, 6 ignored; the targeted revocation recount is 8/58.
+The 181 M-MAC + H-TUN + H-EXPECT classification remains unchanged, so the
+implementation proceeds from this verified tip and repeats the final recount
+after fixture changes land.
 
 ## 3. Failure-class census (183 reds)
 
@@ -384,11 +388,12 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
   would weaken production. Mitigation: choose the helper-level re-scope before M1
   so the recount denominator is settled before fixture changes land; do not defer
   Q1 until after M2/M3.
-- R5 Base/provenance: the live current-HEAD run exactly matches the pinned
-  6392/183/6 denominator, but implementation still rebases onto #10544. Mitigation:
-  repeat the unfiltered release recount after rebase and compare the exact module
-  table in §3; any changed block receives a new evidence-backed class assignment.
-  This is a revalidation risk, not an unresolved census.
+- R5 Base/provenance: the rebased current-HEAD run is 6399/183/6 (6588 total)
+  versus the cited 6392/183/6 baseline; the failure denominator and named
+  classes are unchanged. Mitigation: repeat the unfiltered recount after each
+  implementation stage and compare the exact module table in §3; any changed
+  block receives a new evidence-backed class assignment. This is a revalidation
+  risk, not an unresolved census.
 - R6 PR #10544 interplay: file overlap is ZERO (that PR: `Makefile`,
   `docs/log/10496.md`, `docs/pr/10496-serial-gate-floor/plan.md`,
   `pkg/docsref/make_aggregate_10496_test.go`, `pkg/refactoraudit/structs_6937_test.go`;
@@ -451,7 +456,7 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
   #10553 (H-TUN) and #10552 (H-EXPECT). The `181 + 2 = 183` figure is baseline
   cohort accounting, not a post-fix allowance for 183 failures. If the
   denominator is unchanged, the expected aggregate after fixing those 181
-  cells is `6573 passed / 2 failed / 6 ignored` (6581 total), with the two
+  cells is `6580 passed / 2 failed / 6 ignored` (6588 total), with the two
   failures named and separately owned. This issue does not require a 0-failed
   release leg. Any additional red is unexplained until instrumented and routed
   separately.
@@ -497,7 +502,7 @@ Day-zero order (in this lane's successor implementation):
    the five descriptor survivors and the helper-level #9513 proof). Record exactly
    181 M-MAC green plus the two named #10553/#10552 residual blocks, or route
    any additional red as H-NONMAC with evidence. Treat 181 + 1 + 1 = 183 as
-   baseline cohort accounting; if unchanged, the expected aggregate is 6573
+   baseline cohort accounting; if unchanged, the expected aggregate is 6580
    passed / 2 failed / 6 ignored. Do not require release 0-failed.
 8. Open the implementation PR (this DRAFT v4 becomes its plan section); parent
    lanes run delta plan review next — no reviewer dispatch from this lane.
@@ -535,11 +540,14 @@ Day-zero order (in this lane's successor implementation):
   Add the opt-in cfg(test)-only `txn_run_descriptor_checked(...,
   expect_mac_acceptance: bool)` wrapper in `tests_support.rs`; it asserts that
   `ingress_destination_mac_accepted` equals the explicit expectation before
-  delegating to the raw helper. Every migrated fixture test uses the wrapper
-  with `true`; no production path can call it. The 10314 raw control must remain
-  raw because it intentionally supplies a wrong-unicast destination and proves
-  pre-L3 recycle. This is separate from H-EXPECT/#10552's cfg-gated session-test
-  repair.
+  delegating to the raw helper. End state: every direct caller of
+  `txn_run_descriptor` uses the checked wrapper with `true` except that
+  enumerated 10314 negative. A grep proof in the implementation PR must show
+  raw-helper references only at its definition, the checked-wrapper delegation,
+  and that named negative. No production path can call the wrapper. The 10314
+  raw control must remain raw because it intentionally supplies a wrong-unicast
+  destination and proves pre-L3 recycle. This is separate from
+  H-EXPECT/#10552's cfg-gated session-test repair.
 - K1 (baseline gone): rejected as a current PLAN-KILL premise. #10544 changed
   Make/Go only and the gate/fixtures/builders remain on this tip; step 3 still
   revalidates the baseline after rebase, but a changed denominator is handled
@@ -548,11 +556,11 @@ Day-zero order (in this lane's successor implementation):
   the gate's fail-closed pre-L3 ordering is correct; no gate inversion or
   test-only bypass is in scope.
 
-## 12. Blast-radius numbers (live on HEAD 7dcdd7383 unless marked CITED)
+## 12. Blast-radius numbers (live on rebased HEAD 5049e78c unless marked CITED)
 
 | # | Measure | Value | How reproduced |
 |---|---|---|---|
-| B1 | Full release suite (RUN on HEAD `7dcdd7383`) | 6392 passed / 183 failed / 6 ignored (6581 total) | Isolated full command in §2.1; failure artifact `artifact://59670` |
+| B1 | Full release suite (RUN on rebased HEAD `5049e78c`) | 6399 passed / 183 failed / 6 ignored (6588 total) | Isolated full command in §2.1; failure artifact `artifact://60681` |
 | B2 | Static `#[test]` / `#[ignore]` attrs (this HEAD, `userspace-dp/src/**/*.rs`) | 6672 / 8 (664 files) | In-repo source census; declaration count is independent of the filtered binary result |
 | B3 | Revocation file cells | 66 (`tests_policy_revocation_8356.rs`) | `#[test]\\nfn` source census = 66; issue "59 of 67" corrected to 66 |
 | B4 | Cited family splits (green/red) | revocation 8/58; embedded 28/36; fragment 45/19; authority 0/10; control 6/0 | Issue research provenance; live revocation 8/58 and full module census are §2.3/§3 |
@@ -565,7 +573,7 @@ Day-zero order (in this lane's successor implementation):
 | B11 | Fixture file sizes | `test_fixtures.rs` 2126 lines / 88K; `tests_support.rs` 2852 lines / 104K; `fabric.rs` 820; `poll_descriptor/mod.rs` 7312 (read-only) | `wc -l`, `du -sh` |
 | B12 | PR #10544 file overlap with this issue | 0 paths (that PR: Makefile + 2 docs + 2 Go files; this issue: `userspace-dp/src/afxdp/**` only) | PR body Files(5) vs §2.2 map |
 | B13 | Fix touch estimate (strategy §4) | builder audit uses the 195 raw-hit builder migration denominator: txn-v4 104 = 1 definition + 103 external uses; txn-v6 low-level 7 = 1 definition + 1 wrapper-internal use + 5 external uses; txn-v6 SYN wrapper 18 = 1 definition + 17 external uses; ICMP-v4 descriptor 24 = 1 definition + 23 external uses; ICMP-v6 7 = 1 definition + 6 external uses; frag eth 9 = 1 definition + 1 wrapper-internal use + 7 external uses; frag transit wrapper 13 = 1 definition + 12 external uses; deny-SYN 13 = 1 definition + 12 external uses. Thus 8 definitions + 2 wrapper-internal uses + 185 external uses = 195 builder migration hits. Five are mechanical frame/-dir co-touches (`frame/mod.rs` 1, `frame/tests_9782_copy.rs` 2 v4 + 2 SYN-wrapper) that still require signature migration but do not drive descriptors. The separate frame/ ICMP-v4 17/6 (1 definition + 16 uses) is pure-frame/no-touch, and the combined raw regex is 212, not a migration denominator. Fixtures: ~2 snapshot fns + arrival-row audit (~13 files read, ~6 edited); drivers: 2-3 fns + five descriptor guards + one helper-level guard; tests: 0 outcome asserts weakened | B6-B9 fan-out; exact per-site checklist at implementation |
-| B14 | Go gate live proof | `TestStructMetricIsTypesNotFields6937` FAIL (CompileResult 32f/21t vs floor 20) | RUN §2.1 |
+| B14 | Go gate live proof | `TestStructMetricIsTypesNotFields6937` PASS post-rebase (`ok github.com/psaab/xpf/pkg/refactoraudit 0.004s`) | RUN §2.1 |
 
 Evidence sources: in-repo source census for B2/B6-B10, `wc -l`/`du -sh` for B11,
 and the internal issue/PR records (`issue://10504`, `issue://10544`, `issue://10552`,
