@@ -8,6 +8,8 @@ Userspace dataplane helper:
   Forwarding armed:          true
   Forwarding supported:      false
   Forwarding blocked by:     reason-a; reason-b
+  Last snapshot rejection:   policy trust->untrust/web names content the userspace matcher cannot represent: source-address "missing-book"; application "bad-app", "worse-app"
+                             policy global/dns names content the userspace matcher cannot represent: destination-address
   Workers:                   3
   Ring entries:              4096
   Last snapshot generation:  12

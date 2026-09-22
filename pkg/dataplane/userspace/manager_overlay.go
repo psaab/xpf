@@ -239,6 +239,10 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 		next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
 		next.schedulerActiveStateSet = true
 	}
+	// #10500: scheduler-aware overlay rebuilds recompute the diagnostic;
+	// route-only republishes inherit the current caps. Record before the
+	// duplicate skip so the manager stamp converges even without wire I/O.
+	m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
 
 	// Duplicate-publish skip: identical content (e.g. the actuator ran
 	// twice for the same overlay) does not need a control-socket

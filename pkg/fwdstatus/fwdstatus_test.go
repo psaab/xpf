@@ -2,6 +2,7 @@ package fwdstatus
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -289,6 +290,65 @@ func TestBuild_Unknown_UserspaceStatusErr(t *testing.T) {
 	fs, _ := Build(dp, freshProcReader(), time.Now(), SamplerSnapshot{})
 	if fs.State != StateUnknown {
 		t.Errorf("userspace Status err: state %q, want Unknown", fs.State)
+	}
+}
+
+func TestLastSnapshotRejectReasonsReachRenderedSurface10500(t *testing.T) {
+	reasons := []string{
+		`policy trust->untrust/web names content the userspace matcher cannot represent: source-address "missing-book"; application "bad-app", "worse-app"`,
+		`policy global/dns names content the userspace matcher cannot represent: destination-address`,
+	}
+	dp := &fakeUserspaceDP{
+		fakeDP: fakeDP{loaded: true},
+		status: userspace.ProcessStatus{LastSnapshotRejectReasons: reasons},
+	}
+	fs, err := Build(dp, freshProcReader(), time.Now(), SamplerSnapshot{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(fs.LastSnapshotRejectReasons) != len(reasons) ||
+		fs.LastSnapshotRejectReasons[0] != reasons[0] ||
+		fs.LastSnapshotRejectReasons[1] != reasons[1] {
+		t.Fatalf("Build copied reasons = %v, want %v", fs.LastSnapshotRejectReasons, reasons)
+	}
+	out := Format(fs)
+	wantFirst := fmt.Sprintf("  %-34s %s\n", "Last snapshot rejection", reasons[0])
+	if !strings.Contains(out, wantFirst) {
+		t.Fatalf("forwarding output missing padded first rejection row %q:\n%s", wantFirst, out)
+	}
+	if !strings.Contains(out, strings.Repeat(" ", 37)+reasons[1]) {
+		t.Fatalf("forwarding output missing continuation rejection row:\n%s", out)
+	}
+	if strings.Contains(out, reasons[0]+"; "+reasons[1]) {
+		t.Fatalf("forwarding output joined separate reasons onto one line:\n%s", out)
+	}
+}
+
+func TestLastSnapshotRejectReasonsAbsentFromForwardingSurface10500(t *testing.T) {
+	dp := &fakeUserspaceDP{
+		fakeDP: fakeDP{loaded: true},
+	}
+	fs, err := Build(dp, freshProcReader(), time.Now(), SamplerSnapshot{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if strings.Contains(Format(fs), "Last snapshot rejection") {
+		t.Fatal("empty rejection reasons rendered a forwarding row")
+	}
+}
+
+func TestLastSnapshotRejectReasonsOmittedWhenStatusUnavailable10500(t *testing.T) {
+	dp := &fakeUserspaceDP{
+		fakeDP: fakeDP{loaded: true},
+		status: userspace.ProcessStatus{LastSnapshotRejectReasons: []string{"stale"}},
+		err:    errors.New("status unavailable"),
+	}
+	fs, err := Build(dp, freshProcReader(), time.Now(), SamplerSnapshot{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if strings.Contains(Format(fs), "Last snapshot rejection") {
+		t.Fatal("status-unavailable userspace helper rendered stale rejection reasons")
 	}
 }
 
