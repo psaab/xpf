@@ -336,7 +336,11 @@ fn admit_duplicate_id_rejected_until_drained() {
     assert!(!dup2.admitted, "undrained terminal id cannot be reused");
     assert_eq!(core.drain_ready(16).len(), 1);
     let ok = core.admit(&frame(1, 4, 64));
-    assert!(ok.admitted, "drained id is reusable");
+    assert!(
+        !ok.admitted,
+        "terminal tombstone must prevent request-ID reuse"
+    );
+    assert_eq!(ok.reason, ADMIT_BAD_LEASE);
 }
 
 #[test]
