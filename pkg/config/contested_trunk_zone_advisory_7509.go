@@ -15,8 +15,11 @@ import (
 // That makes the failure SAFE — transit is DENIED as unattributed (#6682
 // refuses it before the implicit default policy) instead of being policed
 // under a zone the operator never wrote for it. Host-bound handling is scoped
-// below: a genuine non-lifeline contest uses #10503; an addressed/tunnel
-// refusal uses #5659; lifelines and shapes with no sentinel remain admitted.
+// below: a genuine non-lifeline contest uses #10503; an unzoned addressed /
+// unzoned tunnel refusal uses #5659; narrow lifelines and shapes with no
+// sentinel remain admitted; prefix-only / lo0 names are zone-gated (neither
+// sentinel arms there, and kernel lifeline exclusion does not apply). An
+// all-zoned tunnel Disagree admits with neither sentinel.
 // It does not make the consequence LEGIBLE: an operator whose untagged trunk
 // traffic starts being denied has no way to reach "these units share a base
 // netdev and disagree about their zone" without reading source. That is the
@@ -105,18 +108,33 @@ func interfaceUnitCollapsesOnBase(
 		cfg.resolveKernelIfNameWith(base, tunnelNames)
 }
 
-// userspaceHostInboundLifeline reports the union of config-aware lifelines and
-// the name/prefix exclusions used by the AF_XDP ingress bind path. Keep this
-// mirror broad: the Rust snapshot matcher and userspaceSkipsIngressInterface
-// exclude fxp*/em*/fab* and lo0, while configured control/fabric names remain
-// valid lifelines even when they do not match a prefix.
+// userspaceHostInboundLifeline is the config-aware host-inbound lifeline
+// selector. Keep this narrow: the broad AF_XDP bind exclusions are not all
+// unconditional host-inbound admits.
 func userspaceHostInboundLifeline(cfg *Config, name string) bool {
+	return HostInboundLifelineInterface(name, HostInboundLifelineSet(cfg))
+}
+
+// userspaceHostInboundZoneGated identifies names excluded from the AF_XDP bind
+// path that are not canonical/configured host-inbound lifelines. Their
+// host-bound traffic remains subject to the applicable zone policy; neither
+// warning site may describe them as a sentinel deny or unconditional admit.
+func userspaceHostInboundZoneGated(cfg *Config, name string) bool {
+	if userspaceHostInboundLifeline(cfg, name) {
+		return false
+	}
 	base := LifelineBaseName(name)
-	return HostInboundLifelineInterface(name, HostInboundLifelineSet(cfg)) ||
-		strings.HasPrefix(base, "fxp") ||
+	return strings.HasPrefix(base, "fxp") ||
 		strings.HasPrefix(base, "em") ||
 		strings.HasPrefix(base, "fab") ||
 		base == "lo0"
+}
+
+func zoneGatedHostBoundAdvisory() string {
+	return "Host-bound traffic on this AF_XDP bind-excluded interface is " +
+		"zone-gated by applicable zone policy; the name is excluded from " +
+		"userspace binding, but it is neither an unconditional lifeline admit " +
+		"nor a host-inbound sentinel deny. "
 }
 
 func sharedUnitIsAddressedOrTunnel(
@@ -149,15 +167,18 @@ func sharedDeviceHostBoundAdvisory(
 	base string,
 	shared map[string][]string,
 ) string {
+	if userspaceHostInboundZoneGated(cfg, base) {
+		return zoneGatedHostBoundAdvisory()
+	}
 	if userspaceHostInboundLifeline(cfg, base) {
 		return "Host-bound traffic on this lifeline remains admitted; #5659 " +
 			"deliberately does not arm an empty-zone host-inbound sentinel. "
 	}
 	if sharedUnitIsAddressedOrTunnel(cfg, base, shared[base]) {
 		return "Host-bound traffic to the firewall itself is denied by the #5659 " +
-			"empty-zone host-inbound sentinel (ICMP errors/PMTUD/ND control " +
-			"messages remain admitted; an explicit per-interface host-inbound " +
-			"stanza still takes precedence). "
+			"empty-zone host-inbound sentinel when local-target/tunnel exposure " +
+			"arms that path (ICMP errors/PMTUD/ND control messages remain admitted; " +
+			"an explicit per-interface host-inbound stanza still takes precedence). "
 	}
 	return "Host-bound traffic remains admitted via the global None => true " +
 		"host-inbound path because this address-less non-tunnel refusal has no " +
@@ -195,17 +216,13 @@ func contestedHostBoundAdvisory(
 	shared map[string][]string,
 	tunnelNames map[string]string,
 ) string {
-	lifeline := userspaceHostInboundLifeline(cfg, base)
-	if sharedUnitIsAddressedOrTunnel(cfg, base, shared[base]) {
-		if lifeline {
-			return "Host-bound traffic on this lifeline remains admitted; #5659 " +
-				"deliberately does not arm an empty-zone host-inbound sentinel. "
-		}
-		return "Host-bound traffic to the firewall itself is denied by the #5659 " +
-			"empty-zone host-inbound sentinel (ICMP errors/PMTUD/ND control " +
-			"messages remain admitted; an explicit per-interface host-inbound " +
-			"stanza still takes precedence). "
+	if len(shared[base]) != 0 {
+		return sharedDeviceHostBoundAdvisory(cfg, base, shared)
 	}
+	if userspaceHostInboundZoneGated(cfg, base) {
+		return zoneGatedHostBoundAdvisory()
+	}
+	lifeline := userspaceHostInboundLifeline(cfg, base)
 	if interfaceTunnelHasCollapsedUnits(cfg, base, tunnelNames) {
 		return "Host-bound traffic remains admitted: all collapsed tunnel " +
 			"units are zoned, so neither the #5659 empty-zone sentinel nor " +
@@ -217,9 +234,10 @@ func contestedHostBoundAdvisory(
 	}
 	return "Host-bound traffic to the firewall itself is denied by the " +
 		"contested-parent host-inbound sentinel (#10503; ICMP errors/PMTUD/ND " +
-		"control messages remain admitted; an explicit per-interface " +
-		"host-inbound stanza still takes precedence). "
+		"control messages remain admitted; an explicit per-interface host-inbound " +
+		"stanza still takes precedence). "
 }
+
 
 // contestedTrunkZones returns, per base interface, the sorted distinct zones its
 // COLLAPSED UNITS are bound to — only for bases whose collapsed units span MORE
@@ -301,11 +319,12 @@ func contestedTrunkZonesWithMaps(
 // unit that actually receives frames on the device was never zoned. Transit is
 // denied as unattributed before any policy is consulted (#6682) only when the
 // resulting ingress is fully unzoned; a retained unit zone is policy-evaluated.
-// Host-bound handling is shape-dependent: addressed/tunnel traffic is denied by
-// the #5659 empty-zone host-inbound sentinel, address-less non-tunnel traffic
-// remains on the global `None => true` admit path, and retained-zone traffic is
-// zone-gated. ICMP errors/PMTUD/ND control messages remain admitted, and an
-// explicit per-interface host-inbound stanza takes precedence.
+// Host-bound handling is shape-dependent: addressed/tunnel traffic follows the
+// #5659 empty-zone host-inbound path when local-target/tunnel exposure arms it,
+// address-less non-tunnel traffic remains on the global `None => true` admit
+// path, and retained-zone traffic is zone-gated. ICMP errors/PMTUD/ND control
+// messages remain admitted, and an explicit per-interface host-inbound stanza
+// takes precedence.
 //
 // SCOPED TO THE UNITS THAT ACTUALLY COLLAPSE, which is the difference between
 // this and a restatement of the contest above. A unit on its OWN device is
@@ -327,7 +346,17 @@ func sharedDeviceUnzonedUnits(cfg *Config) map[string][]string {
 	if len(zoneByIface) == 0 {
 		return nil
 	}
-	tunnelNames := tunnelNameMapFn(cfg)
+	return sharedDeviceUnzonedUnitsWithMaps(cfg, zoneByIface, tunnelNameMapFn(cfg))
+}
+
+func sharedDeviceUnzonedUnitsWithMaps(
+	cfg *Config,
+	zoneByIface map[string]string,
+	tunnelNames map[string]string,
+) map[string][]string {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 || len(zoneByIface) == 0 {
+		return nil
+	}
 	var out map[string][]string
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil || len(ifc.Units) < 2 {
@@ -430,7 +459,7 @@ func appendContestedTrunkZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 		bases = append(bases, base)
 	}
 	sort.Strings(bases)
-	shared := sharedDeviceUnzonedUnits(cfg)
+	shared := sharedDeviceUnzonedUnitsWithMaps(cfg, zoneByIface, tunnelNames)
 	for _, base := range bases {
 		hostBound := contestedHostBoundAdvisory(cfg, base, shared, tunnelNames)
 		if interfaceTunnelHasCollapsedUnits(cfg, base, tunnelNames) {

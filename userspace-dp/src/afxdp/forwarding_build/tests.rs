@@ -2456,6 +2456,15 @@ fn all_zoned_tunnel_disagree_snapshot_10520() -> ConfigSnapshot {
         ],
         interfaces: vec![
             InterfaceSnapshot {
+                name: "st0".into(),
+                zone: "trust".into(),
+                linux_name: "st0".into(),
+                ifindex: 61,
+                is_unit: Some(false),
+                tunnel: true,
+                ..Default::default()
+            },
+            InterfaceSnapshot {
                 name: "st0.0".into(),
                 zone: "trust".into(),
                 linux_name: "st0".into(),

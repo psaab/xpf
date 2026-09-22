@@ -551,6 +551,59 @@ func TestUnzonedInterfaceTunnelDisagreeUsesEmptyZoneHostShape7509(t *testing.T) 
 	}
 }
 
+func TestSharedDeviceOverlapPreemptsContestHostShape7509(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		addressed bool
+	}{
+		{name: "addressless", addressed: false},
+		{name: "addressed", addressed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const base = "ge-0/0/20"
+			cfg := sharedDeviceCfg7509(t, base, false,
+				map[int]int{0: 0, 100: 100, 200: 200},
+				map[string][]string{
+					"lan": {"ge-0/0/20.100"},
+					"wan": {"ge-0/0/20.200"},
+				})
+			if tc.addressed {
+				cfg.Interfaces.Interfaces[base].Units[0].Addresses =
+					[]string{"192.0.2.1/24"}
+			}
+
+			appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+			appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+
+			sharedWarnings := warningsMentioning(cfg, "has unit(s)")
+			if len(sharedWarnings) != 1 {
+				t.Fatalf("expected one shared-device warning; got %d: %v",
+					len(sharedWarnings), cfg.Warnings)
+			}
+			contestWarnings := warningsMentioning(cfg, "has units in more than one security zone")
+			if len(contestWarnings) != 1 {
+				t.Fatalf("expected one contested warning; got %d: %v",
+					len(contestWarnings), cfg.Warnings)
+			}
+			for _, warning := range []string{sharedWarnings[0], contestWarnings[0]} {
+				if strings.Contains(warning, "#10503") {
+					t.Fatalf("shared-device overlap must not claim #10503: %s", warning)
+				}
+				if tc.addressed {
+					if !strings.Contains(warning, "#5659") {
+						t.Fatalf("addressed overlap must describe #5659 path: %s", warning)
+					}
+				} else {
+					if !strings.Contains(warning, "None => true") ||
+						strings.Contains(warning, "is denied by the #5659") {
+						t.Fatalf("addressless overlap must retain global admit path: %s", warning)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestEnforcementLifelineNamesScopeBothAdvisories7509(t *testing.T) {
 	for _, name := range []string{"lo0", "em1", "fab-foo"} {
 		t.Run(name, func(t *testing.T) {
@@ -564,10 +617,12 @@ func TestEnforcementLifelineNamesScopeBothAdvisories7509(t *testing.T) {
 				t.Fatalf("expected one contested warning for %s; got %v",
 					name, contested.Warnings)
 			}
-			if !strings.Contains(contestWarnings[0], "admitted") ||
-				!strings.Contains(contestWarnings[0], "lifeline") ||
-				strings.Contains(contestWarnings[0], "is denied by") {
-				t.Fatalf("contested lifeline warning must admit host traffic; got: %s",
+			if !strings.Contains(contestWarnings[0], "zone-gated") ||
+				strings.Contains(contestWarnings[0], "admitted") ||
+				strings.Contains(contestWarnings[0], "is denied by") ||
+				strings.Contains(contestWarnings[0], "#10503") ||
+				strings.Contains(contestWarnings[0], "#5659") {
+				t.Fatalf("contested bind-excluded warning must remain zone-gated; got: %s",
 					contestWarnings[0])
 			}
 
@@ -580,11 +635,12 @@ func TestEnforcementLifelineNamesScopeBothAdvisories7509(t *testing.T) {
 				t.Fatalf("expected one shared-device warning for %s; got %v",
 					name, shared.Warnings)
 			}
-			if !strings.Contains(sharedWarnings[0], "admitted") ||
-				!strings.Contains(sharedWarnings[0], "lifeline") ||
+			if !strings.Contains(sharedWarnings[0], "zone-gated") ||
+				strings.Contains(sharedWarnings[0], "admitted") ||
 				strings.Contains(sharedWarnings[0], "is denied by") ||
-				strings.Contains(sharedWarnings[0], "#10503") {
-				t.Fatalf("shared lifeline warning must admit host traffic; got: %s",
+				strings.Contains(sharedWarnings[0], "#10503") ||
+				strings.Contains(sharedWarnings[0], "#5659") {
+				t.Fatalf("shared bind-excluded warning must remain zone-gated; got: %s",
 					sharedWarnings[0])
 			}
 		})

@@ -115,9 +115,17 @@ const UNIT_REFUSED_HOST_BOUND_RETAINED_10520: &str =
 const UNIT_REFUSED_HOST_BOUND_LIFELINE_10520: &str =
     "Host-bound traffic on this lifeline remains admitted; #5659 deliberately does \
      not arm an empty-zone host-inbound sentinel.";
+const UNIT_REFUSED_HOST_BOUND_GATED_10520: &str =
+    "Host-bound traffic on this AF_XDP bind-excluded interface remains zone-gated by \
+     applicable zone policy; this prefix-only/lo0 name follows the applicable \
+     zone's host-inbound rules.";
 const UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520: &str =
     "Host-bound traffic on this lifeline remains admitted; #10503 deliberately \
      does not arm a contested-parent sentinel.";
+const UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520: &str =
+    "Host-bound traffic on this AF_XDP bind-excluded interface remains zone-gated by \
+     applicable zone policy; this prefix-only/lo0 name follows the applicable \
+     zone's host-inbound rules.";
 
 const UNIT_REFUSED_HOST_BOUND_CONTESTED_OVERRIDE_10520: &str =
     "Host-bound traffic follows the explicit per-interface host-inbound override; \
@@ -148,26 +156,33 @@ fn unit_refused_host_bound_warning_10520(
         UNIT_REFUSED_HOST_BOUND_RETAINED_10520
     } else if host_sentinel {
         UNIT_REFUSED_HOST_BOUND_SENTINEL_10520
-    } else if config_name.is_some_and(is_host_inbound_lifeline) {
-        UNIT_REFUSED_HOST_BOUND_LIFELINE_10520
     } else if host_override {
         UNIT_REFUSED_HOST_BOUND_OVERRIDE_10520
+    } else if config_name.is_some_and(is_narrow_host_inbound_lifeline) {
+        UNIT_REFUSED_HOST_BOUND_LIFELINE_10520
+    } else if config_name.is_some_and(is_zone_gated_host_inbound_name) {
+        UNIT_REFUSED_HOST_BOUND_GATED_10520
     } else {
         UNIT_REFUSED_HOST_BOUND_ADMIT_10520
     }
 }
 
 fn contested_host_bound_warning_10520(
+    empty_zone_sentinel: bool,
     contested_sentinel: bool,
     host_override: bool,
     config_name: Option<&str>,
 ) -> &'static str {
-    if contested_sentinel {
+    if empty_zone_sentinel {
+        UNIT_REFUSED_HOST_BOUND_SENTINEL_10520
+    } else if contested_sentinel {
         UNIT_REFUSED_HOST_BOUND_CONTESTED_10520
-    } else if config_name.is_some_and(is_host_inbound_lifeline) {
-        UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520
     } else if host_override {
         UNIT_REFUSED_HOST_BOUND_CONTESTED_OVERRIDE_10520
+    } else if config_name.is_some_and(is_narrow_host_inbound_lifeline) {
+        UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520
+    } else if config_name.is_some_and(is_zone_gated_host_inbound_name) {
+        UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520
     } else {
         UNIT_REFUSED_HOST_BOUND_ADMIT_10520
     }
@@ -199,6 +214,9 @@ mod warning_text_tests_10520 {
         assert!(UNIT_REFUSED_HOST_BOUND_RETAINED_10520.contains("override"));
         assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("admitted"));
         assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("#5659"));
+        assert!(UNIT_REFUSED_HOST_BOUND_GATED_10520.contains("zone-gated"));
+        assert!(!UNIT_REFUSED_HOST_BOUND_GATED_10520.contains("admitted"));
+        assert!(!UNIT_REFUSED_HOST_BOUND_GATED_10520.contains("denied"));
         assert!(UNIT_REFUSED_HOST_BOUND_OVERRIDE_10520.contains("override"));
         assert!(UNIT_REFUSED_HOST_BOUND_ADMIT_10520.contains("None => true"));
         assert!(UNIT_REFUSED_HOST_BOUND_ADMIT_10520.contains("all-zoned tunnel"));
@@ -208,7 +226,19 @@ mod warning_text_tests_10520 {
         assert!(UNIT_REFUSED_HOST_BOUND_CONTESTED_10520.contains("override"));
         assert!(UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520.contains("#10503"));
         assert!(!UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520.contains("#5659"));
+        assert!(UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520.contains("zone-gated"));
+        assert!(!UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520.contains("admitted"));
+        assert!(!UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520.contains("denied"));
         assert!(UNIT_REFUSED_HOST_BOUND_CONTESTED_OVERRIDE_10520.contains("contested-parent"));
+        for name in ["fxp0", "em0", "fab0", "fab10", "fab0.0"] {
+            assert!(is_narrow_host_inbound_lifeline(name), "{name} must be narrow");
+            assert!(!is_zone_gated_host_inbound_name(name));
+        }
+        for name in ["fxp1", "em1", "fab-foo", "lo0", "lo0.0"] {
+            assert!(is_host_inbound_lifeline(name), "{name} must remain broad");
+            assert!(is_zone_gated_host_inbound_name(name), "{name} must be gated");
+            assert!(!is_narrow_host_inbound_lifeline(name));
+        }
         let disagree = UnitZoneClaim::Disagree;
         let agreed = UnitZoneClaim::Agreed("trust".into());
         assert!(unit_refused_rows_are_all_zoned_10520(
@@ -236,6 +266,10 @@ mod warning_text_tests_10520 {
             UNIT_REFUSED_HOST_BOUND_LIFELINE_10520
         );
         assert_eq!(
+            unit_refused_host_bound_warning_10520(false, false, false, Some("em1")),
+            UNIT_REFUSED_HOST_BOUND_GATED_10520
+        );
+        assert_eq!(
             unit_refused_host_bound_warning_10520(false, false, true, Some("reth0.0")),
             UNIT_REFUSED_HOST_BOUND_OVERRIDE_10520
         );
@@ -244,15 +278,27 @@ mod warning_text_tests_10520 {
             UNIT_REFUSED_HOST_BOUND_ADMIT_10520
         );
         assert_eq!(
-            contested_host_bound_warning_10520(false, true, Some("reth0.0")),
+            contested_host_bound_warning_10520(false, false, true, Some("reth0.0")),
             UNIT_REFUSED_HOST_BOUND_CONTESTED_OVERRIDE_10520
         );
         assert_eq!(
-            contested_host_bound_warning_10520(false, false, Some("fab0.0")),
+            contested_host_bound_warning_10520(true, true, true, Some("em1")),
+            UNIT_REFUSED_HOST_BOUND_SENTINEL_10520
+        );
+        assert_eq!(
+            contested_host_bound_warning_10520(false, true, false, Some("reth0.0")),
+            UNIT_REFUSED_HOST_BOUND_CONTESTED_10520
+        );
+        assert_eq!(
+            contested_host_bound_warning_10520(false, false, false, Some("fab0.0")),
             UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520
         );
         assert_eq!(
-            contested_host_bound_warning_10520(false, false, Some("st0.0")),
+            contested_host_bound_warning_10520(false, false, false, Some("em1")),
+            UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520
+        );
+        assert_eq!(
+            contested_host_bound_warning_10520(false, false, false, Some("st0.0")),
             UNIT_REFUSED_HOST_BOUND_ADMIT_10520
         );
     }
@@ -899,10 +945,12 @@ pub(super) fn populate_interfaces(
         //   - !iface.host_inbound_configured: an explicit per-interface override
         //     already inserted its own (possibly deny-all) `ifindex_host_inbound`
         //     entry above; never clobber the operator's configured admit set.
-        //   - !is_host_inbound_lifeline: fxp0/em0/fab* are served UNCONDITIONALLY
-        //     (kernel path, excluded from the AF_XDP deny sets). Never arm a deny
-        //     sentinel for a lifeline — doing so would strand management / break
-        //     HA heartbeat the moment a future change bound one.
+        //   - !is_host_inbound_lifeline: the broad fxp*/em*/fab* and lo0
+        //     predicate is the bind-exclusion/sentinel-SKIP mirror. Only the
+        //     narrow names receive unconditional lifeline wording; prefix-only
+        //     names and lo0 are zone-gated in diagnostics. For an unbound
+        //     interface this skip is inert, but it keeps a future bind or
+        //     quarantine path from arming a sentinel for an excluded name.
         //
         // Reachability today is bind-gated (`buildUserspaceBindNetdevs` skips a
         // zoneless interface), so this is a fail-closed-SYMMETRY / defense-in-
@@ -1001,10 +1049,13 @@ pub(super) fn populate_interfaces(
     // interface count for one fact.
     for (ifindex, zones) in &contested_parent_zones {
         let ids: Vec<String> = zones.iter().map(|z| z.to_string()).collect();
+        let empty_zone_sentinel = empty_zone_host_inbound_sentinels.contains(ifindex);
         let contested_sentinel = contested_host_inbound_sentinels.contains(ifindex);
-        let host_override =
-            state.ifindex_host_inbound.contains_key(ifindex) && !contested_sentinel;
+        let host_override = state.ifindex_host_inbound.contains_key(ifindex)
+            && !empty_zone_sentinel
+            && !contested_sentinel;
         let host_bound = contested_host_bound_warning_10520(
+            empty_zone_sentinel,
             contested_sentinel,
             host_override,
             state
@@ -1036,7 +1087,8 @@ pub(super) fn populate_interfaces(
     // Host-bound selection follows built state: a retained zone is zone-gated,
     // an installed #5659 sentinel denies addressed/tunnel traffic with control
     // carve-outs, and a full refusal without that sentinel remains on the
-    // global admit path unless the config name identifies a lifeline.
+    // global admit path unless the config name identifies a narrow lifeline;
+    // broad prefix-only/lo0 names remain zone-gated in the warning text.
     // The commit-time advisory
     // (`pkg/config/contested_trunk_zone_advisory_7509.go`) is the one that can
     // name the INTERFACE; this one is the runtime corroboration.
@@ -1290,41 +1342,51 @@ pub(in crate::afxdp) fn connected_route_tables(routing_instance: &str) -> (Strin
 /// #5659: base-name lifeline match, mirroring the NAME/prefix exclusions of the
 /// authoritative Go SSOT `userspaceSkipsIngressInterface`
 /// (pkg/dataplane/userspace/maps_sync.go): the `fxp*` / `em*` / `fab*` prefixes
-/// plus `lo0`. A lifeline interface's host-bound traffic is served
-/// UNCONDITIONALLY by the kernel path (excluded from the AF_XDP host-inbound
-/// deny sets), so the empty-zone fail-closed backstop in [`populate_interfaces`]
-/// must never arm a deny sentinel for one — that would strand management / break
-/// the HA heartbeat the moment a future change bound it.
+/// plus `lo0`. This broad predicate is for bind-exclusion and sentinel-SKIP
+/// parity, not for every warning's unconditional-admit text. Prefix-only names
+/// and `lo0` are not narrow kernel lifelines in warning text, so those branches
+/// remain zone-gated.
 ///
-/// The earlier form matched only the exact `fxp0` / `em0` names, which was
-/// NARROWER than the SSOT and would arm a deny sentinel on an unzoned+addressed
-/// `lo0` (a router-id / BGP `update-source` loopback) or an `fxp1` / `em1` in
-/// the exact future case this backstop hardens — reintroducing a
-/// management-strand. The remaining arms of `userspaceSkipsIngressInterface` are
-/// handled elsewhere or moot here:
-///   - the mgmt/control-ZONE arm is unreachable — the sentinel branch already
-///     requires an EMPTY zone;
-///   - the `LocalFabric != ""` (fabric parent) arm is subsumed by the `fab*`
-///     prefix, so a fabric parent that gains an L3 address stays exempt;
-///   - the `Tunnel` arm is inert — a tunnel interface is likewise excluded from
-///     the AF_XDP ingress-ifindex map by the same SSOT, so a sentinel on one is
-///     never consulted.
+/// The broad skip is intentionally inert for an unbound interface today:
+/// `buildUserspaceBindNetdevs` does not bind a zoneless interface, so no packet
+/// can consult its sentinel. Keeping the broad predicate here still prevents a
+/// future bind or quarantine path from arming a sentinel for a bind-excluded
+/// name. Only exact `fxp0`, exact `em0`, and canonical `fab` plus digits receive
+/// unconditional lifeline wording.
 ///
 /// The config-derived control/fabric names (#3277: a renamed `control-interface`
 /// / non-default fabric) are still NOT mirrored here because the snapshot does
 /// not carry them; that stays safe only because such a renamed lifeline is
-/// zoneless and thus not AF_XDP-bound today (`buildUserspaceBindNetdevs` skips a
-/// zoneless interface), so a missed match leaves an INERT sentinel that is never
-/// consulted. If a future change binds a zoneless interface, this predicate MUST
-/// be reconciled with `userspaceSkipsIngressInterface` (add a parity test). The
-/// unit suffix is stripped so `em0.0` / `fab1.0` / `lo0.0` match too.
-fn is_host_inbound_lifeline(name: &str) -> bool {
-    let base = match name.split_once('.') {
-        Some((b, _)) => b,
-        None => name,
+/// zoneless and thus not AF_XDP-bound today. If a future change binds a zoneless
+/// interface, this predicate MUST be reconciled with
+/// `userspaceSkipsIngressInterface` (add a parity test). The unit suffix is
+/// stripped so `em0.0` / `fab1.0` / `lo0.0` match too.
+fn host_inbound_base_name(name: &str) -> &str {
+    match name.split_once('.') {
+        Some((base, _)) => base.trim(),
+        None => name.trim(),
     }
-    .trim();
+}
+
+fn is_host_inbound_lifeline(name: &str) -> bool {
+    let base = host_inbound_base_name(name);
     base.starts_with("fxp") || base.starts_with("em") || base.starts_with("fab") || base == "lo0"
+}
+
+fn is_narrow_host_inbound_lifeline(name: &str) -> bool {
+    let base = host_inbound_base_name(name);
+    base == "fxp0" || base == "em0" || is_canonical_fabric_name(base)
+}
+
+fn is_canonical_fabric_name(base: &str) -> bool {
+    let Some(suffix) = base.strip_prefix("fab") else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_zone_gated_host_inbound_name(name: &str) -> bool {
+    is_host_inbound_lifeline(name) && !is_narrow_host_inbound_lifeline(name)
 }
 
 pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<Ipv4Addr> {
