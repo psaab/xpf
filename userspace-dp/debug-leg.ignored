@@ -1,0 +1,2 @@
+xpf-userspace-dp	afxdp::session_glue::tests::reconcile_cost_9327	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	nat::tests_pool::recycle_amortization_9327	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
