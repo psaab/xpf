@@ -102,7 +102,7 @@ fn a_new_session_starts_unvalidated_for_policy_8356() {
 #[test]
 fn a_re_stamped_session_is_fresh_until_the_generation_moves_8356() {
     let (mut table, k) = table_with_one_session(41);
-    table.mark_policy_revalidated(&k);
+    table.mark_policy_revalidated(&k, PolicyRevalidationKind::LiveEgress);
     assert_eq!(
         table.policy_revalidation_target(&k),
         PolicyRevalidationTarget::Fresh,
@@ -143,7 +143,7 @@ fn a_re_stamped_session_is_fresh_until_the_generation_moves_8356() {
 #[test]
 fn the_policy_stamp_does_not_vary_with_the_arrival_interface_8356() {
     let (mut table, k) = table_with_one_session(41);
-    table.mark_policy_revalidated(&k);
+    table.mark_policy_revalidated(&k, PolicyRevalidationKind::LiveEgress);
     // The FILTER stamp would read stale for a different ingress here. The
     // policy stamp must not.
     assert_eq!(
@@ -176,7 +176,7 @@ fn the_policy_and_filter_stamps_do_not_suppress_each_other_8356() {
          re-derivation for the rest of the generation (#8356)"
     );
 
-    table.mark_policy_revalidated(&k);
+    table.mark_policy_revalidated(&k, PolicyRevalidationKind::LiveEgress);
     assert!(
         !table.filter_revalidation_stale(&k, IF_A),
         "and the filter stamp keeps its own state"
@@ -184,7 +184,7 @@ fn the_policy_and_filter_stamps_do_not_suppress_each_other_8356() {
 
     let (mut table2, k2) = table_with_one_session(41);
     table2.set_filter_revalidation_gen(41);
-    table2.mark_policy_revalidated(&k2);
+    table2.mark_policy_revalidated(&k2, PolicyRevalidationKind::LiveEgress);
     assert!(
         table2.filter_revalidation_stale(&k2, IF_A),
         "symmetrically, a POLICY re-stamp must not mark the FILTER verdict \

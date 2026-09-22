@@ -135,7 +135,11 @@ pub(in crate::afxdp::session_glue) fn collect_refresh_owner_rgs_items(
     // instead of trusting potentially stale RG ownership buckets.
     let mut refresh = Vec::new();
     sessions.iter_with_origin(|key, decision, metadata, origin| {
-        if metadata.owner_rg_id <= 0 && !metadata.fabric_ingress {
+        // #10507: every peer-synced origin is refresh-eligible even when
+        // owner_rg_id is unknown and no fabric-ingress marker is present.
+        // This closes the collector omission; the packet-time provenance
+        // fence remains the security proof when this command is delayed.
+        if !origin.is_peer_synced() && metadata.owner_rg_id <= 0 && !metadata.fabric_ingress {
             return;
         }
         let flow = SessionFlow {

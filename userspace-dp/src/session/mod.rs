@@ -630,6 +630,18 @@ pub(crate) enum PolicyRevalidationTarget {
     /// path, or a reused slab slot. Nothing to stamp, nothing to tear down.
     NoLocalEntry,
 }
+/// #10507: receiver-local provenance for the zone-policy stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyRevalidationKind {
+    /// Constructor/upsert default; generation 0 remains stale.
+    Unvalidated,
+    /// Permit derived using a current local forwarding egress.
+    LiveEgress,
+    /// Permit derived while the current decision was a non-local
+    /// FabricRedirect and therefore used recorded egress by design.
+    RecordedEgress,
+}
+
 
 #[derive(Clone, Debug)]
 struct SessionEntry {
@@ -828,6 +840,9 @@ struct SessionEntry {
     /// `SessionEntry` carries no serde, so this is on no wire and is not part of
     /// session identity.
     policy_revalidated_gen: u64,
+    /// #10507: receiver-local provenance for the zone-policy stamp. This is
+    /// intentionally not carried on the HA wire.
+    policy_revalidation_kind: PolicyRevalidationKind,
     /// #2120: the RG epoch (`rg_epochs[owner_rg_id]`, or the node-level
     /// `rg_epochs[0]` for `owner_rg_id <= 0`) recorded the last time this
     /// entry was self-healed (the expire pass observed this node START
@@ -1865,17 +1880,43 @@ impl SessionTable {
         }
     }
 
-    /// #8356: record that this entry's zone-policy verdict has been re-derived
-    /// under the live generation. Takes the CANONICAL key, so it is a
-    /// primary-index write; idempotent, and a miss is a no-op (the session was
-    /// torn down between the probe and here).
-    pub(crate) fn mark_policy_revalidated(&mut self, key: &SessionKey) {
+    /// #10507: return the receiver-local provenance paired with the zone
+    /// policy stamp. A missing entry is conservatively unvalidated.
+    pub(crate) fn policy_revalidation_kind(
+        &self,
+        key: &SessionKey,
+    ) -> PolicyRevalidationKind {
+        self.revalidation_record(key)
+            .map(|record| record.entry.policy_revalidation_kind)
+            .unwrap_or(PolicyRevalidationKind::Unvalidated)
+    }
+
+    /// #8356/#10507: record that this entry's zone-policy verdict has been
+    /// re-derived under the live generation and retain how that verdict was
+    /// derived. Takes the CANONICAL key; a miss is a no-op.
+    pub(crate) fn mark_policy_revalidated(
+        &mut self,
+        key: &SessionKey,
+        kind: PolicyRevalidationKind,
+    ) {
         let live_gen = self.policy_revalidation_gen;
         if let Some(handle) = self.key_to_handle.get(key).copied()
             && let Some(record) = self.entries.get_mut(handle as usize)
             && record.key == *key
         {
             record.entry.policy_revalidated_gen = live_gen;
+            record.entry.policy_revalidation_kind = kind;
+        }
+    }
+
+    /// #10507 A1/A2: leave the numeric generation untouched but revoke its
+    /// provenance so a later locally-forwarding packet must cold-judge.
+    pub(crate) fn clear_policy_revalidation_provenance(&mut self, key: &SessionKey) {
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+        {
+            record.entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
         }
     }
 
@@ -2763,6 +2804,12 @@ impl SessionTable {
             record.entry.decision = decision;
             record.entry.metadata = metadata.clone();
             record.entry.origin = origin;
+            // #10507 A1: a peer-to-local promotion cannot carry a Permit
+            // derived from the peer/recorded egress into local forwarding.
+            if was_peer_synced && !origin.is_peer_synced() {
+                record.entry.policy_revalidation_kind =
+                    PolicyRevalidationKind::Unvalidated;
+            }
             // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #3046: RST is sticky — once observed it keeps the entry on the
@@ -3126,6 +3173,10 @@ impl SessionTable {
                 .expect("handle validated above");
             record.entry.decision = decision;
             record.entry.metadata = metadata;
+            // #10507 A2: both activation and demotion refreshes revoke
+            // receiver-local policy provenance. Packet-time fencing remains
+            // authoritative if this command is delayed or skipped.
+            record.entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
             // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #2120: promotion refresh re-stamps `last_seen_ns` (the entry
