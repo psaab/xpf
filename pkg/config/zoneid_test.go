@@ -188,6 +188,39 @@ func TestStableZoneIDOwnerReturnsSurvivor(t *testing.T) {
 		t.Fatalf("StableZoneIDOwner for an unclaimed id = %q, want empty", got)
 	}
 }
+func TestZoneQuarantineHelpersMatchRuntimeVerdict(t *testing.T) {
+	if StableZoneID("z174") != StableZoneID("z214") {
+		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	}
+	names := []string{"z214", "z174"}
+	exclusions := ZoneQuarantineExclusions(names)
+	if _, ok := exclusions["z214"]; !ok {
+		t.Fatalf("ZoneQuarantineExclusions did not preserve the runtime exclusion: %v", exclusions)
+	}
+	if _, ok := exclusions["z174"]; ok {
+		t.Fatalf("ZoneQuarantineExclusions excluded the surviving zone: %v", exclusions)
+	}
+
+	cfg := &Config{Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+		"z174": {},
+		"z214": {},
+	}}}
+	reason := ZoneQuarantineExcludedReason("z214", cfg)
+	for _, want := range []string{"z214", "z174", "stable ID"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("quarantine reason %q does not mention %q", reason, want)
+		}
+	}
+	if got := ZoneQuarantineExcludedReason("z174", cfg); got != "" {
+		t.Fatalf("surviving zone received a quarantine reason: %q", got)
+	}
+	if got := ZoneQuarantineExcludedReason("ordinary", cfg); got != "" {
+		t.Fatalf("ordinary zone received a quarantine reason: %q", got)
+	}
+	if got := ZoneQuarantineExcludedReason("z214", nil); got != "" {
+		t.Fatalf("nil config received a quarantine reason: %q", got)
+	}
+}
 
 // #3719 (L13): the lenient warning must state that the later-sorting zone is
 // QUARANTINED and that isolation is degraded — the wording must not merely say

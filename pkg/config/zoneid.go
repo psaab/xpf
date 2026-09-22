@@ -244,6 +244,37 @@ func QuarantinedZoneNames(names []string) map[string]struct{} {
 	return quarantined
 }
 
+// ZoneQuarantineExclusions returns the security-zone names that the userspace
+// builders must exclude when StableZoneID collisions occur. It is the
+// builder-facing *Exclusions spelling used by the #6534 showaudit registry;
+// QuarantinedZoneNames remains the single source of the collision decision.
+func ZoneQuarantineExclusions(names []string) map[string]struct{} {
+	return QuarantinedZoneNames(names)
+}
+
+// ZoneQuarantineExcludedReason returns the operator-facing reason for a
+// quarantined zone in cfg. It returns an empty string for an ordinary or
+// survivor zone, and is deliberately derived from the same cfg.Security.Zones
+// key set consumed by the snapshot builders.
+func ZoneQuarantineExcludedReason(name string, cfg *Config) string {
+	if cfg == nil || name == "" || len(cfg.Security.Zones) < 2 {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.Security.Zones))
+	for zoneName := range cfg.Security.Zones {
+		names = append(names, zoneName)
+	}
+	quarantined := ZoneQuarantineExclusions(names)
+	if _, excluded := quarantined[name]; !excluded {
+		return ""
+	}
+	id := StableZoneID(name)
+	owner := StableZoneIDOwner(names, id)
+	return fmt.Sprintf(
+		"security zone %q is quarantined: stable ID %d is owned by surviving zone %q and was omitted from the dataplane",
+		name, id, owner)
+}
+
 // StableZoneIDOwner returns the security-zone name that OWNS a given numeric
 // zone id among names — the sorted-first name that folds to id, i.e. the zone
 // that survives QuarantinedZoneNames. It returns "" when no name in names folds
