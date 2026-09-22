@@ -2,10 +2,14 @@ package grpcapi
 
 import (
 	"context"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
+	"errors"
 	"strings"
 	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -32,6 +36,18 @@ func (d *quarantineGRPCDP) LastApplyResult() *dataplane.ApplyResult {
 func (d *quarantineGRPCDP) ReadZoneCounters(id uint16, dir int) (dataplane.CounterValue, error) {
 	d.reads++
 	return d.Manager.ReadZoneCounters(id, dir)
+}
+
+type quarantineGRPCReadErrDP struct {
+	*quarantineGRPCDP
+	errID uint16
+}
+
+func (d *quarantineGRPCReadErrDP) ReadZoneCounters(id uint16, dir int) (dataplane.CounterValue, error) {
+	if id == d.errID {
+		return dataplane.CounterValue{}, errors.New("trust counter bridge unavailable")
+	}
+	return d.quarantineGRPCDP.ReadZoneCounters(id, dir)
 }
 
 func newQuarantineGRPCFixture(t *testing.T, names ...string) (*Server, *quarantineGRPCDP, map[string]uint16) {
@@ -121,6 +137,31 @@ func TestGetZonesQuarantineCollision10531(t *testing.T) {
 	}
 	if dp.reads != 4 {
 		t.Fatalf("ReadZoneCounters calls = %d, want 4 (two non-quarantined rows only)", dp.reads)
+	}
+}
+
+// TestGetZonesQuarantinePreservesCounterError10531 pins the conjunction of
+// quarantine suppression and #3408 fail-loud behavior. The quarantined
+// z214 row must skip the shared-id read, while a genuine trust read failure
+// still reaches the unconditional Internal return.
+func TestGetZonesQuarantinePreservesCounterError10531(t *testing.T) {
+	if config.StableZoneID("z174") != config.StableZoneID("z214") {
+		t.Fatal("test premise broken: z174/z214 no longer collide")
+	}
+	s, dp, ids := newQuarantineGRPCFixture(t, "z174", "z214", "trust")
+	setQuarantineGRPCCounters(dp, ids["z174"], 11, 1100, 22, 2200)
+	errDP := &quarantineGRPCReadErrDP{
+		quarantineGRPCDP: dp,
+		errID:            ids["trust"],
+	}
+	s.dp = errDP
+
+	_, err := s.GetZones(context.Background(), &pb.GetZonesRequest{})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("GetZones error code = %v, want Internal; err=%v", status.Code(err), err)
+	}
+	if dp.reads != 2 {
+		t.Fatalf("ReadZoneCounters calls before genuine error = %d, want 2 for survivor only; quarantined z214 must be skipped", dp.reads)
 	}
 }
 

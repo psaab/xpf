@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -22,6 +23,18 @@ type quarantineRESTDP struct {
 func (d *quarantineRESTDP) ReadZoneCounters(id uint16, dir int) (dataplane.CounterValue, error) {
 	d.reads++
 	return d.Manager.ReadZoneCounters(id, dir)
+}
+
+type quarantineRESTReadErrDP struct {
+	*quarantineRESTDP
+	errID uint16
+}
+
+func (d *quarantineRESTReadErrDP) ReadZoneCounters(id uint16, dir int) (dataplane.CounterValue, error) {
+	if id == d.errID {
+		return dataplane.CounterValue{}, errors.New("trust counter bridge unavailable")
+	}
+	return d.quarantineRESTDP.ReadZoneCounters(id, dir)
 }
 
 func newQuarantineRESTFixture(t *testing.T, names ...string) (*Server, *quarantineRESTDP, map[string]uint16) {
@@ -178,6 +191,32 @@ func TestZonesHandlerQuarantineCollision10531(t *testing.T) {
 	}
 	if aliasLoser := restZoneByName10531(t, aliasZones, "z214"); aliasLoser.Quarantine == nil || aliasLoser.Quarantine.State != ZoneQuarantineStateQuarantined || aliasLoser.PerZoneCountersAvailable {
 		t.Fatalf("statistics alias z214 = %+v, want same quarantine suppression", aliasLoser)
+	}
+}
+
+// TestZonesHandlerQuarantinePreservesCounterError10531 pins the conjunction
+// of quarantine suppression and #3408 fail-loud behavior. The quarantined
+// z214 row must skip the shared-id read, while a genuine trust read failure
+// still reaches HTTP 500.
+func TestZonesHandlerQuarantinePreservesCounterError10531(t *testing.T) {
+	if config.StableZoneID("z174") != config.StableZoneID("z214") {
+		t.Fatal("test premise broken: z174/z214 no longer collide")
+	}
+	s, dp, ids := newQuarantineRESTFixture(t, "z174", "z214", "trust")
+	setQuarantineRESTCounters(dp, ids["z174"], 11, 1100, 22, 2200)
+	errDP := &quarantineRESTReadErrDP{
+		quarantineRESTDP: dp,
+		errID:            ids["trust"],
+	}
+	s.dp = errDP
+
+	rr := httptest.NewRecorder()
+	s.zonesHandler(rr, httptest.NewRequest(http.MethodGet, "/api/v1/security/zones", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("zonesHandler status = %d, want 500; body=%s", rr.Code, rr.Body.String())
+	}
+	if dp.reads != 2 {
+		t.Fatalf("ReadZoneCounters calls before genuine error = %d, want 2 for survivor only; quarantined z214 must be skipped", dp.reads)
 	}
 }
 
