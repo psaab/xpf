@@ -332,7 +332,12 @@ const (
 	// `ipsec_tunnel_rows` fences rows against same-key config/FIB publishes.
 	// A v29 helper can decode the rows but cannot prove that the packet's
 	// admitted handle generation is the one in the RuntimeView.
-	ProtocolVersion = 30
+	// v30 -> v31 (#10510): `zone_set_validated` authenticates the populated,
+	// collision-free zone identity set before Rust derives removed-zone ids.
+	// A v30 helper cannot distinguish a quarantined/legacy partial map from a
+	// real zone disappearance and can retain stale peer sessions; exact
+	// equality refuses the mixed pair.
+	ProtocolVersion = 31
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -642,18 +647,23 @@ type ConfigSnapshot struct {
 	// the latter advances for ordinary config/FIB publishes, while the former
 	// advances only when admitted NFQUEUE handles rotate. Rust D14 compares its
 	// packet snapshot-generation advisory against this exact capture authority.
-	IpsecTunnelSnapshotGeneration uint64                   `json:"ipsec_tunnel_snapshot_generation,omitempty"`
-	Summary                       SnapshotSummary          `json:"summary"`
-	Capabilities                  UserspaceCapabilities    `json:"capabilities"`
-	MapPins                       UserspaceMapPins         `json:"map_pins"`
-	Zones                         []ZoneSnapshot           `json:"zones,omitempty"`
-	Interfaces                    []InterfaceSnapshot      `json:"interfaces,omitempty"`
-	Fabrics                       []FabricSnapshot         `json:"fabrics,omitempty"`
-	TunnelEndpoints               []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
-	Neighbors                     []NeighborSnapshot       `json:"neighbors,omitempty"`
-	Routes                        []RouteSnapshot          `json:"routes,omitempty"`
-	Flow                          FlowSnapshot             `json:"flow,omitempty"`
-	DefaultPolicy                 string                   `json:"default_policy,omitempty"`
+	IpsecTunnelSnapshotGeneration uint64                `json:"ipsec_tunnel_snapshot_generation,omitempty"`
+	Summary                       SnapshotSummary       `json:"summary"`
+	Capabilities                  UserspaceCapabilities `json:"capabilities"`
+	MapPins                       UserspaceMapPins      `json:"map_pins"`
+	Zones                         []ZoneSnapshot        `json:"zones,omitempty"`
+	// ZoneSetValidated is true only when the producer supplied a populated
+	// zone set and completed duplicate/collision validation without
+	// quarantining a zone. Rust uses it to derive removed-zone ids; absent or
+	// false is a fail-closed no-op for old/ambiguous producers.
+	ZoneSetValidated bool                     `json:"zone_set_validated,omitempty"`
+	Interfaces       []InterfaceSnapshot      `json:"interfaces,omitempty"`
+	Fabrics          []FabricSnapshot         `json:"fabrics,omitempty"`
+	TunnelEndpoints  []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
+	Neighbors        []NeighborSnapshot       `json:"neighbors,omitempty"`
+	Routes           []RouteSnapshot          `json:"routes,omitempty"`
+	Flow             FlowSnapshot             `json:"flow,omitempty"`
+	DefaultPolicy    string                   `json:"default_policy,omitempty"`
 	// WgSteeredListenPorts (#9587) is the bounded SET of WireGuard listen
 	// ports the shim steers onto its AF_XDP WireGuard path (at most
 	// config.MaxSteeredWireGuardPorts, selected by config.SplitSteeredPorts):

@@ -253,6 +253,10 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) ifindex_unambiguous_zone_id: FastMap<i32, u16>,
     pub(in crate::afxdp) zone_name_to_id: FastMap<String, u16>,
     pub(in crate::afxdp) zone_id_to_name: FastMap<u16, String>,
+    /// The zone maps passed the snapshot-level duplicate/collision validator.
+    /// Hand-built test states leave this false, so removed-zone purging is
+    /// fail-closed unless the maps came from the real forwarding builder.
+    pub(in crate::afxdp) zone_set_validated: bool,
     /// #6458: zone ID → deduplicated redundancy-group IDs (> 0) of the
     /// zone's member interfaces, built at config-commit from
     /// `ifindex_to_zone_id` x `EgressInterface.redundancy_group`. A zone is

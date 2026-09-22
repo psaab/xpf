@@ -1482,7 +1482,7 @@ fn steering_key_aliases_routing_domain_and_gre_discriminator_9517() {
 }
 
 #[test]
-fn conntrack_policy_restamp_preserves_runtime_state_10509() {
+fn conntrack_policy_restamp_preserves_runtime_state_10511() {
     let mut metadata = synced_forward_metadata();
     metadata.policy_id = 37;
     metadata.ingress_zone = 11;

@@ -402,6 +402,9 @@ fn rebind_policy_sessions_from_snapshot(
     now_ns: u64,
 ) -> usize {
     let mut rebound = 0usize;
+    if !forwarding.policy_rematch_extensive {
+        return 0;
+    }
     for record in records {
         let (addr_family, src_ip, dst_ip) = match record.family.as_str() {
             "v4" => (
@@ -1347,30 +1350,6 @@ pub(crate) fn worker_loop(
             // the new tables can free the live (possibly carried)
             // reservation. Releasing against the old state would miss carried
             // copies and strand them in the new allocators.
-            let purged_removed_zone_sessions = purge_sessions_with_removed_zone_ids(
-                &mut sessions,
-                session_map.handle(),
-                conntrack_v4_fd,
-                conntrack_v6_fd,
-                &shared_sessions,
-                &shared_nat_sessions,
-                &shared_forward_wire_sessions,
-                &shared_owner_rg_indexes,
-                &peer_worker_commands,
-                &worker_commands_by_id,
-                &new_forwarding,
-                &removed_zone_ids,
-                loop_now_ns,
-                worker_id,
-            );
-            if purged_removed_zone_sessions > 0 {
-                debug_log!(
-                    "REMOVED_ZONE_SYNC_PURGE: worker={} zones={} sessions={}",
-                    worker_id,
-                    removed_zone_ids.len(),
-                    purged_removed_zone_sessions,
-                );
-            }
             let rematched_first_policy_sessions = rematch_bound_first_policy_sessions(
                 &forwarding,
                 &new_forwarding,
@@ -1419,6 +1398,30 @@ pub(crate) fn worker_loop(
                 );
             }
 
+            let purged_removed_zone_sessions = purge_sessions_with_removed_zone_ids(
+                &mut sessions,
+                session_map.handle(),
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &peer_worker_commands,
+                &worker_commands_by_id,
+                &forwarding,
+                &removed_zone_ids,
+                loop_now_ns,
+                worker_id,
+            );
+            if purged_removed_zone_sessions > 0 {
+                debug_log!(
+                    "REMOVED_ZONE_SYNC_PURGE: worker={} zones={} sessions={}",
+                    worker_id,
+                    removed_zone_ids.len(),
+                    purged_removed_zone_sessions,
+                );
+            }
             let purged_input_dscp = purge_sessions_for_input_dscp_filter_revalidation(
                 &mut sessions,
                 session_map.handle(),

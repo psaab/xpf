@@ -50,6 +50,7 @@ func (m *Manager) syncSnapshotLocked() error {
 		// or break the same-plan-during-XSK-startup exception.
 		hash, hashOK := snapshotContentHash(m.lastSnapshot)
 		m.publishedSnapshot = m.lastSnapshot.Generation
+		m.pendingFullSnapshotMetadata = false
 		m.publishedPlanKey = planKey
 		// #2079: the helper already reports this generation as applied
 		// (status.LastSnapshotGeneration >= m.lastSnapshot.Generation
@@ -139,6 +140,7 @@ func (m *Manager) syncSnapshotLocked() error {
 	if hashOK && hash == m.lastSnapshotHash && m.publishedSnapshot != 0 && !m.applySnapshotOutcomeUnknown &&
 		m.partialOutcomeUnknown == 0 {
 		// Still update the published generation so subsequent checks pass.
+		m.pendingFullSnapshotMetadata = false
 		m.publishedSnapshot = m.lastSnapshot.Generation
 		// The retained snapshot is content-equivalent to the helper's already
 		// published state, so this is a successful convergence boundary for its
@@ -211,6 +213,7 @@ func (m *Manager) syncSnapshotLocked() error {
 	// #9520: a content-conflict republish moves the snapshot to a fresh generation.
 	m.adoptPublishedGenerationLocked(m.lastSnapshot, publishSnap.Generation)
 	m.rebuildNeighborIndex()
+	m.pendingFullSnapshotMetadata = false
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = m.lastSnapshot.Generation
 	m.publishedPlanKey = planKey

@@ -653,18 +653,33 @@ pub(super) fn purge_sessions_for_input_dscp_filter_revalidation(
 /// snapshot zone set; an empty map on either side means the producer did not
 /// provide a populated zone set, so the safe answer is no removal rather than
 /// interpreting an empty new set as deletion of every old zone.
+/// `zone_set_validated` is carried by the producer only after it has supplied
+/// a populated, collision-free zone set. Both generations must carry the
+/// marker; absent/false is a safe no-op for legacy, empty, or quarantined
+/// snapshots because the id-keyed maps cannot distinguish quarantine from
+/// genuine disappearance.
 pub(super) fn removed_zone_ids_for_rotation(
     old_forwarding: &ForwardingState,
     new_forwarding: &ForwardingState,
 ) -> FastSet<u16> {
-    if old_forwarding.zone_id_to_name.is_empty() || new_forwarding.zone_id_to_name.is_empty() {
+    if !old_forwarding.zone_set_validated
+        || !new_forwarding.zone_set_validated
+        || old_forwarding.zone_id_to_name.is_empty()
+        || new_forwarding.zone_id_to_name.is_empty()
+    {
         return FastSet::default();
     }
     old_forwarding
         .zone_id_to_name
-        .keys()
-        .filter(|zone_id| **zone_id != 0 && !new_forwarding.zone_id_to_name.contains_key(zone_id))
-        .copied()
+        .iter()
+        .filter(|(zone_id, old_name)| {
+            **zone_id != 0
+                && new_forwarding
+                    .zone_id_to_name
+                    .get(zone_id)
+                    .is_none_or(|new_name| new_name != *old_name)
+        })
+        .map(|(zone_id, _)| *zone_id)
         .collect()
 }
 

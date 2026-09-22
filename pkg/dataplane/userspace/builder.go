@@ -253,6 +253,11 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	// netdev is absent. See ConfigSnapshot.WgSteeredListenPorts.
 	_, snap.WgSteeredListenPorts, _ = config.SplitSteeredPorts(config.SteeredWireGuardListenPorts(cfg))
 	snap.zoneIDCollisions = quarantineCollidingZones(snap)
+	// Removed-zone derivation is valid only for a populated, collision-free
+	// producer snapshot. A quarantined collision intentionally leaves the
+	// published set reduced, so Rust must not mistake that reduction for a
+	// committed zone removal.
+	snap.ZoneSetValidated = len(snap.Zones) > 0 && len(snap.zoneIDCollisions) == 0
 	if len(snap.zoneIDCollisions) > 0 {
 		// Keep the operator-facing counts equal to what is actually published.
 		snap.Summary.ZoneCount = len(snap.Zones)

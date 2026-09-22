@@ -534,6 +534,11 @@ pub(crate) struct ConfigSnapshot {
     pub map_pins: MapPins,
     #[serde(default)]
     pub zones: Vec<ZoneSnapshot>,
+    /// True only when the producer supplied a populated, collision-free zone
+    /// set. Removed-zone rotation is fail-closed when this marker is absent.
+    #[serde(rename = "zone_set_validated", default,
+            skip_serializing_if = "crate::protocol::bool_is_false")]
+    pub zone_set_validated: bool,
     #[serde(default)]
     pub interfaces: Vec<InterfaceSnapshot>,
     #[serde(default)]

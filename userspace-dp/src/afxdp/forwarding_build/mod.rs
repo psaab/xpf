@@ -573,10 +573,12 @@ fn build_fallible_forwarding_state(
     // any id-keyed map is populated — populate_zones would otherwise let the
     // later zone overwrite the earlier's reverse name / host-inbound set /
     // tcp-rst bit, merging two zones. The Go control plane quarantines a
-    // StableZoneID collision on the lenient path, so a clean snapshot never
-    // trips this; this is the helper-boundary backstop.
+    // #10510: carry the producer's populated/unique-zone proof into the
+    // immutable forwarding state. Rust duplicate validation alone cannot
+    // distinguish an intentional Go quarantine from a real rename removal.
     zones::reject_duplicate_zone_ids(snapshot)?;
     zones::populate_zones(snapshot, &mut state);
+    state.zone_set_validated = snapshot.zone_set_validated;
     // #2410: fail CLOSED on a tunnel TTL outside 0..=255 instead of
     // narrowing it with an unchecked `as u8` cast that would wrap
     // (256→0 blackholes the tunnel).

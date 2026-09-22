@@ -23,8 +23,8 @@ use super::*;
 use crate::tcp_flags::TCP_ACK;
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, PolicyRuleSnapshot,
-    ZoneSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
+    PolicyRuleSnapshot, ZoneSnapshot,
 };
 use std::net::Ipv4Addr;
 
@@ -600,4 +600,256 @@ fn a_foreign_packets_lo0_discard_does_not_tear_down_the_session_9519() {
         "a packet from dmz cannot tear down lan's host-bound session, even through a \
          terminal lo0 verdict (#9519)"
     );
+}
+
+#[test]
+fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
+    struct Shape {
+        name: &'static str,
+        dmz_permit: bool,
+        dead_egress: bool,
+        default_permit: bool,
+        permit_control: bool,
+    }
+    let shapes = [
+        Shape {
+            name: "single-zone-equivalent-permit",
+            dmz_permit: true,
+            dead_egress: false,
+            default_permit: false,
+            permit_control: true,
+        },
+        Shape {
+            name: "single-zone-default-deny",
+            dmz_permit: false,
+            dead_egress: false,
+            default_permit: false,
+            permit_control: false,
+        },
+        Shape {
+            name: "multi-zone-dead-egress-default-deny",
+            dmz_permit: false,
+            dead_egress: true,
+            default_permit: false,
+            permit_control: false,
+        },
+        Shape {
+            name: "multi-zone-dead-egress-default-permit",
+            dmz_permit: false,
+            dead_egress: true,
+            default_permit: true,
+            permit_control: true,
+        },
+    ];
+
+    fn matrix_forwarding(
+        dmz_permit: bool,
+        dead_egress: bool,
+        default_permit: bool,
+    ) -> ForwardingState {
+        let mut snapshot = nat_snapshot();
+        snapshot.source_nat_rules.clear();
+        snapshot.neighbors.push(NeighborSnapshot {
+            interface: "ge-0-0-0.80".to_string(),
+            ifindex: WAN_IFINDEX,
+            family: "inet".to_string(),
+            ip: "172.16.80.200".to_string(),
+            mac: "00:11:22:33:44:66".to_string(),
+            state: "reachable".to_string(),
+            router: false,
+            link_local: false,
+        });
+        snapshot.zones.push(ZoneSnapshot {
+            name: "dmz".to_string(),
+            id: TEST_DMZ_ZONE_ID,
+            host_inbound_configured: true,
+            host_inbound_system_services: vec!["any-service".to_string()],
+            ..Default::default()
+        });
+        snapshot.interfaces.push(InterfaceSnapshot {
+            name: "reth2.0".to_string(),
+            zone: "dmz".to_string(),
+            linux_name: "ge-0-0-2".to_string(),
+            ifindex: DMZ_IFINDEX,
+            mtu: 1500,
+            hardware_addr: "02:bf:72:02:00:01".to_string(),
+            ..Default::default()
+        });
+        if dmz_permit {
+            snapshot.policies.push(PolicyRuleSnapshot {
+                name: "dmz-to-wan".to_string(),
+                from_zone: "dmz".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "permit".to_string(),
+                ..Default::default()
+            });
+        }
+        snapshot.default_policy = if default_permit {
+            "permit".to_string()
+        } else {
+            "deny".to_string()
+        };
+        if dead_egress {
+            // Preserve the live WAN interface and route, but change its zone
+            // identity. The old session keeps metadata.egress_zone == 2;
+            // the live policy now has no pair whose egress is 2.
+            snapshot
+                .zones
+                .iter_mut()
+                .find(|zone| zone.name == "wan")
+                .expect("nat fixture must define wan")
+                .id = TEST_MGMT_ZONE_ID;
+        }
+        build_forwarding_state(&snapshot)
+    }
+
+    fn matrix_packet(arrival: i32, flags: u8) -> (Vec<u8>, UserspaceDpMeta) {
+        tcp(
+            REAL,
+            Ipv4Addr::new(172, 16, 80, 200),
+            REAL_PORT,
+            5201,
+            flags,
+            arrival,
+        )
+    }
+    const SWEEP_BOUNDARY_PACKETS: usize = 3;
+
+    fn matrix_forward_observation(sessions: &SessionTable) -> (u64, u32) {
+        let mut observation = None;
+        sessions.iter_with_idle(u64::MAX, |_, _, metadata, idle_ns, _| {
+            if !metadata.is_reverse && observation.is_none() {
+                observation = Some((idle_ns, metadata.policy_id));
+            }
+        });
+        observation.expect("matrix must retain a forward row")
+    }
+
+    for shape in shapes {
+        for revoke_lane in [false, true] {
+            let lane = if revoke_lane { "revoke" } else { "drop" };
+            let name = format!("{}/{}", shape.name, lane);
+            let install = matrix_forwarding(true, false, false);
+            let mut sessions = SessionTable::new();
+            let seeded = drive(
+                &install,
+                &mut sessions,
+                matrix_packet(LAN_IFINDEX, TCP_FLAG_SYN),
+            );
+            assert_eq!(
+                seeded.tx, 1,
+                "{name}: the LAN SYN must be admitted before the rename window"
+            );
+            assert_eq!(
+                session_count(&sessions),
+                2,
+                "{name}: admission must install the forward + reverse pair"
+            );
+
+            let mut live =
+                matrix_forwarding(shape.dmz_permit, shape.dead_egress, shape.default_permit);
+            if revoke_lane {
+                // The same local ingress interface was re-zoned to dmz.
+                // The packet remains on the admitting interface, making this
+                // the local Revoke lane instead of the peer/non-admitting Drop
+                live.ifindex_to_zone_id
+                    .insert(LAN_IFINDEX, TEST_DMZ_ZONE_ID);
+            }
+
+            let mut drops = 0u64;
+            let mut revokes = 0u64;
+            let mut forwarded = 0u64;
+            let mut iterations = 0;
+            while session_count(&sessions) != 0 && iterations < SWEEP_BOUNDARY_PACKETS {
+                let (before_idle, before_policy) = matrix_forward_observation(&sessions);
+                let dbg = drive(
+                    &live,
+                    &mut sessions,
+                    matrix_packet(
+                        if revoke_lane {
+                            LAN_IFINDEX
+                        } else {
+                            DMZ_IFINDEX
+                        },
+                        TCP_ACK,
+                    ),
+                );
+                assert_eq!(
+                    dbg.session_hit, 1,
+                    "{name}: packet must hit the retained row"
+                );
+                drops += u64::from(dbg.foreign_authority_drops);
+                revokes += u64::from(dbg.policy_revoked_sessions);
+                forwarded += u64::from(dbg.tx);
+                iterations += 1;
+                if session_count(&sessions) != 0 {
+                    let (after_idle, after_policy) = matrix_forward_observation(&sessions);
+                    assert!(
+                        after_idle <= before_idle,
+                        "{name}: a live hit must refresh or preserve last-seen state"
+                    );
+                    assert_eq!(
+                        after_policy, before_policy,
+                        "{name}: policy-id refresh must not retarget the retained session"
+                    );
+                }
+            }
+
+            if shape.permit_control {
+                assert_eq!(
+                    iterations, SWEEP_BOUNDARY_PACKETS,
+                    "{name}: Foreign+Forward must be observed through the sweep-emulated bound"
+                );
+                assert!(
+                    forwarded >= 1,
+                    "{name}: Foreign+Forward control must forward before the sweep boundary (forwarded={forwarded}, drops={drops}, revokes={revokes}, rows={})",
+                    session_count(&sessions)
+                );
+                assert_eq!(drops, 0, "{name}: permit control must not count a drop");
+                assert_eq!(revokes, 0, "{name}: permit control must not revoke");
+                assert_eq!(
+                    session_count(&sessions),
+                    2,
+                    "{name}: Foreign+Forward must retain both halves through the emulated sweep window"
+                );
+            } else if revoke_lane {
+                assert!(
+                    iterations <= SWEEP_BOUNDARY_PACKETS,
+                    "{name}: Revoke must terminate no later than the sweep-emulated bound"
+                );
+                assert!(
+                    revokes >= 1,
+                    "{name}: local admitting-interface deny must produce a positive Revoke before bounds"
+                );
+                assert_eq!(
+                    drops, 0,
+                    "{name}: Revoke lane must not also count Foreign Drop"
+                );
+                assert_eq!(
+                    session_count(&sessions),
+                    0,
+                    "{name}: Revoke must clear the pair"
+                );
+            } else {
+                assert_eq!(
+                    iterations, SWEEP_BOUNDARY_PACKETS,
+                    "{name}: Drop must be observed through the sweep-emulated bound"
+                );
+                assert!(
+                    drops >= 1,
+                    "{name}: peer/non-admitting deny must produce a positive Drop before bounds"
+                );
+                assert_eq!(revokes, 0, "{name}: Drop lane must not revoke the pair");
+                assert_eq!(
+                    session_count(&sessions),
+                    2,
+                    "{name}: Drop must retain both halves through the emulated sweep window"
+                );
+            }
+        }
+    }
 }

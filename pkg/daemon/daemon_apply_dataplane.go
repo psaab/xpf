@@ -1253,6 +1253,18 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	if rt == nil {
 		return
 	}
+	// Compile consumes single-use rename metadata after copying it onto the
+	// first full-apply snapshot. This direct same-commit replay is the one
+	// intentional exception: restore that exact snapshot's metadata before
+	// ApplyConfig so the deferred-MAC retry cannot lose the ancestry/rebind
+	// contract, while ordinary later partial republishes remain stripped.
+	if provider, ok := rt.(interface {
+		Manager() *dpuserspace.Manager
+	}); ok {
+		if mgr := provider.Manager(); mgr != nil {
+			mgr.RestagePolicyRenameAncestryForReplay()
+		}
+	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)
 	// #9725: this re-apply can remove the last link even when it reports an
 	// error. Re-read the kernel census on both outcomes; an independent tick

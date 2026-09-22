@@ -92,6 +92,7 @@ fn view_with_policy_metadata(
     forwarding.zone_id_to_name.insert(1, "lan".to_string());
     forwarding.zone_id_to_name.insert(2, "wan".to_string());
     forwarding.zone_id_to_name.insert(3, "dmz".to_string());
+    forwarding.zone_set_validated = true;
     forwarding.ingress_logical_ifindex.insert((11, 0), 11);
     let ingress_zone = rules
         .first()
@@ -109,6 +110,27 @@ fn view_with_policy_metadata(
         },
         forwarding.clone(),
     ));
+    (view, forwarding)
+}
+
+#[cfg(test)]
+fn view_with_removed_zone_metadata(
+    generation: u64,
+    rules: &[crate::PolicyRuleSnapshot],
+    policy_rematch_extensive: bool,
+    policy_rename_ancestry: Vec<crate::protocol::PolicyRenameAncestry>,
+    removed_zone_id: u16,
+) -> (Arc<RuntimeView>, Arc<ForwardingState>) {
+    let (base_view, base_forwarding) = view_with_policy_metadata(
+        generation,
+        rules,
+        policy_rematch_extensive,
+        policy_rename_ancestry,
+    );
+    let mut forwarding = (*base_forwarding).clone();
+    forwarding.zone_id_to_name.remove(&removed_zone_id);
+    let forwarding = Arc::new(forwarding);
+    let view = Arc::new(RuntimeView::new(base_view.validation(), forwarding.clone()));
     (view, forwarding)
 }
 
@@ -222,13 +244,14 @@ struct Presence {
 /// publishes generation 2 with `new_rules`, and reports which keys are still in
 /// the coordinator's shared HA map.
 fn rotate(new_rules: &[crate::PolicyRuleSnapshot]) -> Presence {
-    rotate_with_metadata(new_rules, false, &[])
+    rotate_with_metadata(new_rules, false, &[], None)
 }
 
 fn rotate_with_metadata(
     new_rules: &[crate::PolicyRuleSnapshot],
     policy_rematch_extensive: bool,
     policy_rename_ancestry: &[crate::protocol::PolicyRenameAncestry],
+    removed_zone_id: Option<u16>,
 ) -> Presence {
     let coord = Coordinator::new();
     let channel = RuntimeViewChannel::default();
@@ -278,14 +301,16 @@ fn rotate_with_metadata(
     );
     let worker = std::thread::spawn(move || worker_loop(plan, shared, control, cos, telemetry));
     wait_for_iterations(&heartbeat, 2);
-
     let first_forward = key(40001);
     let first_reverse = reverse_session_key(&first_forward, NatDecision::default());
     let unbound = key(40003);
+    let mut unbound_entry = entry(unbound.clone(), false, None);
+    unbound_entry.metadata.ingress_zone = 3;
+    unbound_entry.origin = SessionOrigin::SharedPromote;
     let entries = [
         entry(first_forward.clone(), false, first_counter.clone()),
         entry(first_reverse.clone(), true, first_counter),
-        entry(unbound.clone(), false, None),
+        unbound_entry,
     ];
     {
         let mut map = synced.lock().expect("shared synced map");
@@ -296,7 +321,11 @@ fn rotate_with_metadata(
     {
         let mut queue = commands.lock().expect("worker command queue");
         for e in entries {
-            queue.push_back(WorkerCommand::UpsertLocal(e));
+            if e.origin == SessionOrigin::SharedPromote {
+                queue.push_back(WorkerCommand::UpsertSynced(e));
+            } else {
+                queue.push_back(WorkerCommand::UpsertLocal(e));
+            }
         }
     }
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -307,14 +336,25 @@ fn rotate_with_metadata(
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+    // Queue emptiness only proves the commands moved out of the shared deque;
+    // let the worker finish its local scratch batch before rotating the view.
     wait_for_iterations(&heartbeat, 2);
-
-    let (new_view, _new_forwarding) = view_with_policy_metadata(
-        2,
-        new_rules,
-        policy_rematch_extensive,
-        policy_rename_ancestry.to_vec(),
-    );
+    let (new_view, _new_forwarding) = if let Some(removed_zone_id) = removed_zone_id {
+        view_with_removed_zone_metadata(
+            2,
+            new_rules,
+            policy_rematch_extensive,
+            policy_rename_ancestry.to_vec(),
+            removed_zone_id,
+        )
+    } else {
+        view_with_policy_metadata(
+            2,
+            new_rules,
+            policy_rematch_extensive,
+            policy_rename_ancestry.to_vec(),
+        )
+    };
     channel.publish(new_view);
     wait_for_iterations(&heartbeat, 3);
     let presence = {
@@ -383,7 +423,7 @@ fn worker_loop_rotation_keeps_the_first_policys_sessions_when_it_survives_9526()
 }
 
 #[test]
-fn extensive_rotation_rebinds_both_halves_with_new_policy_counter_and_zones_10509() {
+fn extensive_rotation_rebinds_both_halves_with_new_policy_counter_and_zones_10511() {
     let ancestry = crate::protocol::PolicyRenameAncestry {
         source_rule_id: "lan->wan/p-first".to_string(),
         destination_rule_id: "dmz->wan/p-new".to_string(),
@@ -404,6 +444,7 @@ fn extensive_rotation_rebinds_both_halves_with_new_policy_counter_and_zones_1050
         &[rule_with_zones("p-new", 0, "dmz", "wan"), rule("p-web", 1)],
         true,
         &[ancestry],
+        None,
     );
     let forward = retained
         .first_forward_entry
@@ -445,9 +486,45 @@ fn extensive_rotation_rebinds_both_halves_with_new_policy_counter_and_zones_1050
     assert_eq!(forward.metadata.egress_zone, 2);
     assert_eq!(reverse.metadata.egress_zone, 3);
 }
+/// A valid ancestry descriptor is not enough to retain policy id 0 when the
+/// extensive rematch gate is disabled. Generic/default rematch keeps the
+/// existing delete behavior, including both halves of the first-policy pair.
+#[test]
+fn non_extensive_ancestry_does_not_retain_first_policy_id_zero_10511() {
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "dmz->wan/p-new".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "dmz".to_string(),
+        destination_to_zone: "wan".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 3,
+        destination_to_zone_id: 2,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let purged = rotate_with_metadata(
+        &[rule_with_zones("p-new", 0, "dmz", "wan"), rule("p-web", 1)],
+        false,
+        &[ancestry],
+        None,
+    );
+    assert!(
+        purged.first_forward_entry.is_none() && purged.first_reverse_entry.is_none(),
+        "plain rematch must purge id-0 first-policy halves even when ancestry is present"
+    );
+    assert!(
+        purged.unbound,
+        "the unrelated SharedPromote id-0 row must remain outside bound-policy teardown"
+    );
+}
 
 #[test]
-fn extensive_rotation_deleting_destination_rule_purges_both_halves_10509() {
+fn extensive_rotation_deleting_destination_rule_purges_both_halves_10511() {
     let ancestry = crate::protocol::PolicyRenameAncestry {
         source_rule_id: "lan->wan/p-first".to_string(),
         destination_rule_id: "lan->wan/p-new".to_string(),
@@ -468,9 +545,23 @@ fn extensive_rotation_deleting_destination_rule_purges_both_halves_10509() {
         &[rule_with_zones("p-other", 0, "lan", "wan")],
         true,
         &[ancestry],
+        None,
     );
     assert!(
         purged.first_forward_entry.is_none() && purged.first_reverse_entry.is_none(),
         "missing destination rule must purge the pair atomically"
+    );
+}
+
+#[test]
+fn rotation_purges_shared_promote_id_zero_when_zone_vanishes_10510() {
+    let purged = rotate_with_metadata(&[rule("p-first", 0), rule("p-web", 1)], false, &[], Some(3));
+    assert!(
+        purged.first_forward && purged.first_reverse,
+        "a bound policy session must survive when its policy remains"
+    );
+    assert!(
+        !purged.unbound,
+        "a SharedPromote unbound id-0 session stamped with the vanished zone must purge"
     );
 }

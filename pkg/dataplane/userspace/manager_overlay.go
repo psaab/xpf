@@ -192,6 +192,15 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	}
 
 	next := *m.lastSnapshot
+	// A full snapshot can be retained before its first apply_snapshot when
+	// startup publication is deferred or the apply outcome is unknown. This
+	// overlay can be the first accepted publication, so preserve its
+	// single-use rename metadata until a publication or status catch-up clears
+	// the latch. Generation inequality is insufficient because FIB bumps
+	// advance lastSnapshot.Generation without consuming a full snapshot.
+	if !m.pendingFullSnapshotMetadata {
+		stripSingleUseCommitMetadata(&next)
+	}
 	nextGeneration := m.generation + 1
 	next.Generation = nextGeneration
 	next.FIBGeneration = m.readFIBGeneration()
@@ -283,6 +292,7 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
+	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&next)
 	// #2079: full apply_snapshot succeeded — record the applied snapshot.
 	m.markAppliedSnapshotLocked()
@@ -317,6 +327,9 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	}
 	wasDebt := m.snapshotRetryDebtLocked()
 	next := *m.lastSnapshot
+	if !m.pendingFullSnapshotMetadata {
+		stripSingleUseCommitMetadata(&next)
+	}
 	next.Generation = m.generation + 1
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
@@ -353,6 +366,7 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
+	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&next)
 	m.markAppliedSnapshotLocked()
 	if h, ok := snapshotContentHash(&next); ok {

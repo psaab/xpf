@@ -409,7 +409,7 @@ func TestNextConfigGenMonotonic(t *testing.T) {
 	}
 }
 
-func TestConfigAncestryReceiveQueueApplyChain10509(t *testing.T) {
+func TestConfigAncestryReceiveQueueApplyChain10511(t *testing.T) {
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
 	const (
 		text = "set security policies from-zone lan to-zone wan policy old\n"
@@ -453,7 +453,7 @@ func TestConfigAncestryReceiveQueueApplyChain10509(t *testing.T) {
 	}
 }
 
-func TestLegacyConfigReceiveQueueApplyChainWithoutAncestry10509(t *testing.T) {
+func TestLegacyConfigReceiveQueueApplyChainWithoutAncestry10511(t *testing.T) {
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
 	const (
 		text = "set system host-name legacy\n"
@@ -482,7 +482,7 @@ func TestLegacyConfigReceiveQueueApplyChainWithoutAncestry10509(t *testing.T) {
 	}
 }
 
-func TestConfigQueueFullDropCanRetryAncestryPayload10509(t *testing.T) {
+func TestConfigQueueFullDropCanRetryAncestryPayload10511(t *testing.T) {
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
 	fillConfigApplyQueue6778(t, s)
 	want := []configstore.RenameDescriptor{{
@@ -517,7 +517,7 @@ func TestConfigQueueFullDropCanRetryAncestryPayload10509(t *testing.T) {
 	}
 }
 
-func TestConfigReceiveReorderedGenerationsApplyNewest10509(t *testing.T) {
+func TestLegacyConfigReceiveReorderedGenerationsApplyNewest10511(t *testing.T) {
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -564,7 +564,7 @@ func TestConfigReceiveReorderedGenerationsApplyNewest10509(t *testing.T) {
 	}
 }
 
-func TestQueueConfigWithAncestryWireReceiveApplyChain10509(t *testing.T) {
+func TestQueueConfigWithAncestryWireReceiveApplyChain10511(t *testing.T) {
 	sender := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
 	receiver := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
 	local, peer := net.Pipe()
