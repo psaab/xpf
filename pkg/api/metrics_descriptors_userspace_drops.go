@@ -214,6 +214,27 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"\"no ext-header drops\" signal.",
 		nil, nil,
 	)
+	c.userspaceUMEMSliceDropped = prometheus.NewDesc(
+		"xpf_userspace_umem_slice_dropped_total",
+		"Packets dropped before raw-frame access because the UMEM slice "+
+			"descriptor was invalid or outside the configured frame. "+
+			"Summed across bindings and emitted unconditionally (#10498).",
+		nil, nil,
+	)
+	c.userspaceUnknownVLANDropped = prometheus.NewDesc(
+		"xpf_userspace_unknown_vlan_dropped_total",
+		"Packets dropped during pre-L3 admission because their VLAN "+
+			"identity was not configured. Summed across bindings and "+
+			"emitted unconditionally (#10498).",
+		nil, nil,
+	)
+	c.userspaceDstMACDropped = prometheus.NewDesc(
+		"xpf_userspace_dst_mac_dropped_total",
+		"Packets dropped during pre-L3 admission because their destination "+
+			"MAC did not match a configured local or transit identity. "+
+			"Summed across bindings and emitted unconditionally (#10498).",
+		nil, nil,
+	)
 	c.userspaceEmbeddedQuoteSubminimalRefused = prometheus.NewDesc(
 		"xpf_userspace_embedded_quote_subminimal_refused_total",
 		"#9901 (F-077): embedded ICMP error quotes refused by the 8-byte "+

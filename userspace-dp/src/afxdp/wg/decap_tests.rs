@@ -1253,6 +1253,7 @@ fn wg_tun_origin_builder_to_shared_to_delivery_10038() {
         meta,
         &local_tunnel_deliveries,
         &shared_sessions,
+        None,
     );
     assert!(
         dbg.session_hit >= 1,
@@ -2129,6 +2130,7 @@ fn wg_tun_origin_response_creates_no_exempting_state_10038() {
         meta,
         &local_tunnel_deliveries,
         &shared_sessions,
+        None,
     );
     assert_eq!(
         batch.host_inbound_denied_packets, 1,
@@ -2213,6 +2215,7 @@ fn wg_tun_origin_swept_pair_faces_gates_10038() {
             meta,
             &local_tunnel_deliveries,
             &shared_sessions,
+            None,
         )
     };
     let mut sessions = SessionTable::new();
@@ -2358,6 +2361,7 @@ fn wg_tun_origin_shared_forward_hit_keeps_provenance_10038() {
         meta,
         &local_tunnel_deliveries,
         &shared_sessions,
+        None,
     );
     assert!(dbg.session_hit >= 1, "the forward tuple must HIT shared");
     assert_eq!(
@@ -2461,6 +2465,7 @@ fn wg_tun_origin_domain_vrf_hit_delivers_10038() {
         meta,
         &local_tunnel_deliveries,
         &shared_sessions,
+        None,
     );
     assert!(
         dbg.session_hit >= 1,

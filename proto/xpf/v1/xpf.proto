@@ -207,6 +207,8 @@ message GetGlobalStatsResponse {
   uint64 nat64_translations = 11;
   uint64 host_inbound_allowed = 12;
   map<string, uint64> screen_drop_details = 13;
+  uint64 unknown_vlan_drops = 14;
+  uint64 dst_mac_drops = 15;
 }
 
 message GetZonesRequest {}

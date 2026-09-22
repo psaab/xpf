@@ -70,6 +70,12 @@ or DNAT reverse mappings.
   maps, and the same targeted unlink of just those two pins applies. It is the
   third growth of this struct to need it (#5460 flags widen, #4983 ingress
   identity).
+- **#10498 is a map-entry crossing.** The `global_counters` shared map grows
+  from `max_entries=41` to `43` for the new unknown-VLAN (41) and
+  destination-MAC (42) indices. A retained 41-entry pin is incompatible with
+  the new userspace shim and must be handled as a targeted
+  `global_counters` pin migration; do not claim that additive JSON fields make
+  this map crossing hitless.
 - **No deploy path crosses it on its own, the loss cluster's included.**
   Measured: `make cluster-deploy` refused at its pre-flight with
   `ValueSize embedded=152 pinned=144`. The pre-flight LOADS anonymous maps

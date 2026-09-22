@@ -64,3 +64,72 @@ fn flowless_counters_round_trip_batch_to_status_to_reset_9956() {
         "zero_unbound_slot must clear the flowless family"
     );
 }
+
+#[test]
+fn named_pre_l3_counters_round_trip_and_reset_10498() {
+    let mut batch = crate::afxdp::BatchCounters::default();
+    batch.touched = true;
+    batch.umem_slice_dropped = 7;
+    batch.unknown_vlan_dropped = 11;
+    batch.dst_mac_dropped = 13;
+    let live = crate::afxdp::binding_state::BindingLiveState::new();
+    batch.flush(&live);
+    assert_eq!(
+        (
+            live.umem_slice_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            live.unknown_vlan_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            live.dst_mac_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
+        (7, 11, 13),
+        "flush must carry named pre-L3 drops batch → live"
+    );
+
+    let snap = live.snapshot();
+    assert_eq!(
+        (
+            snap.umem_slice_dropped,
+            snap.unknown_vlan_dropped,
+            snap.dst_mac_dropped,
+        ),
+        (7, 11, 13),
+        "snapshot must carry named pre-L3 drops live → snapshot"
+    );
+    let mut status = crate::protocol::BindingStatus::default();
+    copy_live_snapshot(&mut status, snap);
+    assert_eq!(
+        (
+            status.umem_slice_dropped,
+            status.unknown_vlan_dropped,
+            status.dst_mac_dropped,
+        ),
+        (7, 11, 13),
+        "copy must carry named pre-L3 drops snapshot → status"
+    );
+    zero_unbound_slot(&mut status);
+    assert_eq!(
+        (
+            status.umem_slice_dropped,
+            status.unknown_vlan_dropped,
+            status.dst_mac_dropped,
+        ),
+        (0, 0, 0),
+        "zero_unbound_slot must clear named pre-L3 drops"
+    );
+}
+
+#[test]
+fn named_pre_l3_wire_keys_are_exact_10498() {
+    let status = crate::protocol::BindingStatus {
+        umem_slice_dropped: 1,
+        unknown_vlan_dropped: 2,
+        dst_mac_dropped: 3,
+        ..Default::default()
+    };
+    let value = serde_json::to_value(status).expect("serialize BindingStatus");
+    assert_eq!(value["umem_slice_dropped"], 1);
+    assert_eq!(value["unknown_vlan_dropped"], 2);
+    assert_eq!(value["dst_mac_dropped"], 3);
+}

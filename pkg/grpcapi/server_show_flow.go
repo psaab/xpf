@@ -187,6 +187,8 @@ func (s *Server) showFlowStatistics(buf *strings.Builder) {
 	fmt.Fprintf(buf, "  %-30s %d\n", "NAT allocation failures:", readCtr(dataplane.GlobalCtrNATAllocFail))
 	fmt.Fprintf(buf, "  %-30s %d\n", "Screen drops:", readCtr(dataplane.GlobalCtrScreenDrops))
 	fmt.Fprintf(buf, "  %-30s %d\n", "Host-inbound denies:", readCtr(dataplane.GlobalCtrHostInboundDeny))
+	fmt.Fprintf(buf, "  %-30s %d\n", "Unknown VLAN drops:", readCtr(dataplane.GlobalCtrUnknownVLANDrops))
+	fmt.Fprintf(buf, "  %-30s %d\n", "Destination MAC drops:", readCtr(dataplane.GlobalCtrDstMACDrops))
 	fmt.Fprintf(buf, "  %-30s %d\n", "Host-inbound allowed:", readCtr(dataplane.GlobalCtrHostInbound))
 	fmt.Fprintf(buf, "  %-30s %d\n", "NAT64 translations:", readCtr(dataplane.GlobalCtrNAT64Xlate))
 	cacheHit := readCtr(dataplane.GlobalCtrFlowCacheHit)

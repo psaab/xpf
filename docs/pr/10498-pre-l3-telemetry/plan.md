@@ -72,11 +72,12 @@ BatchCounters.martian_dropped / ipv6_ext_header_dropped → nonzero-gated
 flush with Relaxed fetch_add and reset → BindingLiveState AtomicU64 + ctor
 → BindingLiveSnapshot struct/load → coordinator copy_live_snapshot and
 zero_unbound_slot → reconcile/reset.rs → Rust BindingStatus wire fields
-with serde rename/default → Go BindingStatus json tags →
-sumBindingCounters and the 1/s global-counter bridge → status summary
-aggregation/render and golden → Prometheus descriptor/collector → CLI/API
-and docs. The full source path is enumerated in §4.3 and the blast-radius
-census in §11.
+with serde rename/default → Go BindingStatus json tags → sumBindingCounters
+and the 1/s global-counter bridge → status summary aggregation/render and
+golden → Prometheus descriptor/collector → CLI/API and docs. This is two
+composed precedents: the martian/IPv6 path is the direct Rust→wire→status/
+userspace-Prom chain; #3326 host-inbound adds the GlobalCtr bridge. The full
+source path is enumerated in §4.3 and the blast-radius census in §11.
 
 Other relevant precedent:
 
@@ -165,34 +166,34 @@ For each counter, implement and test every checkpoint below:
 11. The existing status summary one-pass aggregation and status rows, with
     golden fixture values distinct per row.
 12. Prometheus descriptor registration plus collector emission, summed
-    across bindings and emitted unconditionally (zero is a real signal).
+    across bindings into three aggregate process-level unlabeled series and
+    emitted unconditionally (zero is a real signal).
 13. CLI/REST/gRPC show surfaces for the named rows and, for the two folded
     admission reasons, their global counter breakdowns.
-14. Documentation of status labels, metric names, and Packets dropped
-    scope.
+14. Documentation of status labels, metric names, and Packets dropped scope.
 
 Global-counter ruling (resolved Q3): unknown VLAN and destination-MAC are
 configuration-driven admission rejects, the same operator-enforcement class
 as folded host-inbound deny. Add two dedicated global indices named
 `GlobalCtrUnknownVLANDrops` and `GlobalCtrDstMACDrops` at the next currently
-free slots (41 and 42 on this baseline; re-check before implementation),
+free slots (41 and 42 on this baseline, verified during implementation),
 raise `GlobalCtrMax` accordingly and update the shared C/Go map-size
 constants. `userspaceCounterSnapshot` sums both fields; `totalDrops()` adds
 both; `syncBPFCountersLocked` pushes both reason deltas and the aggregate.
 Add the corresponding CLI/API/Prometheus breakdown rows and distinct global
 series (for example `xpf_unknown_vlan_drops_total` and
 `xpf_dst_mac_drops_total`) so GlobalCtrDrops remains a total-with-breakdown.
-Concrete current owners for those checkpoints are `userspace-dp/src/afxdp/mod.rs` (batch/flush), `userspace-dp/src/afxdp/binding_state/mod.rs` and `binding_state/snapshot.rs` (live/snapshot), `userspace-dp/src/afxdp/coordinator/refresh_bindings.rs` plus `coordinator/reconcile/reset.rs` (copy/zero/reset), `userspace-dp/src/protocol/binding.rs` (Rust serde wire), `pkg/dataplane/userspace/protocol_binding.go` and `manager_counters.go` (Go wire/sum/bridge), `pkg/dataplane/userspace/format/status_sections.go` and its golden test (show summary), `pkg/api/metrics_descriptors_userspace_drops.go`, `metrics_userspace.go`, and `metrics.go` (Prometheus descriptors/collector/registration), `pkg/cli/cli_show_flow.go`, `pkg/grpcapi/server_show_flow.go`, and `pkg/grpcapi/server_show_status.go` (operator/API views), plus `docs/junos-cli-reference.md`.
+Concrete current owners for those checkpoints are `userspace-dp/src/afxdp/mod.rs` (batch/flush), `userspace-dp/src/afxdp/binding_state/mod.rs` and `binding_state/snapshot.rs` (live/snapshot), `userspace-dp/src/afxdp/coordinator/refresh_bindings.rs` plus `coordinator/reconcile/reset.rs` (copy/zero/reset), `userspace-dp/src/protocol/binding.rs` (Rust serde wire), `pkg/dataplane/userspace/protocol_binding.go` and `manager_counters.go` (Go wire/sum/bridge), `pkg/dataplane/userspace/format/status_sections.go` and its golden test (show summary), `pkg/api/metrics_descriptors_userspace_drops.go`, `metrics_userspace.go`, `metrics.go`, `metrics_descriptors_global.go`, and `metrics_counters.go` (Prometheus descriptors/collector/registration), REST `pkg/api/types.go` (`GlobalStats`) plus `stats.go` (`globalStatsHandler`), gRPC `proto/xpf/v1/xpf.proto` plus generated `pkg/grpcapi/xpfv1/xpf.pb.go` and `pkg/grpcapi/server_show_status.go`, CLI `pkg/grpcapi/server_show_flow.go` plus `pkg/cli/cli_show_flow.go`, and `docs/junos-cli-reference.md`.
 
 ### Pinned global_counters ABI and upgrade path
 
 The two new global indices are not mixed-version-safe merely because the
 BindingStatus wire fields use serde defaults and Go `omitempty`. The pinned
 `global_counters` map is a separate ABI: `bpf/headers/xpf_common.h:305`
-currently defines `GLOBAL_CTR_MAX` as 41, `bpf/headers/xpf_maps.h:324` uses
-that C value for `max_entries`, `pkg/dataplane/types.go:982` defines the Go
-`GlobalCtrMax` as 41, and `pkg/dataplane/loader_userspace_shim.go:728`
-creates the Go shared map with that value. Adding indices 41 and 42 requires
+currently defines `GLOBAL_CTR_MAX` as 43, `bpf/headers/xpf_maps.h:324` uses that C
+value for `max_entries`, `pkg/dataplane/types.go:982` defines the Go
+`GlobalCtrMax` as 43, and `pkg/dataplane/loader_userspace_shim.go:728`
+creates the Go shared map with that value. Adding indices 41 and 42 required
 all of these max-entry values to become 43. There is no Rust `GlobalCtrMax`
 constant or Rust declaration to update; the C header and Go loader are the
 map-size authorities.
@@ -349,10 +350,10 @@ the proof honest by splitting the harnesses while pinning their seam.
   1, 2, and 3 across different bindings and asserts each named status row
   renders its own aggregate, never an all-ones or copied field. Removing
   any sum or render term is RED.
-- The Go Prometheus fixture uses distinct binding values and asserts all
-  three per-binding series are emitted unconditionally with their distinct
-  totals. Removing a descriptor, collector emit, or zero-preserving path is
-  RED.
+- The Go Prometheus fixture uses distinct binding values and asserts three
+  aggregate process-level unlabeled series are emitted unconditionally with
+  their distinct totals. Removing a descriptor, collector emit, aggregation,
+  or zero-preserving path is RED.
 - A Go JSON-decode pin feeds the three exact Rust keys with values 1, 2, 3
   and asserts the Go fields. Reverting any json tag is RED.
 - Global-counter bridge tests use distinct unknown-VLAN and dst-MAC values,
@@ -461,10 +462,11 @@ The census query was stated and rerun at the v1 tip:
   returned 55 matching lines; one is a comment, leaving 54 executable code
   pushes in mod.rs.
 - The same query against
-  `userspace-dp/src/afxdp/poll_descriptor/flow_cache_hit.rs` returned 3
-  executable pushes. Tree-wide total: 57 executable pushes; 3 are the named
-  pre-L3 heads in scope, about 51 other executable mod.rs pushes plus the 3
-  post-L3 flow-cache pushes are out of scope.
+  `userspace-dp/src/afxdp/poll_descriptor/flow_cache_hit.rs` returned 7
+  matching lines; four are comments, leaving 3 executable pushes. Tree-wide
+  total: 57 executable pushes; 3 are the named pre-L3 heads in scope, about
+  51 other executable mod.rs pushes plus the 3 post-L3 flow-cache pushes are
+  out of scope.
 - The census confirms no fourth named pre-L3 drop among the adjacent ARP,
   IPv6, screen, IPsec, fragment, host-inbound, or metadata-failure paths;
   those paths have their own counters/events or are explicitly different

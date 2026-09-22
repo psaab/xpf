@@ -1966,6 +1966,8 @@ type GetGlobalStatsResponse struct {
 	Nat64Translations  uint64                 `protobuf:"varint,11,opt,name=nat64_translations,json=nat64Translations,proto3" json:"nat64_translations,omitempty"`
 	HostInboundAllowed uint64                 `protobuf:"varint,12,opt,name=host_inbound_allowed,json=hostInboundAllowed,proto3" json:"host_inbound_allowed,omitempty"`
 	ScreenDropDetails  map[string]uint64      `protobuf:"bytes,13,rep,name=screen_drop_details,json=screenDropDetails,proto3" json:"screen_drop_details,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	UnknownVlanDrops   uint64                 `protobuf:"varint,14,opt,name=unknown_vlan_drops,json=unknownVlanDrops,proto3" json:"unknown_vlan_drops,omitempty"`
+	DstMacDrops        uint64                 `protobuf:"varint,15,opt,name=dst_mac_drops,json=dstMacDrops,proto3" json:"dst_mac_drops,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -2089,6 +2091,20 @@ func (x *GetGlobalStatsResponse) GetScreenDropDetails() map[string]uint64 {
 		return x.ScreenDropDetails
 	}
 	return nil
+}
+
+func (x *GetGlobalStatsResponse) GetUnknownVlanDrops() uint64 {
+	if x != nil {
+		return x.UnknownVlanDrops
+	}
+	return 0
+}
+
+func (x *GetGlobalStatsResponse) GetDstMacDrops() uint64 {
+	if x != nil {
+		return x.DstMacDrops
+	}
+	return 0
 }
 
 type GetZonesRequest struct {
@@ -8917,7 +8933,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\rsession_count\x18\x05 \x01(\x05R\fsessionCount\x12!\n" +
 	"\fcluster_role\x18\x06 \x01(\tR\vclusterRole\x12&\n" +
 	"\x0fcluster_node_id\x18\a \x01(\x05R\rclusterNodeId\"\x17\n" +
-	"\x15GetGlobalStatsRequest\"\xa0\x05\n" +
+	"\x15GetGlobalStatsRequest\"\xf2\x05\n" +
 	"\x16GetGlobalStatsResponse\x12\x1d\n" +
 	"\n" +
 	"rx_packets\x18\x01 \x01(\x04R\trxPackets\x12\x1d\n" +
@@ -8934,7 +8950,9 @@ const file_xpf_proto_rawDesc = "" +
 	" \x01(\x04R\x0ftcEgressPackets\x12-\n" +
 	"\x12nat64_translations\x18\v \x01(\x04R\x11nat64Translations\x120\n" +
 	"\x14host_inbound_allowed\x18\f \x01(\x04R\x12hostInboundAllowed\x12e\n" +
-	"\x13screen_drop_details\x18\r \x03(\v25.xpf.v1.GetGlobalStatsResponse.ScreenDropDetailsEntryR\x11screenDropDetails\x1aD\n" +
+	"\x13screen_drop_details\x18\r \x03(\v25.xpf.v1.GetGlobalStatsResponse.ScreenDropDetailsEntryR\x11screenDropDetails\x12,\n" +
+	"\x12unknown_vlan_drops\x18\x0e \x01(\x04R\x10unknownVlanDrops\x12\"\n" +
+	"\rdst_mac_drops\x18\x0f \x01(\x04R\vdstMacDrops\x1aD\n" +
 	"\x16ScreenDropDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x11\n" +

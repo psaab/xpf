@@ -248,6 +248,8 @@ pub(super) fn poll_binding_process_descriptor(
                 let Some(raw_frame) =
                     unsafe { &*area }.slice(desc.addr as usize, desc.len as usize)
                 else {
+                    telemetry.counters.touched = true;
+                    telemetry.counters.umem_slice_dropped += 1;
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 };
@@ -270,6 +272,7 @@ pub(super) fn poll_binding_process_descriptor(
                     )
                 {
                     telemetry.counters.touched = true;
+                    telemetry.counters.unknown_vlan_dropped += 1;
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
@@ -285,6 +288,7 @@ pub(super) fn poll_binding_process_descriptor(
                     raw_frame,
                 ) {
                     telemetry.counters.touched = true;
+                    telemetry.counters.dst_mac_dropped += 1;
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
@@ -7310,3 +7314,6 @@ pub(super) fn poll_binding_process_descriptor(
     received.release();
     drop(received);
 }
+#[cfg(test)]
+#[path = "named_pre_l3_10498_tests.rs"]
+mod named_pre_l3_10498_tests;

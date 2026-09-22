@@ -924,3 +924,22 @@ func TestFormatBindings(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatStatusSummaryAggregatesNamedPreL3Drops10498(t *testing.T) {
+	status := userspace.ProcessStatus{
+		Bindings: []userspace.BindingStatus{
+			{UMEMSliceDropped: 1, UnknownVLANDropped: 2, DstMACDropped: 3},
+			{UMEMSliceDropped: 5, UnknownVLANDropped: 7, DstMACDropped: 11},
+		},
+	}
+	out := FormatStatusSummary(status)
+	for _, want := range []string{
+		"UMEM slice drops:          6",
+		"Unknown VLAN drops:        9",
+		"Destination MAC drops:     14",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q:\n%s", want, out)
+		}
+	}
+}

@@ -131,6 +131,8 @@ func (c *CLI) showStatistics(detail bool) error {
 		{dataplane.GlobalCtrRxPackets, "RX packets"},
 		{dataplane.GlobalCtrTxPackets, "TX packets"},
 		{dataplane.GlobalCtrDrops, "Drops"},
+		{dataplane.GlobalCtrUnknownVLANDrops, "Unknown VLAN drops"},
+		{dataplane.GlobalCtrDstMACDrops, "Destination MAC drops"},
 		{dataplane.GlobalCtrSessionsNew, "Sessions created"},
 		{dataplane.GlobalCtrSessionsClosed, "Sessions closed"},
 		{dataplane.GlobalCtrScreenDrops, "Screen drops"},
@@ -971,6 +973,8 @@ func (c *CLI) showFlowStatistics() error {
 	rxPkts := readCounter(dataplane.GlobalCtrRxPackets)
 	txPkts := readCounter(dataplane.GlobalCtrTxPackets)
 	drops := readCounter(dataplane.GlobalCtrDrops)
+	unknownVLANDrops := readCounter(dataplane.GlobalCtrUnknownVLANDrops)
+	dstMACDrops := readCounter(dataplane.GlobalCtrDstMACDrops)
 	sessNew := readCounter(dataplane.GlobalCtrSessionsNew)
 	sessClosed := readCounter(dataplane.GlobalCtrSessionsClosed)
 	screenDrops := readCounter(dataplane.GlobalCtrScreenDrops)
@@ -994,6 +998,8 @@ func (c *CLI) showFlowStatistics() error {
 	fmt.Printf("  %-30s %d\n", "Packets received:", rxPkts)
 	fmt.Printf("  %-30s %d\n", "Packets transmitted:", txPkts)
 	fmt.Printf("  %-30s %d\n", "Packets dropped:", drops)
+	fmt.Printf("  %-30s %d\n", "Unknown VLAN drops:", unknownVLANDrops)
+	fmt.Printf("  %-30s %d\n", "Destination MAC drops:", dstMACDrops)
 	fmt.Printf("  %-30s %d\n", "TC egress packets:", tcEgress)
 	fmt.Println()
 	fmt.Printf("  %-30s %d\n", "Policy deny:", policyDeny)

@@ -89,6 +89,8 @@ func (s *Server) globalStatsHandler(w http.ResponseWriter, _ *http.Request) {
 	stats.RxPackets = readCounter(dataplane.GlobalCtrRxPackets)
 	stats.TxPackets = readCounter(dataplane.GlobalCtrTxPackets)
 	stats.Drops = readCounter(dataplane.GlobalCtrDrops)
+	stats.UnknownVLANDrops = readCounter(dataplane.GlobalCtrUnknownVLANDrops)
+	stats.DstMACDrops = readCounter(dataplane.GlobalCtrDstMACDrops)
 	stats.SessionsCreated = readCounter(dataplane.GlobalCtrSessionsNew)
 	stats.SessionsClosed = readCounter(dataplane.GlobalCtrSessionsClosed)
 	stats.ScreenDrops = readCounter(dataplane.GlobalCtrScreenDrops)

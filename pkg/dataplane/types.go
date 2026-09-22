@@ -979,7 +979,9 @@ const (
 	GlobalCtrFlowCacheFlush      = 38
 	GlobalCtrFlowCacheInvalidate = 39
 	GlobalCtrVlanPushFail        = 40
-	GlobalCtrMax                 = 41
+	GlobalCtrUnknownVLANDrops    = 41
+	GlobalCtrDstMACDrops         = 42
+	GlobalCtrMax                 = 43
 )
 
 // CurrentSessions returns the live local-forwarding session count derived

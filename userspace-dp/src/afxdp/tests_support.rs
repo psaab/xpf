@@ -1207,6 +1207,33 @@ pub(super) fn txn_run_descriptor_with_deliveries(
         meta,
         local_tunnel_deliveries,
         &shared_sessions,
+        None,
+    )
+}
+
+/// Descriptor driver variant that overrides the frame length while leaving
+/// metadata and frame bytes in a valid UMEM location.
+pub(super) fn txn_run_descriptor_with_desc_len(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    desc_len: u32,
+) -> (BatchCounters, DebugPollCounters) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        Some(desc_len),
     )
 }
 
@@ -1231,6 +1258,7 @@ pub(super) fn txn_run_descriptor_capturing_shared(
         meta,
         &local_tunnel_deliveries,
         &shared_sessions,
+        None,
     );
     let published = shared_sessions.lock().expect("shared sessions").values().cloned().collect();
     (batch, dbg, published)
@@ -1247,6 +1275,7 @@ pub(super) fn txn_run_descriptor_inner(
     meta: UserspaceDpMeta,
     local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    desc_len: Option<u32>,
 ) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -1270,7 +1299,7 @@ pub(super) fn txn_run_descriptor_inner(
     }
     binding.xsk.rx.push_for_test(XdpDesc {
         addr: frame_offset as u64,
-        len: frame.len() as u32,
+        len: desc_len.unwrap_or(frame.len() as u32),
         options: 0,
     });
 
