@@ -1098,6 +1098,47 @@ mod tests {
         assert!(!tun_origin_reverse_exempt(&sessions, &fresh_shared(), &loop_key, nat));
     }
 
+    /// #10522 Cell 3: an owner-arrival reverse LocalDelivery with a
+    /// TUN-origin forward companion is exempt from the two NEW-session gates.
+    /// That exemption is an explicit per-packet proof and keeps the trusted
+    /// outlet positive control intact.
+    #[test]
+    fn tun_origin_reverse_exempt_gate_proof_selects_trusted_10522() {
+        let nat = NatDecision::default();
+        let fwd_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 17,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 5)),
+            src_port: 5001,
+            dst_port: 5002,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        };
+        let rev_key = crate::session::reverse_session_key(&fwd_key, nat);
+        let (decision, metadata, _) = marker_forward_10038();
+        let mut sessions = SessionTable::new();
+        assert!(sessions.install_with_protocol_with_origin(
+            fwd_key,
+            decision,
+            metadata,
+            SessionOrigin::TunOrigin,
+            122_000_000_000,
+            17,
+            0,
+        ));
+        let shared = Arc::new(Mutex::new(FastMap::default()));
+        let gate_proof = tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat);
+        assert!(gate_proof, "owner-arrival TUN-origin reply must be exempt");
+        assert!(
+            crate::afxdp::tx::dispatch::reinject_host_authorized(
+                ForwardingDisposition::LocalDelivery,
+                gate_proof,
+            ),
+            "the exemption proof must preserve the trusted LocalDelivery outlet",
+        );
+    }
+
     /// Parent-review item 5: the legacy-HA-transit alias is closed. A
     /// legacy-peer's transit import — `SyncImport`, tunnel egress, folded
     /// zero ingress, zeroed counter (`session_sync.rs` defaults missing
