@@ -67,7 +67,7 @@ xpf-userspace-dp	afxdp::coordinator::tests::aggregate_cos_waterfill_min_max_sent
 xpf-userspace-dp	afxdp::coordinator::tests::bind_failure_cause_survives_the_failclosed_teardown_8558	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::bind_incomplete_leaves_no_bound_sibling_8388	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::both_paths_open_full_seven_pin_bundle_before_ok_6243	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::tests::bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
+xpf-userspace-dp	afxdp::coordinator::tests::bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157	coordinator replay path; wrapping_add only constructs a distinct fixture key, not the #9499 overflow oracle
 xpf-userspace-dp	afxdp::coordinator::tests::build_cos_owner_worker_by_queue_falls_back_when_no_ready_workers_exist	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::build_cos_owner_worker_by_queue_prefers_lowest_worker_with_tx_binding	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::build_cos_owner_worker_by_queue_prefers_ready_workers_when_available	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
@@ -246,7 +246,6 @@ xpf-userspace-dp	afxdp::coordinator::wg_control::tests::live_peer_paces_on_fresh
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::poll_loop_exits_on_tun_teardown	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::poll_loop_stop_joins_promptly_while_idle_blocked	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::poll_loop_wakes_on_socket_readiness	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::wg_control::tests::poll_timeout_ms_clamps_and_converts	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::sockaddr_storage_to_socketaddr_global_v6_scope_zero	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::sockaddr_storage_to_socketaddr_preserves_link_local_scope	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant

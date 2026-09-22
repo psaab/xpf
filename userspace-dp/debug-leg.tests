@@ -34,6 +34,7 @@ xpf-userspace-dp	afxdp::bpf_map::tests::steering_key_aliases_routing_domain_and_
 xpf-userspace-dp	afxdp::bpf_map::tests::tunnel_discriminators_demote_kernel_local_to_redirect_9517
 xpf-userspace-dp	afxdp::checksum::dnat_counter_guard_tests_6872::no_dnat_counter_reader_lacks_the_shared_guard_6872
 xpf-userspace-dp	afxdp::checksum::dnat_counter_guard_tests_6872::the_guard_scan_detects_both_defect_shapes_6872
+xpf-userspace-dp	afxdp::coordinator::wg_control::tests::poll_timeout_ms_clamps_and_converts
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::wg_apply_combine_sets_ipv4_ce_and_recomputes_checksum
 xpf-userspace-dp	afxdp::cos::admission::tests::admission_ecn_per_flow_threshold_matches_share_cap_denominator
 xpf-userspace-dp	afxdp::cos::ecn::tests::mark_ecn_ce_ipv4_converts_ect0_to_ce_and_updates_checksum

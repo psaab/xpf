@@ -27,13 +27,14 @@ mk_fixture() {
 	local d
 	d=$(mktemp -d "${TMPDIR:-/tmp}/debug-leg-census-cell.XXXXXXXX")
 	cat >"$d/census.json" <<'EOF'
-{"targets":[{"name":"fixture-bin","kind":"bin","listed":["frame::keep","nat::ignored"],"ignored":["nat::ignored"]},{"name":"fixture-test","kind":"test","listed":["session::keep","checksum::excluded"],"ignored":[]}]}
+{"targets":[{"name":"fixture-bin","kind":"bin","listed":["frame::keep","nat::ignored","nat::second_ignored"],"ignored":["nat::ignored","nat::second_ignored"]},{"name":"fixture-test","kind":"test","listed":["session::keep","checksum::excluded"],"ignored":[]}]}
 EOF
 	printf '%b\n' \
 		'fixture-bin\tframe::keep' \
 		'fixture-test\tsession::keep' >"$d/debug-leg.tests"
 	printf '%b\n' \
-		'fixture-bin\tnat::ignored\tMEASUREMENT: fixture ignored path' >"$d/debug-leg.ignored"
+		'fixture-bin\tnat::ignored\tMEASUREMENT: fixture ignored path' \
+		'fixture-bin\tnat::second_ignored\tMEASUREMENT: second fixture ignored path' >"$d/debug-leg.ignored"
 	printf '%b\n' \
 		'fixture-test\tchecksum::excluded\tfixture control-plane exclusion' >"$d/debug-leg.excluded"
 	printf '%s' "$d"
@@ -60,6 +61,25 @@ expect_fail() {
 	fi
 	rm -rf "$d"
 }
+expect_fail_both() {
+	local name=$1
+	local needle_one=$2
+	local needle_two=$3
+	local mutator=$4
+	local d rc
+	d=$(mk_fixture)
+	"$mutator" "$d"
+	if run_fixture "$d" >"$d/out" 2>&1; then
+		bad "ESCAPE: $name -- validator still passed"
+	elif ! grep -Fqi -- "$needle_one" "$d/out" || ! grep -Fqi -- "$needle_two" "$d/out"; then
+		bad "$name -- validator did not name both expected paths"
+		sed -n '1,12p' "$d/out" | sed 's/^/        /' >&2
+	else
+		ok "$name"
+	fi
+	rm -rf "$d"
+}
+
 
 # Positive controls must pass before the mutations have meaning.
 if python3 "$VALIDATOR" --self-test >/dev/null 2>&1; then
@@ -110,6 +130,34 @@ data["targets"][0]["ignored"] = []
 json.dump(data, open(path, "w", encoding="utf-8"), separators=(",", ":"))
 PY
 }
+ignored_in_allowlist() {
+	python3 - "$1/debug-leg.tests" "$1/debug-leg.ignored" <<'PY'
+import sys
+tests_path, ignored_path = sys.argv[1:]
+tests = open(tests_path, encoding="utf-8").read().splitlines()
+tests.insert(1, "fixture-bin\tnat::ignored")
+open(tests_path, "w", encoding="utf-8").write("\n".join(tests) + "\n")
+ignored = [
+    line for line in open(ignored_path, encoding="utf-8").read().splitlines()
+    if not line.startswith("fixture-bin\tnat::ignored\t")
+]
+open(ignored_path, "w", encoding="utf-8").write("\n".join(ignored) + "\n")
+PY
+}
+substitution_same_cardinality() {
+	python3 - "$1/census.json" <<'PY'
+import json
+import sys
+census_path = sys.argv[1]
+data = json.load(open(census_path, encoding="utf-8"))
+listed = data["targets"][0]["listed"]
+listed.remove("frame::keep")
+listed.append("frame::substitute")
+json.dump(data, open(census_path, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+}
+
+
 duplicate_registry() {
 	python3 - "$1/debug-leg.tests" <<'PY'
 import sys
@@ -143,6 +191,8 @@ expect_fail "empty live list" "live census is empty" empty_live
 expect_fail "missing expected path" "frame::keep" missing_expected
 expect_fail "unexpected family path" "nat::unexpected" unexpected_family
 expect_fail "ignored-to-runnable transition" "ignored family equation" ignored_transition
+expect_fail "ignored family placed in A" "missing/ignored" ignored_in_allowlist
+expect_fail_both "same-cardinality missing plus substitution" "frame::keep" "frame::substitute" substitution_same_cardinality
 expect_fail "duplicate registry entry" "duplicate target/path" duplicate_registry
 expect_fail "unsorted registry" "registry is unsorted" unsorted_registry
 expect_fail "duplicate target path" "target collision" duplicate_target_path

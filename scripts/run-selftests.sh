@@ -158,6 +158,7 @@ scripts/selftest-census.sh
 test/incus/selftest-census-selftest.sh
 scripts/miri-census.sh
 scripts/miri-leg.sh
+scripts/debug-leg-census-selftest.sh
 test/incus/miri-census-selftest.sh
 scripts/close_keyword_lint_ci.sh
 scripts/git-hooks/commit-msg
@@ -423,6 +424,9 @@ run_bash test/incus/go-skip-census-selftest.sh
 # clean run over a filter that matched nothing. So each defence is a mutation
 # cell that must flip the verdict, and the leg's scoring cells drive the real
 # scripts/miri-leg.sh over a stub cargo replaying fixture logs.
+# #10492: exact debug-leg registry/census fixtures. Each partition mutation
+# must RED the same validator that the live Cargo census invokes.
+run_bash scripts/debug-leg-census-selftest.sh
 run_bash test/incus/miri-census-selftest.sh
 # -- go-buildtag census self-test (#9922 F-159): the census below discovers
 # tagged files and vets each single-identifier tag (vet never executes);

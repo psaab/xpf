@@ -263,14 +263,18 @@ def validate(root: Path, listed: set[tuple[str, str]], ignored: set[tuple[str, s
     family = {key for key in live if any(token in key[1] for token in FAMILY_TOKENS)}
     family_ignored = family & ignored
     family_runnable = family & runnable
-    if tests - runnable:
-        raise CensusError(f"debug-leg.tests has missing/ignored entries: [{sample_keys(tests - runnable)}]")
-    if excluded - runnable:
-        raise CensusError(f"debug-leg.excluded has missing/ignored entries: [{sample_keys(excluded - runnable)}]")
-    require_set_equal("ignored family equation X = F intersection I", ignored_registry, family_ignored)
-    require_set_equal("family partition A union E = F intersection R", tests | excluded, family_runnable)
+    if tests & ignored:
+        raise CensusError(f"debug-leg.tests has missing/ignored entries: [{sample_keys(tests & ignored)}]")
+    if excluded & ignored:
+        raise CensusError(f"debug-leg.excluded has missing/ignored entries: [{sample_keys(excluded & ignored)}]")
+    require_set_equal("ignored family equation X = F intersection I", family_ignored, ignored_registry)
+    require_set_equal("family partition A union E = F intersection R", family_runnable, tests | excluded)
     if tests & excluded:
         raise CensusError(f"family partition A intersection E is non-empty: [{sample_keys(tests & excluded)}]")
+    if tests - runnable:
+        raise CensusError(f"debug-leg.tests has missing live entries: [{sample_keys(tests - runnable)}]")
+    if excluded - runnable:
+        raise CensusError(f"debug-leg.excluded has missing live entries: [{sample_keys(excluded - runnable)}]")
     raw_selected = {}
     for target, path_value in tests:
         raw_selected.setdefault(path_value, []).append(target)
