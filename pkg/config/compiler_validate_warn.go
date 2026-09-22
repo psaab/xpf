@@ -1689,6 +1689,11 @@ func ValidateConfig(cfg *Config) []string {
 	warnings = append(warnings, validateFilterLossPriorityWarnings(cfg)...)
 	// #9503: a three-color policer marking action applies meter-only; say so.
 	warnings = append(warnings, validateThreeColorPolicerMarkingWarnings(cfg)...)
+	// #10502: color-aware three-color policers are a genuine userspace
+	// semantic gap. The capability gate keeps the dataplane fail-closed by
+	// disarming forwarding; name the definition at commit so that a clean
+	// commit cannot hide a total transit stop.
+	warnings = append(warnings, validateThreeColorPolicerDisarmWarnings(cfg)...)
 
 	// #4316 (fable-167 F-3a): `firewall filter <n> interface-specific` is
 	// accepted but xpf keeps a single shared counter (not per-interface
