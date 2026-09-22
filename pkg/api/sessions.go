@@ -1356,6 +1356,11 @@ func buildSessionQuery(r *http.Request, view sessionView) (sessionQuery, string)
 	}
 	q.zone = zoneFilter
 	q.proto = r.URL.Query().Get("protocol")
+	if q.proto != "" {
+		if _, ok := appid.ProtocolNumberLenient(q.proto); !ok {
+			return q, "invalid protocol filter: " + q.proto
+		}
+	}
 	q.app = r.URL.Query().Get("application")
 	q.iface = r.URL.Query().Get("interface")
 	q.snatPool = r.URL.Query().Get("source_nat_pool")

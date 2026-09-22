@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -208,6 +209,12 @@ func TestRESTSessionFilterFailsClosed(t *testing.T) {
 		{"negative offset", "offset=-5", 400},
 		{"bad page_size", "page_size=abc", 400},
 		{"negative page_size", "page_size=-1", 400},
+		{"bad protocol", "protocol=tcpip", 400},
+		{"bogus protocol", "protocol=bogus", 400},
+		{"out-of-range protocol", "protocol=256", 400},
+		{"negative protocol", "protocol=-1", 400},
+		{"bad signed protocol", "protocol=%2B6", 400},
+		{"bad space-padded protocol", "protocol=%206", 400},
 		{"valid", "source_prefix=10.0.1.0/24&destination_port=443", 200},
 	}
 	for _, tc := range cases {
@@ -218,6 +225,37 @@ func TestRESTSessionFilterFailsClosed(t *testing.T) {
 				t.Fatalf("%s: status %d, want %d; body: %s", tc.name, rr.Code, tc.want, rr.Body.String())
 			}
 		})
+	}
+}
+func TestRESTSessionProtocolErrorPreservesEncodedPlus(t *testing.T) {
+	s := &Server{dp: newMultiSessionDP()}
+	rr := httptest.NewRecorder()
+	s.sessionsHandler(rr, httptest.NewRequest(
+		"GET", "/api/v1/security/sessions?protocol=%2B6", nil,
+	))
+	if rr.Code != 400 {
+		t.Fatalf("protocol=%%2B6: status %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "invalid protocol filter: +6") {
+		t.Fatalf("protocol=%%2B6: body %q does not preserve decoded +6", rr.Body.String())
+	}
+}
+
+func TestRESTInvalidProtocolIncludePeerStopsFanout(t *testing.T) {
+	fake := &fakeClusterSessionService{}
+	s := &Server{
+		dp:               newMultiSessionDP(),
+		clusterSessionFn: func() ClusterSessionService { return fake },
+	}
+	rr := httptest.NewRecorder()
+	s.sessionsHandler(rr, httptest.NewRequest(
+		"GET", "/api/v1/security/sessions?protocol=tcpip&include_peer=true", nil,
+	))
+	if rr.Code != 400 {
+		t.Fatalf("status %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	if fake.peerGetCalled || fake.getCalled {
+		t.Fatal("invalid protocol reached peer fan-out")
 	}
 }
 
