@@ -175,9 +175,10 @@ func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) [
 // this path is gone.
 //
 // It returns the FIRST helper IPC error encountered, or nil if all succeeded.
-// Best-effort mirror callers (batch delete) discard the result; the
-// authoritative clear-all path (#5881) propagates it so a failed helper
-// revocation is reported instead of masquerading as success.
+// The bare batch callers discard the result (#5096 best-effort); the scoped
+// batch (#10513) and the authoritative clear-all path (#5881) propagate it
+// so a failed helper revocation is reported instead of masquerading as
+// success.
 func (m *Manager) syncSessionRequestsLocked(reqs ...SessionSyncRequest) error {
 	if len(reqs) == 0 {
 		return nil
