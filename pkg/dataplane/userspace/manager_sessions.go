@@ -8,28 +8,90 @@ package userspace
 // change to the authoritative Rust helper.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
+)
+
+const (
+	// Helper pages stay below the control-response cap, while Go retains at
+	// most four pages for one commit-time invalidation capture.
+	policyReadPageMatchCap = 65536
+	policyReadMatchCap     = 262144
+	policyReadByteCap      = 48 * 1024 * 1024
+	policyReadDeadline     = 30 * time.Second
 )
 // ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
 // session authority. It deliberately uses the control socket: this request is
 // the commit-time discovery boundary and must not be accepted on the dedicated
 // session socket, whose allowlist is limited to sync_session/ping/HA refresh.
-// The helper handler still performs the worker fan-out after releasing its
-// snapshot-wide state lock, so the Go side only holds m.mu while framing and
-// re-acquires it after the round trip.
+// Continuation pages share one absolute 30-second capture deadline. A complete
+// response with no continuation is the only authoritative result.
 func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlResponse, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.requestDetailedLocked(ControlRequest{
-		Type:              "list_sessions_by_policy",
-		SuppressStatus:    true,
-		SessionPolicyList: &req,
-	})
+	deadline := time.Now().Add(policyReadDeadline)
+	pageReq := req
+	seenContinuations := map[string]struct{}{}
+	var aggregate ControlResponse
+	aggregate.OK = true
+	for {
+		if time.Now().After(deadline) {
+			return ControlResponse{}, fmt.Errorf("policy session READ deadline exceeded after %s", policyReadDeadline)
+		}
+		m.mu.Lock()
+		page, err := m.requestDetailedLocked(ControlRequest{
+			Type:              "list_sessions_by_policy",
+			SuppressStatus:    true,
+			SessionPolicyList: &pageReq,
+		})
+		m.mu.Unlock()
+		if time.Now().After(deadline) {
+			return ControlResponse{}, fmt.Errorf("policy session READ deadline exceeded after %s", policyReadDeadline)
+		}
+		if err != nil {
+			return ControlResponse{}, err
+		}
+		if len(page.SessionPolicyMatches) > policyReadPageMatchCap {
+			return ControlResponse{}, fmt.Errorf(
+				"policy session READ page exceeds %d matches", policyReadPageMatchCap)
+		}
+		if len(page.SessionPolicyMatches) != 0 {
+			encoded, err := json.Marshal(page.SessionPolicyMatches)
+			if err != nil {
+				return ControlResponse{}, fmt.Errorf("policy session READ page encode: %w", err)
+			}
+			if len(encoded) > policyReadByteCap {
+				return ControlResponse{}, fmt.Errorf(
+					"policy session READ page exceeds %d encoded bytes", policyReadByteCap)
+			}
+		}
+		if len(aggregate.SessionPolicyMatches)+len(page.SessionPolicyMatches) > policyReadMatchCap {
+			return ControlResponse{}, fmt.Errorf(
+				"policy session READ exceeds %d matches", policyReadMatchCap)
+		}
+		aggregate.SessionPolicyMatches = append(
+			aggregate.SessionPolicyMatches, page.SessionPolicyMatches...)
+		aggregate.SessionPolicyPerWorkerErrors = append(
+			aggregate.SessionPolicyPerWorkerErrors, page.SessionPolicyPerWorkerErrors...)
+		if page.SessionPolicyContinuation == "" {
+			if !page.SessionPolicyComplete {
+				return ControlResponse{}, fmt.Errorf(
+					"policy session READ incomplete without continuation")
+			}
+			aggregate.SessionPolicyComplete = true
+			return aggregate, nil
+		}
+		if _, duplicate := seenContinuations[page.SessionPolicyContinuation]; duplicate {
+			return ControlResponse{}, fmt.Errorf(
+				"policy session READ repeated continuation token")
+		}
+		seenContinuations[page.SessionPolicyContinuation] = struct{}{}
+		pageReq.Continuation = page.SessionPolicyContinuation
+	}
 }
 
 
