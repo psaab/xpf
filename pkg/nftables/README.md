@@ -61,8 +61,8 @@ host path. Three test layers pin this:
   byte-for-byte via netlink (`iifnameScopeByRule`) — NOT a global union —
   because google/nftables v0.3.0 renders anonymous string-set elements
   empty in `nft list`, so a scope move/widen between retained ident-RST
-  scope and IKE warning metadata (or the broad zone deny) is invisible to
-  the text diff and a union check (#6405). Mutation-
+  scope and the broad zone deny is invisible to the text diff and a union
+  check (#6405). Mutation-
   sensitivity sub-cases (widened daddr, dropped `saddr !=`, weakened
   verdict, dropped unzoned deny, dropped counter, and an iifname
   exemption-widen that preserves the global union) assert the netlink dump
@@ -183,8 +183,8 @@ those types into the self-contained spec structs in `netlink_spec.go`.
   `{ "", "" }`. The scope is still enforced correctly (verified) — the T1 parity
   test canonicalizes the iifname-set text and compares the decoded element bytes
   PER RULE (`iifnameScopeByRule`), NOT as a global union: a scope move/widen
-  between the retained ident-RST scope, IKE warning metadata, and the broad zone
-  deny that preserves the union is a fail-open a union check misses (#6405).
+  between the retained ident-RST scope and the broad zone deny that preserves
+  the union is a fail-open a union check misses (#6405).
 - lo0 filter ports and DSCP are RESOLVED numerically at build time via the
   same SSOT the compile path uses (`config.ResolveFilterPortRange`,
   `dataplane.DSCPValues`) — the same resolution nft applies to the raw

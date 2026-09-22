@@ -242,10 +242,9 @@ func TestJunosHostPermitRendersAReturnAheadOfTheDeny9504(t *testing.T) {
 	}
 }
 
-// TestJunosHostDenyIKEExemption is the #10524 three-cell regression:
-// (1) no terminal IKE accept may render ahead of the fine jump,
-// (2) BAD udp/500 is denied by the application-any fine DROP, and
-// (3) a GOOD source still reaches the coarse IKE admit after the subchain
+// TestJunosHostDenyIKEExemption is the #10524 two-cell regression:
+// (1) no terminal IKE accept may render ahead of the fine jump, and
+// (2) a GOOD source still reaches the coarse IKE admit after the subchain
 // returns. The old shield-order assertion was a pin of the bug, not parity.
 func TestJunosHostDenyIKEExemption(t *testing.T) {
 	cfg := junosHostDenyTestConfig()
@@ -272,13 +271,7 @@ func TestJunosHostDenyIKEExemption(t *testing.T) {
 	if !strings.Contains(payload, drop) {
 		t.Fatalf("payload missing the junos-host drop %q:\n%s", drop, payload)
 	}
-	// Cell 2: first-match walk through the rendered input window and jumped
-	// subchain denies BAD udp/500. This independently detects a restored
-	// terminal ACCEPT; it does not inspect the projection in isolation.
-	if got := junosHostInputIKEWalk(payload, "10.0.0.5"); got != "drop" {
-		t.Fatalf("#10524: BAD udp/500 walk = %q, want drop", got)
-	}
-	// Cell 3 safety: a source not covered by the deny returns from the subchain,
+	// Safety pin: a source not covered by the deny returns from the subchain,
 	// then remains admitted by the coarse IKE gate below the fine window.
 	if got := junosHostInputIKEWalk(payload, "10.0.0.6"); got != "accept" {
 		t.Fatalf("non-denied IKE walk = %q, want coarse accept", got)

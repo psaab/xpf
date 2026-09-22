@@ -793,8 +793,8 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 	// unit's. That is deliberate and errs toward OVER-INCLUSIVE metadata: an
 	// exemption one unit needs is applied to the parent, so IKE warning metadata
 	// and retained ident-RST scope include a sibling where they did not strictly
-	// have to. The direction is safe for the retained verdicts because IKE is
-	// authenticated and ident is self-limiting, and the units share a zone.
+	// have to. The IKE metadata only broadens an advisory; only the retained
+	// ident-RST verdict is self-limiting and must refuse that sibling safely.
 	//
 	// Recorded here rather than only in the issue: the natural "fix" is to make
 	// the parent entry per-unit, which would narrow metadata and retained-RST

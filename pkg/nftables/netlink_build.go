@@ -738,8 +738,8 @@ func (p *nlPlan) iifnameMatch(names []string) []expr.Any {
 	// NUL-padded to 16). ifname16 below copies without a length check, so a
 	// longer name fills the field with no NUL and the compare key can never
 	// match — the iifname-scoped jump (junos-host), retained ident-RST scope,
-	// IKE warning metadata, ingress scoping, or reinject accept) goes dead while
-	// sibling rules from the same generation still install. Fail the plan CLOSED
+	// ingress scoping, or reinject accept) goes dead while sibling rules from
+	// the same generation still install. Fail the plan CLOSED
 	// (#6512 posture) rather than installing the never-matching rule. This
 	// validates EVERY element before either shape is constructed, so one
 	// invalid member fails the whole set build — the tradeoff is

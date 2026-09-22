@@ -379,6 +379,58 @@ func TestJunosHostIKEOverlapWarning10524(t *testing.T) {
 			t.Fatalf("warning must name only the IKE-admitting interface: %s", got[0])
 		}
 	})
+	t.Run("mixed global remedy is additive", func(t *testing.T) {
+		mixed := jhTestConfig()
+		mixed.Interfaces.Interfaces["ge-0/0/2"] = &InterfaceConfig{
+			Name: "ge-0/0/2",
+			Units: map[int]*InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"10.0.3.10/24"}},
+			},
+		}
+		mixed.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{"ike"}
+		mixed.Security.Zones["trust"] = &ZoneConfig{
+			Name: "trust", Interfaces: []string{"ge-0/0/2.0"},
+			HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"all"}},
+		}
+		mixed.Security.GlobalPolicies = []*Policy{{
+			Name: "global-mixed", Action: PolicyDeny,
+			Match: PolicyMatch{
+				SourceAddresses: []string{"bad-net"},
+				Applications:    []string{"any"},
+				ToZones:         []string{"junos-host"},
+			},
+		}}
+		got := filter10524(validateJunosHostDirectDeliveryWarnings(mixed))
+		if len(got) != 1 {
+			t.Fatalf("expected exactly one mixed-zone global warning, got %v", got)
+		}
+		if !strings.Contains(got[0], "remove `ike`/`ipsec`") ||
+			!strings.Contains(got[0], "`all`") {
+			t.Fatalf("mixed-zone remedy must name explicit and meta admissions: %s", got[0])
+		}
+	})
+
+	t.Run("overridden meta-token is not reported", func(t *testing.T) {
+		overridden := jhTestConfig()
+		zone := overridden.Security.Zones["untrust"]
+		zone.HostInboundTraffic.SystemServices = []string{"all"}
+		zone.InterfaceHostInbound = map[string]*HostInboundTraffic{
+			"ge-0/0/1.0": {SystemServices: []string{"ike"}},
+		}
+		overridden.Security.Policies = []*ZonePairPolicies{
+			{FromZone: "untrust", ToZone: "junos-host", Policies: []*Policy{
+				jhDeny("block-overridden", []string{"bad-net"}, []string{"any"}),
+			}},
+		}
+		got := filter10524(validateJunosHostDirectDeliveryWarnings(overridden))
+		if len(got) != 1 {
+			t.Fatalf("expected exactly one overridden-zone warning, got %v", got)
+		}
+		if !strings.Contains(got[0], "remove `ike`/`ipsec`") ||
+			strings.Contains(got[0], "`all`") {
+			t.Fatalf("remedy must follow effective override, not stale all token: %s", got[0])
+		}
+	})
 }
 
 // TestJunosHostIKEOverlapWarningPartialCoverage10524 proves the advisory does

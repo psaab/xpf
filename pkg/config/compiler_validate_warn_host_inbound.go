@@ -435,10 +435,10 @@ func junosHostPolicyStricterThanCoarseGate(action PolicyAction, m PolicyMatch) (
 	return false, ""
 }
 
-// junosHostIKEFullAdmissionTokens returns authored/effective meta-service tokens
-// that make an IKE overlap broad enough to require a shape-specific remedy.
-// `all` expands to IKE/IPsec, while `any-service` bypasses the named-service
-// union entirely; naming either token makes the warning actionable.
+// junosHostIKEFullAdmissionTokens returns effective meta-service tokens on the
+// overlapping zones' effective interfaces that make an IKE overlap broad enough
+// to require a shape-specific remedy. `all` expands to IKE/IPsec, while
+// `any-service` bypasses the named-service union entirely.
 func junosHostIKEFullAdmissionTokens(cfg *Config, zones []string) []string {
 	seen := make(map[string]bool)
 	add := func(svcs []string) {
@@ -453,9 +453,6 @@ func junosHostIKEFullAdmissionTokens(cfg *Config, zones []string) []string {
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
-		}
-		if zone.HostInboundTraffic != nil {
-			add(zone.HostInboundTraffic.SystemServices)
 		}
 		for _, ref := range zone.Interfaces {
 			svc, _, _ := zone.InterfaceHostInboundEffective(ref)
@@ -592,9 +589,8 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 		serviceRemedy := "remove `ike`/`ipsec` from host-inbound-traffic or " +
 			"narrow/review the policy if that admission is not intended"
 		if fullTokens := junosHostIKEFullAdmissionTokens(cfg, zones); len(fullTokens) > 0 {
-			serviceRemedy = fmt.Sprintf(
-				"narrow/remove coarse `%s` host-inbound admission or review the "+
-					"policy if that admission is not intended",
+			serviceRemedy += fmt.Sprintf(
+				"; also narrow/remove coarse `%s` host-inbound admission",
 				strings.Join(fullTokens, "`/`"))
 		}
 		warnings = append(warnings, fmt.Sprintf(
