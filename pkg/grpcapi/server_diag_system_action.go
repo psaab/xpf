@@ -174,7 +174,7 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 	}
 	if strings.HasPrefix(req.Action, "userspace-attest:arm:") {
 		principal, ok := authorizedPrincipalFromContext(ctx)
-		if !ok || !d11LedgerPrincipalAllowed(principal) {
+		if !ok || !d11LedgerPrincipalAllowed(principal, s.d11AuthorizationConfig()) {
 			return nil, status.Error(codes.PermissionDenied, "D11 attestation arm requires root or configured superuser")
 		}
 		if s.d11ArmFn == nil {

@@ -848,9 +848,12 @@ impl ReinjectCore {
             Some(ADMIT_NO_GENERATION)
         } else if frame.if_id == 0 || frame.origin.stn.is_empty() {
             Some(ADMIT_TUNNEL_ROW_MISSING)
-        } else if inner.terminal_tombstone_overflow {
+        } else if inner.authority.run_id.starts_with("attest-")
+            && inner.terminal_tombstone_overflow
+        {
             Some(ADMIT_FULL)
-        } else if inner.terminal_tombstones.contains(&frame.lease.request_id)
+        } else if (inner.authority.run_id.starts_with("attest-")
+            && inner.terminal_tombstones.contains(&frame.lease.request_id))
             || inner.entries.contains_key(&frame.lease.request_id)
         {
             Some(ADMIT_BAD_LEASE)
@@ -950,9 +953,14 @@ impl ReinjectCore {
             frame.lease.queue_epoch,
         ) {
             Some(ADMIT_STALE)
-        } else if inner.terminal_tombstone_overflow {
+        } else if inner.authority.run_id.starts_with("attest-")
+            && inner.terminal_tombstone_overflow
+        {
             Some(ADMIT_FULL)
-        } else if inner.terminal_tombstones.contains(&id) || inner.entries.contains_key(&id) {
+        } else if (inner.authority.run_id.starts_with("attest-")
+            && inner.terminal_tombstones.contains(&id))
+            || inner.entries.contains_key(&id)
+        {
             Some(ADMIT_BAD_LEASE)
         } else if inner.entries.len() >= N_LIVE {
             Some(ADMIT_FULL)
@@ -1413,7 +1421,10 @@ impl ReinjectCore {
     }
 
     fn remember_terminal_tombstone(inner: &mut CoreInner, id: u64) {
-        if id == 0 || inner.terminal_tombstone_overflow {
+        if !inner.authority.run_id.starts_with("attest-")
+            || id == 0
+            || inner.terminal_tombstone_overflow
+        {
             return;
         }
         if inner.terminal_tombstones.contains(&id) {

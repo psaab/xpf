@@ -26,6 +26,10 @@ func TestIpsecCaptureDispositionMetricsJoinWitnessLabels10478(t *testing.T) {
 				Stale:              5,
 				Cancelled:          6,
 				Refused:            7,
+				D11Available:       true,
+				D11RunID:           "attest-10478",
+				D11Generation:      9,
+				D11PermitEpoch:     11,
 				D11Suppressed:      15,
 				D11Deny52:          16,
 				DeliveredAvailable: true,
@@ -71,12 +75,20 @@ func TestIpsecCaptureDispositionMetricsJoinWitnessLabels10478(t *testing.T) {
 		for _, label := range metric.GetLabel() {
 			labels[label.GetName()] = label.GetValue()
 		}
+		expectedRunID := "run-10478"
+		if family.GetName() == "xpf_ipsec_capture_suppressed_total" ||
+			family.GetName() == "xpf_ipsec_capture_deny_events_total" {
+			expectedRunID = "attest-10478"
+		}
 		for key, expected := range map[string]string{
-			"run_id": "run-10478", "generation": "9", "permit_epoch": "11",
+			"run_id": expectedRunID, "generation": "9", "permit_epoch": "11",
 		} {
 			if labels[key] != expected {
 				t.Errorf("%s: %s label=%q, want %q", family.GetName(), key, labels[key], expected)
 			}
+		}
+		if family.GetName() == "xpf_ipsec_capture_deny_events_total" && labels["reason"] != "52" {
+			t.Errorf("deny reason=%q, want 52", labels["reason"])
 		}
 		if metric.GetCounter().GetValue() != value {
 			t.Errorf("%s: value=%v, want %v", family.GetName(), metric.GetCounter().GetValue(), value)

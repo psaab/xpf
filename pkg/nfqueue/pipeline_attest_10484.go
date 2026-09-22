@@ -1,12 +1,14 @@
 package nfqueue
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -51,15 +53,16 @@ var (
 // callback is the daemon's authority publication hook; it runs before ARMED is
 // made visible to the pipeline.
 type D11AttestationArmer struct {
-	mu          sync.Mutex
-	nodeID      string
-	state       D11ArmState
-	runID       string
-	permitEpoch uint64
-	selector    [16]byte
-	ledger      *D11AttestationLedger
-	announce    func(runID string, permitEpoch uint64) error
-	allow       func() bool
+	mu             sync.Mutex
+	nodeID         string
+	state          D11ArmState
+	runID          string
+	attemptedRunID string
+	permitEpoch    uint64
+	selector       [16]byte
+	ledger         *D11AttestationLedger
+	announce       func(runID string, permitEpoch uint64) error
+	allow          func() bool
 }
 
 func NewD11AttestationArmer(nodeID string, ledger *D11AttestationLedger, announce func(string, uint64) error) *D11AttestationArmer {
@@ -116,7 +119,8 @@ func (a *D11AttestationArmer) Arm(runID string, permitEpoch uint64, selectorHex 
 		return errors.New("nfqueue: D11 authority wiring unavailable")
 	}
 	allow := a.allow
-	if a.state != D11Inactive || permitEpoch == 0 {
+	if (a.state != D11Inactive && a.state != D11Disarmed) || permitEpoch == 0 ||
+		a.attemptedRunID == runID {
 		a.mu.Unlock()
 		return errD11ArmActive
 	}
@@ -132,10 +136,12 @@ func (a *D11AttestationArmer) Arm(runID string, permitEpoch uint64, selectorHex 
 		return err
 	}
 	a.mu.Lock()
-	if a.state != D11Inactive || a.announce == nil {
+	if (a.state != D11Inactive && a.state != D11Disarmed) || a.announce == nil ||
+		a.attemptedRunID == runID {
 		a.mu.Unlock()
 		return errD11ArmActive
 	}
+	a.attemptedRunID = runID
 	a.state = D11Arming
 	a.mu.Unlock()
 
@@ -293,8 +299,11 @@ type D11LedgerSnapshot struct {
 	SnapshotSeq uint64
 	Finalized   bool
 	Truncated   bool
-	Records     []D11LedgerRecord
-	Failures    []D11SelectionFailure
+	// VoidReason is non-empty when the run was finalized without a complete
+	// attestation, such as an authority publication failure.
+	VoidReason string
+	Records    []D11LedgerRecord
+	Failures   []D11SelectionFailure
 }
 
 type D11AttestationLedger struct {
@@ -306,6 +315,7 @@ type D11AttestationLedger struct {
 	snapshotSeq uint64
 	finalized   bool
 	truncated   bool
+	voidReason  string
 	records     map[D11LedgerKey]*D11LedgerRecord
 	byRequest   map[uint64]D11LedgerKey
 }
@@ -322,7 +332,7 @@ func (l *D11AttestationLedger) Begin(nodeID, runID string, permitEpoch uint64) {
 	defer l.mu.Unlock()
 	l.nodeID, l.runID, l.permitEpoch = nodeID, runID, permitEpoch
 	l.snapshotSeq++
-	l.finalized, l.truncated = false, false
+	l.finalized, l.truncated, l.voidReason = false, false, ""
 	l.records = make(map[D11LedgerKey]*D11LedgerRecord)
 	l.byRequest = make(map[uint64]D11LedgerKey)
 	l.failures = nil
@@ -337,7 +347,7 @@ func (l *D11AttestationLedger) RecordFailure(frame CaptureFrame, reason string) 
 	if l.runID == "" || l.finalized {
 		return
 	}
-	if len(l.failures) >= D11ManifestCap {
+	if len(l.records)+len(l.failures) >= D11ManifestCap {
 		l.truncated = true
 		l.snapshotSeq++
 		return
@@ -368,7 +378,7 @@ func (l *D11AttestationLedger) Reserve(frame CaptureFrame, lease ReinjectLease) 
 		l.records = make(map[D11LedgerKey]*D11LedgerRecord)
 		l.byRequest = make(map[uint64]D11LedgerKey)
 	}
-	if len(l.records) >= D11ManifestCap {
+	if len(l.records)+len(l.failures) >= D11ManifestCap {
 		l.truncated = true
 		l.snapshotSeq++
 		return D11LedgerKey{}, errors.New("nfqueue: D11 manifest cap exceeded")
@@ -399,7 +409,11 @@ func (l *D11AttestationLedger) UpdateAdmission(key D11LedgerKey, code string, co
 	}
 	record.AdmissionCode, record.ContractRefusal = code, contractRefusal
 	if code != "ADMIT_OK" {
-		record.TerminalState = "Uncertain"
+		if contractRefusal {
+			record.TerminalState = "FAIL"
+		} else {
+			record.TerminalState = "VOID"
+		}
 	}
 	l.snapshotSeq++
 	return true
@@ -480,9 +494,8 @@ func (l *D11AttestationLedger) MarkVoid(reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.finalized = true
-	if reason != "" {
-		l.snapshotSeq++
-	}
+	l.voidReason = reason
+	l.snapshotSeq++
 }
 
 func (l *D11AttestationLedger) Finalize() {
@@ -523,7 +536,17 @@ func (l *D11AttestationLedger) Snapshot() D11LedgerSnapshot {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := D11LedgerSnapshot{NodeID: l.nodeID, RunID: l.runID, PermitEpoch: l.permitEpoch, SnapshotSeq: l.snapshotSeq, Finalized: l.finalized, Truncated: l.truncated, Records: make([]D11LedgerRecord, 0, len(l.records)), Failures: append([]D11SelectionFailure(nil), l.failures...)}
+	out := D11LedgerSnapshot{
+		NodeID:      l.nodeID,
+		RunID:       l.runID,
+		PermitEpoch: l.permitEpoch,
+		SnapshotSeq: l.snapshotSeq,
+		Finalized:   l.finalized,
+		Truncated:   l.truncated,
+		VoidReason:  l.voidReason,
+		Records:     make([]D11LedgerRecord, 0, len(l.records)),
+		Failures:    append([]D11SelectionFailure(nil), l.failures...),
+	}
 	for _, record := range l.records {
 		copyRecord := *record
 		if record.EarlyCompletion != nil {
@@ -532,6 +555,44 @@ func (l *D11AttestationLedger) Snapshot() D11LedgerSnapshot {
 		}
 		out.Records = append(out.Records, copyRecord)
 	}
+	sort.Slice(out.Records, func(i, j int) bool {
+		a, b := out.Records[i].Key, out.Records[j].Key
+		if a.NodeID != b.NodeID {
+			return a.NodeID < b.NodeID
+		}
+		if a.RequestID != b.RequestID {
+			return a.RequestID < b.RequestID
+		}
+		if a.PermitEpoch != b.PermitEpoch {
+			return a.PermitEpoch < b.PermitEpoch
+		}
+		if a.QueueEpoch != b.QueueEpoch {
+			return a.QueueEpoch < b.QueueEpoch
+		}
+		return a.QueueNumber < b.QueueNumber
+	})
+	sort.Slice(out.Failures, func(i, j int) bool {
+		a, b := out.Failures[i], out.Failures[j]
+		if a.Origin.Family != b.Origin.Family {
+			return a.Origin.Family < b.Origin.Family
+		}
+		if a.Origin.Hook != b.Origin.Hook {
+			return a.Origin.Hook < b.Origin.Hook
+		}
+		if a.Origin.Owner != b.Origin.Owner {
+			return a.Origin.Owner < b.Origin.Owner
+		}
+		if a.Origin.STN != b.Origin.STN {
+			return a.Origin.STN < b.Origin.STN
+		}
+		if a.Origin.OwnedIfindex != b.Origin.OwnedIfindex {
+			return a.Origin.OwnedIfindex < b.Origin.OwnedIfindex
+		}
+		if a.FrameDigest != b.FrameDigest {
+			return bytes.Compare(a.FrameDigest[:], b.FrameDigest[:]) < 0
+		}
+		return a.Reason < b.Reason
+	})
 	return out
 }
 
@@ -545,6 +606,33 @@ func d11OriginWire(origin CaptureOrigin) (uint8, uint8) {
 		hook = 1
 	}
 	return family, hook
+}
+
+func d11AdmissionReason(code uint8) (string, bool) {
+	switch code {
+	case reinjectAdmitOK:
+		return "ADMIT_OK", false
+	case reinjectAdmitStale:
+		return "ADMIT_STALE", false
+	case reinjectAdmitFull:
+		return "ADMIT_FULL", false
+	case reinjectAdmitShutdown:
+		return "ADMIT_SHUTDOWN", false
+	case reinjectAdmitBadLease:
+		return "ADMIT_BAD_LEASE", true
+	case reinjectAdmitBridge:
+		return "ADMIT_BRIDGE", true
+	case reinjectAdmitInputHook:
+		return "ADMIT_INPUT_HOOK", true
+	case reinjectAdmitNonDryRun:
+		return "ADMIT_NON_DRY_RUN", true
+	case reinjectAdmitNoGeneration:
+		return "ADMIT_NO_GENERATION", true
+	case reinjectAdmitTunnelRowMissing:
+		return "ADMIT_TUNNEL_ROW_MISSING", true
+	default:
+		return fmt.Sprintf("ADMIT_UNKNOWN_%d", code), true
+	}
 }
 
 func d11GoFrameDigest(payload []byte, lease ReinjectLease, origin CaptureOrigin, runID string) [32]byte {
@@ -614,11 +702,14 @@ func (p *CapturePipeline) dispatchAttestEligible(frames []CaptureFrame) {
 }
 
 type D11AttestationConfig struct {
-	Armer            *D11AttestationArmer
-	Ledger           *D11AttestationLedger
-	OriginOwner      string
-	OriginSTN        string
-	OriginIfindex    uint32
+	Armer         *D11AttestationArmer
+	Ledger        *D11AttestationLedger
+	OriginOwner   string
+	OriginSTN     string
+	OriginIfindex uint32
+	// OriginValid resolves ownership against the active generation's queue
+	// handles. It is preferred when a runtime contains multiple RG owners.
+	OriginValid      func(CaptureOrigin) bool
 	AuthorityCurrent func() bool
 }
 
@@ -634,14 +725,20 @@ func (p *CapturePipeline) validateD11Frame(frame CaptureFrame) (ZoneEvaluation, 
 		return ZoneEvaluation{}, errors.New("unsupported family or hook")
 	}
 	if p.attestation != nil {
-		if p.attestation.OriginOwner != "" && frame.origin.Owner != p.attestation.OriginOwner {
-			return ZoneEvaluation{}, errors.New("origin owner mismatch")
-		}
-		if p.attestation.OriginSTN != "" && frame.origin.STN != p.attestation.OriginSTN {
-			return ZoneEvaluation{}, errors.New("origin stn mismatch")
-		}
-		if p.attestation.OriginIfindex != 0 && frame.origin.OwnedIfindex != p.attestation.OriginIfindex {
-			return ZoneEvaluation{}, errors.New("origin ifindex mismatch")
+		if p.attestation.OriginValid != nil {
+			if !p.attestation.OriginValid(frame.origin) {
+				return ZoneEvaluation{}, errors.New("origin owner mismatch")
+			}
+		} else {
+			if p.attestation.OriginOwner != "" && frame.origin.Owner != p.attestation.OriginOwner {
+				return ZoneEvaluation{}, errors.New("origin owner mismatch")
+			}
+			if p.attestation.OriginSTN != "" && frame.origin.STN != p.attestation.OriginSTN {
+				return ZoneEvaluation{}, errors.New("origin stn mismatch")
+			}
+			if p.attestation.OriginIfindex != 0 && frame.origin.OwnedIfindex != p.attestation.OriginIfindex {
+				return ZoneEvaluation{}, errors.New("origin ifindex mismatch")
+			}
 		}
 	}
 	if p.zoneEvaluator == nil || p.zoneSnapshot == nil {
@@ -662,6 +759,21 @@ func (p *CapturePipeline) validateD11Frame(frame CaptureFrame) (ZoneEvaluation, 
 	}
 	return evaluation, nil
 }
+func (p *CapturePipeline) attestLease(frame CaptureFrame) (ReinjectLease, error) {
+	if p == nil || p.attestation == nil || p.attestation.Armer == nil {
+		return ReinjectLease{}, errors.New("D11 attestation authority unavailable")
+	}
+	minter, ok := p.leaseMinter.(AttestLeaseMinter)
+	if !ok {
+		return ReinjectLease{}, errors.New("D11 attest lease minter unavailable")
+	}
+	status := p.attestation.Armer.Status()
+	if status.State != D11Armed.String() ||
+		status.RunID == "" || status.PermitEpoch == 0 {
+		return ReinjectLease{}, errors.New("D11 attestation authority is not armed")
+	}
+	return minter.MintLeaseForAttest(frame, status.RunID, status.PermitEpoch)
+}
 
 func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 	if p == nil || p.attestation == nil || p.attestation.Ledger == nil || p.submitter == nil {
@@ -678,6 +790,17 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 	p.submitGate.RLock()
 	admitted := make([]AdjudicatedFrame, 0, len(frames))
 	pending := make([]*pendingReinject, 0, len(frames))
+	p.mu.Lock()
+	d11Revoked := p.d11RevokedPermitEpoch != 0
+	p.mu.Unlock()
+	if d11Revoked {
+		for _, frame := range frames {
+			p.attestation.Ledger.RecordFailure(frame, "D11 authority is draining")
+			p.finishFrame(frame, VerdictDrop)
+		}
+		p.submitGate.RUnlock()
+		return
+	}
 	for _, frame := range frames {
 		evaluation, err := p.validateD11Frame(frame)
 		if err != nil {
@@ -685,7 +808,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 			p.finishFrame(frame, VerdictDrop)
 			continue
 		}
-		lease, err := p.lease(frame)
+		lease, err := p.attestLease(frame)
 		if err != nil {
 			p.attestation.Ledger.RecordFailure(frame, "lease: "+err.Error())
 			p.finishFrame(frame, VerdictDrop)
@@ -740,6 +863,9 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		}
 	}
 	p.submitGate.RUnlock()
+	if len(cancelItems) != 0 {
+		p.uncertain("D11 admission failure")
+	}
 	for _, item := range cancelItems {
 		p.cancelUncertainLease(item.lease)
 	}
@@ -747,6 +873,11 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 
 func (p *CapturePipeline) admissionFailed(item *pendingReinject, code string, cause error) {
 	if p.admissionFailedState(item, code, cause) {
+		if cause != nil {
+			p.uncertain("D11 admission " + code + ": " + cause.Error())
+		} else {
+			p.uncertain("D11 admission " + code)
+		}
 		p.cancelUncertainLease(item.lease)
 	}
 }
@@ -780,11 +911,6 @@ func (p *CapturePipeline) admissionFailedState(item *pendingReinject, code strin
 				Outcome: CompletionUncertain, Reason: "completion before admission",
 			}, "Uncertain")
 		}
-	}
-	if cause != nil {
-		p.uncertain("D11 admission " + code + ": " + cause.Error())
-	} else {
-		p.uncertain("D11 admission " + code)
 	}
 	p.finishFrame(item.frame, VerdictDrop)
 	p.retireFlow(item.frame.FlowKey)
@@ -823,15 +949,16 @@ func (p *CapturePipeline) applyAdmission(item *pendingReinject, admission Reinje
 		item.admissionPending = false
 		p.stats.Refused++
 		p.mu.Unlock()
+		code, contract := d11AdmissionReason(admission.ReasonCode)
 		if item.ledger != nil {
-			item.ledger.UpdateAdmission(item.ledgerKey, "REFUSED", false)
+			item.ledger.UpdateAdmission(item.ledgerKey, code, contract)
 			if early != nil {
 				item.ledger.RecordCompletion(item.ledgerKey, ReinjectCompletion{
 					RequestID: early.RequestID, PermitEpoch: early.PermitEpoch,
 					QueueNumber: early.QueueNumber, QueueEpoch: early.QueueEpoch,
 					Family: early.Family, Hook: early.Hook, OwnedIfindex: early.OwnedIfindex,
 					Outcome: CompletionUncertain, Reason: "completion before refusal",
-				}, "FAIL")
+				}, "Uncertain")
 			}
 		}
 		p.finishFrame(item.frame, VerdictDrop)

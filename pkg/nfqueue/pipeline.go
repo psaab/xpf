@@ -43,6 +43,12 @@ type LeaseMinter interface {
 	MintLease(CaptureFrame) (ReinjectLease, error)
 }
 
+// AttestLeaseMinter binds a lease to the D11 authority run and epoch. D11
+// selection refuses minters that do not implement this explicit contract.
+type AttestLeaseMinter interface {
+	MintLeaseForAttest(CaptureFrame, string, uint64) (ReinjectLease, error)
+}
+
 // LeaseMinterFunc adapts a function to LeaseMinter.
 type LeaseMinterFunc func(CaptureFrame) (ReinjectLease, error)
 
@@ -287,7 +293,10 @@ type CapturePipeline struct {
 	pending          map[uint64]*pendingReinject
 	closed           bool
 	revoked          bool
-	stats            pipelineStats
+	// d11RevokedPermitEpoch fences only the attestation selector after its
+	// scoped rollback cancellation; ordinary capture remains reusable.
+	d11RevokedPermitEpoch uint64
+	stats                 pipelineStats
 }
 
 // NewCapturePipeline constructs a pipeline with explicit bounded resources.
@@ -841,8 +850,6 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 	if p == nil {
 		return 0
 	}
-	p.drainMu.Lock()
-	defer p.drainMu.Unlock()
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -880,6 +887,13 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 		p.stats.Uncertain++
 		p.stats.FlowRetires++
 		p.mu.Unlock()
+		if pending.ledger != nil {
+			pending.ledger.RecordCompletion(pending.ledgerKey, ReinjectCompletion{
+				RequestID: pending.lease.RequestID, PermitEpoch: pending.lease.PermitEpoch,
+				QueueNumber: pending.lease.QueueNumber, QueueEpoch: pending.lease.QueueEpoch,
+				Outcome: CompletionUncertain, Reason: "ack timeout",
+			}, "Uncertain")
+		}
 		p.finishFrame(pending.frame, VerdictDrop)
 		p.retireFlow(pending.frame.FlowKey)
 		resolved++
@@ -984,12 +998,14 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		flow.pending = nil
 	}
 	family, hook := d11OriginWire(pending.frame.origin)
+	originMismatch := pending.ledger != nil &&
+		(completion.Family != family ||
+			completion.Hook != hook ||
+			completion.OwnedIfindex != pending.frame.origin.OwnedIfindex)
 	identityMismatch := completion.PermitEpoch != pending.lease.PermitEpoch ||
 		completion.QueueNumber != pending.lease.QueueNumber ||
 		completion.QueueEpoch != pending.lease.QueueEpoch ||
-		completion.Family != family ||
-		completion.Hook != hook ||
-		completion.OwnedIfindex != pending.frame.origin.OwnedIfindex
+		originMismatch
 	bytesMismatch := completion.Outcome == CompletionWritten &&
 		completion.BytesWritten != uint32(len(pending.frame.Packet.Payload()))
 	wouldPermit := completion.Outcome == CompletionWouldPermit &&
@@ -1020,9 +1036,15 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 			p.stats.Uncertain++
 		}
 	}
-	terminal := "FAIL"
+	terminal := string(completion.Outcome)
 	if ambiguous {
 		terminal = "Uncertain"
+	} else if wouldPermit {
+		// E28 suppression is a deliberate terminal deny, not a successful
+		// reinjection. Keep the completion outcome for accounting while
+		// retaining the historical FAIL terminal discriminator for the
+		// attestation manifest.
+		terminal = "FAIL"
 	} else if completion.Outcome == CompletionWritten {
 		terminal = "Written"
 	}
@@ -1045,13 +1067,15 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		return true
 	}
 	if wouldPermit {
-		p.mu.Lock()
-		p.stats.D11Suppressed++
-		p.mu.Unlock()
-		if p.emitDeny(pending.frame, ReasonEvaluatorUnavailable) {
+		if pending.ledger != nil {
 			p.mu.Lock()
-			p.stats.D11Deny52++
+			p.stats.D11Suppressed++
 			p.mu.Unlock()
+			if p.emitDeny(pending.frame, ReasonEvaluatorUnavailable) {
+				p.mu.Lock()
+				p.stats.D11Deny52++
+				p.mu.Unlock()
+			}
 		}
 		p.finishFrame(pending.frame, VerdictDrop)
 		return true
@@ -1059,7 +1083,6 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 	p.finishFrame(pending.frame, VerdictDrop)
 	return true
 }
-
 func (p *CapturePipeline) retireFlow(key string) {
 	p.mu.Lock()
 	flow := p.flows[key]
@@ -1094,8 +1117,9 @@ func (p *CapturePipeline) CancelForD11Drain(permitEpoch uint64) error {
 	defer p.drainMu.Unlock()
 	p.submitGate.Lock()
 	p.mu.Lock()
-	p.revoked = true
-	p.phase = PipelineQuarantine
+	if p.attestation != nil {
+		p.d11RevokedPermitEpoch = permitEpoch
+	}
 	ids := make([]uint64, 0, len(p.pending))
 	scopeSet := make(map[ReinjectQueueScope]struct{})
 	for id, pending := range p.pending {
@@ -1160,12 +1184,16 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 	}
 	ids := make([]uint64, 0, len(p.pending))
 	drops := make([]CaptureFrame, 0, len(p.pending))
+	ledgerItems := make([]*pendingReinject, 0, len(p.pending))
 	scopeSet := make(map[ReinjectQueueScope]struct{})
 	for id, pending := range p.pending {
 		if (permitEpoch == 0 || pending.lease.PermitEpoch == permitEpoch) &&
 			(queueNumber == 0 || pending.lease.QueueNumber == queueNumber) &&
 			(queueEpoch == 0 || pending.lease.QueueEpoch == queueEpoch) {
 			ids = append(ids, id)
+			if pending.ledger != nil {
+				ledgerItems = append(ledgerItems, pending)
+			}
 			drops = append(drops, pending.frame)
 			scopeSet[ReinjectQueueScope{QueueNumber: pending.lease.QueueNumber, QueueEpoch: pending.lease.QueueEpoch}] = struct{}{}
 			delete(p.pending, id)
@@ -1242,6 +1270,13 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 		_, cancelErr = p.submitter.CancelReinject(ids, wirePermitEpoch, scopes)
 	}
 	p.submitGate.Unlock()
+	for _, item := range ledgerItems {
+		item.ledger.RecordCompletion(item.ledgerKey, ReinjectCompletion{
+			RequestID: item.lease.RequestID, PermitEpoch: item.lease.PermitEpoch,
+			QueueNumber: item.lease.QueueNumber, QueueEpoch: item.lease.QueueEpoch,
+			Outcome: CompletionUncertain, Reason: "pipeline cancelled",
+		}, "Uncertain")
+	}
 	seen := make(map[*Packet]struct{}, len(drops))
 	for _, frame := range drops {
 		if frame.Packet == nil {
@@ -1277,7 +1312,6 @@ func (p *CapturePipeline) Close() error {
 	if p == nil {
 		return nil
 	}
-	_ = p.failPending("pipeline closed")
 	_ = p.Cancel(0, 0, 0)
 	p.mu.Lock()
 	p.closed = true

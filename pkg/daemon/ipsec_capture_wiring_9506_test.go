@@ -846,7 +846,9 @@ func TestIpsecCaptureWitnessUsesD11JoinKey10484(t *testing.T) {
 	}
 	d := &Daemon{opts: Options{NoDataplane: true}, ipsecCapture: runtime, d11Armer: armer}
 	witness := d.apiServerConfig(nil).IpsecCaptureWitnessFn()
-	if witness.RunID != runID || witness.PermitEpoch != 17 {
-		t.Fatalf("witness join key = run=%q epoch=%d, want %q/17", witness.RunID, witness.PermitEpoch, runID)
+	if !witness.D11Available || witness.D11RunID != runID ||
+		witness.D11PermitEpoch != 17 || witness.RunID == runID {
+		t.Fatalf("witness D11 key = available=%v run=%q epoch=%d actor=%q, want true/%q/17/process",
+			witness.D11Available, witness.D11RunID, witness.D11PermitEpoch, witness.RunID, runID)
 	}
 }

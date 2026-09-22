@@ -3,18 +3,19 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"github.com/psaab/xpf/pkg/config"
-	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/nfqueue"
-	xnft "github.com/psaab/xpf/pkg/nftables"
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 	"log/slog"
 	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/nfqueue"
+	xnft "github.com/psaab/xpf/pkg/nftables"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // ipsecCaptureDivertSpec converts one complete four-class queue generation into
@@ -778,25 +779,33 @@ func (r *ipsecCaptureRuntime) finalizeD11AfterClose() {
 	}
 }
 
-func (d *Daemon) d11AuthorityCurrent() bool {
-	if d == nil || d.d11Armer == nil {
-		return false
-	}
-	d.ipsecCaptureMu.Lock()
-	runtime := d.ipsecCapture
-	d.ipsecCaptureMu.Unlock()
-	if runtime == nil {
-		return false
+func (d *Daemon) d11WitnessAuthority(runtime *ipsecCaptureRuntime) (nfqueue.D11AttestationArmStatus, bool) {
+	if d == nil || runtime == nil || d.d11Armer == nil {
+		return nfqueue.D11AttestationArmStatus{}, false
 	}
 	runtime.authorityMu.Lock()
 	_, _, permitEpoch, open, _ := runtime.authoritySnapshotLocked()
 	overrideActive := runtime.d11Override != nil
 	runtime.authorityMu.Unlock()
-	status := d.d11Armer.Status()
-	return overrideActive && open && permitEpoch == status.PermitEpoch &&
-		status.State == nfqueue.D11Armed.String()
+	arm := d.d11Armer.Status()
+	return arm, overrideActive && open &&
+		permitEpoch == arm.PermitEpoch && arm.State == nfqueue.D11Armed.String()
 }
 
+func (d *Daemon) d11AuthorityCurrentForRuntime(runtime *ipsecCaptureRuntime) bool {
+	_, current := d.d11WitnessAuthority(runtime)
+	return current
+}
+
+func (d *Daemon) d11AuthorityCurrent() bool {
+	if d == nil {
+		return false
+	}
+	d.ipsecCaptureMu.Lock()
+	runtime := d.ipsecCapture
+	d.ipsecCaptureMu.Unlock()
+	return d.d11AuthorityCurrentForRuntime(runtime)
+}
 func sameReinjectQueueEpochs(a, b []nfqueue.ReinjectQueueEpoch) bool {
 	if len(a) != len(b) {
 		return false
@@ -1182,10 +1191,33 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	for _, handle := range handles {
 		queueEpochs[handle.Number] = handle.Epoch
 	}
+	var stagedRuntime *ipsecCaptureRuntime
 	attestation := (*nfqueue.D11AttestationConfig)(nil)
 	if d.d11Armer != nil && d.d11Ledger != nil {
 		attestation = &nfqueue.D11AttestationConfig{
-			Armer: d.d11Armer, Ledger: d.d11Ledger, AuthorityCurrent: d.d11AuthorityCurrent,
+			Armer: d.d11Armer, Ledger: d.d11Ledger,
+			AuthorityCurrent: func() bool {
+				return d.d11AuthorityCurrentForRuntime(stagedRuntime)
+			},
+			OriginValid: func(origin nfqueue.CaptureOrigin) bool {
+				for _, handle := range handles {
+					family := nfqueue.CaptureFamilyInet
+					if handle.Key.Family == ipsecFamilyBridge {
+						family = nfqueue.CaptureFamilyBridge
+					}
+					hook := nfqueue.CaptureHookForward
+					if handle.Key.Hook == ipsecHookInput {
+						hook = nfqueue.CaptureHookInput
+					}
+					if origin.Family == family && origin.Hook == hook &&
+						origin.Owner == handle.Key.Owner &&
+						origin.STN == handle.Key.STN &&
+						origin.OwnedIfindex == uint32(handle.Key.Ifindex) {
+						return true
+					}
+				}
+				return false
+			},
 		}
 	}
 	denyEvents := nfqueue.DenyEventSinkFunc(func(event nfqueue.IpsecInnerDeny) bool {
@@ -1255,6 +1287,7 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			}
 		},
 	}
+	stagedRuntime = staged
 	d.ipsecCaptureStaged = staged
 	d.ipsecCaptureStagePending = true
 	return old, staged, nil

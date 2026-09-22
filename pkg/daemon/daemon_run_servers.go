@@ -732,15 +732,8 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				return api.IpsecCaptureWitness{}
 			}
 			status := runtime.actor.Status()
-			if d.d11AuthorityCurrent() {
-				// Actor.Status carries the process run id. During an armed
-				// D11 join, the ledger/metrics labels must use the
-				// node-local attestation run id and permit epoch instead.
-				arm := d.d11Armer.Status()
-				status.RunID = arm.RunID
-				status.PermitEpoch = arm.PermitEpoch
-			}
-			return api.IpsecCaptureWitness{
+			arm, d11Current := d.d11WitnessAuthority(runtime)
+			witness := api.IpsecCaptureWitness{
 				Available:          status.Available,
 				RunID:              status.RunID,
 				ActorActive:        status.Active && !status.Down,
@@ -762,6 +755,13 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				DeliveredAvailable: status.DeliveredAvailable,
 				Delivered:          status.Delivered,
 			}
+			if d11Current {
+				witness.D11Available = true
+				witness.D11RunID = arm.RunID
+				witness.D11Generation = status.Generation
+				witness.D11PermitEpoch = arm.PermitEpoch
+			}
+			return witness
 		},
 		SchedulerRepublishStaleSecondsFn: d.SchedulerRepublishStaleSeconds,
 		// #5669: surface the bounded-age fail-closed escalation so

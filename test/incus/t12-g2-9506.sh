@@ -993,8 +993,7 @@ if [[ "$MODE" == selftest ]]; then
         elif [[ "$fixture" != 1 ]]; then
             printf 'VOID\tenv-void\n'
         else
-            # The live body is deliberately conservative until packet/workload
-            # measurements and verdict logic are implemented.
+            # Static selftest inputs do not include packet/workload evidence.
             printf 'VOID\tmeasurement-not-run\n'
         fi
     }
@@ -1004,20 +1003,26 @@ if [[ "$MODE" == selftest ]]; then
     expect "complete fixture awaits measurement" "VOID" "$(cell_verdict 1 1 1 MATCH/both | cut -f1)"
     d11_run_id="attest-0123456789abcdef0123456789abcdef"
     d11_permit_epoch=41
-    d11_marker_hex="00112233445566778899aabbccddeeff"
+    d11_marker_hex=00112233445566778899aabbccddeeff
     d11_action="userspace-attest:arm:${d11_run_id}:${d11_permit_epoch}:${d11_marker_hex}"
     expect "D11 arm action has exact wire prefix" \
         "userspace-attest:arm:" "${d11_action%%${d11_run_id}*}"
     expect "D11 run id is attest plus 32 lowercase hex" "1" \
         "$( [[ "$d11_run_id" =~ ^attest-[0-9a-f]{32}$ ]] && echo 1 || echo 0 )"
     expect "D11 selector is exactly 16 bytes" "32" "${#d11_marker_hex}"
+    expect "D11 malformed run id is refused" "0" \
+        "$( [[ "attest-0123" =~ ^attest-[0-9a-f]{32}$ ]] && echo 1 || echo 0 )"
+    expect "D11 zero permit epoch is refused" "0" \
+        "$( [[ "$d11_permit_epoch" == 0 ]] && echo 1 || echo 0 )"
+    expect "D11 short selector is refused" "0" \
+        "$( [[ ${#d11_marker_hex} == 16 ]] && echo 1 || echo 0 )"
     if [[ "$D11_REATTEST" == 0 ]]; then
         expect "D11 arm mode defaults off" "0" "$D11_REATTEST"
     else
         expect "D11 arm mode enables only with explicit flag" "1" "$D11_REATTEST"
     fi
-    expect "bad fence awaits measurement" "VOID" "$(cell_verdict 0 1 1 MATCH/both | cut -f1)"
-    expect "bad divert awaits measurement" "VOID" "$(cell_verdict 1 0 1 MATCH/both | cut -f1)"
+    expect "bad fence is VOID" "VOID" "$(cell_verdict 0 1 1 MATCH/both | cut -f1)"
+    expect "bad divert is VOID" "VOID" "$(cell_verdict 1 0 1 MATCH/both | cut -f1)"
     cell_shape() {
         local label="$1"
         shift
@@ -1408,7 +1413,7 @@ PY
         "$parser_dir/provenance-st-links.txt")"
     expect "malformed provenance stays unavailable" "unavailable" \
         "$(observer_field "$MALFORMED_OBS" packet_samples)"
-    if [[ "$fail" == 0 && "$pass" == 67 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 70 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -1684,12 +1689,68 @@ d11_row() {
         "$gate" "$section" "$predicate" "$observed" "$verdict" "$reason" "$metrics" >>"$D11_ROWS_FILE"
 }
 
+d11_metric_delta() {
+    local before0="$1" after0="$2" before1="$3" after1="$4" run_id="$5" metric="$6" reason="${7:-}"
+    python3 - "$before0" "$after0" "$before1" "$after1" "$run_id" "$metric" "$reason" <<'PY'
+import re
+import sys
+
+before0, after0, before1, after1, run_id, metric, reason = sys.argv[1:]
+def total(path):
+    value = 0.0
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return 0.0
+    for line in text.splitlines():
+        match = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([-+0-9.eE]+)", line)
+        if not match or match.group(1) != metric:
+            continue
+        labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', match.group(2)))
+        if labels.get("run_id") != run_id:
+            continue
+        if reason and labels.get("reason") != reason:
+            continue
+        if set(labels) != ({"run_id", "generation", "permit_epoch"} |
+                           ({"reason"} if reason else set())):
+            continue
+        try:
+            value += float(match.group(3))
+        except ValueError:
+            continue
+    return value
+delta = max(0.0, total(after0) - total(before0))
+delta += max(0.0, total(after1) - total(before1))
+print(int(delta))
+PY
+}
+
+d11_status_ready() {
+    local status="$1" run_id="$2" epoch="$3"
+    python3 - "$status" "$run_id" "$epoch" <<'PY'
+import json
+import sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print(0)
+    raise SystemExit
+if isinstance(doc, dict) and isinstance(doc.get("status"), dict):
+    doc = doc["status"]
+rust = doc.get("s5_reinject") if isinstance(doc, dict) else None
+print(int(isinstance(rust, dict) and rust.get("run_id") == sys.argv[2] and
+          rust.get("permit_epoch") == int(sys.argv[3]) and
+          rust.get("permit_open") is True))
+PY
+}
+
 run_d11_reattest() {
     D11_ROWS_FILE="$ARCHIVE_DIR/d11-cells.tsv"
     : >"$D11_ROWS_FILE"
     D11_RUN_ID="attest-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-    [[ "$D11_RUN_ID" =~ ^attest-[0-9a-f]{32}$ ]] ||
-        D11_RUN_ID=attest-00000000000000000000000000000000
+    if [[ ! "$D11_RUN_ID" =~ ^attest-[0-9a-f]{32}$ ]]; then
+        D11_RUN_ID="attest-$(printf '%s' "$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -c1-32)"
+    fi
     D11_MARKER_HEX=00112233445566778899aabbccddeeff
     D11_ARM0="$ARCHIVE_DIR/d11-fw0-arm.txt"
     D11_ARM1="$ARCHIVE_DIR/d11-fw1-arm.txt"
@@ -1699,23 +1760,54 @@ run_d11_reattest() {
     D11_LEDGER1_FINAL="$ARCHIVE_DIR/d11-fw1-ledger-final.json"
     D11_TRAFFIC="$ARCHIVE_DIR/d11-marker-traffic.txt"
     local epoch0="${D11_PRE_EPOCH_FW0:-0}" epoch1="${D11_PRE_EPOCH_FW1:-0}"
-    local arm0=0 arm1=0 join_ok=0 terminal_ok=0 metrics_ok=0 final_ok=0
-    local setup_reason
+    local arm0=0 arm1=0 ready0=0 ready1=0 join_ok=0 terminal_ok=0 final_ok=0
+    local setup_reason env_verdict env_reason
+    local pre_metrics0 pre_metrics1 post_metrics0 post_metrics1
+    local d11_suppressed=0 d11_deny52=0
+
+    # Capture readiness independently on both nodes. A CLI arm success by
+    # itself is not proof that the Rust authority and Go metrics surfaces are
+    # joined, so every later cell consumes these observations.
+    observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-ready
+    local status0_ready="$RUNTIME_STATUS_FILE" metrics0_ready="$RUNTIME_METRICS_FILE"
+    local run0_ready="$RUNTIME_RUN_ID" gen0_ready="$RUNTIME_GENERATION" state0_ready="$RUNTIME_PERMIT_STATE"
+    pre_metrics0="$metrics0_ready"
+    if [[ "$RUNTIME_S5_AVAILABLE" == 1 && "$RUNTIME_SOCKET_READY" == 1 &&
+          "$RUNTIME_PERMIT_OPEN" == 1 && "$epoch0" =~ ^[1-9][0-9]*$ ]]; then
+        ready0=1
+    fi
+    observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-ready
+    local status1_ready="$RUNTIME_STATUS_FILE" metrics1_ready="$RUNTIME_METRICS_FILE"
+    local run1_ready="$RUNTIME_RUN_ID" gen1_ready="$RUNTIME_GENERATION" state1_ready="$RUNTIME_PERMIT_STATE"
+    pre_metrics1="$metrics1_ready"
+    if [[ "$RUNTIME_S5_AVAILABLE" == 1 && "$RUNTIME_SOCKET_READY" == 1 &&
+          "$RUNTIME_PERMIT_OPEN" == 1 && "$epoch1" =~ ^[1-9][0-9]*$ ]]; then
+        ready1=1
+    fi
     if [[ "$T12_FIXTURE_SETUP" != 1 || "$fixture" != 1 ||
           "$T12_FIXTURE_SHAPE" != v4_native || "$T12_FIXTURE_COUNT" != 2 ]]; then
-        setup_reason="missing-precondition:d11-complete-v4-native-x2-fixture"
+        env_verdict=VOID
+        env_reason="missing-precondition:d11-complete-v4-native-x2-fixture"
+    elif [[ "$ready0" != 1 || "$ready1" != 1 ]]; then
+        env_verdict=VOID
+        env_reason="runtime-readiness-unavailable:both-node-s5-go-authority"
+    else
+        env_verdict=FAIL
+        env_reason="d11-cell-observation-failed"
+    fi
+    if [[ "$env_verdict" == VOID ]]; then
         d11_row d11_reattest_arm 'r6 §6.4' 'both node-local D11 arms succeed' \
-            "fixture_ready=0 run_id=$D11_RUN_ID" VOID "$setup_reason" \
+            "fixture_ready=0 ready_fw0=$ready0 ready_fw1=$ready1 run_id=$D11_RUN_ID" "$env_verdict" "$env_reason" \
             "cell_failed=1 arm_fw0=0 arm_fw1=0"
         d11_row d11_reattest_join 'r6 §6.4' 'Go ledger and Rust provenance join on node/request/lease/digest' \
-            "fixture_ready=0" VOID "$setup_reason" \
-            "cell_failed=1 joined=0 rows_fw0=0 rows_fw1=0"
+            "fixture_ready=0 ready_fw0=$ready0 ready_fw1=$ready1" "$env_verdict" "$env_reason" \
+            "cell_failed=1 joined=0 rows_fw0=0 rows_fw1=0 digest_joined=0"
         d11_row d11_reattest_reason52 'r6 §6.4' 'WouldPermit emits evaluator-unavailable reason 52 and suppression accounting' \
-            "fixture_ready=0" VOID "$setup_reason" \
-            "cell_failed=1 suppressed=0 deny52=0"
+            "fixture_ready=0" "$env_verdict" "$env_reason" \
+            "cell_failed=1 suppressed=0 deny52=0 terminal_would_permit=0"
         d11_row d11_reattest_rollback 'r6 §6.4' 'rollback finalizes the selected D11 ledger and restores the fixture' \
-            "fixture_ready=0 run_id=$D11_RUN_ID finalized=0 restore_clean=0" VOID "$setup_reason" \
-            "cell_failed=1 finalized=0 restore_clean=0 authority_observed=0"
+            "fixture_ready=0 run_id=$D11_RUN_ID finalized=0 restore_clean=0" "$env_verdict" "$env_reason" \
+            "cell_failed=1 finalized=0 restore_clean=0 d11_authority_absent=0"
         if [[ "$T12_FIXTURE_SETUP" == 1 && "$T12_FIXTURE_CLEANED" != 1 ]]; then
             if fix9506_teardown "$T12_FIXTURE_COUNT" "$T12_FIXTURE_DIR"; then
                 T12_FIXTURE_CLEANED=1
@@ -1729,28 +1821,48 @@ run_d11_reattest() {
         fi
         return 0
     fi
+
     if [[ "$epoch0" =~ ^[1-9][0-9]*$ && "$epoch1" =~ ^[1-9][0-9]*$ ]]; then
         remote "$NODE0" "/usr/local/sbin/cli --d11-reattest --d11-phase arm --d11-run-id $D11_RUN_ID --d11-permit-epoch $epoch0 --d11-marker-hex $D11_MARKER_HEX" >"$D11_ARM0" 2>&1 && arm0=1
         remote "$NODE1" "/usr/local/sbin/cli --d11-reattest --d11-phase arm --d11-run-id $D11_RUN_ID --d11-permit-epoch $epoch1 --d11-marker-hex $D11_MARKER_HEX" >"$D11_ARM1" 2>&1 && arm1=1
     fi
-    if ((arm0 == 1 && arm1 == 1)); then
+    # Re-read both authorities after the arm RPC. This catches one-node arms
+    # that returned success before the Rust authority publication was visible.
+    observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-armed
+    local status0_armed="$RUNTIME_STATUS_FILE"
+    local armed0
+    armed0="$(d11_status_ready "$status0_armed" "$D11_RUN_ID" "$epoch0")"
+    post_metrics0="$RUNTIME_METRICS_FILE"
+    observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-armed
+    local status1_armed="$RUNTIME_STATUS_FILE"
+    local armed1
+    armed1="$(d11_status_ready "$status1_armed" "$D11_RUN_ID" "$epoch1")"
+    post_metrics1="$RUNTIME_METRICS_FILE"
+    if ((arm0 == 1 && arm1 == 1 && armed0 == 1 && armed1 == 1)); then
         d11_row d11_reattest_arm 'r6 §6.4' 'both node-local D11 arms succeed' \
-            "fixture_ready=1 run_id=$D11_RUN_ID permit_epoch_fw0=$epoch0 permit_epoch_fw1=$epoch1" PASS "armed" \
-            "cell_failed=0 arm_fw0=1 arm_fw1=1"
+            "fixture_ready=1 ready_fw0=$ready0 ready_fw1=$ready1 armed_fw0=$armed0 armed_fw1=$armed1 run_id=$D11_RUN_ID permit_epoch_fw0=$epoch0 permit_epoch_fw1=$epoch1" PASS "armed-and-ready" \
+            "cell_failed=0 arm_fw0=1 arm_fw1=1 readiness_fw0=1 readiness_fw1=1"
         : >"$D11_TRAFFIC"
         d11_inner0="$(fix9506_inner4_ip 0)"
         d11_inner1="$(fix9506_inner4_ip 1)"
-        fix9506_remote "$FIX9506_PEER_REF" "ping -c 2 -W 2 -s 32 -p $D11_MARKER_HEX -I $d11_inner1 $LAN_HOST_IP" >>"$D11_TRAFFIC" 2>&1 || :
-        fix9506_remote "$FIX9506_LAN_REF" "ping -c 2 -W 2 -s 32 -p $D11_MARKER_HEX $d11_inner1" >>"$D11_TRAFFIC" 2>&1 || :
-        fix9506_remote "$FIX9506_PEER_REF" "ping -c 2 -W 2 -s 32 -p $D11_MARKER_HEX -I $d11_inner0 $LAN_HOST_IP" >>"$D11_TRAFFIC" 2>&1 || :
+        fix9506_remote "$FIX9506_PEER_REF" "ping -c 3 -W 2 -s 32 -p $D11_MARKER_HEX -I $d11_inner1 $LAN_HOST_IP" >>"$D11_TRAFFIC" 2>&1 || :
+        fix9506_remote "$FIX9506_LAN_REF" "ping -c 3 -W 2 -s 32 -p $D11_MARKER_HEX $d11_inner1" >>"$D11_TRAFFIC" 2>&1 || :
+        fix9506_remote "$FIX9506_PEER_REF" "ping -c 3 -W 2 -s 32 -p $D11_MARKER_HEX -I $d11_inner0 $LAN_HOST_IP" >>"$D11_TRAFFIC" 2>&1 || :
+        fix9506_remote "$FIX9506_LAN_REF" "ping -c 3 -W 2 -s 32 -p $D11_MARKER_HEX $d11_inner0" >>"$D11_TRAFFIC" 2>&1 || :
+        observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-post
+        local status0_post="$RUNTIME_STATUS_FILE"
+        post_metrics0="$RUNTIME_METRICS_FILE"
+        observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-post
+        local status1_post="$RUNTIME_STATUS_FILE"
+        post_metrics1="$RUNTIME_METRICS_FILE"
         remote "$NODE0" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER0" 2>&1 || :
         remote "$NODE1" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER1" 2>&1 || :
-        read -r join_ok join_rows0 join_rows1 join_terminal <<<"$(python3 - "$D11_LEDGER0" "$D11_LEDGER1" "$D11_RUN_ID" <<'PY'
+        read -r join_ok join_rows0 join_rows1 digest_joined join_terminal traffic_ok <<<"$(python3 - "$D11_LEDGER0" "$D11_LEDGER1" "$D11_RUN_ID" "$status0_post" "$status1_post" "$D11_TRAFFIC" <<'PY'
 import base64
 import json
+import re
 import sys
-
-want = sys.argv[3]
+want, status_paths, traffic = sys.argv[3], sys.argv[4:6], sys.argv[6]
 def load(path):
     try:
         with open(path, encoding="utf-8") as fh:
@@ -1758,107 +1870,105 @@ def load(path):
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
-def check(doc):
-    if doc.get("run_id") != want or not doc.get("node_id"):
-        return 0, 0, 0
-    rows = doc.get("records")
-    if not isinstance(rows, list) or not rows:
-        return 0, 0, 0
-    joined = 0
-    terminal = 0
+def digest_bytes(value):
+    if isinstance(value, str):
+        try:
+            return base64.b64decode(value, validate=True)
+        except Exception:
+            return b""
+    if isinstance(value, list) and all(isinstance(x, int) and 0 <= x <= 255 for x in value):
+        return bytes(value)
+    return b""
+def provenance(path):
+    doc = load(path)
+    if isinstance(doc.get("status"), dict):
+        doc = doc["status"]
+    rust = doc.get("s5_reinject") if isinstance(doc, dict) else None
+    if not isinstance(rust, dict) or rust.get("run_id") != want:
+        return {}
+    rows = rust.get("provenance")
+    if not isinstance(rows, list):
+        return {}
+    out = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
-        digest = row.get("frame_digest", "")
-        try:
-            digest_len = len(base64.b64decode(digest, validate=True))
-        except Exception:
-            digest_len = 0
+        key = tuple(row.get(item, 0) for item in
+                   ("request_id", "permit_epoch", "queue_epoch", "queue_number"))
+        if all(isinstance(item, int) and item > 0 for item in key):
+            out[key] = digest_bytes(row.get("frame_digest"))
+    return out
+prov_maps = [provenance(status_paths[0]), provenance(status_paths[1])]
+joined_nodes = []
+joined_rows = []
+terminal = 0
+for index, path in enumerate(sys.argv[1:3]):
+    doc = load(path)
+    rows = doc.get("records")
+    valid = isinstance(rows, list) and doc.get("run_id") == want and bool(doc.get("node_id"))
+    prov = prov_maps[index]
+    joined = 0
+    terminals = 0
+    for row in rows if valid else []:
+        if not isinstance(row, dict):
+            continue
+        key = tuple(row.get(item, 0) for item in
+                   ("request_id", "permit_epoch", "queue_epoch", "queue_number"))
+        digest = digest_bytes(row.get("frame_digest"))
         if (row.get("node_id") == doc.get("node_id") and
-                row.get("request_id", 0) > 0 and row.get("permit_epoch", 0) > 0 and
-                row.get("queue_epoch", 0) > 0 and row.get("queue_number", 0) > 0 and
-                row.get("admission_code") == "ADMIT_OK" and digest_len == 32):
+                row.get("admission_code") == "ADMIT_OK" and
+                all(isinstance(item, int) and item > 0 for item in key) and
+                len(digest) == 32 and prov.get(key) == digest):
             joined += 1
         if (row.get("completion") == "would_permit" and
-                row.get("resolve_count") == 1 and row.get("terminal_state") == "FAIL" and
+                row.get("resolve_count") == 1 and
+                row.get("terminal_state") == "FAIL" and
                 not row.get("duplicate")):
-            terminal += 1
-    return 1, joined, terminal
-a = check(load(sys.argv[1]))
-b = check(load(sys.argv[2]))
-print(int(a[0] and b[0]), a[1], b[1], int(a[2] and b[2]))
+            terminals += 1
+    joined_nodes.append(int(valid and joined > 0))
+    joined_rows.append(joined)
+    terminal += terminals
+print(int(all(joined_nodes)), joined_rows[0], joined_rows[1],
+      sum(joined_rows), int(terminal > 0),
+      int(sum(1 for line in open(traffic, encoding="utf-8", errors="replace")
+              if re.search(r'(?:^|,\s*)0% packet loss(?:,|$)', line)) >= 2) if traffic else 0)
 PY
 )"
         [[ "$join_ok" =~ ^[01]$ ]] || join_ok=0
         [[ "$join_rows0" =~ ^[0-9]+$ ]] || join_rows0=0
         [[ "$join_rows1" =~ ^[0-9]+$ ]] || join_rows1=0
+        [[ "$digest_joined" =~ ^[0-9]+$ ]] || digest_joined=0
         [[ "$join_terminal" =~ ^[01]$ ]] || join_terminal=0
-        # The current fixture has no independent NFLOG snaplen-full observer.
-        # Ledger rows and marker pings cannot prove the Rust frame digest or
-        # Go-to-Rust attribution without that second observer.
+        [[ "$traffic_ok" =~ ^[01]$ ]] || traffic_ok=0
         d11_row d11_reattest_join 'r6 §6.4' 'Go ledger and Rust provenance join on node/request/lease/digest' \
-            "run_id=$D11_RUN_ID rows_fw0=$join_rows0 rows_fw1=$join_rows1 joined=$join_ok terminal=$join_terminal" VOID \
-            "independent-nflog-observer-unavailable" \
-            "cell_failed=1 joined=$join_ok rows_fw0=$join_rows0 rows_fw1=$join_rows1 terminal=$join_terminal"
-        if ((join_terminal == 1)); then
-            terminal_ok=1
+            "run_id=$D11_RUN_ID rows_fw0=$join_rows0 rows_fw1=$join_rows1 joined=$join_ok digest_joined=$digest_joined terminal=$join_terminal traffic_ok=$traffic_ok" \
+            "$([[ "$join_ok" == 1 && "$digest_joined" -gt 0 && "$traffic_ok" == 1 ]] && echo PASS || echo FAIL)" \
+            "$([[ "$join_ok" == 1 && "$digest_joined" -gt 0 && "$traffic_ok" == 1 ]] && echo joined || echo join-or-traffic-mismatch)" \
+            "cell_failed=$([[ "$join_ok" == 1 && "$digest_joined" -gt 0 && "$traffic_ok" == 1 ]] && echo 0 || echo 1) joined=$join_ok rows_fw0=$join_rows0 rows_fw1=$join_rows1 digest_joined=$digest_joined traffic_ok=$traffic_ok"
+        terminal_ok="$join_terminal"
+        d11_suppressed="$(d11_metric_delta "$pre_metrics0" "$post_metrics0" "$pre_metrics1" "$post_metrics1" "$D11_RUN_ID" xpf_ipsec_capture_suppressed_total)"
+        d11_deny52="$(d11_metric_delta "$pre_metrics0" "$post_metrics0" "$pre_metrics1" "$post_metrics1" "$D11_RUN_ID" xpf_ipsec_capture_deny_events_total 52)"
+        local reason_ok=0
+        if [[ "$terminal_ok" == 1 && "$d11_suppressed" -gt 0 && "$d11_deny52" -eq "$d11_suppressed" ]]; then
+            reason_ok=1
         fi
-        observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-post
-        d11_suppressed="$(python3 - "$RUNTIME_METRICS_FILE" "$D11_RUN_ID" <<'PY'
-import re
-import sys
-path, run_id = sys.argv[1:]
-total = 0
-try:
-    text = open(path, encoding="utf-8").read()
-except Exception:
-    text = ""
-for line in text.splitlines():
-    m = re.match(r"^xpf_ipsec_capture_suppressed_total\{([^}]*)\}\s+([0-9.eE+-]+)", line)
-    if not m:
-        continue
-    labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', m.group(1)))
-    if labels.get("run_id") == run_id and labels.get("reason") == "would_permit":
-        total += int(float(m.group(2)))
-print(total)
-PY
-)"
-        d11_deny52="$(python3 - "$RUNTIME_METRICS_FILE" "$D11_RUN_ID" <<'PY'
-import re
-import sys
-path, run_id = sys.argv[1:]
-total = 0
-try:
-    text = open(path, encoding="utf-8").read()
-except Exception:
-    text = ""
-for line in text.splitlines():
-    m = re.match(r"^xpf_ipsec_capture_deny_events_total\{([^}]*)\}\s+([0-9.eE+-]+)", line)
-    if not m:
-        continue
-    labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', m.group(1)))
-    if labels.get("run_id") == run_id and labels.get("reason") == "evaluator_unavailable":
-        total += int(float(m.group(2)))
-print(total)
-PY
-)"
-        # Reason-52 counters are useful diagnostics, but the acceptance cell
-        # remains VOID until an independent NFLOG observer ties the marker
-        # frame to the retained digest and attribution.
         d11_row d11_reattest_reason52 'r6 §6.4' 'WouldPermit emits evaluator-unavailable reason 52 and suppression accounting' \
-            "run_id=$D11_RUN_ID suppressed=${d11_suppressed:-0} deny52=${d11_deny52:-0} terminal=$terminal_ok" VOID \
-            "independent-nflog-observer-unavailable" \
-            "cell_failed=1 suppressed=${d11_suppressed:-0} deny52=${d11_deny52:-0} terminal=$terminal_ok"
+            "run_id=$D11_RUN_ID suppressed=$d11_suppressed deny52=$d11_deny52 terminal_would_permit=$terminal_ok" \
+            "$([[ "$reason_ok" == 1 ]] && echo PASS || echo FAIL)" \
+            "$([[ "$reason_ok" == 1 ]] && echo reason-52-sink-joined || echo reason-52-metric-mismatch)" \
+            "cell_failed=$([[ "$reason_ok" == 1 ]] && echo 0 || echo 1) suppressed=$d11_suppressed deny52=$d11_deny52 terminal_would_permit=$terminal_ok"
     else
         d11_row d11_reattest_arm 'r6 §6.4' 'both node-local D11 arms succeed' \
-            "fixture_ready=1 run_id=$D11_RUN_ID arm_fw0=$arm0 arm_fw1=$arm1" FAIL "arm-failed" \
+            "fixture_ready=1 ready_fw0=$ready0 ready_fw1=$ready1 arm_fw0=$arm0 arm_fw1=$arm1" FAIL "arm-or-post-arm-readiness-failed" \
             "cell_failed=1 arm_fw0=$arm0 arm_fw1=$arm1"
         d11_row d11_reattest_join 'r6 §6.4' 'Go ledger and Rust provenance join on node/request/lease/digest' \
-            "fixture_ready=1" VOID "arm-failed" "cell_failed=1 joined=0 rows_fw0=0 rows_fw1=0"
+            "fixture_ready=1 ready_fw0=$ready0 ready_fw1=$ready1" FAIL "arm-failed" "cell_failed=1 joined=0 rows_fw0=0 rows_fw1=0 digest_joined=0"
         d11_row d11_reattest_reason52 'r6 §6.4' 'WouldPermit emits evaluator-unavailable reason 52 and suppression accounting' \
-            "fixture_ready=1" VOID "arm-failed" "cell_failed=1 suppressed=0 deny52=0"
+            "fixture_ready=1" FAIL "arm-failed" "cell_failed=1 suppressed=0 deny52=0 terminal_would_permit=0"
     fi
+    local restore_clean=0
     if fix9506_teardown "$T12_FIXTURE_COUNT" "$T12_FIXTURE_DIR"; then
+        restore_clean=1
         T12_FIXTURE_CLEANED=1
         ACTIVE_FIXTURE_SETUP=0
         ACTIVE_FIXTURE_COUNT=0
@@ -1866,34 +1976,57 @@ PY
         sleep 1
         remote "$NODE0" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER0_FINAL" 2>&1 || :
         remote "$NODE1" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER1_FINAL" 2>&1 || :
+        observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-final
+        local final_metrics0="$RUNTIME_METRICS_FILE"
+        observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-final
+        local final_metrics1="$RUNTIME_METRICS_FILE"
+        local d11_authority_absent
+        d11_authority_absent="$(python3 - "$final_metrics0" "$final_metrics1" "$D11_RUN_ID" <<'PY'
+import re
+import sys
+found = 0
+for path in sys.argv[1:3]:
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        continue
+    for line in text.splitlines():
+        if "{" not in line:
+            continue
+        labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', line))
+        if labels.get("run_id") == sys.argv[3] and labels.get("generation") and labels.get("permit_epoch"):
+            found += 1
+print(int(found == 0))
+PY
+)"
         final_ok="$(python3 - "$D11_LEDGER0_FINAL" "$D11_LEDGER1_FINAL" "$D11_RUN_ID" <<'PY'
 import json
 import sys
-want = sys.argv[3]
 ok = 1
 for path in sys.argv[1:3]:
     try:
-        with open(path, encoding="utf-8") as fh:
-            doc = json.load(fh)
+        doc = json.load(open(path, encoding="utf-8"))
     except Exception:
         ok = 0
         continue
-    if doc.get("run_id") != want or not doc.get("finalized") or not doc.get("records"):
+    if (doc.get("run_id") != sys.argv[3] or not doc.get("finalized") or
+            not isinstance(doc.get("records"), list) or not doc.get("records")):
         ok = 0
 print(ok)
 PY
 )"
         [[ "$final_ok" == 1 ]] || final_ok=0
+        [[ "$d11_authority_absent" == 1 ]] || d11_authority_absent=0
     fi
-    if [[ "$final_ok" == 1 ]]; then
-        d11_row d11_reattest_rollback 'r6 §6.4' 'rollback finalizes the selected D11 ledger and restores the fixture' \
-            "run_id=$D11_RUN_ID finalized=1 restore_pending=1" PASS "finalized" \
-            "cell_failed=0 finalized=1 restore_clean=1 authority_observed=0"
-    else
-        d11_row d11_reattest_rollback 'r6 §6.4' 'rollback finalizes the selected D11 ledger and restores the fixture' \
-            "run_id=$D11_RUN_ID finalized=0" VOID "rollback-finalization-unavailable" \
-            "cell_failed=1 finalized=0 restore_clean=0 authority_observed=0"
+    local rollback_ok=0
+    if [[ "$restore_clean" == 1 && "$final_ok" == 1 && "$d11_authority_absent" == 1 ]]; then
+        rollback_ok=1
     fi
+    d11_row d11_reattest_rollback 'r6 §6.4' 'rollback finalizes the selected D11 ledger and restores the fixture' \
+        "run_id=$D11_RUN_ID finalized=$final_ok restore_clean=$restore_clean d11_authority_absent=${d11_authority_absent:-0}" \
+        "$([[ "$rollback_ok" == 1 ]] && echo PASS || echo FAIL)" \
+        "$([[ "$rollback_ok" == 1 ]] && echo finalized-and-restored || echo rollback-proof-incomplete)" \
+        "cell_failed=$([[ "$rollback_ok" == 1 ]] && echo 0 || echo 1) finalized=$final_ok restore_clean=$restore_clean d11_authority_absent=${d11_authority_absent:-0}"
 }
 snapshot_node() {
     local node="$1" path="$2"

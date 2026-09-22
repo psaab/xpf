@@ -345,11 +345,11 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 	c.ipsecCaptureD11SuppressedTotal = prometheus.NewDesc(
 		"xpf_ipsec_capture_suppressed_total",
 		"D11 selected frames suppressed after a terminal WouldPermit completion (#10484).",
-		[]string{"run_id", "generation", "permit_epoch", "reason"}, nil,
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
 	)
 	c.ipsecCaptureD11Deny52Total = prometheus.NewDesc(
 		"xpf_ipsec_capture_deny_events_total",
-		"D11 deny events emitted for terminal evaluator-unavailable reason 52 (#10484).",
+		"D11 deny events emitted for evaluator-unavailable reason 52 (#10484).",
 		[]string{"run_id", "generation", "permit_epoch", "reason"}, nil,
 	)
 	c.ipsecCaptureDeliveredAvail = prometheus.NewDesc(

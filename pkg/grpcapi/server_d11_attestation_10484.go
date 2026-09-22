@@ -7,12 +7,26 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
-func d11LedgerPrincipalAllowed(principal authz.Principal) bool {
+func d11LedgerPrincipalAllowed(principal authz.Principal, cfgs ...*config.Config) bool {
+	var cfg *config.Config
+	if len(cfgs) != 0 {
+		cfg = cfgs[0]
+	}
 	return principal.Source == authz.SourcePeerUID &&
-		(principal.UID == 0 || principal.Class == "super-user")
+		(principal.UID == 0 ||
+			principal.Superuser ||
+			config.ClassHasPermission(cfg, principal.Class, config.PermMaint))
+}
+
+func (s *Server) d11AuthorizationConfig() *config.Config {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.ActiveConfig()
 }
 
 // GetD11AttestationLedger is restricted to local root or the configured
@@ -20,7 +34,7 @@ func d11LedgerPrincipalAllowed(principal authz.Principal) bool {
 // mutate admission state or request a second arm through this read surface.
 func (s *Server) GetD11AttestationLedger(ctx context.Context, _ *xpfv1.GetD11AttestationLedgerRequest) (*xpfv1.GetD11AttestationLedgerResponse, error) {
 	principal, ok := authorizedPrincipalFromContext(ctx)
-	if !ok || !d11LedgerPrincipalAllowed(principal) {
+	if !ok || !d11LedgerPrincipalAllowed(principal, s.d11AuthorizationConfig()) {
 		return nil, status.Error(codes.PermissionDenied, "D11 attestation ledger requires uid 0 or the configured super-user class")
 	}
 	if s == nil || s.d11LedgerFn == nil {

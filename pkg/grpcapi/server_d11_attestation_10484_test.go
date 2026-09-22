@@ -2,11 +2,11 @@ package grpcapi
 
 import (
 	"context"
-	"strings"
-	"testing"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"net"
+	"strings"
+	"testing"
 
 	"github.com/psaab/xpf/pkg/authz"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -112,5 +112,17 @@ func TestD11ArmSystemActionAuthorization10484(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("d11 arm callback calls = %d, want 2 accepted local principals", calls)
+	}
+}
+
+func TestNewServerWiresPeerLookup10484(t *testing.T) {
+	want := authz.PeerIdentity{UID: 1234, OK: true, Local: true}
+	s := NewServer("bufnet", Config{
+		PeerLookupFn: func(net.Addr, net.Addr) authz.PeerIdentity {
+			return want
+		},
+	})
+	if got := s.lookupPeer(nil, nil); got != want {
+		t.Fatalf("peer lookup = %+v, want %+v", got, want)
 	}
 }

@@ -417,6 +417,7 @@ func NewServer(addr string, cfg Config) *Server {
 		kernelUpgradeStatusFn:     cfg.KernelUpgradeStatusFn,
 		bootstrapImportFn:         cfg.BootstrapImportFn,
 		hostInboundAppliedFn:      cfg.HostInboundAppliedFn,
+		peerLookupFn:              cfg.PeerLookupFn,
 		d11ArmFn:                  cfg.D11ArmFn,
 		d11LedgerFn:               cfg.D11LedgerFn,
 	}
