@@ -230,9 +230,10 @@ cases) to prove symmetry.
 - R3 — observability/ops: NEGLIGIBLE. No log lines added/removed/releveled;
   no counter/flag semantics change. Second-order effect: fewer spurious
   fail-closed refusals (fewer `failed to add VIP` Warns + fewer BACKUP
-  revert events) IF annotated-EEXIST occurs in the fleet — that is the fix
-  working, not a monitoring break. `vipDiverged`/`vipRemoveFailures` paths
-  untouched.
+  revert events) IF an outer/future wrapper preserves a chained EEXIST but
+  renders Error text without `exists`; the pinned v1.3.1 annotated shape
+  already matches pre-fix. That is the fix working, not a monitoring break.
+  `vipDiverged`/`vipRemoveFailures` paths remain untouched.
 - R4 — compat/rollout (kernel + netlink variance): LOW. `errors.Is` against
   `unix.EEXIST` is version-independent for any error chain rooted in the
   errno; the fallback covers strerror-only wrappers. Error-message reporting
