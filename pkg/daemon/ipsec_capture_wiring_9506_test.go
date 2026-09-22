@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/nfqueue"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
@@ -137,8 +141,7 @@ func TestBuildPMechZoneSnapshotMarksDuplicateBindsAmbiguous9506(t *testing.T) {
 func TestPMechSnapshotAdvancesAcceptedAuthorityWithoutCaptureRotation10485(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
-		"vpn-a": {BindInterface: "st1"},
-		"vpn-b": {BindInterface: "st1.0"},
+		"vpn-a": {BindInterface: "st1.0"},
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"zone": {Interfaces: []string{"st1.0"}},
@@ -161,8 +164,148 @@ func TestPMechSnapshotAdvancesAcceptedAuthorityWithoutCaptureRotation10485(t *te
 	if accepted, fib := snapshot.AcceptedGenerations(); accepted != 9 || fib != 7 {
 		t.Fatalf("accepted authority=(%d,%d), want (9,7)", accepted, fib)
 	}
+	rows := runtime.tunnelRowsSnapshot()
+	if len(rows) != 1 || rows[0].STN != "st1.0" {
+		t.Fatalf("unambiguous tunnel rows=%+v, want one st1.0 row", rows)
+	}
+}
+
+func TestIpsecCaptureOmitsAmbiguousTunnelRows10485(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
+		"vpn-a": {BindInterface: "st1"},
+		"vpn-b": {BindInterface: "st1.0"},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"zone": {Interfaces: []string{"st1.0"}},
+	}
+	handles := wiringHandles9506()
+	runtime := &ipsecCaptureRuntime{
+		handles:      handles,
+		zoneSnapshot: buildPMechZoneSnapshot(cfg, handles, 4, 4),
+	}
 	if rows := runtime.tunnelRowsSnapshot(); len(rows) != 0 {
 		t.Fatalf("ambiguous tunnel rows=%+v, want closed-world omission", rows)
+	}
+}
+
+type captureAuthorityHealDP10485 struct {
+	dataplane.RuntimeDataPlane
+	current    func() *ipsecCaptureRuntime
+	observed   *ipsecCaptureRuntime
+	published  bool
+	publishErr error
+	bumpErr    error
+	calls      []string
+}
+
+func (f *captureAuthorityHealDP10485) RepublishCurrentCaptureAuthority() (bool, error) {
+	f.calls = append(f.calls, "republish")
+	if f.current != nil {
+		f.observed = f.current()
+	}
+	if f.publishErr != nil {
+		return false, f.publishErr
+	}
+	return f.published, nil
+}
+
+func (f *captureAuthorityHealDP10485) BumpFIBGeneration() (uint32, error) {
+	f.calls = append(f.calls, "bump")
+	return 1, f.bumpErr
+}
+
+func TestIpsecCaptureRollbackHealRestoresHelperAuthority10485(t *testing.T) {
+	old := &ipsecCaptureRuntime{}
+	staged := &ipsecCaptureRuntime{}
+	d := &Daemon{
+		ipsecCapture:             staged,
+		ipsecCaptureStaged:       staged,
+		ipsecCaptureStagePending: true,
+	}
+	dp := &captureAuthorityHealDP10485{
+		published: true,
+		current: func() *ipsecCaptureRuntime {
+			d.ipsecCaptureMu.Lock()
+			defer d.ipsecCaptureMu.Unlock()
+			return d.ipsecCapture
+		},
+	}
+	d.dpCell.Store(&dpSlot{v: dp})
+
+	if err := d.rollbackIpsecCaptureStage(old, staged); err != nil {
+		t.Fatalf("rollback stage: %v", err)
+	}
+	if err := d.healIpsecCaptureAuthorityAfterRollback(nil); err != nil {
+		t.Fatalf("post-rollback authority heal: %v", err)
+	}
+	if dp.observed != old {
+		t.Fatalf("helper republish observed runtime=%p, want restored old runtime=%p", dp.observed, old)
+	}
+	if len(dp.calls) != 2 || dp.calls[0] != "republish" || dp.calls[1] != "bump" {
+		t.Fatalf("heal calls=%v, want [republish bump]", dp.calls)
+	}
+}
+
+func TestApplyConfigRollbackWiresAuthorityHeal10485(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "daemon_apply.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse daemon_apply.go: %v", err)
+	}
+	var apply *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "applyConfigLocked" {
+			apply = fn
+			break
+		}
+	}
+	if apply == nil {
+		t.Fatal("applyConfigLocked declaration not found")
+	}
+	var heals int
+	ast.Inspect(apply.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "healIpsecCaptureAuthorityAfterRollback" {
+			heals++
+		}
+		return true
+	})
+	if heals != 1 {
+		t.Fatalf("applyConfigLocked authority-heal calls=%d, want exactly one", heals)
+	}
+}
+
+func TestIpsecCaptureRollbackHealReportsPublisherFailures10485(t *testing.T) {
+	publishErr := errors.New("republish failed")
+	bumpErr := errors.New("fib bump failed")
+	for _, tc := range []struct {
+		name       string
+		publishErr error
+		bumpErr    error
+		published  bool
+		want       error
+	}{
+		{name: "republish", publishErr: publishErr, want: publishErr},
+		{name: "fib-bump", published: true, bumpErr: bumpErr, want: bumpErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Daemon{}
+			dp := &captureAuthorityHealDP10485{
+				published:  tc.published,
+				publishErr: tc.publishErr,
+				bumpErr:    tc.bumpErr,
+			}
+			d.dpCell.Store(&dpSlot{v: dp})
+			err := d.healIpsecCaptureAuthorityAfterRollback(nil)
+			if err == nil || !errors.Is(err, tc.want) {
+				t.Fatalf("heal error=%v, want wrapped %v", err, tc.want)
+			}
+		})
 	}
 }
 func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {

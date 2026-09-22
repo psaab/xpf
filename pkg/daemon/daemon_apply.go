@@ -507,6 +507,9 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	defer func() {
 		if !captureCommitted && captureStagePending {
 			_ = d.rollbackIpsecCaptureStage(captureOld, captureStaged)
+			if healErr := d.healIpsecCaptureAuthorityAfterRollback(cfg); healErr != nil {
+				retErr = errors.Join(retErr, healErr)
+			}
 		}
 	}()
 	d.policyActivationSecs = daemonMonotonicSeconds()

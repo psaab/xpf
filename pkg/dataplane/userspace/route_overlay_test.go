@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -272,6 +273,57 @@ func TestPublishRouteOverlaySnapshot(t *testing.T) {
 	}
 	if !kept {
 		t.Fatalf("full apply did not preserve the active overlay: %+v", snap.Routes)
+	}
+}
+
+func TestRepublishCurrentCaptureAuthorityRefreshesRows10485(t *testing.T) {
+	dir := t.TempDir()
+	controlSock, reqCh := overlayControlServer(t, dir)
+	cfg := overlayTestConfig()
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.cfg.ControlSocket = controlSock
+	m.generation = 7
+	m.lastSnapshot = mustBuildSnapshot(t, cfg, config.UserspaceConfig{ControlSocket: controlSock}, 7, 0)
+	m.lastSnapshot.IpsecTunnelSnapshotGeneration = 9
+	m.lastSnapshot.IpsecTunnelRows = []IpsecTunnelRowSnapshot{{
+		STN:            "st1.0",
+		IfID:           8,
+		LogicalIfindex: 16,
+	}}
+	baselineRoutes := append([]RouteSnapshot(nil), m.lastSnapshot.Routes...)
+	baselinePolicies := append([]PolicyRuleSnapshot(nil), m.lastSnapshot.Policies...)
+	if h, ok := snapshotContentHash(m.lastSnapshot); ok {
+		m.lastSnapshotHash = h
+	}
+	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
+	m.captureEpochProvider = func(uint64, uint32) (
+		uint64,
+		[]QueueEpochSnapshot,
+		uint64,
+		[]IpsecTunnelRowSnapshot,
+	) {
+		return 19, nil, 4, nil
+	}
+
+	published, err := m.RepublishCurrentCaptureAuthority()
+	if err != nil || !published {
+		t.Fatalf("RepublishCurrentCaptureAuthority: published=%v err=%v", published, err)
+	}
+	var req ControlRequest
+	select {
+	case req = <-reqCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture-authority republish did not send apply_snapshot")
+	}
+	if req.Snapshot == nil || len(req.Snapshot.IpsecTunnelRows) != 0 {
+		t.Fatalf("republished tunnel rows=%+v, want staged row removed", req.Snapshot)
+	}
+	if !reflect.DeepEqual(req.Snapshot.Routes, baselineRoutes) {
+		t.Fatalf("capture-authority republish changed routes: got=%+v want=%+v", req.Snapshot.Routes, baselineRoutes)
+	}
+	if !reflect.DeepEqual(req.Snapshot.Policies, baselinePolicies) {
+		t.Fatalf("capture-authority republish changed policies: got=%+v want=%+v", req.Snapshot.Policies, baselinePolicies)
 	}
 }
 

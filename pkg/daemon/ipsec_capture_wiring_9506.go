@@ -1109,6 +1109,61 @@ func (d *Daemon) rollbackIpsecCaptureStage(old, staged *ipsecCaptureRuntime) err
 
 }
 
+// captureAuthorityRepublisher is the minimal userspace capability needed to
+// heal a helper that may have accepted a staged capture snapshot before the
+// daemon rolled back its divert/queue runtime.
+type captureAuthorityRepublisher interface {
+	RepublishCurrentCaptureAuthority() (published bool, err error)
+	BumpFIBGeneration() (uint32, error)
+}
+
+// healIpsecCaptureAuthorityAfterRollback republishes CURRENT capture authority
+// after a stage the helper may have ACKed ends uncommitted (#10485 M4). The
+// caller must invoke this only after the rollback has settled (pending
+// cleared, previous runtime restored) so the provider serves the rolled-back
+// authority the helper must converge to — never the retired staged rows.
+//
+// The heal is deliberately unconditional on the landed token: a snapshot can
+// be installed on the helper without marking the stage landed (the deferred-
+// worker capture skip in markAppliedSnapshotLocked), so gating on landed
+// would skip exactly the incoherent case. Coherent cases are safe by
+// construction: the current-snapshot republish restamps capture authority
+// from the live provider and duplicate-skips when content already matches,
+// so an already-converged helper costs one hash and no wire publish.
+//
+// A failed heal returns an error for the caller to join into the commit
+// verdict; the commit is already failing on every path that reaches the
+// rollback, so reporting the heal failure can only add diagnosis, never flip
+// success.
+func (d *Daemon) healIpsecCaptureAuthorityAfterRollback(_ *config.Config) error {
+	if d == nil {
+		return nil
+	}
+	pub, ok := d.dataplane().(captureAuthorityRepublisher)
+	if !ok {
+		// Helperless (no userspace dataplane publisher): no helper holds
+		// staged rows, so there is nothing to converge.
+		return nil
+	}
+	published, err := pub.RepublishCurrentCaptureAuthority()
+	if err != nil {
+		slog.Warn("ipsec capture: post-rollback authority republish failed; the helper may hold retired rows until the next apply",
+			"err", err)
+		return fmt.Errorf("ipsec capture: post-rollback authority republish: %w", err)
+	}
+	if !published {
+		// Duplicate-skip: the helper already enforces content equivalent
+		// to current authority. Converged; do not churn flow caches.
+		return nil
+	}
+	if _, err := pub.BumpFIBGeneration(); err != nil {
+		slog.Warn("ipsec capture: FIB generation bump unconfirmed after post-rollback republish",
+			"err", err)
+		return fmt.Errorf("ipsec capture: post-rollback FIB generation bump: %w", err)
+	}
+	return nil
+}
+
 type ipsecCaptureGuardedInstaller interface {
 	InstallIpsecDivertWithDrain(xnft.IpsecDivertSpec, func() error) error
 }
