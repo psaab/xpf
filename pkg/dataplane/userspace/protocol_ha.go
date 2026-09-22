@@ -198,6 +198,11 @@ type SessionSyncRequest struct {
 	// declares the same keys.
 	InstallTableDomain uint32 `json:"install_table_domain,omitempty"`
 	InstallTableCheck  uint32 `json:"install_table_check,omitempty"`
+	// PurgeTunnelVariants requests a fail-closed GRE delete when the BPF
+	// conntrack mirror could not carry the sync-only discriminator. Rust treats
+	// this as a wildcard over discriminator variants for the same
+	// (family,tuple,routing-domain), never as a delete of the None class.
+	PurgeTunnelVariants bool `json:"purge_tunnel_variants,omitempty"`
 }
 
 // SessionDeltaInfo is the HA session-open/close delta as it reaches this

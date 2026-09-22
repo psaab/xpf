@@ -46,7 +46,8 @@ mod tests;
 // `use self::forwarding_build::*;` in `afxdp/mod.rs`.
 pub(in crate::afxdp) use fib::{
     infer_connected_route_target_v4, infer_connected_route_target_v6, parse_route_next_hop,
-    parse_route_next_hop_v6, resolve_ifindex, resolve_route_next_hops_v4, resolve_route_next_hops_v6,
+    parse_route_next_hop_v6, resolve_ifindex, resolve_route_next_hops_v4,
+    resolve_route_next_hops_v6,
 };
 pub(in crate::afxdp) use interfaces::{
     connected_route_tables, pick_interface_v4, pick_interface_v6,
@@ -58,7 +59,7 @@ pub(in crate::afxdp) use tunnels::hydrate_wg_identity;
 // #2327: typed tunnel-kind classifier shared with the GRE decap path
 // (`gre.rs`) and the egress encap dispatcher (`frame/mod.rs`) so the
 // kind-segregation and fail-closed `_ =>` arm have one source of truth.
-pub(in crate::afxdp) use tunnels::{tunnel_mode_kind, TunnelKind};
+pub(in crate::afxdp) use tunnels::{TunnelKind, tunnel_mode_kind};
 
 // #2410: `build_cos_state` is now fallible (it fails the snapshot
 // closed on an out-of-range CoS queue id or an unresolved scheduler-map
@@ -533,8 +534,9 @@ pub(in crate::afxdp) fn commit_rule_counter_prune(
 ) {
     policy_counters.reconcile_rules(&snapshot.policies);
     // #2218: drop hit counters for NAT rules removed by this config.
-    nat_counters
-        .reconcile_ids(&crate::afxdp::coordinator::snapshot_active_nat_counter_ids(snapshot));
+    nat_counters.reconcile_ids(&crate::afxdp::coordinator::snapshot_active_nat_counter_ids(
+        snapshot,
+    ));
 }
 
 /// Every fallible step of the forwarding build. Returns `Err` on any snapshot
@@ -618,6 +620,9 @@ fn build_fallible_forwarding_state(
         &snapshot.address_books,
         policy_counters,
     )?;
+    state.policy_rematch_extensive = snapshot.policy_rematch_extensive;
+    state.policy_rename_ancestry = snapshot.policy_rename_ancestry.clone();
+    state.policy_session_rebinds = snapshot.policy_session_rebinds.clone();
     // #3534: thread the implicit-default-policy RT_FLOW log selection into the
     // policy state. Set here (not in the parser) so the parser's many test
     // callers and the discard-only preflight call sites are untouched; the
@@ -673,16 +678,12 @@ fn build_fallible_forwarding_state(
         .iter()
         .filter(|sp| sp.syn_flood_timeout > 0 && !sp.zone.is_empty())
         .filter_map(|sp| {
-            state
-                .zone_name_to_id
-                .get(&sp.zone)
-                .copied()
-                .map(|zone_id| {
-                    (
-                        zone_id,
-                        crate::session::secs_to_ns_saturating(u64::from(sp.syn_flood_timeout)),
-                    )
-                })
+            state.zone_name_to_id.get(&sp.zone).copied().map(|zone_id| {
+                (
+                    zone_id,
+                    crate::session::secs_to_ns_saturating(u64::from(sp.syn_flood_timeout)),
+                )
+            })
         })
         .collect();
     // #6751: CARRY the interface-mode identity registry across the apply.
@@ -914,7 +915,11 @@ fn build_fallible_forwarding_state(
                 if wildcard {
                     state.local_nat_any_table_v4.insert(v4);
                 } else {
-                    state.local_tables_v4.entry(v4).or_default().insert(table_v4);
+                    state
+                        .local_tables_v4
+                        .entry(v4)
+                        .or_default()
+                        .insert(table_v4);
                 }
             }
             std::net::IpAddr::V6(v6) => {
@@ -922,7 +927,11 @@ fn build_fallible_forwarding_state(
                 if wildcard {
                     state.local_nat_any_table_v6.insert(v6);
                 } else {
-                    state.local_tables_v6.entry(v6).or_default().insert(table_v6);
+                    state
+                        .local_tables_v6
+                        .entry(v6)
+                        .or_default()
+                        .insert(table_v6);
                 }
             }
         }

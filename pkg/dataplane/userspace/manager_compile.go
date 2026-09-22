@@ -306,12 +306,12 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	}
 	stampCaptureAuthority(snap, epochProvider)
 	snap.partialUpdateEpoch = partialEpoch
-	// #1620: stamp the cold-path sample mask onto the snapshot. The
-	// daemon called SetColdPathSampleMask once at startup with the
-	// validated CLI flag value (or nil for "use default"). A nil
-	// pointer here leaves the wire field absent (omitempty), which
-	// the Rust receiver unwrap_or-s to 0xff per plan §4.3.
+	// The daemon stages provenance immediately before this Compile call, while
+	// holding its apply semaphore. Copy it onto this exact snapshot so a failed
+	// apply can retry the same metadata without consulting a later config.
 	m.mu.Lock()
+	snap.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), m.policyRenameAncestry...)
+	snap.PolicySessionRebinds = append([]PolicySessionRebind(nil), m.policySessionRebinds...)
 	snap.ColdPathSampleMask = m.coldPathSampleMask
 	m.mu.Unlock()
 	return m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)

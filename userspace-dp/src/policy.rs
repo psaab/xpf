@@ -1760,6 +1760,10 @@ impl PolicyState {
     ) -> Option<&'a Arc<PolicyRuleCounter>> {
         bound.or_else(|| self.hit_counter_by_idx(idx))
     }
+    pub(crate) fn rule_for_policy_id(&self, policy_id: u32) -> Option<&PolicyRule> {
+        self.rules.iter().find(|rule| rule.policy_id == policy_id)
+    }
+
 
     /// #3395: re-resolve the CURRENT positional `policy_id` (#3056) for an
     /// ESTABLISHED session at a local publish surface (the ~1s live-row refresh

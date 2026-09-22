@@ -114,17 +114,35 @@ func (d *Daemon) commitWithGenBinding(
 		// changes under d.applySem (held here), so it is stable across the
 		// transaction.
 		oldActive = d.store.ActiveConfig()
+		d.pendingRenameMu.Lock()
 		compiled, err = commitFn(gen)
 		if err == nil {
+			activeGen, _ := d.store.ActiveSnapshot()
+			descriptors := d.store.PendingRenameAncestryForGeneration(gen)
+			if d.pendingRenameApplies == nil {
+				d.pendingRenameApplies = make(map[uint64]pendingRenameApply)
+			}
+			for pendingGen := range d.pendingRenameApplies {
+				if pendingGen != activeGen {
+					delete(d.pendingRenameApplies, pendingGen)
+				}
+			}
+			if activeGen != 0 && len(descriptors) > 0 {
+				d.pendingRenameApplies[activeGen] = pendingRenameApply{
+					generation: gen, descriptors: descriptors,
+				}
+			}
+			d.pendingRenameMu.Unlock()
 			return oldActive, compiled, nil
 		}
+		d.pendingRenameMu.Unlock()
 		if errors.Is(err, configstore.ErrCandidateGenerationConflict) && attempt < maxCommitPreflightRetries {
 			slog.Warn("commit: candidate configuration changed during pre-flight; re-validating on the new generation",
 				"attempt", attempt+1)
 			continue
 		}
 		return nil, nil, err
-	}
+}
 }
 
 // commitAndApply atomically promotes the candidate config and
@@ -274,6 +292,14 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 // committed config is returned alongside the error so the operator sees the
 // failure while the standby still converges.
 func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncPeer peerSyncPolicy) (*config.Config, error) {
+	activeGen, _ := d.store.ActiveSnapshot()
+	d.pendingRenameMu.Lock()
+	renameApply, hasRenameApply := d.pendingRenameApplies[activeGen]
+	d.pendingRenameMu.Unlock()
+	var renameApplyPtr *pendingRenameApply
+	if hasRenameApply {
+		renameApplyPtr = &renameApply
+	}
 	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.
 	// Only this caller holds the pre-commit active config — the store promoted
 	// the new one upstream — and the invalidation's candidate set has to be READ
@@ -281,7 +307,7 @@ func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncP
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
-	d.armPolicyInvalidationPlan(oldActive, compiled)
+	d.armPolicyInvalidationPlanWithRename(oldActive, compiled, renameApplyPtr)
 	// #9841: the committing wrapper, not the bare apply — it returns the
 	// response object projecting this attempt's unconverged-MTU records
 	// (a copy carrying the lines, or the applied pointer itself when there
@@ -335,9 +361,20 @@ func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncP
 		d.pushCommittedConfigToPeer()
 	}
 	joined := errors.Join(applyErr, clearErr)
+	if joined == nil && d.store != nil {
+		d.pendingRenameMu.Lock()
+		pending, ok := d.pendingRenameApplies[activeGen]
+		d.pendingRenameMu.Unlock()
+		if ok {
+			// The store-side candidate lineage is no longer needed once this
+			// generation reached the local dataplane. Keep the daemon-side
+			// descriptor copy for peer retry/reconnect.
+			d.store.ClearPendingRenameAncestryForGeneration(pending.generation)
+		}
+	}
 	// #4957: a fully-successful commit apply (no fatal apply error, no partial
-	// session-invalidation) means the committed active config has converged on the
-	// dataplane. Stamp it applied so that if THIS node later becomes secondary and
+	// session-invalidation) means the committed active config has converged on
+	// the dataplane. Stamp it applied so that if THIS node later becomes secondary and
 	// the new primary syncs this same config back, handleConfigSync's converged
 	// shortcut recognizes it without a redundant re-apply. A non-nil joined error
 	// leaves the prior digest — the config did not fully converge.
@@ -432,7 +469,20 @@ func (d *Daemon) pushCommittedConfigToPeer() {
 // promotion) + applyConfigLocked, so a peer-sync can't interleave
 // between a local committer's Commit and applyConfig (which would
 // briefly leave store=peer-config but kernel=local-config).
-func (d *Daemon) syncAndApply(ctx context.Context, configText string, chassisPreserve func(*config.ConfigTree)) (compiled *config.Config, retErr error) {
+func (d *Daemon) syncAndApply(
+	ctx context.Context,
+	configText string,
+	chassisPreserve func(*config.ConfigTree),
+) (compiled *config.Config, retErr error) {
+	return d.syncAndApplyWithAncestry(ctx, configText, chassisPreserve, nil)
+}
+
+func (d *Daemon) syncAndApplyWithAncestry(
+	ctx context.Context,
+	configText string,
+	chassisPreserve func(*config.ConfigTree),
+	ancestry []configstore.RenameDescriptor,
+) (compiled *config.Config, retErr error) {
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -644,15 +694,16 @@ func (d *Daemon) syncAndApply(ctx context.Context, configText string, chassisPre
 	}()
 
 	// #5564: capture the apply error instead of returning early on ANY error.
-	// applyErrSkipsPeerSync (shared with applyAndSyncCommitted) classifies the
-	// two FATAL classes — a required-protocol-gate error (dataplane DISARMED,
-	// #2138) or a daemon-stop context abort (#2926) — that mean the config is
-	// NOT live-forwarding. On those, discard the config and return the error
-	// WITHOUT invalidating (armedActive stays false; no spurious clear), exactly
-	// as the pre-#5564 early-return and applyAndSyncCommitted's fatal branch did.
-	// Every OTHER (non-fatal, best-effort tail) error leaves the config active +
-	// the snapshot armed, so the invalidators still run and the tail error is
-	// surfaced (joined with any partial-invalidation error), not swallowed.
+	// applyErrSkipsPeerSync (shared with applyAndSyncCommitted) classifies
+	// the two FATAL classes — a required-protocol-gate error (dataplane
+	// DISARMED, #2138) or a daemon-stop context abort (#2926) — that mean the
+	// config is NOT live-forwarding. On those, discard the config and return
+	// the error WITHOUT invalidating (armedActive stays false; no spurious
+	// clear), exactly as the pre-#5564 early-return and applyAndSyncCommitted's
+	// fatal branch did. Every OTHER (non-fatal, best-effort tail) error leaves
+	// the config active + the snapshot armed, so the invalidators still run and
+	// the tail error is surfaced (joined with any partial-invalidation error),
+	// not swallowed.
 	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.
 	// Only this caller holds the pre-commit active config — the store promoted
 	// the new one upstream — and the invalidation's candidate set has to be READ
@@ -660,7 +711,13 @@ func (d *Daemon) syncAndApply(ctx context.Context, configText string, chassisPre
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
-	d.armPolicyInvalidationPlan(oldActive, compiled)
+	if len(ancestry) > 0 {
+		d.armPolicyInvalidationPlanWithRename(oldActive, compiled, &pendingRenameApply{
+			descriptors: append([]configstore.RenameDescriptor(nil), ancestry...),
+		})
+	} else {
+		d.armPolicyInvalidationPlan(oldActive, compiled)
+	}
 	applyErr := d.applyConfigLocked(d.applyCancelCtx(), compiled)
 	if applyErrSkipsPeerSync(applyErr) {
 		return nil, applyErr

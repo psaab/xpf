@@ -4,9 +4,9 @@ use crate::nat64::Nat64ReverseInfo;
 use rustc_hash::{FxHashMap, FxHashSet, FxSeededState};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// #2364: session-index maps keyed by attacker-controllable values (the
 /// externally-chosen 5-tuple `SessionKey`, per-IP `IpAddr`) use a SEEDED
@@ -50,10 +50,10 @@ type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, FxSeededState>
 // translated_session_key, reverse_canonical_key, reverse_wire_key,
 // reply_matches_forward_session) live in session/key.rs. Re-exporting
 // at pub(crate) keeps the existing crate::session::* surface intact.
-pub(crate) mod pptp;
-pub(crate) mod pptp_control;
 mod discriminator;
 mod key;
+pub(crate) mod pptp;
+pub(crate) mod pptp_control;
 // #7188: `WireDiscriminator` is exported alongside the class enum because the
 // HA session-sync receiver has to distinguish "the peer stated a class" from
 // "the peer could not state one" — two answers a plain `TunnelDiscriminator`
@@ -62,15 +62,17 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 // #7239: the routing domain's HA-wire encoding. Reserved-zero, three-state
 // decode — #7188's shape, for #7188's reason.
 mod routing_domain_wire;
+pub(crate) use key::*;
 pub(crate) use routing_domain_wire::{
-    QUARANTINED_ROUTING_DOMAIN, WireRoutingDomain, install_table_identity,
-    routing_domain_from_wire,
-    routing_domain_to_wire,
+    QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
     // with the codec's own constant rather than a bare literal.
     WIRE_ABSENT as ROUTING_DOMAIN_WIRE_ABSENT,
+    WireRoutingDomain,
+    install_table_identity,
+    routing_domain_from_wire,
+    routing_domain_to_wire,
 };
-pub(crate) use key::*;
 mod entry;
 pub(crate) use entry::*;
 mod ctx;
@@ -232,7 +234,9 @@ pub(crate) const MAX_SESSION_TIMEOUT_SECS: u64 = (i64::MAX / 1_000_000_000) as u
 pub(crate) const MAX_SESSION_TIMEOUT_NS: u64 = MAX_SESSION_TIMEOUT_SECS * 1_000_000_000;
 
 const _: () = assert!(
-    MAX_SESSION_TIMEOUT_SECS.checked_mul(1_000_000_000).is_some(),
+    MAX_SESSION_TIMEOUT_SECS
+        .checked_mul(1_000_000_000)
+        .is_some(),
     "MAX_SESSION_TIMEOUT_SECS * 1e9 must not overflow u64"
 );
 
@@ -510,7 +514,9 @@ use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 // so the conntrack submodules (install, lookup, expire) keep referencing
 // TCP_FIN/TCP_RST via `super::*`. The session-closing test is the shared
 // `is_closing` predicate.
-use crate::tcp_flags::{TCP_FIN, TCP_RST, has_fin, has_rst, is_closing, is_initial_syn, is_syn_ack};
+use crate::tcp_flags::{
+    TCP_FIN, TCP_RST, has_fin, has_rst, is_closing, is_initial_syn, is_syn_ack,
+};
 
 #[allow(unused_macros)]
 macro_rules! debug_log {
@@ -910,6 +916,21 @@ struct SessionEntry {
     /// derived state, like `established`: `SessionEntry` carries no serde,
     /// so this is on no HA wire and a peer re-derives its own budget.
     last_icmp_error_tat: u64,
+}
+
+/// Snapshot of one live half after a policy rebind. The worker uses this
+/// narrow copy to restamp the shared-session and BPF mirrors without exposing
+/// the worker-owned `SessionEntry`.
+#[derive(Clone, Debug)]
+pub(crate) struct PolicyRebindEntry {
+    pub(crate) key: SessionKey,
+    pub(crate) decision: SessionDecision,
+    pub(crate) metadata: SessionMetadata,
+    pub(crate) origin: SessionOrigin,
+    pub(crate) protocol: u8,
+    pub(crate) tcp_flags: u8,
+    pub(crate) session_id: u64,
+    pub(crate) tcp_close_class: u8,
 }
 
 /// #2501: per-session traffic accounting, split by direction. A `Copy`
@@ -1679,10 +1700,8 @@ impl SessionTable {
         let Some(record) = self.revalidation_record(key) else {
             return FilterRevalidationTarget::NoLocalEntry;
         };
-        let live = FilterRevalidationStamp::live(
-            self.filter_revalidation_gen,
-            logical_ingress_ifindex,
-        );
+        let live =
+            FilterRevalidationStamp::live(self.filter_revalidation_gen, logical_ingress_ifindex);
         if record.entry.filter_revalidated == live {
             FilterRevalidationTarget::Fresh
         } else {
@@ -1729,7 +1748,8 @@ impl SessionTable {
     /// foreign packet on the session's own admitting interface — which has no
     /// `PolicyRevalidationTarget::Stale(key)` to read the key from.
     pub(crate) fn revalidation_canonical_key(&self, key: &SessionKey) -> Option<SessionKey> {
-        self.revalidation_record(key).map(|record| record.key.clone())
+        self.revalidation_record(key)
+            .map(|record| record.key.clone())
     }
 
     /// #7212 test view: the CANONICAL key the probe resolves, or `None` when it
@@ -1781,7 +1801,6 @@ impl SessionTable {
             record.entry.filter_revalidated = FilterRevalidationStamp::UNVALIDATED;
         }
     }
-
 
     /// #7212 test view: the boolean half of
     /// [`SessionTable::stale_filter_revalidation_key`]. A `.is_some()` over the
@@ -1859,7 +1878,6 @@ impl SessionTable {
             record.entry.policy_revalidated_gen = live_gen;
         }
     }
-
 
     /// #3527: install the per-screened-zone half-open (`tcp_opening_ns`)
     /// timeout overrides (zone id → ns), driven from each zone's `syn-flood
@@ -2111,7 +2129,8 @@ impl SessionTable {
         // the wrong one of such a pair is a mistake this campaign has already
         // made once. Counting inside the resolver cannot pick the wrong site.
         let Some(handle) = self.handle_for_key(key) else {
-            self.lookup_miss_no_handle.fetch_add(1, AtomicOrdering::Relaxed);
+            self.lookup_miss_no_handle
+                .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
         };
         let Some(record) = self.entries.get(handle as usize) else {
@@ -2147,7 +2166,8 @@ impl SessionTable {
         // which is a weaker and true claim. If the per-function split is ever
         // actually wanted, it needs new fields — do not infer it from these.
         let Some(handle) = self.handle_for_key(key) else {
-            self.lookup_miss_no_handle.fetch_add(1, AtomicOrdering::Relaxed);
+            self.lookup_miss_no_handle
+                .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
         };
         let Some(record) = self.entries.get_mut(handle as usize) else {
@@ -2226,7 +2246,10 @@ impl SessionTable {
     /// << 48`, in the high 16 bits of every id it mints. So a non-zero id whose high
     /// bits differ was adopted from the publisher (for a local session's replica,
     /// the installer). An id minted here, or 0, is not carried.
-    pub(in crate::session) fn session_id_carried_from_another_worker(&self, session_id: u64) -> bool {
+    pub(in crate::session) fn session_id_carried_from_another_worker(
+        &self,
+        session_id: u64,
+    ) -> bool {
         const NAMESPACE_MASK: u64 = 0xFFFF_u64 << 48;
         session_id != 0 && (session_id & NAMESPACE_MASK) != self.session_id_worker_hi
     }
@@ -2234,7 +2257,9 @@ impl SessionTable {
     /// #9412: the live entry's close class on the HA wire (`0` if open or
     /// absent), for the Open deltas that re-announce an existing session.
     pub(crate) fn close_class_wire_for(&self, key: &SessionKey) -> u8 {
-        self.entry_by_key(key).map(|e| e.tcp_close_class_wire()).unwrap_or(0)
+        self.entry_by_key(key)
+            .map(|e| e.tcp_close_class_wire())
+            .unwrap_or(0)
     }
 
     /// #8125: the session's OWN inactivity window, in whole seconds, for the
@@ -2328,8 +2353,8 @@ impl SessionTable {
                 if age > expires_after {
                     return false;
                 }
-                let refresh_after = expires_after.max(SESSION_KEEPALIVE_DIVISOR)
-                    / SESSION_KEEPALIVE_DIVISOR;
+                let refresh_after =
+                    expires_after.max(SESSION_KEEPALIVE_DIVISOR) / SESSION_KEEPALIVE_DIVISOR;
                 age >= refresh_after
             }
             None => return false,
@@ -2455,7 +2480,11 @@ impl SessionTable {
     /// Volume, against #8593: at most one delta per class TRANSITION, and a
     /// retransmitted FIN in the same class emits nothing. A session can
     /// therefore emit at most three over its life (CLOSING, TIME_WAIT, RST).
-    pub(in crate::session) fn emit_close_state_update(&mut self, matched_key: &SessionKey, class_before: u8) {
+    pub(in crate::session) fn emit_close_state_update(
+        &mut self,
+        matched_key: &SessionKey,
+        class_before: u8,
+    ) {
         let Some(matched) = self.entry_by_key(matched_key) else {
             return;
         };
@@ -2492,21 +2521,24 @@ impl SessionTable {
         // The metadata clone bumps the bound policy-counter Arc (#5445). That is
         // acceptable here only because this runs on a class transition, never
         // on the per-packet path.
-        let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Update,
-        key: forward_key.clone(),
-        decision: forward.decision,
-        metadata: forward.metadata.clone(),
-        origin: forward.origin,
-        fabric_redirect_sync: false,
-        created_ns: forward.created_ns,
-        last_seen_ns: forward.last_seen_ns,
-        counters: SessionCounters::default(),
-        observed_tos: forward.observed_tos,
-        observed_tcp_flags: forward.observed_tcp_flags,
-        session_id: forward.session_id,
-        bulk_resync: false,
-        tcp_close_class: class_after,
-        purge_retirement: false, };
+        let delta = SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Update,
+            key: forward_key.clone(),
+            decision: forward.decision,
+            metadata: forward.metadata.clone(),
+            origin: forward.origin,
+            fabric_redirect_sync: false,
+            created_ns: forward.created_ns,
+            last_seen_ns: forward.last_seen_ns,
+            counters: SessionCounters::default(),
+            observed_tos: forward.observed_tos,
+            observed_tcp_flags: forward.observed_tcp_flags,
+            session_id: forward.session_id,
+            bulk_resync: false,
+            tcp_close_class: class_after,
+            purge_retirement: false,
+        };
         self.push_delta(delta);
     }
 
@@ -2577,8 +2609,7 @@ impl SessionTable {
                 // ONE fin.
                 entry.fin_peer |= fin;
                 entry.last_seen_ns = now_ns;
-                entry.expires_after_ns =
-                    tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
+                entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
                 shortened = true;
             }
         }
@@ -2686,8 +2717,7 @@ impl SessionTable {
         let old_owner_rg = record.entry.metadata.owner_rg_id;
         // #10310: a WorkerLocalImport replica is not counted, but a promote
         // to a local origin becomes one logical limit-session unit.
-        let old_counted =
-            !old_is_reverse && install::session_limit_origin_counted(old_origin);
+        let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
         if !ha_activation {
             let new_peer = origin.is_peer_synced();
             // Reject: both peer-synced (refresh_local on a synced entry) OR peer
@@ -2808,8 +2838,7 @@ impl SessionTable {
         }
         // #10310: keep count maintenance balanced across in-place origin
         // transitions (notably WorkerLocalImport -> local promotion).
-        let new_counted =
-            !metadata.is_reverse && install::session_limit_origin_counted(origin);
+        let new_counted = !metadata.is_reverse && install::session_limit_origin_counted(origin);
         if new_counted && !old_counted {
             self.session_limit_inc(key.src_ip, key.dst_ip);
         } else if old_counted && !new_counted {
@@ -2868,23 +2897,111 @@ impl SessionTable {
             // #9412: a promote re-announces the session, so it carries the close
             // class the entry already holds.
             let tcp_close_class = self.close_class_wire_for(key);
-            self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, tcp_close_class,
-            purge_retirement: false,
-            kind: SessionDeltaKind::Open,
-            key: key.clone(),
-            decision,
-            metadata,
-            origin,
-            fabric_redirect_sync: false,
-            created_ns,
-            last_seen_ns: now_ns,
-            counters,
-            observed_tos,
-            observed_tcp_flags,
-            session_id,
-            bulk_resync: false, });
+            self.push_delta(SessionDelta {
+                provenance: crate::session::ExportProvenance::Incremental,
+                tcp_close_class,
+                purge_retirement: false,
+                kind: SessionDeltaKind::Open,
+                key: key.clone(),
+                decision,
+                metadata,
+                origin,
+                fabric_redirect_sync: false,
+                created_ns,
+                last_seen_ns: now_ns,
+                counters,
+                observed_tos,
+                observed_tcp_flags,
+                session_id,
+                bulk_resync: false,
+            });
         }
         true
+    }
+
+    /// Rebind both halves of a retained policy session to the new rule
+    /// identity selected by commit-time rematching. Policy and zone fields are
+    /// not secondary-index inputs, so the update is atomic with respect to the
+    /// worker's single-writer session table.
+    pub(crate) fn rebind_policy_pair(
+        &mut self,
+        key: &SessionKey,
+        policy_id: u32,
+        policy_counter_idx: u32,
+        policy_counter: std::sync::Arc<crate::policy::PolicyRuleCounter>,
+        ingress_zone: u16,
+        egress_zone: u16,
+        log_session_init: bool,
+        log_session_close: bool,
+    ) -> bool {
+        let Some(forward) = self.entry_by_key(key) else {
+            return false;
+        };
+        if forward.metadata.is_reverse {
+            return false;
+        }
+        let companion_key = reverse_session_key(key, forward.decision.nat);
+        if companion_key != *key {
+            let Some(companion) = self.entry_by_key(&companion_key) else {
+                return false;
+            };
+            if !companion.metadata.is_reverse {
+                return false;
+            }
+        }
+        let mut rebound = false;
+        for (candidate, ingress, egress) in [
+            (key, ingress_zone, egress_zone),
+            (&companion_key, egress_zone, ingress_zone),
+        ] {
+            if let Some(record) = self.entry_by_key_mut(candidate) {
+                record.metadata.policy_id = policy_id;
+                record.metadata.policy_counter_idx = policy_counter_idx;
+                record.metadata.policy_counter = Some(policy_counter.clone());
+                record.metadata.ingress_zone = ingress;
+                record.metadata.egress_zone = egress;
+                record.metadata.log_session_init = log_session_init;
+                record.metadata.log_session_close = log_session_close;
+                rebound = true;
+            }
+        }
+        rebound
+    }
+
+    /// Return the live forward/reverse halves after a policy rebind so mirror
+    /// layers can be restamped with the same policy identity.
+    pub(crate) fn policy_rebind_pair_entries(
+        &self,
+        key: &SessionKey,
+    ) -> Option<Vec<PolicyRebindEntry>> {
+        let forward = self.entry_by_key(key)?;
+        if forward.metadata.is_reverse {
+            return None;
+        }
+        let companion_key = reverse_session_key(key, forward.decision.nat);
+        if companion_key != *key {
+            let companion = self.entry_by_key(&companion_key)?;
+            if !companion.metadata.is_reverse {
+                return None;
+            }
+        }
+        let mut entries = Vec::with_capacity(2);
+        for candidate in [key, &companion_key] {
+            let Some(entry) = self.entry_by_key(candidate) else {
+                continue;
+            };
+            entries.push(PolicyRebindEntry {
+                key: candidate.clone(),
+                decision: entry.decision,
+                metadata: entry.metadata.clone(),
+                origin: entry.origin,
+                protocol: candidate.protocol,
+                tcp_flags: entry.observed_tcp_flags,
+                session_id: entry.session_id,
+                tcp_close_class: entry.tcp_close_class_wire(),
+            });
+        }
+        Some(entries)
     }
 
     /// Thin wrapper for local-only refresh (non-HA-activation path).
@@ -3408,9 +3525,7 @@ impl SessionTable {
                 );
             }
         }
-        if !is_reverse
-            && let Some(l3_key) = l3_reverse_key_for_forward(key, nat)
-        {
+        if !is_reverse && let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
             // #10130: this index is a gate, not a reverse session lookup. It
             // intentionally carries no L4 identity and no collision telemetry;
             // the packet itself has no ports, and the caller re-validates the
@@ -3472,7 +3587,11 @@ impl SessionTable {
         // key is dropped only once its bucket empties. This is what leaves a
         // surviving colliding session's return path intact when the other
         // closes (the single-value map wiped the whole key and stranded it).
-        nat_index_bucket_remove(&mut self.nat_reverse_index, &reverse_wire_key(key, nat), handle);
+        nat_index_bucket_remove(
+            &mut self.nat_reverse_index,
+            &reverse_wire_key(key, nat),
+            handle,
+        );
         nat_index_bucket_remove(
             &mut self.nat_reverse_index,
             &reverse_canonical_key(key, nat),
@@ -3621,11 +3740,7 @@ fn nat_index_bucket_remove(
     }
 }
 
-fn l3_reverse_bucket_remove(
-    map: &mut SeededL3ReverseIndex,
-    key: &L3ReverseKey,
-    handle: u32,
-) {
+fn l3_reverse_bucket_remove(map: &mut SeededL3ReverseIndex, key: &L3ReverseKey, handle: u32) {
     if let Some(bucket) = map.get_mut(key) {
         bucket.retain(|h| *h != handle);
         if bucket.is_empty() {

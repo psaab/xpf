@@ -428,7 +428,6 @@ type SessionValue struct {
 	InstallTableDomain uint32
 	InstallTableCheck  uint32
 }
-
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
 type SessionKeyV6 struct {
 	SrcIP    [16]byte

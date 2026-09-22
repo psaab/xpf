@@ -1525,6 +1525,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// compatibility against a version the reconnected (possibly downgraded)
 		// peer no longer speaks.
 		s.peerSessionSyncWire.Store(0)
+		s.configAncestryWaitSince.Store(0)
 		// #5718 C01a: peerHeartbeatAckEver is a capability probe of the peer
 		// PROCESS, not of this node, so it must be scoped to the peer
 		// incarnation exactly like clockSynced above. Full disconnect ends

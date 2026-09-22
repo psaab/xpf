@@ -41,11 +41,16 @@ const sessionDeleteBatchSize = 64
 type SessionEntryV4 struct {
 	Key   SessionKey
 	Value SessionValue
+	// PurgeTunnelVariants is set only by policy invalidation when the BPF
+	// mirror lost a protocol-47 discriminator. It is a delete option, not part
+	// of SessionValue or the BPF ABI.
+	PurgeTunnelVariants bool
 }
 
 type SessionEntryV6 struct {
-	Key   SessionKeyV6
-	Value SessionValueV6
+	Key                 SessionKeyV6
+	Value               SessionValueV6
+	PurgeTunnelVariants bool
 }
 
 type SessionStore interface {
@@ -105,20 +110,18 @@ type ClusterBulkReconcileResult struct {
 // When two tenants hold that tuple the probe is ambiguous and the helper REFUSES
 // (#8636). #9146 fixed the SINGULAR delete this way; the batch path — which is
 // the one that retires sessions continuously, from the conntrack GC — still
-// stripped the value.
-//
-// `RoutingDomain == 0` means "no domain to name", which is both the default
-// instance and "the caller had no value". Both want the pre-#9364 bare delete, so
-// one value serves both and no reserved sentinel is needed.
 type ScopedSessionKey struct {
 	Key           SessionKey
 	RoutingDomain uint32
+	// PurgeTunnelVariants is an explicit policy-invalidation delete option.
+	PurgeTunnelVariants bool
 }
 
 // ScopedSessionKeyV6 is the IPv6 analogue of ScopedSessionKey (#9364).
 type ScopedSessionKeyV6 struct {
-	Key           SessionKeyV6
-	RoutingDomain uint32
+	Key                 SessionKeyV6
+	RoutingDomain       uint32
+	PurgeTunnelVariants bool
 }
 
 // sessionDomainBatchDeleter is the #9364 optional capability: a dataplane that
@@ -557,8 +560,9 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 			// so it carries the same domain — the identical derivation #9146's
 			// syncDeleteV4Locked uses for the singular path.
 			reverseKeys = append(reverseKeys, ScopedSessionKey{
-				Key:           val.ReverseKey,
-				RoutingDomain: val.RoutingDomain,
+				Key:                 val.ReverseKey,
+				RoutingDomain:       val.RoutingDomain,
+				PurgeTunnelVariants: entry.PurgeTunnelVariants,
 			})
 		}
 	}
@@ -570,8 +574,9 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 	forwardKeys := make([]ScopedSessionKey, 0, len(entries))
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, ScopedSessionKey{
-			Key:           entry.Key,
-			RoutingDomain: entry.Value.RoutingDomain,
+			Key:                 entry.Key,
+			RoutingDomain:       entry.Value.RoutingDomain,
+			PurgeTunnelVariants: entry.PurgeTunnelVariants,
 		})
 	}
 	deleted, err := s.batchDeleteV4(forwardKeys)
@@ -607,8 +612,9 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 		if !forwardOnly && val.ReverseKey.Protocol != 0 {
 			// #9364: same tenant as its forward half — see the V4 twin.
 			reverseKeys = append(reverseKeys, ScopedSessionKeyV6{
-				Key:           val.ReverseKey,
-				RoutingDomain: val.RoutingDomain,
+				Key:                 val.ReverseKey,
+				RoutingDomain:       val.RoutingDomain,
+				PurgeTunnelVariants: entry.PurgeTunnelVariants,
 			})
 		}
 	}
@@ -620,8 +626,9 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 	forwardKeys := make([]ScopedSessionKeyV6, 0, len(entries))
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, ScopedSessionKeyV6{
-			Key:           entry.Key,
-			RoutingDomain: entry.Value.RoutingDomain,
+			Key:                 entry.Key,
+			RoutingDomain:       entry.Value.RoutingDomain,
+			PurgeTunnelVariants: entry.PurgeTunnelVariants,
 		})
 	}
 	deleted, err := s.batchDeleteV6(forwardKeys)

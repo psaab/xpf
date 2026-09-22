@@ -231,6 +231,10 @@ type Manager struct {
 	lastStatusSeq uint64
 	lastSnapshot  *ConfigSnapshot
 	lastApply     *dataplane.ApplyResult
+	// policyRenameAncestry and policySessionRebinds are daemon-provided
+	// pre-publication metadata consumed by the Rust rotation path.
+	policyRenameAncestry   []PolicyRenameAncestry
+	policySessionRebinds   []PolicySessionRebind
 	// lastSnapshotRejectReasons holds the #3261 diagnostic: the reasons the
 	// most recently built snapshot carries unrepresentable policy content that
 	// the helper integrity preflight rejects (previous-good retained, or

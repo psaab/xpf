@@ -382,7 +382,6 @@ func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.Ses
 	return nil
 }
 
-
 // syncDeleteV4LockedMarked is syncDeleteV4Locked with the #9714 peer mark set on
 // both helper requests (the key and its reverse companion). It reports whether the
 // helper REFUSED the marked delete of the key; a refused key keeps its reverse
@@ -449,7 +448,6 @@ func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.S
 	}
 	return nil
 }
-
 
 // syncDeleteV6LockedMarked is the IPv6 analogue of syncDeleteV4LockedMarked (#9714).
 func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer, forwardOnly bool) bool {
@@ -852,6 +850,7 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 			// pre-#9364 bare request, bit-identical.
 			req := m.buildSessionSyncRequestV4(
 				"delete", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
+			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)
@@ -930,9 +929,9 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 		}
 		reqs := make([]SessionSyncRequest, 0, end-start)
 		for i := start; i < end; i++ {
-			// #9364: name the domain — see the V4 twin.
 			req := m.buildSessionSyncRequestV6(
 				"delete", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
+			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)

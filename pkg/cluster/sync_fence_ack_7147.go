@@ -170,14 +170,16 @@ const (
 	// installs every session stamp-less, so a stamped install sent there
 	// would silently wrong-table after failover.
 	capFlagInstallTableIdentity uint8 = 1 << 3
+	// capFlagConfigAncestry: the peer decodes the additive config-sync
+	// rename-ancestry trailer and carries it through ordered apply.
+	capFlagConfigAncestry uint8 = 1 << 4
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
 // constant: the capability is a property of the BINARY, not of runtime
-// configuration, so it must not be conditioned on anything a deployment can
 // turn off. In particular it is deliberately independent of
 // localSnapshotProtocol — see sendCapabilities for why that mattered.
-const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity
+const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -341,6 +343,22 @@ func (s *SessionSync) InstallTableIdentityCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags.Load())&capFlagInstallTableIdentity != 0
+}
+
+// ConfigAncestryCapable reports whether the peer advertised support for the
+// rename-ancestry config sidecar (#10509). It is false both before capability
+// discovery and for a peer that explicitly lacks the bit.
+func (s *SessionSync) ConfigAncestryCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags.Load())&capFlagConfigAncestry != 0
+}
+
+// ConfigAncestryNegotiated reports whether this peer incarnation has sent its
+// capabilities frame, distinguishing "not learned yet" from "incapable".
+func (s *SessionSync) ConfigAncestryNegotiated() bool {
+	return s.peerCapabilitiesLearned()
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been

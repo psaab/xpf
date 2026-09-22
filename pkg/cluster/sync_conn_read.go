@@ -1010,6 +1010,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			peerWire = binary.LittleEndian.Uint16(payload[3:5])
 		}
 		s.peerSessionSyncWire.Store(uint32(peerWire))
+		// A capability response closes the bounded pre-discovery window.
+		s.configAncestryWaitSince.Store(0)
 		// #9818: the sender's process identity rides after the existing
 		// capabilities fields. Old peers ignore this trailing extension; a
 		// short frame leaves the connection unattributed and therefore on the
@@ -1025,6 +1027,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			}
 		}
 		s.noteConnPeerCapabilities(conn, peerIdentity)
+		if cb := s.OnPeerCapabilitiesChanged; cb != nil {
+			go cb()
+		}
 		// #9752 round 4: a capable discovery re-arms the bulk. A window that
 		// aborted during the discovery race must not stay latched once the
 		// peer proves capable — the next redrive completes it.
@@ -1144,8 +1149,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
 	s.stats.ConfigsReceived.Add(1)
 	s.stats.LastConfigSyncTime.Store(time.Now().UnixNano())
-	configText, gen := decodeConfigPayload(payload)
-	s.stats.LastConfigSyncSize.Store(uint64(len(configText)))
+	configText, gen, ancestry := decodeConfigPayloadWithAncestry(payload)
 	slog.Info("cluster sync: config received from peer", "size", len(configText), "gen", gen)
 	// #5563: advance the received-config high-water BEFORE enqueue. This is
 	// the receiver's view of the peer's current committed generation and
@@ -1175,7 +1179,7 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
 	// payload that was already QUEUED when the re-prime landed, which is the
 	// reported defect ("resetRecvGen does not drain items already queued from
 	// the prior boot"). Neither site subsumes the other.
-	item := configApplyItem{gen: gen, text: configText, incarnation: s.connBootIncarnation(conn)}
+	item := configApplyItem{gen: gen, text: configText, ancestry: ancestry, incarnation: s.connBootIncarnation(conn)}
 	if s.configItemIncarnationStale(item) {
 		s.stats.ConfigsDeadIncarnationDropped.Add(1)
 		slog.Warn("cluster sync: dropping config received under a replaced peer boot "+

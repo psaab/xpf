@@ -18,18 +18,29 @@
 // So these cells publish a real forwarding rotation into a running worker and
 // observe the purge. Loaded from loop_body/mod.rs via `#[path]`.
 use super::*;
-use crate::policy::{parse_policy_state_with_counters, PolicyCounterStore, PolicyRuleCounter, PolicyState};
+use crate::policy::{
+    PolicyCounterStore, PolicyRuleCounter, PolicyState, parse_policy_state_with_counters,
+};
 use rustc_hash::FxHashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 fn rule(name: &str, policy_id: u32) -> crate::PolicyRuleSnapshot {
+    rule_with_zones(name, policy_id, "lan", "wan")
+}
+
+fn rule_with_zones(
+    name: &str,
+    policy_id: u32,
+    from_zone: &str,
+    to_zone: &str,
+) -> crate::PolicyRuleSnapshot {
     crate::PolicyRuleSnapshot {
         name: name.to_string(),
         policy_id,
-        from_zone: "lan".to_string(),
-        to_zone: "wan".to_string(),
+        from_zone: from_zone.to_string(),
+        to_zone: to_zone.to_string(),
         source_addresses: vec!["any".to_string()],
         destination_addresses: vec!["any".to_string()],
         applications: vec![format!("app-{name}")],
@@ -48,9 +59,13 @@ fn rule(name: &str, policy_id: u32) -> crate::PolicyRuleSnapshot {
 }
 
 fn policy(rules: &[crate::PolicyRuleSnapshot]) -> PolicyState {
-    let zones: FxHashMap<String, u16> = [("lan".to_string(), 1u16), ("wan".to_string(), 2u16)]
-        .into_iter()
-        .collect();
+    let zones: FxHashMap<String, u16> = [
+        ("lan".to_string(), 1u16),
+        ("wan".to_string(), 2u16),
+        ("dmz".to_string(), 3u16),
+    ]
+    .into_iter()
+    .collect();
     parse_policy_state_with_counters("deny", rules, &zones, &[], &PolicyCounterStore::default())
         .expect("fixture policy must parse")
 }
@@ -61,11 +76,32 @@ fn policy(rules: &[crate::PolicyRuleSnapshot]) -> PolicyState {
 // redundant attribute puts the construction in the file's test half, where
 // its marker is honoured.
 #[cfg(test)]
-fn view(generation: u64, rules: &[crate::PolicyRuleSnapshot]) -> (Arc<RuntimeView>, Arc<ForwardingState>) {
+fn view_with_policy_metadata(
+    generation: u64,
+    rules: &[crate::PolicyRuleSnapshot],
+    policy_rematch_extensive: bool,
+    policy_rename_ancestry: Vec<crate::protocol::PolicyRenameAncestry>,
+) -> (Arc<RuntimeView>, Arc<ForwardingState>) {
     let mut forwarding = ForwardingState::default();
     forwarding.policy = policy(rules);
+    forwarding.policy_rematch_extensive = policy_rematch_extensive;
+    forwarding.policy_rename_ancestry = policy_rename_ancestry;
+    forwarding.zone_name_to_id.insert("lan".to_string(), 1);
+    forwarding.zone_name_to_id.insert("wan".to_string(), 2);
+    forwarding.zone_name_to_id.insert("dmz".to_string(), 3);
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_id_to_name.insert(3, "dmz".to_string());
+    forwarding.ingress_logical_ifindex.insert((11, 0), 11);
+    let ingress_zone = rules
+        .first()
+        .and_then(|rule| forwarding.zone_name_to_id.get(&rule.from_zone))
+        .copied()
+        .unwrap_or(0);
+    forwarding.ifindex_to_zone_id.insert(11, ingress_zone);
     let forwarding = Arc::new(forwarding);
-    let view = Arc::new(RuntimeView::new( // runtime-view-canary: test-local
+    let view = Arc::new(RuntimeView::new(
+        // runtime-view-canary: test-local
         ValidationState {
             snapshot_installed: true,
             config_generation: generation,
@@ -74,6 +110,23 @@ fn view(generation: u64, rules: &[crate::PolicyRuleSnapshot]) -> (Arc<RuntimeVie
         forwarding.clone(),
     ));
     (view, forwarding)
+}
+
+#[cfg(test)]
+fn view(
+    generation: u64,
+    rules: &[crate::PolicyRuleSnapshot],
+) -> (Arc<RuntimeView>, Arc<ForwardingState>) {
+    view_with_policy_metadata(generation, rules, false, Vec::new())
+}
+
+#[cfg(test)]
+fn extensive_view(
+    generation: u64,
+    rules: &[crate::PolicyRuleSnapshot],
+    ancestry: Vec<crate::protocol::PolicyRenameAncestry>,
+) -> (Arc<RuntimeView>, Arc<ForwardingState>) {
+    view_with_policy_metadata(generation, rules, true, ancestry)
 }
 
 fn key(src_port: u16) -> SessionKey {
@@ -89,24 +142,33 @@ fn key(src_port: u16) -> SessionKey {
     }
 }
 
-fn entry(key: SessionKey, is_reverse: bool, counter: Option<Arc<PolicyRuleCounter>>) -> SyncedSessionEntry {
+fn entry(
+    key: SessionKey,
+    is_reverse: bool,
+    counter: Option<Arc<PolicyRuleCounter>>,
+) -> SyncedSessionEntry {
     SyncedSessionEntry {
         key,
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: 0,
-        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
-            ingress_ifindex: 0,
+            ingress_ifindex: 11,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
             fabric_ingress: false,
@@ -138,7 +200,10 @@ fn wait_for_iterations(heartbeat: &AtomicU64, n: usize) {
         let before = heartbeat.load(Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_secs(30);
         while heartbeat.load(Ordering::Relaxed) == before {
-            assert!(Instant::now() < deadline, "the worker loop stopped iterating");
+            assert!(
+                Instant::now() < deadline,
+                "the worker loop stopped iterating"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
     }
@@ -148,17 +213,28 @@ struct Presence {
     first_forward: bool,
     first_reverse: bool,
     unbound: bool,
+    first_forward_entry: Option<SyncedSessionEntry>,
+    first_reverse_entry: Option<SyncedSessionEntry>,
+    old_first_counter: Option<Arc<PolicyRuleCounter>>,
 }
-
 /// Starts a real worker on generation 1 (`p-first` at policy_id 0, `p-web` at
 /// 1), installs a session pair bound to `p-first` plus an unbound id-0 session,
 /// publishes generation 2 with `new_rules`, and reports which keys are still in
 /// the coordinator's shared HA map.
 fn rotate(new_rules: &[crate::PolicyRuleSnapshot]) -> Presence {
+    rotate_with_metadata(new_rules, false, &[])
+}
+
+fn rotate_with_metadata(
+    new_rules: &[crate::PolicyRuleSnapshot],
+    policy_rematch_extensive: bool,
+    policy_rename_ancestry: &[crate::protocol::PolicyRenameAncestry],
+) -> Presence {
     let coord = Coordinator::new();
     let channel = RuntimeViewChannel::default();
     let (old_view, old_forwarding) = view(1, &[rule("p-first", 0), rule("p-web", 1)]);
     let first_counter = old_forwarding.policy.hit_counter_by_idx(1).cloned();
+    let old_first_counter = first_counter.clone();
     assert_eq!(
         first_counter.as_ref().map(|c| c.rule_id()),
         Some("lan->wan/p-first"),
@@ -184,7 +260,13 @@ fn rotate(new_rules: &[crate::PolicyRuleSnapshot]) -> Presence {
         None,
         startup_tx,
     );
-    let plan = WorkerLaunchPlan::new(0, 0, Vec::new(), crate::PollMode::BusyPoll, DnatTableFds::default());
+    let plan = WorkerLaunchPlan::new(
+        0,
+        0,
+        Vec::new(),
+        crate::PollMode::BusyPoll,
+        DnatTableFds::default(),
+    );
     let cos = WorkerCoSState::from_coord(&coord);
     let telemetry = WorkerPublishedTelemetry::new(
         Arc::new(Mutex::new(ExceptionEventRing::new())),
@@ -219,25 +301,39 @@ fn rotate(new_rules: &[crate::PolicyRuleSnapshot]) -> Presence {
     }
     let deadline = Instant::now() + Duration::from_secs(30);
     while !commands.lock().expect("worker command queue").is_empty() {
-        assert!(Instant::now() < deadline, "the worker never drained its command queue");
+        assert!(
+            Instant::now() < deadline,
+            "the worker never drained its command queue"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
     wait_for_iterations(&heartbeat, 2);
 
-    let (new_view, _new_forwarding) = view(2, new_rules);
+    let (new_view, _new_forwarding) = view_with_policy_metadata(
+        2,
+        new_rules,
+        policy_rematch_extensive,
+        policy_rename_ancestry.to_vec(),
+    );
     channel.publish(new_view);
     wait_for_iterations(&heartbeat, 3);
-
     let presence = {
         let map = synced.lock().expect("shared synced map");
+        let first_forward_entry = map.get(&first_forward).cloned();
+        let first_reverse_entry = map.get(&first_reverse).cloned();
         Presence {
-            first_forward: map.contains_key(&first_forward),
-            first_reverse: map.contains_key(&first_reverse),
+            first_forward: first_forward_entry.is_some(),
+            first_reverse: first_reverse_entry.is_some(),
             unbound: map.contains_key(&unbound),
+            first_forward_entry,
+            first_reverse_entry,
+            old_first_counter: old_first_counter.clone(),
         }
     };
     stop.store(true, Ordering::Relaxed);
-    worker.join().expect("the worker loop exits cleanly on stop");
+    worker
+        .join()
+        .expect("the worker loop exits cleanly on stop");
     presence
 }
 
@@ -262,7 +358,10 @@ fn worker_loop_rotation_purges_the_deleted_first_policys_sessions_9526() {
         !renamed.first_forward && !renamed.first_reverse,
         "a rename is delete + add by stable id, so it purges the old policy's sessions"
     );
-    assert!(renamed.unbound, "a rename must not touch unbound id-0 sessions");
+    assert!(
+        renamed.unbound,
+        "a rename must not touch unbound id-0 sessions"
+    );
 }
 
 /// The control that makes the purge cell above mean something: the same
@@ -280,5 +379,82 @@ fn worker_loop_rotation_keeps_the_first_policys_sessions_when_it_survives_9526()
         kept.first_forward,
         kept.first_reverse,
         kept.unbound
+    );
+}
+
+#[test]
+fn extensive_rotation_rebinds_both_halves_with_new_policy_counter_and_zones_10509() {
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "dmz->wan/p-new".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "dmz".to_string(),
+        destination_to_zone: "wan".to_string(),
+    };
+    let retained = rotate_with_metadata(
+        &[rule_with_zones("p-new", 0, "dmz", "wan"), rule("p-web", 1)],
+        true,
+        &[ancestry],
+    );
+    let forward = retained
+        .first_forward_entry
+        .as_ref()
+        .expect("extensive rematch must retain the forward half");
+    let reverse = retained
+        .first_reverse_entry
+        .as_ref()
+        .expect("extensive rematch must retain the reverse half");
+    assert_eq!(forward.metadata.policy_id, 0);
+    assert_eq!(reverse.metadata.policy_id, 0);
+    assert_eq!(forward.metadata.policy_counter_idx, 1);
+    assert_eq!(reverse.metadata.policy_counter_idx, 1);
+    let forward_counter = forward
+        .metadata
+        .policy_counter
+        .as_ref()
+        .expect("forward half must carry the new counter Arc");
+    let reverse_counter = reverse
+        .metadata
+        .policy_counter
+        .as_ref()
+        .expect("reverse half must carry the new counter Arc");
+    assert_eq!(forward_counter.rule_id(), "dmz->wan/p-new");
+    assert_eq!(reverse_counter.rule_id(), "dmz->wan/p-new");
+    assert!(Arc::ptr_eq(forward_counter, reverse_counter));
+    assert!(
+        !Arc::ptr_eq(
+            forward_counter,
+            retained
+                .old_first_counter
+                .as_ref()
+                .expect("fixture must expose the old counter"),
+        ),
+        "the rebind must replace, not reuse, the old policy counter Arc"
+    );
+    assert_eq!(forward.metadata.ingress_zone, 3);
+    assert_eq!(reverse.metadata.ingress_zone, 2);
+    assert_eq!(forward.metadata.egress_zone, 2);
+    assert_eq!(reverse.metadata.egress_zone, 3);
+}
+
+#[test]
+fn extensive_rotation_deleting_destination_rule_purges_both_halves_10509() {
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "lan->wan/p-new".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "lan".to_string(),
+        destination_to_zone: "wan".to_string(),
+    };
+    let purged = rotate_with_metadata(
+        &[rule_with_zones("p-other", 0, "lan", "wan")],
+        true,
+        &[ancestry],
+    );
+    assert!(
+        purged.first_forward_entry.is_none() && purged.first_reverse_entry.is_none(),
+        "missing destination rule must purge the pair atomically"
     );
 }

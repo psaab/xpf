@@ -71,7 +71,7 @@ func (s *Store) setAsQuotedGroupedPlantClass(sessionID, plantClass string, path 
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -144,7 +144,7 @@ func (s *Store) deleteAsGroupedPlantClass(sessionID, plantClass string, path []s
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -212,7 +212,7 @@ func (s *Store) DeactivateFromInputAsPlantClass(sessionID, plantClass, input str
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -249,7 +249,7 @@ func (s *Store) ActivateFromInputAsPlantClass(sessionID, plantClass, input strin
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -284,7 +284,7 @@ func (s *Store) CopyAsPlantClass(sessionID, plantClass string, srcPath, dstPath 
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -319,7 +319,11 @@ func (s *Store) RenameAsPlantClass(sessionID, plantClass string, srcPath, dstPat
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
+	s.recordRenameAncestryLocked(s.candidateGen, RenameDescriptor{
+		SourcePath:      srcPath,
+		DestinationPath: dstPath,
+	})
 	s.dirty = true
 	return nil
 }
@@ -360,7 +364,7 @@ func (s *Store) InsertAsPlantClass(sessionID, plantClass string, elementPath, re
 	}
 	config.StampChangedEventPlantClasses(beforeTree, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -409,7 +413,7 @@ func (s *Store) AnnotateAs(sessionID string, path []string, comment string) erro
 		return err
 	}
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -476,7 +480,7 @@ func (s *Store) LoadOverrideAsPlantClass(sessionID, plantClass, content string) 
 	config.StampChangedEventPlantClasses(s.candidate, tree, plantClass)
 	s.candidate = tree
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateGenLocked() // #5848: complete candidate replacement retires rename lineage
 	s.dirty = true
 	return nil
 }
@@ -626,7 +630,7 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 	config.StampChangedEventPlantClasses(s.candidate, working, plantClass)
 	s.candidate = working
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
@@ -740,7 +744,7 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 	config.StampChangedEventPlantClasses(s.candidate, working, plantClass)
 	s.candidate = working
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
-	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
+	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return count, nil
 }

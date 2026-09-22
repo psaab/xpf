@@ -75,6 +75,17 @@ func (a *LegacyDataPlaneAdapter) Manager() *Manager {
 	return a.manager
 }
 
+// SetPolicyRenameAncestry forwards daemon pre-publication provenance through
+// the compatibility adapter to the Manager snapshot builder.
+func (a *LegacyDataPlaneAdapter) SetPolicyRenameAncestry(
+	ancestry []PolicyRenameAncestry,
+	rebinds []PolicySessionRebind,
+) {
+	if m := a.Manager(); m != nil {
+		m.SetPolicyRenameAncestry(ancestry, rebinds)
+	}
+}
+
 // AppliedNATView exposes the manager's last-applied NAT view through the
 // adapter so the gRPC/REST/CLI deterministic-mapping lookup (#5794) can
 // reach it via a single narrow interface (no packet-path I/O). Returns an

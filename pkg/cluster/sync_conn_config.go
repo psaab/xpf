@@ -6,7 +6,15 @@ import (
 	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
+
+// configAncestryCapabilityWait bounds the pre-discovery sidecar hold. A
+// pre-capability peer may be an older build that never sends
+// syncMsgPeerCapabilities; after this interval legacy text/generation is sent
+// and the receiver safely takes the existing teardown path.
+const configAncestryCapabilityWait = 2 * time.Second
 
 // DefaultConfigApplyFailGrace is how long a received config-sync generation may
 // stay un-applied — apply hard-failing, standby config stale, high-water pinned
@@ -248,6 +256,14 @@ func (s *SessionSync) noteConfigApplySuccess(appliedGen uint64) {
 	}
 }
 
+// ReserveConfigGen reserves an outgoing config generation without writing.
+// Daemon callers hold their active-snapshot publication lock while reserving,
+// then pass this token to QueueConfigWithAncestryAtGeneration. That ordering
+// prevents a stale snapshot from acquiring a newer generation after a commit.
+func (s *SessionSync) ReserveConfigGen() uint64 {
+	return s.nextConfigGen()
+}
+
 // nextConfigGen draws the next strictly-monotonic config generation stamped
 // on an outgoing config-sync message (#3931). The counter is seeded from
 // CLOCK_MONOTONIC nanos at construction so it never regresses below a value
@@ -256,18 +272,72 @@ func (s *SessionSync) nextConfigGen() uint64 {
 	return s.configGenCounter.Add(1)
 }
 
-// QueueConfig sends the full config text to the peer for configuration
-// synchronization. The payload carries a monotonic config generation (#3931)
-// so the receiver can order a rapid commit pair and refuse a reordered older
-// config.
+// QueueConfig sends the full config text to the peer using the legacy payload
+// shape. Callers with explicit rename provenance should use
+// QueueConfigWithAncestry.
 func (s *SessionSync) QueueConfig(configText string) {
+	s.queueConfig(configText, nil, 0)
+}
+
+// QueueConfigWithAncestry sends config text and its validated rename
+// descriptors as one ordered payload when the peer advertises support. It
+// reports false when capability discovery deferred the send or the write
+// failed.
+func (s *SessionSync) QueueConfigWithAncestry(
+	configText string,
+	ancestry []configstore.RenameDescriptor,
+) bool {
+	return s.queueConfig(configText, ancestry, 0)
+}
+
+// QueueConfigWithAncestryAtGeneration sends a previously reserved config
+// generation. The daemon reserves under its active-publication lock, then
+// releases that lock before this method performs I/O.
+func (s *SessionSync) QueueConfigWithAncestryAtGeneration(
+	configText string,
+	ancestry []configstore.RenameDescriptor,
+	gen uint64,
+) bool {
+	if gen == 0 {
+		return false
+	}
+	return s.queueConfig(configText, ancestry, gen)
+}
+
+func (s *SessionSync) queueConfig(
+	configText string,
+	ancestry []configstore.RenameDescriptor,
+	reservedGen uint64,
+) bool {
 	conn := s.getActiveConn()
 	if conn == nil {
-		return
+		return false
 	}
-	gen := s.nextConfigGen()
+	if len(ancestry) > 0 && !s.ConfigAncestryNegotiated() {
+		now := time.Now().UnixNano()
+		since := s.configAncestryWaitSince.Load()
+		if since == 0 && s.configAncestryWaitSince.CompareAndSwap(0, now) {
+			since = now
+		}
+		if since > 0 && time.Duration(now-since) < configAncestryCapabilityWait {
+			// Hold the first push until capability discovery; sending legacy
+			// first would apply/tear down before a framed retry can arrive.
+			return false
+		}
+		if since > 0 {
+			// -1 records that this connection exhausted the bounded wait.
+			// Subsequent retries use the safe legacy teardown behavior.
+			s.configAncestryWaitSince.Store(-1)
+		}
+	}
+	gen := reservedGen
+	if gen == 0 {
+		gen = s.nextConfigGen()
+	}
 	payload := encodeConfigPayload(configText, gen)
-	// #6629: the config text is the ACTIVE TREE, rendered unredacted — it
+	if len(ancestry) > 0 && s.ConfigAncestryCapable() {
+		payload = encodeConfigPayloadWithAncestry(configText, gen, ancestry)
+	}
 	// carries every Secret leaf, including `chassis cluster
 	// authentication-key`, the PSK this very link authenticates with. Seal it
 	// under the connection's ephemeral key so a passive observer on the
@@ -313,7 +383,7 @@ func (s *SessionSync) QueueConfig(configText string) {
 		slog.Warn("cluster sync: config send error", "err", err)
 		s.stats.Errors.Add(1)
 		s.handleDisconnect(conn)
-		return
+		return false
 	}
 	// #7328: record the generation actually put on the wire so a peer's
 	// config-apply nack can be matched to THIS push. Stored only after a
@@ -323,6 +393,7 @@ func (s *SessionSync) QueueConfig(configText string) {
 	s.stats.ConfigsSent.Add(1)
 	slog.Info("cluster sync: config sent to peer", "size", len(configText), "gen", gen,
 		"encrypted", encrypted)
+	return true
 }
 
 // errConfigApplyQueueFull is the health-debt reason recorded when a config
@@ -529,7 +600,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text))
 				continue
 			}
-			if s.OnConfigReceived == nil {
+			if s.OnConfigReceivedWithAncestry == nil && s.OnConfigReceived == nil {
 				// No apply handler wired — the config cannot be applied, so the
 				// high-water must NOT advance (M-2/#4151). A later wired handler
 				// re-applies on the primary's next push of this generation.
@@ -537,14 +608,17 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 			}
 			// #6284 item 2: fence installs against the generation being applied
 			// for the ENTIRE apply. The clearSessionsForDeletedPolicies sweep
-			// runs inside OnConfigReceived, so a synced session stamped with an
-			// older epoch that races the sub-µs gap between the sweep and the
-			// high-water advance must be refused now — the fence makes
-			// configEpochStale refuse it against the applying generation rather
-			// than admit it against the not-yet-advanced high-water.
+			// runs inside OnConfigReceived, so a synced session install that races
+			// the sub-µs gap between the sweep and the high-water advance must be
+			// refused now.
 			s.beginConfigApply(item.gen)
-			if err := s.OnConfigReceived(item.text); err != nil {
-				// The apply did not take effect (compile/promote failure or a
+			var applyErr error
+			if s.OnConfigReceivedWithAncestry != nil {
+				applyErr = s.OnConfigReceivedWithAncestry(item.text, item.ancestry)
+			} else {
+				applyErr = s.OnConfigReceived(item.text)
+			}
+			if applyErr != nil {
 				// transient RG0-primary rejection). Do NOT advance the
 				// high-water: leaving it at the last-applied generation keeps
 				// the standby eligible for the primary's re-push so it
@@ -560,7 +634,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				// rate-independent observable is the ConfigsApplyFailed counter
 				// above (surfaced in cluster status), not this log.
 				slog.Debug("cluster sync: config apply failed — retaining prior high-water so the peer re-push re-converges",
-					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text), "err", err)
+					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text), "err", applyErr)
 				// #6387: drive the time-based CF health signal on this failure
 				// edge. On the FIRST failure of a streak it ARMS an independent
 				// grace-expiry timer that raises OnConfigApplyHealth(true) once
@@ -571,7 +645,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				// persistent apply failure thus surfaces as a CF monitor-failure /
 				// degraded health instead of only the terse `Transfer ready: no`
 				// string.
-				s.noteConfigApplyFailure(err)
+				s.noteConfigApplyFailure(applyErr)
 				// #7328: tell the SENDER this generation did not take effect.
 				// #4151 leaves this node eligible for a re-push of the SAME
 				// generation, but the sender's #5863 (epoch x generation) marker

@@ -81,6 +81,12 @@ type dpSlot struct{ v dataplane.RuntimeDataPlane }
 type Daemon struct {
 	opts  Options
 	store *configstore.Store
+
+	// pendingRenameApplies is keyed by the monotonic promoted active
+	// generation. A failed apply keeps its exact ancestry available for retry;
+	// a later promotion has a different key even if its text is identical.
+	pendingRenameMu      sync.Mutex
+	pendingRenameApplies map[uint64]pendingRenameApply
 	// fatalCh carries a condition that must END the daemon rather than be
 	// logged and survived (#8233). Buffered so the reporting goroutine never
 	// blocks, and single-shot: the first fatal wins and later ones are dropped,

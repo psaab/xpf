@@ -3,9 +3,13 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"net"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // #3931 — HA config-sync generation ordering guard tests.
@@ -61,6 +65,29 @@ func TestConfigPayloadEmptyText(t *testing.T) {
 	gotText, gotGen := decodeConfigPayload(payload)
 	if gotText != "" || gotGen != 7 {
 		t.Fatalf("empty-text framing mis-decoded: got %q/%d", gotText, gotGen)
+	}
+}
+
+func TestConfigPayloadAncestryRoundTrip(t *testing.T) {
+	text := "set security policies from-zone trust to-zone untrust policy old\n"
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "old"},
+		DestinationPath: []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "new"},
+	}}
+	payload := encodeConfigPayloadWithAncestry(text, 19, want)
+	gotText, gotGen, got := decodeConfigPayloadWithAncestry(payload)
+	if gotText != text || gotGen != 19 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ancestry payload round-trip mismatch: text=%q gen=%d ancestry=%#v", gotText, gotGen, got)
+	}
+}
+
+func TestConfigPayloadMalformedAncestryFallsBackToGeneration(t *testing.T) {
+	payload := encodeConfigPayload("set system host-name node0\n", 23)
+	payload = append(payload, configAncestryMagic[:]...)
+	payload = append(payload, 4, 0, 0, 0, '{')
+	gotText, gotGen, got := decodeConfigPayloadWithAncestry(payload)
+	if gotText == "" || gotGen != 23 || got != nil {
+		t.Fatalf("malformed ancestry should be ignored without losing config framing: text=%q gen=%d ancestry=%#v", gotText, gotGen, got)
 	}
 }
 
@@ -379,5 +406,221 @@ func TestNextConfigGenMonotonic(t *testing.T) {
 	_, gen := decodeConfigPayload(payload)
 	if gen != g2 {
 		t.Fatalf("decoded gen %d != stamped gen %d", gen, g2)
+	}
+}
+
+func TestConfigAncestryReceiveQueueApplyChain10509(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	const (
+		text = "set security policies from-zone lan to-zone wan policy old\n"
+		gen  = 77
+	)
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	type result struct {
+		text     string
+		ancestry []configstore.RenameDescriptor
+	}
+	applied := make(chan result, 1)
+	s.OnConfigReceivedWithAncestry = func(gotText string, gotAncestry []configstore.RenameDescriptor) error {
+		applied <- result{text: gotText, ancestry: gotAncestry}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.configApplyLoop(ctx)
+
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayloadWithAncestry(text, gen, want))
+	select {
+	case got := <-applied:
+		if got.text != text || !reflect.DeepEqual(got.ancestry, want) {
+			t.Fatalf("receive→queue→ancestry callback changed payload: got text=%q ancestry=%#v", got.text, got.ancestry)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("config ancestry payload never reached the apply callback")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for s.lastAppliedConfigGen.Load() != gen && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := s.lastAppliedConfigGen.Load(); got != gen {
+		t.Fatalf("successful ancestry apply must advance applied generation: got %d want %d", got, gen)
+	}
+	if got := s.lastRecvConfigGen.Load(); got != gen {
+		t.Fatalf("receive path must advance received generation before apply: got %d want %d", got, gen)
+	}
+}
+
+func TestLegacyConfigReceiveQueueApplyChainWithoutAncestry10509(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	const (
+		text = "set system host-name legacy\n"
+		gen  = 78
+	)
+	applied := make(chan string, 1)
+	s.OnConfigReceived = func(got string) error {
+		applied <- got
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.configApplyLoop(ctx)
+
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayload(text, gen))
+	select {
+	case got := <-applied:
+		if got != text {
+			t.Fatalf("legacy payload changed in receive/apply chain: got %q want %q", got, text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy config payload never reached the legacy apply callback")
+	}
+	if got := s.lastAppliedConfigGen.Load(); got != gen {
+		t.Fatalf("legacy framed config must advance applied generation: got %d want %d", got, gen)
+	}
+}
+
+func TestConfigQueueFullDropCanRetryAncestryPayload10509(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	fillConfigApplyQueue6778(t, s)
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	const gen = 79
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayloadWithAncestry("retry-me", gen, want))
+	if got := s.stats.ConfigsQueueFullDropped.Load(); got != 1 {
+		t.Fatalf("full queue must count the dropped ancestry payload: got %d", got)
+	}
+	for len(s.configApplyCh) > 0 {
+		<-s.configApplyCh
+	}
+
+	applied := make(chan []configstore.RenameDescriptor, 1)
+	s.OnConfigReceivedWithAncestry = func(_ string, ancestry []configstore.RenameDescriptor) error {
+		applied <- ancestry
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.configApplyLoop(ctx)
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayloadWithAncestry("retry-me", gen, want))
+	select {
+	case got := <-applied:
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("retry must preserve ancestry sidecar: got %#v want %#v", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-pushed ancestry payload never applied after queue drained")
+	}
+}
+
+func TestConfigReceiveReorderedGenerationsApplyNewest10509(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	applied := make(chan string, 2)
+	s.OnConfigReceived = func(text string) error {
+		select {
+		case entered <- struct{}{}:
+			<-release
+		default:
+		}
+		applied <- text
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.configApplyLoop(ctx)
+
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayload("config-C2", 2))
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("newer config never entered apply callback")
+	}
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayload("config-C1", 1))
+	close(release)
+	select {
+	case got := <-applied:
+		if got != "config-C2" {
+			t.Fatalf("newer config must apply first, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("newer config apply did not complete")
+	}
+	select {
+	case got := <-applied:
+		t.Fatalf("reordered stale config must not apply, got %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := s.lastAppliedConfigGen.Load(); got != 2 {
+		t.Fatalf("reordered receive chain must retain newest applied generation: got %d", got)
+	}
+	if got := s.stats.ConfigsStaleIgnored.Load(); got != 1 {
+		t.Fatalf("reordered stale config must be counted once: got %d", got)
+	}
+}
+
+func TestQueueConfigWithAncestryWireReceiveApplyChain10509(t *testing.T) {
+	sender := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	receiver := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	local, peer := net.Pipe()
+	t.Cleanup(func() {
+		local.Close()
+		peer.Close()
+	})
+	sender.installConn(0, local)
+	sender.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	sender.peerSnapshotProtocol.Store(1)
+
+	const (
+		text = "set security policies from-zone lan to-zone wan policy old\n"
+		gen  = 81
+	)
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	applied := make(chan struct {
+		text     string
+		ancestry []configstore.RenameDescriptor
+	}, 1)
+	receiver.OnConfigReceivedWithAncestry = func(gotText string, gotAncestry []configstore.RenameDescriptor) error {
+		applied <- struct {
+			text     string
+			ancestry []configstore.RenameDescriptor
+		}{gotText, gotAncestry}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiver.configApplyLoop(ctx)
+
+	queued := make(chan bool, 1)
+	go func() {
+		queued <- sender.QueueConfigWithAncestry(text, want)
+	}()
+	msgType, payload, _ := readOneFrame(t, peer)
+	if msgType != syncMsgConfig {
+		t.Fatalf("QueueConfigWithAncestry must emit a config frame: got type %d", msgType)
+	}
+	if ok := <-queued; !ok {
+		t.Fatal("QueueConfigWithAncestry reported that the negotiated sidecar write failed")
+	}
+	gotText, gotGen, gotAncestry := decodeConfigPayloadWithAncestry(payload)
+	if gotText != text || gotGen == 0 || !reflect.DeepEqual(gotAncestry, want) {
+		t.Fatalf("wire sender changed config sidecar: text=%q gen=%d ancestry=%#v", gotText, gotGen, gotAncestry)
+	}
+	receiver.handleMessage(nil, syncMsgConfig, payload)
+	select {
+	case got := <-applied:
+		if got.text != text || !reflect.DeepEqual(got.ancestry, want) {
+			t.Fatalf("wire→receive→apply changed config sidecar: text=%q ancestry=%#v", got.text, got.ancestry)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wire config frame never reached the ancestry apply callback")
 	}
 }

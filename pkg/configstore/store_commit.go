@@ -264,7 +264,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	// Promote candidate to active
 	s.active = s.candidate
 	s.candidate = s.active.Clone()
-	s.bumpCandidateGenLocked() // #5848: fresh candidate — advance the generation
+	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled
 	s.publishActiveLocked() // #9905: publish the new active snapshot
 	s.dirty = false
@@ -652,7 +652,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	// Promote candidate to active
 	s.active = s.candidate
 	s.candidate = s.active.Clone()
-	s.bumpCandidateGenLocked() // #5848: fresh candidate — advance the generation
+	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled
 	s.publishActiveLocked() // #9905: publish the new active snapshot
 	s.dirty = false

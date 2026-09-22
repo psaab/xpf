@@ -564,6 +564,38 @@ type QueueEpochSnapshot struct {
 	Queue uint16 `json:"queue"`
 	Epoch uint64 `json:"epoch"`
 }
+// Rename operation. It is additive wire state; absent ancestry means the
+// helper retains the historical teardown behavior.
+type PolicyRenameAncestry struct {
+	SourceRuleID      string `json:"source_rule_id"`
+	DestinationRuleID string `json:"destination_rule_id"`
+	SourceFromZone    string `json:"source_from_zone,omitempty"`
+	SourceToZone      string `json:"source_to_zone,omitempty"`
+	DestinationFromZone string `json:"destination_from_zone,omitempty"`
+	DestinationToZone   string `json:"destination_to_zone,omitempty"`
+}
+// PolicySessionRebind is a pre-publication Go verdict joined to a canonical
+// forward tuple. Rust consumes it during rotation to restamp both pair halves.
+//
+// TunnelDiscriminator is trailing-additive JSON metadata. It is the opaque
+// TunnelDiscriminator value already carried by SessionValue and used to build
+// the Rust SessionKey. Older readers omit/ignore this field; Rust treats a
+// missing or invalid value as non-retainable and deletes the pair.
+type PolicySessionRebind struct {
+	Family              string `json:"family"`
+	SrcIP               string `json:"src_ip"`
+	DstIP               string `json:"dst_ip"`
+	SrcPort             uint16 `json:"src_port,omitempty"`
+	DstPort             uint16 `json:"dst_port,omitempty"`
+	Protocol            uint8  `json:"protocol"`
+	RoutingDomain       uint32 `json:"routing_domain,omitempty"`
+	PolicyID            uint32 `json:"policy_id"`
+	RuleID              string `json:"rule_id"`
+	IngressZone         uint16 `json:"ingress_zone"`
+	EgressZone          uint16 `json:"egress_zone"`
+	TunnelDiscriminator uint64 `json:"tunnel_discriminator,omitempty"`
+}
+
 // IpsecTunnelRowSnapshot is one per-admitted-tunnel P-MECH identity row (#10485,
 // design section 1.1 D1). The daemon publishes one row per admitted tunnel:
 // STN is always the authored vpn.BindInterface, IfID is the ownership-checked
@@ -655,9 +687,13 @@ type ConfigSnapshot struct {
 	DefaultLogSessionInit  bool                         `json:"default_log_session_init,omitempty"`
 	DefaultLogSessionClose bool                         `json:"default_log_session_close,omitempty"`
 	Policies               []PolicyRuleSnapshot         `json:"policies,omitempty"`
+	// PolicyRematchExtensive enables the conditional retain/rebind rotation arm.
+	PolicyRematchExtensive bool `json:"policy_rematch_extensive,omitempty"`
+	PolicyRenameAncestry   []PolicyRenameAncestry `json:"policy_rename_ancestry,omitempty"`
+	PolicySessionRebinds   []PolicySessionRebind `json:"policy_session_rebinds,omitempty"`
+	DestinationNAT         []DestinationNATRuleSnapshot `json:"destination_nat_rules,omitempty"`
 	SourceNAT              []SourceNATRuleSnapshot      `json:"source_nat_rules,omitempty"`
 	StaticNAT              []StaticNATRuleSnapshot      `json:"static_nat_rules,omitempty"`
-	DestinationNAT         []DestinationNATRuleSnapshot `json:"destination_nat_rules,omitempty"`
 	NAT64                  []NAT64RuleSnapshot          `json:"nat64_rules,omitempty"`
 	Nptv6                  []Nptv6RuleSnapshot          `json:"nptv6_rules,omitempty"`
 	Screens                []ScreenProfileSnapshot      `json:"screens,omitempty"`
