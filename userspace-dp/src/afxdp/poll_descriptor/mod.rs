@@ -97,6 +97,23 @@ use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
 
 #[inline]
+pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
+    protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
+}
+#[inline]
+fn stage11_declared_frame(packet_frame: &[u8], meta: UserspaceDpMeta) -> &[u8] {
+    let Some(declared_end) =
+        declared_l3_end(packet_frame, meta.l3_offset as usize, meta.addr_family)
+    else {
+        // A malformed/truncated L3 declaration cannot provide an authoritative
+        // boundary. Give every Stage-11 classifier an empty view so UDP/IKE/
+        // ESP-in-UDP parsing fails closed instead of borrowing Ethernet slack.
+        return &packet_frame[..0];
+    };
+    packet_frame.get(..declared_end).unwrap_or(&packet_frame[..0])
+}
+
+#[inline]
 fn record_ipsec_sa_miss_sample(
     sample_phase: &mut u8,
     worker_ctx: &WorkerContext,
@@ -105,6 +122,10 @@ fn record_ipsec_sa_miss_sample(
     let current = *sample_phase;
     *sample_phase = current.wrapping_add(1);
     if current == 0 {
+        // Keep sampled exceptions under one bounded key. The reason-specific
+        // atomics above are authoritative; dynamically splitting this
+        // deliberately sparse diagnostic stream would make its cardinality
+        // unbounded without improving the packet-path verdict.
         record_exception(
             worker_ctx.recent_exceptions,
             &worker_ctx.ident,
@@ -582,9 +603,23 @@ pub(super) fn poll_binding_process_descriptor(
                 // Responder-SPI-nonzero IKE packet matching NO seeded live
                 // exchange faces the same gate — a forged Responder SPI no
                 // longer rides the established exemption on a closed zone.
+                // Only an IPsec candidate pays for the authoritative
+                // declared-end trim; ordinary traffic keeps its zero-extra-
+                // work Stage-11 fall-through.
+                let stage11_packet_frame = match flow.as_ref() {
+                    Some(flow)
+                        if crate::afxdp::forwarding::is_ipsec_traffic(
+                            meta.protocol,
+                            flow.forward_key.dst_port,
+                        ) =>
+                    {
+                        stage11_declared_frame(packet_frame, meta)
+                    }
+                    _ => packet_frame,
+                };
                 match stage_ipsec_passthrough_check(
                     flow.as_ref(),
-                    packet_frame,
+                    stage11_packet_frame,
                     meta,
                     ingress_zone_override,
                     &binding.live,
@@ -620,14 +655,29 @@ pub(super) fn poll_binding_process_descriptor(
                             }
                             admission_to_commit = admission;
                         }
-                        let outlet = if meta.protocol == crate::ip_proto::PROTO_ESP
-                            || meta.protocol == crate::ip_proto::PROTO_AH
-                        {
-                            // Raw ESP/AH has no UDP SPI or IKE header. Its
-                            // existing passthrough admission already
-                            // authorizes direct delegation.
-                            SlowPathOutlet::Delegated
-                        } else {
+                        if stage11_raw_protocol_requires_drop(meta.protocol) {
+                            // Raw ESP/AH has no UDP-4500 SA proof.  Even
+                            // when the generic passthrough gate admits it,
+                            // Stage 11 must deny rather than minting q0.
+                            worker_ctx.forwarding.ipsec_sa.counters.record_miss(
+                                crate::afxdp::forwarding::IpsecSaMissReason::Truncated,
+                            );
+                            record_ipsec_sa_miss_sample(
+                                &mut binding.ipsec_sa_miss_sample_phase,
+                                worker_ctx,
+                                meta,
+                            );
+                            if let Some(admission) = admission_to_commit.take() {
+                                worker_ctx
+                                    .forwarding
+                                    .nat64
+                                    .frag_overlap
+                                    .fail_admission(admission);
+                            }
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        let outlet = {
                             let Some(flow) = flow.as_ref() else {
                                 worker_ctx
                                     .forwarding
@@ -651,7 +701,7 @@ pub(super) fn poll_binding_process_descriptor(
                             };
                             let flow_dst_port = flow.forward_key.dst_port;
                             if crate::afxdp::forwarding::is_admitted_positive_ike(
-                                packet_frame,
+                                stage11_packet_frame,
                                 meta.l4_offset as usize,
                                 meta.protocol,
                                 flow_dst_port,
@@ -662,7 +712,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // 11 can never mint the armed q0 token.
                                 SlowPathOutlet::Delegated
                             } else if crate::afxdp::forwarding::is_malformed_ike(
-                                packet_frame,
+                                stage11_packet_frame,
                                 meta.l4_offset as usize,
                                 meta.protocol,
                                 flow_dst_port,
@@ -690,15 +740,17 @@ pub(super) fn poll_binding_process_descriptor(
                                 continue;
                             } else {
                                 let Some(spi) = crate::afxdp::forwarding::esp_in_udp_spi(
-                                    packet_frame,
+                                    stage11_packet_frame,
                                     meta.l4_offset as usize,
                                     flow_dst_port,
+                                    stage11_packet_frame.len(),
                                 ) else {
                                     let reason =
                                         crate::afxdp::forwarding::esp_in_udp_miss_reason(
-                                            packet_frame,
+                                            stage11_packet_frame,
                                             meta.l4_offset as usize,
                                             flow_dst_port,
+                                            stage11_packet_frame.len(),
                                         );
                                     worker_ctx.forwarding.ipsec_sa.counters.record_miss(reason);
                                     record_ipsec_sa_miss_sample(

@@ -75,6 +75,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 	c.emitFairnessRSSGauges(ch, status)
 	c.emitFairnessThroughputGauges(ch, status)
 	c.emitNeighborWarmCounters(ch, status)
+	c.emitIpsecSaCounters(ch, status)
 	c.emitNeighborColdStartCapture(ch, status)
 	c.emitWireguardTelemetry(ch, status)
 	c.emitPolicyContentRejected(ch, status)

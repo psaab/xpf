@@ -77,7 +77,14 @@ pub(crate) enum ReconcileError {
     /// #5143: a worker SPAWNED successfully on the POST-TEARDOWN path but its
     /// IN-THREAD XSK/UMEM bind did not bring up its full planned binding set
     /// (a partial/empty bind), or it never reported startup readiness within
-    /// the bounded barrier deadline.
+    /// the bounded barrier deadline. #4952's spawn-error propagation does NOT
+    /// catch this — the spawn SUCCEEDED; the failure is inside the worker
+    /// thread's setup, where a live heartbeat over an incomplete binding set
+    /// used to satisfy the supervisor (the #5143 silent forwarding outage).
+    /// Like `WorkerSpawn` this is raised AFTER teardown (the queue set has no
+    /// XSK-bound worker), so the handler fails closed and does NOT persist the
+    /// broken snapshot. #6244: carries the preserved typed
+    /// [`ReconcileStage::WorkerBindIncomplete`] identity (was its stage `String`).
     WorkerBindIncomplete(ReconcileStage),
 }
 
@@ -96,6 +103,8 @@ impl std::fmt::Display for ReconcileError {
         }
     }
 }
+/// State preserved across `stop_inner(false)` that the later phases
+/// need to consume. `had_live_workers` lives entirely inside
 /// `teardown.rs` (it gates the 500ms mlx5 quiesce sleep alongside the
 /// `will_rebind` flag, which is not needed outside teardown).
 pub(in crate::afxdp) struct PreservedReconcileState {

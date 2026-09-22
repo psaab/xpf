@@ -449,10 +449,22 @@ pub(super) fn apply(
             | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage)
             | crate::afxdp::ReconcileError::IpsecSaNotReady(stage) = &err
             {
-                // #4952 / #5143 / #10516: POST-TEARDOWN worker bring-up
-                // failure. The new queue set is not operational, so preserve
-                // the last-good baseline but report real dataplane-down
-                // status rather than restoring stale bindings.
+                // #4952 / #5143 / #10516: POST-TEARDOWN worker-bringup
+                // failure — a worker that failed to SPAWN (#4952), spawned
+                // but bound an INCOMPLETE queue set / never reported readiness
+                // (#5143), or whose SA monitor never established readiness
+                // (#10516). Unlike the pre-teardown integrity/map faults below
+                // — where the old workers + forwarding stayed live and
+                // restoring the prior bindings is truthful — here tear_down
+                // already stopped the old workers and the new bring-up did not
+                // produce a full XSK-bound worker set, so this queue set has NO
+                // XSK-bound worker: the data plane is DOWN. Fail closed so the
+                // broken snapshot is NOT persisted as the boot baseline. Roll
+                // the in-memory baseline back to the prior good snapshot +
+                // status generation (a retry / forwarding toggle then
+                // reconciles last-good), but DO NOT restore existing_bindings —
+                // refresh_status must report the REAL post-teardown per-binding
+                // state, not the pre-teardown workers that no longer exist.
                 guard.snapshot = prev_snapshot;
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;

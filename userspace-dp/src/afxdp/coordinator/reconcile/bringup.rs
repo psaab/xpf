@@ -57,8 +57,9 @@ pub(super) enum WorkerBringUpError {
     /// #5143: a worker SPAWNED successfully but its in-thread XSK/UMEM bind
     /// did not bring up its FULL planned binding set (a partial/empty bind), or
     /// it never reported readiness within the bounded deadline. HEARTBEAT !=
-    /// READINESS — the reconcile transaction now requires one READY binding
-    /// per required plan.
+    /// READINESS — a live heartbeat over an incomplete binding set is the
+    /// silent forwarding outage this guards. #6244: carries the preserved typed
+    /// [`ReconcileStage::WorkerBindIncomplete`] identity (was a stage `String`).
     BindIncomplete(ReconcileStage),
 }
 
@@ -191,6 +192,7 @@ pub(super) fn bring_up_workers(
         return Err(WorkerBringUpError::IpsecSaNotReady(stage));
     }
     let _ = ensure_resolver(coord);
+    // Phase: SPAWN. The startup-report channel is created HERE, in the shell,
     // and the SENDER is passed BY REFERENCE into the spawn loop (each worker
     // clones it). Keeping the original sender alive in the shell through the
     // readiness barrier preserves the exact channel-disconnect semantics

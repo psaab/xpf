@@ -786,6 +786,22 @@ type ProcessStatus struct {
 	NeighborNetlinkRedumpUpsertsTotal       uint64 `json:"neighbor_netlink_redump_upserts_total,omitempty"`
 	NeighborPendingKeys                     uint64 `json:"neighbor_pending_keys,omitempty"`
 	NegNeighKeys                            uint64 `json:"neg_neigh_keys,omitempty"`
+	// #10516: XFRM-SA snapshot gate telemetry. These additive counters
+	// decode to zero for helpers predating the SA gate.
+	IpsecSAMissDroppedPacketsTotal    uint64 `json:"ipsec_sa_miss_dropped_packets_total,omitempty"`
+	IpsecSAMissNoSATotal              uint64 `json:"ipsec_sa_miss_no_sa_total,omitempty"`
+	IpsecSAMissTruncatedTotal         uint64 `json:"ipsec_sa_miss_truncated_total,omitempty"`
+	IpsecSAMissMalformedIKETotal      uint64 `json:"ipsec_sa_miss_malformed_ike_total,omitempty"`
+	IpsecSAMissKeepaliveTotal         uint64 `json:"ipsec_sa_miss_keepalive_total,omitempty"`
+	IpsecSASnapshotStaleDenyTotal     uint64 `json:"ipsec_sa_snapshot_stale_deny_total,omitempty"`
+	IpsecSAInsertsTotal               uint64 `json:"ipsec_sa_inserts_total,omitempty"`
+	IpsecSARemovesTotal               uint64 `json:"ipsec_sa_removes_total,omitempty"`
+	IpsecSAExpiryRemovesTotal         uint64 `json:"ipsec_sa_expiry_removes_total,omitempty"`
+	IpsecSAEvictionsTotal             uint64 `json:"ipsec_sa_evictions_total,omitempty"`
+	IpsecSAMultiSourceCollisionsTotal uint64 `json:"ipsec_sa_multi_source_collisions_total,omitempty"`
+	IpsecSANetlinkEnobufsTotal        uint64 `json:"ipsec_sa_netlink_enobufs_total,omitempty"`
+	IpsecSANetlinkRedumpsTotal        uint64 `json:"ipsec_sa_netlink_redumps_total,omitempty"`
+	IpsecSANetlinkRedumpUpsertsTotal  uint64 `json:"ipsec_sa_netlink_redump_upserts_total,omitempty"`
 	// WgTunnels carries the #1865 per-WG-tunnel telemetry rows. Keyed
 	// by tunnel NAME (Tunnel) — TunnelEndpointID is informational only
 	// (#1873: positional ids renumber across commits). Absent/empty for

@@ -27,6 +27,7 @@ func newCollector(srv *Server) *xpfCollector {
 	c.initBindingDescriptors()
 	c.initFairnessDescriptors()
 	c.initNeighborDescriptors()
+	c.initIpsecSaDescriptors()
 	c.initWireGuardDescriptors()
 	c.initFlowExportDescriptors()
 	return c

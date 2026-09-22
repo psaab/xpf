@@ -822,6 +822,21 @@ type xpfCollector struct {
 	neighborNetlinkRedumpUpsertsTotal       *prometheus.Desc
 	neighborPendingKeys                     *prometheus.Desc
 	negNeighKeys                            *prometheus.Desc
+	// #10516: XFRM-SA snapshot gate counters.
+	ipsecSAMissDroppedPacketsTotal    *prometheus.Desc
+	ipsecSAMissNoSATotal              *prometheus.Desc
+	ipsecSAMissTruncatedTotal         *prometheus.Desc
+	ipsecSAMissMalformedIKETotal      *prometheus.Desc
+	ipsecSAMissKeepaliveTotal         *prometheus.Desc
+	ipsecSASnapshotStaleDenyTotal     *prometheus.Desc
+	ipsecSAInsertsTotal               *prometheus.Desc
+	ipsecSARemovesTotal               *prometheus.Desc
+	ipsecSAExpiryRemovesTotal         *prometheus.Desc
+	ipsecSAEvictionsTotal             *prometheus.Desc
+	ipsecSAMultiSourceCollisionsTotal *prometheus.Desc
+	ipsecSANetlinkEnobufsTotal        *prometheus.Desc
+	ipsecSANetlinkRedumpsTotal        *prometheus.Desc
+	ipsecSANetlinkRedumpUpsertsTotal  *prometheus.Desc
 	// #3773 (M13): fabric-link skip diagnostics — malformed value vs
 	// unresolved (empty) peer/local MAC.
 	fabricLinkSkippedMalformedTotal *prometheus.Desc
@@ -1272,6 +1287,20 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.neighborResolverQueueDepth
 	ch <- c.neighborResolverEnqueueDropsTotal
 	ch <- c.neighborResolverDisconnectedTotal
+	ch <- c.ipsecSAMissDroppedPacketsTotal
+	ch <- c.ipsecSAMissNoSATotal
+	ch <- c.ipsecSAMissTruncatedTotal
+	ch <- c.ipsecSAMissMalformedIKETotal
+	ch <- c.ipsecSAMissKeepaliveTotal
+	ch <- c.ipsecSASnapshotStaleDenyTotal
+	ch <- c.ipsecSAInsertsTotal
+	ch <- c.ipsecSARemovesTotal
+	ch <- c.ipsecSAExpiryRemovesTotal
+	ch <- c.ipsecSAEvictionsTotal
+	ch <- c.ipsecSAMultiSourceCollisionsTotal
+	ch <- c.ipsecSANetlinkEnobufsTotal
+	ch <- c.ipsecSANetlinkRedumpsTotal
+	ch <- c.ipsecSANetlinkRedumpUpsertsTotal
 	ch <- c.neighborResolverGetAttemptsTotal
 	ch <- c.neighborResolverGetResolvedTotal
 	ch <- c.neighborResolverProbeOnStaleTotal

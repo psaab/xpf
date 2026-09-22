@@ -7,7 +7,10 @@
 
 use super::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Mutex,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Maximum number of inbound ESP states retained by the control-plane cache.
@@ -113,11 +116,6 @@ impl IpsecSaCounters {
         }
     }
 
-
-    #[cfg(test)]
-    fn miss_total(&self) -> u64 {
-        self.sa_miss_dropped_packets.load(Ordering::Relaxed)
-    }
     pub(in crate::afxdp) fn snapshot(&self) -> IpsecSaCounterSnapshot {
         IpsecSaCounterSnapshot {
             sa_miss_dropped_packets: self.sa_miss_dropped_packets.load(Ordering::Relaxed),
@@ -146,15 +144,23 @@ pub(in crate::afxdp) struct IpsecSaSnapshot {
     entries: FastMap<IpsecSaKey, IpsecSaEpoch>,
     generation: u64,
     stale: bool,
-    epoch: u64,
+    stale_epoch: u64,
 }
 
 /// Read-mostly SA store. The monitor/control side is the sole writer; workers
 /// load one immutable snapshot per RX batch and perform plain hash lookups.
+/// `stale_epoch` advances ONLY on stale-state transitions (fresh→stale or
+/// stale→fresh), never on benign inserts/removals/redumps, so an in-flight
+/// batch keeps its verdict across routine monitor traffic (rekey-overlap P6:
+/// a NEWSA landing mid-batch must not Stale-deny the remainder).
+/// `revoked` is the teardown fence: set before the monitor join, it denies
+/// lookups even if a racing in-flight dump publishes fresh state.
 pub(in crate::afxdp) struct IpsecSaStore {
     snapshot: arc_swap::ArcSwap<IpsecSaSnapshot>,
     insertion_order: AtomicU64,
-    epoch: AtomicU64,
+    stale_epoch: AtomicU64,
+    revoked: AtomicBool,
+    writer: Mutex<()>,
     pub(in crate::afxdp) counters: IpsecSaCounters,
 }
 impl std::fmt::Debug for IpsecSaStore {
@@ -182,12 +188,19 @@ impl IpsecSaStore {
                 entries: FastMap::default(),
                 generation: 0,
                 stale: true,
-                epoch: 0,
+                stale_epoch: 0,
             }),
             insertion_order: AtomicU64::new(0),
-            epoch: AtomicU64::new(0),
+            stale_epoch: AtomicU64::new(0),
+            revoked: AtomicBool::new(false),
+            writer: Mutex::new(()),
             counters: IpsecSaCounters::default(),
         }
+    }
+
+    #[inline]
+    fn lock_writer(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[inline]
@@ -196,33 +209,34 @@ impl IpsecSaStore {
     }
 
     #[inline]
-    pub(in crate::afxdp) fn generation(&self) -> u64 {
-        self.snapshot.load().generation
-    }
-
-    #[inline]
     fn publish_snapshot(&self, mut snapshot: IpsecSaSnapshot) {
-        // Advance before publishing so a reader holding an older batch
-        // snapshot fails closed even during the store/revocation handoff.
-        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-        snapshot.epoch = epoch;
+        // Stamp, never bump: only stale-state transitions advance
+        // `stale_epoch` (see mark_stale/reset_for_monitor_start and the
+        // stale→fresh arm of publish_full_dump). Benign publications reuse
+        // the current epoch so loaded batches keep their verdict.
+        snapshot.stale_epoch = self.stale_epoch.load(Ordering::Acquire);
         self.snapshot.store(Arc::new(snapshot));
     }
-    #[inline]
-    pub(in crate::afxdp) fn is_stale(&self) -> bool {
-        self.snapshot.load().stale
-    }
 
+    #[inline]
+    fn bump_stale_epoch(&self) {
+        self.stale_epoch.fetch_add(1, Ordering::AcqRel);
+    }
     pub(in crate::afxdp) fn mark_stale(&self) {
+        let _writer = self.lock_writer();
         let current = self.snapshot.load_full();
         if current.stale {
             return;
         }
+        // Fresh→stale transition: advance the fence epoch so every batch
+        // holding a pre-transition snapshot denies from here on.
+        self.bump_stale_epoch();
         let mut next = (*current).clone();
         next.stale = true;
         self.publish_snapshot(next);
     }
 
+    #[cfg(test)]
     #[inline]
     pub(in crate::afxdp) fn lookup(&self, key: IpsecSaKey) -> IpsecSaLookup {
         let snapshot = self.snapshot.load_full();
@@ -235,7 +249,20 @@ impl IpsecSaStore {
         snapshot: &IpsecSaSnapshot,
         key: IpsecSaKey,
     ) -> IpsecSaLookup {
-        if self.epoch.load(Ordering::Acquire) != snapshot.epoch {
+        // Teardown revocation denies even a fresh snapshot: a racing
+        // in-flight dump may publish fresh state after stop begins.
+        if self.revoked.load(Ordering::Acquire) {
+            return IpsecSaLookup::Stale;
+        }
+        // Fence ONLY on stale-state transitions. Benign inserts, removals,
+        // and routine drift redumps share the snapshot's epoch, so a batch
+        // remainder keeps its Hit/Miss verdict across routine monitor
+        // traffic. DELSA-freshness inside one batch is within monitor-event
+        // latency (§5.5); the packet is unmarked q1 either way, FORWARD
+        // still fences, INPUT still hits XFRM enforcement — and a rekey
+        // NEWSA landing mid-batch must not Stale-deny the overlap window
+        // (§5.10/§7-P6 zero-spike acceptance).
+        if self.stale_epoch.load(Ordering::Acquire) != snapshot.stale_epoch {
             return IpsecSaLookup::Stale;
         }
         Self::lookup_snapshot(snapshot, key)
@@ -267,13 +294,20 @@ impl IpsecSaStore {
         &self,
         entries: FastMap<IpsecSaKey, IpsecSaEpoch>,
     ) -> FastMap<IpsecSaKey, IpsecSaEpoch> {
-        // A complete dump does not carry a useful relative order between
-        // records. Assign one shared monotonic domain and sort keys first so
-        // cap eviction remains deterministic for equal-age dump records.
-        let mut keys: Vec<IpsecSaKey> = entries.keys().copied().collect();
-        keys.sort_unstable();
+        // A complete dump carries per-record XFRM `add_time` as the incoming
+        // `generation`. Sort oldest-first (ties by key for determinism), then
+        // assign one shared monotonic domain in that sequence: cap eviction
+        // keeps "oldest SA first", while later incremental upserts — drawn
+        // from the same counter — always sort newer.
+        let mut ordered: Vec<(IpsecSaKey, u64)> = entries
+            .iter()
+            .map(|(key, epoch)| (*key, epoch.generation))
+            .collect();
+        ordered.sort_unstable_by(|(key_a, age_a), (key_b, age_b)| {
+            age_a.cmp(age_b).then_with(|| key_a.cmp(key_b))
+        });
         let mut normalized = FastMap::default();
-        for key in keys {
+        for (key, _) in ordered {
             normalized.insert(
                 key,
                 IpsecSaEpoch {
@@ -288,12 +322,15 @@ impl IpsecSaStore {
     /// the new map is visible, which makes the first successful dump the
     /// readiness gate for data-plane lookups.
     pub(in crate::afxdp) fn publish_full_dump(&self, entries: FastMap<IpsecSaKey, IpsecSaEpoch>) {
-        let generation = self
-            .snapshot
-            .load()
-            .generation
-            .saturating_add(1)
-            .max(1);
+        let _writer = self.lock_writer();
+        let current = self.snapshot.load();
+        let generation = current.generation.saturating_add(1).max(1);
+        // Stale→fresh is a stale-state transition: fence batches holding a
+        // pre-recovery snapshot. Fresh→fresh (routine 30s drift redump) must
+        // NOT bump — it is benign monitor traffic, not an outage.
+        if current.stale {
+            self.bump_stale_epoch();
+        }
         let collisions = multi_source_collision_count(&entries);
         self.counters.record_multi_source_collisions(collisions);
         let entries = self.normalize_dump_entries(entries);
@@ -302,16 +339,21 @@ impl IpsecSaStore {
             entries,
             generation,
             stale: false,
-            epoch: 0,
+            stale_epoch: 0,
         });
     }
 
     pub(in crate::afxdp) fn reset_for_monitor_start(&self) {
+        let _writer = self.lock_writer();
+        // A (re)started monitor establishes a new baseline: clear any prior
+        // teardown revocation, then fence all pre-reset batches.
+        self.revoked.store(false, Ordering::Release);
+        self.bump_stale_epoch();
         self.publish_snapshot(IpsecSaSnapshot {
             entries: FastMap::default(),
             generation: 0,
             stale: true,
-            epoch: 0,
+            stale_epoch: 0,
         });
     }
 
@@ -330,6 +372,7 @@ impl IpsecSaStore {
     }
 
     pub(in crate::afxdp) fn upsert(&self, key: IpsecSaKey) {
+        let _writer = self.lock_writer();
         let current = self.snapshot.load_full();
         let collision = current.entries.keys().any(|existing| {
             existing.family == key.family
@@ -350,7 +393,7 @@ impl IpsecSaStore {
             generation,
             // Incremental NEWSA/UPDSA observations never clear a stale fence.
             stale: current.stale,
-            epoch: 0,
+            stale_epoch: 0,
         });
         if collision {
             self.counters.record_multi_source_collisions(1);
@@ -358,7 +401,9 @@ impl IpsecSaStore {
         self.counters.sa_inserts.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub(in crate::afxdp) fn remove(&self, key: IpsecSaKey) -> bool {
+        let _writer = self.lock_writer();
         let current = self.snapshot.load_full();
         let mut entries = current.entries.clone();
         let removed = entries.remove(&key).is_some();
@@ -367,7 +412,7 @@ impl IpsecSaStore {
                 entries,
                 generation: current.generation,
                 stale: current.stale,
-                epoch: 0,
+                stale_epoch: 0,
             });
             self.counters.sa_removes.fetch_add(1, Ordering::Relaxed);
         }
@@ -380,6 +425,7 @@ impl IpsecSaStore {
         dst: u128,
         spi: u32,
     ) -> u64 {
+        let _writer = self.lock_writer();
         let current = self.snapshot.load_full();
         let mut entries = current.entries.clone();
         let before = entries.len();
@@ -390,7 +436,7 @@ impl IpsecSaStore {
                 entries,
                 generation: current.generation,
                 stale: current.stale,
-                epoch: 0,
+                stale_epoch: 0,
             });
             self.counters
                 .sa_removes
@@ -478,12 +524,12 @@ pub(in crate::afxdp) fn esp_in_udp_spi(
     packet_frame: &[u8],
     l4_offset: usize,
     dst_port: u16,
+    declared_end: usize,
 ) -> Option<u32> {
     if dst_port != 4500 {
         return None;
     }
-    let _udp = packet_frame.get(l4_offset..l4_offset.checked_add(8)?)?;
-    let payload = packet_frame.get(l4_offset.checked_add(8)?..)?;
+    let payload = esp_in_udp_payload(packet_frame, l4_offset, declared_end)?;
     if payload == [0xff] {
         return None;
     }
@@ -494,25 +540,33 @@ pub(in crate::afxdp) fn esp_in_udp_spi(
     Some(spi)
 }
 
+fn esp_in_udp_payload(
+    packet_frame: &[u8],
+    l4_offset: usize,
+    declared_end: usize,
+) -> Option<&[u8]> {
+    let packet = packet_frame.get(..declared_end)?;
+    let header_end = l4_offset.checked_add(8)?;
+    let header = packet.get(l4_offset..header_end)?;
+    let udp_len = u16::from_be_bytes([header[4], header[5]]) as usize;
+    if udp_len < 8 {
+        return None;
+    }
+    let packet_end = l4_offset.checked_add(udp_len)?;
+    packet.get(header_end..packet_end)
+}
+
 #[inline]
 pub(in crate::afxdp) fn esp_in_udp_miss_reason(
     packet_frame: &[u8],
     l4_offset: usize,
     dst_port: u16,
+    declared_end: usize,
 ) -> IpsecSaMissReason {
     if dst_port != 4500 {
         return IpsecSaMissReason::Truncated;
     }
-    let Some(_udp) = l4_offset
-        .checked_add(8)
-        .and_then(|end| packet_frame.get(l4_offset..end))
-    else {
-        return IpsecSaMissReason::Truncated;
-    };
-    let Some(payload) = l4_offset
-        .checked_add(8)
-        .and_then(|offset| packet_frame.get(offset..))
-    else {
+    let Some(payload) = esp_in_udp_payload(packet_frame, l4_offset, declared_end) else {
         return IpsecSaMissReason::Truncated;
     };
     if payload == [0xff] {
@@ -544,9 +598,11 @@ impl IpsecSaMonitor {
     }
 
     pub(in crate::afxdp) fn stop_and_join(&mut self) {
-        // Fence immediately so packets cannot use the old proof while the
-        // monitor is winding down. The second fence below covers a dump that
-        // was already publishing when the stop flag was raised.
+        // Revoke FIRST: lookups deny from here on even if a racing in-flight
+        // dump publishes fresh state before the join completes. The stale
+        // fences below keep the stored snapshot consistent for direct
+        // readers; revocation is what makes "fence immediately" true.
+        self.store.revoked.store(true, Ordering::Release);
         self.store.mark_stale();
         if let Some(stop) = self.stop.take() {
             stop.store(true, Ordering::Release);
@@ -765,8 +821,8 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
                 return false;
             }
             if msg_type == XFRM_MSG_NEWSA {
-                if let Some((key, _add_time)) = parse_sa_payload_with_epoch(payload, true) {
-                    entries.insert(key, IpsecSaEpoch { generation: 0 });
+                if let Some((key, add_time)) = parse_sa_payload_with_epoch(payload, true) {
+                    entries.insert(key, IpsecSaEpoch { generation: add_time });
                 }
             }
             offset += (len + 3) & !3;
@@ -860,15 +916,23 @@ fn parse_sa_payload_with_epoch(
     let hard_bytes = read_u64_ne(payload, 96 + 8)?;
     let hard_packets = read_u64_ne(payload, 96 + 24)?;
     let hard_add = read_u64_ne(payload, 96 + 40)?;
+    let hard_use = read_u64_ne(payload, 96 + 56)?;
     let cur_bytes = read_u64_ne(payload, 160)?;
     let cur_packets = read_u64_ne(payload, 168)?;
     let add_time = read_u64_ne(payload, 176)?;
+    let use_time = read_u64_ne(payload, 184)?;
     if (hard_bytes != u64::MAX && cur_bytes >= hard_bytes)
         || (hard_packets != u64::MAX && cur_packets >= hard_packets)
         || (hard_add != 0
             && hard_add != u64::MAX
             && add_time
                 .checked_add(hard_add)
+                .is_none_or(|deadline| now_secs() >= deadline))
+        || (hard_use != 0
+            && hard_use != u64::MAX
+            && use_time != 0
+            && use_time
+                .checked_add(hard_use)
                 .is_none_or(|deadline| now_secs() >= deadline))
     {
         return None;
@@ -930,6 +994,12 @@ fn parse_sa_direction(attrs: &[u8]) -> Option<u8> {
             return None;
         }
         if kind == XFRMA_SA_DIR {
+            // XFRMA_SA_DIR carries one u8 payload (NLA length 5). A
+            // zero-payload attribute must not read the next NLA/padding byte
+            // as its direction.
+            if len != 5 {
+                return None;
+            }
             return attrs.get(offset + 4).copied();
         }
         offset += (len + 3) & !3;
@@ -956,25 +1026,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(u64::MAX)
-}
-
-/// Apply a single already-validated event to the snapshot.  Kept as a small
-/// seam for deterministic monitor tests and for callers that have parsed a
-/// netlink message outside the receive loop.
-pub(in crate::afxdp) fn apply_xfrm_event(
-    store: &IpsecSaStore,
-    added: Option<IpsecSaKey>,
-    removed: Option<IpsecSaKey>,
-    expired: bool,
-) {
-    if let Some(key) = removed {
-        if store.remove(key) && expired {
-            store.counters.sa_expiry_removes.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    if let Some(key) = added {
-        store.upsert(key);
-    }
 }
 
 #[cfg(test)]
@@ -1064,7 +1115,48 @@ mod tests {
         let batch = store.load_snapshot();
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
         assert!(store.remove(key(1)));
+        // Routine DELSA/NEWSA publications keep the in-flight batch's
+        // stale epoch unchanged; its key verdict remains Hit.  A refreshed
+        // snapshot observes the removal as a Miss.
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        let refreshed = store.load_snapshot();
+        assert_eq!(
+            store.lookup_loaded(&refreshed, key(1)),
+            IpsecSaLookup::Miss
+        );
+    }
+    #[test]
+    fn loaded_batch_keeps_verdict_across_benign_upsert_and_redump() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+        store.upsert(key(2));
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+
+        let mut redump = FastMap::default();
+        redump.insert(key(3), IpsecSaEpoch { generation: 2 });
+        store.publish_full_dump(redump);
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        let refreshed = store.load_snapshot();
+        assert_eq!(
+            store.lookup_loaded(&refreshed, key(1)),
+            IpsecSaLookup::Miss
+        );
+    }
+
+    #[test]
+    fn loaded_batch_snapshot_fences_after_mark_stale() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        store.mark_stale();
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
+        assert_eq!(store.lookup(key(1)), IpsecSaLookup::Stale);
     }
 
     #[test]
@@ -1076,42 +1168,102 @@ mod tests {
         assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Hit);
         monitor.stop_and_join();
         assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Stale);
+        // The independent teardown revocation remains authoritative even if
+        // a racing dump publishes a fresh snapshot after stop begins.
+        monitor.store.publish_empty_dump_for_test();
+        assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Stale);
     }
 
-    #[test]
-    fn cap_eviction_is_control_side_only() {
-        let store = IpsecSaStore::new();
-        let mut entries = FastMap::default();
-        for n in 0..(IPSEC_SA_SNAPSHOT_CAP + 3) {
-            entries.insert(key(n as u32), IpsecSaEpoch { generation: n as u64 + 1 });
-        }
-        store.publish_full_dump(entries);
-        assert_eq!(store.entries_len(), IPSEC_SA_SNAPSHOT_CAP);
-    }
 
     #[test]
     fn full_dump_and_incremental_upsert_share_cap_order_domain() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
         for n in 0..IPSEC_SA_SNAPSHOT_CAP {
-            entries.insert(key(n as u32), IpsecSaEpoch { generation: 0 });
+            entries.insert(
+                key(n as u32),
+                IpsecSaEpoch {
+                    // Deliberately make the final key oldest so this test
+                    // proves age ordering rather than key ordering.
+                    generation: if n == IPSEC_SA_SNAPSHOT_CAP - 1 {
+                        0
+                    } else {
+                        n as u64 + 1
+                    },
+                },
+            );
         }
         store.publish_full_dump(entries);
         let newest = key((IPSEC_SA_SNAPSHOT_CAP + 1) as u32);
         store.upsert(newest);
         assert_eq!(store.entries_len(), IPSEC_SA_SNAPSHOT_CAP);
+        assert_eq!(
+            store.lookup(key((IPSEC_SA_SNAPSHOT_CAP - 1) as u32)),
+            IpsecSaLookup::Miss
+        );
+        assert_eq!(store.lookup(key(0)), IpsecSaLookup::Hit);
         assert_eq!(store.lookup(newest), IpsecSaLookup::Hit);
     }
 
     #[test]
     fn esp_parser_distinguishes_keepalive_and_marker() {
         let mut frame = vec![0u8; 8];
-        frame.extend_from_slice(&[0xff]);
-        assert_eq!(esp_in_udp_spi(&frame, 0, 4500), None);
-        assert_eq!(esp_in_udp_miss_reason(&frame, 0, 4500), IpsecSaMissReason::Keepalive);
+        frame[4..6].copy_from_slice(&9u16.to_be_bytes());
+        frame.extend_from_slice(&[0xff, 0, 0]);
+        assert_eq!(esp_in_udp_spi(&frame, 0, 4500, frame.len()), None);
+        assert_eq!(
+            esp_in_udp_miss_reason(&frame, 0, 4500, frame.len()),
+            IpsecSaMissReason::Keepalive
+        );
         frame.truncate(8);
+        frame[4..6].copy_from_slice(&12u16.to_be_bytes());
         frame.extend_from_slice(&[0, 0, 0, 0]);
-        assert_eq!(esp_in_udp_miss_reason(&frame, 0, 4500), IpsecSaMissReason::NoSa);
+        assert_eq!(
+            esp_in_udp_miss_reason(&frame, 0, 4500, frame.len()),
+            IpsecSaMissReason::NoSa
+        );
+    }
+    #[test]
+    fn esp_parser_bounds_spi_by_declared_ipv4_ipv6_end() {
+        for l4_offset in [34usize, 54usize] {
+            let mut frame = vec![0u8; l4_offset + 8 + 4];
+            frame[l4_offset + 4..l4_offset + 6].copy_from_slice(&12u16.to_be_bytes());
+            frame[l4_offset + 8..l4_offset + 12]
+                .copy_from_slice(&0x1122_3344u32.to_be_bytes());
+            let declared_end = l4_offset + 8;
+            assert_eq!(
+                esp_in_udp_spi(&frame, l4_offset, 4500, declared_end),
+                None,
+                "SPI beyond declared IPv{} end must not be read",
+                if l4_offset == 34 { 4 } else { 6 }
+            );
+            assert_eq!(
+                esp_in_udp_miss_reason(&frame, l4_offset, 4500, declared_end),
+                IpsecSaMissReason::Truncated
+            );
+            assert_eq!(
+                esp_in_udp_spi(&frame, l4_offset, 4500, frame.len()),
+                Some(0x1122_3344)
+            );
+        }
+    }
+
+    #[test]
+    fn esp_parser_rejects_tiny_first_fragment_spi_slack() {
+        let l4_offset = 34usize;
+        let mut frame = vec![0u8; l4_offset + 8 + 4];
+        frame[l4_offset + 4..l4_offset + 6].copy_from_slice(&10u16.to_be_bytes());
+        frame[l4_offset + 8..l4_offset + 12]
+            .copy_from_slice(&0x1122_3344u32.to_be_bytes());
+        let tiny_first_fragment_end = l4_offset + 8 + 2;
+        assert_eq!(
+            esp_in_udp_spi(&frame, l4_offset, 4500, tiny_first_fragment_end),
+            None
+        );
+        assert_eq!(
+            esp_in_udp_miss_reason(&frame, l4_offset, 4500, tiny_first_fragment_end),
+            IpsecSaMissReason::Truncated
+        );
     }
 
     #[test]
@@ -1132,6 +1284,15 @@ mod tests {
         // expired. The parser must retain this ordinary unlimited SA.
         payload[136..144].fill(0);
         assert!(parse_sa_payload(&payload, true).is_some());
+        // Hard-use lifetime is inactive before the SA is first used.
+        payload[152..160].copy_from_slice(&10u64.to_ne_bytes());
+        payload[184..192].fill(0);
+        assert!(parse_sa_payload(&payload, true).is_some());
+        // An already-started use lifetime with an elapsed deadline is
+        // ineligible even when byte/packet/add lifetimes remain unlimited.
+        payload[184..192].copy_from_slice(&1u64.to_ne_bytes());
+        assert!(parse_sa_payload(&payload, true).is_none());
+        payload[184..192].fill(0);
         payload[136..144].copy_from_slice(&u64::MAX.to_ne_bytes());
         // A present direction attribute is required by the gate.
         payload[224..232].fill(0);
@@ -1141,6 +1302,11 @@ mod tests {
         payload[228] = 2;
         assert!(parse_sa_payload(&payload, true).is_none());
         payload[228] = XFRM_SA_DIR_IN;
+        // A zero-payload DIR NLA must not consume the next attribute or
+        // padding byte as an inbound direction.
+        payload[224..226].copy_from_slice(&4u16.to_ne_bytes());
+        assert!(parse_sa_payload(&payload, true).is_none());
+        payload[224..226].copy_from_slice(&5u16.to_ne_bytes());
         let parsed = parse_sa_payload(&payload, true).expect("eligible inbound SA");
         assert_eq!(
             parsed,

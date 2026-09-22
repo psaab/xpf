@@ -815,9 +815,14 @@ impl Coordinator {
         // writer, so joining is the no-mutation-after-stop fence.
         self.neighbors.stop_and_join_ipsec_sa_monitor();
         // #5165: signal AND JOIN the neighbor monitor before any downstream
-        // teardown clears/rebuilds the shared neighbor map.
+        // teardown clears/rebuilds the shared neighbor map. The bare stop store
+        // (pre-#5165) left the monitor detached: a retired old-generation
+        // monitor blocked in recv() could apply a queued kernel event to
+        // `dynamic` after a fresh baseline repopulated it. Joining (bounded by
+        // the monitor's 500ms SO_RCVTIMEO) is the real no-mutation-after-stop
+        // guard, mirroring the resolver join below.
         self.neighbors.stop_and_join_monitor();
-        // the worker's recv side disconnects, and JOIN it — mirroring the
+        // #1636 / #6314: stop the neighbor warmer, drop the producer handle so
         // monitor (above) and resolver (below) siblings. Signalling + dropping
         // the queue alone left the warmer detached (the pre-#5165 odd-one-out):
         // a warmer blocked in recv_timeout could fire one stray ARP/NDP solicit
@@ -969,8 +974,8 @@ impl Coordinator {
         // identical to the seven field assignments it replaces.
         self.bpf_maps.store(Arc::new(BpfMaps::default()));
         self.forwarding = ForwardingState::default();
+        // #6592: reset BOTH halves before the single worker-visible publish.
         self.forwarding.ipsec_sa = self.neighbors.ipsec_sa_monitor.store.clone();
-        // `self.validation` was defaulted further down pre-#6592 — after the
         // old `shared_validation` / `ha.forwarding` stores — which was
         // harmless while the two were independent Arcs stored with explicit
         // values, but would now publish a default forwarding paired with the

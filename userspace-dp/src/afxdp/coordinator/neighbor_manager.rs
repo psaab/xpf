@@ -53,11 +53,11 @@ pub(crate) struct NeighborManager {
     /// before resetting worker-visible forwarding state.
     pub(crate) ipsec_sa_monitor: super::super::forwarding::IpsecSaMonitor,
     pub(crate) monitor_stop: Option<Arc<AtomicBool>>,
-    /// #5165: join handle for the neighbor-monitor thread. Retained (like
-    /// the sibling `resolver_join`, no longer discarded via `.ok()`) so
-    /// `stop_inner` can JOIN the monitor after signalling stop — joining is
-    /// what enforces the no-mutation-after-stop invariant that the loop's
-    /// 500ms SO_RCVTIMEO bounds.
+    /// #5165: join handle for the neighbor-monitor thread. Retained (like the
+    /// sibling `resolver_join`, no longer discarded via `.ok()`) so `stop_inner`
+    /// can JOIN the monitor after signalling stop — joining is what enforces the
+    /// no-mutation-after-stop invariant that the loop's 500ms `SO_RCVTIMEO`
+    /// bounds.
     pub(crate) monitor_join: Option<std::thread::JoinHandle<()>>,
     // #1636 option C: proactive neighbor warming.
     /// Per-(ifindex, hop) last-probe timestamp (monotonic ns) for the

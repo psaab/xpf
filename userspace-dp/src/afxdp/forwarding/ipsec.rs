@@ -91,9 +91,42 @@ fn isakmp_demux(
     if protocol != PROTO_UDP {
         return IsakmpDemux::NotIsakmp;
     }
-    // UDP payload (ISAKMP or, on 4500, the NAT-T non-ESP marker) starts after
-    // the fixed 8-byte UDP header.
-    let Some(payload) = packet_frame.get(l4_offset + 8..) else {
+    // UDP payload (ISAKMP or, on NAT-T UDP 4500, the non-ESP marker) is
+    // bounded by BOTH the fixed UDP header and the UDP-declared datagram
+    // length. The caller has already trimmed packet_frame to the IP-declared
+    // end, so this second bound rejects bytes hidden in UDP/IP slack.
+    let header_end = l4_offset.checked_add(8);
+    let Some(header_end) = header_end else {
+        return IsakmpDemux::Truncated;
+    };
+    let Some(header) = packet_frame.get(l4_offset..header_end) else {
+        return IsakmpDemux::Truncated;
+    };
+    let udp_len = u16::from_be_bytes([header[4], header[5]]) as usize;
+    if udp_len < 8 {
+        return IsakmpDemux::Truncated;
+    }
+    let Some(udp_end) = l4_offset.checked_add(udp_len) else {
+        return IsakmpDemux::Truncated;
+    };
+    // A UDP declaration extending beyond the authoritative IP/frame end is
+    // itself truncated. Do not clamp it: a complete-looking marker/header
+    // prefix in the available bytes must never become positive IKE.
+    if udp_end > packet_frame.len() {
+        if dst_port == 4500 {
+            let Some(prefix) = packet_frame.get(header_end..) else {
+                return IsakmpDemux::Truncated;
+            };
+            if matches!(prefix.get(0..4), Some([0, 0, 0, 0])) {
+                return IsakmpDemux::Truncated;
+            }
+            // Non-marker 4500 remains on the ESP-in-UDP path, whose strict
+            // UDP-length parser returns a truncated miss.
+            return IsakmpDemux::NotIsakmp;
+        }
+        return IsakmpDemux::Truncated;
+    }
+    let Some(payload) = packet_frame.get(header_end..udp_end) else {
         return IsakmpDemux::Truncated;
     };
     if dst_port == 4500 {
@@ -606,7 +639,13 @@ mod tests {
         frame.extend_from_slice(&[0x00, 0x20, 0x22, 0x08]); // np/ver/exchange/flags
         frame.extend_from_slice(&0u32.to_be_bytes()); // message id
         frame.extend_from_slice(&0u32.to_be_bytes()); // length
+        set_udp_len(&mut frame);
         frame
+    }
+
+    fn set_udp_len(frame: &mut [u8]) {
+        let udp_len = (frame.len() - 34) as u16;
+        frame[38..40].copy_from_slice(&udp_len.to_be_bytes());
     }
 
     #[test]
@@ -641,6 +680,7 @@ mod tests {
         let mut esp = vec![0u8; 42];
         esp.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
         esp.extend_from_slice(&[0u8; 16]);
+        set_udp_len(&mut esp);
         assert_eq!(established_ike_initiator_spi(&esp, 34, 4500), None);
         assert_eq!(ike_initiation_spi(&esp, 34, 4500), None);
     }
@@ -685,6 +725,7 @@ mod tests {
         let mut esp_in_udp = vec![0u8; 42];
         esp_in_udp.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
         esp_in_udp.extend_from_slice(&[0u8; 16]);
+        set_udp_len(&mut esp_in_udp);
         assert_eq!(
             classify_ipsec_admission(&esp_in_udp, 34, PROTO_UDP, 4500),
             IpsecAdmissionClass::Exempt
@@ -708,6 +749,32 @@ mod tests {
         assert_eq!(
             classify_ipsec_admission(&shorter, 34, PROTO_UDP, 500),
             IpsecAdmissionClass::NewInboundIke
+        );
+    }
+    #[test]
+    fn demux_honors_udp_declared_length_over_backing_slack() {
+        let mut slack = ike_frame(false, 0x1122_3344_5566_7788, 0xdead_beef_cafe_0001);
+        // Keep the complete non-zero-responder ISAKMP header in backing
+        // memory, but declare an empty UDP payload. The bytes beyond UDP end
+        // are slack and must not turn this into an established IKE packet.
+        slack[38..40].copy_from_slice(&8u16.to_be_bytes());
+        assert_eq!(
+            classify_ipsec_admission(&slack, 34, PROTO_UDP, 500),
+            IpsecAdmissionClass::NewInboundIke
+        );
+        assert!(is_malformed_ike(&slack, 34, PROTO_UDP, 500));
+        assert_eq!(established_ike_initiator_spi(&slack, 34, 500), None);
+        let mut truncated_marker = ike_frame(true, 0x1122_3344_5566_7788, 0xdead_beef_cafe_0001);
+        let udp_len_past_frame = (truncated_marker.len() - 34 + 4) as u16;
+        truncated_marker[38..40].copy_from_slice(&udp_len_past_frame.to_be_bytes());
+        assert_eq!(
+            classify_ipsec_admission(&truncated_marker, 34, PROTO_UDP, 4500),
+            IpsecAdmissionClass::NewInboundIke
+        );
+        assert!(is_malformed_ike(&truncated_marker, 34, PROTO_UDP, 4500));
+        assert_eq!(
+            established_ike_initiator_spi(&truncated_marker, 34, 4500),
+            None
         );
     }
 
