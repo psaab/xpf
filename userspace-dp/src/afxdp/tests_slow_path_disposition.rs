@@ -2878,3 +2878,317 @@ fn neigh_miss_static_snat_suppresses_slow_path_copy_while_parked_10311() {
 fn neigh_miss_nptv6_suppresses_slow_path_copy_while_parked_10311() {
     drive_neigh_miss_10311(NeighMissNat10311::Nptv6);
 }
+// #10525: DNAT-to-self IKE must pass the userspace fine gates (lo0 + to-zone
+// junos-host) before Stage-11 reinject, and must seed the live-exchange table
+// only AFTER those gates pass. The VIP 203.0.113.9:500/udp DNATs to the
+// firewall's own 10.0.61.1:500; Stage 11 claims it pre-NAT via
+// `owns_configured_ip` (DNAT destinations are members of `local_v*`) and the
+// reinject carries the wire tuple (`NatDecision::default`, no translation), so
+// both fine gates judge the external tuple.
+const IKE_10525_SRC: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 10);
+const IKE_10525_VIP: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 9);
+const IKE_10525_SPI: u64 = 0x1122_3344_5566_7788;
+const IKE_10525_RESPONDER_SPI: u64 = 0x8877_6655_4433_2211;
+const IKE_10525_IFINDEX: u32 = 12;
+
+fn dnat_to_self_snapshot_10525() -> ConfigSnapshot {
+    let mut snapshot = nat_snapshot();
+    snapshot.destination_nat_rules = vec![DestinationNATRuleSnapshot {
+        name: "vip-to-self-ike".to_string(),
+        from_zone: "wan".to_string(),
+        destination_address: "203.0.113.9".to_string(),
+        destination_port: 500,
+        protocol: "udp".to_string(),
+        pool_address: "10.0.61.1".to_string(),
+        pool_port: 500,
+        ..Default::default()
+    }];
+    snapshot
+}
+
+fn junos_host_ike_deny_10525() -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: "no-ike-to-vip".to_string(),
+        from_zone: "wan".to_string(),
+        to_zone: "junos-host".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["203.0.113.9/32".to_string()],
+        applications: vec!["ike-500".to_string()],
+        application_terms: vec![crate::protocol::PolicyApplicationSnapshot {
+            name: "ike-500".to_string(),
+            protocol: "udp".to_string(),
+            source_port: String::new(),
+            destination_port: "500".to_string(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: "deny".to_string(),
+        ..Default::default()
+    }
+}
+
+fn lo0_ike_discard_snapshot_10525() -> ConfigSnapshot {
+    let mut snapshot = dnat_to_self_snapshot_10525();
+    snapshot.flow.lo0_filter_input_v4 = "protect-re".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "protect-re".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "drop-ike".to_string(),
+            destination_addresses: vec!["203.0.113.9/32".to_string()],
+            protocols: vec!["udp".to_string()],
+            destination_ports: vec!["500".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+    }];
+    snapshot
+}
+
+fn new_ike_frame_10525() -> Vec<u8> {
+    let mut frame = build_stage11_ike_v4_frame_10516(
+        IKE_10525_SRC,
+        IKE_10525_VIP,
+        40_000,
+        500,
+        IKE_10525_SPI,
+        0,
+    );
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
+    frame
+}
+
+fn followup_ike_frame_10525() -> Vec<u8> {
+    let mut frame = build_stage11_ike_v4_frame_10516(
+        IKE_10525_SRC,
+        IKE_10525_VIP,
+        40_000,
+        500,
+        IKE_10525_SPI,
+        IKE_10525_RESPONDER_SPI,
+    );
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
+    frame
+}
+
+fn ike_meta_10525(frame: &[u8]) -> UserspaceDpMeta {
+    stage11_ipv4_udp_meta_10516(
+        frame,
+        IKE_10525_SRC,
+        IKE_10525_VIP,
+        IKE_10525_IFINDEX,
+        40_000,
+        500,
+    )
+}
+
+fn ike_key_10525() -> crate::afxdp::forwarding::IkeExchangeKey {
+    crate::afxdp::forwarding::IkeExchangeKey::new(
+        IKE_10525_SPI,
+        IpAddr::V4(IKE_10525_SRC),
+        IpAddr::V4(IKE_10525_VIP),
+    )
+}
+
+fn run_stage11_ike_poll_10525(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    ike_exchanges: &Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    usize,
+    Vec<bool>,
+    BatchCounters,
+    DebugPollCounters,
+) {
+    let forwarding = build_forwarding_state(snapshot);
+    assert!(
+        forwarding.owns_configured_ip(IpAddr::V4(IKE_10525_VIP)),
+        "premise: the DNAT VIP must be firewall-owned so Stage 11 claims the IKE pre-NAT"
+    );
+    forwarding.ipsec_sa.publish_empty_dump_for_test();
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let mut binding =
+        BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from(match meta.ingress_ifindex {
+        6 => "ge-0-0-1",
+        12 => "reth0.80",
+        _ => "ge-0-0-1",
+    });
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path_and_ike(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+        ike_exchanges,
+    );
+    (
+        reinjector.status(),
+        reinjector.delegated_status(),
+        binding.scratch.scratch_recycle.len(),
+        reinjector.test_enqueued_delegated(),
+        batch,
+        dbg,
+    )
+}
+
+#[test]
+// R1 / RED-on-revert: removing the pre-reinject fine gate restores delegated
+// reinject + seed; moving the seed before gates restores the table entry.
+fn r1_dnat_to_self_ike_fine_deny_drops_without_seed_or_reinject_10525() {
+    let mut snapshot = dnat_to_self_snapshot_10525();
+    snapshot.policies.push(junos_host_ike_deny_10525());
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let frame = new_ike_frame_10525();
+    let meta = ike_meta_10525(&frame);
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10525(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 0,
+        "a to-zone junos-host DENY covering the DNAT-to-self IKE must drop it before \
+         Stage-11 reinject (#10525 confirmed bypass)"
+    );
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(
+        ike_exchanges.len(),
+        0,
+        "a fine-denied IKE must NEVER seed the live-exchange table (#10525 seed discipline)"
+    );
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(
+        batch.host_inbound_denied_packets, 0,
+        "a fine deny is a policy deny, not a host-inbound deny"
+    );
+}
+
+#[test]
+// R2 / RED-on-revert: removing the pre-reinject lo0 gate restores delegated
+// reinject + seed; moving the seed before gates restores the table entry.
+fn r2_dnat_to_self_ike_lo0_discard_drops_without_seed_10525() {
+    let snapshot = lo0_ike_discard_snapshot_10525();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let frame = new_ike_frame_10525();
+    let meta = ike_meta_10525(&frame);
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10525(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 0,
+        "an lo0 filter-input discard covering the DNAT-to-self IKE must drop it before \
+         Stage-11 reinject (#10525 skipped userspace lo0 eval)"
+    );
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(
+        ike_exchanges.len(),
+        0,
+        "an lo0-denied IKE must NEVER seed the live-exchange table (#10525 seed discipline)"
+    );
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// R3 / RED-on-revert: established Stage-11 IKE must not bypass a late fine
+// deny; removing the per-packet gate admits the seeded follow-up.
+fn r3_seeded_ike_followup_late_fine_deny_drops_10525() {
+    let mut snapshot = dnat_to_self_snapshot_10525();
+    snapshot.policies.push(junos_host_ike_deny_10525());
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    ike_exchanges.seed(ike_key_10525(), 123_000_000_000);
+    let frame = followup_ike_frame_10525();
+    let meta = ike_meta_10525(&frame);
+    let (trusted, delegated, recycled, queues, _batch, dbg) =
+        run_stage11_ike_poll_10525(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 0,
+        "an established IKE follow-up must be re-gated per packet: a late fine deny drops \
+         it (#10525 session-HIT parity)"
+    );
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(
+        ike_exchanges.len(),
+        1,
+        "the drop is per-packet re-eval without teardown: the seed stays and every follow-up \
+         is re-gated until it idles out"
+    );
+}
+
+#[test]
+// C1 / control: coarse-admitted IKE with no fine/lo0 match remains delegated,
+// and the caller seeds only after the gates pass.
+fn c1_dnat_to_self_ike_admits_and_seeds_delegated_10525() {
+    let snapshot = dnat_to_self_snapshot_10525();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let frame = new_ike_frame_10525();
+    let meta = ike_meta_10525(&frame);
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10525(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 1,
+        "control: coarse-admitted IKE with no fine/lo0 deny must still delegate byte-identically"
+    );
+    assert_eq!(queues, vec![true]);
+    assert_eq!(recycled, 1);
+    assert_eq!(
+        ike_exchanges.len(),
+        1,
+        "control: an admitted NEW IKE must seed exactly once"
+    );
+    assert!(
+        ike_exchanges.matches(&ike_key_10525(), 123_000_000_000),
+        "control: the seed must be keyed (initiator SPI, peer, local)"
+    );
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(dbg.host_inbound_deny, 0);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// C2 / control: the existing coarse host-inbound deny remains first and never
+// seeds or reinjects.
+fn c2_dnat_to_self_ike_coarse_deny_drops_without_seed_10525() {
+    let mut snapshot = dnat_to_self_snapshot_10525();
+    for zone in snapshot.zones.iter_mut() {
+        zone.host_inbound_system_services.clear();
+    }
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let frame = new_ike_frame_10525();
+    let meta = ike_meta_10525(&frame);
+    let (trusted, delegated, recycled, queues, batch, _dbg) =
+        run_stage11_ike_poll_10525(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 0,
+        "control: a zone omitting `ike` must deny (coarse gate)"
+    );
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(
+        ike_exchanges.len(),
+        0,
+        "control: a coarse-denied IKE must never seed (#6471)"
+    );
+    assert_eq!(batch.host_inbound_denied_packets, 1);
+}

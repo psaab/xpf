@@ -1178,11 +1178,53 @@ pub(super) enum IpsecPassthroughOutcome {
 
 /// #4323/#6471: resolve the LOGICAL ingress ifindex + from-zone exactly as the
 /// local-delivery resolver does (a VLAN sub-interface keys its own unit; a
-/// fabric-ingress packet keys the override zone), then apply the per-interface
-/// / per-zone host-inbound admit check for IKE. `host_inbound_admits_iface`
-/// honours a per-interface override where one exists and otherwise falls back
-/// to the from-zone set. Returns `Some(from_zone_id)` when IKE is NOT admitted
-/// (the caller returns `Denied`), `None` when admitted.
+/// fabric-ingress packet keys the override zone). The returned override is the
+/// owner-RG-gated value used by host-inbound admission, while the logical
+/// ifindex and from-zone are reused by Stage-11's post-admission local policy
+/// gates (#10525). Keeping this resolution in one helper prevents the coarse
+/// IKE gate and the fine/lo0 gates from disagreeing about attribution.
+/// #6458: the V1-validated stamp drives host-inbound admission only when the
+/// DESTINATION address's owner RG is forwarding-active LOCALLY — the same V2
+/// owner binding the session-miss zone-pair sites apply, resolved for a
+/// host-destined packet from the local address (review MEDIUM: a forged stamped
+/// NEW IKE initiation to a single-primary backup's reth address was Passthrough
+/// AND seeded the #6471 live-exchange table; it now degrades to the fabric zone).
+#[inline]
+pub(super) fn ike_host_inbound_gate_context(
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    now_secs: u64,
+    worker_ctx: &WorkerContext,
+) -> (i32, u16, Option<u16>) {
+    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+        worker_ctx.forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let ingress_zone_override =
+        crate::afxdp::forwarding::gate_fabric_zone_override_on_local_owner_rg(
+            worker_ctx.forwarding,
+            worker_ctx.ha_state,
+            now_secs,
+            ingress_zone_override,
+            flow.dst_ip,
+        );
+    let (from_zone_id, _to_zone_id) =
+        crate::afxdp::forwarding::zone_pair_ids_for_flow_with_override(
+            worker_ctx.forwarding,
+            ingress_logical,
+            ingress_zone_override,
+            0,
+        );
+    (ingress_logical, from_zone_id, ingress_zone_override)
+}
+
+/// #4323/#6471: apply the per-interface / per-zone host-inbound admit check
+/// for IKE. Returns `Some(from_zone_id)` when IKE is NOT admitted (the caller
+/// returns `Denied`), and `None` when admitted.
+#[inline]
 fn ike_host_inbound_deny_zone(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
@@ -1191,33 +1233,8 @@ fn ike_host_inbound_deny_zone(
     now_secs: u64,
     worker_ctx: &WorkerContext,
 ) -> Option<u16> {
-    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-        worker_ctx.forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    // #6458 (review fold): the V1-validated stamp drives host-inbound
-    // admission only when the DESTINATION address's owner RG is
-    // forwarding-active LOCALLY — the same V2 owner binding the session-miss
-    // zone-pair sites apply, resolved for a host-destined packet from the
-    // local address (review MEDIUM: a forged stamped NEW IKE initiation to a
-    // single-primary backup's reth address was Passthrough AND seeded the
-    // #6471 live-exchange table; it now degrades to the fabric zone).
-    let ingress_zone_override = crate::afxdp::forwarding::gate_fabric_zone_override_on_local_owner_rg(
-        worker_ctx.forwarding,
-        worker_ctx.ha_state,
-        now_secs,
-        ingress_zone_override,
-        flow.dst_ip,
-    );
-    let (from_zone_id, _to_zone_id) =
-        crate::afxdp::forwarding::zone_pair_ids_for_flow_with_override(
-            worker_ctx.forwarding,
-            ingress_logical,
-            ingress_zone_override,
-            0,
-        );
+    let (ingress_logical, from_zone_id, _ingress_zone_override) =
+        ike_host_inbound_gate_context(flow, meta, ingress_zone_override, now_secs, worker_ctx);
     if crate::afxdp::forwarding::host_inbound_admits_iface(
         worker_ctx.forwarding,
         ingress_logical,
@@ -1255,8 +1272,8 @@ fn ike_host_inbound_deny_zone(
 /// "established" — the SPI bytes are attacker-controlled, so a forged
 /// non-zero Responder SPI otherwise rode the #4323 `Exempt` class straight
 /// to strongSwan on a zone the operator closed to IKE. Established now means
-/// MATCHING the shared live-exchange table (`IkeExchangeTable`): seeded here
-/// when a NEW initiation passes the host-inbound gate, and seeded in the
+/// MATCHING the shared live-exchange table (`IkeExchangeTable`): seeded in the
+/// caller only after every userspace fine gate passes, and seeded in the
 /// native-GRE local-origin path when the firewall initiates IKE through a
 /// tunnel (its replies arrive on this stage with the Responder SPI set and
 /// no inbound seed). A non-zero-Responder IKE packet that matches a seed is
@@ -1343,25 +1360,6 @@ pub(super) fn stage_ipsec_passthrough_check(
                 ike_host_inbound_deny_zone(flow, meta, dst_port, ingress_zone_override, now_secs, worker_ctx)
             {
                 return IpsecPassthroughOutcome::Denied { from_zone_id };
-            }
-            // #6471: the initiation was ADMITTED — seed the exchange so its
-            // established follow-ups (Responder SPI set) are recognized. A
-            // DENIED initiation must never seed: a forged follow-up would
-            // otherwise mint its own "established" entry and re-open the
-            // bypass on a closed zone.
-            if let Some(initiator_spi) = crate::afxdp::forwarding::ike_initiation_spi(
-                packet_frame,
-                meta.l4_offset as usize,
-                dst_port,
-            ) {
-                worker_ctx.ike_exchanges.seed(
-                    crate::afxdp::forwarding::IkeExchangeKey::new(
-                        initiator_spi,
-                        flow.src_ip,
-                        flow.dst_ip,
-                    ),
-                    now_ns,
-                );
             }
         }
         crate::afxdp::forwarding::IpsecAdmissionClass::Exempt => {

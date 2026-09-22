@@ -88,10 +88,10 @@ use session_hit_authority::{
 
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
-    SynCookieAckOutcome, reinject_ipsec_passthrough, stage_classify_fabric_ingress,
-    stage_ipsec_passthrough_check, stage_link_layer_classify, stage_native_gre_decap,
-    stage_parse_flow_and_learn, stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss,
-    stage_wg_decap,
+    SynCookieAckOutcome, ike_host_inbound_gate_context, reinject_ipsec_passthrough,
+    stage_classify_fabric_ingress, stage_ipsec_passthrough_check, stage_link_layer_classify,
+    stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check,
+    stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
 };
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
@@ -146,7 +146,7 @@ use resolver_enqueue::try_enqueue_resolver;
 
 use policy_revalidation::{revalidate_zone_policy_on_session_hit, tun_origin_reverse_exempt};
 use filter::{
-    collect_revoked_flow_cache_keys, emit_input_filter_log_match,
+    apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit,
     evaluate_non_pbr_input_filter, evaluate_non_pbr_input_filter_counters_cached,
     evaluate_non_pbr_input_filter_log_only, filter_terminal,
@@ -852,6 +852,131 @@ pub(super) fn poll_binding_process_descriptor(
                                 }
                             }
                         };
+                        // #10525: Stage 11 claims DNAT-to-self IKE before the
+                        // ordinary LocalDelivery arms. Re-run the same lo0
+                        // and `to-zone junos-host` gates here, before the
+                        // delegated reinject. The kernel lo0 chain still
+                        // enforces its own terms; this userspace gate is
+                        // required for the delegated xpf-usp1 path, whose
+                        // iifname is intentionally outside kernel junos-host
+                        // ingress scopes.
+                        let is_positive_ike = flow.as_ref().is_some_and(|flow| {
+                            crate::afxdp::forwarding::is_admitted_positive_ike(
+                                stage11_packet_frame,
+                                meta.l4_offset as usize,
+                                meta.protocol,
+                                flow.forward_key.dst_port,
+                            )
+                        });
+                        let pending_ike_seed = if is_positive_ike {
+                            let flow = flow.as_ref().expect("positive IKE has a parsed flow");
+                            crate::afxdp::forwarding::ike_initiation_spi(
+                                stage11_packet_frame,
+                                meta.l4_offset as usize,
+                                flow.forward_key.dst_port,
+                            )
+                            .map(|initiator_spi| {
+                                crate::afxdp::forwarding::IkeExchangeKey::new(
+                                    initiator_spi,
+                                    flow.src_ip,
+                                    flow.dst_ip,
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        if is_positive_ike {
+                            let flow = flow.as_ref().expect("positive IKE has a parsed flow");
+                            let (ingress_logical, from_zone_id, ingress_zone_override) =
+                                ike_host_inbound_gate_context(
+                                    flow,
+                                    meta,
+                                    ingress_zone_override,
+                                    now_secs,
+                                    worker_ctx,
+                                );
+                            // #10525/#9529: Stage 11's passthrough decision
+                            // carries NatDecision::default, so the wire
+                            // destination is also the post-translation
+                            // policy destination here. Keep lo0 on the wire
+                            // tuple, exactly like the normal LocalDelivery
+                            // path; the fine policy sees the same tuple.
+                            let policy_dst =
+                                host_bound_policy_dst(flow, flow.forward_key.dst_port, None, None);
+                            debug_assert_eq!(
+                                policy_dst,
+                                (flow.dst_ip, flow.forward_key.dst_port),
+                                "#9529: Stage-11 IKE gate must judge wire == post-translation tuple"
+                            );
+                            let (lo0_action, lo0_log) = apply_lo0_filter_action(
+                                worker_ctx.forwarding,
+                                crate::afxdp::frame::term_match_extra_from_frame(
+                                    stage11_packet_frame,
+                                    meta,
+                                ),
+                                Some(flow),
+                                meta,
+                                ingress_logical,
+                                ingress_zone_override,
+                                now_ns,
+                            );
+                            if filter_terminal(
+                                &mut binding.tx_pipeline,
+                                worker_ctx.forwarding,
+                                worker_ctx.event_stream,
+                                binding.ifindex,
+                                stage11_packet_frame,
+                                meta,
+                                flow,
+                                telemetry.counters,
+                                lo0_action,
+                                lo0_log,
+                                now_ns,
+                            ) {
+                                telemetry.dbg.local += 1;
+                                telemetry.dbg.policy_deny += 1;
+                                telemetry.counters.touched = true;
+                                if let Some(admission) = admission_to_commit.take() {
+                                    worker_ctx
+                                        .forwarding
+                                        .nat64
+                                        .frag_overlap
+                                        .fail_admission(admission);
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                            if matches!(
+                                junos_host_local_policy(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    &mut binding.tx_pipeline,
+                                    binding.ifindex,
+                                    stage11_packet_frame,
+                                    telemetry.counters,
+                                    flow,
+                                    meta,
+                                    policy_dst,
+                                    from_zone_id,
+                                    desc.len as u64,
+                                    now_ns,
+                                ),
+                                JunosHostLocalPolicy::Dropped
+                            ) {
+                                telemetry.dbg.local += 1;
+                                telemetry.dbg.policy_deny += 1;
+                                telemetry.counters.touched = true;
+                                if let Some(admission) = admission_to_commit.take() {
+                                    worker_ctx
+                                        .forwarding
+                                        .nat64
+                                        .frag_overlap
+                                        .fail_admission(admission);
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                        }
                         let accepted = reinject_ipsec_passthrough(
                             packet_frame,
                             meta,
@@ -859,6 +984,15 @@ pub(super) fn poll_binding_process_descriptor(
                             worker_ctx,
                             outlet,
                         );
+                        if accepted {
+                            // #10525/#6471: a NEW IKE seed becomes visible
+                            // only after both userspace fine gates and the
+                            // reinject admission succeed. A denied IKE can
+                            // therefore never mint an established follow-up.
+                            if let Some(seed) = pending_ike_seed {
+                                worker_ctx.ike_exchanges.seed(seed, now_ns);
+                            }
+                        }
                         if let Some(admission) = admission_to_commit {
                             let tracker = &worker_ctx.forwarding.nat64.frag_overlap;
                             if accepted {
