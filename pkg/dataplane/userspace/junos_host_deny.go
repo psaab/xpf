@@ -36,6 +36,7 @@ type JunosHostProgram struct {
 	// RulesV4 / RulesV6 are the projected rules (config SSOT), each family in
 	// first-match order.
 	RulesV4 []config.JunosHostDenyRule
+	RulesV6 []config.JunosHostDenyRule
 	// CoarseAdmitsIKE / CoarseIdentResets are projection metadata. The daemon
 	// uses CoarseIdentResets with HasApplicationAnyDeny for the retained ident
 	// RST; CoarseAdmitsIKE and IKEExemptNetdevs are retained for projection
