@@ -1,142 +1,607 @@
-# DRAFT v1 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
+# DRAFT v2 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
 
-Status: DRAFT v1 (STEP-0 output, design path — no production code in this commit).
+Status: DRAFT v2 (plan-review fold output, design path — no production code in this commit).
 Issue: #10512 (OPEN, bug + audit + validated-by:research + source:deep-review).
-Base: `2781465ee3afe52a780d94d2245cb565a1e80548` on `fix/10512-commit-invalidation` (clean vs `origin/master`).
+Base: `2781465ee3afe52a780d94d2245cb565a1e80548` on `fix/10512-commit-invalidation`; v1 tip `4d2cb2bf6` (in history).
 Lane: Eng10512. Date: 2026-09-22.
 
-## 1. STEP-0 verification (what was confirmed, not assumed)
+## 0. Plan-review fold (round 1 → v2)
 
-- `gh issue view 10512` → OPEN. Body pins the mechanism precisely; comment cross-links the same #5578 partial-clear family: #10513 (candidate-present helper-error discard) and #10528 (NotFound-recovery per-key swallow). Those are distinct roots/fixes and explicitly out of scope here.
-- Not already fixed:
-  - `git log --all --oneline --grep='10512' -i` → 0 hits.
-  - `gh pr list --state merged --search "10512"` → empty; `--search "invalidation"` shows only older work (#7822 for #6948, #5588 for #5578, #4350, #4252, etc.), none closing #10512.
-  - `gh pr list --state open --search "10512"` → empty.
-  - `git diff origin/master...HEAD --stat` → empty (lane starts at base).
-- Live on HEAD by source (all paths below read at base, not inferred):
-  - The Go sweep matches ONLY `val.PolicyID` in BOTH producers:
-    - Legacy post-apply: `pkg/daemon/daemon_policy_invalidate.go:449-461` (v4) and `:463-477` (v6), inside `clearSessionsForPolicyIDs`.
-    - Pre-publication capture: `pkg/daemon/daemon_policy_invalidate_capture.go:210-223` (v4) and `:224-237` (v6), inside `capturePolicyInvalidationLocked`.
-  - The enumeration source is the bare-keyed BPF mirror: `pkg/dataplane/session_store.go:221-233` (`ForEachV4/V6` → `dp.BatchIterateSessions{,V6}`) → `pkg/dataplane/maps_session.go:252-284` (batch lookup over `sessions`/`sessions_v6` maps).
-  - The BPF key is the bare 5-tuple with no domain axis: `userspace-dp/src/afxdp/bpf_map/mod.rs:547-563` (`bpf_session_key_v4`: src_ip/dst_ip/src_port/dst_port/protocol) and `:568-583` (v6). `SessionKey` in Go is the same bare shape: `pkg/dataplane/types.go:12-20` (v4), `:432-436` (v6).
-  - Both publishers overwrite with `BPF_ANY`: `userspace-dp/src/afxdp/bpf_map/publish_conntrack.rs:138-145` (v4) and `:390-397` (v6). Two tenants sharing a tuple therefore occupy ONE row carrying the last publisher's value.
-  - The mirror's `RoutingDomain` VALUE cannot de-alias a KEY collision. This is stated in-tree, not a new claim: `docs/log/9546.md:28-30` ("the BPF key has no domain axis ... so two tenants sharing a 5-tuple share one mirror row. This turns 'both refused as ambiguous' into 'the surviving row deletes exactly'; it does not de-alias."). The forward/reverse value contract is `publish_conntrack.rs:154-176` (`conntrack_row_routing_domain`).
-  - The empty-candidate path returns success: `daemon_policy_invalidate.go:529-532` (`deleteInvalidatedSessions`: `if c.empty() { return nil }`). When the surviving row carries tenant B's `PolicyID` while tenant A's policy was deleted, the A-targeted candidate set is empty, the delete is a nil no-op, and the commit reports success although A's domain-scoped helper session remains.
-  - The authoritative helper table IS per-domain: `userspace-dp/src/session/key.rs:66-157` (`SessionKey.routing_domain: u32`, with reverse-match keys deliberately zeroed at `:293-300`). The standby keys synced sessions BY domain (`docs/log/9146.md:36-40`, proven by the #8636 fixture `state_holding_the_same_tuple_in(&[100_007, 100_008])` → 4 rows). The loss is purely in the Go-visible mirror enumeration.
-  - No helper verb enumerates sessions by policy per domain today. The control dispatch (`userspace-dp/src/server/handlers/mod.rs:262-472`) offers `sync_session` (upsert/delete one 5-tuple), `drain_session_deltas`, `export_owner_rg_sessions`, `export_all_sessions`, `session_counters` (per-tuple diagnostic, #7919), plus counters/snapshot/binding verbs. None answers "which (domain, 5-tuple) rows were admitted by policy id N".
+Round-1 verdicts on v1 (both read in full): Rev10512PlanA PLAN-NEEDS-MAJOR
+(F1 mirror GC, F2 bare HA-sync, F3 frozen/admissions, F4 two-phase, F5 fan-out,
+F6 test coverage, F7 guards, F8 skew fallback, F9 version, F10 blast-radius,
+F11 B1 feasibility); Rev10512PlanB PLAN-NEEDS-MAJOR near-KILL (F1 HA leg,
+F2 mirror lifecycle, F3 predicate/admissions, F4 placement, F5 fan-out/skew,
+F6 tests, F7 decided-questions). Convergent: miss mechanics verified, Option A
+direction sound, contracts to close the miss on every path not specified.
 
-GATE: DESIGN needed. The miss is structural (lossy discovery index), not a one-line predicate fix. Any repair that stays on the mirror cannot see the shadowed tenant; any repair that leaves the mirror needs a new cross-language contract or a new Go-side index, both with HA/protocol/ABI consequences. No production code is changed on this path.
+Parent SOURCE-DETERMINED closures (closed in this revision, not re-asked):
 
-## 2. Source map (exact files/symbols the implement lane will touch or read)
+| Q | Ruling | Closed in |
+|---|--------|-----------|
+| Q1 verb shape | READ verb `list_sessions_by_policy`; Go orchestrates scoped deletes + HA + logging (a single helper discover+delete RPC cannot satisfy capture-READ + delete-after-live) | §2–§4 |
+| Q2 old-numbering | Go passes OLD id sets; helper scans FROZEN install ids | §3 |
+| Q3 bounds + lock | Budgeted/chunked like refresh/export, kick/collect, never hold ServerState across scan; worst case + timeout stated | §4 |
+| Q4 failure | NO mirror fallback; fail closed as #5578 commit error | §4 |
+| Q5 standby | YES, standby coverage required (delete-sync as today does NOT suffice) | §1 |
+| Q6 B1 end-state | OPEN as follow-up tech-debt filing only (needs shim-domain feasibility proof first) | §8 |
 
-### 2.1 Invalidation producers (both must be fixed together)
-- `pkg/daemon/daemon_policy_invalidate.go`
-  - `clearSessionsForDeletedPolicies` (:154-167) — consumes `policyInvalidationCapture.deleted` or falls back to `clearSessionsForPolicyIDs(deletedPolicyRuntimeIDs(...))`.
-  - `clearSessionsForModifiedPolicies` (:201-215) — same for `modified` / `changedPolicyRuntimeIDs`.
-  - `clearSessionsForDefaultPolicyChange` (:272-284) — same for `deflt` / `defaultPolicyChangeRuntimeIDs`.
-  - `clearSessionsForPolicyIDs` (:406-507) — legacy post-apply enumeration; predicate at :450-461 / :464-477.
-  - `deleteInvalidatedSessions` (:529-595) — single delete site; empty→nil at :530-532; HA delete-sync at :545-579.
-  - `deletedPolicyRuntimeIDs` (:93-118) — old-numbering id set; id-0 excluded (:104-108); first-policy purge delegated to helper (:58-66, `purge_sessions_bound_to_deleted_first_policy`).
-  - `changedPolicyRuntimeIDs` (:631-683) — policy-rematch-gated modified set.
-- `pkg/daemon/daemon_policy_invalidate_capture.go`
-  - `armPolicyInvalidationPlan` (:124-126), `capturePolicyInvalidationLocked` (:149-246) — one pass per family at :210-237, same PolicyID-only predicate, called at the last statement before `rt.ApplyConfig` from `pkg/daemon/daemon_apply_dataplane.go:171`.
-  - Arm sites: `pkg/daemon/daemon_apply_commit.go:284,663,949` (three commit-class paths).
-- `pkg/daemon/daemon_policy_invalidate_test.go`, `policy_reused_id_capture_6948_test.go`, `policy_reused_id_overclear_6948_test.go`, `daemon_policy_modified_4234_test.go`, `daemon_policy_default_4342_test.go`, `policy_rematch_shipped_6723_test.go` — existing contract cells; the #6723 wiring test pins `clearSessionsForPolicyChanges → clearSessionsForModifiedPolicies → changedPolicyRuntimeIDs`.
+Boundary honored: HA-wire/standby is IN scope (§1) and mirror preservation is
+specified with a B-visibility proof (§2). No `GC will heal` claim anywhere:
+the refresh path writes with `BPF_EXIST` specifically so it will not recreate
+a deleted entry (`userspace-dp/src/afxdp/bpf_map/mod.rs` refresh;
+`pkg/dataplane/userspace/manager_sessions.go:620-622` "Silence is not assent").
 
-### 2.2 Mirror (lossy discovery index)
-- `pkg/dataplane/session_store.go:221-233` (`ForEachV4/V6`), `:529-627` (`DeleteBatchKnownV4/V6` — scoped deletes via `ScopedSessionKey{Key, RoutingDomain}` at `:113-122`), `:746-824` (peer-marked #9714 path).
-- `pkg/dataplane/maps_session.go:46-284` (`IterateSessions{,V6,From,V6From}`, `BatchIterateSessions{,V6}` over `sessions`/`sessions_v6`).
-- `pkg/dataplane/types.go:12-20` + `:432-436` (bare keys), `:23-...` + `:443-...` (`SessionValue{,V6}` with `PolicyID`, `RoutingDomain`, `ReverseKey`, `Created`, `IsReverse`).
-- `pkg/dataplane/bpf_session_value.go:135-139,205-209` (on-map `routing_domain` slot, #9546), `routing_domain_mirror_9546_test.go`, `bpf_session_value_test.go:361-362` (offsets 144/192).
-- `userspace-dp/src/afxdp/bpf_map/mod.rs:547-583` (bare key constructors), `publish_conntrack.rs:96-152` (v4 publish), `:311-404` (v6 publish), `:170-176` (row domain stamp), `:183-290` + `:410-497` (value builders).
-- `userspace-dp/src/session/key.rs:66-157` (authoritative per-domain key), `userspace-dp/src/session/mod.rs:1039+` (`SessionTable`), `userspace-dp/src/afxdp/bpf_map_tests.rs` (mirror tests).
+## 1. HA design: domain-carrying cross-node delete (required block 1)
 
-### 2.3 Helper delete path (works once discovery names the row — #9146/#9364/#9546)
-- `pkg/dataplane/userspace/manager_sessions.go:771-810` (`deleteHelperSessionsScopedV4{,Marked}`, `...V6...`), `manager_sessionsync_request.go:16,140` (`buildSessionSyncRequestV4/V6`), `protocol_ha.go:41+` (`SessionSyncRequest` with `routing_domain`, `peer_delete`, `forward_only`).
-- `userspace-dp/src/server/handlers/mod.rs:262-472` (verb dispatch; `sync_session` served off-lock at :207-210), `userspace-dp/src/protocol/control.rs:314+` (`ControlRequest`), `pkg/dataplane/userspace/protocol.go` (Go side; current version v16+ per #9714/#9752 comments).
+### 1.1 Why the current wire cannot close the failover leg (grounded)
 
-### 2.4 Prior art that bounds this fix (read before designing)
-- `docs/log/9146.md:16-54` (bare-mirror swap emits zero retractions; standby accumulates both rows; bare delete refused as ambiguous #8636).
-- `docs/log/9546.md:20-30` (value carries domain; key still bare; explicitly does not de-alias).
-- `pkg/dataplane/userspace/batch_delete_domain_9364_test.go`, `batch_delete_mirror_domain_9546_test.go`, `sync_delete_domain_9146_test.go` (delete-scoping cells; the #9546 cell follows the GC path exactly: seed → `ForEachV4` → `DeleteBatchKnownV4` → wire).
-- Sibling filings in the same #5578 family (do NOT fix here): #10513 (helper-error discard), #10528 (NotFound per-key swallow), #9364 (once-selected scope the delete — fixed), #9526 (id-0 first-policy purge — fixed, helper-side), #6948 (pre-publication capture — fixed, same predicate), #8636 (bare-delete refusal — fixed, orthogonal).
+- Primary sends bare deletes: `pkg/daemon/daemon_policy_invalidate.go:560,576`
+  `ss.QueueDeleteV4(e.Key, false)` / V6 twin — bare `SessionKey` only.
+- `pkg/cluster/sync_conn_write.go:194` `QueueDeleteV4(key, forwardOnly)`:
+  `gen := s.takeDeleteGenV4(key)` (:201) — generation keyed by BARE tuple, so
+  colliding tenants share one generation space — then `encodeDeleteV4` (:202),
+  journaled on disconnect (`s.journalDelete(msg)`).
+- `pkg/cluster/sync_protocol.go:479-523`: delete = 16-byte (v4) / 40-byte (v6)
+  tuple + trailing #2170 generation u64 + one #9752 forwardOnly byte. NO
+  domain. Installs DO carry `RoutingDomain` (reviewer-verified
+  sync_protocol.go:269,435,742,928; corroborated by measured upserts
+  `docs/log/9146.md:20-21` and the `SessionSyncRequest.routing_domain` field).
+- Standby applies bare:
+  `pkg/cluster/sync_conn_gen.go:1203-1227` `deleteClusterSyncedV4` →
+  `s.sessions.DeleteWithCompanionsV4(bare key, ClusterStale)` (:1223), and
+  `delete(s.installTableRecvV4, key)` (:1220-1222) — received-identity ALSO
+  keyed bare, so colliding tenants share that record too.
+- `pkg/dataplane/session_store.go:888-899`: `GetSessionV4(bare)` returns ONE
+  row (the standby's own bare-mirror last-writer) and deletes with THAT row's
+  domain; on miss, bare peer-delete probes every instance and is REFUSED when
+  two tenants match (`userspace-dp/src/server/handlers/sync_session.rs:257-273`
+  probe, `:304-315` ambiguous refusal, #8636).
+- `docs/log/9146.md:27-40`: a tenant swap emits 2 upserts + 0 deletes; the
+  standby accumulates both rows (proven by
+  `state_holding_the_same_tuple_in(&[100_007, 100_008])` → 4 rows).
 
-## 3. Blast radius (measured at base)
+Trace of "HA-sync as today": primary deletes A locally, sends bare
+QueueDelete; standby holds synced A+B; its bare `GetSessionV4` returns B
+(deletes B, keeps A: over+under), or misses and the bare peer-delete is
+refused (under), or returns A by ordering luck. Failover then resurrects A
+and/or loses B. Q5 is therefore NOT empirical — the wire + probe prove it.
 
-- Invalidation entry/wiring: 3 arm sites (`daemon_apply_commit.go`), 1 capture site (`daemon_apply_dataplane.go:171`), 3 clear consumers + 1 shared core + 1 shared delete site (`daemon_policy_invalidate.go`), 2 producers (capture + legacy) each scanning 2 families with the same predicate. Any discovery change must land in BOTH producers or the defect moves to the fallback path (boot/non-commit applies use legacy; commit-class uses capture).
-- Enumeration consumers sharing the mirror: conntrack GC (`pkg/conntrack/gc.go:313,390` + deletes at :362,447), cluster bulk sync (`pkg/cluster/sync_bulk.go:235,247`), conn sweep (`pkg/cluster/sync_conn_sweep.go:255,303`), HA reconcile (`pkg/daemon/daemon_ha.go:2304,2318`), stale reconcile (`pkg/dataplane/session_store.go:1023,1047`), plus `show`/`clear` surfaces. A mirror-key change touches ALL of them; a helper-verb addition touches only the invalidation producers (plus the new verb's own tests).
-- Delete-path callers of `DeleteBatchKnownV4/V6`: GC, cluster-stale reconcile, commit invalidation (this issue), plus ~15 test fakes pinning scoped/peer/forward-only behavior (#9364/#9714/#9752 cells). Discovery changes must keep producing `SessionEntry{Key, Value}` with a trustworthy `Value.RoutingDomain` or every scoped-delete cell regresses.
-- Cross-language surface: BPF C header (`bpf/headers/xpf_conntrack.h`), Rust mirror (`BpfSessionKey*`/`BpfSessionValue*`), Go mirror (`SessionKey{,V6}`/`SessionValue{,V6}` + `bpfSessionValue{,V6}`), control protocol (`ControlRequest`/`SessionSyncRequest` both sides, `ProtocolVersion`/`CONFIG_SNAPSHOT_PROTOCOL_VERSION`). A BPF-key change is a 3-language ABI break with pinned-map migration (cf. #5460/#4983/#9546 crossings); a new control verb is a 2-language protocol addition with version bump (cf. #7919/#8121/#9412/#9714/#9752).
-- Test suites that must stay green: `pkg/daemon` (invalidation + #6948/#4234/#4342/#4343/#6723 cells), `pkg/dataplane` + `pkg/dataplane/userspace` (mirror, scoped delete, sync wire), `pkg/conntrack`, `pkg/cluster`, `userspace-dp` session/bpf_map/server suites. Privileged cells (real BPF maps, CAP_BPF) skip on unprivileged CI (#9337) — the acceptance fixture below needs the privileged cluster.
+### 1.2 Design: widen the delete wire (chosen over standby-verb RPC)
 
-## 4. Root cause (one paragraph)
+Rationale: delete-sync journaling, replay, generation guards, and
+bulk-reconcile already ARE the cross-node channel. A separate standby verb
+RPC would duplicate journaling + promotion-race handling; the widened wire
+keeps Go as orchestrator (Q1) with one channel.
 
-Discovery and authority disagree by construction. Authority (helper `SessionTable`, HA-synced store) is keyed per routing domain; discovery (Go `ForEachV4/V6` over the BPF conntrack mirror) is keyed on the bare 5-tuple and keeps one row per tuple under `BPF_ANY` last-writer-wins. The invalidation predicate (`val.PolicyID in deletedIds`) is evaluated against the surviving row only, so when the survivor belongs to the non-deleted tenant the deleted tenant's sessions are never named, the candidate set is empty, `deleteInvalidatedSessions` returns nil, and the commit reports success with stale helper sessions still installed. #9546's value-carried domain fixes WHICH domain a selected row deletes in; it cannot surface a row the key collision already discarded.
+- Wire: append length-gated `routing_domain` u32 and expected
+  `expected_rt_flow_session_id` u64 after the forwardOnly byte in
+  `encodeDeleteV4/V6` (v4 payload 37 bytes, v6 payload 61 bytes; old decoders
+  stop after bytes they know — same length-gated discipline as the #2170
+  generation and #9752 marker). A domain delete conditionally removes the
+  forward half when that RT_FLOW id matches; once it matches, the peer derives
+  its own reverse companion. The local-only companion identity is never put
+  on the HA wire. A legacy delete without domain/id keeps bare behavior
+  (single-tenant fast path, non-policy sweeps).
+- Generation per (domain, tuple): `takeDeleteGenV4/V6` and
+  `deleteGenGuardV4/V6` keyed by scoped identity; `installTableRecvV4/V6`
+  keyed by scoped identity. Migration note: in-flight bare records from a
+  mixed-version window are treated as unknown-generation; legacy fallback is
+  permitted only for explicitly bare non-policy records, never authoritative
+  for a scoped policy delete. Implement lane pins the exact map-key migration.
+- Version floor + skew/withhold: new cluster-sync capability bit + MinProtocol
+  gate (precedent: `suppressDeleteForIncapablePeer` #9714,
+  `suppressForwardOnlyDeleteForIncapablePeer` #9752 at
+  sync_conn_write.go:208-233). For an incapable peer the domain-carrying
+  delete is WITHHELD (counter + one-shot warn + operator guidance), leaving
+  the session to idle out — the same visible-leak-over-invisible-teardown
+  trade the #9752 suppressor makes. NEVER downgrade a colliding-tuple delete
+  to bare: bare would refuse (safe under-clear, but silent-looking) or
+  mis-delete (over+under). Withhold is explicit and counted.
+- Standby apply: `deleteClusterSyncedV4/V6` with domain +
+  `expected_rt_flow_session_id` → the same helper-first, collision-aware
+  scoped delete used by §2 (no bare `GetSession` first and no ambiguous
+  probe); it deletes only when the current `(domain, tuple)` helper row has
+  that RT_FLOW identity, otherwise no-ops. Gen guard per (domain, tuple)
+  orders replay versus install; refused/unknown-domain handling mirrors the
+  existing `ImportsRefusedByHelper`/`DeletesStaleIgnored` counters.
 
-## 5. Fix options (implement lane picks one; reviewer confirms)
+### 1.3 Failover traces (A deleted, B survives — both orderings)
 
-### Option A — Helper-side policy-scoped delete verb (recommended for design review)
-- Shape: new control verb, e.g. `delete_sessions_by_policy { policy_ids[], reason }` (both families in one call or per-family verbs), executed helper-side against the authoritative per-domain `SessionTable` (and the synced-session table on standby). Go producers stop enumerating the mirror for discovery and instead (a) compute the same three id sets, (b) call the verb at the same two boundaries (pre-publication capture point for the candidate decision, post-apply for the delete — or capture-then-delete with the verb doing both phases), (c) mirror-gc the bare rows for the deleted tuples as today via the existing scoped path, (d) HA-sync the deletes as today (#2468).
-- Why it fits: the helper already owns the per-domain index, the rule-handle binding (`purge_sessions_bound_to_deleted_first_policy` precedent for id-0), the #3395 re-resolution that moves `policy_id` under Go, and the ambiguous-delete refusal (#8636) that proves it can see both tenants. Discovery moves to where the data is instead of reconstructing it from a lossy projection.
-- Costs: new 2-language control verb + protocol bump + version-skew behavior (old helper must fail closed or Go must fall back to mirror scan with a loud partial-clear error, never silent success); per-worker fan-out design (session tables are per-worker — cf. `session_counters` kick/collect at `handlers/mod.rs:452-460` and `export_all_sessions` push); lock discipline (off-lock like `sync_session` vs locked phase); HA standby semantics (verb must run on both nodes or ride the existing delete-sync channel); `policy_id` staleness window (verb must evaluate against the OLD numbering — same #6948 placement constraint, now helper-side).
-- Touches: `userspace-dp/src/server/handlers/*` (new verb + per-worker session-table scan by `policy_id`), `userspace-dp/src/protocol/control.rs` + `pkg/dataplane/userspace/protocol*.go` (request/response, version bump), `pkg/daemon/daemon_policy_invalidate*.go` (replace mirror enumeration with verb call in both producers; keep `deleteInvalidatedSessions` for mirror/HA fan-out), tests both sides + privileged two-domain fixture.
+Ordering 1 — delete before promotion. Primary helper holds A+B, mirror shows
+B. Commit deletes A's policy. READ verb names (A, tuple) only (§3). Primary:
+scoped helper delete of A + collision-aware mirror handling (§2). Go always
+queues `QueueDelete(A, tuple, expected_rt_flow_session_id)` for the captured
+match, even if the local helper reports `stale_forward`; the standby
+conditionally deletes only its matching A RT_FLOW incarnation. Failover
+promotes: B present on both nodes, A absent on both. Journal/replay: if the
+peer was disconnected, the domain+RT_FLOW-identity delete journals and replays
+on reconnect; the per-domain generation guard orders it against newer A
+installs.
 
-### Option B — Per-domain mirror enumeration (de-alias at the mirror)
-- Shape: give the mirror a domain axis so Go can enumerate per domain: either (B1) widen the BPF map KEY with `routing_domain` (new map, new ABI, migration), or (B2) keep the key bare and add a per-domain secondary index (second map keyed `(domain, 5-tuple)` → presence/policy, maintained by all four publish sites + refresh + delete + GC), or (B3) stop sharing one row by salting collisions (rejected — changes forwarding lookup identity).
-- Why it fits: keeps discovery in Go, keeps the existing predicate shape (`PolicyID` + domain loop), no new helper RPC on the commit path.
-- Costs: (B1) is the largest ABI break in the repo's history for this map — 3-language struct change, pinned-map migration with live-pin preflight refusal, size asserts in C/Rust/Go, every `ForEach`/`Get`/`Delete`/`show`/`clear`/GC/sync caller re-examined, rolling-upgrade mixed-version behavior. (B2) doubles the write fan-out on the hottest path (publish/refresh/delete/GC must keep two maps consistent under `BPF_ANY` races and partial failures) and still needs a disciplined reader (stale index entries → over-clear of valid commits). Both keep the #6948 re-stamp race (the index must be captured pre-publication too).
-- Touches (B1): `bpf/headers/xpf_conntrack.h`, `pkg/dataplane/{types,bpf_session_value,maps_session,session_store}.go`, `userspace-dp/src/afxdp/bpf_map/*`, every test pinning offsets/sizes/wire. (B2): same writers plus a new map definition, lifecycle, and consistency tests. Either is a multi-PR crossing, not a single commit.
+Ordering 2 — promotion before delete. Old standby (now primary) holds A+B as
+synced+local rows; the policy-delete config arrives via config sync. New
+primary runs the same READ verb against its helper, which MUST scan both local
+and synced tables (unified view; the synced-side predicate is
+`synced_session_contains`, sync_session.rs:261-272). Names (A, tuple) →
+deletes locally → queues `QueueDelete(A, tuple,
+expected_rt_flow_session_id)` to the new standby. Resurrect rule: promotion
+never resurrects a `(domain, tuple)` delete whose generation tombstone orders
+the install; the captured RT_FLOW id is equality-only, so a current row with a
+different id is preserved by the conditional helper delete. The generation
+tombstone is per scoped identity, same shape as the existing
+delete-ahead-of-install guard in QueueDeleteV4's contract, sync_conn_write.go:
+180-187; bulk-reconcile treats a missing (domain, tuple) on the owner as
+authoritative-absent and must neither re-push it nor delete the survivor's row
+(implement lane pins the reconcile seam; the invariant is normative here).
 
-### Option C — Go-side policy→sessions index (de-alias without touching the dataplane)
-- Shape: maintain in Go (daemon or userspace Manager) a `(policy_id, domain) → set of 5-tuples` index fed by install/delete/refresh/sync events; the invalidation producers consult the index for the deleted ids instead of scanning the mirror, then delete the named `(domain, tuple)` rows through the existing scoped path.
-- Why it fits: no ABI break, no new helper verb, no commit-path RPC; purely control-plane state.
-- Costs: the index must observe EVERY mutation that moves `policy_id` or domain — frame-driven installs (3 sites), HA peer import, #3395 re-resolution re-stamps (helper-internal, 100ms slices), GC expiry, operator clears, cluster-stale reconciles, standby promotion — or it drifts and either misses (this bug again, silently) or over-clears (drops valid commits' sessions, the #6948 inverse). The re-stamp feed alone likely needs a new helper→Go event stream (back to a protocol change, but continuous instead of on-demand). HA/failover and daemon-restart reconstruction are unsolved in this sketch. Highest silent-drift risk of the three options.
-- Touches: `pkg/daemon/*` (index lifecycle tied to apply/commit), `pkg/dataplane/userspace/*` (install/delete hooks), possibly a new event-stream leg, plus drift-detection/reconciliation tests. Recommend rejecting unless A and B both fail review.
+## 2. Mirror lifecycle (required block 2)
 
-Recommendation: take Option A into plan review. It puts the predicate where the index already exists, bounds the change to the invalidation producers + one new verb, and reuses the proven scoped-delete + HA-sync machinery for the actual removals. Option B is the principled long-term repair but is a multi-PR ABI crossing disproportionate to a commit-success lie with a narrower available fix; Option C trades a visible miss for invisible index drift.
+`list_sessions_by_policy { policy_ids[], mode: prepublish|legacy,
+before_secs?, families[], classes[] }`
+returns `matches[] { addr_family, routing_domain, tuple, reverse_key,
+policy_id, created_secs, created_ns, expected_rt_flow_session_id,
+companion_policy_id, expected_companion_rt_flow_session_id }` +
+`per_worker_errors[]` + `complete: bool`, chunked with a continuation cursor
+(§4). `created_secs` (and optional `created_ns`) is returned for audit and the
+legacy time fence; prepublish mode deliberately applies no `before_secs`
+filter. The two expected RT_FLOW ids are the canonical conditional-delete
+identities for the independently installed forward/reverse rows. They come
+from Rust `SessionEntry.session_id`; Go's node-local
+`dataplane.SessionValue.SessionID` is never used for HA identity. A zero
+forward id is an `identity_missing` integrity failure; a zero companion id is
+valid only when the forward has no reverse row. Any other missing/unknown
+required id is `identity_missing`, not `stale_capture`, and never an
+unconditional delete.
+- Go retains each match as `SessionEntryV4/V6{Key: tuple, Value: {RoutingDomain,
+  ReverseKey, PolicyID, Created}}` for counts/logging plus an identity sidecar
+  `{expected_rt_flow_session_id, expected_companion_rt_flow_session_id,
+  created_ns}`. It invokes a new `deletePolicyMatchesScoped` path from
+  `deleteInvalidatedSessions`: send an explicit domain-scoped helper delete
+  carrying both local expected row identities, collect applied/stale-forward/
+  partial-companion outcomes, then issue the domain-carrying QueueDelete for
+  every captured match (including a local stale-forward), carrying ONLY the
+  expected forward RT_FLOW id; the peer conditionally derives its reverse.
+  It MUST NOT call existing `DeleteBatchKnownV4/V6` for these matches, because
+  that API begins with a bare mirror delete. Existing DeleteBatchKnown remains
+  for non-verb paths. The policy-invalidation capture object holds matches +
+  per_worker_errors + complete; non-nil + complete + 0 matches =
+  positively-known-empty (§4).
 
-## 6. Acceptance test plan (must all land with the fix)
+- Forward rows ONLY: the scan skips `IsReverse != 0` (same rationale as the
+  Go sweep comment at daemon_policy_invalidate.go:416-419 — a reverse row
+  carries the same policy_id, so including it double-deletes, and for NAT
+  targets the translated tuple). Go expands companions using the same rules as
+  `DeleteBatchKnownV4/V6` (reviewer-verified companion expansion at
+  session_store.go:555-563), but routes every forward and companion through
+  `deletePolicyMatchesScoped`; it does not call that bare-mirror API here.
+- `policy_id 0` is NEVER returned by the generic READ (server-side exclusion):
+  the id-0 first policy stays owned by the helper `#9526` purge
+  (`purge_sessions_bound_to_deleted_first_policy`, reviewer-verified
+  `session_glue/mod.rs:680-742`), which discriminates by bound rule-handle,
+  not by sweeping the overloaded zero value (host-inbound/fabric/tunnel/
+  synced/legacy zeros + rolling-upgrade whole-table zeros,
+  daemon_policy_invalidate.go:37-66).
+- Every exact #9526 removal is nevertheless routed through the same tuple
+  coordinator and collision-safe mirror repair as §2.2; because the purge
+  currently runs on a worker with `&mut SessionTable`, it first reports
+  candidates (forward/reverse keys, domains, independent
+  `expected_rt_flow_session_id` values, and rule-handle) and returns to the
+  worker command loop. The coordinator then initiates the conditional
+  removals/probes (no worker self-deadlock); its close delta/HA peer delete
+  carries only the forward expected RT_FLOW id, while the local reverse id is
+  used only by local conditional removal. It never enumerates unrelated zero
+  carriers, while a first-policy A colliding with B preserves B on helper,
+  mirror, and standby.
 
-1. Privileged two-domain same-tuple fixture (the issue's acceptance, runs on the privileged cluster): install helper sessions for tenants A (domain 100007) and B (domain 100008) on the identical 5-tuple; delete ONLY A's policy; assert A's helper rows are gone (or the commit fails loudly) while B's rows remain; repeat across standby/failover (synced-session promotion must not resurrect A). Both families (v4 + v6). This is the RED cell: it fails on base (A survives, commit nil) and passes with the fix.
-2. Unprivileged regression at the producer level (runs on ordinary CI): fake store/helper pair modeling the collision (mirror row carries B's `PolicyID`, helper holds A+B per-domain rows); drive `armPolicyInvalidationPlan → capturePolicyInvalidationLocked → clearSessionsForPolicyChanges` and the legacy `clearSessionsForPolicyIDs` fallback; assert A named + B untouched. Mirror the existing #6948/#9364/#9546 cell style (fake socket + recording manager, e.g. `newSyncOnlyManager9146`).
-3. RED-on-revert firsthand: revert the fix (keep the tests), show the new cells FAIL; re-apply, show PASS. Record the exact commands and outputs in the implement PR.
-4. No-over-clear guards: single-tenant delete still deletes exactly; mirror-occupant-tenant delete still works; valid commit with no deletions scans nothing and reports success; modified-policy path (`policy-rematch`) and default-policy path (#4342) unchanged; id-0 first-policy behavior unchanged (#9526 helper purge still owns it).
-5. Affected suites green: `pkg/daemon`, `pkg/dataplane/...`, `pkg/conntrack`, `pkg/cluster`, `userspace-dp` session/bpf_map/server tests. No project-wide `go test ./...` mid-flight (parent runs it once after all lanes land); scoped `go test` with lane-isolated `GOCACHE`/`GOTMPDIR` under `/dev/shm`.
-6. HA/failover leg: the privileged fixture's standby/failover repetition, plus delete-sync propagation assertions (#2468 channel) so a cleared session cannot resurrect on promotion.
+### 2.2 Who mutates the bare row (helper owns it for verb-driven deletes)
 
-## 7. Risks and edge cases (each must be closed by the implement lane)
+- Existing Go `BatchDeleteSessionsScoped` (manager_sessions.go:560-566) deletes
+  the mirror row BARE before/alongside helper IPC and is therefore NOT the
+  policy-invalidation path after this fix. Its current contract remains for
+  non-policy GC/operator/stale callers. The new `deletePolicyMatchesScoped`
+  path sends the existing domain-present `sync_session` delete shape
+  helper-first, then uses the applied result for the HA domain delete; it
+  never issues a bare bpfShim delete. Precedent: #9714
+  `deleteAppliedMirrorRows` (manager_sessions.go:613-639) makes mirror
+  mutation follow helper-applied truth.
 
-- Silent-skew sensitivity (the core hazard): any fallback (old helper, verb error, partial enumeration) must surface a #5578 error and suppress the success line — never return nil with candidates unvisited. The `c.empty() → nil` early return must become "empty AND positively known empty", not "empty because discovery failed".
-- Valid-commit breakage: the new discovery must not widen the candidate set beyond the deleted/modified/default id sets under OLD numbering (#6948 placement). Over-clear drops live permitted sessions — the inverse defect. The admitted-after-activation guard (legacy path) and pre-publication capture (commit path) semantics must be preserved or re-expressed helper-side.
-- Old-numbering window: runtime policy ids are positional; delete renumbers survivors. Whatever evaluates the predicate (helper verb or Go index) must evaluate it against the pre-publish numbering. For Option A this means the verb needs the OLD id set + a capture-before-publish call, or the helper must resolve ids from a pinned pre-publish rule table.
-- Reverse/DNAT companions: discovery names FORWARD rows only; `DeleteBatchKnownV4/V6` expands to reverse + DNAT/NAT64 companions. A helper-side verb must preserve companion expansion (or return forward rows for Go to expand as today). Reverse rows carry the same `policy_id` — including them double-deletes and, for NAT, targets the translated tuple.
-- id-0 exclusion: `policy_id 0` stays excluded from the Go id sets (overloaded: first policy + host-inbound/fabric/tunnel/synced/legacy zeros). The helper-side verb must either also exclude 0 or take over the #9526 first-policy purge deliberately with its discriminator (rule counter-handle binding) — not by sweeping `policy_id == 0`.
-- Standby/no-packet population: M2 next-packet re-derivation does NOT repair this class (no packet on standby; explicitly M2-declined populations). The fix must work with zero traffic on the standby and survive failover promotion.
-- Version skew: new verb + old helper (rolling upgrade) must fail closed with a loud commit error or a well-defined fallback — never silent success. Protocol bump per repo precedent (bump on the merits, pin the digest cell).
-- Two producers, two families: capture + legacy, v4 + v6. Fixing one producer or one family moves the defect, it does not close it. The #6948 capture's "non-nil empty capture is authoritative" invariant must survive.
-- Sibling scope discipline: #10513 and #10528 are separate roots in the same family. The implement lane must not absorb them; cross-link and stop at the discovery boundary.
+Rule (normative): for verb-driven deletes the HELPER owns mirror mutation,
+because only the helper holds the survivor's value (Go cannot re-publish B
+after a bare row delete — it has no B value once the row is gone).
 
-## 8. Open questions for plan review (parent lanes)
+- Shared tuple mutation sequence (load-bearing): the helper owns a bounded,
+  sharded gate keyed by bare `(addr_family, tuple)`. Every helper path that
+  can install, publish, refresh, or delete the mirror (local admission, HA
+  import, refresh, #9526 terminal purge, and this policy delete) must acquire
+  the gate before publishing; ordinary workers wait/retry rather than writing
+  around it. A delete acquires a sequence token/lease for the tuple, then
+  broadcasts `conditional_probe(token)` commands. Workers validate the token
+  and mutate their own single-threaded `SessionTable` without reacquiring the
+  gate; they return bounded acknowledgements. If the captured forward/
+  companion ids still match, the coordinator broadcasts
+  `conditional_remove(token)` commands, collects applied acknowledgements,
+  broadcasts a second bounded survivor probe, chooses a deterministic live
+  survivor (if several), repairs the BPF row while the token remains held,
+  then releases the gate. This uses worker command queues, not nonexistent
+  cross-thread table locks. The READ scan never holds `ServerState`; the gate
+  spans only bounded per-match commands. On timeout, the coordinator marks the
+  token aborting, drains bounded worker acknowledgements, repairs any applied
+  half if possible, and releases the gate only after the token is quiescent;
+  the operation returns a visible failure and never falls back to an unlocked
+  repair.
+- The domain-present helper delete path used by `deletePolicyMatchesScoped`
+  is collision-aware and identity-conditional. It probes each independently
+  installed half under the sequence token. A missing/different forward
+  `expected_rt_flow_session_id` is a `stale_forward` no-op; a matching
+  forward is removed. An absent expected companion is an idempotent no-op; a
+  matching `expected_companion_rt_flow_session_id` is removed; a different
+  companion is preserved and reported as `partial_companion`. Any applied
+  half triggers the survivor probe across every worker and mirror repair.
+  Go always queues the forward-id conditional HA delete; the peer derives its
+  own reverse companion after that forward matches. If B exists, re-publish its
+  row (`publish_bpf_conntrack_entry`, `BPF_ANY` recreate) with its value
+  (domain, policy_id, reverse key); else delete the bare row. Reverse
+  companion follows the forward's domain (existing #9146/#9364 scoping).
+- Refresh/reconcile writes remain `BPF_EXIST` and therefore cannot recreate a
+  missing row; only the tuple sequence's validated survivor repair may use
+  `BPF_ANY`. Go MUST NOT issue a bare `bpfShim` delete or publish during the
+  sequence (it would destroy/race B's row). The #9526 purge uses this same
+  sequence without sweeping unrelated zero carriers.
 
-1. Option A verb shape: one `delete_sessions_by_policy` verb that both discovers and deletes helper-side, or a read verb (`list_sessions_by_policy` → Go decides → existing scoped deletes)? The former is fewer round trips; the latter keeps Go as the delete orchestrator (HA-sync, mirror cleanup, logging) and is easier to make RED-testable at the producer level.
-2. Where does the OLD-numbering capture live under Option A — Go passes the OLD id set computed at arm time (current `deleted`/`modified`/`deflt` sets), or the helper pins the pre-publish rule table? Who owns the #6948 placement invariant?
-3. Per-worker fan-out: session tables are per-worker. Is the verb a broadcast + collect (cf. `session_counters`, `export_all_sessions`), or does it run against a coordinator-visible aggregate? What are the bounds (worst-case session count × workers) on the commit path?
-4. Failure semantics: verb timeout/partial-worker-failure → commit error (fail closed) with what operator guidance? Is there any safe fallback to the mirror scan, or does fallback reintroduce the silent miss?
-5. Does the verb need to cover the synced-session table on the standby explicitly, or does the existing #2468 delete-sync propagation suffice? The acceptance fixture's failover leg decides this empirically.
-6. Long-term: is Option B1 (domain-axis BPF key) the intended end state, with Option A as the bounded repair? If so, should this plan file the B1 crossing as a follow-up issue now so the mirror's lossiness is tracked as tech debt rather than rediscovered?
+### 2.3 B-visibility-preservation proof (asserted by cells in §5)
 
-## 9. Implement-lane execution sketch (after plan approval)
+After deleting A on a colliding tuple, the tuple sequence has quiesced every
+worker publisher for the whole repair: (1) helper holds B (scoped delete named
+A only; B never matched); (2) the mirror row EXISTS and carries B's value
+(re-published by the collision-aware delete; if the row already carried B, the
+helper leaves-or-rewrites B — invariant: a tuple with any live session has a
+row carrying a LIVE tenant's value); (3) `show`/GC/sweep/bulk/stale consumers
+(`ForEachV4/V6` → `BatchIterateSessions`) enumerate B with B's PolicyID +
+RoutingDomain; (4) no phantom A targeting (A's value is gone from mirror and
+helper). If instead the row carried A's value at delete time (A was last
+publisher), the same sequence replaces it with B's republish, never leaves
+stale A (which would linger to GC expiry and phantom-retarget future sweeps).
 
-1. Work in the implement worktree/branch only; lane-isolated `GOCACHE`/`GOTMPDIR` under `/dev/shm`; no cluster/incus commands except the privileged fixture runs the harness provides; no merges; no reviewer dispatch (parent owns it).
-2. Write the failing tests first (§6.1–6.2), prove RED on base, then implement the chosen option.
-3. Keep the change minimal: both producers, both families, same three id sets, same delete/HA-sync machinery; no refactors, no adjacent cleanups.
-4. Prove RED-on-revert firsthand (§6.3), run the affected suites (§6.5), rebase on `origin/master`, open the PR with `Closes #10512` and a Why/What/Validation body, report + STOP.
+## 3. Predicate + timing (required block 3)
 
-## 10. STEP-0 deliverable checklist
+- Frozen value: the verb scans `SessionMetadata.policy_id`
+  (userspace-dp/src/session/entry.rs:241 — stamped at install). It is frozen
+  because refresh takes `&SessionTable` (immutable, bpf_map/mod.rs:1035-1039)
+  and re-stamps ONLY the BPF map value (:1091-1094) via
+  `reresolve_session_policy_id` (policy.rs:1801-1819: bound+deleted →
+  `DEFAULT_POLICY_SENTINEL_ID` (u32::MAX), unbound → frozen stamped). The
+  bound handle (entry.rs:308) is IGNORED for matching (it exists for the
+  #9526 discriminator and hit-count stability). Synced entries carry the wire
+  scalar (entry.rs:303-305, frozen-at-sync); known residual: after an origin
+  reorder the scalar may be stale (documented P2 #3322 follow-up) — the
+  standby scan uses the same scalar, consistent with the origin's OLD
+  numbering at sync time; noted, not solved here.
+- Go OLD ids: `deletedPolicyRuntimeIDs` (daemon_policy_invalidate.go:93-118,
+  id-0 excluded), `changedPolicyRuntimeIDs` (:631-651 + reviewer-verified
+  remainder), `defaultPolicyChangeRuntimeIDs` (reviewer-verified :295-307)
+  are computed at arm from (oldCfg, newCfg) exactly as today. Prepublish
+  capture sends `mode=prepublish` with no `before_secs`: the helper scans every
+  frozen OLD-id row encountered by each bounded worker cursor and returns
+  `created_secs`/identity fields for audit. It MUST NOT use
+  `d.policyActivationSecs` as a cutoff, because that value is stamped before a
+  potentially long READ and would exclude OLD-policy admissions made while the
+  READ runs.
+- Legacy post-apply enumeration sends `mode=legacy` and
+  `before_secs = d.policyActivationSecs`, captured by
+  `daemonMonotonicSeconds` immediately before apply (`daemon.go:658-685`,
+  `daemon_apply.go:515`). This is CLOCK_MONOTONIC seconds, matching the
+  helper's `monotonic_nanos()/1_000_000_000` (`bpf_map/mod.rs:860`), not wall
+  time; only this post-publish legacy mode applies the `created_secs` fence.
+- Placement (two RPCs; #6948 preserved): (a) pre-publish READ RPC inside
+  `capturePolicyInvalidationLocked`
+  (daemon_policy_invalidate_capture.go:149-246, called at the last statement
+  before `rt.ApplyConfig` from daemon_apply_dataplane.go:171) — a READ, so it
+  cannot re-admit (capture.go:53-59); every session later deleted was OBSERVED
+- Post-publish admission exclusion applies to legacy mode: it filters
+  `created_secs <= before_secs` (helper-side analogue of the legacy
+  `admittedAfterActivation := created > activationSecs`,
+  daemon_policy_invalidate.go:444-447 — strictly-greater, ambiguous still
+  cleared = over fail-safe, same ≤1s granularity residual). Prepublish mode
+  deliberately has no stale `activationSecs` cutoff; rows admitted while its
+  worker cursor runs are the acknowledged capture→publish residual, while
+  exact RT_FLOW identities prevent later tuple reuse from being removed.
+- Exact capture identity closes the remaining TOCTOU: local post-apply delete
+  carries `expected_rt_flow_session_id` and independent
+  `expected_companion_rt_flow_session_id`; worker commands condition each half
+  separately while the tuple gate is held. A matching forward is removed; a
+  missing/different forward is a `stale_forward` no-op. A matching companion
+  is removed; an absent old companion is an idempotent no-op, while a
+  different companion is preserved and reported as `partial_companion` (the
+  safe forward removal still proceeds). `created_ns` remains a timestamp/fence
+  value, never the identity. The HA wire carries ONLY the forward
+  `expected_rt_flow_session_id`: once the peer forward matches, standby derives
+  and removes its peer-local reverse (whose id is intentionally different).
+  Local stale/partial outcomes never suppress that conditional HA delete.
+  Thus capture→expiry→same-tuple replacement→delete cannot remove the
+  replacement locally or on the peer.
+- `policyInvalidationCapture` authoritative-empty invariant kept
+  (capture.go:103-112 — non-nil + complete + empty means "ran, nothing to
+  invalidate", distinct from nil "no capture taken"): the capture object holds
+  verb matches + `complete`; consumed once
+  (daemon_policy_invalidate.go:361-369).
+- Legacy path (capture nil: boot, non-commit applies): SAME verb, with id sets
+  from the legacy derivation and `before_secs = d.policyActivationSecs` (the
+  existing pre-apply monotonic fence, never `now`; zero retains the existing
+  no-fence behavior). Policy invalidations NEVER enumerate the mirror after
+  this fix — the mirror scan remains ONLY for non-policy sweeps (GC/stale/show).
+  Assumption (stated): userspace dataplane. If a legacy caller has no helper
+  access, it fails closed with a #5578 error, never a silent mirror scan.
+  Implement lane proves or narrows this assumption against the kernel-BPF path.
+- Capture→publish residual: prepublish mode has no snapshot/time fence. A worker
+  can admit an OLD-policy session after its cursor passes; it is not in
+  `matches` and can forward until idle timeout. The bounded residual lasts at
+  most the remaining READ deadline (30s overall) plus the actual `ApplyConfig`
+  publish latency, not merely the call itself. This widened but explicit
+  window is the security tradeoff for capturing admissions made during the
+  scan; exact RT_FLOW identities still prevent later tuple reuse over-clear.
 
-- [x] Issue read (`gh issue view 10512 --comments` + JSON); OPEN; mechanism + acceptance + siblings recorded.
-- [x] Live on base confirmed: 0 merged/open PRs for #10512; `git log --grep` clean; source predicates read at HEAD (PolicyID-only in both producers; bare BPF key; `BPF_ANY` overwrite both families; empty→nil success).
-- [x] Source map from SOURCE (§2) with file:line + symbols; no inferred paths.
-- [x] Blast radius quantified (§3); prior art distinguished (§2.4).
-- [x] GATE recorded: DESIGN needed; no production code touched in this commit.
-- [x] DRAFT v1 plan staged, committed via `git add -f docs/pr/10512-commit-invalidation/plan.md`, and pushed; report + STOP.
+## 4. Fan-out bounds + failure mapping (required block 4)
+
+- Bounds (Q3 closed): let `W` be configured live workers, hard-capped at 128
+  worker ids (the existing `MAX_NAT_HOLDER_WORKERS=128` ceiling,
+  userspace-dp/src/afxdp/bpf_map/steering_owners.rs:25-27). Each worker
+  scans only its owner-local table: `W * DEFAULT_MAX_SESSIONS` rows = 64
+  internal 2048-row chunks/worker. The shared synced authority is scanned once
+  by the helper coordinator, not once per worker: its
+  `2 * W * DEFAULT_MAX_SESSIONS` entry cap is `128 * W` internal chunks. The
+  dedupe key is `(addr_family, routing_domain, tuple,
+  expected_rt_flow_session_id)`; reverse rows are not returned. Thus the
+  global internal bound is `192 * W` chunks, at most 24576 chunks for W=128,
+  with no hidden W² fan-out.
+- Wire paging is separate from scan chunks: a server-side capture handle/stream
+  emits continuation pages of at most 65536 matches and 48 MiB encoded bytes
+  (below the 64MB `MAX_CONTROL_REQUEST_BYTES`, protocol/control.rs:311). Go
+  retains at most `MAX_CAPTURE_MATCHES=262144` candidates (four pages) across
+  both families/classes; aggregate overflow returns `complete=false` rather
+  than allocating unbounded memory. Every continuation uses the same 30s
+  overall deadline from kick; the helper enforces a 100ms internal chunk
+  budget. Exceeding the 192W chunk bound, 65536-match/48MiB page bound,
+  262144-match capture bound, or 30s deadline returns `complete=false` with a
+  named `per_worker_error`, `capture_limit`, or timeout, never an authoritative
+  empty. The commit
+  holds `d.applySem` during READ (daemon_policy_invalidate.go:146-147), so the
+  30s maximum is a deliberate apply-window/security tradeoff, not an
+  unbounded continuation loop.
+  Control-socket verb (the session socket serves EXACTLY
+  ping/sync_session/session-update_ha_state; anything else is refused fast,
+  handlers/mod.rs:233-249). Locked phase = validate + broadcast kick +
+  capture wait handle (cf. `session_counters::kick`, handlers/mod.rs:452-460;
+  export kicks :439-450); unlock; lock-free collect with timeout (cf.
+  :513-517); status attach after (:473-481). The READ is diagnostic-shaped
+  (like `session_counters`) despite its commit-path caller.
+- Failure → #5578 mapping (normative table):
+
+  | Outcome | Meaning | Commit result |
+  |---|---|---|
+  | complete=true, 0 matches | positively-known-empty | nil; success line allowed |
+  | complete=true, N matches | full candidate set | delete N via §1+§2; join per-match errors |
+  | complete=true, N matches with local `stale_forward` | captured forward
+  already expired/replaced locally | local no-op is success; conditional HA
+  delete still sent, and a peer copy with the captured id may be removed |
+  | `partial_companion` (forward matched, companion id differed) | safe forward
+  removed, replacement companion preserved | `clearErr` joined (visible
+  partial outcome); conditional HA forward delete still sent |
+  | `identity_missing` / complete=false / per_worker_errors / timeout /
+  transport error / unknown-verb (old helper, handlers/mod.rs:468-471) |
+  discovery or protocol integrity NOT positively complete | `clearErr` joined
+  into commit (mark-and-continue: config stays committed+active, peer still
+  syncs, operator sees failure, re-commit converges — daemon_apply_commit.go:
+  310-351); success line SUPPRESSED; safe fan-out STILL attempted for
+  matches-in-hand; NEVER use an unconditional delete |
+- NO mirror fallback (Q4 closed): unknown-verb/partial NEVER degrades to a
+  PolicyID-only mirror scan — that reintroduces the silent miss. Old helper +
+  new verb maps to `clearErr`, never nil.
+- Version floor: bump 30→31 on the merits (verified current floor:
+  `ProtocolVersion = 30`, protocol.go:335; mirror
+  `CONFIG_SNAPSHOT_PROTOCOL_VERSION = 30`, control.rs:197; exact-equality
+  gates refuse cross-version snapshots outright, protocol.go:10-15). Pin the
+  digest cell (`snapshot_shape_version_8892_test`). The cluster-sync delete
+  widening (§1) needs its own MinProtocol gate + withhold rules. Rolling
+  upgrade: new daemon + old helper → commit error with operator guidance
+  until the helper upgrades (fail closed, visible).
+- Operator guidance (draft; implement lane finalizes wording + docs):
+  `policy session invalidation: helper session query incomplete or
+  unsupported (need helper protocol >= 31); some sessions of <changed
+  policies> may keep forwarding under stale authorization; complete the helper
+  upgrade and re-commit (a no-op change suffices), or clear the affected
+  policies' sessions explicitly.`
+- Retry/idempotency: prepublish READ is idempotent with no time cutoff;
+  legacy retries reuse the SAME `before_secs` to preserve its capture fence.
+  Deletes are idempotent by `(domain, tuple,
+  expected_rt_flow_session_id[, expected_companion_rt_flow_session_id])` on
+  the local helper; an absent/different incarnation is a conditional no-op,
+  while a matching incarnation is removed once. The peer uses only the
+  forward RT_FLOW identity and derives its local reverse, so retries converge
+  without a bare delete (per-key NotFound contract owned by #10528).
+
+## 5. Tests (required block 5)
+
+Privileged collision cells (all THREE classes × both families × both
+producers + failover; each states its failing defect on base: A survives,
+commit nil, via the PolicyID-only predicates at
+daemon_policy_invalidate.go:449-477 + capture.go:210-237 vs survivor B id →
+`c.empty()→nil` at daemon_policy_invalidate.go:529-532):
+Matrix rule: every class/family combination runs once through the capture
+producer and once through the legacy producer. T1–T4 name the deleted-policy
+cells explicitly; T5–T7 repeat each listed family/class assertion in both
+producer modes rather than relying on the deleted-policy rows as proxies.
+
+- T1 deleted/v4/capture, T2 deleted/v6/capture, T3 deleted/v4/legacy,
+  T4 deleted/v6/legacy: install A(100007)+B(100008) same tuple → commit
+  deleting A's policy only → A gone (helper + mirror + standby), B intact
+  (helper + mirror + standby), commit error nil iff discovery complete.
+- T5 modified/v4+v6/capture+legacy: same collision, A's policy
+  match/action changed with `policy-rematch` set → A's sessions reaped, B
+  untouched. (Same shadow: all three classes share the predicate via the
+  three-way switch at capture.go:214-220 and the joined clears at
+  daemon_policy_invalidate.go:360-379.)
+- T6 modified scheduler-flip (#4343)/v4+v6/capture+legacy: A's scheduler
+  active→inactive → same assertions.
+- T7 default/v4+v6/capture+legacy (#4342, `DefaultPolicySentinelID` =
+  u32::MAX): default permit→deny with colliding default-permit sessions →
+  same assertions.
+- T8 failover both orderings (§1.3) for deleted/v4 + v6 spot: delete-before-
+  promotion AND promotion-before-delete; assert no A resurrection, no B loss.
+
+Unprivileged verb-coherent cells (ordinary CI): fake helper speaking
+`list_sessions_by_policy` (per-domain table, frozen ids, prepublish no-cutoff
+mode, legacy `Created <= before_secs` fence, RT_FLOW identity checks, chunking,
+error injection) + recording Go manager; drive arm→READ→clear + legacy; assert
+A named/B untouched. Genuine RED-on-revert: revert = verb disabled
+(unknown-verb → clearErr, no success line) or discovery pointed back at the
+mirror scan (A survives, commit nil) — RED; fix on — PASS. The verb-mock RED
+leg MUST exercise the old discovery and the replacement-identity race, not just
+return A from an otherwise unchanged mock.
+
+Guard cells: B-preservation (§2.3 proof items 1-4); id-0-collision
+(first-policy A delete selected by its bound rule-handle, colliding zero-carrier
+B remains on helper + BPF mirror + standby while unrelated zeros survive, and
+#9526 purge still owns only A); companion/NAT (SNAT/DNAT/NAT64 colliding tuple
+→ A's independently identified forward/reverse companions removed, B's intact,
+no translated-tuple mistarget, changed companion preserved as
+`partial_companion`); version-skew fail-closed (unknown-verb → clearErr, no
+success line, no fallback); partial-worker-failure (per_worker_errors → joined
+error + matches-in-hand fan-out attempted); standby-refusal (bare delete never
+sent for a colliding tuple; incapable-peer withhold counter increments);
+capture→publish residual pin (admission after a worker cursor survives to idle);
+capture→replacement→delete (A captured, A expires, same tuple installs C,
+delayed delete carries A's forward RT_FLOW id and leaves C + its mirror/standby
+copies intact).
+
+Process: tests first, RED on base where the defect exists (T1–T8 + revert
+legs), then implement; record exact `go test`/`cargo test` invocations with
+lane-isolated caches in the implement PR; affected suites green per §9.
+
+## 6. STEP-0 verification (condensed; v1 §1 in history)
+
+Issue OPEN; no merged/open PR or commit for #10512 at base; live on HEAD by
+source: PolicyID-only predicates in BOTH producers
+(daemon_policy_invalidate.go:449-477, capture.go:210-237) over the bare-keyed
+BPF mirror (`SessionKey` types.go:12-20/v6; BPF key constructors
+bpf_map/mod.rs:547-583; `BPF_ANY` last-writer-wins both families,
+publish_conntrack.rs:138-145/390-397); empty→nil success
+(daemon_policy_invalidate.go:529-532); per-domain helper authority
+(session/key.rs:66-157); value-carried domain cannot de-alias
+(docs/log/9546.md:28-30); no policy-enumeration helper verb in dispatch
+(handlers/mod.rs:262-472). Siblings #10513/#10528 are distinct roots —
+out of scope.
+
+## 7. Source map (v1 §2 + v2 pins)
+
+Invalidation: `pkg/daemon/daemon_policy_invalidate.go` (id sets :93-118 +
+:631-651, clears :154-167/:201-215/:272-284, core :406-507, delete site
+:529-595, join :360-379), `daemon_policy_invalidate_capture.go` (:124-126
+arm, :149-246 capture, :103-112 authoritative-empty), arm sites
+`daemon_apply_commit.go:284,663,949`, capture point
+`daemon_apply_dataplane.go:171`, #5578 join `daemon_apply_commit.go:310-351`.
+Mirror: `pkg/dataplane/session_store.go` (ForEach :221-233, scoped keys,
+`DeleteBatchKnown`, `DeleteWithCompanionsV4` :888-899,
+`deleteAppliedMirrorRows` precedent via userspace manager),
+`pkg/dataplane/maps_session.go` iterators, `types.go` keys/values,
+`bpf_session_value.go` domain slot; Rust `bpf_map/mod.rs` (keys :547-583,
+refresh :1035-1100, conntrack delete :913-939, dispatch :200-260/:262-472),
+`publish_conntrack.rs` (publishes + row-domain stamp :154-176),
+`session/key.rs` + `session/entry.rs:241,308` + `session/mod.rs`
+(bounds/ownership) + `policy.rs:1801-1819` (re-resolve) + `session_glue`
+terminal delete (reviewer-verified collision work site).
+HA: `pkg/cluster/sync_conn_write.go:194-233` (bare QueueDelete + suppressor
+precedents), `sync_protocol.go:479-523` (bare delete encoding),
+`sync_conn_gen.go:1203-1227` (bare standby apply + bare recv-identity),
+`sync_session.rs:249-323` (probe + #8636 refusal), `protocol.go:335` /
+`control.rs:197,311` (v30 floor, 64MB cap).
+Tests: existing contract cells `daemon_policy_invalidate_test.go`,
+`policy_reused_id_capture_6948_test.go`,
+`policy_reused_id_overclear_6948_test.go`, `daemon_policy_modified_4234_test.go`,
+`daemon_policy_default_4342_test.go`, `policy_rematch_shipped_6723_test.go`,
+`batch_delete_domain_9364_test.go`, `batch_delete_mirror_domain_9546_test.go`,
+`sync_delete_domain_9146_test.go`.
+
+## 8. Blast radius (v1 §3 corrected)
+
+3 arm sites, 1 capture site, 3 clears + shared core + shared delete site, 2
+producers × 2 families (both must change together). Mirror consumers sharing
+the row: GC (`pkg/conntrack/gc.go`), bulk (`pkg/cluster/sync_bulk.go`
+forEach — reviewer 1-line drift noted vs v1's 235,247), conn sweep
+(`sync_conn_sweep.go`), HA reconcile (`daemon_ha.go`), stale reconcile
+(`session_store.go`), plus show/clear surfaces. CORRECTIONS to v1: (a)
+current protocol floor is v30, not "v16+" (protocol.go:335,
+control.rs:197); (b) the helper verb touches producers + verb + HA wire (§1)
++ mirror-delete path (§2), not "producers only"; (c) discovery output keeps
+producing `SessionEntry` with trustworthy `RoutingDomain` (verb matches
+carry it) so the #9364/#9714/#9752 scoped-delete cells stay meaningful.
+Suites that must stay green: `pkg/daemon`, `pkg/dataplane/...`,
+`pkg/conntrack`, `pkg/cluster`, `userspace-dp` session/bpf_map/server.
+Privileged cells skip without CAP_BPF (#9337); T1–T8 need the privileged
+cluster.
+
+## 9. Root cause (unchanged from v1)
+
+Discovery and authority disagree by construction. Authority (helper
+`SessionTable`, HA-synced store) is keyed per routing domain; discovery (Go
+`ForEachV4/V6` over the BPF conntrack mirror) is keyed on the bare 5-tuple
+and keeps one row per tuple under `BPF_ANY` last-writer-wins. The
+invalidation predicate (`val.PolicyID in deletedIds`) is evaluated against
+the surviving row only, so when the survivor belongs to the non-deleted
+tenant the deleted tenant's sessions are never named, the candidate set is
+empty, `deleteInvalidatedSessions` returns nil, and the commit reports
+success with stale helper sessions still installed. #9546's value-carried
+domain fixes WHICH domain a selected row deletes in; it cannot surface a row
+the key collision already discarded.
+
+## 10. Fix options (decision recorded)
+
+Option A (CHOSEN, READ-verb shape per Q1): `list_sessions_by_policy` +
+Go-orchestrated scoped deletes (§1–§4). Puts the predicate where the index
+exists; bounds the change to producers + one verb + HA wire widening +
+collision-aware mirror delete; reuses scoped-delete + #5578 machinery.
+Option B (per-domain mirror: B1 key widening / B2 secondary index):
+rejected for this fix — multi-PR 3-language ABI crossing (B1) or doubled
+hot-path write fan-out with consistency hazards (B2); B1 as long-term
+end-state is a follow-up tech-debt FILING, not an assumption — it needs a
+shim-domain feasibility proof first (the mirror is shim-probed; the shim
+would have to resolve config-derived FNV domains at probe time). Implement
+lane files that issue. Option C (Go-side index): rejected — silent drift
+across every mutation source (frame installs, HA import, #3395 re-stamps,
+GC, clears, promotion, restart) trades a visible miss for invisible index
+rot.
+
+## 11. Risks (v1 §7, each now pointing at its closer)
+
+Silent-skew → §4 mapping table + positively-known-empty rule. Valid-commit
+over-clear → §3 frozen ids + mode-specific fence + RT_FLOW identity guards.
+Old-numbering window → §3 placement + explicitly widened bounded residual.
+Companions → §2.1 forward-only + independent local identities + peer forward
+identity derivation. id-0 → §2.1 selective #9526 coordinator repair and B
+preservation. Standby/no-packet → §1.3 traces + §5 T8. Version skew → §4
+floor + withhold + guidance. Two-producer/two-family → §3 legacy rule + §5
+T1–T4. Siblings → still out of scope (#10513, #10528).
+
+## 12. Implement-lane execution sketch (after plan approval)
+
+Lane-isolated caches under `/dev/shm`; assigned worktree/branch only; no
+merges, no reviewer dispatch (parent owns), and no cluster/incus commands.
+Tests first (§5), RED on base, then implement §§1–4.
+Minimal diff: both producers, both families, same three id sets, same
+delete/HA-sync machinery shape. RED-on-revert firsthand, affected suites
+(§8), rebase on `origin/master`, PR with `Closes #10512` + Why/What/
+Validation body, report + STOP.
+
+## 13. Deliverable checklist
+
+- [x] Round-1 fold: both reviewer reports read in full; findings mapped
+  (A F1→§2, F2→§1, F3→§3, F4→§3, F5→§4, F6→§5, F7→§2+§3, F8→§4, F9→§4,
+  F10→§8, F11→§10; B F1→§1, F2→§2, F3→§3, F4→§3, F5→§4, F6→§5, F7→§0).
+- [x] Parent closures Q1/Q2/Q3/Q4/Q5 recorded as decided (§0); Q6 filed as
+  follow-up; boundary honored (HA/standby in scope; no GC-will-heal claim).
+- [x] Required blocks present: (1) HA §1 with wire + traces, (2) mirror §2
+  with return shape + rule + proof, (3) predicate+timing §3, (4) bounds+
+  failure §4, (5) tests §5 (3 classes × 2 families × 2 producers + guards).
+- [x] No production code touched; plan-only diff.
+- [x] DRAFT v2 plan force-added and committed; branch publication handled
+  outside this document.
