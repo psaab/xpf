@@ -1,6 +1,6 @@
-# DRAFT v2 — Fix the 183-red descriptor-enforcement baseline on the fixture-MAC gate (#10504)
+# DRAFT v3 — Fix the 183-red descriptor-enforcement baseline on the fixture-MAC gate (#10504)
 
-- Status: DRAFT v2 (plan only; no production code, no test changes in this lane).
+- Status: DRAFT v3 (plan only; no production code, no test changes in this lane).
 - Base: `7dcdd7383` (`sessions: share protocol filter contract across REST/gRPC/CLI (#10486)`), branch `fix/10504-fixture-mac`.
 - Pinned research base: `b71c52d6` (issue body; our HEAD is newer — see STEP-0 drift note).
 - Date: 2026-09-22.
@@ -73,7 +73,7 @@ RUN (this lane, HEAD `7dcdd7383`, isolated `GOCACHE=/dev/shm/Eng10504/gocache`,
   `structs_6937_test.go:95: CompileResult (32 fields, 21 types) flags; it is the
   just-UNDER calibration point for a floor of 20`. Make gate is blocked before Rust.
 - Static census and component review (RUN): `poll_descriptor/mod.rs:276-289`,
-  `forwarding/fabric.rs:198-238`, `test_fixtures.rs:674-745,951-1021`,
+  `forwarding/fabric.rs:198-238`, `test_fixtures.rs:674-822,951-1021`,
   `tests_support.rs` frame builders, revocation/authority/fragment/embedded drivers.
 
 CITED (not re-run in this lane; retained as causality and provenance):
@@ -191,16 +191,23 @@ correct; production AF_XDP ingress always carries a configured MAC).
   fixtures carry production-plausible distinct MACs, frames address the arrival.
 - M2/M3 (builder parameterization + per-test repair): add a dst-MAC parameter to
   `build_txn_tcp_syn_frame_v4`, `build_txn_tcp_frame_v6`,
-  `build_icmp_echo_frame_v4`, `build_icmp_echo_frame_v6`,
-  `eth_ipv4_frag_frame`, and `build_policy_deny_tcp_syn_frame` (and thin
-  wrappers where the call-site count favors it). The
-  `build_txn_tcp_syn_frame_v6` wrapper must carry the parameter through its
-  `build_txn_tcp_frame_v6` call. Migrate the exact per-site checklist: txn-v4
-  104/18, txn-v6 7 hits/2 (one definition plus wrapper and external uses),
-  ICMP-v4 41/13, ICMP-v6 7 hits/3, fragment eth 9/2 plus transit 13/3, and
-  deny-SYN 13/6. The deny-SYN sites are M2 arrivals, not a generic default:
-  `tests_support.rs:715-778`, `tests_nat64_tunnel.rs:898,975`, and the
-  `tests_embedded_poll_filter.rs` LAN-bound sites must pass the LAN MAC.
+  `build_txn_tcp_syn_frame_v6`, `build_icmp_echo_frame_v4`,
+  `build_icmp_echo_frame_v6`, `eth_ipv4_frag_frame`, and
+  `build_policy_deny_tcp_syn_frame` (and thin wrappers where the call-site count
+  favors it). The v6 SYN wrapper must carry the parameter through its
+  `build_txn_tcp_frame_v6` call. Migrate the exact raw-hit checklist:
+  txn-v4 104/18; v6 low-level 7/2 plus SYN wrapper 18/6; ICMP-v4 descriptor
+  builder 24/7 plus the separate `frame/` pure-frame builder 17/6 (no-touch);
+  ICMP-v6 7/3; fragment eth 9/2 plus transit wrapper 13/3; and deny-SYN 13/6.
+  The combined ICMP-v4 41/13 regex is a census across both modules, not a
+  descriptor migration denominator. The deny-SYN sites are M2 arrivals, not a
+  generic default: `tests_support.rs:715-778`, `tests_nat64_tunnel.rs:898,975`,
+  `tests_embedded_poll_filter.rs` LAN-bound sites including `:3149` (VLAN
+  special arrival; pass the logical-unit MAC), `tests_gre_local_delivery.rs:643`,
+  and `poll_descriptor/filter_revalidation_7212_tests.rs:348`. The
+  `tests_filter_revocation_7212.rs:212` occurrence is a control interaction:
+  pass the new argument mechanically if the signature requires it, but preserve
+  its WAN-MAC-on-LAN shape under the #10554 exemption; it is not an M-MAC repair.
   Each interface keeps its distinct production-plausible MAC (LAN
   `02:bf:72:01:00:01`, WAN `02:bf:72:00:80:08`, DMZ `02:bf:72:02:00:01`);
   reusing one MAC across rows is forbidden (it would mask cross-interface bugs
@@ -210,9 +217,10 @@ correct; production AF_XDP ingress always carries a configured MAC).
   `local_mac` or parent egress MAC per the `fabric.rs:228-232` fallback order —
   verify against `fabric_admit_snapshot_9604`), foreign/DMZ arrivals (dst = DMZ
   MAC). The `ifindex==0` no-identity cell (§11 Q1) cannot pass any MAC gate by
-  construction and gets re-scoped, not patched. The duplicate
-  `frame/tests_support.rs` ICMP builder is pure-frame/no-descriptor and is
-  explicitly no-touch; B9 must verify it is not double-counted.
+  construction and gets re-scoped, not patched. The separate
+  `frame/tests_support.rs` ICMP-v4 builder is pure-frame/no-descriptor and is
+  explicitly no-touch; its 17/6 hits must remain outside the descriptor 24/7
+  migration count, and B9 must verify no double-counting.
 - V (driver preconditions, first): add `assert_eq!(dbg.session_hit, 1, …)`
   (session-hit drivers) or `assert_eq!(dbg.tx, 1, …)` + `session_count==2`
   (admission drivers) to `drive_one_packet_with_action`,
@@ -314,14 +322,15 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
   fail-dominant, exit nonzero iff either leg fails); `pkg/refactoraudit` passes
   uncached. Verified post-rebase, owned by #10544.
 - H-TUN: this issue makes no claim about coordinator/TUN cleanup. The unfiltered
-  release denominator is 183 total: 181 M-MAC cells plus one H-TUN block and one
-  H-EXPECT block. H-TUN is owned by #10553 and requires a TUN-capable rerun or
-  its separate disposition; a MAC fixture change cannot satisfy this contract.
-- H-EXPECT: this issue makes no claim about the session panic contract. The
-  unfiltered release denominator is the same explicit 181 + 1 + 1; H-EXPECT is
-  owned by #10552, and the release `debug_assert!` behavior is deterministic.
-  The cfg-gated debug/release repair is out of scope here. Descriptor fixture
-  changes cannot alter the expected-panic contract.
+  release result has a baseline classified cohort of 183 = 181 M-MAC cells plus
+  one H-TUN block and one H-EXPECT block; this is not an allowed-failure budget.
+  H-TUN is owned by #10553 and requires a TUN-capable rerun or its separate
+  disposition. A MAC fixture change cannot satisfy this contract.
+- H-EXPECT: this issue makes no claim about the session panic contract. It is
+  the second named block in the same 181 + 1 + 1 baseline cohort, owned by
+  #10552; the release `debug_assert!` behavior is deterministic. The cfg-gated
+  debug/release repair is out of scope here. Descriptor fixture changes cannot
+  alter the expected-panic contract.
 
 ## 7. Invariants (MUST NOT break)
 
@@ -343,20 +352,23 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
    named in invariant 4 and owned by #10554. Frames address the arrival row.
 6. Full release recount is the acceptance signal, not family spot-checks: all 181
    M-MAC working-attribution cells must be green with survivor witnesses; the
-   H-TUN and H-EXPECT blocks remain separately owned residuals with the explicit
-   181 + 2 denominator and issue references #10553/#10552. No unexplained red
-   may be called a fixture-MAC success.
+   H-TUN and H-EXPECT blocks remain separately owned residuals with explicit
+   181 + 1 + 1 baseline cohort accounting, not an allowed post-fix failure
+   budget, and issue references #10553/#10552. No unexplained red may be called
+   a fixture-MAC success.
 
 ## 8. Risks (incl. fixture-churn blast radius)
 
 - R1 Fixture-churn blast radius (largest): `policy_deny_snapshot` 71 sites / 13 files;
   `nat_snapshot` 171 / 23; `txn_run_descriptor` 232 / 19; txn v4 builder 104 / 18;
-  v6 builder 7 / 2; ICMP echo v4 41 / 13 and v6 7 / 3; frag builders 9 + 13
-  uses / 2 + 3 files; `build_policy_deny_tcp_syn_frame` 13 / 6. Builder-signature
-  changes are mechanical but wide; a missed call site is a silent MAC mismatch
-  (honest red via new guards, not silent green — the V-first ordering bounds this).
-  Mitigation: `grep`-verified call-site migration checklists from the fan-out
-  numbers in §12; V guards land first so every miss reds loudly.
+  v6 low-level builder 7 / 2 + SYN wrapper 18 / 6; ICMP-v4 descriptor builder
+  24 / 7 + frame/ no-touch builder 17 / 6; ICMP-v6 7 / 3; frag builders 9 / 2 +
+  transit wrapper 13 / 3; `build_policy_deny_tcp_syn_frame` 13 / 6.
+  Builder-signature changes are mechanical but wide; a missed call site is a
+  silent MAC mismatch (honest red via new guards, not silent green — the V-first
+  ordering bounds this). Mitigation: `grep`-verified call-site migration
+  checklists from the fan-out numbers in §12; V guards land first so every miss
+  reds loudly. The combined ICMP-v4 41 / 13 regex is not a migration count.
 - R2 MAC aliasing masking cross-interface bugs: fixed by invariant 5 (distinct MACs)
   + review checklist item per touched fixture. The filter-revocation control is
   the explicit temporary exception, preserved as a tripwire and tracked by #10554;
@@ -398,12 +410,16 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
   green on `out.hit==1` + outcome; deny-SYN 13/6 sites → green with LAN arrival
   MACs. Revert check: restore one hardcoded LAN-MAC frame on a WAN arrival →
   that cell's hit/tx guard reds.
-- M3: ICMP revocation cells (8618/9949/9386 groups) → green on hit + outcome;
+- M3: descriptor ICMP-v4 cells use the 24/7 afxdp builder migration; the
+  separate `frame/` builder's 17/6 pure-frame cells remain no-touch. ICMP
+  revocation cells (8618/9949/9386 groups) → green on hit + outcome;
   `tests_fragment.rs` → 33/33 with `frame/tests_fragment_term_extra.rs` 33/33
   unchanged (pure-frame control). Revert check: restore
-  `aa:bb:cc:dd:ee:ff` dst on one ICMP cell → hit guard reds. ICMP-v6 call sites
-  are included in the 7-hit/3-file checklist; the frame/ duplicate remains
-  no-touch and excluded from the descriptor count.
+  `aa:bb:cc:dd:ee:ff` dst on one descriptor ICMP cell → its hit guard reds.
+  ICMP-v6 call sites are included in the 7-hit/3-file checklist. The
+  implementation evidence must report the descriptor 24/7 and frame/ 17/6
+  counts separately; the combined 41/13 regex is not a second migration set
+  and must not be double-counted.
 - V (RED-on-revert cells for the vacuous six — permanent guards, not throwaway):
   for §5 #1-5, the added `session_hit==1` guard is the revert cell: with the
   fix reverted (fixture MAC blanked or frame MAC mismatched), each fails AT THE
@@ -428,9 +444,13 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
   unfiltered denominator. This issue passes when all 181/181 M-MAC working-
   attribution cells are green, all six survivor witnesses are present, and the
   two named residual blocks are explicitly recorded as separately owned by
-  #10553 (H-TUN) and #10552 (H-EXPECT). The allowed release denominator is
-  181 + 2 = 183; this issue does not require a 0-failed release leg. Any
-  additional red is unexplained until instrumented and routed separately.
+  #10553 (H-TUN) and #10552 (H-EXPECT). The `181 + 2 = 183` figure is baseline
+  cohort accounting, not a post-fix allowance for 183 failures. If the
+  denominator is unchanged, the expected aggregate after fixing those 181
+  cells is `6573 passed / 2 failed / 6 ignored` (6581 total), with the two
+  failures named and separately owned. This issue does not require a 0-failed
+  release leg. Any additional red is unexplained until instrumented and routed
+  separately.
 
 ## 10. Sequencing (what starts the day #10544 lands)
 
@@ -466,13 +486,16 @@ Day-zero order (in this lane's successor implementation):
    flip red→green). Family runs per area; retain the control's scoped exception.
 6. Land M2/M3 builder parameterization + per-test arrival-MAC repairs (authority,
    DNAT, reverse-path, ICMP v4/v6, deny-SYN, frag, embedded nat_based cells flip).
-   Run the exact builder checklist in §4 and verify B9's frame/ duplicate is not
+   Run the exact builder checklist in §4, report ICMP-v4 descriptor 24/7 versus
+   frame/ 17/6 separately, and verify B9's frame/ duplicate is not
    double-counted. Family runs per area.
 7. Full recount + RED-on-revert evidence per §9 (paste guard output for each of
    the five descriptor survivors and the helper-level #9513 proof). Record exactly
-   181 M-MAC green plus the two named #10553/#10552 residual blocks, or route any
-   additional red as H-NONMAC with evidence. Do not require release 0-failed.
-8. Open the implementation PR (this DRAFT v2 becomes its plan section); parent
+   181 M-MAC green plus the two named #10553/#10552 residual blocks, or route
+   any additional red as H-NONMAC with evidence. Treat 181 + 1 + 1 = 183 as
+   baseline cohort accounting; if unchanged, the expected aggregate is 6573
+   passed / 2 failed / 6 ignored. Do not require release 0-failed.
+8. Open the implementation PR (this DRAFT v3 becomes its plan section); parent
    lanes run delta plan review next — no reviewer dispatch from this lane.
 
 ## 11. Open questions (incl. PLAN-KILL)
@@ -484,11 +507,15 @@ Day-zero order (in this lane's successor implementation):
   descriptor arrival or delete the decline coverage. Owner: implementation
   lane + reviewer; decision is binding before fixture MACs land.
 - Q2 (builder shape): use dst-MAC parameters on existing builders and carry them
-  through `build_txn_tcp_syn_frame_v6`; include `build_policy_deny_tcp_syn_frame`,
-  `build_icmp_echo_frame_v6`, and the frag transit wrapper in the checklist.
-  The `frame/` duplicate ICMP builder is pure-frame/no-descriptor and is
-  explicitly no-touch; verify B9 does not double-count it. No hardcoded LAN,
-  WAN, or garbage default may survive as a silent cross-interface path.
+  through both `build_txn_tcp_frame_v6` and its
+  `build_txn_tcp_syn_frame_v6` wrapper. The checklist is txn-v6 low-level 7/2
+  plus wrapper 18/6, ICMP-v4 descriptor 24/7 plus frame/ 17/6 no-touch,
+  ICMP-v6 7/3, and the frag transit wrapper 13/3. Include
+  `build_policy_deny_tcp_syn_frame` 13/6. The combined ICMP-v4 41/13 regex
+  includes both modules and is not a migration denominator. The frame/ duplicate
+  ICMP builder is pure-frame/no-descriptor and explicitly no-touch; verify B9
+  does not double-count it. No hardcoded LAN, WAN, or garbage default may survive
+  as a silent cross-interface path.
 - Q3 (fabric arrivals): confirm `fabric_admit_snapshot_9604` MACs + `stamp_fabric_zone`
   dst (`02:bf:72:ff:00:01`) satisfy the `fabric.rs:216-232` fallback order
   (egress src_mac, else ingress src_mac, else fabric local_mac) post-fix; the
@@ -498,12 +525,11 @@ Day-zero order (in this lane's successor implementation):
   Step 3 must capture representative MAC instrumentation for M1/M2/M3 (or
   equivalent post-fix/revert evidence) before calling each attribution final;
   an H-NONMAC branch routes any first failure that fits none.
-- Q5 (fail-fast helper): yes, add a fixture-blaming `debug_assert!` in
-  `txn_run_descriptor`; this helper is already `#[cfg(test)]`-only
-  (`afxdp/mod.rs:621-623`), so there is no production-shared-code concern.
-  The debug-only diagnostic is separate from H-EXPECT/#10552's cfg-gated
-  session-test repair; retained batch counters and representative instrumentation
-  provide release-leg evidence when the debug assertion is compiled out.
+- Q5 (fail-fast helper): yes, add a fixture-blaming plain `assert!` or explicit
+  panic in `txn_run_descriptor`; this helper is already `#[cfg(test)]`-only
+  (`afxdp/mod.rs:621-623`), so there is no production-shared-code concern and
+  the release acceptance leg fails fast on a fixture mismatch. This is separate
+  from H-EXPECT/#10552's cfg-gated session-test repair.
 - K1 (baseline gone): rejected as a current PLAN-KILL premise. #10544 changed
   Make/Go only and the gate/fixtures/builders remain on this tip; step 3 still
   revalidates the baseline after rebase, but a changed denominator is handled
@@ -524,11 +550,11 @@ Day-zero order (in this lane's successor implementation):
 | B6 | `policy_deny_snapshot` fan-out | 71 sites / 13 files (top: tests_fragment 20, revocation 18, tests_9950 9, embedded 6, filter_revalidation 6, nat64_tunnel 4) | `policy_deny_snapshot\\(\\)` regex |
 | B7 | `nat_snapshot` fan-out | 171 sites / 23 files | `nat_snapshot\\(\\)` regex |
 | B8 | `txn_run_descriptor` fan-out | 232 sites / 19 files | `txn_run_descriptor\\(` regex |
-| B9 | Frame-builder fan-out | txn-v4 104/18; txn-v6 7 hits/2 (definition + wrapper + external uses); ICMP echo v4 41/13; ICMP echo v6 7 hits/3; frag eth 9/2 + transit 13/3; deny-SYN 13/6; frame/ duplicate excluded | per-builder regex (§2.1), with no double-count across descriptor and pure-frame modules |
+| B9 | Frame-builder fan-out | txn-v4 104/18; txn-v6 low-level 7/2 + SYN wrapper 18/6; ICMP echo v4 descriptor 24/7 + frame/ 17/6 no-touch (combined regex 41/13 includes both and is not the migration denominator); ICMP echo v6 7/3; frag eth 9/2 + transit wrapper 13/3; deny-SYN 13/6 | per-symbol regex qualified by module (§2.1/§4), with no double-count across the descriptor migration and pure-frame control |
 | B10 | Gate symbol fan-out | `ingress_destination_mac_accepted` 4 uses / 3 files (def + poll call site + tests) | regex |
 | B11 | Fixture file sizes | `test_fixtures.rs` 2126 lines / 88K; `tests_support.rs` 2852 lines / 104K; `fabric.rs` 820; `poll_descriptor/mod.rs` 7312 (read-only) | `wc -l`, `du -sh` |
 | B12 | PR #10544 file overlap with this issue | 0 paths (that PR: Makefile + 2 docs + 2 Go files; this issue: `userspace-dp/src/afxdp/**` only) | PR body Files(5) vs §2.2 map |
-| B13 | Fix touch estimate (strategy §4) | fixtures: ~2 snapshot fns + arrival-row audit (~13 files read, ~6 edited); builders: 6 MAC-parameterized fns + 1 v6 wrapper and 179 external call-site migrations (181 builder hits including definition/wrapper) across ~30 files; drivers: 2-3 fns + five descriptor guards + one helper-level guard; tests: 0 outcome asserts weakened | B6-B9 fan-out; exact per-site checklist at implementation |
+| B13 | Fix touch estimate (strategy §4) | builder audit uses the descriptor-only 195 raw-hit denominator: txn-v4 104 = 1 definition + 103 external uses; txn-v6 low-level 7 = 1 definition + 1 wrapper-internal use + 5 external uses; txn-v6 SYN wrapper 18 = 1 definition + 17 external uses; ICMP-v4 descriptor 24 = 1 definition + 23 external uses; ICMP-v6 7 = 1 definition + 6 external uses; frag eth 9 = 1 definition + 8 external uses; frag transit wrapper 13 = 1 definition + 12 external uses; deny-SYN 13 = 1 definition + 12 external uses. Thus 8 definitions + 1 wrapper-internal use + 186 external uses = 195 descriptor-bound hits; frame/ ICMP-v4 17/6 (1 definition + 16 uses) is pure-frame/no-touch, and the combined raw regex is 212, not a migration denominator. Fixtures: ~2 snapshot fns + arrival-row audit (~13 files read, ~6 edited); drivers: 2-3 fns + five descriptor guards + one helper-level guard; tests: 0 outcome asserts weakened | B6-B9 fan-out; exact per-site checklist at implementation |
 | B14 | Go gate live proof | `TestStructMetricIsTypesNotFields6937` FAIL (CompileResult 32f/21t vs floor 20) | RUN §2.1 |
 
 Evidence sources: in-repo source census for B2/B6-B10, `wc -l`/`du -sh` for B11,
