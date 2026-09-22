@@ -18,7 +18,16 @@ import (
 // second prerequisite when the first one fails.
 func capturedLeg(line, target string) bool {
 	suffix := target + " || status=$$?"
-	return line == suffix || strings.HasPrefix(line, suffix+";")
+	return line == suffix || line == suffix+"; \\"
+}
+
+func initializedStatus(line string) bool {
+	return line == "@status=0; \\" || line == "status=0; \\"
+}
+
+func announcesNotExamined(line string) bool {
+	return (strings.HasPrefix(line, "echo ") || strings.HasPrefix(line, "printf ")) &&
+		strings.Contains(line, "NOT EXAMINED")
 }
 
 func validateMakeAggregate(mk string) error {
@@ -60,7 +69,7 @@ func validateMakeAggregate(mk string) error {
 	goLeg, rustLeg := -1, -1
 	statusInit := -1
 	for i, line := range recipe {
-		if strings.HasPrefix(line, "@status=0;") || strings.HasPrefix(line, "status=0;") {
+		if initializedStatus(line) {
 			if statusInit >= 0 {
 				return fmt.Errorf("duplicate status initialization")
 			}
@@ -106,7 +115,7 @@ func validateMakeAggregate(mk string) error {
 	}
 	announced := false
 	for i, line := range recipe {
-		if i > rustLeg && i < exit && strings.Contains(line, "NOT EXAMINED") {
+		if i > rustLeg && i < exit && announcesNotExamined(line) {
 			announced = true
 			break
 		}
@@ -186,6 +195,32 @@ func TestMakefileSerialAggregate10496(t *testing.T) {
 	if err := validateMakeAggregate(droppedCapture); err == nil ||
 		!strings.Contains(err.Error(), "lack contiguous status capture") {
 		t.Fatalf("dropped capture did not trip the capture check: %v", err)
+	}
+
+	// A capture line that resets status after the submake can erase a red
+	// result. The capture must therefore be the complete continued command.
+	failureReset := "test:\n" +
+		"\t@status=0; \\\n" +
+		"\t$(MAKE) test-go || status=$$?; status=0; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\techo \"NOT EXAMINED\"; \\\n" +
+		"\texit $$status\n"
+	if err := validateMakeAggregate(failureReset); err == nil ||
+		!strings.Contains(err.Error(), "lack contiguous status capture") {
+		t.Fatalf("failure-reset capture did not trip the exact-capture check: %v", err)
+	}
+
+	// An initializer that runs another command can bypass status setup before
+	// either leg. Only the complete initializer continuation is accepted.
+	brokenInitializer := "test:\n" +
+		"\t@status=0; exit 0; \\\n" +
+		"\t$(MAKE) test-go || status=$$?; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\techo \"NOT EXAMINED\"; \\\n" +
+		"\texit $$status\n"
+	if err := validateMakeAggregate(brokenInitializer); err == nil ||
+		!strings.Contains(err.Error(), "initialize a failure status") {
+		t.Fatalf("broken initializer did not trip the initializer check: %v", err)
 	}
 
 	// Legs without any trailing exit leave the aggregate's status on the
