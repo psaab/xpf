@@ -62,7 +62,7 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 	for _, z := range snap.Zones {
 		names = append(names, z.Name)
 	}
-	quarantined := config.QuarantinedZoneNames(names)
+	quarantined := config.ZoneQuarantineExclusions(names)
 	if len(quarantined) == 0 {
 		return nil
 	}
@@ -233,5 +233,5 @@ func quarantinedZoneNamesForConfig(cfg *config.Config) map[string]struct{} {
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
 	}
-	return config.QuarantinedZoneNames(names)
+	return config.ZoneQuarantineExclusions(names)
 }
