@@ -29,9 +29,9 @@ func warningsMentioning(cfg *Config, sub string) []string {
 // whose units span two zones must be reported AT COMMIT, naming the interface,
 // both zones, and the consequence.
 //
-// The dataplane change makes this failure safe; this makes it legible. Without
-// it the operator's only signal is untagged traffic silently falling to the
-// default policy, with nothing on the box saying why (#8296's shape).
+// The dataplane change makes this failure safe and explicit: transit is denied
+// as unattributed before the implicit default policy (#6682), while host-bound
+// traffic is denied by the contested-parent host-inbound sentinel (#10503).
 func TestContestedTrunkZoneAdvisoryFires7509(t *testing.T) {
 	cfg := contestedCfg7509(t, map[string][]string{
 		"lan": {"ge-0/0/0.100"},
@@ -47,10 +47,16 @@ func TestContestedTrunkZoneAdvisoryFires7509(t *testing.T) {
 	// The operator has to be able to act on it: which interface, which zones,
 	// and what actually changes. A warning that says only "contested" sends
 	// them back to source, which is the gap this exists to close.
-	for _, want := range []string{"ge-0/0/0", "lan", "wan", "UNTAGGED", "default policy"} {
+	for _, want := range []string{
+		"ge-0/0/0", "lan", "wan", "UNTAGGED", "unattributed", "DENIED",
+		"host-inbound", "#6682", "#10503",
+	} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("advisory must name %q so it is actionable; got: %s", want, got[0])
 		}
+	}
+	if strings.Contains(got[0], "falls to the default policy") {
+		t.Fatalf("advisory must not claim traffic falls to default policy; got: %s", got[0])
 	}
 }
 
@@ -133,15 +139,24 @@ func TestCanonicalUnitRefsAreOneUnit7509(t *testing.T) {
 }
 
 // sharedDeviceCfg7509 builds a config with real interface UNITS (the contested
-// helper above needs only zone refs; this half's predicate reads the units'
-// vlan-id and the interface's tunnel stanza, so those have to exist).
-func sharedDeviceCfg7509(t *testing.T, name string, tunnel bool, units map[int]int, zones map[string][]string) *Config {
+// helper above needs only zone refs; the shared-device predicate reads each
+// unit's effective kernel-device identity, so these fields have to exist).
+func sharedDeviceCfg7509(
+	t *testing.T,
+	name string,
+	tunnel bool,
+	units map[int]int,
+	zones map[string][]string,
+) *Config {
 	t.Helper()
 	cfg := contestedCfg7509(t, zones)
 	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{}
 	ifc := &InterfaceConfig{Name: name, Units: map[int]*InterfaceUnit{}}
 	if tunnel {
-		ifc.Tunnel = &TunnelConfig{}
+		ifc.Tunnel = &TunnelConfig{
+			Source:      "192.0.2.1",
+			Destination: "192.0.2.2",
+		}
 	}
 	for num, vlan := range units {
 		ifc.Units[num] = &InterfaceUnit{Number: num, VlanID: vlan}
@@ -166,10 +181,70 @@ func TestSharedDeviceUnzonedUnitAdvisoryFires7509(t *testing.T) {
 		t.Fatalf("expected exactly one advisory naming the unzoned device-sharing "+
 			"unit; got %d: %v", len(got), cfg.Warnings)
 	}
-	for _, want := range []string{"ge-0/0/0", "ge-0/0/0.0", "UNZONED", "default policy"} {
+	for _, want := range []string{
+		"ge-0/0/0", "ge-0/0/0.0", "UNZONED", "unattributed", "DENIED",
+		"host-inbound", "#6682", "#5659", "address-less", "admitted",
+		"None => true",
+	} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("advisory must name %q so it is actionable; got: %s", want, got[0])
 		}
+	}
+	if strings.Contains(got[0], "#10503") ||
+		strings.Contains(got[0], "is denied by the #5659") {
+		t.Fatalf("address-less refusal advisory must not claim a host deny; got: %s", got[0])
+	}
+	if strings.Contains(got[0], "falls to the default policy") {
+		t.Fatalf("advisory must not claim traffic falls to default policy; got: %s", got[0])
+	}
+}
+
+// A contest warning still fires for a lifeline base, but #10503 deliberately
+// skips its host-inbound sentinel. The warning must describe that admit path,
+// not claim a deny that the dataplane does not install.
+func TestContestedTrunkLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
+	cfg := contestedCfg7509(t, map[string][]string{
+		"lan": {"fab0.100"},
+		"wan": {"fab0.200"},
+	})
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+
+	got := warningsMentioning(cfg, "fab0")
+	if len(got) != 1 {
+		t.Fatalf("expected one lifeline contest advisory; got %d: %v", len(got), cfg.Warnings)
+	}
+	for _, want := range []string{"UNTAGGED", "unattributed", "DENIED", "#6682", "#10503", "lifeline", "admitted"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("lifeline advisory must name %q; got: %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "host-inbound sentinel (#10503") {
+		t.Fatalf("lifeline advisory must not claim a sentinel deny; got: %s", got[0])
+	}
+}
+
+// A shared-device warning also has a lifeline shape: the warning still fires,
+// but the host-bound clause must describe the deliberate #5659 admit path
+// rather than claim a #5659 deny or the contested-parent #10503 sentinel.
+func TestSharedDeviceLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "fab0", false,
+		map[int]int{0: 0, 100: 100},
+		map[string][]string{"lan": {"fab0.100"}})
+	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+
+	got := warningsMentioning(cfg, "fab0.0")
+	if len(got) != 1 {
+		t.Fatalf("expected one shared-device lifeline advisory; got %d: %v",
+			len(got), cfg.Warnings)
+	}
+	for _, want := range []string{"fab0", "UNZONED", "unattributed", "DENIED", "#6682", "#5659", "lifeline", "admitted"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("lifeline refusal advisory must name %q; got: %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "#10503") ||
+		strings.Contains(got[0], "is denied by the #5659") {
+		t.Fatalf("lifeline advisory must not claim a host-inbound sentinel deny; got: %s", got[0])
 	}
 }
 
@@ -182,10 +257,35 @@ func TestSharedDeviceUnzonedTunnelUnitAdvisoryFires7509(t *testing.T) {
 		map[int]int{0: 0, 1: 0},
 		map[string][]string{"vpnb": {"gr-0/0/0.1"}})
 	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
-
-	if got := warningsMentioning(cfg, "gr-0/0/0.0"); len(got) != 1 {
+	got := warningsMentioning(cfg, "gr-0/0/0.0")
+	if len(got) != 1 {
 		t.Fatalf("expected one advisory for the unzoned tunnel unit; got %d: %v",
 			len(got), cfg.Warnings)
+	}
+	for _, want := range []string{"#5659", "DENIED", "admitted"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("tunnel refusal advisory must name %q; got: %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "#10503") {
+		t.Fatalf("tunnel refusal advisory must not claim the contested-parent sentinel; got: %s", got[0])
+	}
+}
+
+func TestSharedDeviceUnzonedTunnelUnitNUsesResolver7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "gr-0/0/1", true,
+		map[int]int{0: 0, 1: 0, 5: 0},
+		map[string][]string{"vpnb": {"gr-0/0/1.0"}})
+	cfg.Interfaces.Interfaces["gr-0/0/1"].Units[5].Tunnel =
+		&TunnelConfig{Name: "gr-0-0-1u5"}
+	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+	got := warningsMentioning(cfg, "gr-0/0/1")
+	if len(got) != 1 {
+		t.Fatalf("expected one resolver-shaped tunnel advisory; got %v", cfg.Warnings)
+	}
+	if !strings.Contains(got[0], "gr-0/0/1.1") ||
+		strings.Contains(got[0], "gr-0/0/1.5") {
+		t.Fatalf("only the interface-level unit should be called shared; got: %s", got[0])
 	}
 }
 
@@ -221,9 +321,10 @@ func TestFullyZonedInterfaceIsSilent7509(t *testing.T) {
 	}
 }
 
-// And the case with NO zoned unit at all: an interface entirely outside every
-// zone already fell to the default policy before #7509 and nothing changed for
-// it, so it must stay silent too.
+// And the case with NO zoned unit at all: it remains outside every zone and
+// therefore has no contested-parent advisory; its transit is handled by the
+// unzoned-ingress path (#6682), and host-bound admission is not changed by
+// #10503's contested-parent sentinel. It must stay silent too.
 func TestWhollyUnzonedInterfaceIsSilent7509(t *testing.T) {
 	cfg := sharedDeviceCfg7509(t, "ge-0/0/0", false,
 		map[int]int{0: 0, 100: 100},
@@ -315,5 +416,281 @@ func TestBothZoneAdvisoriesReachTheRealCompiler7509(t *testing.T) {
 	if got := warningsMentioning(contested, "more than one security zone"); len(got) != 1 {
 		t.Fatalf("the #8402 advisory must survive the REAL compiler; got %d of %d "+
 			"warnings: %v", len(got), len(contested.Warnings), contested.Warnings)
+	}
+}
+
+func TestNativeUnitZeroDisambiguatesParentIsSilent7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "ge-0/0/0", false,
+		map[int]int{0: 0, 100: 100},
+		map[string][]string{
+			"lan": {"ge-0/0/0.0"},
+			"wan": {"ge-0/0/0.100"},
+		})
+	cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].Tunnel =
+		&TunnelConfig{Name: "ge-0-0-0"}
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("zoned native unit 0 retains the parent zone and must be silent; got %v",
+			cfg.Warnings)
+	}
+}
+
+func TestNativeUnitZeroSeparateTunnelStillContests7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "ge-0/0/1", false,
+		map[int]int{0: 0, 100: 100},
+		map[string][]string{
+			"lan": {"ge-0/0/1.0"},
+			"wan": {"ge-0/0/1.100"},
+		})
+	cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0].Tunnel =
+		&TunnelConfig{Name: "ge-0-0-1u0"}
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+	if got := warningsMentioning(cfg, "ge-0/0/1"); len(got) != 1 {
+		t.Fatalf("unit 0 on its own tunnel device must not disambiguate the parent; got %v",
+			cfg.Warnings)
+	}
+}
+
+func TestSeparateNativeUnitZeroDoesNotTriggerSharedAdvisory7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "ge-0/0/2", false,
+		map[int]int{0: 0, 100: 100},
+		map[string][]string{"lan": {"ge-0/0/2.100"}})
+	cfg.Interfaces.Interfaces["ge-0/0/2"].Units[0].Tunnel =
+		&TunnelConfig{Name: "ge-0-0-2u0"}
+	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("unit 0 on its own tunnel device must not be called shared; got %v",
+			cfg.Warnings)
+	}
+}
+
+func TestSecureTunnelUnitDevicePrecedesTunnelMap7509(t *testing.T) {
+	tree := &ConfigTree{}
+	for _, cmd := range []string{
+		"set security ipsec vpn v bind-interface st0.1",
+		"set interfaces st0 unit 1 tunnel mode gre",
+		"set interfaces st0 unit 1 tunnel source 10.0.0.1",
+		"set interfaces st0 unit 1 tunnel destination 10.0.0.2",
+		"set security zones security-zone trust interfaces st0.1",
+	} {
+		path, err := ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	want, owned := cfg.SecureTunnelUnitNetdev("st0.1")
+	if !owned || want != "st0.1" {
+		t.Fatalf("secure-tunnel fixture must own st0.1; got (%q, %v)", want, owned)
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	if tunnelNames["st0.1"] != "st0u1" {
+		t.Fatalf("fixture must also provide the competing tunnel map; got %q",
+			tunnelNames["st0.1"])
+	}
+	if got := snapshotUnitDevice(cfg, "st0.1", tunnelNames); got != want {
+		t.Fatalf("unit-device helper must honor secure ownership before TunnelNameMap: got %q, want %q",
+			got, want)
+	}
+}
+func TestAllZonedInterfaceTunnelDisagreeUsesAdmittedHostShape7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "st0", true,
+		map[int]int{0: 0, 1: 0},
+		map[string][]string{
+			"trust":   {"st0.0"},
+			"untrust": {"st0.1"},
+		})
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+	got := warningsMentioning(cfg, "st0")
+	if len(got) != 1 {
+		t.Fatalf("expected one all-zoned tunnel advisory; got %d: %v",
+			len(got), cfg.Warnings)
+	}
+	for _, want := range []string{
+		"UNZONED", "DENIED", "#6682", "Host-bound traffic remains admitted",
+		"all collapsed tunnel units are zoned",
+	} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("all-zoned tunnel advisory must name %q; got: %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "UNTAGGED") ||
+		strings.Contains(got[0], "Tagged traffic on each unit") {
+		t.Fatalf("interface-level tunnel advisory must not claim per-unit tagged traffic; got: %s",
+			got[0])
+	}
+}
+
+func TestUnzonedInterfaceTunnelDisagreeUsesEmptyZoneHostShape7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "st1", true,
+		map[int]int{0: 0, 1: 0, 2: 0},
+		map[string][]string{
+			"trust":   {"st1.1"},
+			"untrust": {"st1.2"},
+		})
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+	got := warningsMentioning(cfg, "st1")
+	if len(got) != 1 {
+		t.Fatalf("expected one unzoned tunnel advisory; got %d: %v", len(got), cfg.Warnings)
+	}
+	for _, want := range []string{"#5659", "host-inbound", "DENIED"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("unzoned tunnel advisory must name %q; got: %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "#10503") {
+		t.Fatalf("unzoned tunnel advisory must not claim the contested-parent sentinel; got: %s",
+			got[0])
+	}
+}
+
+func TestSharedDeviceOverlapPreemptsContestHostShape7509(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		addressed bool
+	}{
+		{name: "addressless", addressed: false},
+		{name: "addressed", addressed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const base = "ge-0/0/20"
+			cfg := sharedDeviceCfg7509(t, base, false,
+				map[int]int{0: 0, 100: 100, 200: 200},
+				map[string][]string{
+					"lan": {"ge-0/0/20.100"},
+					"wan": {"ge-0/0/20.200"},
+				})
+			if tc.addressed {
+				cfg.Interfaces.Interfaces[base].Units[0].Addresses =
+					[]string{"192.0.2.1/24"}
+			}
+
+			appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+			appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+
+			sharedWarnings := warningsMentioning(cfg, "has unit(s)")
+			if len(sharedWarnings) != 1 {
+				t.Fatalf("expected one shared-device warning; got %d: %v",
+					len(sharedWarnings), cfg.Warnings)
+			}
+			contestWarnings := warningsMentioning(cfg, "has units in more than one security zone")
+			if len(contestWarnings) != 1 {
+				t.Fatalf("expected one contested warning; got %d: %v",
+					len(contestWarnings), cfg.Warnings)
+			}
+			for _, warning := range []string{sharedWarnings[0], contestWarnings[0]} {
+				if strings.Contains(warning, "#10503") {
+					t.Fatalf("shared-device overlap must not claim #10503: %s", warning)
+				}
+				if tc.addressed {
+					if !strings.Contains(warning, "#5659") {
+						t.Fatalf("addressed overlap must describe #5659 path: %s", warning)
+					}
+				} else {
+					if !strings.Contains(warning, "None => true") ||
+						strings.Contains(warning, "is denied by the #5659") {
+						t.Fatalf("addressless overlap must retain global admit path: %s", warning)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestEnforcementLifelineNamesScopeBothAdvisories7509(t *testing.T) {
+	for _, name := range []string{"lo0", "em1", "fab-foo"} {
+		t.Run(name, func(t *testing.T) {
+			contested := contestedCfg7509(t, map[string][]string{
+				"lan": {name + ".100"},
+				"wan": {name + ".200"},
+			})
+			appendContestedTrunkZoneAdvisoryLocked(contested, compileOpts{})
+			contestWarnings := warningsMentioning(contested, name)
+			if len(contestWarnings) != 1 {
+				t.Fatalf("expected one contested warning for %s; got %v",
+					name, contested.Warnings)
+			}
+			if !strings.Contains(contestWarnings[0], "zone-gated") ||
+				strings.Contains(contestWarnings[0], "admitted") ||
+				strings.Contains(contestWarnings[0], "is denied by") ||
+				strings.Contains(contestWarnings[0], "#10503") ||
+				strings.Contains(contestWarnings[0], "#5659") {
+				t.Fatalf("contested bind-excluded warning must remain zone-gated; got: %s",
+					contestWarnings[0])
+			}
+
+			shared := sharedDeviceCfg7509(t, name, false,
+				map[int]int{0: 0, 100: 100},
+				map[string][]string{"lan": {name + ".100"}})
+			appendSharedDeviceUnzonedUnitAdvisoryLocked(shared, compileOpts{})
+			sharedWarnings := warningsMentioning(shared, name)
+			if len(sharedWarnings) != 1 {
+				t.Fatalf("expected one shared-device warning for %s; got %v",
+					name, shared.Warnings)
+			}
+			if !strings.Contains(sharedWarnings[0], "zone-gated") ||
+				strings.Contains(sharedWarnings[0], "admitted") ||
+				strings.Contains(sharedWarnings[0], "is denied by") ||
+				strings.Contains(sharedWarnings[0], "#10503") ||
+				strings.Contains(sharedWarnings[0], "#5659") {
+				t.Fatalf("shared bind-excluded warning must remain zone-gated; got: %s",
+					sharedWarnings[0])
+			}
+		})
+	}
+}
+
+func TestMixedPerUnitTunnelUsesCollapsedUnitText7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "ip-0/0/0", true,
+		map[int]int{0: 0, 1: 0, 5: 0},
+		map[string][]string{
+			"trust":   {"ip-0/0/0.0"},
+			"untrust": {"ip-0/0/0.1"},
+		})
+	cfg.Interfaces.Interfaces["ip-0/0/0"].Units[0].Tunnel =
+		&TunnelConfig{Name: "ip-0-0-0"}
+	cfg.Interfaces.Interfaces["ip-0/0/0"].Units[5].Tunnel =
+		&TunnelConfig{Name: "ip-0-0-0u5"}
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+	got := warningsMentioning(cfg, "ip-0/0/0")
+	if len(got) != 1 {
+		t.Fatalf("expected one mixed-tunnel contest advisory; got %d: %v",
+			len(got), cfg.Warnings)
+	}
+	for _, want := range []string{
+		"interface-level tunnel maps units whose resolved kernel device matches its base",
+		"units whose resolved kernel device differs remain independent",
+	} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("mixed tunnel advisory must name %q; got: %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "Tagged traffic on each unit is unaffected") ||
+		strings.Contains(got[0], "maps every logical unit onto one netdev") {
+		t.Fatalf("mixed tunnel advisory must not claim all units share one device; got: %s",
+			got[0])
+	}
+}
+
+func TestSingleCollapsedUnitWithPerUnitSiblingIsSilent7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "ip-0/0/1", true,
+		map[int]int{0: 0, 1: 0},
+		map[string][]string{
+			"trust":   {"ip-0/0/1.0"},
+			"untrust": {"ip-0/0/1.1"},
+		})
+	cfg.Interfaces.Interfaces["ip-0/0/1"].Units[1].Tunnel =
+		&TunnelConfig{Name: "ip-0-0-1u1"}
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("a per-unit tunnel sibling owns its device, so one collapsed unit "+
+			"cannot contest the parent; got %v", cfg.Warnings)
 	}
 }
