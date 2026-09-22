@@ -638,17 +638,7 @@ func (f *sessionFilter) resolveEgressIfaces(fibIfindex uint32, fibVlanID uint16,
 	return f.zoneIfaces[egressZone]
 }
 
-func (c *CLI) fetchPeerSessions(f sessionFilter) *pb.GetSessionsResponse {
-	conn := c.dialPeer()
-	if conn == nil {
-		return nil
-	}
-	defer conn.Close()
-
-	client := pb.NewBpfrxServiceClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
+func buildPeerShowRequest(f sessionFilter) *pb.GetSessionsRequest {
 	req := &pb.GetSessionsRequest{Limit: 10000}
 	if f.zoneID != 0 {
 		// Zone IDs are config-compile-derived and config is synced
@@ -682,6 +672,21 @@ func (c *CLI) fetchPeerSessions(f sessionFilter) *pb.GetSessionsResponse {
 	if f.snatPool != "" {
 		req.SourceNatPool = f.snatPool
 	}
+	return req
+}
+
+func (c *CLI) fetchPeerSessions(f sessionFilter) *pb.GetSessionsResponse {
+	conn := c.dialPeer()
+	if conn == nil {
+		return nil
+	}
+	defer conn.Close()
+
+	client := pb.NewBpfrxServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req := buildPeerShowRequest(f)
 
 	resp, err := client.GetSessions(ctx, req)
 	if err != nil {

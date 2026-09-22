@@ -185,16 +185,28 @@ func TestGetSessionsRejectsNegativeOffset(t *testing.T) {
 }
 
 func TestClearSessionsRejectsInvalidProtocol(t *testing.T) {
-	s := newClearServer(t, &clearFaultGRPCDP{
-		Manager:   dataplane.New(),
-		iterErr:   fmt.Errorf("invalid protocol reached iterator"),
-		iterV6Err: fmt.Errorf("invalid protocol reached v6 iterator"),
-	})
+	dp := &clearFaultGRPCDP{
+		Manager:    dataplane.New(),
+		v4Sessions: seedGRPCV4(false),
+		iterErr:    fmt.Errorf("invalid protocol reached iterator"),
+		iterV6Err:  fmt.Errorf("invalid protocol reached v6 iterator"),
+	}
+	s := newClearServer(t, dp)
 	_, err := s.ClearSessions(context.Background(), &pb.ClearSessionsRequest{
 		Protocol: "tcpip",
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("ClearSessions(protocol=tcpip) = %v (code %v); want InvalidArgument",
 			err, status.Code(err))
+	}
+	if dp.iterCalls != 0 || dp.iterV6Calls != 0 ||
+		dp.iterFromCalls != 0 || dp.iterV6FromCalls != 0 ||
+		dp.deleteCalls != 0 || dp.deleteV6Calls != 0 ||
+		dp.dnatCalls != 0 || dp.dnatV6Calls != 0 ||
+		dp.clearAllCalls != 0 {
+		t.Fatalf("invalid protocol performed dataplane work: %+v", dp)
+	}
+	if got := len(dp.v4Sessions); got != 1 {
+		t.Fatalf("invalid protocol changed the seeded table: %d entries, want 1", got)
 	}
 }

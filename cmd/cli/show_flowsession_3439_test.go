@@ -43,6 +43,7 @@ func TestParseFlowSessionArgsRejectsMalformed(t *testing.T) {
 		{"protocol", "+6"},                     // signed numerics are non-canonical
 		{"protocol", " 6"},                     // whitespace-padded numerics are non-canonical
 		{"limit", "0"},                         // non-positive limit
+		{"bogus-token"},                        // unknown filter keyword
 		{"destination-port"},                   // missing value
 		{"summary", "destination-port", "abc"}, // malformed after a terminal subcmd
 		// A filter combined with a global aggregation (summary/sort-by)

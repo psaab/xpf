@@ -201,6 +201,19 @@ func TestBuildPeerClearRequestProtocolZero(t *testing.T) {
 	}
 }
 
+func TestBuildPeerShowRequestProtocolZero(t *testing.T) {
+	c := &CLI{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	f := c.parseSessionFilter([]string{"protocol", "0"})
+	if f.parseErr != nil || !f.hasProto || f.proto != 0 {
+		t.Fatalf("protocol 0 parse: err=%v proto=%d hasProto=%t; want nil/0/true",
+			f.parseErr, f.proto, f.hasProto)
+	}
+	req := buildPeerShowRequest(f)
+	if req.Protocol != "0" {
+		t.Fatalf("protocol 0 peer show request = %q, want %q", req.Protocol, "0")
+	}
+}
+
 // Parse errors must surface through hasFilter (so the clear path
 // cannot fall through to ClearAllSessions) and validate (so the
 // command fails). Historically `clear security flow session protocol
@@ -234,6 +247,7 @@ func TestSessionFilterParseErrors(t *testing.T) {
 		proto uint8
 	}{
 		{"gre", 47},
+		{"47", 47},
 		{"sctp", 132},
 		{"ipv6", 41},
 		{"0", 0},

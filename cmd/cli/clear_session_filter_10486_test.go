@@ -48,3 +48,21 @@ func TestClearSessionProtocolTokensForwardVerbatim_10486(t *testing.T) {
 		})
 	}
 }
+
+func TestClearSessionPortsRejectBeforeRPC_10486(t *testing.T) {
+	for _, args := range [][]string{
+		{"security", "flow", "session", "source-port", "abc"},
+		{"security", "flow", "session", "destination-port", "70000"},
+	} {
+		t.Run(args[3]+"/"+args[4], func(t *testing.T) {
+			fake := &clearProtocolRecorder{}
+			c := &ctl{client: fake}
+			if err := c.handleClear(args); err == nil {
+				t.Fatalf("args %v: expected client-side port error", args)
+			}
+			if fake.calls != 0 {
+				t.Fatalf("args %v: ClearSessions calls=%d, want zero", args, fake.calls)
+			}
+		})
+	}
+}

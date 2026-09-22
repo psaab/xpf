@@ -32,11 +32,22 @@ type clearFaultGRPCDP struct {
 	fwdDelErr  error
 	revDelErr  error
 	delDNATErr error
+
+	iterCalls       int
+	iterV6Calls     int
+	iterFromCalls   int
+	iterV6FromCalls int
+	deleteCalls     int
+	deleteV6Calls   int
+	dnatCalls       int
+	dnatV6Calls     int
+	clearAllCalls   int
 }
 
 func (d *clearFaultGRPCDP) IsLoaded() bool { return true }
 
 func (d *clearFaultGRPCDP) IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	d.iterCalls++
 	for k, v := range d.v4Sessions {
 		if !fn(k, v) {
 			break
@@ -46,6 +57,7 @@ func (d *clearFaultGRPCDP) IterateSessions(fn func(dataplane.SessionKey, datapla
 }
 
 func (d *clearFaultGRPCDP) IterateSessionsV6(fn func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
+	d.iterV6Calls++
 	return d.iterV6Err
 }
 
@@ -55,24 +67,39 @@ func (d *clearFaultGRPCDP) IterateSessionsV6(fn func(dataplane.SessionKeyV6, dat
 // nothing. They route through the in-memory sessions and preserve the injected
 // iterator errors.
 func (d *clearFaultGRPCDP) IterateSessionsFrom(cursor *dataplane.SessionKey, fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	d.iterFromCalls++
 	iterateV4From(d.v4Sessions, cursor, fn)
 	return d.iterErr
 }
 
 func (d *clearFaultGRPCDP) IterateSessionsV6From(cursor *dataplane.SessionKeyV6, fn func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
+	d.iterV6FromCalls++
 	return d.iterV6Err
 }
 
 func (d *clearFaultGRPCDP) DeleteSession(key dataplane.SessionKey) error {
+	d.deleteCalls++
 	if _, isForward := d.v4Sessions[key]; isForward {
 		return d.fwdDelErr
 	}
 	return d.revDelErr
 }
-func (d *clearFaultGRPCDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return nil }
-func (d *clearFaultGRPCDP) DeleteDNATEntry(dataplane.DNATKey) error      { return d.delDNATErr }
-func (d *clearFaultGRPCDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
-
+func (d *clearFaultGRPCDP) DeleteSessionV6(dataplane.SessionKeyV6) error {
+	d.deleteV6Calls++
+	return nil
+}
+func (d *clearFaultGRPCDP) DeleteDNATEntry(dataplane.DNATKey) error {
+	d.dnatCalls++
+	return d.delDNATErr
+}
+func (d *clearFaultGRPCDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error {
+	d.dnatV6Calls++
+	return nil
+}
+func (d *clearFaultGRPCDP) ClearAllSessions() (int, int, error) {
+	d.clearAllCalls++
+	return 0, 0, nil
+}
 func seedGRPCV4(snat bool) map[dataplane.SessionKey]dataplane.SessionValue {
 	// Distinct src/dst ports so the reverse companion key differs from
 	// the forward key (the mock distinguishes them by key membership). A

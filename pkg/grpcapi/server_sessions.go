@@ -436,6 +436,8 @@ func (f *sessionFilter) validate() error {
 	return nil
 }
 
+// ProtocolNumberLenient equals the strict ProtocolNumber for current tables
+// (#3393 closed the last gap, ipv6=41) and remains the stable filter seam.
 func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	f := &sessionFilter{
 		zoneFilter: uint16(req.Zone),

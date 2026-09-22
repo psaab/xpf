@@ -244,25 +244,25 @@ func TestRESTSessionFilterFailsClosed(t *testing.T) {
 	s := &Server{dp: newMultiSessionDP()}
 
 	cases := []struct {
-		name string
-		q    string
-		want int
+		name   string
+		q      string
+		want   int
+		reason string
 	}{
-		{"bad source_prefix", "source_prefix=10.0.0.300/24", 400},
-		{"bad destination_prefix", "destination_prefix=notanip", 400},
-		{"bad source_port", "source_port=abc", 400},
-		{"out-of-range destination_port", "destination_port=70000", 400},
-		{"bad limit", "limit=abc", 400},
-		{"negative offset", "offset=-5", 400},
-		{"bad page_size", "page_size=abc", 400},
-		{"negative page_size", "page_size=-1", 400},
-		{"bad protocol", "protocol=tcpip", 400},
-		{"bogus protocol", "protocol=bogus", 400},
-		{"out-of-range protocol", "protocol=256", 400},
-		{"negative protocol", "protocol=-1", 400},
-		{"bad signed protocol", "protocol=%2B6", 400},
-		{"bad space-padded protocol", "protocol=%206", 400},
-		{"valid", "source_prefix=10.0.1.0/24&destination_port=443", 200},
+		{"bad source_prefix", "source_prefix=10.0.0.300/24", 400, ""},
+		{"bad destination_prefix", "destination_prefix=notanip", 400, ""},
+		{"bad source_port", "source_port=abc", 400, ""},
+		{"out-of-range destination_port", "destination_port=70000", 400, ""},
+		{"bad limit", "limit=abc", 400, ""},
+		{"negative offset", "offset=-5", 400, ""},
+		{"bad page_size", "page_size=abc", 400, ""},
+		{"bad protocol", "protocol=tcpip", 400, "invalid protocol filter: tcpip"},
+		{"bogus protocol", "protocol=bogus", 400, "invalid protocol filter: bogus"},
+		{"out-of-range protocol", "protocol=256", 400, "invalid protocol filter: 256"},
+		{"negative protocol", "protocol=-1", 400, "invalid protocol filter: -1"},
+		{"bad signed protocol", "protocol=%2B6", 400, "invalid protocol filter: +6"},
+		{"bad space-padded protocol", "protocol=%206", 400, "invalid protocol filter:  6"},
+		{"valid", "source_prefix=10.0.1.0/24&destination_port=443", 200, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,6 +270,9 @@ func TestRESTSessionFilterFailsClosed(t *testing.T) {
 			s.sessionsHandler(rr, httptest.NewRequest("GET", "/api/v1/security/sessions?"+tc.q, nil))
 			if rr.Code != tc.want {
 				t.Fatalf("%s: status %d, want %d; body: %s", tc.name, rr.Code, tc.want, rr.Body.String())
+			}
+			if tc.reason != "" && !strings.Contains(rr.Body.String(), tc.reason) {
+				t.Fatalf("%s: body %q does not contain reason %q", tc.name, rr.Body.String(), tc.reason)
 			}
 		})
 	}

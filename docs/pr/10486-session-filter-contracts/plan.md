@@ -1,18 +1,22 @@
 # 10486: REST / gRPC / CLI session-filter contract convergence
 
-Status: DRAFT v3 — plan only, no production code.
-Base: `origin/master b71c52d60`; worktree `.claude/worktrees/10486-session`,
-branch `fix/10486-session-filter-contracts`. All `file:line` refs re-pinned at
-that HEAD (the issue's evidence pin `1a6952b` is stale).
+Status: READY v4 — implementation landed; PR #10541 is open for delta review.
+Base: `origin/master 21df4afd8`; worktree `.claude/worktrees/10486-session`,
+branch `fix/10486-session-filter-contracts`. The implementation branch was
+rebased onto this merge-base; later master fast-forwards do not touch the
+changed production files.
 Review lineage: v1 (`44f4e10bc`) drew two concurring PLAN-NEEDS-MAJOR verdicts
 (direction sound, Lenient/canonical ruler, staged A-then-B; bug real). v2
 (`366ee44f8`) folded the adjudication (Q2 closed, Q3 canonical, A/B tables,
 parse-once `(proto,hasProto)` ruler, `hasProto` peer-clear site) and drew a
-split delta: READY / STILL-NEEDS-WORK on executable-test gaps. This v3 folds
-the delta-2 residuals only: proto-41 + proto-7 fixture rows, URL-encoded REST
-rows, explicit conformance matrix, SCTP selective-clear test, G wiring proof,
-C serialization-only scope, and citation/mechanical-wording corrections. No
-production code in this round; v3 goes to delta-3 (single confirming pass).
+split delta: READY / STILL-NEEDS-WORK on executable-test gaps. v3 folded the
+delta-2 residuals: proto-41 + proto-7 fixture rows, URL-encoded REST rows,
+explicit conformance matrix, SCTP selective-clear test, G wiring proof, C
+serialization-only scope, and citation/mechanical-wording corrections.
+Implementation landed as A `f5d688993` and B `52e85dace`; the G-wiring
+`tcp`/`6` token correction is folded. A staged MatrixA validated-empty proof
+(`sctp`/`" tcp "`) was accepted as-is in the parent fold because the final
+tip matrix proves the intended A→B transition.
 
 ## 1. Issue framing
 
@@ -334,7 +338,8 @@ B touch list (B-with-L, exhaustive): `pkg/appid/catalog.go` (2 new fns);
 stale comment 1); `pkg/grpcapi/pagination_test.go` (direct filter literals);
 `pkg/grpcapi/session_filter_test.go` (parsed-pair matcher matrix);
 `pkg/grpcapi/session_filter_3439_test.go` (stale comment 2, direct matcher
-assertions, + extended validation sets);
+assertions, + extended validation sets, G-clear zero-work proof);
+`pkg/grpcapi/clear_sessions_errors_test.go` (fault-fixture call counters);
 `pkg/cli/session_filter.go` (field/parse + 4 gates);
 `pkg/cli/cli_clear.go` (5th gate);
 `pkg/cli/cli_clear_bounded_4886_test.go` (SCTP selective-clear proof);
@@ -531,17 +536,18 @@ B contract:
   validation/zero-clear tests that reject before iteration; this fake is the
   production call-site proof for both G matchers and complements, rather than
   duplicates, the helper truth table.
-- G-clear: NEW `TestClearSessionsRejectsInvalidProtocol` (same file family,
-  `newViewServer` + `viewFaultGRPCDP` fixture per `:28`): `ClearSessions`
-  with `Protocol:"tcpip"` → `InvalidArgument` (`invalid session filter: …`
-  wrap) + zero cleared. Red-on-revert: validate bypass → clear proceeds.
+- G-clear: `TestClearSessionsRejectsInvalidProtocol` uses
+  `clearFaultGRPCDP` with a seeded matching row and iterator/delete/
+  clear-all call counters. `ClearSessions` with `Protocol:"tcpip"` returns
+  `InvalidArgument` and all counters remain zero, proving zero cleared and
+  validation-before-walk. This intentionally differs from the original
+  `newViewServer` + `viewFaultGRPCDP` sketch because the fault fixture can
+  prove delete/clear-all non-invocation directly.
 - L-parse/match: extend `session_filter_test.go` parse table: post-B accepts
   `gre/sctp/ipv6/0/007/" tcp "` (with `hasProto=true` asserted), rejects `+6`
   (parseErr) and still rejects `ospfx`; match assertions run `matchesV4/V6`
-  against fixed `SessionKey`s for protocols 7, 41, and 0 (observable:
-  boolean, NOT the `proto` field — a field assertion would pass even if the
-  matcher ignored it).
-- L-peer-show: `fetchPeerSessions` protocol-0 case: parsed `protocol 0` →
+- L-peer-show: `buildPeerShowRequest` (the pure request-construction seam used
+  by `fetchPeerSessions`) covers parsed `protocol 0` →
   forwarded `req.Protocol == "0"`. Observable: serialized request field.
   Red-on-revert: `hasProto` gate omitted → `""`.
 - L-peer-clear: NEW `TestBuildPeerClearRequestProtocolZero` mirroring
@@ -621,16 +627,12 @@ live-cluster runs in this round (parent sequences smoke at merge time).
 
 ## 11. Open questions (each states its kill condition)
 
-- Q1 — R `200→400` rollout: source evidence supports single-shot, but owner
-  confirmation remains REQUIRED before implementation. All seven sibling
-  fail-closed validations in this handler shipped as single-shot 400 with no
-  warn phase (zone, prefix/port, limit/offset, page_size, nat_only,
-  include_peer), and no deprecation-header machinery exists in `pkg/api`
-  (`[Dd]eprecat` search: only two unrelated comments). Warn-then-enforce would
-  new machinery for a one-cell fix. The owner gate is whether supported
-  external automation asserts 200 on arbitrary tokens. If none, Q1 closes;
-  if a corpus surfaces AND phased rollout is unacceptable, PLAN-KILL
-  single-shot A and re-plan phased.
+- Q1 — CLOSED by parent/owner gate: adopt single-shot R `200→400`.
+  Supported in-repo callers do not assert HTTP 200 for arbitrary protocol
+  tokens; the REST handler already uses single-shot 400 for the sibling
+  fail-closed filters (zone, prefix/port, limit/offset, page_size, nat_only,
+  include_peer), and no deprecation-header machinery exists. PR #10541
+  records the intentional external-automation compatibility flip.
 - Q2 — CLOSED as source-resolved (no kill branch). The strict and lenient
   resolvers are behaviorally IDENTICAL at HEAD: `catalog.go:362-370` ("for the
   current tables this function is equal to ProtocolNumber"), the strict
@@ -650,15 +652,13 @@ live-cluster runs in this round (parent sequences smoke at merge time).
   `api.go:165-175`); choosing `Atoi` would re-split filters from commit
   grammar AND widen G (which rejects `+6` today). Disclosed cost: `+6` flips
   `200-match → 400` on R under A and accept → parseErr on L under B.
-- Q4 — L widening: open ONLY for CLI-owner sign-off (genuine scope question).
-  Honest statement: numeric-using scripts are unaffected (L already accepts
-  `1-255` incl. `47`/`89`, pinned by `session_filter_test.go:176-181,219-222`);
-  widening = names (`gre`/`sctp`/aliases), `0`, whitespace-names; tightening =
-  `+6` (canonical); plus the `junos-cli-reference.md:75` doc update. Owner
-  question: accept that package, or ship B-without-L (R/G/S share the ruler, L
-  documents its narrower switch — coherent fallback, stated in the trailer)?
-  If the owner vetoes widening AND deems B-without-L incoherent, PLAN-KILL B
-  and ship A-only.
+- Q4 — CLOSED by CLI-owner/parent sign-off: accept L widening with B.
+  Numeric-using scripts are unaffected (L already accepted `1-255` including
+  `47`/`89`); the deliberate widening is names (`gre`/`sctp`/aliases), `0`,
+  and whitespace-padded names, while canonical `+6` tightens to parseErr.
+  The Junos reference now documents the accepted Lenient set and numeric
+  grammar. The parent fold accepted B-with-L as coherent with the shared
+  R/G/S ruler; no PLAN-KILL branch remains.
 - Q5 — C client guard: default OMIT (reversible only with exact-text spec).
   Server-side `InvalidArgument` already fails closed; a client guard changes
   error text (`unknown protocol %q` a la `show_flow.go:93` vs today's server
@@ -676,10 +676,9 @@ live-cluster runs in this round (parent sequences smoke at merge time).
   (`ifaceMatches`, `session_filter.go:404-409`). Validating those needs
   config-aware existence checks with different failure modes — separate
   filings per the issue's own Limits.
-- Q7 — SPLIT trailers (no kill branch). Option A lands as the
-  `#3439`-R-residual follow-up (same guard idiom, same rationale lineage;
-  trailer `Refs #3439` + `#10486`). Option B re-opens #2935's
-  proposed-not-shipped helper direction AND widens L beyond any filed issue
-  (trailer `Refs #2935-direction` + standalone `#10486` justification + Q4
-  CLI-owner sign-off). The A-first-commit-then-B sequencing already implements
-  this; the trailers just label it.
+- Q7 — CLOSED as a documented split (no history rewrite). A is the
+  `#3439` REST-residual follow-up; B re-opens #2935's proposed-not-shipped
+  helper direction and widens L with CLI-owner sign-off. The pushed commit
+  subjects remain stable; the equivalent `Refs #3439`, `Refs
+  #2935-direction`, standalone `#10486`, and Q4 sign-off records live in the
+  PR body and `docs/log/10486.md` rather than amended trailers.
