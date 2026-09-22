@@ -142,7 +142,7 @@ func quarantinedZoneNames(cfg *config.Config) map[string]struct{} {
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
 	}
-	return config.QuarantinedZoneNames(names)
+	return config.ZoneQuarantineExclusions(names)
 }
 
 func buildInterfaceZoneMap(cfg *config.Config) map[string]string {

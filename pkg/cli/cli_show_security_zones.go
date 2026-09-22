@@ -43,6 +43,9 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 
 		// Junos format: "Security zone: <name>"
 		fmt.Printf("Security zone: %s\n", name)
+		if reason := config.ZoneQuarantineExcludedReason(name, cfg); reason != "" {
+			fmt.Printf("  Quarantine: %s\n", reason)
+		}
 		if zoneID > 0 {
 			fmt.Printf("  Zone ID: %d\n", zoneID)
 		}
