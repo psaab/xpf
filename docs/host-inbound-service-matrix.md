@@ -2116,10 +2116,14 @@ helper never sees it, so a helper crash cannot lock management out).
     `len(netdevs) > 0` cannot tell that from full coverage — it reported such a
     zone as fully enforced.
 
-  A zone with NO candidates at all (lifeline-only, or no interfaces) is a third
-  state and must stay distinct: there is nothing to enforce, so it must not block
-  suppression. The distinction is exactly `len(Unscopable) > 0` — the zone HAD
-  candidates and could not use them all.
+  A zone with NO candidates at all is a third state and must stay distinct:
+  when it has a configured lifeline ref but no non-lifeline candidates, there
+  is nothing to enforce on that zone, so it must not block ordinary-zone
+  suppression. The projection records that configured lifeline applicability,
+  while a no-interface zone is not recorded; a shared global / from-zone-any
+  policy retains one warning naming the lifeline-only zone. A per-zone
+  lifeline-only policy likewise retains its warning; ordinary-zone enforcement
+  still suppresses per-zone.
 
 - **Representable is not enforced — a deny that projects NO rule keeps its
   warning (#6705).** The suppression asks whether the kernel gate enforces the
@@ -2385,14 +2389,22 @@ EFFECTIVE admit set rather than a token test, because a syntactic
 run inside `ValidateConfig`) emits a WARN-only commit message for each `to-zone
 junos-host` policy — zone-pair or global — that is **stricter than the coarse
 gate** (a `then deny`/`then reject`, or a source-restricted `then permit`) AND is
-**not** enforced by the direction-(b) projection above. A representable DENY that
-renders an enforced kernel rule in every enforceable ingress zone it applies to
-has its warning **suppressed** (`BuildJunosHostDenyProjection().RenderedPolicyKeys`);
-an un-representable / lifeline-only / unenforceable policy still warns. The trigger
-is deliberately conservative — a plain `permit`-from-any to junos-host only mirrors
-the coarse permit-by-service gate and does **not** warn. It is **never a hard
-reject**: the config is legal Junos and a reject would brick a previously committed
-config. The warning names the policy and points here.
+**not** fully enforced by the direction-(b) projection above. A representable
+DENY that renders an enforced kernel rule in every ordinary ingress zone it
+applies to has its warning **suppressed** when there is no configured
+lifeline-only applicability (`BuildJunosHostDenyProjection().RenderedPolicyKeys`
+with an empty `LifelineOnlyZones[key]`). `RenderedPolicyZoneKeys` records which
+ordinary zones supplied the enforced-rule evidence. If the same global or
+from-zone-any policy also applies to a configured lifeline-only zone, its warning
+is retained once and names the uncovered zone: the lifeline has no kernel
+junos-host rule by design (lifeline NEVER-deny), while the coarse gate still
+admits. A zone-pair policy scoped to a configured lifeline-only zone likewise
+retains its warning; exact per-zone enforcement remains independent. An
+un-representable / otherwise unenforceable policy still warns.
+The trigger is deliberately conservative — a plain `permit`-from-any to junos-host
+only mirrors the coarse permit-by-service gate and does **not** warn. It is
+**never a hard reject**: the config is legal Junos and a reject would brick a
+previously committed config. The warning names the policy and points here.
 
 ### Historical alternatives (rejected)
 
