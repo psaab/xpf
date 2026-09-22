@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -392,7 +393,8 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// persisted, or a peer sends, still loads. Strict where the operator
 		// can fix it, tolerant where refusing would brick the node.
 		if closed {
-			return typedLeafErrorf(path, "unknown configuration keyword %q under closed-world subtree", keyword)
+			return fmt.Errorf("%s: unknown configuration keyword %q under closed-world subtree",
+				strings.Join(path, " "), keyword)
 		}
 		// Open-world — the default for a subtree that has NOT opted in, which
 		// is most of them and emphatically not all. Unknown keywords are not
@@ -430,7 +432,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	if childSchema.nodeValidator != nil && exactMatch {
 		if err := childSchema.nodeValidator(node, parent); err != nil {
 			leafPath := append(append([]string(nil), path...), keyword)
-			return typedLeafErrorf(leafPath, "%v", err)
+			return fmt.Errorf("%s: %v", strings.Join(leafPath, " "), err)
 		}
 	}
 	// exactMatch is computed here rather than at its original site further
@@ -559,8 +561,9 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// levels arrive as nested children.
 	if childSchema.midKeyword != "" && len(node.Keys) > childSchema.midKeywordAt &&
 		node.Keys[childSchema.midKeywordAt] != childSchema.midKeyword {
-		return typedLeafErrorf(newPath, "unexpected keyword %q — expected %q (`%s <a> %s <b>` names a zone pair, and the middle keyword is fixed)",
-			node.Keys[childSchema.midKeywordAt], childSchema.midKeyword, node.Keys[0], childSchema.midKeyword)
+		return fmt.Errorf("%s: unexpected keyword %q — expected %q (`%s <a> %s <b>` names a zone pair, and the middle keyword is fixed)",
+			strings.Join(newPath, " "), node.Keys[childSchema.midKeywordAt],
+			childSchema.midKeyword, node.Keys[0], childSchema.midKeyword)
 	}
 
 	// Typed KEY slot (#1319 PR 3): a named-instance container with a
@@ -850,8 +853,8 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 	if containerSchema.midKeyword != "" {
 		for i, tok := range node.Keys[:consume] {
 			if baseArgIdx+i == containerSchema.midKeywordAt-1 && tok != containerSchema.midKeyword {
-				return typedLeafErrorf(path, "unexpected keyword %q — expected %q (the middle keyword of this stanza is fixed)",
-					tok, containerSchema.midKeyword)
+				return fmt.Errorf("%s: unexpected keyword %q — expected %q (the middle keyword of this stanza is fixed)",
+					strings.Join(path, " "), tok, containerSchema.midKeyword)
 			}
 		}
 	}
@@ -1258,7 +1261,9 @@ func validateTailLeaf(node *Node, leafSchema *schemaNode, parentPath []string, s
 		siblingTails = append(siblingTails, gatherLeafTailTokens(s))
 	}
 	if err := leafSchema.tailValidator(tokens, siblingTails); err != nil {
-		return fmt.Errorf("%s: %v", strings.Join(path, " "), err)
+		return &typedLeafSchemaError{
+			msg: fmt.Sprintf("%s: %v", strings.Join(path, " "), err),
+		}
 	}
 	return nil
 }
@@ -1317,11 +1322,28 @@ func siblingSuppliesTypedValue(siblings []*Node, leafName string, leafSchema *sc
 	return false
 }
 
+// typedLeafSchemaError marks a schema rejection caused by a typed leaf. The
+// tolerant configstore path persists only this class as a queryable typed-leaf
+// warning; closed-world keyword and top-level stanza errors remain ordinary
+// tolerated schema diagnostics.
+type typedLeafSchemaError struct{ msg string }
+
+func (e *typedLeafSchemaError) Error() string { return e.msg }
+
+// IsTypedLeafSchemaError reports whether err (including wrapped errors) came
+// from a typed-leaf validator or typed-leaf structural check.
+func IsTypedLeafSchemaError(err error) bool {
+	var typed *typedLeafSchemaError
+	return errors.As(err, &typed)
+}
+
 // typedLeafErrorf builds a commit-check error scoped to the leaf's
 // consumed config path, e.g. "class-of-service schedulers be
 // transmit-rate: missing value". path already includes the leaf keyword.
 func typedLeafErrorf(path []string, format string, args ...interface{}) error {
-	return fmt.Errorf("%s: %s", strings.Join(path, " "), fmt.Sprintf(format, args...))
+	return &typedLeafSchemaError{
+		msg: fmt.Sprintf("%s: %s", strings.Join(path, " "), fmt.Sprintf(format, args...)),
+	}
 }
 
 // typedLeafInvalidErrorf builds the "invalid value" variant which quotes
@@ -1367,9 +1389,13 @@ func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 				reason = strings.ReplaceAll(reason, tok, "<redacted>")
 			}
 		}
-		return fmt.Errorf("%s: invalid value <redacted>: %s", joined, reason)
+		return &typedLeafSchemaError{
+			msg: fmt.Sprintf("%s: invalid value <redacted>: %s", joined, reason),
+		}
 	}
-	return fmt.Errorf("%s: invalid value %q: %v", joined, tok, err)
+	return &typedLeafSchemaError{
+		msg: fmt.Sprintf("%s: invalid value %q: %v", joined, tok, err),
+	}
 }
 
 // checkUnknownTopLevelStanza rejects a root keyword the schema does not model

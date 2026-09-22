@@ -118,6 +118,7 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	var warnings []string
 	if cfg != nil {
 		warnings = config.ValidateConfig(cfg)
+		warnings = append(warnings, config.ToleratedTypedLeafWarnings(cfg)...)
 	}
 	// #9530: a peer config sync that discarded a local commit is an alarm too.
 	divergence := s.store.ConfigSyncDivergenceAlarm()

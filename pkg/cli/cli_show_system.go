@@ -1117,6 +1117,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 		var divergence string
 		if cfg != nil {
 			warnings = config.ValidateConfig(cfg)
+			warnings = append(warnings, config.ToleratedTypedLeafWarnings(cfg)...)
 			// #9530: a peer config sync that discarded a local commit is an alarm too.
 			divergence = c.store.ConfigSyncDivergenceAlarm()
 		}
