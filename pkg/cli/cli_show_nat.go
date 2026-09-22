@@ -249,6 +249,7 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 				if _, exists := ifacePoolSeen[key]; exists {
 					continue
 				}
+				ifacePoolSeen[key] = struct{}{}
 				pools = append(pools, poolInfo{
 					name:    fmt.Sprintf("%s/%s (interface)", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)),
 					address: "interface",
