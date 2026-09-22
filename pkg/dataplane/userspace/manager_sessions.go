@@ -341,7 +341,7 @@ func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 	err := m.syncDeleteV4Locked(key, val, valErr == nil)
 	m.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("delete v4 session from userspace helper: %w", err)
+		return surfaceSingularHelperDeleteError("v4", err)
 	}
 	if err := m.bpfShim.DeleteSession(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return err
@@ -382,7 +382,6 @@ func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.Ses
 	return nil
 }
 
-
 // syncDeleteV4LockedMarked is syncDeleteV4Locked with the #9714 peer mark set on
 // both helper requests (the key and its reverse companion). It reports whether the
 // helper REFUSED the marked delete of the key; a refused key keeps its reverse
@@ -420,7 +419,7 @@ func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 	err := m.syncDeleteV6Locked(key, val, valErr == nil)
 	m.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("delete v6 session from userspace helper: %w", err)
+		return surfaceSingularHelperDeleteError("v6", err)
 	}
 	if err := m.bpfShim.DeleteSessionV6(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return err
@@ -449,7 +448,6 @@ func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.S
 	}
 	return nil
 }
-
 
 // syncDeleteV6LockedMarked is the IPv6 analogue of syncDeleteV4LockedMarked (#9714).
 func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer, forwardOnly bool) bool {
@@ -613,6 +611,18 @@ func surfaceScopedHelperDeleteError(family string, err error) error {
 			family, errSessionHelperUnreachable, err)
 	}
 	return fmt.Errorf("delete %s sessions from userspace helper: %w", family, err)
+}
+
+// surfaceSingularHelperDeleteError is the singular DeleteSession analogue of
+// surfaceScopedHelperDeleteError. Transport failures retain the stable helper
+// sentinel but do not expose a raw dial ENOENT to the session-store recovery
+// classifier (#10528).
+func surfaceSingularHelperDeleteError(family string, err error) error {
+	if errors.Is(err, errSessionHelperUnreachable) {
+		return fmt.Errorf("delete %s session from userspace helper: %w (%v)",
+			family, errSessionHelperUnreachable, err)
+	}
+	return fmt.Errorf("delete %s session from userspace helper: %w", family, err)
 }
 
 // peerDeleteRefusedLocalOwned is the helper's in-band answer to a #9714 peer delete
