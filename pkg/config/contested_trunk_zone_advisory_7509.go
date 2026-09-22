@@ -10,13 +10,14 @@ import (
 // different security zones.
 //
 // WHY THIS EXISTS AS WELL AS THE DATAPLANE CHANGE. The dataplane now leaves a
-// contested parent ifindex UNZONED rather than adjudicating a packet against
-// whichever sibling unit was walked first (`forwarding_build/interfaces.rs`).
+// genuinely contested parent ifindex UNZONED rather than adjudicating a packet
+// against whichever sibling unit was walked first (`forwarding_build/interfaces.rs`).
 // That makes the failure SAFE — transit is DENIED as unattributed (#6682
 // refuses it before the implicit default policy) instead of being policed
-// under a zone the operator never wrote for it, and host-bound traffic to the
-// firewall itself is denied by the contested-parent host-inbound sentinel
-// (#10503). It does not make it LEGIBLE: an operator whose untagged trunk
+// under a zone the operator never wrote for it. Host-bound handling is scoped
+// below: a genuine non-lifeline contest uses #10503; an addressed/tunnel
+// refusal uses #5659; lifelines and shapes with no sentinel remain admitted.
+// It does not make the consequence LEGIBLE: an operator whose untagged trunk
 // traffic starts being denied has no way to reach "these units share a base
 // netdev and disagree about their zone" without reading source. That is the
 // #8296 shape, where a config committed clean, rendered back verbatim, and
@@ -29,18 +30,202 @@ import (
 //
 // SCOPE, wider than #7509's own framing. The issue describes interface-level
 // TUNNEL units sharing one netdev. The condition is any parent whose units span
-// different zones, which includes an ordinary VLAN trunk. Only traffic that
-// resolves to the RAW PARENT is affected — a tagged frame resolves to its own
-// logical unit ifindex first (#3021) — so in practice this is untagged traffic
-// on a mixed-zone trunk.
+// different zones and whose raw parent is not disambiguated by a collapsed,
+// zoned native unit 0. Only traffic that resolves to the RAW PARENT is affected
+// — a tagged frame resolves to its own logical unit ifindex first (#3021) — so
+// in practice this is untagged traffic on a mixed-zone trunk.
 //
 // WHAT WOULD INVALIDATE IT (#4308): `native-vlan-id` is accepted-only and not
 // enforced today, so untagged frames have no defined unit. If #4308 is ever
 // implemented they acquire one, and this advisory becomes wrong for the native
 // VLAN specifically while staying right for every other contested case.
 
+// nativeUnitZeroDisambiguatesParent reports whether native unit 0 resolves to
+// the base device and is zoned there. Its zone is the raw parent identity, so
+// sibling units on their own devices cannot make that parent a contested ifindex.
+func nativeUnitZeroDisambiguatesParent(
+	cfg *Config,
+	base string,
+	zoneByIface map[string]string,
+	tunnelNames map[string]string,
+) bool {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return false
+	}
+	ifc := cfg.Interfaces.Interfaces[base]
+	if ifc == nil || ifc.Tunnel != nil {
+		return false
+	}
+	unit := ifc.Units[0]
+	if unit == nil || unit.VlanID != 0 {
+		return false
+	}
+	unitRef := fmt.Sprintf("%s.0", base)
+	return zoneByIface[unitRef] != "" &&
+		snapshotUnitDevice(cfg, unitRef, tunnelNames) ==
+			cfg.resolveKernelIfNameWith(base, tunnelNames)
+}
+
+// snapshotUnitDevice follows the userspace snapshot's unit-device precedence:
+// secure-tunnel ownership wins, then TunnelNameMap owns emitted unit
+// references, while the canonical resolver is the fallback for references
+// without an explicit tunnel-device mapping.
+func snapshotUnitDevice(
+	cfg *Config,
+	name string,
+	tunnelNames map[string]string,
+) string {
+	if device, ok := cfg.SecureTunnelUnitNetdev(name); ok {
+		return device
+	}
+	if device := tunnelNames[name]; device != "" {
+		return device
+	}
+	return cfg.resolveKernelIfNameWith(name, tunnelNames)
+}
+
+// interfaceUnitCollapsesOnBase reports whether a unit reference resolves to
+// the same kernel device as the interface-level tunnel. Per-unit tunnel stanzas
+// usually own their own device, but unit 0 can deliberately anchor to the base
+// device; compare the canonical resolver answers rather than the stanza shape.
+func interfaceUnitCollapsesOnBase(
+	cfg *Config,
+	base string,
+	name string,
+	tunnelNames map[string]string,
+) bool {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return true
+	}
+	ifc := cfg.Interfaces.Interfaces[base]
+	if ifc == nil || ifc.Tunnel == nil {
+		return true
+	}
+	return snapshotUnitDevice(cfg, name, tunnelNames) ==
+		cfg.resolveKernelIfNameWith(base, tunnelNames)
+}
+
+// userspaceHostInboundLifeline reports the union of config-aware lifelines and
+// the name/prefix exclusions used by the AF_XDP ingress bind path. Keep this
+// mirror broad: the Rust snapshot matcher and userspaceSkipsIngressInterface
+// exclude fxp*/em*/fab* and lo0, while configured control/fabric names remain
+// valid lifelines even when they do not match a prefix.
+func userspaceHostInboundLifeline(cfg *Config, name string) bool {
+	base := LifelineBaseName(name)
+	return HostInboundLifelineInterface(name, HostInboundLifelineSet(cfg)) ||
+		strings.HasPrefix(base, "fxp") ||
+		strings.HasPrefix(base, "em") ||
+		strings.HasPrefix(base, "fab") ||
+		base == "lo0"
+}
+
+func sharedUnitIsAddressedOrTunnel(
+	cfg *Config,
+	base string,
+	names []string,
+) bool {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return false
+	}
+	ifc := cfg.Interfaces.Interfaces[base]
+	if ifc == nil {
+		return false
+	}
+	for _, name := range names {
+		for num, unit := range ifc.Units {
+			if fmt.Sprintf("%s.%d", base, num) != name {
+				continue
+			}
+			if ifc.Tunnel != nil || (unit != nil && len(unit.Addresses) > 0) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sharedDeviceHostBoundAdvisory(
+	cfg *Config,
+	base string,
+	shared map[string][]string,
+) string {
+	if userspaceHostInboundLifeline(cfg, base) {
+		return "Host-bound traffic on this lifeline remains admitted; #5659 " +
+			"deliberately does not arm an empty-zone host-inbound sentinel. "
+	}
+	if sharedUnitIsAddressedOrTunnel(cfg, base, shared[base]) {
+		return "Host-bound traffic to the firewall itself is denied by the #5659 " +
+			"empty-zone host-inbound sentinel (ICMP errors/PMTUD/ND control " +
+			"messages remain admitted; an explicit per-interface host-inbound " +
+			"stanza still takes precedence). "
+	}
+	return "Host-bound traffic remains admitted via the global None => true " +
+		"host-inbound path because this address-less non-tunnel refusal has no " +
+		"#5659 sentinel. "
+}
+
+func interfaceTunnelHasCollapsedUnits(
+	cfg *Config,
+	base string,
+	tunnelNames map[string]string,
+) bool {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return false
+	}
+	ifc := cfg.Interfaces.Interfaces[base]
+	if ifc == nil || ifc.Tunnel == nil || len(ifc.Units) == 0 {
+		return false
+	}
+	baseDevice := cfg.resolveKernelIfNameWith(base, tunnelNames)
+	for num, unit := range ifc.Units {
+		if unit == nil {
+			continue
+		}
+		unitRef := fmt.Sprintf("%s.%d", base, num)
+		if snapshotUnitDevice(cfg, unitRef, tunnelNames) == baseDevice {
+			return true
+		}
+	}
+	return false
+}
+
+func contestedHostBoundAdvisory(
+	cfg *Config,
+	base string,
+	shared map[string][]string,
+	tunnelNames map[string]string,
+) string {
+	lifeline := userspaceHostInboundLifeline(cfg, base)
+	if sharedUnitIsAddressedOrTunnel(cfg, base, shared[base]) {
+		if lifeline {
+			return "Host-bound traffic on this lifeline remains admitted; #5659 " +
+				"deliberately does not arm an empty-zone host-inbound sentinel. "
+		}
+		return "Host-bound traffic to the firewall itself is denied by the #5659 " +
+			"empty-zone host-inbound sentinel (ICMP errors/PMTUD/ND control " +
+			"messages remain admitted; an explicit per-interface host-inbound " +
+			"stanza still takes precedence). "
+	}
+	if interfaceTunnelHasCollapsedUnits(cfg, base, tunnelNames) {
+		return "Host-bound traffic remains admitted: all collapsed tunnel " +
+			"units are zoned, so neither the #5659 empty-zone sentinel nor " +
+			"the #10503 contested-parent sentinel applies. "
+	}
+	if lifeline {
+		return "Host-bound traffic on this lifeline remains admitted; #10503 " +
+			"deliberately does not arm a contested-parent sentinel. "
+	}
+	return "Host-bound traffic to the firewall itself is denied by the " +
+		"contested-parent host-inbound sentinel (#10503; ICMP errors/PMTUD/ND " +
+		"control messages remain admitted; an explicit per-interface " +
+		"host-inbound stanza still takes precedence). "
+}
+
 // contestedTrunkZones returns, per base interface, the sorted distinct zones its
-// UNITS are bound to — only for bases whose units span MORE THAN ONE zone.
+// COLLAPSED UNITS are bound to — only for bases whose collapsed units span MORE
+// THAN ONE zone and whose raw parent is not disambiguated by a zoned native unit
+// 0. A per-unit tunnel stanza resolving to a distinct device is not part of this
+// set; a unit stanza that resolves to the base device remains part of it.
 //
 // Keyed off `InterfaceZoneMap` rather than walking zones directly so this and
 // the snapshot builder answer from the same source. That map already canonicalises
@@ -51,6 +236,14 @@ func contestedTrunkZones(cfg *Config) map[string][]string {
 	if len(zoneByIface) == 0 {
 		return nil
 	}
+	return contestedTrunkZonesWithMaps(cfg, zoneByIface, tunnelNameMapFn(cfg))
+}
+
+func contestedTrunkZonesWithMaps(
+	cfg *Config,
+	zoneByIface map[string]string,
+	tunnelNames map[string]string,
+) map[string][]string {
 	// base -> set of zones its units name. UNIT keys only: the base's own entry
 	// in InterfaceZoneMap is the inherited fan-UP value (first unit wins), which
 	// is the very guess this change removes — counting it would let a base
@@ -70,6 +263,9 @@ func contestedTrunkZones(cfg *Config) map[string][]string {
 			continue
 		}
 		base := s.Base
+		if !interfaceUnitCollapsesOnBase(cfg, base, iface, tunnelNames) {
+			continue
+		}
 		if byBase[base] == nil {
 			byBase[base] = map[string]struct{}{}
 		}
@@ -77,7 +273,7 @@ func contestedTrunkZones(cfg *Config) map[string][]string {
 	}
 	var out map[string][]string
 	for base, zones := range byBase {
-		if len(zones) < 2 {
+		if len(zones) < 2 || nativeUnitZeroDisambiguatesParent(cfg, base, zoneByIface, tunnelNames) {
 			continue
 		}
 		names := make([]string, 0, len(zones))
@@ -114,11 +310,10 @@ func contestedTrunkZones(cfg *Config) map[string][]string {
 // SCOPED TO THE UNITS THAT ACTUALLY COLLAPSE, which is the difference between
 // this and a restatement of the contest above. A unit on its OWN device is
 // adjudicated per unit and is unaffected; warning about it would describe a
-// consequence that does not happen. Two units collapse onto the base device:
-//
-//   - unit 0 with no vlan-id — `snapshotLinuxName`'s non-VLAN unit-0 fold; and
-//   - every unit of an INTERFACE-level tunnel with no per-unit tunnel stanza —
-//     `TunnelNameMap` maps them all onto the tunnel device.
+// consequence that does not happen. Device identity follows the snapshot's
+// secure-tunnel, TunnelNameMap, and canonical fallback precedence:
+//   - a native unit 0 whose effective device is the bare interface; and
+//   - an interface-level tunnel unit whose effective device is that tunnel.
 //
 // Both conditions are read off the config here rather than from the snapshot
 // builder, which lives in a package that imports this one. The pairing is
@@ -132,6 +327,7 @@ func sharedDeviceUnzonedUnits(cfg *Config) map[string][]string {
 	if len(zoneByIface) == 0 {
 		return nil
 	}
+	tunnelNames := tunnelNameMapFn(cfg)
 	var out map[string][]string
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil || len(ifc.Units) < 2 {
@@ -139,6 +335,7 @@ func sharedDeviceUnzonedUnits(cfg *Config) map[string][]string {
 			// has nothing that collapses onto it.
 			continue
 		}
+		baseDevice := cfg.resolveKernelIfNameWith(name, tunnelNames)
 		zoned, unzonedShared := false, []string(nil)
 		for num, unit := range ifc.Units {
 			if unit == nil {
@@ -149,8 +346,7 @@ func sharedDeviceUnzonedUnits(cfg *Config) map[string][]string {
 				zoned = true
 				continue
 			}
-			sharesDevice := (num == 0 && unit.VlanID == 0) ||
-				(ifc.Tunnel != nil && unit.Tunnel == nil)
+			sharesDevice := snapshotUnitDevice(cfg, unitName, tunnelNames) == baseDevice
 			if sharesDevice {
 				unzonedShared = append(unzonedShared, unitName)
 			}
@@ -187,18 +383,8 @@ func appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg *Config, opts compileOpts) 
 		bases = append(bases, base)
 	}
 	sort.Strings(bases)
-	lifelines := HostInboundLifelineSet(cfg)
 	for _, base := range bases {
-		hostBound := "Host-bound handling is shape-dependent: addressed/tunnel traffic " +
-			"is denied by the #5659 empty-zone host-inbound sentinel (ICMP " +
-			"errors/PMTUD/ND control messages remain admitted; an explicit " +
-			"per-interface host-inbound stanza still takes precedence); address-less " +
-			"non-tunnel traffic remains admitted via the global None => true path; " +
-			"retained sibling-zone traffic is zone-gated. "
-		if HostInboundLifelineInterface(base, lifelines) {
-			hostBound = "Host-bound traffic on this lifeline remains admitted; #5659 " +
-				"deliberately does not arm an empty-zone host-inbound sentinel. "
-		}
+		hostBound := sharedDeviceHostBoundAdvisory(cfg, base, shared)
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
 			"interface %s has unit(s) %s in no security zone sharing one kernel "+
 				"device with %s, whose other units ARE zoned: the dataplane sees the "+
@@ -213,12 +399,13 @@ func appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg *Config, opts compileOpts) 
 	}
 }
 
-// appendContestedTrunkZoneAdvisoryLocked adds one advisory per contested base.
-//
-// A WARNING, never an error. A mixed-zone trunk is a legitimate configuration —
-// its TAGGED traffic is adjudicated per unit and is unaffected — so rejecting it
-// would outlaw a working config to describe a narrow consequence. We are
-// declining to guess for one traffic class, not forbidding the shape.
+// A WARNING, never an error. A mixed-zone ordinary trunk is a legitimate
+// configuration — its TAGGED traffic is adjudicated per unit and is unaffected
+// — so rejecting it would outlaw a working config to describe a narrow
+// consequence. Interface-level tunnels use a separate complete sentence below:
+// units whose resolved kernel device matches the base collapse onto one netdev,
+// while independent per-unit devices remain separate. We are declining to
+// guess for one traffic class, not forbidding either shape.
 //
 // `opts.suppressContestedTrunkZoneAdvisory` silences it on the TOLERANT paths,
 // which back `Store.Load` (persisted-config boot) and `Store.SyncApply` (HA peer
@@ -229,7 +416,12 @@ func appendContestedTrunkZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 	if cfg == nil || opts.suppressContestedTrunkZoneAdvisory {
 		return
 	}
-	contested := contestedTrunkZones(cfg)
+	zoneByIface := InterfaceZoneMap(cfg)
+	if len(zoneByIface) == 0 {
+		return
+	}
+	tunnelNames := tunnelNameMapFn(cfg)
+	contested := contestedTrunkZonesWithMaps(cfg, zoneByIface, tunnelNames)
 	if len(contested) == 0 {
 		return
 	}
@@ -238,15 +430,24 @@ func appendContestedTrunkZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 		bases = append(bases, base)
 	}
 	sort.Strings(bases)
-	lifelines := HostInboundLifelineSet(cfg)
+	shared := sharedDeviceUnzonedUnits(cfg)
 	for _, base := range bases {
-		hostBound := "Host-bound traffic to the firewall itself is denied by the " +
-			"contested-parent host-inbound sentinel (#10503; ICMP errors/PMTUD/ND " +
-			"control messages remain admitted; an explicit per-interface " +
-			"host-inbound stanza still takes precedence). "
-		if HostInboundLifelineInterface(base, lifelines) {
-			hostBound = "Host-bound traffic on this lifeline remains admitted; #10503 " +
-				"deliberately does not arm a contested-parent sentinel. "
+		hostBound := contestedHostBoundAdvisory(cfg, base, shared, tunnelNames)
+		if interfaceTunnelHasCollapsedUnits(cfg, base, tunnelNames) {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+				"interface %s has units in more than one security zone (%s): this "+
+					"interface-level tunnel maps units whose resolved kernel device "+
+					"matches its base onto one netdev; units whose resolved kernel "+
+					"device differs remain independent, so transit cannot be "+
+					"attributed to a unit where it collapses and remains UNZONED "+
+					"(#7509). Transit arriving "+
+					"there is DENIED as unattributed — #6682 refuses it before the "+
+					"implicit default policy is consulted, default-policy permit-all "+
+					"does not admit it, and the deny logs as unattributed (#9989, "+
+					"counter UNZONED_INGRESS_DENIED); %sConfigure per-unit tunnel "+
+					"devices or one consistent zone if this traffic must be forwarded.",
+				base, strings.Join(contested[base], ", "), hostBound))
+			continue
 		}
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
 			"interface %s has units in more than one security zone (%s): UNTAGGED "+
