@@ -385,20 +385,6 @@ const (
 	// ignore the scope and import a lease as domain 0.
 	MinProtocolPersistentNatLeaseScope = 25
 
-	// MinProtocolIpsecTunnelRows is the FIRST snapshot protocol version whose
-	// ConfigSnapshot carries the immutable per-admitted-tunnel P-MECH identity
-	// rows consumed by Rust D14. A helper below this floor cannot prove the
-	// `{stn, if_id, logical_ifindex}` join and must never be paired with a
-	// snapshot that claims the feature.
-	MinProtocolIpsecTunnelRows = 29
-
-	// MinProtocolIpsecTunnelSnapshotGeneration is the first version that
-	// carries the capture-generation fence paired with the row set. Keep this
-	// distinct from MinProtocolIpsecTunnelRows: the rows themselves landed in
-	// v29, while the generation needed to reject same-key stale pairing landed
-	// in v30.
-	MinProtocolIpsecTunnelSnapshotGeneration = 30
-
 	// MinProtocolSecureTunnelRefusal: the device-level AF_XDP binding refusal
 	// contract spans THREE bumps on the #5619/#6691 branch — v5 added
 	// InterfaceSnapshot.SecureTunnel (be8aec13e), v6 the every-owner refusal

@@ -3,6 +3,7 @@ package userspace
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -346,22 +347,14 @@ func TestProtocolVersionMovedWithTheWire9054(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control.rs: %v", err)
 	}
-	want := "pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = " +
-		strings.TrimSpace(strings.Split(strings.Split(string(raw), "CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = ")[1], ";")[0]) + ";"
-	if !strings.Contains(string(raw), want) {
-		t.Fatalf("could not read the Rust protocol constant")
+	rawText := string(raw)
+	want := fmt.Sprintf("pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = %d;", ProtocolVersion)
+	if !strings.Contains(rawText, want) {
+		t.Fatalf("Rust CONFIG_SNAPSHOT_PROTOCOL_VERSION is not %d — the planes disagree. Expected the full declaration %q",
+			ProtocolVersion, want)
 	}
-	// This literal tracks the CURRENT snapshot version, not a #9054 floor: the
-	// `ProtocolVersion < 10` check above is the #9054 floor. It moves with any
-	// later bump (#9425 took it to 11, #9546 to 12, #9412 to 13, #9521 to 14,
-	// #9520 to 15, #9714 to 16, #9587 to 17, #9637 to 18, #9874 to 19, #9875
-	// to 20, #9821 to 21, #9752 to 22, #9553 to 23, #9955 to 24, #10018 to
-	// 25, #10196 to 26, #9522 to 27, #9506 S5 to 28, #9506 P-MECH to 29)
-	// because what it asserts is that the two planes moved TOGETHER — a
-	// one-sided bump makes every pairing a mismatch.
-	if !strings.Contains(string(raw), "= 29;") {
-		t.Fatalf("the Rust CONFIG_SNAPSHOT_PROTOCOL_VERSION did not move with the Go one; a "+
-			"one-sided bump makes EVERY pairing a mismatch, including matched deployments. Go "+
-			"is at %d", ProtocolVersion)
-	}
+	// This checks the CURRENT snapshot version, not a #9054 floor: it moves
+	// with every later wire bump so a one-sided bump cannot pass matched
+	// deployment checks. #9506 moved P-MECH rows to 29 and the paired
+	// capture-generation fence to 30.
 }
