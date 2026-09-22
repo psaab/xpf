@@ -8,10 +8,19 @@ import (
 	"testing"
 )
 
-// validateMakeAggregate checks the observable contract of the unprivileged
-// aggregate without pinning incidental recipe spelling. In particular, the
-// test target must not become a prerequisite list again: make stops before
-// the second prerequisite when the first one fails.
+// validateMakeAggregate pins the unprivileged aggregate's load-bearing shape:
+// a line-anchored test target with no prerequisites, a failure-status
+// initializer ordered before both legs, two distinct TAB-indented recipe
+// lines running "$(MAKE) test-go || status=$$?" / the test-rust analog with
+// contiguous capture, a trailing "exit $$status" command, and the NOT EXAMINED
+// announcement between the Rust leg and the exit. In particular, the test
+// target must not become a prerequisite list again: make stops before the
+// second prerequisite when the first one fails.
+func capturedLeg(line, target string) bool {
+	suffix := target + " || status=$$?"
+	return line == suffix || strings.HasPrefix(line, suffix+";")
+}
+
 func validateMakeAggregate(mk string) error {
 	lines := strings.Split(mk, "\n")
 	target := -1
@@ -57,13 +66,13 @@ func validateMakeAggregate(mk string) error {
 			}
 			statusInit = i
 		}
-		if strings.HasPrefix(line, "$(MAKE) test-go || status=$$?") {
+		if capturedLeg(line, "$(MAKE) test-go") {
 			if goLeg >= 0 {
 				return fmt.Errorf("duplicate Go leg")
 			}
 			goLeg = i
 		}
-		if strings.HasPrefix(line, "$(MAKE) test-rust || status=$$?") {
+		if capturedLeg(line, "$(MAKE) test-rust") {
 			if rustLeg >= 0 {
 				return fmt.Errorf("duplicate Rust leg")
 			}
@@ -81,14 +90,11 @@ func validateMakeAggregate(mk string) error {
 		return fmt.Errorf("failure status initializes after the Go leg")
 	}
 	if goLeg >= rustLeg {
-		if goLeg == rustLeg {
-			return fmt.Errorf("Go and Rust legs must occupy distinct recipe lines")
-		}
 		return fmt.Errorf("Go leg must run before Rust leg")
 	}
 	exit := -1
 	for i, line := range recipe {
-		if strings.HasPrefix(line, "exit $$status") {
+		if line == "exit $$status" {
 			if exit >= 0 {
 				return fmt.Errorf("duplicate trailing exit $$status")
 			}
@@ -97,6 +103,16 @@ func validateMakeAggregate(mk string) error {
 	}
 	if exit <= rustLeg {
 		return fmt.Errorf("trailing exit $$status is missing or precedes Rust leg")
+	}
+	announced := false
+	for i, line := range recipe {
+		if i > rustLeg && i < exit && strings.Contains(line, "NOT EXAMINED") {
+			announced = true
+			break
+		}
+	}
+	if !announced {
+		return fmt.Errorf("test target lacks the NOT EXAMINED announcement between the Rust leg and the trailing exit")
 	}
 	return nil
 }
@@ -146,6 +162,54 @@ func TestMakefileSerialAggregate10496(t *testing.T) {
 		"\texit $$status\n"
 	if err := validateMakeAggregate(lateStatus); err == nil {
 		t.Fatal("late status initialization passed the aggregate contract")
+	}
+
+	// A swapped leg order must fail: the Go leg runs first, and the order
+	// check is what pins it.
+	swappedOrder := "test:\n" +
+		"\t@status=0; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\t$(MAKE) test-go || status=$$?; \\\n" +
+		"\texit $$status\n"
+	if err := validateMakeAggregate(swappedOrder); err == nil ||
+		!strings.Contains(err.Error(), "must run before Rust leg") {
+		t.Fatalf("swapped leg order did not trip the order check: %v", err)
+	}
+
+	// A bare leg without contiguous capture swallows its failure: without
+	// set -e the next command overwrites $?, the R1 false all-clear.
+	droppedCapture := "test:\n" +
+		"\t@status=0; \\\n" +
+		"\t$(MAKE) test-go; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\texit $$status\n"
+	if err := validateMakeAggregate(droppedCapture); err == nil ||
+		!strings.Contains(err.Error(), "lack contiguous status capture") {
+		t.Fatalf("dropped capture did not trip the capture check: %v", err)
+	}
+
+	// Legs without any trailing exit leave the aggregate's status on the
+	// floor: the last command's exit becomes the target's.
+	missingExit := "test:\n" +
+		"\t@status=0; \\\n" +
+		"\t$(MAKE) test-go || status=$$?; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\techo done\n"
+	if err := validateMakeAggregate(missingExit); err == nil ||
+		!strings.Contains(err.Error(), "trailing exit") {
+		t.Fatalf("missing exit did not trip the exit check: %v", err)
+	}
+
+	// Legs and exit without the announcement recreate the #7766 shape: the
+	// gate would stop saying what it did not examine.
+	missingAnnouncement := "test:\n" +
+		"\t@status=0; \\\n" +
+		"\t$(MAKE) test-go || status=$$?; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\texit $$status\n"
+	if err := validateMakeAggregate(missingAnnouncement); err == nil ||
+		!strings.Contains(err.Error(), "NOT EXAMINED") {
+		t.Fatalf("missing announcement did not trip the announcement check: %v", err)
 	}
 
 	// A missing target is a zero-denominator control: a canary that finds no
