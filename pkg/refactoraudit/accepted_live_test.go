@@ -20,7 +20,8 @@ func acceptedEntryLOC(content []byte) int {
 // contract. It must fail closed for a missing path: audit_is_audited_path is
 // intentionally pattern-only, and the touched-file probe's [ -f ] skip is
 // correct for its changed-set question but would silently revive a stale
-// acknowledgement here.
+// acknowledgement here. This assumes a full checkout; sparse or partial
+// checkouts intentionally fail closed when an accepted path is absent.
 func acceptedEntryViolations(root string, accepted []acceptedCrossing) []string {
 	var violations []string
 	for _, a := range accepted {
@@ -65,20 +66,24 @@ func TestAcceptedEntriesAreLive(t *testing.T) {
 
 func TestAcceptedEntryFloorBoundaries(t *testing.T) {
 	tests := []struct {
-		name      string
-		tier      string
-		loc       int
-		wantLive  bool
-		wantWords string
+		name       string
+		tier       string
+		loc        int
+		wantLive   bool
+		wantText   string
+		forbidText string
 	}{
-		{name: "watch just below", tier: tierWatch, loc: 1499, wantWords: "prune"},
+		{name: "watch just below", tier: tierWatch, loc: 1499, wantText: "prune the entry", forbidText: "demote"},
 		{name: "watch at floor", tier: tierWatch, loc: 1500, wantLive: true},
 		{name: "watch just above", tier: tierWatch, loc: 1501, wantLive: true},
 		{name: "watch above refactor floor", tier: tierWatch, loc: 2001, wantLive: true},
-		{name: "refactor just below", tier: tierRefactor, loc: 1999, wantWords: "demote it to [WATCH] or prune"},
+		{name: "refactor below watch floor", tier: tierRefactor, loc: 1499, wantText: "prune the entry", forbidText: "demote"},
+		{name: "refactor at watch floor", tier: tierRefactor, loc: 1500, wantText: "demote it to [WATCH] or prune the entry"},
+		{name: "refactor just above watch floor", tier: tierRefactor, loc: 1501, wantText: "demote it to [WATCH] or prune the entry"},
+		{name: "refactor just below", tier: tierRefactor, loc: 1999, wantText: "demote it to [WATCH] or prune the entry"},
 		{name: "refactor at floor", tier: tierRefactor, loc: 2000, wantLive: true},
 		{name: "refactor just above", tier: tierRefactor, loc: 2001, wantLive: true},
-		{name: "unknown tier", tier: "[UNKNOWN]", loc: 1, wantWords: "unknown tier"},
+		{name: "unknown tier", tier: "[UNKNOWN]", loc: 1, wantText: "unknown tier"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -93,8 +98,14 @@ func TestAcceptedEntryFloorBoundaries(t *testing.T) {
 				}
 				return
 			}
-			if len(violations) != 1 || !strings.Contains(violations[0], tt.wantWords) {
-				t.Fatalf("below-floor entry got violations %v, want %q", violations, tt.wantWords)
+			if len(violations) != 1 {
+				t.Fatalf("boundary entry got violations %v, want one", violations)
+			}
+			if tt.wantText != "" && !strings.Contains(violations[0], tt.wantText) {
+				t.Fatalf("boundary violation %q lacks required text %q", violations[0], tt.wantText)
+			}
+			if tt.forbidText != "" && strings.Contains(violations[0], tt.forbidText) {
+				t.Fatalf("boundary violation %q contains forbidden text %q", violations[0], tt.forbidText)
 			}
 		})
 	}
@@ -113,16 +124,20 @@ func TestAcceptedEntryReaddFails(t *testing.T) {
 	if len(violations) != 2 {
 		t.Fatalf("re-adding the two pruned entries produced %d violations, want 2: %v", len(violations), violations)
 	}
-	for _, path := range []string{"pkg/api/metrics_userspace.go", "pkg/vrrp/instance.go"} {
+	wantViolations := []string{
+		"[REFACTOR] pkg/api/metrics_userspace.go: 529 LOC is below its 2000 LOC floor; prune the entry",
+		"[WATCH] pkg/vrrp/instance.go: 825 LOC is below its 1500 LOC floor; prune the entry",
+	}
+	for _, want := range wantViolations {
 		found := false
 		for _, violation := range violations {
-			if strings.Contains(violation, path) {
+			if violation == want {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("re-added entry %s did not produce a named violation: %v", path, violations)
+			t.Errorf("re-added entry did not produce exact tier/LOC violation %q: %v", want, violations)
 		}
 	}
 

@@ -627,7 +627,7 @@ inlining. Treat the trend as a defect, not a style preference.
   This repository has no CI, so a change that skips `make test-go` can leave
   master red until the next developer runs it; run the target before merge.
 - Keeping the global heatmap current is `make audit-refresh`'s job; its lag
-  fails nothing. See `docs/refactoring-audit.md` "The two gates".
+  fails nothing. See `docs/refactoring-audit.md` "The three gates".
 
 ## Overflow / failure policy
 

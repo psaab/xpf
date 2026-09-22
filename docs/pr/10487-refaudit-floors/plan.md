@@ -1,7 +1,7 @@
 ---
-status: DRAFT v2 — delta-review requested after round-1 findings; no production code
+status: IMPLEMENTED — dual PLAN-READY; code-review fold applied; PR #10532 OPEN
 issue: #10487
-phase: single PR — prune 2 dead entries + add a fail-closed live-entry re-check; tooling/tests/docs only
+phase: implementation complete — test-only + policy docs; no production runtime code
 base: origin/master b71c52d6093f23a7d9c9cca12d00cb40b3dffa8d
 ---
 
@@ -9,9 +9,10 @@ base: origin/master b71c52d6093f23a7d9c9cca12d00cb40b3dffa8d
 
 ## 1. Status
 
-DRAFT v2, revised 2026-09-21 after the round-1 Codex/Gemini plan review.
-The design verdict was READY-compatible; v2 closes the test, evidence, and
-wording findings before delta re-review. No production code is in scope.
+Implementation follows the v2 design after both delta reviewers confirmed
+PLAN-READY with zero residuals. PR #10532 is OPEN; the code-round
+MERGE-NEEDS-MINOR findings are folded in this revision before parent
+review/merge. No production runtime code is in scope.
 
 STEP-0 was rerun against fresh `origin/master`: `git fetch origin master`
 left `origin/master` at `b71c52d6093f23a7d9c9cca12d00cb40b3dffa8d`.
@@ -21,9 +22,10 @@ Actual GitHub searches were empty for all of:
 - `gh pr list --state merged --search 'refaudit floor' --limit 100`
 - `gh pr list --state open --search '10487' --limit 100`
 
-There is no prior fix or competing PR. The issue remains OPEN. This branch
-stops after the plan commit and push; implementation waits for parent-run
-delta review.
+The implementation is on `fix/10487-refaudit-floors`: stale entries are
+pruned, live-entry tests and committed negative controls are present, and the
+policy docs plus history log are updated. The full package's only red remains
+the pre-existing #6937 calibration failure documented in §9.6.
 
 ## 2. Issue framing
 
@@ -431,13 +433,10 @@ explicit so review can flip them deliberately):
    actions (split, record, prune/demote) without implying accepted entries
    expire by time? Proposed: use the exact same-PR floor rule in all three.
 
-## 12. Verdict request
+## 12. Implementation disposition
 
-PLAN-READY → implement §5.1 with the committed tests in §9 and documentation
-cutover in §5.4.
-
-PLAN-NEEDS-MINOR → adjust only the proposed resolutions/open wording.
-
-PLAN-KILL → only if delta review demonstrates a load-bearing consumer,
-false-red population, or a calibration interaction not found in the source
-study. Current evidence shows none.
+Both delta reviewers confirmed PLAN-READY with zero residuals. The design is
+implemented in PR #10532, and the code-round MERGE-NEEDS-MINOR findings are
+folded: the audit documentation has three coherent gate sections, the
+full-checkout assumption is explicit, and the floor/re-add assertions pin the
+repair wording and exact tier/LOC results. Parent review and merge remain.
