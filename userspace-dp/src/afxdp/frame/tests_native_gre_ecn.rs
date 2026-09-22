@@ -259,7 +259,281 @@ fn local_origin_tunnel_tx_request_encapsulates_raw_ip_for_active_owner() {
     assert_eq!(&plan.tx_request.bytes[60..62], &[0x08, 0x00]);
     assert_eq!(&plan.tx_request.bytes[74..78], &[10, 255, 192, 42]);
     assert_eq!(&plan.tx_request.bytes[78..82], &[10, 255, 192, 41]);
-    assert_eq!(plan.session_entry.key.protocol, PROTO_ICMP);
+    assert_eq!(
+        plan.session_entry
+            .as_ref()
+            .expect("owned local-origin source must publish")
+            .key
+            .protocol,
+        PROTO_ICMP
+    );
+}
+/// #10518: a TUN-readable packet is not automatically firewall-originated.
+/// A non-owned source is still sent through GRE, but it must not mint the
+/// TunOrigin forward/reverse pair that feeds both policy exemptions.
+#[test]
+fn local_origin_tunnel_nonlocal_source_encapsulates_without_tun_session_10518() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    assert!(
+        !state.owns_configured_ip(std::net::IpAddr::V4(Ipv4Addr::new(10, 123, 0, 5))),
+        "test precondition: 10.123.0.5 must be non-owned in this fixture"
+    );
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let packet = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 123, 0, 5),
+        Ipv4Addr::new(10, 255, 192, 41),
+        64,
+    );
+    let ike_exchanges = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let plan = build_local_origin_tunnel_tx_request(
+        &packet[14..],
+        1,
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        &ike_exchanges,
+    )
+    .expect("non-local source must remain encap-able");
+
+    assert_eq!(plan.tx_ifindex, 6);
+    assert_eq!(&plan.tx_request.bytes[12..16], &[0x81, 0x00, 0x00, 0x50]);
+    assert_eq!(&plan.tx_request.bytes[16..18], &[0x86, 0xdd]);
+    assert_eq!(plan.tx_request.bytes[24], PROTO_GRE);
+    assert_eq!(&plan.tx_request.bytes[60..62], &[0x08, 0x00]);
+    assert_eq!(&plan.tx_request.bytes[74..78], &[10, 123, 0, 5]);
+    assert_eq!(&plan.tx_request.bytes[78..82], &[10, 255, 192, 41]);
+    assert!(
+        plan.session_entry.is_none(),
+        "a non-owned source must not mint a TunOrigin forward"
+    );
+    assert!(
+        plan.reverse_session_entry.is_none(),
+        "a non-owned source must not mint a TunOrigin reverse"
+    );
+}
+const LOCAL_IKE_INITIATOR_SPI_10518: u64 = 0x5152_5354_5556_5758;
+
+fn local_origin_ike_v4_packet(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
+    const IPV4_HEADER_LEN: usize = 20;
+    const UDP_HEADER_LEN: usize = 8;
+    const IKE_HEADER_LEN: usize = 28;
+    let total_len = IPV4_HEADER_LEN + UDP_HEADER_LEN + IKE_HEADER_LEN;
+    let mut packet = vec![0u8; total_len];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = PROTO_UDP;
+    packet[12..16].copy_from_slice(&src.octets());
+    packet[16..20].copy_from_slice(&dst.octets());
+    packet[20..22].copy_from_slice(&500u16.to_be_bytes());
+    packet[22..24].copy_from_slice(&500u16.to_be_bytes());
+    packet[24..26].copy_from_slice(&((UDP_HEADER_LEN + IKE_HEADER_LEN) as u16).to_be_bytes());
+    packet[28..36].copy_from_slice(&LOCAL_IKE_INITIATOR_SPI_10518.to_be_bytes());
+    packet[44..48].copy_from_slice(&[0x00, 0x20, 0x22, 0x08]);
+    let ip_checksum = checksum16(&packet[..IPV4_HEADER_LEN]);
+    packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    packet
+}
+
+/// #10518: the ownership gate must not suppress the existing local-IKE seed
+/// needed by firewall-initiated exchanges.
+#[test]
+fn local_origin_tunnel_owned_ike_seeds_before_encapsulation_10518() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let src = Ipv4Addr::new(10, 255, 192, 42);
+    let dst = Ipv4Addr::new(10, 255, 192, 41);
+    let packet = local_origin_ike_v4_packet(src, dst);
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ike_exchanges = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let plan = build_local_origin_tunnel_tx_request(
+        &packet,
+        1,
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        &ike_exchanges,
+    )
+    .expect("owned IKE initiation must remain encap-able");
+
+    assert_eq!(ike_exchanges.len(), 1);
+    assert!(ike_exchanges.matches(
+        &crate::afxdp::forwarding::IkeExchangeKey::new(
+            LOCAL_IKE_INITIATOR_SPI_10518,
+            IpAddr::V4(dst),
+            IpAddr::V4(src),
+        ),
+        monotonic_nanos(),
+    ));
+    assert_eq!(
+        plan.session_entry
+            .as_ref()
+            .expect("owned IKE source must publish")
+            .key
+            .protocol,
+        PROTO_UDP
+    );
+    assert!(plan.reverse_session_entry.is_some());
+}
+
+/// #10518: non-owned TUN traffic is encap-only, including the IKE seed side
+/// effect that otherwise feeds the established-exchange host-inbound bypass.
+#[test]
+fn local_origin_tunnel_nonlocal_ike_does_not_seed_or_publish_10518() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let src = Ipv4Addr::new(10, 123, 0, 5);
+    let dst = Ipv4Addr::new(10, 255, 192, 41);
+    assert!(
+        !state.owns_configured_ip(IpAddr::V4(src)),
+        "test precondition: nonlocal IKE source must not be configured"
+    );
+    let packet = local_origin_ike_v4_packet(src, dst);
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ike_exchanges = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let plan = build_local_origin_tunnel_tx_request(
+        &packet,
+        1,
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        &ike_exchanges,
+    )
+    .expect("nonlocal IKE source must remain encap-able");
+
+    assert_eq!(ike_exchanges.len(), 0);
+    assert!(plan.session_entry.is_none());
+    assert!(plan.reverse_session_entry.is_none());
+}
+
+/// #10518: the ownership predicate is family-independent; IPv6 TUN traffic
+/// must keep GRE transport while remaining outside both TunOrigin entries.
+#[test]
+fn local_origin_tunnel_nonlocal_v6_encapsulates_without_tun_session_10518() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let src: Ipv6Addr = "2001:db8:1234::5".parse().unwrap();
+    let dst: Ipv6Addr = "2001:db8:1234::41".parse().unwrap();
+    assert!(
+        !state.owns_configured_ip(IpAddr::V6(src)),
+        "test precondition: nonlocal IPv6 source must not be configured"
+    );
+    let packet = build_icmpv6_echo_frame(src, dst, 64, 128, 0x1051);
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ike_exchanges = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let plan = build_local_origin_tunnel_tx_request(
+        &packet[14..],
+        1,
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        &ike_exchanges,
+    )
+    .expect("nonlocal IPv6 source must remain encap-able");
+
+    assert_eq!(plan.tx_ifindex, 6);
+    assert_eq!(&plan.tx_request.bytes[16..18], &[0x86, 0xdd]);
+    assert_eq!(plan.tx_request.bytes[24], PROTO_GRE);
+    assert_eq!(&plan.tx_request.bytes[60..62], &[0x86, 0xdd]);
+    let src_octets = src.octets();
+    let dst_octets = dst.octets();
+    assert_eq!(&plan.tx_request.bytes[70..86], &src_octets[..]);
+    assert_eq!(&plan.tx_request.bytes[86..102], &dst_octets[..]);
+    assert_eq!(plan.tx_request.expected_addr_family, libc::AF_INET6 as u8);
+    assert_eq!(plan.tx_request.expected_protocol, PROTO_ICMPV6);
+    assert!(plan.session_entry.is_none());
+    assert!(plan.reverse_session_entry.is_none());
+}
+
+/// #10518: an encap-only plan must never reach shared publication, not just
+/// omit the metadata in the plan.
+#[test]
+fn local_origin_tunnel_nonlocal_plan_skips_shared_publication_10518() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let indexes = SharedSessionOwnerRgIndexes::default();
+    let packet = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 123, 0, 5),
+        Ipv4Addr::new(10, 255, 192, 41),
+        64,
+    );
+    let nonlocal_ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let nonlocal_plan = build_local_origin_tunnel_tx_request(
+        &packet[14..],
+        1,
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        &nonlocal_ike,
+    )
+    .expect("nonlocal source must produce an encap-only plan");
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mut local_sessions = FastMap::default();
+    let mut local_sessions_last_prune_ns = 0;
+    maybe_enqueue_local_tunnel_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &indexes,
+        &worker_commands,
+        &mut local_sessions,
+        &mut local_sessions_last_prune_ns,
+        &nonlocal_plan,
+    );
+    assert!(shared_sessions.lock().expect("shared sessions").is_empty());
+    assert!(shared_nat_sessions.lock().expect("shared NAT sessions").is_empty());
+    assert!(
+        shared_forward_wire_sessions
+            .lock()
+            .expect("shared forward-wire sessions")
+            .is_empty()
+    );
+    assert!(local_sessions.is_empty());
+    assert_eq!(local_sessions_last_prune_ns, 0);
+
+    let owned_packet = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 255, 192, 42),
+        Ipv4Addr::new(10, 255, 192, 41),
+        64,
+    );
+    let owned_ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let owned_plan = build_local_origin_tunnel_tx_request(
+        &owned_packet[14..],
+        1,
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        &owned_ike,
+    )
+    .expect("owned source must produce a publishable plan");
+    let owned_shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owned_shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owned_shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mut owned_local_sessions = FastMap::default();
+    let mut owned_last_prune_ns = 0;
+    maybe_enqueue_local_tunnel_session(
+        &owned_shared_sessions,
+        &owned_shared_nat_sessions,
+        &owned_shared_forward_wire_sessions,
+        &indexes,
+        &worker_commands,
+        &mut owned_local_sessions,
+        &mut owned_last_prune_ns,
+        &owned_plan,
+    );
+    assert_eq!(
+        owned_shared_sessions
+            .lock()
+            .expect("owned shared sessions")
+            .len(),
+        2
+    );
+    assert_eq!(owned_local_sessions.len(), 1);
 }
 
 
@@ -296,19 +570,23 @@ fn local_origin_tunnel_session_uses_global_timeout_no_policy_match_6224() {
         &ike_exchanges,
     )
     .expect("local-origin tunnel tx request");
+    let session = plan
+        .session_entry
+        .as_ref()
+        .expect("owned local-origin source must publish");
 
     // Forward half: no admitting application/policy on the local-origin path.
     assert_eq!(
-        plan.session_entry.metadata.inactivity_timeout_ns, None,
+        session.metadata.inactivity_timeout_ns, None,
         "local-origin GRE session must age on the global per-protocol timeout \
          (no admitting application to source a per-app idle timeout)"
     );
     assert_eq!(
-        plan.session_entry.metadata.policy_id, 0,
+        session.metadata.policy_id, 0,
         "local-origin GRE session runs no policy match (no admitting policy ID)"
     );
     assert!(
-        plan.session_entry.metadata.policy_counter.is_none(),
+        session.metadata.policy_counter.is_none(),
         "local-origin GRE session runs no policy match (no hit-counter handle)"
     );
 

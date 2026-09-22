@@ -1845,8 +1845,12 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
         &ike,
     )
     .expect("GRE builder must succeed");
+    let gre_forward = plan
+        .session_entry
+        .as_ref()
+        .expect("owned GRE source must publish");
     assert_eq!(
-        plan.session_entry.key,
+        gre_forward.key,
         inner_flow_key(&request, PROTO_ICMP).forward_key,
         "the GRE builder must key what the worker will HIT"
     );
@@ -1855,7 +1859,7 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
     let now_ns = 122_000_000_000u64;
     assert!(
         sessions.upsert_synced_with_origin(
-            plan.session_entry.clone().into_session_install(now_ns),
+            gre_forward.clone().into_session_install(now_ns),
             true,
         ),
         "GRE forward must install via the UpsertLocal path"
@@ -1960,8 +1964,12 @@ fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
         &ike,
     )
     .expect("GRE builder must succeed");
+    let gre_forward = plan
+        .session_entry
+        .as_ref()
+        .expect("owned GRE source must publish");
     assert_eq!(
-        plan.session_entry.key.routing_domain, 7,
+        gre_forward.key.routing_domain, 7,
         "the GRE builder must stamp the VRF domain"
     );
     let gre_reverse = plan.reverse_session_entry.clone().expect("GRE reverse");
@@ -1974,7 +1982,7 @@ fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
     let now_ns = 122_000_000_000u64;
     assert!(
         sessions.upsert_synced_with_origin(
-            plan.session_entry.clone().into_session_install(now_ns),
+            gre_forward.clone().into_session_install(now_ns),
             true,
         ),
         "GRE forward must install via the UpsertLocal path"

@@ -560,7 +560,12 @@ fn local_origin_tunnel_session_carries_the_routing_domain_9032() {
     .expect("local-origin plan");
 
     assert_eq!(
-        plan.session_entry.key.routing_domain, 7,
+        plan.session_entry
+            .as_ref()
+            .expect("owned local-origin source must publish")
+            .key
+            .routing_domain,
+        7,
         "the PUBLISHED local-origin session key must carry the tunnel's routing \
          domain. Publishing it under 0 gives the same flow a different identity \
          from the wire path, which stamps the real domain (#9032/#7160)"
@@ -595,7 +600,12 @@ fn local_origin_tunnel_session_domain_is_zero_without_routing_instances_9032() {
     .expect("local-origin plan");
 
     assert_eq!(
-        plan.session_entry.key.routing_domain, 0,
+        plan.session_entry
+            .as_ref()
+            .expect("owned local-origin source must publish")
+            .key
+            .routing_domain,
+        0,
         "with no routing-instance membership the published key must stay at \
          domain 0 — pre-#7160 bit-identical"
     );

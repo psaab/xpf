@@ -244,6 +244,9 @@ impl PreparedTxRecycle {
 pub(in crate::afxdp) struct LocalTunnelTxPlan {
     pub(in crate::afxdp) tx_ifindex: i32,
     pub(in crate::afxdp) tx_request: TxRequest,
-    pub(in crate::afxdp) session_entry: SyncedSessionEntry,
+    /// #10518: `None` for non-firewall-local inner src (encap-only, never
+    /// published as TunOrigin — the WG `parse_wg_tun_origin_flow` twin).
+    /// `Some` only when provenance is proven; the loop still TXes either way.
+    pub(in crate::afxdp) session_entry: Option<SyncedSessionEntry>,
     pub(in crate::afxdp) reverse_session_entry: Option<SyncedSessionEntry>,
 }
