@@ -16,12 +16,10 @@ FAILN=0
 ok() { PASS=$((PASS + 1)); printf '  ok   %s\n' "$*"; }
 bad() { FAILN=$((FAILN + 1)); printf '  FAIL %s\n' "$*" >&2; }
 
-for required in "$VALIDATOR"; do
-	[ -f "$required" ] || {
-		bad "missing validator: $required"
-		exit 1
-	}
-done
+if [ ! -f "$VALIDATOR" ]; then
+	bad "missing validator: $VALIDATOR"
+	exit 1
+fi
 
 mk_fixture() {
 	local d
@@ -48,7 +46,7 @@ expect_fail() {
 	local name=$1
 	local needle=$2
 	local mutator=$3
-	local d rc
+	local d
 	d=$(mk_fixture)
 	"$mutator" "$d"
 	if run_fixture "$d" >"$d/out" 2>&1; then
@@ -66,7 +64,7 @@ expect_fail_both() {
 	local needle_one=$2
 	local needle_two=$3
 	local mutator=$4
-	local d rc
+	local d
 	d=$(mk_fixture)
 	"$mutator" "$d"
 	if run_fixture "$d" >"$d/out" 2>&1; then
@@ -109,7 +107,16 @@ for target in data["targets"]:
 json.dump(data, open(path, "w", encoding="utf-8"), separators=(",", ":"))
 PY
 }
-missing_expected() { sed -i '/^fixture-bin\tframe::keep$/d' "$1/debug-leg.tests"; }
+missing_expected() {
+	python3 - "$1/census.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["targets"][0]["listed"].remove("frame::keep")
+json.dump(data, open(path, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+}
 unexpected_family() {
 	python3 - "$1/census.json" <<'PY'
 import json
