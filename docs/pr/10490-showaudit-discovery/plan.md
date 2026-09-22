@@ -253,7 +253,17 @@ close the entire convention class but changes the gate contract for all
 seven families. File it as a follow-up now; do not combine it with this
 bounded wrapper/census work.
 
+### Helper shape (A3 decision)
+
+Adopt A3-(b): expose the exact `(name, cfg)` helper shape and keep the
+pure collision computation behind it, rather than exporting A3-(a)'s
+name-set core. The renderer owns only the object name and typed config;
+deriving the exact `cfg.Security.Zones` key set inside one helper keeps
+all surfaces on the builder's SSOT and prevents each caller from
+rebuilding a subtly different name set.
+
 ### Implementation sequence and ownership
+
 
 **#10490 first (this plan):**
 
@@ -282,6 +292,10 @@ bounded wrapper/census work.
    calls in 4 files (the 3 non-builder consumers plus the wrapper body)
    and 3 alias calls in 2 builder files. Any other result blocks the PR.
 
+**B-A1 hatch:** Post-cutover SSOT reuse from `builderPkg` stays
+gate-blind by construction; it is closed at landing by invariant 9 and
+long-term by the Option-C follow-up.
+
 **#10489 second:**
 
 1. Use only the exact two helper names and the exact two collections.
@@ -300,7 +314,7 @@ bounded wrapper/census work.
    command is silently declared fixed by this five-path scope.
 3. For every other entry, output/serialization functions call the
    shared reason helper or add the reviewed structured reason field.
-   Only pure no-output helpers may receive an exact
+   Only exact no-Zone-value-enforcement helpers may receive an exact
    `exemptRenderers` key; the two named structured inventory handlers
    are the only no-wire exceptions. No adjacent output is exempted just
    because its behavior is deferred.
@@ -309,14 +323,15 @@ bounded wrapper/census work.
    `Successor: "#10489"`. At drain, add their exact structured-wire
    exemptions with the follow-up issue linked. This is the agreed
    no-wire-change option, not a hidden collection omission.
-5. Annotate `showZonesDetail` and every other text, metric, NAT/session,
-   event, screen, interface, VLAN, RETH, or test-command path that
-   outputs a zone value. Pure helpers retain only their site-specific
-   no-output rationale.
+5. Annotate `showZonesDetail` and every other text, NAT/session, event,
+   screen, interface, VLAN, RETH, or test-command path that outputs a
+   zone value. Metric paths call the reason helper and omit the metric
+   sample when it returns non-empty. No-Zone-value helpers retain only
+   their site-specific rationale.
 6. Drain the row to `Unannotated: nil` only after every remaining entry
-   is predicate-reached or has an exact, reviewed no-output/structured
-   exemption. #10489 stays OPEN until that drain is merged. Before
-   drain, link two follow-ups: structured-wire quarantine truth
+   is predicate-reached or has an exact, reviewed no-Zone-value or
+   structured exemption. #10489 stays OPEN until that drain is merged.
+   Before drain, link two follow-ups: structured-wire quarantine truth
    (`GetZones`/`zonesHandler` enum + presence) and adjacent-surface
    behavior (interfaces, screen, metrics, sessions, NAT, events, and
    test commands).
@@ -327,22 +342,22 @@ The gate has no output filter. The annotation bias therefore applies to
 every function that prints or serializes a Zone value. The permanent
 `showZonesDisplay` canary is the only #10490-owned annotation; every
 other ANNOTATE row below is owned by #10489 and must land before its
-successor is drained. Only the two pure/no-output cases below are
-EXEMPT (plus the explicitly named structured inventory exceptions).
+successor is drained. Only the two no-Zone-value-enforcement cases below
+are EXEMPT (plus the explicitly named structured inventory exceptions).
 
 | Function | Disposition | Site-specific rationale |
 |---|---|---|
-| `pkg/api/interfaces.go:interfacesHandler` | ANNOTATE | Structured InterfaceStats Zone field is an enforcement claim; #10489 adds the shared reason representation in the adjacent interface-wire follow-up |
-| `pkg/api/interfaces.go:writeInterfacesTerse` | EXEMPT | Builds `ifaceZoneName` but never reads it; this helper emits no Zone enforcement state |
+| `pkg/api/interfaces.go:interfacesHandler` | ANNOTATE | Structured InterfaceStats Zone field is an enforcement claim; #10489 adds the shared reason representation in its implementation |
+| `pkg/api/interfaces.go:writeInterfacesTerse` | EXEMPT | Builds `ifaceZoneName` but never reads it; this helper makes no Zone-value enforcement claim |
 | `pkg/api/interfaces.go:writeInterfacesDetail` | ANNOTATE | Text Zone line reports authored interface state; #10489 uses the shared reason |
-| `pkg/api/stats.go:ifaceStatsHandler` | ANNOTATE | Structured interface stats Zone field reports authored state; #10489 adds the shared reason representation |
-| `pkg/cli/cli_show_cluster.go:showChassisClusterStatus` | EXEMPT | Emits VRRP rows derived from zone interfaces, not a Zone value; no zone enforcement claim |
+| `pkg/api/stats.go:ifaceStatsHandler` | ANNOTATE | Structured interface stats Zone field reports authored state; #10489 adds the shared reason representation in its implementation |
+| `pkg/cli/cli_show_cluster.go:showChassisClusterStatus` | EXEMPT | Emits VRRP rows, not a Zone value; this output makes no Zone-value enforcement claim |
 | `pkg/cli/cli_show_interfaces.go:showInterfaces` | ANNOTATE | Authored Security Zone column can lie after dataplane unzoning |
 | `pkg/cli/cli_show_interfaces_detail.go:showInterfacesDetail` | ANNOTATE | Authored Security zone text can lie after dataplane unzoning |
 | `pkg/cli/cli_show_interfaces_detail.go:showInterfacesRethDetail` | ANNOTATE | Authored RETH Security zone text can lie after dataplane unzoning |
 | `pkg/cli/cli_show_interfaces_extensive.go:showInterfacesExtensiveFiltered` | ANNOTATE | Authored Security zone text is an enforcement claim |
 | `pkg/cli/cli_show_interfaces_stats.go:showVlans` | ANNOTATE | VLAN Zone column is an enforcement claim |
-| `pkg/grpcapi/server_show_interfaces.go:GetInterfaces` | ANNOTATE | Structured protobuf Zone field is an enforcement claim; #10489 adds the shared reason representation |
+| `pkg/grpcapi/server_show_interfaces.go:GetInterfaces` | ANNOTATE | Structured protobuf Zone field is an enforcement claim; #10489 adds the shared reason representation in its implementation |
 | `pkg/grpcapi/server_show_interfaces.go:ShowInterfacesDetail` | ANNOTATE | Interface detail output carries Zone state |
 | `pkg/grpcapi/server_show_interfaces.go:showInterfacesTerse` | ANNOTATE | Terse interface output carries Zone state |
 | `pkg/grpcapi/server_show_interfaces.go:writeRethDetail` | ANNOTATE | RETH Zone output is an enforcement claim |
@@ -350,15 +365,16 @@ EXEMPT (plus the explicitly named structured inventory exceptions).
 | `pkg/grpcapi/server_show_interfaces_text.go:showInterfacesExtensive` | ANNOTATE | Text Security zone line is an enforcement claim |
 | `pkg/grpcapi/server_show_interfaces_text.go:showVLANs` | ANNOTATE | VLAN Zone column is an enforcement claim |
 
-The same rule applies to the remaining non-interface entries: pure
-map/filter helpers (`allInterfaceNames`, `populateIfaceMaps`,
-`buildSessionView`, `buildSessionFilter`, and the existing
-collision-aware `pkg/cli/apply.go:syslogZoneNameMap`) are EXEMPT only
-because they emit no operator state. Metrics, NAT/session/event/screen,
-and test-command functions that output zone names are ANNOTATE; #10489
-owns those calls. The only no-wire structured exemptions are the
-explicitly named `GetZones` and `zonesHandler`, each citing the
-structured-wire follow-up.
+The same rule applies to the remaining non-interface entries: exact
+no-Zone-value-enforcement helpers (`allInterfaceNames`,
+`populateIfaceMaps`, `buildSessionView`, `buildSessionFilter`, and the
+existing collision-aware `pkg/cli/apply.go:syslogZoneNameMap`) are
+EXEMPT only because they emit no Zone enforcement state. Metrics,
+NAT/session/event/screen, and test-command functions that output zone
+names are ANNOTATE; metric functions omit the sample when the shared
+reason is non-empty, and #10489 owns those calls. The only no-wire
+structured exemptions are the explicitly named `GetZones` and
+`zonesHandler`, each citing the structured-wire follow-up.
 
 ## API
 
@@ -396,10 +412,11 @@ structured-wire follow-up.
    exemptions.
 3. **Shared verdict:** builder and annotated surfaces use the same
    alias/reason chain; no new sorted-first algorithm is introduced.
-4. **Reason or explicit disposition:** owned text inventory paths carry
-   the shared reason; adjacent structured/metric/helper paths close
-   only through exact exemptions with linked follow-up issues, never a
-   broad exemption or an unreviewed claim of truth.
+4. **Reason or explicit disposition:** every output/serialization path
+   consults the shared reason. Text and structured paths carry the
+   reason representation; metric paths omit the sample when the reason
+   is non-empty. Only exact no-Zone-value-enforcement helpers and the
+   named `GetZones`/`zonesHandler` no-wire cases are exemptions.
 5. **HA symmetry:** the verdict is a pure function of the full config
    zone-name set; both HA nodes and cold boot agree.
 6. **No-brick behavior:** dropping the later-sorting zone, unzoning its
@@ -430,15 +447,15 @@ structured-wire follow-up.
    Mitigation: gate-owned AST list, exact 52-entry skeleton, no new
    exemptions in #10490, per-site #10489 rationale, and a second
    RED-on-revert for the canary.
-3. **API and wire truthfulness.** JSON/protobuf and metric outputs do
-   not have a free text annotation slot. Pretending they are out of
-   scope would leave the exact gate lying, but forcing a wire change
-   into #10490 would exceed the agreed skeleton. Mitigation: keep
-   `GetZones`/`zonesHandler` non-nil under #10490; #10489 adds exact
-   exemptions citing the structured-wire follow-up, and separately
-   files the adjacent-surface follow-up. No package-wide exemption is
-   allowed, and the gate closes only after every key is annotated or
-   explicitly reasoned.
+3. **API and wire truthfulness.** Structured JSON/protobuf paths require
+   the shared reason representation in their #10489-owned implementation;
+   metric paths have no text slot, so they consult the reason helper and
+   omit the sample for a quarantined object. The only no-wire exceptions
+   are `GetZones`/`zonesHandler`, which remain non-nil under #10490 and
+   receive exact #10489 exemptions citing the structured-wire follow-up.
+   No package-wide exemption is allowed, and the gate closes only after
+   every output key is annotated, omitted by that metric rule, or covered
+   by one of those exact no-claim dispositions.
 4. **Coordination and cutover.** Two branches could use different
    names, rows, or issue ownership. Mitigation: locked exact names,
    #10490-first order, #10489-open-until-drain, explicit canary, and
@@ -461,8 +478,8 @@ structured-wire follow-up.
   listed with `Successor: "#10489"`.
 - `TestExemptionsNameRealRenderers6534`: existing completion entries
   remain real; #10490 adds no exemption. When #10489 drains the row,
-  every new entry must be an exact function key with a written
-  adjacent/structured follow-up rationale; no package wildcard.
+  only exact no-Zone-value helpers and the two named structured handlers
+  may be added, each with a written rationale; no package wildcard.
 - RED-on-revert evidence in the PR: remove one alias call and observe
   the named builder-registry failure; remove the canary reason call and
   observe the named census failure.
@@ -516,7 +533,8 @@ structured-wire follow-up.
 5. **ifZone verdict?** Annotation bias was applied per site. Every
    interface/ifZone function that prints or serializes a Zone is an
    #10489-owned ANNOTATE row and must land before the successor drains.
-   Only the two pure/no-output functions have exact EXEMPT rationale.
+   Only the two no-Zone-value-enforcement functions have exact EXEMPT
+   rationale.
 6. **Structured surfaces?** They are initial Unannotated entries under
    live #10489. Interface stats/`GetInterfaces` become annotations with
    the shared reason representation before drain. Only `GetZones` and
