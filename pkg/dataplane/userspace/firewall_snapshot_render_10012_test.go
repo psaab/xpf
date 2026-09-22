@@ -89,6 +89,41 @@ func compileLenientFilter10012(t *testing.T, action, rejectType string) *config.
 	}
 	return cfg
 }
+// compileLenientRoutingInstance10012 exercises the tolerant path for the
+// routing-instance + next-term contradiction. The strict gate rejects this
+// shape, while CompileConfigLenient retains it with a warning.
+func compileLenientRoutingInstance10012(t *testing.T) *config.Config {
+	t.Helper()
+	lines := []string{
+		"set routing-instances mgmt-vrf instance-type virtual-router",
+		"set firewall family inet filter edge term steer from protocol tcp",
+		"set firewall family inet filter edge term steer then routing-instance mgmt-vrf",
+		"set firewall family inet filter edge term steer then next term",
+	}
+	tree := &config.ConfigTree{}
+	for _, line := range lines {
+		path, err := config.ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient must retain the contradiction: %v", err)
+	}
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "next term") &&
+			strings.Contains(warning, "routing-instance") {
+			return cfg
+		}
+	}
+	t.Fatalf("lenient compile retained no routing-instance/next-term warning: %v", cfg.Warnings)
+	return nil
+}
+
 
 func snapshotTermsFromConfig10012(t *testing.T, cfg *config.Config, filterName string) []FirewallTermSnapshot {
 	t.Helper()
@@ -235,9 +270,9 @@ func TestSnapshotRenderImplicitFallThroughWithoutBit10012(t *testing.T) {
 
 // TestSnapshotRenderRoutingInstanceNextTermHandBuilt10012 pins the PBR arm of
 // the Rust predicate: a routing-instance term terminates even when a snapshot
-// still carries next_term (the Go builder clears the bit for RI terms, so
-// only a hand-built or mixed-version-peer snapshot carries both —
-// `continue_term` is false whenever the routing-instance is set). The render
+// still carries next_term. The userspace builder preserves this authored bit on
+// tolerant snapshots; this hand-built cell isolates the renderer behavior —
+// `continue_term` is false whenever the routing-instance is set. The render
 // must show the terminating accept, not the fall-through claim, and annotate
 // the ignored bit.
 func TestSnapshotRenderRoutingInstanceNextTermHandBuilt10012(t *testing.T) {
@@ -259,5 +294,37 @@ func TestSnapshotRenderRoutingInstanceNextTermHandBuilt10012(t *testing.T) {
 	}
 	if !strings.Contains(out, "then next term (ignored") {
 		t.Errorf("PBR term must annotate the contradictory next-term bit as ignored.\n%s", out)
+	}
+}
+// TestSnapshotRenderRoutingInstanceNextTermTolerant10012 exercises the complete
+// tolerant config path: the builder must preserve the authored next-term bit
+// even though routing-instance makes the effective term terminating.
+func TestSnapshotRenderRoutingInstanceNextTermTolerant10012(t *testing.T) {
+	cfg := compileLenientRoutingInstance10012(t)
+	terms := snapshotTermsFromConfig10012(t, cfg, "edge")
+	if len(terms) != 1 {
+		t.Fatalf("expected 1 snapshot term, got %d: %+v", len(terms), terms)
+	}
+	snap := terms[0]
+	if snap.RoutingInstance != "mgmt-vrf" || !snap.NextTerm {
+		t.Fatalf("tolerant snapshot lost RI+next-term contradiction: %+v", snap)
+	}
+	if rustContinues10012(snap) {
+		t.Fatalf("Rust predicate continues the routing-instance fixture: %+v", snap)
+	}
+	out := RenderFirewallFilterSnapshot(&FirewallFilterSnapshot{
+		Name: "edge", Family: "inet", Terms: terms,
+	})
+	for _, want := range []string{
+		"then routing-instance mgmt-vrf",
+		"then accept",
+		"then next term (ignored — contradictory with terminating action)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tolerant RI+next-term render missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "then next term (fall-through)") {
+		t.Errorf("tolerant RI+next-term render must not claim fall-through:\n%s", out)
 	}
 }
