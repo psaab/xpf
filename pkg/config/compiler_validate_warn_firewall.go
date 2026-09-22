@@ -74,6 +74,39 @@ func validateThreeColorPolicerMarkingWarnings(cfg *Config) []string {
 	}
 	return warnings
 }
+// validateThreeColorPolicerDisarmWarnings emits a WARN-only commit-time
+// message for every color-aware three-color policer (#10502).
+//
+// The userspace capability gate cannot represent inherited packet color, so
+// ColorBlind=false disarms forwarding for the whole dataplane. That is a
+// deliberate fail-closed runtime decision, but without this warning a clean
+// commit can still stop all transit with no configuration-level explanation.
+// Keep this definition-wide (rather than reference-scoped): the capability
+// gate currently walks every definition, and this warning must name every
+// definition that can trigger that gate.
+func validateThreeColorPolicerDisarmWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.ThreeColorPolicers))
+	for name, pol := range cfg.Firewall.ThreeColorPolicers {
+		if pol != nil && !pol.ColorBlind {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	warnings := make([]string, 0, len(names))
+	for _, name := range names {
+		warnings = append(warnings, fmt.Sprintf(
+			"firewall three-color-policer %q uses color-aware mode, which the "+
+				"userspace dataplane cannot represent; userspace forwarding will "+
+				"be disarmed and transit will STOP until the policer is changed "+
+				"to color-blind",
+			name))
+	}
+	return warnings
+}
+
 
 // validateFirewallInterfaceSpecificWarnings emits a WARN-only commit-time
 // message for each firewall filter carrying `interface-specific` (fable-167
