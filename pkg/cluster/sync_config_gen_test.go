@@ -601,17 +601,17 @@ func TestQueueConfigWithAncestryWireReceiveApplyChain10509(t *testing.T) {
 
 	queued := make(chan bool, 1)
 	go func() {
-		queued <- sender.QueueConfigWithAncestry(text, want)
+		queued <- sender.QueueConfigWithAncestryAtGeneration(text, want, gen)
 	}()
 	msgType, payload, _ := readOneFrame(t, peer)
 	if msgType != syncMsgConfig {
-		t.Fatalf("QueueConfigWithAncestry must emit a config frame: got type %d", msgType)
+		t.Fatalf("QueueConfig must emit a config frame: got type %d", msgType)
 	}
 	if ok := <-queued; !ok {
 		t.Fatal("QueueConfigWithAncestry reported that the negotiated sidecar write failed")
 	}
 	gotText, gotGen, gotAncestry := decodeConfigPayloadWithAncestry(payload)
-	if gotText != text || gotGen == 0 || !reflect.DeepEqual(gotAncestry, want) {
+	if gotText != text || gotGen != gen || !reflect.DeepEqual(gotAncestry, want) {
 		t.Fatalf("wire sender changed config sidecar: text=%q gen=%d ancestry=%#v", gotText, gotGen, gotAncestry)
 	}
 	receiver.handleMessage(nil, syncMsgConfig, payload)

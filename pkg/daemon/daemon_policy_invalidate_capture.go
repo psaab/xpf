@@ -265,9 +265,13 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
 			})
 		case idInSet(modified, val.PolicyID):
-			capture.modified.v4 = append(capture.modified.v4, dataplane.SessionEntryV4{Key: key, Value: val})
+			capture.modified.v4 = append(capture.modified.v4, dataplane.SessionEntryV4{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		case idInSet(deflt, val.PolicyID):
-			capture.deflt.v4 = append(capture.deflt.v4, dataplane.SessionEntryV4{Key: key, Value: val})
+			capture.deflt.v4 = append(capture.deflt.v4, dataplane.SessionEntryV4{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		}
 		return true
 	})
@@ -291,9 +295,13 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
 			})
 		case idInSet(modified, val.PolicyID):
-			capture.modified.v6 = append(capture.modified.v6, dataplane.SessionEntryV6{Key: key, Value: val})
+			capture.modified.v6 = append(capture.modified.v6, dataplane.SessionEntryV6{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		case idInSet(deflt, val.PolicyID):
-			capture.deflt.v6 = append(capture.deflt.v6, dataplane.SessionEntryV6{Key: key, Value: val})
+			capture.deflt.v6 = append(capture.deflt.v6, dataplane.SessionEntryV6{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		}
 		return true
 	})

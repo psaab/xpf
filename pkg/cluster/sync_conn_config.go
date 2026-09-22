@@ -10,12 +10,6 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
-// configAncestryCapabilityWait bounds the pre-discovery sidecar hold. A
-// pre-capability peer may be an older build that never sends
-// syncMsgPeerCapabilities; after this interval legacy text/generation is sent
-// and the receiver safely takes the existing teardown path.
-const configAncestryCapabilityWait = 2 * time.Second
-
 // DefaultConfigApplyFailGrace is how long a received config-sync generation may
 // stay un-applied — apply hard-failing, standby config stale, high-water pinned
 // per M-2/#4151 — before the node raises the CF config-sync monitor-failure /
@@ -280,9 +274,9 @@ func (s *SessionSync) QueueConfig(configText string) {
 }
 
 // QueueConfigWithAncestry sends config text and its validated rename
-// descriptors as one ordered payload when the peer advertises support. It
-// reports false when capability discovery deferred the send or the write
-// failed.
+// descriptors as one ordered payload. A peer that has not negotiated the
+// additive sidecar receives the legacy text/generation payload and therefore
+// takes the existing safe teardown behavior.
 func (s *SessionSync) QueueConfigWithAncestry(
 	configText string,
 	ancestry []configstore.RenameDescriptor,
@@ -312,23 +306,6 @@ func (s *SessionSync) queueConfig(
 	conn := s.getActiveConn()
 	if conn == nil {
 		return false
-	}
-	if len(ancestry) > 0 && !s.ConfigAncestryNegotiated() {
-		now := time.Now().UnixNano()
-		since := s.configAncestryWaitSince.Load()
-		if since == 0 && s.configAncestryWaitSince.CompareAndSwap(0, now) {
-			since = now
-		}
-		if since > 0 && time.Duration(now-since) < configAncestryCapabilityWait {
-			// Hold the first push until capability discovery; sending legacy
-			// first would apply/tear down before a framed retry can arrive.
-			return false
-		}
-		if since > 0 {
-			// -1 records that this connection exhausted the bounded wait.
-			// Subsequent retries use the safe legacy teardown behavior.
-			s.configAncestryWaitSince.Store(-1)
-		}
 	}
 	gen := reservedGen
 	if gen == 0 {

@@ -1187,11 +1187,6 @@ type SessionSync struct {
 	// retained fence-ack bit would make a confirmed-fence gate wait out its
 	// whole timeout against a downgraded peer that can never answer.
 	peerCapabilityFlags atomic.Uint32
-	// The first sidecar send waits briefly for capability discovery. If an old
-	// peer never advertises the frame, QueueConfigWithAncestry falls back to
-	// legacy text/generation after this bounded interval; it must not defer a
-	// committed config forever.
-	configAncestryWaitSince atomic.Int64
 
 	// peerSessionSyncWire holds the peer's advertised SessionSyncWireVersion
 	// (#7990), carried as a trailing u16 on syncMsgPeerCapabilities on top of

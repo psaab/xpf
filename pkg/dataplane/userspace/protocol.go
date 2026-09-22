@@ -395,7 +395,7 @@ const (
 	// was collision resolution against #6722's parallel v5, not a fourth change
 	// to this contract — see the ProtocolVersion comment above.)
 
-	MinProtocolSecureTunnelRefusal = 7
+	MinProtocolSecureTunnelRefusal   = 7
 	InjectPacketTupleProtocolVersion = 1
 	TypeUserspace                    = "userspace"
 
@@ -564,16 +564,29 @@ type QueueEpochSnapshot struct {
 	Queue uint16 `json:"queue"`
 	Epoch uint64 `json:"epoch"`
 }
+
 // Rename operation. It is additive wire state; absent ancestry means the
 // helper retains the historical teardown behavior.
 type PolicyRenameAncestry struct {
-	SourceRuleID      string `json:"source_rule_id"`
-	DestinationRuleID string `json:"destination_rule_id"`
-	SourceFromZone    string `json:"source_from_zone,omitempty"`
-	SourceToZone      string `json:"source_to_zone,omitempty"`
+	SourceRuleID        string `json:"source_rule_id"`
+	DestinationRuleID   string `json:"destination_rule_id"`
+	SourceFromZone      string `json:"source_from_zone,omitempty"`
+	SourceToZone        string `json:"source_to_zone,omitempty"`
 	DestinationFromZone string `json:"destination_from_zone,omitempty"`
 	DestinationToZone   string `json:"destination_to_zone,omitempty"`
+	// Numeric ids are captured from the validated old/new snapshots. Rust
+	// checks them against the session's recorded zones and the destination
+	// forwarding map; names alone are not an identity proof across snapshots.
+	SourceFromZoneID       uint16 `json:"source_from_zone_id,omitempty"`
+	SourceToZoneID         uint16 `json:"source_to_zone_id,omitempty"`
+	DestinationFromZoneID  uint16 `json:"destination_from_zone_id,omitempty"`
+	DestinationToZoneID    uint16 `json:"destination_to_zone_id,omitempty"`
+	SourceFromZoneAny      bool   `json:"source_from_zone_any,omitempty"`
+	SourceToZoneAny        bool   `json:"source_to_zone_any,omitempty"`
+	DestinationFromZoneAny bool   `json:"destination_from_zone_any,omitempty"`
+	DestinationToZoneAny   bool   `json:"destination_to_zone_any,omitempty"`
 }
+
 // PolicySessionRebind is a pre-publication Go verdict joined to a canonical
 // forward tuple. Rust consumes it during rotation to restamp both pair halves.
 //
@@ -629,18 +642,18 @@ type ConfigSnapshot struct {
 	// the latter advances for ordinary config/FIB publishes, while the former
 	// advances only when admitted NFQUEUE handles rotate. Rust D14 compares its
 	// packet snapshot-generation advisory against this exact capture authority.
-	IpsecTunnelSnapshotGeneration uint64 `json:"ipsec_tunnel_snapshot_generation,omitempty"`
-	Summary         SnapshotSummary          `json:"summary"`
-	Capabilities    UserspaceCapabilities    `json:"capabilities"`
-	MapPins         UserspaceMapPins         `json:"map_pins"`
-	Zones           []ZoneSnapshot           `json:"zones,omitempty"`
-	Interfaces      []InterfaceSnapshot      `json:"interfaces,omitempty"`
-	Fabrics         []FabricSnapshot         `json:"fabrics,omitempty"`
-	TunnelEndpoints []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
-	Neighbors       []NeighborSnapshot       `json:"neighbors,omitempty"`
-	Routes          []RouteSnapshot          `json:"routes,omitempty"`
-	Flow            FlowSnapshot             `json:"flow,omitempty"`
-	DefaultPolicy   string                   `json:"default_policy,omitempty"`
+	IpsecTunnelSnapshotGeneration uint64                   `json:"ipsec_tunnel_snapshot_generation,omitempty"`
+	Summary                       SnapshotSummary          `json:"summary"`
+	Capabilities                  UserspaceCapabilities    `json:"capabilities"`
+	MapPins                       UserspaceMapPins         `json:"map_pins"`
+	Zones                         []ZoneSnapshot           `json:"zones,omitempty"`
+	Interfaces                    []InterfaceSnapshot      `json:"interfaces,omitempty"`
+	Fabrics                       []FabricSnapshot         `json:"fabrics,omitempty"`
+	TunnelEndpoints               []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
+	Neighbors                     []NeighborSnapshot       `json:"neighbors,omitempty"`
+	Routes                        []RouteSnapshot          `json:"routes,omitempty"`
+	Flow                          FlowSnapshot             `json:"flow,omitempty"`
+	DefaultPolicy                 string                   `json:"default_policy,omitempty"`
 	// WgSteeredListenPorts (#9587) is the bounded SET of WireGuard listen
 	// ports the shim steers onto its AF_XDP WireGuard path (at most
 	// config.MaxSteeredWireGuardPorts, selected by config.SplitSteeredPorts):
@@ -684,13 +697,13 @@ type ConfigSnapshot struct {
 	// fields rather than silently preserving either stale-ownership behavior.
 	LearnedRouteImportCapped bool `json:"learned_route_import_capped,omitempty"`
 
-	DefaultLogSessionInit  bool                         `json:"default_log_session_init,omitempty"`
-	DefaultLogSessionClose bool                         `json:"default_log_session_close,omitempty"`
-	Policies               []PolicyRuleSnapshot         `json:"policies,omitempty"`
+	DefaultLogSessionInit  bool                 `json:"default_log_session_init,omitempty"`
+	DefaultLogSessionClose bool                 `json:"default_log_session_close,omitempty"`
+	Policies               []PolicyRuleSnapshot `json:"policies,omitempty"`
 	// PolicyRematchExtensive enables the conditional retain/rebind rotation arm.
-	PolicyRematchExtensive bool `json:"policy_rematch_extensive,omitempty"`
-	PolicyRenameAncestry   []PolicyRenameAncestry `json:"policy_rename_ancestry,omitempty"`
-	PolicySessionRebinds   []PolicySessionRebind `json:"policy_session_rebinds,omitempty"`
+	PolicyRematchExtensive bool                         `json:"policy_rematch_extensive,omitempty"`
+	PolicyRenameAncestry   []PolicyRenameAncestry       `json:"policy_rename_ancestry,omitempty"`
+	PolicySessionRebinds   []PolicySessionRebind        `json:"policy_session_rebinds,omitempty"`
 	DestinationNAT         []DestinationNATRuleSnapshot `json:"destination_nat_rules,omitempty"`
 	SourceNAT              []SourceNATRuleSnapshot      `json:"source_nat_rules,omitempty"`
 	StaticNAT              []StaticNATRuleSnapshot      `json:"static_nat_rules,omitempty"`

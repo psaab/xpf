@@ -28,7 +28,10 @@ type policyRenameBinding struct {
 
 func policyRulePathKey(path []string) (string, string, string, bool) {
 	for i := 0; i+5 < len(path); i++ {
-		if path[i] != "from-zone" || path[i+2] != "to-zone" || path[i+4] != "policy" {
+		if i+6 != len(path) ||
+			path[i] != "from-zone" ||
+			path[i+2] != "to-zone" ||
+			path[i+4] != "policy" {
 			continue
 		}
 		from, to, name := path[i+1], path[i+3], path[i+5]
@@ -38,7 +41,7 @@ func policyRulePathKey(path []string) (string, string, string, bool) {
 		return from, to, name, true
 	}
 	for i := 0; i+2 < len(path); i++ {
-		if path[i] == "global" && path[i+1] == "policy" && path[i+2] != "" {
+		if i+3 == len(path) && path[i] == "global" && path[i+1] == "policy" && path[i+2] != "" {
 			return config.JunosGlobalZoneName, config.JunosGlobalZoneName, path[i+2], true
 		}
 	}
@@ -46,10 +49,14 @@ func policyRulePathKey(path []string) (string, string, string, bool) {
 }
 
 func zoneRenamePath(path []string) (string, bool) {
-	for i := 0; i+1 < len(path); i++ {
-		if path[i] == "zones" && path[i+1] != "" {
-			return path[i+1], true
+	for i := 0; i+2 < len(path); i++ {
+		if path[i] != "zones" || path[i+1] != "security-zone" || i+2 != len(path)-1 {
+			continue
 		}
+		if path[i+2] == "" {
+			return "", false
+		}
+		return path[i+2], true
 	}
 	return "", false
 }
@@ -109,6 +116,11 @@ func expandPolicyRenameAncestry(
 	if len(oldFingerprints) == 0 || len(newFingerprints) == 0 {
 		return nil, nil, false
 	}
+	oldZoneNames, oldZoneOK := zoneNamesByID(oldCfg)
+	newZoneNames, newZoneOK := zoneNamesByID(newCfg)
+	if !oldZoneOK || !newZoneOK {
+		return nil, nil, false
+	}
 	bindings := make(map[uint32]policyRenameBinding, len(descriptors))
 	wire := make([]dpuserspace.PolicyRenameAncestry, 0, len(descriptors))
 	type ancestryPair struct {
@@ -156,6 +168,17 @@ func expandPolicyRenameAncestry(
 	for _, pair := range pairs {
 		sf, st, sn := pair.sf, pair.st, pair.sn
 		df, dt, dn := pair.df, pair.dt, pair.dn
+		sourceFromZoneID, sourceFromZoneAny, sourceFromOK :=
+			renameZoneWireIdentity(sf, oldZoneNames)
+		sourceToZoneID, sourceToZoneAny, sourceToOK :=
+			renameZoneWireIdentity(st, oldZoneNames)
+		destinationFromZoneID, destinationFromZoneAny, destinationFromOK :=
+			renameZoneWireIdentity(df, newZoneNames)
+		destinationToZoneID, destinationToZoneAny, destinationToOK :=
+			renameZoneWireIdentity(dt, newZoneNames)
+		if !sourceFromOK || !sourceToOK || !destinationFromOK || !destinationToOK {
+			return nil, nil, false
+		}
 		sourceID := dpuserspace.StablePolicyRuleID(sf, st, sn)
 		destinationID := dpuserspace.StablePolicyRuleID(df, dt, dn)
 		oldID, oldOK := oldIDs[sourceID]
@@ -186,6 +209,10 @@ func expandPolicyRenameAncestry(
 			SourceRuleID: sourceID, DestinationRuleID: destinationID,
 			SourceFromZone: sf, SourceToZone: st,
 			DestinationFromZone: df, DestinationToZone: dt,
+			SourceFromZoneID: sourceFromZoneID, SourceToZoneID: sourceToZoneID,
+			DestinationFromZoneID: destinationFromZoneID, DestinationToZoneID: destinationToZoneID,
+			SourceFromZoneAny: sourceFromZoneAny, SourceToZoneAny: sourceToZoneAny,
+			DestinationFromZoneAny: destinationFromZoneAny, DestinationToZoneAny: destinationToZoneAny,
 		})
 	}
 	// A chain means the source/destination relation is not one-to-one in this
@@ -205,7 +232,11 @@ func policyQueryProtocol(proto uint8) string {
 	return strconv.Itoa(int(proto))
 }
 
-func networkPort(port uint16) int { return int((port >> 8) | (port << 8)) }
+func networkPort(port uint16) int {
+	var raw [2]byte
+	binary.NativeEndian.PutUint16(raw[:], port)
+	return int(binary.BigEndian.Uint16(raw[:]))
+}
 
 func permittedRenameResult(cfg *config.Config, binding policyRenameBinding, q policymatch.Query) (dpuserspace.PolicySessionRebind, bool) {
 	q.PolicyInactiveFn = binding.policyInactiveFn
@@ -233,8 +264,22 @@ func qProtocol(proto string) uint8 {
 	return uint8(n)
 }
 
+func renameZoneWireIdentity(name string, zoneNames map[uint16]string) (uint16, bool, bool) {
+	switch name {
+	case "any":
+		return 0, true, true
+	case config.JunosGlobalZoneName:
+		return ^uint16(0), false, true
+	case "junos-host":
+		return config.ZoneIDReservedMin, false, true
+	default:
+		id := config.StableZoneID(name)
+		return id, false, id != 0 && zoneNames[id] == name
+	}
+}
+
 func zoneNamesByID(cfg *config.Config) (map[uint16]string, bool) {
-	if cfg == nil || cfg.Security.Zones == nil {
+	if cfg == nil {
 		return nil, false
 	}
 	out := make(map[uint16]string, len(cfg.Security.Zones))

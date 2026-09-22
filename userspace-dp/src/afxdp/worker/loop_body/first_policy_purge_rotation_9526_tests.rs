@@ -391,6 +391,14 @@ fn extensive_rotation_rebinds_both_halves_with_new_policy_counter_and_zones_1050
         source_to_zone: "wan".to_string(),
         destination_from_zone: "dmz".to_string(),
         destination_to_zone: "wan".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 3,
+        destination_to_zone_id: 2,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
     };
     let retained = rotate_with_metadata(
         &[rule_with_zones("p-new", 0, "dmz", "wan"), rule("p-web", 1)],
@@ -447,6 +455,14 @@ fn extensive_rotation_deleting_destination_rule_purges_both_halves_10509() {
         source_to_zone: "wan".to_string(),
         destination_from_zone: "lan".to_string(),
         destination_to_zone: "wan".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 1,
+        destination_to_zone_id: 2,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
     };
     let purged = rotate_with_metadata(
         &[rule_with_zones("p-other", 0, "lan", "wan")],

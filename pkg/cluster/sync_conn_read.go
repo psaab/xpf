@@ -1010,8 +1010,6 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			peerWire = binary.LittleEndian.Uint16(payload[3:5])
 		}
 		s.peerSessionSyncWire.Store(uint32(peerWire))
-		// A capability response closes the bounded pre-discovery window.
-		s.configAncestryWaitSince.Store(0)
 		// #9818: the sender's process identity rides after the existing
 		// capabilities fields. Old peers ignore this trailing extension; a
 		// short frame leaves the connection unattributed and therefore on the
@@ -1150,6 +1148,7 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
 	s.stats.ConfigsReceived.Add(1)
 	s.stats.LastConfigSyncTime.Store(time.Now().UnixNano())
 	configText, gen, ancestry := decodeConfigPayloadWithAncestry(payload)
+	s.stats.LastConfigSyncSize.Store(uint64(len(configText)))
 	slog.Info("cluster sync: config received from peer", "size", len(configText), "gen", gen)
 	// #5563: advance the received-config high-water BEFORE enqueue. This is
 	// the receiver's view of the peer's current committed generation and

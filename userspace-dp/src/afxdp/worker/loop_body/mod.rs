@@ -117,6 +117,65 @@ mod policy_rebind_discriminator_tests {
         );
     }
 }
+fn ancestry_source_zone_matches(
+    forwarding: &crate::afxdp::ForwardingState,
+    name: &str,
+    id: u16,
+    any: bool,
+    actual_id: u16,
+) -> bool {
+    if actual_id == 0 {
+        return false;
+    }
+    if any {
+        return name == "any" && id == 0;
+    }
+    if name == "junos-global" {
+        return id == crate::policy::JUNOS_GLOBAL_ZONE_ID;
+    }
+    if name == "junos-host" {
+        return id == crate::policy::ZONE_ID_RESERVED_MIN
+            && actual_id == crate::policy::ZONE_ID_RESERVED_MIN;
+    }
+    id == actual_id
+        && forwarding
+            .zone_id_to_name
+            .get(&actual_id)
+            .map(String::as_str)
+            == Some(name)
+}
+
+fn ancestry_destination_zone_id(
+    forwarding: &crate::afxdp::ForwardingState,
+    name: &str,
+    id: u16,
+    any: bool,
+    fallback_id: u16,
+    require_fallback: bool,
+) -> Option<u16> {
+    if fallback_id == 0 {
+        return None;
+    }
+    if any {
+        return (name == "any" && id == 0 && forwarding.zone_id_to_name.contains_key(&fallback_id))
+            .then_some(fallback_id);
+    }
+    if name == "junos-global" {
+        return (id == crate::policy::JUNOS_GLOBAL_ZONE_ID
+            && forwarding.zone_id_to_name.contains_key(&fallback_id))
+        .then_some(fallback_id);
+    }
+    if name == "junos-host" {
+        return (id == crate::policy::ZONE_ID_RESERVED_MIN
+            && fallback_id == crate::policy::ZONE_ID_RESERVED_MIN)
+            .then_some(fallback_id);
+    }
+    let mapped = forwarding.zone_name_to_id.get(name).copied()?;
+    if mapped != id || (require_fallback && mapped != fallback_id) {
+        return None;
+    }
+    Some(mapped)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn rematch_bound_first_policy_sessions(
@@ -180,33 +239,63 @@ fn rematch_bound_first_policy_sessions(
         let mut retained = false;
         if ancestry.len() == 1 {
             let descriptor = ancestry[0];
-            let old_from = old_forwarding
-                .zone_id_to_name
-                .get(&metadata.ingress_zone)
-                .map(String::as_str);
-            let old_to = old_forwarding
-                .zone_id_to_name
-                .get(&metadata.egress_zone)
-                .map(String::as_str);
-            if old_from == Some(descriptor.source_from_zone.as_str())
-                && old_to == Some(descriptor.source_to_zone.as_str())
+            if ancestry_source_zone_matches(
+                old_forwarding,
+                &descriptor.source_from_zone,
+                descriptor.source_from_zone_id,
+                descriptor.source_from_zone_any,
+                metadata.ingress_zone,
+            )
+                && ancestry_source_zone_matches(
+                    old_forwarding,
+                    &descriptor.source_to_zone,
+                    descriptor.source_to_zone_id,
+                    descriptor.source_to_zone_any,
+                    metadata.egress_zone,
+                )
                 && let Ok(ifindex) = i32::try_from(metadata.ingress_ifindex)
-                && let Some(logical_ifindex) = resolve_ingress_logical_ifindex(
+                // Untagged physical ports carry no (parent, vlan) entry; fall
+                // back to the physical ifindex exactly like the flow-cache
+                // classifier. A tagged miss on a trunk must fail closed before
+                // the physical parent's inherited first-unit zone can match.
+                && !crate::afxdp::forwarding::unknown_ingress_vlan(
                     new_forwarding,
                     ifindex,
                     metadata.ingress_vlan_id,
                 )
+                && let logical_ifindex = resolve_ingress_logical_ifindex(
+                    new_forwarding,
+                    ifindex,
+                    metadata.ingress_vlan_id,
+                )
+                .unwrap_or(ifindex)
                 && let Some(&from_id) = new_forwarding.ifindex_to_zone_id.get(&logical_ifindex)
                 && from_id != 0
-                && let Some(&to_id) = new_forwarding
-                    .zone_name_to_id
-                    .get(&descriptor.destination_to_zone)
+                // The interface-derived ingress zone must be the ancestry
+                // pair's destination-from zone: without this, a broad/global
+                // destination rule could permit the same flow from an unrelated
+                // current zone and falsely prove continuity.
+                && ancestry_destination_zone_id(
+                    new_forwarding,
+                    &descriptor.destination_from_zone,
+                    descriptor.destination_from_zone_id,
+                    descriptor.destination_from_zone_any,
+                    from_id,
+                    true,
+                )
+                .is_some()
+                && let Some(to_id) = ancestry_destination_zone_id(
+                    new_forwarding,
+                    &descriptor.destination_to_zone,
+                    descriptor.destination_to_zone_id,
+                    descriptor.destination_to_zone_any,
+                    metadata.egress_zone,
+                    false,
+                )
                 && to_id != 0
-                && let Some(destination_rule) = new_forwarding
+                && let Some(_destination_rule) = new_forwarding
                     .policy
-                    .rules
-                    .iter()
-                    .find(|rule| rule.rule_id == descriptor.destination_rule_id)
+                    .rule_for_stable_id(&descriptor.destination_rule_id)
             {
                 let policy_dst_ip = decision.nat.rewrite_dst.unwrap_or(key.dst_ip);
                 let policy_dst_port = decision.nat.rewrite_dst_port.unwrap_or(key.dst_port);
@@ -222,8 +311,13 @@ fn rematch_bound_first_policy_sessions(
                     None,
                 );
                 if result.action == crate::policy::PolicyAction::Permit
-                    && result.policy_id == destination_rule.policy_id
                     && result.policy_counter_idx != 0
+                    && let Some(matched_rule) = result
+                        .policy_counter_idx
+                        .checked_sub(1)
+                        .and_then(|idx| usize::try_from(idx).ok())
+                        .and_then(|idx| new_forwarding.policy.rules.get(idx))
+                    && matched_rule.policy_id == result.policy_id
                 {
                     let record = crate::protocol::PolicySessionRebind {
                         family: if key.addr_family == libc::AF_INET as u8 {
@@ -238,7 +332,7 @@ fn rematch_bound_first_policy_sessions(
                         protocol: key.protocol,
                         routing_domain: key.routing_domain,
                         policy_id: result.policy_id,
-                        rule_id: destination_rule.rule_id.clone(),
+                        rule_id: matched_rule.rule_id.clone(),
                         ingress_zone: from_id,
                         egress_zone: to_id,
                         tunnel_discriminator: key.discriminator.to_wire(),
@@ -253,11 +347,19 @@ fn rematch_bound_first_policy_sessions(
                         shared_sessions,
                         shared_nat_sessions,
                         shared_forward_wire_sessions,
+                        shared_owner_rg_indexes,
+                        peer_worker_commands,
+                        worker_commands_by_id,
+                        worker_id,
+                        now_ns,
                     ) != 0;
                 }
             }
         }
         if !retained {
+            // Teardown context is the new state, same rule as the
+            // rotation-purge note below: live reservations live in the new
+            // allocator objects.
             delete_terminal_filtered_session(
                 sessions,
                 session_map.handle(),
@@ -282,7 +384,7 @@ fn rematch_bound_first_policy_sessions(
     }
     changed
 }
-
+#[allow(clippy::too_many_arguments)]
 fn rebind_policy_sessions_from_snapshot(
     sessions: &mut crate::session::SessionTable,
     forwarding: &crate::afxdp::ForwardingState,
@@ -293,6 +395,11 @@ fn rebind_policy_sessions_from_snapshot(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    worker_id: u32,
+    now_ns: u64,
 ) -> usize {
     let mut rebound = 0usize;
     for record in records {
@@ -330,21 +437,17 @@ fn rebind_policy_sessions_from_snapshot(
             // records from aliasing a live tunnel under `None`.
             continue;
         };
-        let Some(rule) = forwarding.policy.rule_for_policy_id(record.policy_id) else {
-            continue;
-        };
-        if !record.rule_id.is_empty() && record.rule_id != rule.rule_id {
+        if record.rule_id.is_empty() {
             continue;
         }
-        let Some(policy_counter_idx) = forwarding
-            .policy
-            .rules
-            .iter()
-            .position(|candidate| candidate.policy_id == record.policy_id)
-            .and_then(|idx| u32::try_from(idx + 1).ok())
+        let Some((policy_counter_idx, rule)) =
+            forwarding.policy.rule_binding_by_stable_id(&record.rule_id)
         else {
             continue;
         };
+        if rule.policy_id != record.policy_id {
+            continue;
+        }
         let key = crate::session::SessionKey {
             addr_family,
             protocol: record.protocol,
@@ -362,33 +465,61 @@ fn rebind_policy_sessions_from_snapshot(
             rule.hit_counter.clone(),
             record.ingress_zone,
             record.egress_zone,
-            rule.log_session_init,
-            rule.log_session_close,
         ) {
-            if let Some(entries) = sessions.policy_rebind_pair_entries(&key) {
-                for entry in entries {
-                    crate::afxdp::shared_ops::restamp_shared_policy_entry(
+            let Some(entries) = sessions.policy_rebind_pair_entries(&key) else {
+                continue;
+            };
+            // Restamp both map rows before publishing any shared alias. If a
+            // live BPF row cannot be read or updated, tear down the newly
+            // rebound pair rather than exposing a split policy identity.
+            let bpf_ok = entries.iter().all(|entry| {
+                restamp_bpf_conntrack_policy(
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
+                    &entry.key,
+                    &entry.metadata,
+                )
+            });
+            if !bpf_ok {
+                if let Some(entry) = entries.first() {
+                    delete_terminal_filtered_session(
+                        sessions,
+                        session_map.handle(),
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
                         shared_sessions,
                         shared_nat_sessions,
                         shared_forward_wire_sessions,
-                        &entry,
-                    );
-                    publish_worker_session_map_entry(
-                        session_map.handle(),
+                        shared_owner_rg_indexes,
+                        peer_worker_commands,
+                        worker_commands_by_id,
                         forwarding,
                         &entry.key,
                         entry.decision,
                         &entry.metadata,
                         entry.origin,
-                        true,
-                    );
-                    restamp_bpf_conntrack_policy(
-                        conntrack_v4_fd,
-                        conntrack_v6_fd,
-                        &entry.key,
-                        &entry.metadata,
+                        now_ns,
+                        worker_id,
                     );
                 }
+                continue;
+            }
+            crate::afxdp::shared_ops::restamp_shared_policy_entries(
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                &entries,
+            );
+            for entry in entries {
+                publish_worker_session_map_entry(
+                    session_map.handle(),
+                    forwarding,
+                    &entry.key,
+                    entry.decision,
+                    &entry.metadata,
+                    entry.origin,
+                    true,
+                );
             }
             rebound += 1;
         }
@@ -1208,6 +1339,14 @@ pub(crate) fn worker_loop(
                 }
             }
 
+            // Teardown runs against the NEW state deliberately: interface-NAT
+            // identity is Arc-shared across the rotation, pool/NAT64
+            // allocators are reused-or-reseeded into the new objects
+            // (parse_source_nat_rules_with_previous + carry), and old-only
+            // allocator objects die with the old ForwardingState — so only
+            // the new tables can free the live (possibly carried)
+            // reservation. Releasing against the old state would miss carried
+            // copies and strand them in the new allocators.
             let purged_removed_zone_sessions = purge_sessions_with_removed_zone_ids(
                 &mut sessions,
                 session_map.handle(),
@@ -1266,6 +1405,11 @@ pub(crate) fn worker_loop(
                 &shared_sessions,
                 &shared_nat_sessions,
                 &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &peer_worker_commands,
+                &worker_commands_by_id,
+                worker_id,
+                loop_now_ns,
             );
             if rebound_policy_sessions > 0 {
                 debug_log!(

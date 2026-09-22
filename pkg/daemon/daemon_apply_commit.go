@@ -292,7 +292,10 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 // committed config is returned alongside the error so the operator sees the
 // failure while the standby still converges.
 func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncPeer peerSyncPolicy) (*config.Config, error) {
-	activeGen, _ := d.store.ActiveSnapshot()
+	var activeGen uint64
+	if d.store != nil {
+		activeGen, _ = d.store.ActiveSnapshot()
+	}
 	d.pendingRenameMu.Lock()
 	renameApply, hasRenameApply := d.pendingRenameApplies[activeGen]
 	d.pendingRenameMu.Unlock()

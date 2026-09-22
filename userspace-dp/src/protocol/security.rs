@@ -571,6 +571,22 @@ pub(crate) struct PolicyRenameAncestry {
     pub destination_from_zone: String,
     #[serde(rename = "destination_to_zone", default)]
     pub destination_to_zone: String,
+    #[serde(rename = "source_from_zone_id", default)]
+    pub source_from_zone_id: u16,
+    #[serde(rename = "source_to_zone_id", default)]
+    pub source_to_zone_id: u16,
+    #[serde(rename = "destination_from_zone_id", default)]
+    pub destination_from_zone_id: u16,
+    #[serde(rename = "destination_to_zone_id", default)]
+    pub destination_to_zone_id: u16,
+    #[serde(rename = "source_from_zone_any", default)]
+    pub source_from_zone_any: bool,
+    #[serde(rename = "source_to_zone_any", default)]
+    pub source_to_zone_any: bool,
+    #[serde(rename = "destination_from_zone_any", default)]
+    pub destination_from_zone_any: bool,
+    #[serde(rename = "destination_to_zone_any", default)]
+    pub destination_to_zone_any: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

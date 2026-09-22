@@ -973,13 +973,15 @@ pub(super) fn restamp_bpf_conntrack_policy(
     conntrack_v6_fd: c_int,
     key: &SessionKey,
     metadata: &SessionMetadata,
-) {
+) -> bool {
     if key.addr_family as i32 == libc::AF_INET {
         let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
-            return;
+            return false;
         };
+        // Unit tests and builds without a pinned conntrack map deliberately
+        // pass -1. There is no map state to restamp, so this is not a failure.
         if conntrack_v4_fd < 0 {
-            return;
+            return true;
         }
         let bpf_key = bpf_session_key_v4(
             src.octets(),
@@ -996,23 +998,26 @@ pub(super) fn restamp_bpf_conntrack_policy(
                 (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
             )
         };
-        if found == 0 {
-            restamp_bpf_value_v4(&mut value, metadata);
-            let _ = unsafe {
-                libbpf_sys::bpf_map_update_elem(
-                    conntrack_v4_fd,
-                    (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
-                    (&value as *const BpfSessionValueV4).cast::<c_void>(),
-                    libbpf_sys::BPF_EXIST as u64,
-                )
-            };
+        if found != 0 {
+            return false;
         }
-    } else if key.addr_family as i32 == libc::AF_INET6 {
+        restamp_bpf_value_v4(&mut value, metadata);
+        let updated = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v4_fd,
+                (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                (&value as *const BpfSessionValueV4).cast::<c_void>(),
+                libbpf_sys::BPF_EXIST as u64,
+            )
+        };
+        return updated == 0;
+    }
+    if key.addr_family as i32 == libc::AF_INET6 {
         let (IpAddr::V6(src), IpAddr::V6(dst)) = (key.src_ip, key.dst_ip) else {
-            return;
+            return false;
         };
         if conntrack_v6_fd < 0 {
-            return;
+            return true;
         }
         let bpf_key = bpf_session_key_v6(
             src.octets(),
@@ -1029,18 +1034,21 @@ pub(super) fn restamp_bpf_conntrack_policy(
                 (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
             )
         };
-        if found == 0 {
-            restamp_bpf_value_v6(&mut value, metadata);
-            let _ = unsafe {
-                libbpf_sys::bpf_map_update_elem(
-                    conntrack_v6_fd,
-                    (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
-                    (&value as *const BpfSessionValueV6).cast::<c_void>(),
-                    libbpf_sys::BPF_EXIST as u64,
-                )
-            };
+        if found != 0 {
+            return false;
         }
+        restamp_bpf_value_v6(&mut value, metadata);
+        let updated = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v6_fd,
+                (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                (&value as *const BpfSessionValueV6).cast::<c_void>(),
+                libbpf_sys::BPF_EXIST as u64,
+            )
+        };
+        return updated == 0;
     }
+    false
 }
 
 /// Update `last_seen` in BPF conntrack entries for active userspace sessions.

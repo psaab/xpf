@@ -1770,11 +1770,11 @@ pub(super) fn publish_shared_session(
 
 /// Update policy identity in every shared alias without replacing the entry.
 /// A policy rename must not reset HA generation, counters, or liveness.
-pub(super) fn restamp_shared_policy_entry(
+pub(super) fn restamp_shared_policy_entries(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    entry: &crate::session::PolicyRebindEntry,
+    entries: &[crate::session::PolicyRebindEntry],
 ) {
     fn apply(stored: &mut SyncedSessionEntry, entry: &crate::session::PolicyRebindEntry) {
         stored.metadata.policy_id = entry.metadata.policy_id;
@@ -1786,36 +1786,49 @@ pub(super) fn restamp_shared_policy_entry(
         stored.metadata.log_session_close = entry.metadata.log_session_close;
     }
 
+    // Hold each alias map lock once for the complete pair. This prevents a
+    // concurrent reader from observing one half restamped while the other
+    // still carries the old policy identity within any one map.
     {
         let mut sessions = lock_shared_recover(shared_sessions);
-        if let Some(stored) = sessions.get_mut(&entry.key) {
-            apply(stored, entry);
-        }
-    }
-    if entry.metadata.is_reverse {
-        return;
-    }
-    let aliases = [
-        reverse_session_key(&entry.key, entry.decision.nat),
-        reverse_canonical_key(&entry.key, entry.decision.nat),
-    ];
-    {
-        let mut sessions = lock_shared_recover(shared_nat_sessions);
-        for alias in aliases {
-            if let Some(stored) = sessions.get_mut(&alias)
-                && stored.key == entry.key
-            {
+        for entry in entries {
+            if let Some(stored) = sessions.get_mut(&entry.key) {
                 apply(stored, entry);
             }
         }
     }
-    let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
-    if wire_key != entry.key {
+    {
+        let mut sessions = lock_shared_recover(shared_nat_sessions);
+        for entry in entries {
+            if entry.metadata.is_reverse {
+                continue;
+            }
+            let aliases = [
+                reverse_session_key(&entry.key, entry.decision.nat),
+                reverse_canonical_key(&entry.key, entry.decision.nat),
+            ];
+            for alias in aliases {
+                if let Some(stored) = sessions.get_mut(&alias)
+                    && stored.key == entry.key
+                {
+                    apply(stored, entry);
+                }
+            }
+        }
+    }
+    {
         let mut sessions = lock_shared_recover(shared_forward_wire_sessions);
-        if let Some(stored) = sessions.get_mut(&wire_key)
-            && stored.key == entry.key
-        {
-            apply(stored, entry);
+        for entry in entries {
+            if entry.metadata.is_reverse {
+                continue;
+            }
+            let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
+            if wire_key != entry.key
+                && let Some(stored) = sessions.get_mut(&wire_key)
+                && stored.key == entry.key
+            {
+                apply(stored, entry);
+            }
         }
     }
 }

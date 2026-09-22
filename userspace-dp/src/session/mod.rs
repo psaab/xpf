@@ -2931,8 +2931,6 @@ impl SessionTable {
         policy_counter: std::sync::Arc<crate::policy::PolicyRuleCounter>,
         ingress_zone: u16,
         egress_zone: u16,
-        log_session_init: bool,
-        log_session_close: bool,
     ) -> bool {
         let Some(forward) = self.entry_by_key(key) else {
             return false;
@@ -2949,19 +2947,25 @@ impl SessionTable {
                 return false;
             }
         }
+
+        // A non-NAT flow has an identical reverse key. Mutate it once; a
+        // second pass would swap the zones back and leave the pair unchanged.
         let mut rebound = false;
-        for (candidate, ingress, egress) in [
-            (key, ingress_zone, egress_zone),
-            (&companion_key, egress_zone, ingress_zone),
-        ] {
-            if let Some(record) = self.entry_by_key_mut(candidate) {
+        if let Some(record) = self.entry_by_key_mut(key) {
+            record.metadata.policy_id = policy_id;
+            record.metadata.policy_counter_idx = policy_counter_idx;
+            record.metadata.policy_counter = Some(policy_counter.clone());
+            record.metadata.ingress_zone = ingress_zone;
+            record.metadata.egress_zone = egress_zone;
+            rebound = true;
+        }
+        if companion_key != *key {
+            if let Some(record) = self.entry_by_key_mut(&companion_key) {
                 record.metadata.policy_id = policy_id;
                 record.metadata.policy_counter_idx = policy_counter_idx;
-                record.metadata.policy_counter = Some(policy_counter.clone());
-                record.metadata.ingress_zone = ingress;
-                record.metadata.egress_zone = egress;
-                record.metadata.log_session_init = log_session_init;
-                record.metadata.log_session_close = log_session_close;
+                record.metadata.policy_counter = Some(policy_counter);
+                record.metadata.ingress_zone = egress_zone;
+                record.metadata.egress_zone = ingress_zone;
                 rebound = true;
             }
         }
@@ -2985,21 +2989,25 @@ impl SessionTable {
                 return None;
             }
         }
+
         let mut entries = Vec::with_capacity(2);
-        for candidate in [key, &companion_key] {
-            let Some(entry) = self.entry_by_key(candidate) else {
-                continue;
-            };
-            entries.push(PolicyRebindEntry {
-                key: candidate.clone(),
-                decision: entry.decision,
-                metadata: entry.metadata.clone(),
-                origin: entry.origin,
-                protocol: candidate.protocol,
-                tcp_flags: entry.observed_tcp_flags,
-                session_id: entry.session_id,
-                tcp_close_class: entry.tcp_close_class_wire(),
-            });
+        let mut append_entry = |candidate: &SessionKey| {
+            if let Some(entry) = self.entry_by_key(candidate) {
+                entries.push(PolicyRebindEntry {
+                    key: candidate.clone(),
+                    decision: entry.decision,
+                    metadata: entry.metadata.clone(),
+                    origin: entry.origin,
+                    protocol: candidate.protocol,
+                    tcp_flags: entry.observed_tcp_flags,
+                    session_id: entry.session_id,
+                    tcp_close_class: entry.tcp_close_class_wire(),
+                });
+            }
+        };
+        append_entry(key);
+        if companion_key != *key {
+            append_entry(&companion_key);
         }
         Some(entries)
     }
