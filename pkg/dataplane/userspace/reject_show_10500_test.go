@@ -62,6 +62,9 @@ func TestUpdatePolicyScheduleStateRecordsRejectReasons10500(t *testing.T) {
 	if req.Snapshot == nil {
 		t.Fatal("scheduler republish sent no snapshot")
 	}
+	if len(req.Snapshot.Capabilities.PolicyContentRejected) == 0 {
+		t.Fatal("fixture did not flip to rejected")
+	}
 	assertRejectReasonsEqual10500(t, m.lastSnapshotRejectReasons,
 		req.Snapshot.Capabilities.PolicyContentRejected)
 }
@@ -84,6 +87,9 @@ func TestPublishRouteOverlaySnapshotRecordsRejectReasons10500(t *testing.T) {
 	req := <-reqs
 	if req.Snapshot == nil {
 		t.Fatal("route-overlay republish sent no snapshot")
+	}
+	if len(req.Snapshot.Capabilities.PolicyContentRejected) == 0 {
+		t.Fatal("fixture did not flip to rejected")
 	}
 	assertRejectReasonsEqual10500(t, m.lastSnapshotRejectReasons,
 		req.Snapshot.Capabilities.PolicyContentRejected)
