@@ -151,15 +151,18 @@ type pmechTunnelZone struct {
 	reason  nfqueue.ZoneReason
 }
 
-// pmechZoneSnapshot is immutable after publication. The live-ifindex map is
-// frozen per generation; rotations publish a new value and mark the old one
-// stale before any old descriptor can be interpreted by a new generation.
+// pmechZoneSnapshot freezes the live-ifindex map per capture generation.
+// Rotations publish a new value and mark the old one stale before any old
+// descriptor can be interpreted by a new generation. The accepted config/FIB
+// authority advances atomically at successful snapshot boundaries.
 type pmechZoneSnapshot struct {
-	generation    uint64
-	fibGeneration uint32
-	current       atomic.Bool
-	tunnels       map[string]pmechTunnelZone
-	queueEpochs   map[uint16]uint64
+	generation               uint64
+	fibGeneration            uint32
+	acceptedConfigGeneration atomic.Uint64
+	acceptedFIBGeneration    atomic.Uint32
+	current                  atomic.Bool
+	tunnels                  map[string]pmechTunnelZone
+	queueEpochs              map[uint16]uint64
 }
 
 func (s *pmechZoneSnapshot) ResolveSTN(stn string) nfqueue.ZoneResolution {
@@ -181,6 +184,13 @@ func (s *pmechZoneSnapshot) Generations() (uint64, uint32) {
 		return 0, 0
 	}
 	return s.generation, s.fibGeneration
+}
+
+func (s *pmechZoneSnapshot) AcceptedGenerations() (uint64, uint32) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.acceptedConfigGeneration.Load(), s.acceptedFIBGeneration.Load()
 }
 
 func (s *pmechZoneSnapshot) QueueEpoch(queue uint16) uint64 {
@@ -221,6 +231,8 @@ func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, gene
 		queueEpochs: make(map[uint16]uint64),
 	}
 	snapshot.current.Store(true)
+	snapshot.acceptedConfigGeneration.Store(generation)
+	snapshot.acceptedFIBGeneration.Store(fibGeneration)
 	if cfg == nil {
 		return snapshot
 	}
@@ -392,7 +404,8 @@ func (r *ipsecCaptureRuntime) tunnelRowsSnapshot() []dpuserspace.IpsecTunnelRowS
 			continue
 		}
 		tunnel, ok := r.zoneSnapshot.tunnels[stn]
-		if !ok || tunnel.ifID == 0 || tunnel.ifindex == 0 ||
+		if !ok || tunnel.reason != nfqueue.ZoneReasonZoned ||
+			tunnel.ifID == 0 || tunnel.ifindex == 0 ||
 			tunnel.ifindex != uint32(handle.Key.Ifindex) {
 			invalid[stn] = struct{}{}
 			continue
@@ -426,7 +439,8 @@ func (r *ipsecCaptureRuntime) tunnelRowsSnapshot() []dpuserspace.IpsecTunnelRowS
 // configSnapshotAuthority is the single daemon-side feed used by the
 // userspace snapshot compiler. It preserves the permit-gated S5 epoch feed
 // while publishing the staged P-MECH identity rows even when the permit is
-// temporarily closed; nftables and Rust D14 remain fail-closed until it opens.
+// temporarily closed; the D11 submit-admission gate and nftables remain
+// fail-closed until it opens.
 func (r *ipsecCaptureRuntime) configSnapshotAuthority() (
 	uint64,
 	[]dpuserspace.QueueEpochSnapshot,
@@ -441,10 +455,16 @@ func (r *ipsecCaptureRuntime) configSnapshotAuthority() (
 // advisories only after the corresponding ConfigSnapshot has been accepted.
 // The capture-generation half remains immutable per admitted handle.
 func (r *ipsecCaptureRuntime) publishSnapshotAuthority(configGeneration uint64, fibGeneration uint32) {
-	if r == nil || r.actor == nil {
+	if r == nil {
 		return
 	}
-	r.actor.publishSnapshotAuthority(configGeneration, fibGeneration)
+	if r.zoneSnapshot != nil {
+		r.zoneSnapshot.acceptedConfigGeneration.Store(configGeneration)
+		r.zoneSnapshot.acceptedFIBGeneration.Store(fibGeneration)
+	}
+	if r.actor != nil {
+		r.actor.publishSnapshotAuthority(configGeneration, fibGeneration)
+	}
 }
 
 // ipsecCaptureConfigSnapshot selects the generation that an in-flight

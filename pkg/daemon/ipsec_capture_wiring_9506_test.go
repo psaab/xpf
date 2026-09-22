@@ -133,6 +133,38 @@ func TestBuildPMechZoneSnapshotMarksDuplicateBindsAmbiguous9506(t *testing.T) {
 		}
 	}
 }
+
+func TestPMechSnapshotAdvancesAcceptedAuthorityWithoutCaptureRotation10485(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
+		"vpn-a": {BindInterface: "st1"},
+		"vpn-b": {BindInterface: "st1.0"},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"zone": {Interfaces: []string{"st1.0"}},
+	}
+	snapshot := buildPMechZoneSnapshot(cfg, wiringHandles9506(), 4, 4)
+	if capture, fib := snapshot.Generations(); capture != 4 || fib != 4 {
+		t.Fatalf("capture authority=(%d,%d), want (4,4)", capture, fib)
+	}
+	if accepted, fib := snapshot.AcceptedGenerations(); accepted != 4 || fib != 4 {
+		t.Fatalf("initial accepted authority=(%d,%d), want (4,4)", accepted, fib)
+	}
+	runtime := &ipsecCaptureRuntime{
+		zoneSnapshot: snapshot,
+		handles:      wiringHandles9506(),
+	}
+	runtime.publishSnapshotAuthority(9, 7)
+	if capture, fib := snapshot.Generations(); capture != 4 || fib != 4 {
+		t.Fatalf("capture authority changed=(%d,%d), want immutable (4,4)", capture, fib)
+	}
+	if accepted, fib := snapshot.AcceptedGenerations(); accepted != 9 || fib != 7 {
+		t.Fatalf("accepted authority=(%d,%d), want (9,7)", accepted, fib)
+	}
+	if rows := runtime.tunnelRowsSnapshot(); len(rows) != 0 {
+		t.Fatalf("ambiguous tunnel rows=%+v, want closed-world omission", rows)
+	}
+}
 func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {
 	origLink := ipsecCaptureLinkByName
 	origOpen := ipsecCaptureOpenQueue
