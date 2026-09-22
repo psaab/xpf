@@ -34,6 +34,7 @@ mod session_deltas;
 mod snapshot;
 mod stop_workers;
 mod sync_session;
+mod policy_list;
 
 use crate::afxdp::{HaRefreshOutcome, SessionDomain, HA_REFRESH_NEEDS_CONTROL_SOCKET};
 use super::super::*;
@@ -132,6 +133,11 @@ pub(crate) fn handle_stream(
         ok: true,
         error: String::new(),
         status: None,
+        session_counters: Vec::new(),
+        session_policy_matches: Vec::new(),
+        session_policy_complete: false,
+        session_policy_continuation: String::new(),
+        session_policy_per_worker_errors: Vec::new(),
         session_deltas: Vec::new(),
         session_export_more: false,
         session_export_dropped: 0,
@@ -139,7 +145,6 @@ pub(crate) fn handle_stream(
         session_export_seq: 0,
         idle_leases: Vec::new(),
         display_leases: Vec::new(),
-        session_counters: Vec::new(),
         session_mirror_v4_count: 0,
         session_mirror_v6_count: 0,
         session_mirror_complete: false,
@@ -204,14 +209,18 @@ pub(crate) fn handle_stream(
     //
     // Measured before removing it: NOTHING consumes `status` on a
     // `sync_session` response. Both daemon senders set `SuppressStatus`
-    // (`pkg/dataplane/userspace/manager_sessionsync_transmit.go`), no Go caller
-    // reads the field, and none of the 18 Rust cells driving this verb asserts
-    // on it. So the attach was not a service being withdrawn; it was the last
-    // remaining path by which an HA session mirror could queue behind a 10 s
-    // worker-readiness barrier.
-    let served_off_lock = request.request_type == "sync_session";
-    if served_off_lock {
+    let served_off_lock = matches!(
+        request.request_type.as_str(),
+        "sync_session" | "list_sessions_by_policy"
+    );
+    if request.request_type == "sync_session" {
         sync_session::handle(&session_domain, request.session_sync, &mut response);
+    } else if request.request_type == "list_sessions_by_policy" {
+        policy_list::handle(
+            &session_domain,
+            request.session_policy_list,
+            &mut response,
+        );
     }
 
     // #9629: session-socket HA fast path — lease-only refresh, never `ServerState`.

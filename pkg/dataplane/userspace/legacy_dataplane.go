@@ -852,6 +852,18 @@ func (a *LegacyDataPlaneAdapter) BatchDeleteSessionsScopedV6(scoped []dataplane.
 	}
 	return m.BatchDeleteSessionsScopedV6(scoped)
 }
+// ListSessionsByPolicy performs the helper-owned READ phase (#10512). It is an
+// optional capability so non-userspace runtimes retain their existing
+// SessionStore surface.
+func (a *LegacyDataPlaneAdapter) ListSessionsByPolicy(
+	req SessionPolicyListRequest,
+) (ControlResponse, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return ControlResponse{}, err
+	}
+	return m.ListSessionsByPolicy(req)
+}
 
 // BatchDeletePeerSyncedSessionsScoped forwards the #9714 peer-delete batch. The
 // store's type assertion is handed this adapter, not the Manager (see

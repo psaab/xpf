@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // #6948 — the commit-time session invalidation reads the session table BEFORE
@@ -191,6 +194,79 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		return
 	}
 	store := rt.Sessions()
+	// #10512: userspace policy invalidation reads the helper authority, not
+	// the BPF mirror. A missing/incomplete READ is a partial invalidation and
+	// must never be converted into an authoritative empty capture.
+	if lister, ok := rt.(interface {
+		ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error)
+	}); ok {
+		ids := make([]uint32, 0, len(deleted)+len(modified)+len(deflt))
+		for id := range deleted {
+			ids = append(ids, id)
+		}
+		for id := range modified {
+			ids = append(ids, id)
+		}
+		for id := range deflt {
+			ids = append(ids, id)
+		}
+		resp, err := lister.ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest{
+			PolicyIDs: ids,
+			Mode:      "prepublish",
+			Families:  []uint8{4, 6},
+			Classes:   []string{"forward"},
+		})
+		if err != nil {
+			capture.v4Err = fmt.Errorf("policy session READ: %w", err)
+			capture.v6Err = capture.v4Err
+			capture.deleted.enumFailed = true
+			capture.modified.enumFailed = true
+			capture.deflt.enumFailed = true
+			d.policyInvalidationCapture = capture
+			return
+		}
+		if !resp.SessionPolicyComplete {
+			readErr := fmt.Errorf(
+				"policy session READ incomplete: %s",
+				strings.Join(resp.SessionPolicyPerWorkerErrors, ", "),
+			)
+			capture.v4Err = readErr
+			capture.v6Err = readErr
+			capture.deleted.enumFailed = true
+			capture.modified.enumFailed = true
+			capture.deflt.enumFailed = true
+			d.policyInvalidationCapture = capture
+			return
+		}
+		for _, match := range resp.SessionPolicyMatches {
+			entry4, entry6, err := policyMatchEntries(match)
+			if err != nil {
+				capture.v4Err = errors.Join(capture.v4Err, err)
+				capture.v6Err = capture.v4Err
+				continue
+			}
+			target := &capture.deleted
+			if idInSet(modified, match.PolicyID) {
+				target = &capture.modified
+			} else if idInSet(deflt, match.PolicyID) {
+				target = &capture.deflt
+			}
+			if entry4 != nil {
+				target.v4 = append(target.v4, *entry4)
+			}
+			if entry6 != nil {
+				target.v6 = append(target.v6, *entry6)
+			}
+		}
+		if capture.v4Err != nil || capture.v6Err != nil {
+			capture.deleted.enumFailed = true
+			capture.modified.enumFailed = true
+			capture.deflt.enumFailed = true
+		}
+		d.policyInvalidationCapture = capture
+		return
+	}
+
 	if store == nil {
 		return
 	}

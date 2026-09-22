@@ -336,6 +336,62 @@ impl SessionDomain {
         crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced).len()
     }
 
+    /// #10512: enumerate policy-tagged sessions from the helper-owned shared
+    /// authority. The worker-local tables are added by the control-plane
+    /// capture command; this shared leg is intentionally kept read-only and
+    /// lock-free with respect to `ServerState`.
+    pub(crate) fn list_sessions_by_policy(
+        &self,
+        request: &crate::protocol::SessionPolicyListRequest,
+    ) -> (
+        Vec<crate::protocol::SessionPolicyMatch>,
+        bool,
+        Vec<String>,
+    ) {
+        use std::collections::HashSet;
+
+        let wanted: HashSet<u32> = request.policy_ids.iter().copied().filter(|id| *id != 0).collect();
+        if wanted.is_empty() {
+            return (Vec::new(), true, Vec::new());
+        }
+        let family_allowed = |family: u8| {
+            request.families.is_empty() || request.families.iter().any(|candidate| *candidate == family)
+        };
+        let class_allowed = |is_reverse: bool| {
+            request.classes.is_empty()
+                || request.classes.iter().any(|class| {
+                    (is_reverse && class == "reverse") || (!is_reverse && class == "forward")
+                })
+        };
+        let shared = crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced);
+        // A complete READ must include every worker-local table. The command
+        // fan-out/ack leg is not wired yet, so never report a shared-only scan
+        // as authoritative (an ordinary local session would become a false
+        // empty capture).
+        let matches = Vec::new();
+        let mut errors = vec!["worker-local-scan-unavailable".to_string()];
+        let complete = false;
+        for entry in shared.values() {
+            if entry.metadata.is_reverse
+                || !family_allowed(entry.key.addr_family)
+                || !class_allowed(false)
+                || !wanted.contains(&entry.metadata.policy_id)
+            {
+                continue;
+            }
+            // SyncedSessionEntry predates the READ verb and does not carry the
+            // monotonic creation timestamp required for a safe prepublish
+            // audit or the legacy before_secs fence. Do not encode zero as a
+            // timestamp: an incomplete answer is fail-closed and lets Go
+            // surface #5578 instead of manufacturing an authoritative empty.
+            errors.push(format!(
+                "shared:{}:created-time-unavailable",
+                entry.key.addr_family
+            ));
+        }
+        (matches, complete, errors)
+    }
+
     /// #9629: the operator-facing HA status for one RG, read lock-free.
     ///
     /// Single-entry `Coordinator::ha_groups()` over the shared `rg_runtime`

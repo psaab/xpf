@@ -38,6 +38,37 @@ type SessionExportRequest struct {
 	ContinuationSequence    uint64 `json:"session_export_seq,omitempty"`
 }
 
+type SessionPolicyListRequest struct {
+	PolicyIDs    []uint32 `json:"policy_ids,omitempty"`
+	Mode         string   `json:"mode,omitempty"`
+	BeforeSecs   *uint64  `json:"before_secs,omitempty"`
+	Families     []uint8  `json:"families,omitempty"`
+	Classes      []string `json:"classes,omitempty"`
+	Continuation string   `json:"continuation,omitempty"`
+}
+
+type SessionPolicyTuple struct {
+	AddrFamily    uint8  `json:"addr_family,omitempty"`
+	Protocol      uint8  `json:"protocol,omitempty"`
+	SrcIP         string `json:"src_ip,omitempty"`
+	DstIP         string `json:"dst_ip,omitempty"`
+	SrcPort       uint16 `json:"src_port,omitempty"`
+	DstPort       uint16 `json:"dst_port,omitempty"`
+	RoutingDomain uint32 `json:"routing_domain,omitempty"`
+}
+
+type SessionPolicyMatch struct {
+	AddrFamily                     uint8               `json:"addr_family,omitempty"`
+	RoutingDomain                  uint32              `json:"routing_domain,omitempty"`
+	Tuple                          SessionPolicyTuple  `json:"tuple"`
+	ReverseKey                     *SessionPolicyTuple `json:"reverse_key,omitempty"`
+	PolicyID                       uint32              `json:"policy_id,omitempty"`
+	CreatedSecs                    uint64              `json:"created_secs,omitempty"`
+	CreatedNS                      uint64              `json:"created_ns,omitempty"`
+	ExpectedRTFlowSessionID        uint64              `json:"expected_rt_flow_session_id,omitempty"`
+	CompanionPolicyID              uint32              `json:"companion_policy_id,omitempty"`
+	ExpectedCompanionRTFlowSessionID uint64            `json:"expected_companion_rt_flow_session_id,omitempty"`
+}
 type SessionSyncRequest struct {
 	Operation   string `json:"operation,omitempty"`
 	// #10512: every helper-first tuple mutation carries a process-generation

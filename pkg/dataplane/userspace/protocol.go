@@ -487,6 +487,7 @@ type ControlRequest struct {
 	Binding        *BindingControlRequest    `json:"binding,omitempty"`
 	Packet         *InjectPacketRequest      `json:"packet,omitempty"`
 	SessionSync    *SessionSyncRequest       `json:"session_sync,omitempty"`
+	SessionPolicyList *SessionPolicyListRequest `json:"session_policy_list,omitempty"`
 	SessionDeltas  *SessionDeltaDrainRequest `json:"session_deltas,omitempty"`
 	SessionExport  *SessionExportRequest     `json:"session_export,omitempty"`
 	// #7919: the 5-tuple for the read-only `session_counters` verb. An ADDED
@@ -521,6 +522,10 @@ type ControlResponse struct {
 	OK            bool               `json:"ok"`
 	Error         string             `json:"error,omitempty"`
 	Status        *ProcessStatus     `json:"status,omitempty"`
+	SessionPolicyMatches []SessionPolicyMatch `json:"session_policy_matches,omitempty"`
+	SessionPolicyComplete bool `json:"session_policy_complete,omitempty"`
+	SessionPolicyContinuation string `json:"session_policy_continuation,omitempty"`
+	SessionPolicyPerWorkerErrors []string `json:"session_policy_per_worker_errors,omitempty"`
 	SessionDeltas []SessionDeltaInfo `json:"session_deltas,omitempty"`
 	// SessionExportMore reports that an export_owner_rg_sessions answer was
 	// CAPPED by the request's Max and the helper still holds deltas from the

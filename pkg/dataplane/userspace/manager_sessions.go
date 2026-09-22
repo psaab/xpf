@@ -15,6 +15,18 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
+// ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
+// session authority. The returned response is authoritative only when
+// SessionPolicyComplete is true; callers must not synthesize an empty capture
+// from a transport or incomplete result.
+func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlResponse, error) {
+	return m.requestSessionSyncResponse(ControlRequest{
+		Type:              "list_sessions_by_policy",
+		SuppressStatus:    true,
+		SessionPolicyList: &req,
+	})
+}
+
 
 // ExportAllSessionsViaEventStream tells the Rust helper to push all current
 // sessions through the event stream as Open events. The Go daemon receives
