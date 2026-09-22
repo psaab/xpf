@@ -13,8 +13,9 @@
 > the fabric state; `pkg/dataplane/userspace/manager_fabric_sync.go` publishes
 > it to the helper, while `pkg/daemon/daemon_ha_fabric.go` resolves link and
 > peer state and triggers the refresh. Sections marked **historical** below
-> describe the retired eBPF design and are kept for lineage; the per-issue
-> sections from #1946 onward describe live userspace behavior.
+> describe retired designs and are kept for lineage; the per-issue
+> sections from #1946 onward describe live userspace behavior, except
+> #4439/#4453/#4414 whose fast path was removed (#6478).
 
 ## Problem Statement
 
@@ -64,14 +65,14 @@ instead of wan/lan) doesn't matter.
 | File | Change |
 |------|--------|
 | `bpf/headers/xpf_maps.h` | `fabric_fwd_info` struct + `fabric_fwd` ARRAY map (1 entry) |
-| `bpf/headers/xpf_helpers.h` | `try_fabric_redirect()` inline helper (retained AF_XDP shim/parity header; definition has no source call sites) |
+| `bpf/headers/xpf_helpers.h` | `try_fabric_redirect()` inline helper (retained header; definition has no source call sites) |
 | `bpf/headers/xpf_common.h` | `GLOBAL_CTR_FABRIC_REDIRECT = 26` |
 | `bpf/xdp/xdp_zone.c` (deleted) | Called `try_fabric_redirect()` in NO_NEIGH + NOT_FWDED paths (eBPF era) |
 | `pkg/dataplane/types.go` | Go `FabricFwdInfo` struct matching C layout |
 | `pkg/dataplane/maps.go` (moved to `pkg/dataplane/maps_fabric.go`) | `UpdateFabricFwd()` method on eBPF Manager |
 | `pkg/dataplane/loader_ebpf.go` (deleted) | Registered `fabric_fwd` map from zoneObjs (eBPF era) |
 | `pkg/dataplane/dataplane.go` | `UpdateFabricFwd()` in DataPlane interface |
-| `pkg/daemon/daemon.go` (now `pkg/daemon/daemon_ha_fabric.go`) | `populateFabricFwd()` goroutine in `startClusterComms()` |
+| `pkg/daemon/daemon.go` (`populateFabricFwd` now in `pkg/daemon/daemon_ha_fabric.go`) | `populateFabricFwd()` goroutine in `startClusterComms()` |
 
 **Anti-loop protection:** `try_fabric_redirect()` checks
 `ctx->ingress_ifindex == ff->ifindex` — packets arriving on the fabric interface
@@ -734,7 +735,7 @@ scope guards) and `afxdp/poll_stages.rs`
 (`fabric_ingress_skips_rate_flood_direct_still_counts_4155`, driving the live
 `stage_screen_check`).
 
-## The cluster-peer return fast path must not adopt NEW UDP flows (#4439)
+## The cluster-peer return fast path must not adopt NEW UDP flows (#4439) — HISTORICAL (removed #6478)
 
 `cluster_peer_return_fast_path` (`userspace-dp/src/afxdp/forwarding/fabric.rs`,
 called from the session-MISS decision in `poll_descriptor/mod.rs`) exists for
@@ -795,7 +796,7 @@ revert, `None` with the fix) alongside the preserved
 `cluster_peer_return_fast_path_allows_sfmix_to_lan_reply` (ICMP echo reply
 still fast-paths) and `_skips_pure_tcp_syn` / `_skips_icmp_echo_request`.
 
-## The return fast path must not adopt a bare RST/FIN either (#4453)
+## The return fast path must not adopt a bare RST/FIN either (#4453) — HISTORICAL (removed #6478)
 
 The #4439 UDP exclusion left one class of session-less packet still adopted:
 a **bare TCP RST/FIN** (`is_closing(flags) && !has_syn(flags)`). It is NOT an
@@ -840,7 +841,7 @@ alongside the preserved `_allows_sfmix_to_lan_reply`,
 `_skips_udp_new_flow_4439`, `_skips_pure_tcp_syn`, and
 `_skips_icmp_echo_request`.
 
-## Every markerless protocol must be excluded, not just UDP (#4414)
+## Every markerless protocol must be excluded, not just UDP (#4414) — HISTORICAL (removed #6478)
 
 #4439 excluded UDP and #4453 excluded the bare TCP RST/FIN, but the guard was
 still enumerated protocol-by-protocol. Its own stated invariant — *fire only
