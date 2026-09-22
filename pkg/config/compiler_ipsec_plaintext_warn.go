@@ -12,10 +12,12 @@ import ()
 // snapshot's SecureTunnel flag; #6691 round 5 stopped it calling
 // IsSecureTunnelIfName, and the Rust mirror is_secure_tunnel_ifname was
 // deleted rather than re-derived) because there is no path to hand a plaintext
-// frame back INTO an xfrmi for the egress direction. xpf installs only
-// `hook input` nftables chains and force-enables ip_forward, so the plaintext
-// is forwarded by the kernel with no zone policy, no session, no NAT and no
-// screen.
+// frame back INTO an xfrmi for the egress direction. The normal userspace
+// ingress path still excludes xfrmi, but an admitted generation's separate
+// nft/NFQUEUE divert captures INPUT+FORWARD ahead of policy and terminally
+// drops them (#10517). Only a divert-absent window without the quarantine
+// guard can expose INPUT to the local input path without tunnel-zone policy,
+// session, NAT or screen.
 //
 // Why a warning and not a rejection. Route-based (st0/XFRM) IPsec is the ONLY
 // IPsec model xpf supports — policy-based `then permit tunnel` is hard-rejected
@@ -100,11 +102,15 @@ import ()
 // #7949 NARROWED WHAT "AN OPERATOR WHO ZONES A VPN INTERFACE HAS BEEN TOLD
 // SOMETHING UNTRUE" MEANS, and the direction matters. This advisory is about
 // the INGRESS half — the plaintext the kernel XFRM stack delivers ON the
-// xfrmi, which remains unadjudicated (#9506 owns that half; the exclusion
-// above is what makes it so): FORWARD transit is fence-dropped while armed
-// (#10302: policy-DROP + XDP/mark pinholes, xfrmi absent — fail-closed,
-// not forwarded), and INPUT/host-bound plaintext still reaches the local
-// input path without tunnel-zone policy. It is NOT about the
+// xfrmi. #10517: an admitted generation installs INPUT and FORWARD divert
+// queues before host-inbound/transit policy; the Enforcing capture pipeline
+// terminally drops every captured frame (inet zone-PASS counted as
+// V1PermitSuppressed; bridge captures drop as L2Unsupported), so neither half
+// is delivered to xpf policy, the local input path, or forwarding. The transit
+// fence remains a backstop, not the primary drop mechanism. The quarantine
+// guard also fail-closes. INPUT can reach the local input path only during a
+// divert-absent window without quarantine guard (for example before first
+// commit or after removal) without tunnel-zone policy. It is NOT about the
 // EGRESS half. Before #7949 a `bind-interface`-only tunnel produced no
 // interface row at all, so its LAN -> tunnel direction resolved NoRoute and was
 // slow-path reinjected to the kernel too; that direction is now adjudicated
@@ -113,8 +119,8 @@ import ()
 //
 // So the warning stays, unchanged and unconditional, but a reader must not
 // take it as saying the zone does nothing. It says the zone does not govern
-// the DECRYPTED traffic. Widening it back to "the zone is inert" would now be
-// the false statement.
+// the DECRYPTED traffic before the divert's terminal drop. Widening it back
+// to "the zone is inert" would now be the false statement.
 //
 // An AST pre-walk (like validateSecureTunnelBindInterfaceAST) rather than a
 // typed-Config pass, so it runs on the group-expanded, inactive-pruned tree in
@@ -189,16 +195,17 @@ func warnSecureTunnelPlaintextUnadjudicatedAST(nodes []*Node) []string {
 }
 
 // IPsec's group headings and unzoned caveat. Moved here from
-// compiler_tunnel_plaintext_advisory.go by #9251 with their TEXT UNCHANGED:
-// they are still exactly true for route-based IPsec, whose plaintext never
-// reaches the dataplane. They stopped being shared because they are false for
-// WireGuard (see plaintextAdvisoryWording).
+// compiler_tunnel_plaintext_advisory.go by #9251. They describe route-based
+// IPsec's decrypted plaintext, which is captured before xpf policy and
+// terminally dropped by the normal divert path; a divert-absent window is the
+// residual local-input exposure. They stopped being shared because they are
+// false for WireGuard (see plaintextAdvisoryWording).
 const (
 	// ipsecPlaintextZonedHeading introduces the ACUTE group. A zoned tunnel is
-	// worse than an unimplemented feature: the zone assignment commits cleanly
-	// and nothing distinguishes it from a zone that is enforced, so the
-	// operator has been told something specific and untrue.
-	ipsecPlaintextZonedHeading = "ASSIGNED A ZONE THAT IS NOT ENFORCED — this reads as protected and is not:"
+	// not zone-adjudicated: the zone assignment commits cleanly and nothing
+	// distinguishes its zone policy from one that is enforced, even though the
+	// installed divert still fail-closes captured plaintext.
+	ipsecPlaintextZonedHeading = "ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as zone-adjudicated and is not:"
 
 	// ipsecPlaintextUnzonedHeading introduces the plain-statement group.
 	ipsecPlaintextUnzonedHeading = "NOT ZONE-ADJUDICATED:"
@@ -226,16 +233,22 @@ func secureTunnelPlaintextAdvisoryWording() plaintextAdvisoryWording {
 		zonedHeading:   ipsecPlaintextZonedHeading,
 		zonedSuffix:    "but that zone does NOT govern its decrypted traffic",
 		unzonedHeading: ipsecPlaintextUnzonedHeading,
-		// r6-plan §7.2: keep the operator-visible mechanism aligned with the
-		// fence-dropped FORWARD and local-input residuals.
-		mechanism: "Route-based IPsec decrypts in the kernel XFRM stack and the plaintext is " +
-			"not adjudicated by xpf: FORWARD transit is fence-dropped while the armed " +
-			"transit fence is installed, INPUT/host-bound plaintext still reaches the " +
-			"local input path without tunnel-zone policy, and no session, NAT or screen " +
-			"are applied to either half.",
+		// #10517: the mechanism must describe the installed divert's terminal
+		// DROP and the narrow divert-absent residual, not claim INPUT delivery
+		// during the normal successful route-VPN path.
+		mechanism: "Route-based IPsec decrypts in the kernel XFRM stack. With the " +
+			"IPsec divert installed, its INPUT and FORWARD hooks capture plaintext " +
+			"before host-inbound or transit policy and the Enforcing capture pipeline " +
+			"terminally drops every frame (inet zone-PASS counted as " +
+			"V1PermitSuppressed; bridge captures drop as L2Unsupported); no decrypted " +
+			"plaintext reaches the local input path or is forwarded. During a " +
+			"divert-absent window without quarantine guard, INPUT/host-bound plaintext " +
+			"can reach the local input path without tunnel-zone policy. No session, NAT " +
+			"or screen are applied to either half.",
 		unzonedCaveat: ipsecPlaintextUnzonedCaveat,
-		remedy: "Restrict what the tunnel can reach with routing or with the peer's own " +
-			"policy until this is enforced.",
+		remedy: "The installed IPsec divert is fail-closed; if it is absent during " +
+			"startup or recovery, restrict what the tunnel can reach with routing or " +
+			"with the peer's own policy until capture is restored.",
 	}
 }
 
