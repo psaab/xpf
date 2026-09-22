@@ -5,25 +5,32 @@ import "sort"
 // Detach debt (#10519) is the fail-closed fence half of the DetachXDP
 // observability fix.
 //
-// DetachXDP fails in two arms with opposite fence consequences. Arm (a), the
-// IFACE_FLAG_XDP_ATTACHED claim cleanup, fails BEFORE the link is closed or
-// removed: the xdpLinks entry stays, the kernel program stays attached, and
-// the fence census (AttachedXDPIfindexes / withAttachedXDPFence) keeps
+// DetachXDP fails in retained-link arms with opposite fence consequences from
+// the close arm. Arm (a), the IFACE_FLAG_XDP_ATTACHED claim cleanup, and arm
+// (a2), a substantive l.Unpin() failure, both fail BEFORE the link is closed
+// or removed: the xdpLinks entry stays, the kernel program stays attached,
+// and the fence census (AttachedXDPIfindexes / withAttachedXDPFence) keeps
 // returning the ifindex — a stale pinhole for an interface the accepted
 // snapshot intends detached. Arm (b), l.Close(), fails AFTER the entry is
 // deleted: the census already omits the ifindex by absence (availability
-// loss, never widening).
+// loss, never widening). An already-unpinned os.ErrNotExist from Unpin is
+// benign and proceeds to Close. DetachTC likewise retains its tracked handle
+// on substantive Unpin failure, but TC links are not XDP fence candidates and
+// therefore do not enter detachDebt. A substantive XDP Close failure deletes
+// xdpLinks and carries no debt, yielding availability loss; a substantive TC
+// Close failure retains tcLinks without debt for retry.
 //
-// detachDebt records exactly the arm-(a) population: intended-detached +
-// detach-failed + still tracked. The census skips debt members, so the armed
-// forward fence closes the pinhole instead of re-opening it on every install.
-// The daemon reinstalls the fence on every transit-gate reassert (1 Hz tick
-// plus event wakes), so the pinhole closes at most one tick after the debt is
-// recorded; no observer wake is needed.
+// detachDebt records exactly the retained XDP-link population: intended-
+// detached + detach-failed + still tracked. The census skips debt members, so
+// the armed forward fence closes the pinhole instead of re-opening it on every
+// install. The daemon reinstalls the fence on every transit-gate reassert
+// (1 Hz tick plus event wakes), so the pinhole closes at most one tick after
+// the debt is recorded; no observer wake is needed.
 //
 // Lifecycle:
-//   - set by DetachXDP on the flag-clear failure return, under the XDP
-//     ownership write lease it already holds;
+//   - set by DetachXDP on the flag-clear or substantive-Unpin failure return,
+//     under the XDP ownership write lease it already holds; an
+//     os.ErrNotExist Unpin result is benign and proceeds to Close;
 //   - pre-acceptance attach fallback detaches in compiler.go and
 //     attachUserspaceShimXDP may transiently add debt for interfaces the
 //     pending snapshot still intends to attach. The next post-acceptance

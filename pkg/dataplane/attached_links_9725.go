@@ -41,10 +41,10 @@ func (m *Manager) AttachedXDPLinkCount() int {
 //
 // #10519: detach-debt members are intentionally excluded even when kernel
 // truth still proves their XDP link attached. Their accepted snapshot has
-// already dropped the interface, but the claim-clear arm failed before the
-// link could be closed; returning it here would re-open the stale forward
-// fence pinhole on every gate reassert. Copy the candidates and debt under
-// m.mu, then perform kernel Info reads without holding m.mu.
+// already dropped the interface, but the flag-clear or substantive-Unpin arm
+// failed before the link could be closed; returning it here would re-open the
+// stale forward fence pinhole on every gate reassert. Copy the candidates and
+// debt under m.mu, then perform kernel Info reads without holding m.mu.
 func (m *Manager) AttachedXDPIfindexes() []int {
 	if m == nil {
 		return nil

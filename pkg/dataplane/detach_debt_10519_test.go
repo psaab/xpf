@@ -163,6 +163,28 @@ func TestDetachXDPUnpinFailureRetainsAndRecoversFenceCandidate10519(t *testing.T
 	}
 }
 
+// T2c: an already-unpinned XDP link is still closed and deleted. The benign
+// ENOENT path must not retain debt or strand the tracked link.
+func TestDetachXDPAlreadyUnpinnedProceedsToClose10519(t *testing.T) {
+	const ifindex = 10530
+	m := New()
+	l := &detachDebtTestLink10519{unpinErr: os.ErrNotExist}
+	m.SetLinkForTest(ifindex, l, nil)
+
+	if err := m.DetachXDP(ifindex); err != nil {
+		t.Fatalf("DetachXDP already-unpinned link: %v", err)
+	}
+	if _, ok := m.XDPLinks()[ifindex]; ok {
+		t.Fatal("already-unpinned XDP retry retained xdpLinks entry")
+	}
+	if got := m.ReconcileDetachDebt(nil); len(got) != 0 {
+		t.Fatalf("detach debt after already-unpinned XDP = %v, want empty", got)
+	}
+	if !l.closed {
+		t.Fatal("already-unpinned XDP path did not proceed to Close")
+	}
+}
+
 // T6: TC retains its link on Close failure and returns the error. A healthy
 // second pass removes it, preserving TC's existing retryable lifecycle shape
 // while D1/D2 make the failure observable to the userspace reconciler.
