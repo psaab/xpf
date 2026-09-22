@@ -188,7 +188,7 @@ no product semantic change to default paths):
 | Rust provenance + authority | slowpath_reinject_9506.rs: internal admit-time digest witness (bytes available at :847-920), terminalize row+reason (:1359-1425), terminal tombstones (NEW set in CoreInner :608-621), run_id reset extension (:352-362) | harness independently recomputes and compares the digest; tombstone reuse refused; provenance cap/eviction (PROVENANCE_MAX=128 :498) per-daemon D11 cap guard; additive status exposure compat (existing chain slowpath.rs:1483-1484 -> coordinator/status.rs:934-940 -> helpers/status.rs:547) |
 | Metrics/witness export | pkg/api/server.go:101-120 witness +2 fields (NEW); pkg/api/metrics_ipsec_capture_10478.go:14-59 collector +2; pkg/api/metrics_descriptors_controlplane.go descs +2; pkg/daemon/daemon_run_servers.go:709 callback feeds them; daemon DenyEventSink wiring (NEW counting sink; today zero production setters) | descriptor coverage test extends metrics_ipsec_capture_10478_test.go pattern; unavailable-omitted preserved (:19-21) |
 | Management/status RPC | proto/xpf/v1/xpf.proto + generated BpfrxService: NEW GetD11AttestationLedger and bounded D11LedgerRecord schema; authz adds a PermMaint method entry plus a reviewed `methodsWithoutCanonicalCommand` reason because this is a privileged diagnostic, and the handler requires UID 0/superuser server-derived peer-UID principal (not a generic maintenance class); daemon-owned final snapshot remains after runtime reset | generated RPC client polls fw0/fw1 with stable snapshot_seq, exact run_id, finalized/no-truncation gates; non-privileged-principal denial, UID-0/configured-superuser allow cases, method-table completeness, and cap/truncation selftests |
-| Script mode + driver | t12-g2-9506.sh: --d11-reattest case (:19-33), D11 branch sets `D11_ROWS_FILE` and `D11_BUFFER_ONLY=1` before replay (:2327), T12_D11_SUMMARY (distinct from T12_G2_SUMMARY :2342), minimal v4_native x2 fixture via fix9506_setup/teardown, shared restore proof | --selftest hermetic trigger/attribution/shape/refusal cases + no-arg regression pin (still 30 rows, exit 2 on VOID) |
+| Script mode + driver | t12-g2-9506.sh: --d11-reattest case (:19-33), D11 branch populates `D11_ROWS_FILE`, assigns `CELL_ROWS_FILE=$D11_ROWS_FILE`, buffers with existing `CELL_BUFFER_ONLY=1`, then sets `CELL_BUFFER_ONLY=0` immediately before replay (:2322-2336), T12_D11_SUMMARY (distinct from T12_G2_SUMMARY :2342), minimal v4_native x2 fixture via fix9506_setup/teardown, shared restore proof | --selftest hermetic trigger/attribution/shape/refusal cases + no-arg regression pin (still 30 rows, exit 2 on VOID) |
 
 Gate: DESIGN (recorded 2026-09-22, re-affirmed in v3). Mechanical is refused
 for three independent reasons, any one sufficient: (a) acceptance is a
@@ -470,8 +470,10 @@ P2 code to open). Any design that needs P2 is Option C and a PLAN-KILL trigger
   the row is still `ADMISSION_PENDING`: buffer it as `earlyCompletion` on that
   row under `p.mu`. When the response arrives, atomically install ADMIT_OK,
   set `pending.deadline = time.Now().Add(AckDeadline)`, and apply the buffered
-  completion; a refusal or transport error with a buffered completion becomes
-  Uncertain/FAIL and clears the row, never overwriting a terminal state.
+  completion; a refusal or transport error with a buffered completion
+  terminalizes the ledger row Uncertain/FAIL, retaining admission code,
+  early-completion/late-attempt evidence; clear only `p.pending` and
+  `flow.pending`, never delete the ledger row or overwrite terminal state.
 - Reservation/submit unwind table (every branch is fail-closed). Every branch
   releases `submitGate.RUnlock` while retaining `drainMu` before any scoped
   submitter cancellation; cancellation uses the lock-aware helper and MUST NOT
@@ -497,6 +499,13 @@ P2 code to open). Any design that needs P2 is Option C and a PLAN-KILL trigger
     timeout fires: treat this as the submit transport/decode unwind above,
     cancel the scoped batch, clear pending/flow entries, and mark rows
     Uncertain; Poll cannot classify a missing admission response;
+  - An admission response refusal records its exact admission code in the
+    retained ledger row, clears only `p.pending`/`flow.pending`, and never
+    deletes the selected-key record. `STALE`, `FULL`, and `SHUTDOWN` are
+    environmental refusals -> VOID. `BAD_LEASE`, `BRIDGE`, `INPUT_HOOK`,
+    `NON_DRY_RUN`, `NO_GENERATION`, and `TUNNEL_ROW_MISSING` are contract
+    refusals -> FAIL when the frozen authority/lease/origin/generation
+    preconditions were observed; if those preconditions are unavailable, VOID.
   - Poll skips timeout evaluation for rows with admission state
     `ADMISSION_PENDING` or a zero `deadline`; after ADMIT_OK, Poll (:823-867)
     finds no terminal completion by the stored `pending.deadline`: expire and
@@ -522,8 +531,9 @@ P2 code to open). Any design that needs P2 is Option C and a PLAN-KILL trigger
 - Admission and pending lifecycle: call `SubmitAdjudicated` once for the
   selected batch and match every `ReinjectAdmission` by
   `(node_id, request_id, local lease tuple)`. ADMIT_OK waits for completion;
-  all refusal codes, transport errors, and AckDeadline expiry follow the
-  unwind table above, while a completion resolves through the existing
+  refusal codes follow the environmental-versus-contract mapping in the unwind
+  table, transport errors remain Uncertain, and AckDeadline expiry follows the
+  same retained-row cleanup. A completion resolves through the existing
   Poll/resolve path and late completions cannot reselect a head.
 - Singleton and socket rule: the Rust accept loops
   (submit :317-340, complete :343-362; comment :360-361) document one
@@ -541,7 +551,7 @@ P2 code to open). Any design that needs P2 is Option C and a PLAN-KILL trigger
   lab permit epoch/queue scopes (`Cancel` :1014-1138; submitGate write lock
   :1018 linearizes against in-flight submits); (3) drain completions via Poll
   (:828-847) until pending empty and verify `p.pending`/every `flow.pending`
-  is empty; transition DRAINING->DISARMED only after this drain; (4) while
+  is empty; transition DRAINING->DISARMED only after this drain; (4) while OPEN,
   `retireHostInputFenceOverlay(cfg, expectedOpen)` supplies the conntrack/nft
   fence-retire ACK; (5) Rust close/tombstone while submitter connected;
   (6) topology revoke leaves Go CLOSING; (7) `ipsecCaptureRuntime.close`
@@ -641,14 +651,19 @@ live ids only). V1's `authenticated` wording therefore overclaimed. V3 design
   records wire-compat impact + test).
 - Independent harness comparison: the driver does not submit a manifest or
   attribution data and does not reconstruct L3 bytes from `ping -p` arguments.
-  The independent byte source is a NEW bounded snaplen-full in-tree capture
-  observer at a kernel hook whose payload is proven byte-identical to the
-  NFQUEUE `Packet.Payload()` across the forward-hook TTL transition. It records
-  at most `D11ManifestCap=32` full packets per daemon per armed run window,
-  with each snaplen capped at 65,535 bytes (`reinjectMaxData`), so the raw
-  payload bound is 2,097,120 bytes per daemon. Each marker request uses a
-  harness-assigned non-reused ICMP identifier per direction; the observer key
-  is `(node_id, src, dst, icmp_identifier, icmp_sequence, marker_selector)`.
+  The independent byte source is a NEW bounded snaplen-full in-tree NFLOG
+  consumer attached to the same nftables FORWARD chain immediately before the
+  NFQUEUE rule. Slice-1 pins the chain priority/rule order and proves this
+  post-forward NFLOG payload byte-identical to NFQUEUE `Packet.Payload()`;
+  pre-routing/ingress captures are forbidden because TTL/header checksum can
+  differ. It records at most `D11ManifestCap=32` full packets per daemon per
+  armed run window, with each snaplen capped at 65,535 bytes
+  (`reinjectMaxData`), so the raw payload bound is 2,097,120 bytes per daemon.
+  A 33rd matching capture sets `overflow/truncated` and forces VOID; inability
+  to prove that fail-loud enforcement is PLAN-KILL before the run. Each marker
+  request uses a harness-assigned non-reused ICMP identifier per direction; the
+  observer key is `(node_id, src, dst, icmp_identifier, icmp_sequence,
+  marker_selector)`.
   Slice-1 MUST implement the observer and a byte-equality proof before the D11
   run; if no such point can be proven, this plan is PLAN-KILLED rather than
   permitting bytes copied back from the Go ledger. The driver joins those
@@ -701,11 +716,12 @@ live ids only). V1's `authenticated` wording therefore overclaimed. V3 design
   contains the captured origin, the independently recorded frame_digest,
   admission code, completion outcome, `resolve_count`, and terminal state.
   Create that record atomically with the `p.pending` reservation before socket
-  I/O; the `SubmitAdjudicated` response updates its admission code immediately
-  before any completion is processed. Update the record on every completion
-  attempt, including duplicate/late attempts, and publish the final
-  `resolveCompletion` outcome rather than leaving the bool internal. If the
-  cap is exceeded, a selected frame is missing, or a second terminal
+  I/O; the `SubmitAdjudicated` response updates its admission code under
+  `p.mu`, and an early completion is buffered then applied atomically when
+  ADMIT_OK installs its completion deadline. Update the record on every
+  completion attempt, including duplicate/late attempts, and publish the final
+  `resolveCompletion` outcome rather than leaving the bool internal.
+  If the cap is exceeded, a selected frame is missing, or a second terminal
   transition is observed, the run is VOID/FAIL per section 6.4. Ledger
   publication is synchronized with pipeline terminalization; rollback marks
   the ledger finalized but never clears it, so the post-rollback RPC remains
@@ -788,7 +804,8 @@ live ids only). V1's `authenticated` wording therefore overclaimed. V3 design
   XFRM deltas corroborate fixture readiness ONLY. `D11ManifestCap=32` is
   enforced independently per daemon (64 combined upper bound), while the
   harness acceptance selects exactly four total selected rows across both nodes:
-  two packets per marker flow (four D11 rows, not four flows). PROVENANCE_MAX=128
+  two packets per marker flow (four selected-frame ledger records, distinct
+  from the four proof-cell rows; not four flows). PROVENANCE_MAX=128
   evict-oldest at :1404-1408 leaves 4x headroom per process; quiesce means no
   concurrent admitters.
   Missing witness/ledger row -> VOID, never infer.
@@ -832,7 +849,7 @@ nonzero delta in routine-only counters (ZoneGateDrops and friends) -> VOID
   (pollution), never subtracted out.
 | Cell | Proves | Observer (authoritative surface) | VOID if | FAIL if |
 | --- | --- | --- | --- | --- |
-| d11_9506_submit_admit | trigger + admit + 26B tail/generation acceptance, both nodes | Go D11 ledger admission records keyed by (node_id, request_id, local lease, origin, digest, admission code) plus ADMIT responses per composite key (ADMIT_OK :41) + adjudicated_admitted delta (:1427-1431) | authority drift (STALE), FULL, any refusal code (pre-join -> VOID with code), ledger/status unavailable | duplicate composite key admitted twice (:886-887 bypassed); admitted key outside the internally selected CaptureFrame rows; ledger record differs from ADMIT |
+| d11_9506_submit_admit | trigger + admit + 26B tail/generation acceptance, both nodes | Go D11 ledger admission records keyed by (node_id, request_id, local lease, origin, digest, admission code) plus ADMIT responses per composite key (ADMIT_OK :41) + adjudicated_admitted delta (:1427-1431) | authority drift (STALE), FULL, SHUTDOWN, or required precondition/ledger status unavailable -> VOID | duplicate composite key admitted twice (:886-887 bypassed); BAD_LEASE/BRIDGE/INPUT_HOOK/NON_DRY_RUN/NO_GENERATION/TUNNEL_ROW_MISSING after frozen authority/lease/origin/generation preconditions -> FAIL; admitted key outside the internally selected CaptureFrame rows; ledger record differs from ADMIT |
 | d11_9506_worker_verdict | Rust adjudication + transport + terminalization; split Deny/WouldPermit; never q0 | provenance rows keyed by (node_id, request_id, local lease) with outcome split, origin, independent digest + row reasons (NEW fields); q0 primary witness below | status surface unavailable, non-final snapshot, or no readable rows before any selected key is admitted | finalized selected/admitted key missing a provenance row or digest (including eviction), outcome/identity/digest mismatch vs internally selected CaptureFrame expectation; ANY row reason==52; ANY row outcome==written (Rust half of never-q0) |
 | d11_9506_completion_join | end-to-end join, the only true join proof | Go D11 ledger (one admission, one completion outcome, resolve_count==1, terminal state per (node_id, request_id, local lease)) + Rust rows with same key (origin/digest match) + LateCompletions delta==0 (:929) + Timeouts delta==0 (:848-869) | any observer unavailable; completions pending past deadline without terminal state | misjoin (wrong node/id/lease/origin/digest); duplicate terminal; late completion; resolve_count!=1; missing row; Go/Rust outcome disagreement |
 | d11_9506_wouldpermit_accounting | suppression accounting split (section 6.1) | Rust row reasons (52-delta==0) + NEW xpf_ipsec_capture_suppressed_total (delta==WouldPermit-count) + NEW xpf_ipsec_capture_deny_events_total{reason=52} (delta==WouldPermit-count) | metrics/sink unwired; reason field absent | Rust-52-delta!=0; Go-52-delta!=count; suppressed-delta!=count; WouldPermit row carrying reason 52 |
@@ -859,8 +876,10 @@ nonzero delta in routine-only counters (ZoneGateDrops and friends) -> VOID
   routine 52s from :653-660 etc. are excluded by the quiesce guard, and any
   routine traffic in-window voids the run rather than being subtracted).
 - Mode mechanics (exact): add `--d11-reattest` case to arg parse (:19-33);
-  D11 branch sets `D11_ROWS_FILE` and `D11_BUFFER_ONLY=1` to select the
-  4-row buffer BEFORE the replay loop (:2327-2336; restore demotion
+  D11 branch populates `D11_ROWS_FILE`, assigns `CELL_ROWS_FILE=$D11_ROWS_FILE`,
+  and uses existing `CELL_BUFFER_ONLY=1` while collecting; immediately before
+  replay sets `CELL_BUFFER_ONLY=0` and replays the 4-row buffer (:2322-2336;
+  restore demotion
   :2329-2334 applies to D11 rows identically -- a PASS
   written before restore is FAIL per section 8); separate gate
   `D11_CELL_COUNT==4`, pass==4, fail==0, void==0, exit 0; summary
@@ -893,14 +912,19 @@ Slice 1 -- contract freeze (source-only, no cluster; the load-bearing slice):
      OPEN `retireHostInputFenceOverlay` ACK before revoke, runtime close,
      queue/listener teardown ACK, S4 close-owner finalization, then normal
      CLOSED re-publication; `reconcileIpsecHostInputFence` is not the close
-     primitive. Freeze Q2 tail bytes + flags + generation window, the admit-time digest
-     witness, and the independent bounded snaplen-full capture observer at a
-     kernel hook proven byte-identical to NFQUEUE payloads through the forward
-     hook TTL transition (keyed by ICMP sequence + marker selector); if that
+     primitive. Freeze Q2 tail bytes + flags + generation window, the admit-time
+     digest witness, and the independent full-copy NFLOG observer attached to
+     the same nftables FORWARD chain immediately before NFQUEUE; pin the chain
+     priority/rule order and key `(node_id, src, dst, icmp_identifier,
+     icmp_sequence, marker_selector)`. If byte-equality or overflow fail-loud
      proof is unavailable, PLAN-KILL before the run. Freeze the concrete
      authenticated bounded `GetD11AttestationLedger` RPC schema/retention.
      Freeze metric names and all status/ledger gates. The contract is frozen;
      Slice-1 completes the outstanding file:line pins before implementation.
+     Refusal precedence is frozen: if an admission refusal and an early or
+     late completion co-occur, retain and terminalize that ledger record as
+     Uncertain/FAIL (contract refusal -> FAIL), never collapse it to blanket
+     VOID; clear only pipeline pending pointers.
   b. Verify the D11 unit proofs still pass at the run commit (cargo
      ipsec_inner_queue 18 cells, ipsec_inner_verdict_bridge 2 cells,
      reinject_9506 66 cells; Go AdmissionReasonConsistency /
@@ -964,12 +988,14 @@ Slice 5 -- record and close:
 
 The existing script has 30 rows and exits 2 when any row is VOID (:2320-2347).
 Several of those rows are intentionally unrelated measurement-incomplete cells,
-so merely appending four D11 rows would make a successful D11 run impossible.
-The --d11-reattest branch MUST populate `D11_ROWS_FILE` with the D11 rows and
-set `D11_BUFFER_ONLY=1` before the existing 30-row emission loop, run the shared
-setup and restore proof, and use a separate exact four-row count. It MUST NOT
-relabel, delete, or silently pass the ordinary rows.
-
+so merely appending four proof-cell rows to that 30-row output would make a
+successful D11 run impossible.
+The --d11-reattest branch MUST populate `D11_ROWS_FILE` with the D11 rows,
+assign `CELL_ROWS_FILE=$D11_ROWS_FILE` and set existing `CELL_BUFFER_ONLY=1`
+while collecting; set `CELL_BUFFER_ONLY=0` immediately before the existing
+30-row emission loop, run the shared setup and restore proof, and use a
+separate exact four-row count. It MUST NOT relabel, delete, or silently
+pass the ordinary rows.
 The accepted #10484 run is: `t12-g2-9506.sh --d11-reattest` with
 `T12_D11_SUMMARY cells=4 pass=4 fail=0 void=0 exe_check=MATCH`, converged
 fixtures, per-node composite-key attribution, and clean restore. The no-arg script
@@ -996,32 +1022,34 @@ halves, section 6.4); routine-path pollution deltas == 0 (quiesce guard);
 Q4 re-grounding records leg 1 preserved for ordinary/non-trigger frames and
 the trigger-only selection exception; shared restore clean
 (fw0/fw1_config_cmp=1, residue clear, probe errors=0) with D11 rows buffered
-until after restore. The mode emits exactly four D11 rows, all PASS, zero
-VOID/FAIL, exit 0.
+until after restore. The run retains exactly four selected-frame ledger records;
+the mode emits exactly four proof-cell rows, all PASS, zero VOID/FAIL, exit 0.
 VOID (never PASS, never FAIL): exe_check != MATCH; fixture-setup-failed (any
 fix9506_setup step incl. RG2 failover); no captured marker frames; authority
-drift (STALE) or any ADMIT refusal; any required observer unavailable (Rust
-status, Go D11 ledger, Go metrics incl. NEW suppressed/deny surfaces, nfqueue,
-st-links, digest/reason fields, or the independent byte-identical capture
-observer); routine-path pollution in-window; Q4 showing default dark
-intact-but-unverifiable. A VOID run is retained as diagnostic evidence but
-cannot close the issue.
+drift (STALE), FULL, SHUTDOWN, or required selector/authority/generation
+precondition unavailable; those environmental refusals are VOID; any required
+observer unavailable (Rust status, Go D11 ledger, Go metrics incl. NEW
+suppressed/deny surfaces, nfqueue, st-links, digest/reason fields, or the
+independent byte-identical capture observer); routine-path pollution in-window;
+Q4 showing default dark intact-but-unverifiable. A VOID run is retained as
+diagnostic evidence but cannot close the issue.
 FAIL (claim broken, not environment): Go ledger or Rust completion joined to a
 wrong `(node_id, request_id, local lease tuple)`; duplicate or late
 completion; ledger `resolve_count` not one or terminal-state mismatch;
 provenance identity/digest/reason mismatch; outcome mismatch between the
-internal selected row, Go ledger, and Rust provenance; any Rust-52 among D11
-rows; Go-52 or suppressed delta != WouldPermit-count; any Written outcome
-(either half); PASS emitted before restore; D11 row-count != 4; any D11 row
-silently omitted. Any FAIL kills the run: no close.
+internal selected row, Go ledger, and Rust provenance; BAD_LEASE/BRIDGE/
+INPUT_HOOK/NON_DRY_RUN/NO_GENERATION/TUNNEL_ROW_MISSING after frozen
+preconditions -> FAIL; any Rust-52 among D11 rows; Go-52 or suppressed delta
+!= WouldPermit-count; any Written outcome (either half); PASS emitted before
+restore; `D11_CELL_COUNT != 4`; any selected-frame ledger record silently omitted. Any FAIL kills the run: no close.
 
 PLAN-KILL boundaries (return to owner for re-scope per the merge-gate
 sequencing: #10483 ruling, #10484 before S9.5/counter reliance): the guarded
 trigger cannot preserve every deny-only predicate (section 5.3 table); the
 Rust admit-time digest witness or its additive status surface cannot be
-produced; the bounded byte-identical capture observer or its byte-equality
-proof cannot be produced, or the harness cannot independently compare it; the
-bounded Go ledger cannot expose one authoritative record per
+produced; the bounded byte-identical capture observer, its byte-equality or
+overflow fail-loud proof cannot be produced, or the harness cannot independently
+compare it; the bounded Go ledger cannot expose one authoritative record per
 `(node_id, request_id, local lease tuple)` through the authenticated
 `GetD11AttestationLedger` RPC; the run would need the S9.5 cutover (Option C) or
 any product semantic change to default paths (e.g. removing pipeline.go:984,
