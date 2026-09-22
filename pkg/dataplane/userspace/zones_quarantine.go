@@ -50,7 +50,7 @@ func (c ZoneIDCollision) String() string {
 // (a brick on a fresh boot), so the scrub is coordinated across zones,
 // interfaces, and policies.
 //
-// The quarantine set is config.QuarantinedZoneNames over the snapshot's own zone
+// The quarantine set is config.ZoneQuarantineExclusions over the snapshot's own zone
 // names — a pure function of the name set, so both HA nodes and a cold-booting
 // node resolve the identical set. Returns the collisions it resolved, sorted for
 // deterministic operator output (nil in the common no-collision case).
@@ -135,7 +135,7 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 // reintroduced; leaving it in next.Policies while next.Zones stays reduced ships
 // a dangling policy->zone reference that the Rust UnresolvableZoneReference
 // preflight (userspace-dp/src/policy.rs) rejects wholesale — a whole-snapshot
-// brick. quarantined is the set of dropped zone names (config.QuarantinedZoneNames
+// brick. quarantined is the set of dropped zone names (config.ZoneQuarantineExclusions
 // over the FULL zone-name set); "" and "junos-global" are never members (not real
 // zone names), so global/zone-pair sentinels are preserved.
 //

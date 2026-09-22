@@ -15,6 +15,14 @@ func TestShowZonesDisplayReportsQuarantinedZone10490(t *testing.T) {
 		"z174": {},
 		"z214": {},
 	}}}
+	exclusions := config.ZoneQuarantineExclusions([]string{"z214", "z174"})
+	if _, ok := exclusions["z214"]; !ok {
+		t.Fatalf("builder exclusion verdict omitted z214: %v", exclusions)
+	}
+	if _, ok := exclusions["z174"]; ok {
+		t.Fatalf("builder exclusion verdict dropped surviving z174: %v", exclusions)
+	}
+
 	out := captureStdout(t, func() {
 		if err := (&CLI{}).showZonesDisplay(cfg, false, ""); err != nil {
 			t.Fatalf("showZonesDisplay: %v", err)
