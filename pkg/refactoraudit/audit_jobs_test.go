@@ -154,6 +154,35 @@ func (r *fixtureRepo) touched(baseRef string) []touchedFile {
 	return parseTouched(r.t, "fixture refactoring-audit-touched.sh", stdout)
 }
 
+// TestTouchedRenamePreservesBaseLOC10488 is the regression for #10488:
+// a pure rename must be measured from its source path at the merge base,
+// not as a new file. The rename is staged but uncommitted so the probe's
+// working-tree view is covered as well as the committed path it will
+// see in a real pull request.
+func TestTouchedRenamePreservesBaseLOC10488(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.writeFile("pkg/rename_control/old.go", 1701)
+	r.commit("base file")
+
+	r.git("checkout", "-q", "-b", "feature")
+	r.git("mv", "pkg/rename_control/old.go", "pkg/rename_control/new.go")
+
+	touched := r.touched("master")
+	if len(touched) != 1 {
+		t.Fatalf("want one touched file, got %+v", touched)
+	}
+	got := touched[0]
+	if got.path != "pkg/rename_control/new.go" {
+		t.Fatalf("wrong touched path: got %q, want destination path", got.path)
+	}
+	if got.isNew || got.baseLOC != 1701 || got.headLOC != 1701 {
+		t.Fatalf("pure rename must preserve source measurement: got %+v, want base=1701 head=1701 isNew=false", got)
+	}
+	if crossings := thresholdCrossings(touched); len(crossings) != 0 {
+		t.Fatalf("pure rename must not cross a modularity floor: got %+v", crossings)
+	}
+}
+
 // staleFixture builds the #7253 situation. Four commits, and every one of
 // them is load-bearing:
 //

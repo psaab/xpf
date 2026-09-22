@@ -35,10 +35,14 @@
 #
 # The changed set is `git diff --name-only <merge-base> --` (plus
 # untracked files), where <merge-base> = `git merge-base <base-ref> HEAD`
-# and base-ref defaults to origin/master. Diffing against the MERGE BASE
-# rather than the base ref tip is what keeps master's own commits out of
-# the set: a file master grew after this branch forked is not in HEAD, so
-# it is not in the diff, however far behind the branch is.
+# and base-ref defaults to origin/master. For tracked renames, the probe
+# also reads `git diff --name-status --find-renames=100%` and carries
+# the old path into the merge-base lookup; `--name-only` alone would
+# lose that ancestry and measure a pure rename as a new file.
+# Diffing against the MERGE BASE rather than the base ref tip is what
+# keeps master's own commits out of the set: a file master grew after
+# this branch forked is not in HEAD, so it is not in the diff, however
+# far behind the branch is.
 #
 # What it gets wrong:
 #
@@ -100,15 +104,29 @@ merge_base="$(git merge-base "$base_ref" HEAD 2>/dev/null)" ||
 # Tracked changes (merge base vs WORKING TREE, so uncommitted growth
 # counts too; --diff-filter=d drops deletions, which cannot cross a floor
 # upward) plus untracked files, which the generator already measures
-# because it walks the working tree.
+# because it walks the working tree. Keep rename ancestry separately:
+# --name-only below intentionally remains the changed-path stream, while
+# this status stream lets a destination use its source's merge-base blob.
+declare -A rename_sources=()
+while IFS=$'\t' read -r status old new; do
+    case "$status" in
+    R100*) rename_sources["$new"]="$old" ;;
+    esac
+done < <(git diff --name-status --find-renames=100% --diff-filter=d "$merge_base" --)
+
 {
     git diff --name-only --diff-filter=d "$merge_base" --
     git ls-files --others --exclude-standard
 } | LC_ALL=C sort -u | while read -r p; do
     audit_is_audited_path "$p" || continue
     [ -f "$p" ] || continue
-    if git cat-file -e "$merge_base:$p" 2>/dev/null; then
-        base_loc="$(git show "$merge_base:$p" | wc -l)"
+    base_path="$p"
+    if ! git cat-file -e "$merge_base:$base_path" 2>/dev/null; then
+        base_path="${rename_sources["$p"]-}"
+    fi
+    if [ -n "$base_path" ] &&
+        git cat-file -e "$merge_base:$base_path" 2>/dev/null; then
+        base_loc="$(git show "$merge_base:$base_path" | wc -l)"
     else
         base_loc='-'
     fi
