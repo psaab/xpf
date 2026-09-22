@@ -1,11 +1,11 @@
-# DRAFT v3 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
+# DRAFT v4 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
 
-Status: DRAFT v3 (Delta2 R1+R2 fold: bounded gate proof and delete fan-out; no other semantic changes; design path — no production code in this commit).
+Status: DRAFT v4 (Fold-3: cross-process Go↔helper tuple-gate coverage for every Go BPF mirror mutation, HA-import race proof, and Delta1 NR-1/NR-2/NR-3 corrections; no production code in this commit).
 Issue: #10512 (OPEN, bug + audit + validated-by:research + source:deep-review).
 Base: `2781465ee3afe52a780d94d2245cb565a1e80548` on `fix/10512-commit-invalidation`; v1 tip `4d2cb2bf6` (in history).
 Lane: Eng10512. Date: 2026-09-22.
 
-## 0. Plan-review fold (round 1 → v3)
+## 0. Plan-review fold (round 1 → v4)
 
 Round-1 verdicts on v1 (both read in full): Rev10512PlanA PLAN-NEEDS-MAJOR
 (F1 mirror GC, F2 bare HA-sync, F3 frozen/admissions, F4 two-phase, F5 fan-out,
@@ -20,7 +20,19 @@ adds bounded tuple-gate permits, finalization, liveness, and proof in §2.2;
 R2 adds bounded delete batching, deadlines, completion, and #5578 mapping in
 §2.4/§4. Delta2 R3–R6 are deferred per the parent brief.
 
+Fold-3 (V4): Delta2 R1's cross-process objection is closed by a helper-first
+  migration, not a direct Go BPF lease. Every production Go `bpfShim` session
+  mutation caller is cut over to a helper-first mutator; the helper derives
+  forward+reverse keys, acquires the bounded tuple gate, and performs
+  SessionTable/BPF mutation in one process. HA-import upsert, reverse-only
+  publish, #5305 compensation, restart epoch, and the HA-import race proof are
+  pinned in §2.2 and §5; no paused Go caller can resume a stale BPF syscall.
+Delta1's NR-1 positive-empty contrast, NR-2 mixed-version skew sentences, and
+NR-3 within-commit retry/convergence correction are folded in §1.2, §2.4, §4,
+and §5.
+
 Parent SOURCE-DETERMINED closures (closed in this revision, not re-asked):
+
 
 | Q | Ruling | Closed in |
 |---|--------|-----------|
@@ -110,6 +122,8 @@ keeps Go as orchestrator (Q1) with one channel.
   that RT_FLOW identity, otherwise no-ops. Gen guard per (domain, tuple)
   orders replay versus install; refused/unknown-domain handling mirrors the
   existing `ImportsRefusedByHelper`/`DeletesStaleIgnored` counters.
+Mixed-version skew has the explicit two-direction rule: old→new bare applies with gen-guard-only semantics, so colliding pre-existing over/under behavior remains possible until both peers upgrade. New→old domain deletes are withheld, leaving stale A on the old peer; promotion during that in-window can resurrect A.
+
 
 ### 1.3 Failover traces (A deleted, B survives — both orderings)
 
@@ -246,18 +260,92 @@ after a bare row delete — it has no B value once the row is gone).
   probe→repair→release window therefore has no table mutation or BPF syscall
   racing it. Distinct tuples proceed in parallel, and idle entries are removed
   only after all permits release.
-  A delete micro-batch holds at most 64 tuple entries; during `Draining`,
-  transient publisher and install permits are each bounded by `64*W<=8192`,
-  and both counts are zero before `Finalizing` probe/repair. The gate never
-  grows with the full 262144-match capture.
-  Every non-holder BPF publish path for that tuple (local admission, HA import,
+  A delete micro-batch holds at most 128 tuple entries: 64 forward keys plus
+  at most one reverse-companion key per match. During `Draining`, transient
+  publisher and install permits are each bounded by `128*W<=16384`, and both
+  counts are zero before `Finalizing` probe/repair. The gate never grows with
+  the full 262144-match capture.
+- Every non-holder BPF publish path for that tuple (local admission, HA import,
   refresh, and #9526 purge) takes its `PublishPermit` before `publish`/`delete`.
   The policy-delete coordinator is the sole exception after `Held(token)`:
-  its survivor repair calls token-authorized `publish_under_token(token)` or
-  `delete_under_token(token)`, which validates the current `Held` or
-  `Finalizing` token (or the coordinator-only repair token issued after
-  quiescence) and performs the BPF syscall without acquiring a normal permit.
-  Workers never write around the gate.
+  its survivor repair calls token-authorized
+  `publish_under_token(token)` or `delete_under_token(token)`, which validates
+  the current `Held` or `Finalizing` token (or the coordinator-only repair
+  token issued after quiescence) and performs the BPF syscall without acquiring
+  a normal permit. Workers never write around the gate.
+- Helper-first cross-process boundary (R1 correction): Go MUST NOT issue a
+  session-map BPF mutation syscall. Replace every production
+  `bpfShim.SetSession*`, `DeleteSession*`, and `BatchDeleteSessions*` mutation
+  below with tuple verbs `mirror_upsert`, `mirror_publish_only`,
+  `mirror_delete`, and `mirror_delete_batch`. Each tuple verb derives the
+  complete forward-plus-reverse BPF key set, deduplicates it, acquires a
+  bounded `GateLease` with per-key `TupleToken`s in canonical family/tuple
+  order, and performs the `SessionTable` mutation plus every BPF
+  publication/deletion under those tokens in the helper process. The response
+  is sent only after table and mirror state agree; a reverse companion cannot
+  publish outside the gate.
+- `mirror_clear_chunk` is the deliberate map-wide exception: the helper owns
+  cursor/page enumeration under a global clear fence, deletes both helper
+  table and BPF rows in bounded chunks, and returns continuation, v4/v6
+  counts, and first-error status. Go only drives that continuation; it never
+  enumerates or deletes through the shim and never acquires an unbounded
+  tuple-gate set.
+- Mutator transport failure or unavailable helper is fail-closed: no tuple BPF
+  syscall has occurred, the caller receives `helper_unavailable`/
+  `unknown_outcome`, and the existing Go best-effort mirror shortcut is
+  removed. Retry uses the logical identity after helper recovery; no direct
+  shim fallback is permitted for local admission, HA import, policy delete,
+  stale sweep, or clear.
+- `SetSessionV4/V6` forwards and both forward
+  `SetClusterSyncedSessionV4/V6` branches submit their values to
+  `mirror_upsert`; helper-side synthesis covers the reverse companion. A
+  reverse-only local or HA import is deliberately different: it uses a
+  helper-gated `mirror_publish_only` operation for the exact reverse BPF key,
+  which mutates no `SessionTable` row and is not the ordinary standalone
+  reverse `sync_session` upsert that the helper refuses. The operation acquires
+  the same key gate and publishes only the retained reverse mirror value.
+- The #5305 transaction applies only to forward `mirror_upsert`: the helper
+  snapshots the BPF pre-image and SessionTable row, applies the upsert and
+  helper mirror publication, and rolls both back before returning a typed
+  failure. `mirror_publish_only` has its own BPF pre-image/result and never
+  creates a helper table row. Both requests carry a logical mutation identity
+  plus `(helper_epoch, operation_id)`. A lost response is reported
+  `unknown_outcome`, never success; after the helper reconciles, Go reissues
+  with a new epoch-scoped operation id carrying the same logical identity;
+  the helper probes
+  identity first. An already-applied upsert returns `Applied` without
+  rewriting a different incarnation; an absent upsert applies once; a
+  conditional publish/delete already applied returns `Noop`. No unknown
+  outcome triggers a direct Go repair write.
+  `restoreBPFSessionV4/V6` becomes a token-authorized helper rollback, not a
+  `bpfShim.SetSession`/`DeleteSession` call.
+- Helper-backed `DeleteSessionV4/V6`, peer/scoped/bare batches, and
+  `deleteAppliedMirrorRows` use `mirror_delete*` and receive
+  `preserve`/`delete`/`republish` dispositions. The helper performs the sole
+  final mirror mutation under the matching per-key tokens; Go suppresses all
+  post-repair bare deletes. Legacy non-policy callers retain bounded chunk
+  and count/error contracts, but they also use helper-first mutation.
+  `ClearAllSessionsChunked` becomes bounded `mirror_clear_chunk` calls under
+  a helper map-wide clear fence, so no clear callback can bypass tuple gates.
+- The source audit enumerates every production direct mutation to cut over:
+  `manager_sessions.go:37,107,132,189,194,201,236,248,283,288,346,425,
+  493,508,537,561,570,598,608,659`, with `ClearAllSessionsChunked` at
+  `:724`; after cutover each is an RPC wrapper, not a Go BPF write. Read-only
+  `GetSession` calls remain allowed for diagnostics; test fixture seed calls
+  are setup, not publishers.
+- Lock order is normative: Go does not hold `m.mu` while waiting for helper
+  gate admission or a BPF operation. The helper acquires its `GateLease`,
+  mutates `SessionTable` and BPF, and returns a typed result; Go then takes
+  `m.mu` only to record the result/health state. No helper worker waits for
+  `m.mu`, and no Go path can resume a stale direct syscall after helper
+  restart. A helper crash/restart bumps the coordinator epoch and rejects
+  old `(helper_epoch, operation_id)` pairs until map reconcile completes.
+  Go receives `unknown_outcome`, then submits a new operation id carrying the
+  same logical identity; the reconciled helper returns `Applied`/`Noop` if
+  the old transaction had completed, or applies it once if absent, with
+  conditional identity checks preserving any different incarnation. Thus
+  #5305 cannot split on a lost response and helper restart cannot admit a
+  stale direct writer.
 - Install-generation revalidation: each worker-local table mutation uses the
   non-blocking `InstallPermit` protocol above and returns the observed
   `install_seq` with its survivor probe. Before the final probe the coordinator
@@ -268,34 +356,44 @@ after a bare row delete — it has no B value once the row is gone).
   sequence during earlier repair passes forces another pass, up to three
   passes or the remaining 200ms lease. A continuously changing tuple stays
   fenced and returns `gate_timeout` rather than releasing with a mirror gap.
-- Token and lease: `TupleToken { seq: u64 per-shard monotonic, epoch: u32
+- Token and lease: each key has
+  `TupleToken { seq: u64 per-shard monotonic, shard: u8 }`, while every
+  helper-owned logical mutation obtains one `GateLease { epoch: u32
   coordinator epoch (bumped on restart/reconcile), expiry_ns: u64 monotonic,
-  shard: u8 }`. Gate acquisition is separate from the sequence lease: the
-  batch may spend at most 100ms trying to acquire sorted tuple keys; a
-  `Draining` entry waits at most 20ms for existing `PublishPermit`s to release.
-  Only after publisher count reaches zero does the entry become `Held` and set
-  `expiry_ns` to 200ms from that instant. Workers accept only exact `seq+epoch`
-  with `now < expiry`, else `TokenStale`; the coordinator accepts only acks
-  carrying the issued token. The 200ms sequence budget covers three 20ms
-  command phases plus BPF repair and queue slack; each phase collect has a 20ms
-  deadline. A tuple not acquired, or whose permits do not drain, by the 100ms
-  batch budget is returned as `gate_timeout` without a delete token.
+  entries: Vec<(TupleKey, TupleToken)> }`. The full forward-plus-companion key
+  set is derived and deduplicated before any acquire; entries are sorted in
+  canonical family/tuple order, acquired as one bounded operation, and
+  released together. Helper operations validate the token corresponding to
+  each BPF key plus the shared lease epoch/expiry; a singular per-shard token
+  can never authorize a different shard. Gate acquisition is separate from
+  the sequence lease: the batch may spend at most 100ms trying to acquire the
+  sorted key set; a `Draining` entry waits at most 20ms for existing
+  `PublishPermit`s to release. Only after every publisher count reaches zero
+  does each entry become `Held` and set its 200ms expiry. Workers accept only
+  exact key-token+epoch with `now < expiry`, else `TokenStale`; the coordinator
+  accepts only acks carrying the issued `GateLease`. No Go process performs a
+  BPF syscall under this lease, so expiry cannot leave a paused direct writer
+  behind; expiry instead fences the helper lease before recovery. A
+  continuously changing key set stays fenced and returns `gate_timeout` rather
+  than releasing with a mirror gap.
 - Command queues: each delete micro-batch is represented by three batched
   `WorkerCommand` envelopes (`conditional_probe`, `conditional_remove`, and
-  survivor probe), each carrying at most 64 `(token, match)` items. They use
-  the existing per-worker `Mutex<VecDeque<WorkerCommand>>` via `push_bounded`
-  ONLY (`MAX_PENDING_WORKER_COMMANDS=4096`,
+  survivor probe), each carrying at most 64 `(GateLeaseID, match)` items.
+  The referenced lease carries the canonical key→token set; workers validate
+  the token for every forward/companion BPF key they touch. Envelopes use the
+  existing per-worker `Mutex<VecDeque<WorkerCommand>>` via `push_bounded` ONLY
+  (`MAX_PENDING_WORKER_COMMANDS=4096`,
   `WORKER_COMMAND_DRAIN_BUDGET=256`, worker_queue.rs:80,580). Kick is
   non-blocking; a refused push, poisoned mutex (`lock_recover`, committed
   prefix kept), or dead-worker shed maps to a named `per_worker_error` for
   that batch, never a silent drop. Workers drain at most 256 command
   envelopes per pass and feed `commands_backlogged` into `did_work`; the
-  delete handler separately caps tuple work at 64 items per phase/pass and
-  yields before the next AF_XDP poll. This is a tuple/work bound, not a
-  timing extrapolation from the full-queue benchmark; implementation must
-  measure the real BPF syscall budget. A micro-batch therefore has at most
-  192 tuple slots per worker across its three phases (see R2), with bounded
-  ring stall.
+  delete handler separately caps 64 matches per phase/pass and yields before
+  the next AF_XDP poll. This is a tuple/work bound, not a timing
+  extrapolation from the full-queue benchmark; implementation must measure
+  the real BPF syscall budget. A micro-batch therefore has at most 192
+  command-match slots per worker across its three phases and at most 128
+  BPF gate entries coordinator-wide, with bounded ring stall.
 - Refresh integration: `refresh_bpf_conntrack_last_seen(..., sessions:
   &SessionTable, ...)` (bpf_map/mod.rs:1035-1039) keeps `&SessionTable` (no
   `&mut`, no table lock) and gains `gate: &TupleGate`. Each budgeted cursor
@@ -310,26 +408,31 @@ after a bare row delete — it has no B value once the row is gone).
   no write can bypass the gate. Persistent contention returns retryable
   `GateContention`/`gate_table_full`, never a drop.
 - Liveness: on phase timeout, worker panic, quarantine, death, or an HA-import
-  race, the coordinator marks the token `Aborting` and blocks new
-  `PublishPermit`s. It first drains live-worker acks for at most 50ms; it does
-  not repair yet. On a confirmed-dead worker, it takes that worker's queue
-  lock and filters each batched envelope in place, removing only items whose
-  `(token, match)` equals this abort; it preserves item order and unrelated
-  token items, dropping an envelope only when it becomes empty. It then marks
-  the worker fenced/non-executable for this epoch; dead queues are not required
-  to become empty. A resurrected worker gets a new coordinator epoch, so stale
-  commands cannot execute. The gate remains
-  `Aborting` until all live-worker acks/queue entries are quiescent. If the
-  original token expires first, the coordinator issues a fresh probe-only
-  recovery token accepted by live workers for survivor reads only (no remove,
-  publish, or permit acquisition), collects those bounded acks, then issues a
-  coordinator-only repair token. After quiescence, it runs that final
-  survivor probe and performs the token-authorized repair (republish B or
-  delete the bare row), then releases the gate. If the final probe/repair
-  cannot complete, it retains the fence and returns visible `gate_timeout` or
+  race, the coordinator marks the `GateLease` `Aborting` and blocks new
+  `PublishPermit`s for every key in its key→token set. It first drains live
+  worker acks for at most 50ms; it does not repair yet. On a confirmed-dead
+  worker, it takes that worker's queue lock and filters each batched envelope
+  in place, removing only items whose `(GateLeaseID, match)` equals this
+  abort; it preserves item order and unrelated lease items, dropping an
+  envelope only when it becomes empty. It then marks the worker
+  fenced/non-executable for this epoch; dead queues are not required to become
+  empty. A resurrected worker gets a new coordinator epoch, so stale commands
+  cannot execute. A helper crash also invalidates every in-memory lease and
+  mutator RPC; restart enters reconcile quarantine and publishes a new epoch
+  before accepting any mutation, so no paused Go caller can issue a direct BPF
+  syscall. The lease remains `Aborting` until all live-worker acks/queue
+  entries are quiescent. If the internal lease expires first, the coordinator
+  issues a fresh probe-only recovery lease accepted by live workers for
+  survivor reads only (no remove, publish, or permit acquisition), collects
+  those bounded acks, then issues a coordinator-only repair token. After
+  quiescence, it runs that final survivor probe and performs the
+  token-authorized repair (republish B or delete the bare row) for the matching
+  key tokens, then releases the lease. If final probe/repair cannot complete,
+  it retains the fence and returns visible `gate_timeout` or
   `per_worker_error`, never an unlocked repair or an early optional repair.
-  Shed queues (`worker_command_queue_shed_total`), poison recoveries, and drops
-  (`worker_command_queue_drops_total`) all force batch `complete=false` (R2).
+  Shed queues (`worker_command_queue_shed_total`), poison recoveries, and
+  drops (`worker_command_queue_drops_total`) all force batch `complete=false`
+  (R2).
 - Necessity: conditional-delete plus republish without BPF serialization loses
   when delete probes (no survivor), concurrent B installs into its table and
   publishes the bare BPF row, then delete deletes that fresh row. The gate
@@ -338,10 +441,12 @@ after a bare row delete — it has no B value once the row is gone).
   BPF publish waits, so the second survivor probe (which reads `SessionTable`,
   not BPF) sees B and the repair republishes B instead of deleting.
 - Proof sketch: under the gate, `probe, conditional_remove, survivor-probe,
-  publish_under_token/delete_under_token` is atomic with respect to all normal
-  BPF publishers for that tuple: they hold `PublishPermit` through their
-  syscalls and cannot enter while the gate is `Held` or `Finalizing`.
-  Conditional ids make
+  publish_under_token/delete_under_token` is atomic with respect to every
+  helper-internal publisher, including `mirror_upsert`,
+  `mirror_publish_only`, refresh, HA import, and clear. Each operation holds
+  its per-key `PublishPermit` through the BPF syscall; Go callers can only
+  enqueue these helper verbs and have no direct map syscall that could bypass
+  `Held` or `Finalizing`. Conditional ids make
   removal equality-only (stale or different ids are no-ops, so tuple reuse
   cannot over-clear); survivor selection is deterministic over post-remove
   table contents (which include every concurrent install); each worker's
@@ -391,14 +496,19 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
 - Candidate batching: a complete READ yields at most
   `MAX_CAPTURE_MATCHES=262144` identities. Go retains them in bounded
   4096-entry candidate pages and sends sequential delete micro-batches of at
-  most 64 forward matches. It deduplicates their gate keys and acquires
-  distinct gates in canonical `(addr_family, tuple)` order; only after those
-  gates are held does it order conditional work by
-  `(routing_domain, expected_rt_flow_session_id, expected_companion_rt_flow_session_id)`.
-  Thus the worst case is 4096 micro-batches, never one unbounded
-  `262144 × W` broadcast. A micro-batch runs the three phases, performs the
-  final token-authorized survivor repair, then releases all gates before the
-  next micro-batch.
+  most 64 forward matches and at most 128 deduplicated BPF gate keys (the
+  forward key plus a possible reverse companion for each match). Go
+  pre-expands captured reverse keys where present; the helper validates that
+  set and derives only a missing companion during a preflight. If preflight
+  would exceed 128, it rejects before gate acquisition and Go splits the
+  forward page. The helper then acquires all keys in canonical
+  `(addr_family, tuple)` order; only after the `GateLease` is held does it
+  order conditional work by
+  `(routing_domain, expected_rt_flow_session_id,
+  expected_companion_rt_flow_session_id)`. Thus the worst case is 4096
+  micro-batches, never one unbounded `262144 × W` broadcast. A micro-batch
+  runs the three phases, performs the final token-authorized survivor repair,
+  then releases all gates before the next micro-batch.
 - Kick/collect: delete uses the same control-handle discipline as READ:
   validate and kick while locked, unlock, collect lock-free, then attach
   status. The delete handle has a separate 30s absolute deadline from its
@@ -415,8 +525,9 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
 - Worker fan-out: each micro-batch sends three batched
   `WorkerCommand` envelopes to each live worker, each envelope carrying at
   most 64 token/match items. For `W<=128`, that is at most 384 queue pushes
-  and 192 tuple slots per worker per micro-batch; each worker's
-  `MAX_PENDING_WORKER_COMMANDS=4096` queue and 64-tuple-per-phase drain
+  and 192 command-match slots per worker per micro-batch; the coordinator's
+  separate `GateLease` cardinality is at most 128 BPF keys. Each worker's
+  `MAX_PENDING_WORKER_COMMANDS=4096` queue and 64-match-per-phase drain
   budget remain the hard limits. A refused push, queue poison, dead-worker
   shed, token expiry, gate-table full, or per-phase ack shortfall records a
   named `per_worker_error` and terminates that micro-batch safely; no command
@@ -436,10 +547,12 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
   `clearErr` joined into #5578 (config remains committed+active, success line
   suppressed, safe fan-out for matches-in-hand still attempted). Helper abort
   follows §2.2's fence→quiesce→final-probe→repair order; it never falls back
-  to a bare or unconditional mirror delete. A retry reuses the same captured
-  domain/tuple/forward and companion RT_FLOW identities, so applied and stale
-  batches are idempotent; the peer still receives only the forward identity
-  and derives its local reverse.
+  to a bare or unconditional mirror delete. Retry is scoped to re-issuing an
+  unfinished micro-batch within this commit, reusing its captured
+  domain/tuple/forward and companion RT_FLOW identities; after `clearErr` is
+  returned, the capture is consumed and dropped, with no cross-commit
+  retention. Applied and stale batches remain idempotent, and the peer still
+  receives only the forward identity and derives its local reverse.
 
 ## 3. Predicate + timing (required block 3)
 
@@ -569,15 +682,25 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
   | delete `complete=false` / `gate_timeout` / `queue_overflow` /
   `worker_dead` / `token_stale` / `delete_deadline` | some candidate batches
   applied or no-op, but delete fan-out is not complete | `clearErr` joined into
-  #5578; config remains committed+active, success line suppressed, retry the
-  same identities; never claim convergence or use a bare fallback |
-  | `identity_missing` / complete=false / per_worker_errors / timeout /
-  transport error / unknown-verb (old helper, handlers/mod.rs:468-471) |
+  #5578; config remains committed+active, success line suppressed. Before
+  returning `clearErr`, only unfinished micro-batches may be re-issued within
+  this commit using the live capture; after `clearErr` the capture is
+  consumed/dropped. A revert-and-re-apply of the policy change (or any commit
+  whose diff re-covers the affected policies) re-runs invalidation and
+  converges; a no-op re-commit returns clean WITHOUT re-targeting; until then
+  explicitly clear the affected policies' sessions or allow idle expiry; never
+  claim convergence or use a bare fallback |
+  | `identity_missing` / `complete=false` / `per_worker_errors` / timeout /
+  transport error / `unknown_outcome` / `helper_restart` / unknown-verb (old
+  helper, handlers/mod.rs:468-471) |
   discovery or protocol integrity NOT positively complete | `clearErr` joined
   into commit (mark-and-continue: config stays committed+active, peer still
-  syncs, operator sees failure, re-commit converges — daemon_apply_commit.go:
-  310-351); success line SUPPRESSED; safe fan-out STILL attempted for
-  matches-in-hand; NEVER use an unconditional delete |
+  syncs, operator sees failure; revert-and-re-apply the policy change (or any
+  commit whose diff re-covers the affected policies) re-runs invalidation and
+  converges; a no-op re-commit returns clean WITHOUT re-targeting; until then
+  explicitly clear the affected policies' sessions or allow idle expiry —
+  daemon_apply_commit.go:310-351); success line SUPPRESSED; safe fan-out STILL
+  attempted for matches-in-hand; NEVER use an unconditional delete |
 - NO mirror fallback (Q4 closed): unknown-verb/partial NEVER degrades to a
   PolicyID-only mirror scan — that reintroduces the silent miss. Old helper +
   new verb maps to `clearErr`, never nil.
@@ -593,16 +716,29 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
   `policy session invalidation: helper session query incomplete or
   unsupported (need helper protocol >= 31); some sessions of <changed
   policies> may keep forwarding under stale authorization; complete the helper
-  upgrade and re-commit (a no-op change suffices), or clear the affected
-  policies' sessions explicitly.`
+  upgrade and revert-and-re-apply the policy change (or any commit whose diff
+  re-covers the affected policies) so invalidation runs again; a no-op
+  re-commit returns clean WITHOUT re-targeting; until then explicitly clear
+  the affected policies' sessions or allow idle expiry.`
 - Retry/idempotency: prepublish READ is idempotent with no time cutoff;
   legacy retries reuse the SAME `before_secs` to preserve its capture fence.
   Deletes are idempotent by `(domain, tuple,
   expected_rt_flow_session_id[, expected_companion_rt_flow_session_id])` on
   the local helper; an absent/different incarnation is a conditional no-op,
-  while a matching incarnation is removed once. The peer uses only the
-  forward RT_FLOW identity and derives its local reverse, so retries converge
-  without a bare delete (per-key NotFound contract owned by #10528).
+  while a matching incarnation is removed once. Only unfinished micro-batches
+  may be re-issued within the current commit; after `clearErr` the capture is
+  consumed/dropped and no cross-commit identity retention is allowed. The peer
+  uses only the forward RT_FLOW identity and derives its local reverse, so
+  within-commit retries converge without a bare delete (per-key NotFound
+  contract owned by #10528).
+- Helper-first restart retry: `mirror_upsert`/`mirror_publish_only`/
+  `mirror_delete*` responses are typed `Applied`, `Noop`, `Stale`, or
+  `unknown_outcome`. After `unknown_outcome` or `helper_restart`, the Go
+  caller waits for reconcile and reissues the same logical identity under a
+  new `(helper_epoch, operation_id)`; the helper probes before mutating.
+  A matching prior upsert is `Applied`, an absent one applies once, and a
+  conditional delete/publish already completed is `Noop`. No cross-epoch
+  bare write or unconditional rollback is allowed.
 
 ## 5. Tests (required block 5)
 
@@ -642,6 +778,12 @@ A named/B untouched. Genuine RED-on-revert: revert = verb disabled
 mirror scan (A survives, commit nil) — RED; fix on — PASS. The verb-mock RED
 leg MUST exercise the old discovery and the replacement-identity race, not just
 return A from an otherwise unchanged mock.
+- Protocol-state contrast (ordinary CI): `complete=true` with zero matches
+  returns `nil` and emits the success line; a nil capture selects the legacy
+  producer; `complete=false` joins `clearErr` and suppresses success. The cell
+  asserts these three states remain distinct, so an authoritative empty is
+  never manufactured from a missing or incomplete capture.
+
 
 Guard cells: B-preservation (§2.3 proof items 1-4); id-0-collision
 (first-policy A delete selected by its bound rule-handle, colliding zero-carrier
@@ -657,10 +799,26 @@ capture→publish residual pin (admission after a worker cursor survives to idle
 capture→replacement→delete (A captured, A expires, same tuple installs C,
 delayed delete carries A's forward RT_FLOW id and leaves C + its mirror/standby
 copies intact).
+- Helper-first HA-import/delete race (privileged helper test, v4 and v6):
+  use separate barriers for both acquisition orders. Delete-first pauses the
+  policy delete after the helper enters `Held`/`Finalizing`, queues the HA
+  import before its helper gate acquisition, and asserts the import performs
+  no BPF syscall until final survivor repair/release. Import-first pauses the
+  HA import after the helper acquires its `GateLease` but before its
+  `SessionTable`+BPF mutation, queues policy delete, and asserts delete waits
+  for import completion; then the conditional A removal preserves the imported
+  different-identity row. Repeat with reverse-only `mirror_publish_only` to
+  prove it never inserts a standalone helper row. Hold the import barrier past
+  the internal 200ms worker deadline and restart the helper; assert the old
+  epoch is rejected, the Go retry reissues one new epoch-scoped operation id
+  carrying the same logical identity after reconcile, no token self-blocks,
+  no A resurrection occurs, and no B is lost.
 
-Process: tests first, RED on base where the defect exists (T1–T8 + revert
-legs), then implement; record exact `go test`/`cargo test` invocations with
-lane-isolated caches in the implement PR; affected suites green per §9.
+
+Process: tests first, RED on base where the defect exists (T1–T8 + protocol
+contrast + cross-process race + revert legs), then implement; record exact
+`go test`/`cargo test` invocations with lane-isolated caches in the implement
+PR; affected suites green per §9.
 
 ## 6. STEP-0 verification (condensed; v1 §1 in history)
 
@@ -686,10 +844,15 @@ arm, :149-246 capture, :103-112 authoritative-empty), arm sites
 `daemon_apply_dataplane.go:171`, #5578 join `daemon_apply_commit.go:310-351`.
 Mirror: `pkg/dataplane/session_store.go` (ForEach :221-233, scoped keys,
 `DeleteBatchKnown`, `DeleteWithCompanionsV4` :888-899,
-`deleteAppliedMirrorRows` precedent via userspace manager),
-`pkg/dataplane/maps_session.go` iterators, `types.go` keys/values,
-`bpf_session_value.go` domain slot; Rust `bpf_map/mod.rs` (keys :547-583,
-refresh :1035-1100, conntrack delete :913-939, dispatch :200-260/:262-472),
+`deleteAppliedMirrorRows` precedent via userspace manager);
+`pkg/dataplane/userspace/manager_sessions.go:37,107,132,189,194,201,236,
+248,283,288,346,425,493,508,537,561,570,598,608,659,724` (all production
+session-map mutations cut over to helper-first RPC); `pkg/dataplane/maps_session.go`
+iterators, `types.go` keys/values, `bpf_session_value.go` domain slot; Rust
+`userspace-dp/src/server/handlers/mod.rs` mutator dispatch and
+`userspace-dp/src/session` TupleGate/SessionTable transaction; Rust
+`bpf_map/mod.rs` (keys :547-583, refresh :1035-1100, conntrack delete
+:913-939, dispatch :200-260/:262-472),
 `publish_conntrack.rs` (publishes + row-domain stamp :154-176),
 `session/key.rs` + `session/entry.rs:241,308` + `session/mod.rs`
 (bounds/ownership) + `policy.rs:1801-1819` (re-resolve) + `session_glue`
@@ -706,6 +869,13 @@ Tests: existing contract cells `daemon_policy_invalidate_test.go`,
 `batch_delete_domain_9364_test.go`, `batch_delete_mirror_domain_9546_test.go`,
 `sync_delete_domain_9146_test.go`.
 
+The userspace manager's direct session-map mutation surface is a required
+cutover boundary: all listed `bpfShim` writers become helper-first RPC
+wrappers, including reverse-only `mirror_publish_only`, forward transactional
+upsert, helper-disposition deletes, and map-clear chunks. The helper control
+protocol, TupleGate/SessionTable transaction, restart epoch, and ordinary
+CI/privileged race cells therefore join the blast radius; no Go direct-write
+fallback is permitted.
 ## 8. Blast radius (v1 §3 corrected)
 
 3 arm sites, 1 capture site, 3 clears + shared core + shared delete site, 2
@@ -772,9 +942,12 @@ Lane-isolated caches under `/dev/shm`; assigned worktree/branch only; no
 merges, no reviewer dispatch (parent owns), and no cluster/incus commands.
 Tests first (§5), RED on base, then implement §§1–4.
 Minimal diff: both producers, both families, same three id sets, same
-delete/HA-sync machinery shape. RED-on-revert firsthand, affected suites
-(§8), rebase on `origin/master`, PR with `Closes #10512` + Why/What/
-Validation body, report + STOP.
+delete/HA-sync machinery shape, plus the helper-first cutover of every listed
+Go session-map mutation to `mirror_upsert`, `mirror_publish_only`,
+`mirror_delete*`, or `mirror_clear_chunk`; no direct Go BPF fallback.
+RED-on-revert firsthand, affected suites (§8), rebase on `origin/master`, PR
+with `Closes #10512` + Why/What/Validation body, report + STOP.
+
 
 ## 13. Deliverable checklist
 
@@ -790,5 +963,10 @@ Validation body, report + STOP.
 - [x] Fold-2 Delta2 R1/R2: tuple-gate permits/finalization/liveness/proof and
   bounded delete batching/deadlines/completion/#5578 mapping are recorded;
   Delta2 R3–R6 remain deferred per the parent brief.
-- [x] DRAFT v3 plan force-added and committed; branch publication handled
+- [x] Fold-3 V4: helper-first migration covers every production Go
+  session-map mutation (including HA imports, reverse-only publication, and
+  #5305 compensation); per-key GateLease/restart epoch/reissue semantics are
+  specified, and the HA-import/delete race cell is present; NR-1 positive-empty,
+  NR-2 skew, and NR-3 retry/convergence corrections are recorded.
+- [x] DRAFT v4 plan force-added and committed; branch publication handled
   outside this document.
