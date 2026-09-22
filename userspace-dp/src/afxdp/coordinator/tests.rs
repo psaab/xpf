@@ -10025,12 +10025,12 @@ fn wg9521_decision(
         .map(|entry| entry.spawned_kernel_transport)
 }
 
-/// #9521 end to end. Two WireGuard endpoints on distinct listen ports; the
-/// snapshot steers the first. A real authenticated transport record — IPv4 and
+/// #9521/#10527 end to end. Two WireGuard endpoints on distinct listen ports;
+/// the snapshot steers the first. A real authenticated transit record — IPv4 and
 /// IPv6, both outer and inner — is sent to each endpoint's real control-thread
-/// socket. The steered endpoint's thread must write the plaintext to its TUN
-/// (positive control); the unsteered endpoint's thread must count the record as
-/// an unsteered-port drop and write nothing.
+/// socket. The steered endpoint's thread applies the kernel-path posture and
+/// drops/counts transit on its uncovered/non-local test ingress; the unsteered
+/// endpoint's thread counts the record as an unsteered-port drop and writes nothing.
 #[test]
 fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
     use crate::afxdp::coordinator::wg_control::{
@@ -10086,7 +10086,14 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
             // read as this family's outcome.
             thread::sleep(Duration::from_millis(200));
             while tun_standin_recv_9521(tun).is_some() {}
-            let drops_before = engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed);
+            let unsteered_before = engine
+                .counters()
+                .rx_unsteered_transport_drops
+                .load(Ordering::Relaxed);
+            let degraded_before = engine
+                .counters()
+                .rx_degraded_transit_drops
+                .load(Ordering::Relaxed);
             let dst: std::net::SocketAddr = if outer_v6 {
                 format!("[::1]:{port}")
             } else {
@@ -10097,7 +10104,8 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
             let sender =
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut dropped) = (None, false);
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
+                (None, false, false);
             // Resend until the thread (which binds asynchronously) accounts for one.
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
@@ -10108,24 +10116,60 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                     delivered = Some(bytes);
                     break;
                 }
-                if engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > drops_before {
-                    dropped = true;
+                if engine
+                    .counters()
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed)
+                    > unsteered_before
+                {
+                    unsteered_dropped = true;
+                    break;
+                }
+                if engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed)
+                    > degraded_before
+                {
+                    degraded_dropped = true;
                     break;
                 }
             }
             if steered {
-                assert_eq!(
-                    delivered.as_deref(),
-                    Some(&inner[..]),
-                    "{family}: the steered endpoint's spawned thread must deliver kernel-path \
-                     transport plaintext (positive control)"
+                assert!(
+                    delivered.is_none(),
+                    "{family}: the steered endpoint wrote transit plaintext to the TUN: {:?}",
+                    delivered
                 );
-                assert!(!dropped, "{family}: the steered endpoint counted an unsteered drop");
+                assert!(
+                    degraded_dropped,
+                    "{family}: the steered endpoint never counted its degraded-transit drop"
+                );
+                assert_eq!(
+                    engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                    degraded_before + 1,
+                    "{family}: the steered endpoint counted an unexpected number of degraded drops"
+                );
+                assert_eq!(
+                    engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                    unsteered_before,
+                    "{family}: the steered endpoint counted an unsteered drop"
+                );
             } else {
                 assert!(
-                    dropped,
+                    unsteered_dropped,
                     "{family}: the unsteered endpoint never counted an unsteered-port drop — \
                      either the record never arrived or the thread spawned with the wrong decision"
+                );
+                assert_eq!(
+                    engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                    unsteered_before + 1,
+                    "{family}: the unsteered endpoint counted an unexpected number of drops"
+                );
+                assert_eq!(
+                    engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                    degraded_before,
+                    "{family}: the unsteered endpoint counted a degraded-transit drop"
                 );
                 thread::sleep(Duration::from_millis(100));
                 assert!(
@@ -10137,8 +10181,9 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
         }
     }
     // The operator-visible surface. The status row built for each endpoint must
-    // carry the drops its engine counted — the unsteered endpoint dropped at
-    // least one record per family above, the steered endpoint none.
+    // carry the counter its engine counted: the unsteered endpoint dropped at
+    // least one record per family above, while the steered endpoint recorded
+    // degraded transit drops for both families.
     thread::sleep(Duration::from_millis(300));
     let rows = coordinator.wg_tunnel_statuses();
     let row = |id: u16| {
@@ -10147,20 +10192,38 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
             .expect("a status row per WireGuard endpoint")
     };
     assert!(
+        row(1).rx_degraded_transit_drops >= 2,
+        "the steered endpoint's status row reports {} degraded-transit drops; its engine \
+         dropped at least one record per family, so the status mapping is not carrying \
+         the counter to the operator",
+        row(1).rx_degraded_transit_drops
+    );
+    assert_eq!(
+        row(1).rx_unsteered_transport_drops,
+        0,
+        "the steered endpoint reports unsteered drops"
+    );
+    assert!(
         row(2).rx_unsteered_transport_drops >= 2,
         "the unsteered endpoint's status row reports {} unsteered-port drops; its engine \
          dropped at least one record per family, so the status mapping is not carrying \
          the counter to the operator",
         row(2).rx_unsteered_transport_drops
     );
-    assert_eq!(row(1).rx_unsteered_transport_drops, 0, "the steered endpoint reports unsteered drops");
+    assert_eq!(
+        row(2).rx_degraded_transit_drops,
+        0,
+        "the unsteered endpoint reports degraded-transit drops"
+    );
     coordinator.stop();
 }
 
-/// #9587: every steered port delivers. The successor direction to the #9521
-/// overflow cell above: with the snapshot's steered SET covering both
-/// endpoints' ports, each spawned thread must Deliver in both families and
-/// `rx_unsteered_transport_drops` must stay 0 everywhere.
+/// #9587: every steered port has the Deliver disposition. The successor
+/// direction to the #9521 overflow cell above: with the snapshot's steered SET
+/// covering both endpoints' ports, each spawned thread must refuse the transit
+/// record as degraded/uncovered, increment `rx_degraded_transit_drops`, and
+/// write nothing to TUN in both families; `rx_unsteered_transport_drops` stays
+/// 0 everywhere.
 ///
 /// Level, stated precisely (GPT PR-review): this cell drives snapshot →
 /// forwarding set → spawn decision → control-thread dispatch → TUN stand-in
@@ -10224,7 +10287,14 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
             let inner = if outer_v6 { inner_v6_9521() } else { inner_v4_9521() };
             thread::sleep(Duration::from_millis(200));
             while tun_standin_recv_9521(tun).is_some() {}
-            let drops_before = engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed);
+            let unsteered_before = engine
+                .counters()
+                .rx_unsteered_transport_drops
+                .load(Ordering::Relaxed);
+            let degraded_before = engine
+                .counters()
+                .rx_degraded_transit_drops
+                .load(Ordering::Relaxed);
             let dst: std::net::SocketAddr = if outer_v6 {
                 format!("[::1]:{port}")
             } else {
@@ -10235,7 +10305,8 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
             let sender =
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let mut delivered = None;
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
+                (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
                 let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
@@ -10245,18 +10316,42 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
                     delivered = Some(bytes);
                     break;
                 }
-                if engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > drops_before {
+                if engine
+                    .counters()
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed)
+                    > unsteered_before
+                {
+                    unsteered_dropped = true;
+                    break;
+                }
+                if engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed)
+                    > degraded_before
+                {
+                    degraded_dropped = true;
                     break;
                 }
             }
+            assert!(
+                delivered.is_none(),
+                "{family}: endpoint {id}'s spawned thread wrote transit plaintext to TUN: {:?}",
+                delivered
+            );
+            assert!(
+                degraded_dropped,
+                "{family}: endpoint {id}'s spawned thread never counted degraded transit"
+            );
             assert_eq!(
-                delivered.as_deref(),
-                Some(&inner[..]),
-                "{family}: endpoint {id}'s spawned thread must deliver kernel-path transport plaintext"
+                engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                degraded_before + 1,
+                "{family}: endpoint {id} counted an unexpected number of degraded drops"
             );
             assert_eq!(
                 engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
-                drops_before,
+                unsteered_before,
                 "{family}: endpoint {id} counted an unsteered drop while steered"
             );
         }
@@ -10264,6 +10359,11 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
     thread::sleep(Duration::from_millis(300));
     let rows = coordinator.wg_tunnel_statuses();
     for r in &rows {
+        assert!(
+            r.rx_degraded_transit_drops >= 2,
+            "each steered endpoint must report one degraded-transit drop per family, got {}",
+            r.rx_degraded_transit_drops
+        );
         assert_eq!(
             r.rx_unsteered_transport_drops, 0,
             "no endpoint may report unsteered drops when all ports are steered"
@@ -10273,9 +10373,10 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
 }
 
 /// #9587 single-port control for the cell above: same two endpoints, but the
-/// snapshot steers ONLY the first port. The first thread must Deliver in both
-/// families (positive control that the fixture delivers at all); the second
-/// must decide DropUnsteered, write nothing to its TUN, and count one
+/// snapshot steers ONLY the first port. The first thread has Deliver disposition
+/// but refuses the transit record as degraded/uncovered in both families,
+/// increments `rx_degraded_transit_drops`, and writes nothing to its TUN. The
+/// second must decide DropUnsteered, write nothing to its TUN, and count one
 /// unsteered drop per family. Without this control the two-port cell cannot
 /// discriminate — both would pass if the second endpoint delivered
 /// unconditionally.
@@ -10310,7 +10411,8 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
 
     let allowed: Vec<ipnet::IpNet> =
         vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
-    // Positive control: the steered endpoint delivers both families.
+    // Positive control: the steered endpoint has Deliver disposition, but its
+    // transit records are degraded/uncovered and never reach the TUN.
     {
         let engine = coordinator
             .forwarding
@@ -10329,6 +10431,14 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
             let family = if outer_v6 { "IPv6" } else { "IPv4" };
             thread::sleep(Duration::from_millis(200));
             while tun_standin_recv_9521(&tun_a).is_some() {}
+            let unsteered_before = engine
+                .counters()
+                .rx_unsteered_transport_drops
+                .load(Ordering::Relaxed);
+            let degraded_before = engine
+                .counters()
+                .rx_degraded_transit_drops
+                .load(Ordering::Relaxed);
             let dst: std::net::SocketAddr = if outer_v6 {
                 format!("[::1]:{port_a}")
             } else {
@@ -10339,7 +10449,8 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
             let sender =
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let mut delivered = None;
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
+                (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
                 let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
@@ -10349,11 +10460,43 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                     delivered = Some(bytes);
                     break;
                 }
+                if engine
+                    .counters()
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed)
+                    > unsteered_before
+                {
+                    unsteered_dropped = true;
+                    break;
+                }
+                if engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed)
+                    > degraded_before
+                {
+                    degraded_dropped = true;
+                    break;
+                }
             }
+            assert!(
+                delivered.is_none(),
+                "{family}: steered endpoint 1 wrote transit plaintext to its TUN: {:?}",
+                delivered
+            );
+            assert!(
+                degraded_dropped,
+                "{family}: steered endpoint 1 never counted degraded transit"
+            );
             assert_eq!(
-                delivered.as_deref(),
-                Some(&inner[..]),
-                "{family}: steered endpoint 1 must deliver kernel-path transport plaintext"
+                engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                degraded_before + 1,
+                "{family}: steered endpoint 1 counted an unexpected number of degraded drops"
+            );
+            assert_eq!(
+                engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                unsteered_before,
+                "{family}: steered endpoint 1 counted an unsteered drop"
             );
         }
     }
@@ -10376,7 +10519,14 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
             let family = if outer_v6 { "IPv6" } else { "IPv4" };
             thread::sleep(Duration::from_millis(200));
             while tun_standin_recv_9521(&tun_b).is_some() {}
-            let drops_before = engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed);
+            let unsteered_before = engine
+                .counters()
+                .rx_unsteered_transport_drops
+                .load(Ordering::Relaxed);
+            let degraded_before = engine
+                .counters()
+                .rx_degraded_transit_drops
+                .load(Ordering::Relaxed);
             let dst: std::net::SocketAddr = if outer_v6 {
                 format!("[::1]:{port_b}")
             } else {
@@ -10387,21 +10537,52 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
             let sender =
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            loop {
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
+                (None, false, false);
+            while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
                 let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
                 let _ = sender.send_to(&wire[..enc.len], dst);
                 thread::sleep(Duration::from_millis(40));
-                if engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > drops_before {
+                if let Some(bytes) = tun_standin_recv_9521(&tun_b) {
+                    delivered = Some(bytes);
                     break;
                 }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "{family}: unsteered endpoint 2 never counted the drop"
-                );
+                if engine
+                    .counters()
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed)
+                    > unsteered_before
+                {
+                    unsteered_dropped = true;
+                    break;
+                }
+                if engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed)
+                    > degraded_before
+                {
+                    degraded_dropped = true;
+                    break;
+                }
             }
             assert!(
-                tun_standin_recv_9521(&tun_b).is_none(),
+                unsteered_dropped,
+                "{family}: unsteered endpoint 2 never counted the drop"
+            );
+            assert_eq!(
+                engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                unsteered_before + 1,
+                "{family}: unsteered endpoint 2 counted an unexpected number of drops"
+            );
+            assert_eq!(
+                engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                degraded_before,
+                "{family}: unsteered endpoint 2 counted a degraded-transit drop"
+            );
+            assert!(
+                delivered.is_none() && tun_standin_recv_9521(&tun_b).is_none(),
                 "{family}: unsteered endpoint 2 wrote plaintext to its TUN"
             );
         }
@@ -10413,14 +10594,25 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
             .find(|r| r.tunnel_endpoint_id as u64 == u64::from(id))
             .expect("a status row per WireGuard endpoint")
     };
+    assert!(
+        row(1).rx_degraded_transit_drops >= 2,
+        "steered endpoint 1 must report one degraded-transit drop per family, got {}",
+        row(1).rx_degraded_transit_drops
+    );
     assert_eq!(
-        row(1).rx_unsteered_transport_drops, 0,
+        row(1).rx_unsteered_transport_drops,
+        0,
         "steered endpoint 1 must report no unsteered drops"
     );
     assert!(
         row(2).rx_unsteered_transport_drops >= 2,
         "unsteered endpoint 2 must report one drop per family, got {}",
         row(2).rx_unsteered_transport_drops
+    );
+    assert_eq!(
+        row(2).rx_degraded_transit_drops,
+        0,
+        "unsteered endpoint 2 must report no degraded-transit drops"
     );
     coordinator.stop();
 }
@@ -10599,13 +10791,14 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
 
 /// #9594/#10527: the PRODUCTION posture view places an ingress the way the fix
 /// depends on — in the shim's ingress set is covered (degraded arrival); a
-/// CONFIGURED interface outside it is uncovered, #8274's residual, and now
-/// receives the same transit refusal while preserving local delivery; an
-/// ifindex that is neither cannot be placed. The middle case is the one a
-/// regression would hide in: if the view stopped consulting the runtime
-/// forwarding state, every uncovered ingress would read as unplaceable and its
-/// classification would change from the #10527 uncovered arm to fail-closed
-/// Unknown.
+/// CONFIGURED interface outside it is uncovered, #8274's residual. This cell
+/// only checks that production classification; the fixed-view end-to-end cells
+/// separately pin the #10527 degraded-transit refusal and no TUN write, while
+/// uncovered local delivery remains the Half-B follow-up (#10597). An ifindex
+/// that is neither cannot be placed. The middle case is the one a regression
+/// would hide in: if the view stopped consulting the runtime forwarding state,
+/// every uncovered ingress would read as unplaceable and its classification
+/// would change from the #10527 uncovered arm to fail-closed Unknown.
 #[test]
 fn shim_maps_view_places_configured_uncovered_ingress_9594() {
     use crate::afxdp::coordinator::wg_control::kernel_path::{
