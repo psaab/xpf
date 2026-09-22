@@ -249,9 +249,10 @@ Baseline today: `make test` aborts after red `test-go`; no cargo invocation.
    AFTER both legs. Include a broken-snippet self-test (prereq-form snippet
    MUST fail the canary — naive contains-checks pass pre-fix) plus a
    zero-denominator control (fail if the `^test:` block is not found).
-5. Re-run the three existing Makefile parser-canaries (uncached
-   `TestMakefileRunsAuditPackageUncached` + the two race-gate coverage
-   canaries) — cheap, guards the file Phase 1 edits.
+5. Re-run the four existing Makefile parser-canaries (uncached
+   `TestMakefileRunsAuditPackageUncached` + the three race-gate coverage
+   canaries: daemon 6743, cluster 6550, dataplane 9045) — cheap, guards
+   the file Phase 1 edits.
 
 ### Out of scope
 
