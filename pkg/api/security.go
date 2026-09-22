@@ -24,6 +24,11 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	cr := s.applyResult()
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for zoneName := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, zoneName)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
 	// #3408: a per-zone counter read failure must not be reported as a clean
 	// 0 — surface it as HTTP 500 after building, mirroring the global
 	// /stats/global contract (#3345).
@@ -39,7 +44,20 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 			TcpRst:      zone.TCPRst,
 			Interfaces:  zone.Interfaces,
 		}
-		quarantined := config.ZoneQuarantineExcludedReason(zoneName, cfg) != ""
+		_, quarantined := quarantinedZones[zoneName]
+		if quarantined {
+			zi.Quarantine = &ZoneQuarantineInfo{
+				State:        ZoneQuarantineStateQuarantined,
+				SurvivorZone: config.StableZoneIDOwner(zoneNames, config.StableZoneID(zoneName)),
+			}
+			// Do not publish the survivor's counters under the quarantined
+			// name. The numeric counter fields remain their zero values.
+			zi.PerZoneCountersAvailable = false
+		} else {
+			zi.Quarantine = &ZoneQuarantineInfo{
+				State: ZoneQuarantineStateNotQuarantined,
+			}
+		}
 		if zone.ScreenProfile != "" {
 			zi.ScreenProfile = zone.ScreenProfile
 		}
@@ -95,11 +113,7 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 		if cr != nil {
 			if id, ok := cr.ZoneIDs[zoneName]; ok {
 				zi.ID = id
-				// A quarantined name shares its stable id with the survivor, but
-				// its interfaces and policy references would be omitted if this
-				// snapshot is applied. Never attribute the survivor's live volume
-				// to that desired-config row: keep the existing fields and leave
-				// the four counts at their zero values with availability false.
+
 				if !quarantined && s.dp != nil && s.dp.IsLoaded() {
 					ing, errIn := s.dp.ReadZoneCounters(id, 0)
 					eg, errOut := s.dp.ReadZoneCounters(id, 1)

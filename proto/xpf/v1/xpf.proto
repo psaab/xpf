@@ -345,6 +345,17 @@ message ZoneInfo {
   // idle one — silence that reads as "no traffic", which is a wrong answer
   // rather than a missing one.
   ZoneCounterAvailability per_zone_counter_availability = 17;
+  // quarantine_state (#10531) tells a structured client whether this zone is
+  // excluded by StableZoneID collision quarantine. NOT_QUARANTINED means the
+  // collision verdict did not exclude it; it does not assert that the
+  // dataplane is loaded or has applied the zone. UNKNOWN=0 means an old server
+  // omitted the field; clients MUST fall back to their pre-#10531 rendering
+  // rather than treating absence as a clean verdict.
+  ZoneQuarantineState quarantine_state = 18;
+  // quarantine_survivor_zone is set only when quarantine_state is
+  // QUARANTINED. It names the earlier-sorting zone that owns the shared
+  // StableZoneID. It is empty for UNKNOWN and NOT_QUARANTINED.
+  string quarantine_survivor_zone = 19;
 }
 
 // InterfaceHostInbound (#3328, #3362) is a per-interface host-inbound-traffic
@@ -1382,4 +1393,38 @@ enum PeerFetchStatus {
   // wrong-looking rather than wrong -- and that is the trade the additive
   // choice buys.
   PEER_FETCH_STATUS_BUSY = 4;
+}
+// ZoneQuarantineState reports whether the server quarantined a zone because its
+// StableZoneID collides with an earlier-sorting zone's id (#10531).
+//
+// UNKNOWN IS 0 ON PURPOSE, and it is the whole point of this being an enum
+// rather than a bool — the same skew argument as ZoneCounterAvailability
+// (#6895). proto3 has no field presence for scalars: a `bool quarantined` sent
+// by an OLD server decodes to `false` on a new client, which is
+// indistinguishable from the server saying "not quarantined" — so every
+// quarantined zone from an old server would render as clean. The inverted
+// spelling has the mirror-image defect: absent decodes to "quarantined" and
+// every ordinary zone renders as dropped from the dataplane.
+//
+// With UNKNOWN = 0 the skewed pair is honest by construction: a new client
+// talking to an old server sees UNKNOWN and renders exactly as it did before
+// #10531, introducing no new wrong answer in either direction. Clients MUST
+// fall back to their pre-#10531 rendering on UNKNOWN and MUST never render it
+// as clean.
+enum ZoneQuarantineState {
+  // The server did not say. An old server omits the field entirely and it
+  // decodes here. Clients MUST fall back to their pre-#10531 rendering.
+  ZONE_QUARANTINE_STATE_UNKNOWN = 0;
+  // The zone is not excluded by StableZoneID collision quarantine (ordinary
+  // zone or collision survivor). This verdict does not assert that the
+  // dataplane is loaded or has applied the zone. quarantine_survivor_zone is
+  // empty.
+  ZONE_QUARANTINE_STATE_NOT_QUARANTINED = 1;
+  // The zone's StableZoneID collides with an earlier-sorting zone's id, so
+  // the zone was dropped from the dataplane (its interfaces unzoned, its
+  // traffic denied). quarantine_survivor_zone names the surviving zone that
+  // owns the shared numeric id. The four counter fields are meaningless zeros
+  // and per_zone_counter_availability is UNAVAILABLE: the server never
+  // publishes the survivor's volume under the loser.
+  ZONE_QUARANTINE_STATE_QUARANTINED = 2;
 }
