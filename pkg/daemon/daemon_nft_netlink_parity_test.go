@@ -393,14 +393,12 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// from the fresh oracle (the accept + counter vanish) — proving the T1
 		// gate is sensitive to the fail-closed flag, not blind to it.
 		{"reinject_gate_flag_cleared", func(s *xnft.HostInboundSpec) { s.DataplaneFresh = false }},
-		// FIX-2: widen the narrow IKE exemption to also cover ge-0-0-2.80 — an
-		// interface ALREADY in the broad zone-deny IngressIfnames, so the global
-		// iifname UNION is unchanged and the TEXT diff is blind (anonymous ifname
-		// sets render empty). Only the PER-RULE iifname comparison catches it. If
-		// the parity used a union (the pre-fix blind spot) this mutation would pass
-		// vacuously — a real IKE-exemption widening merged undetected.
-		{"iifname_ike_exemption_widened", func(s *xnft.HostInboundSpec) {
-			s.Programs[0].IKEExemptNetdevs = []string{"ge-0-0-2", "ge-0-0-2.50", "ge-0-0-2.80"}
+		// #10524 deletes the IKE ACCEPT from both rendering paths, so an
+		// IKEExemptNetdevs widening is intentionally no longer visible in the
+		// ruleset. Keep the mutation-sensitive scope check on the retained ident
+		// RST shield instead; its terminal reject cannot re-admit denied traffic.
+		{"iifname_ident_reset_exemption_widened", func(s *xnft.HostInboundSpec) {
+			s.Programs[0].IdentResetNetdevs = []string{"ge-0-0-2", "ge-0-0-2.50", "ge-0-0-2.80"}
 		}},
 	}
 	for _, mc := range mutations {
@@ -706,14 +704,13 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 			HasApplicationAnyDeny: true,
 			CoarseAdmitsIKE:       true,
 			CoarseIdentResets:     true,
-			// IKE exemption is a per-interface SUBSET of the zone deny scope (a
-			// 2-member anonymous set). The #6405 FIX-2 mutation widens it to also
-			// cover ge-0-0-2.80 — already in IngressIfnames, so the global iifname
-			// UNION is unchanged; only the PER-RULE parity check catches the widen.
+			// #10524: IKEExemptNetdevs remains projection metadata for the
+			// warning, but no IKE ACCEPT is rendered. IdentResetNetdevs is the
+			// retained per-interface terminal RST scope exercised by the netlink
+			// parity mutation above.
 			IKEExemptNetdevs:  []string{"ge-0-0-2", "ge-0-0-2.50"},
 			IdentResetNetdevs: []string{"ge-0-0-2"},
 			RulesV4: []config.JunosHostDenyRule{
-				// #9504: an earlier permit's carve renders as a return ahead of the deny.
 				{Family: "ip", Src: []string{"192.0.2.10"}, DstAny: true, Verdict: config.JunosHostReturn},
 				{Family: "ip", Src: []string{"192.0.2.0/24", "198.51.100.7"}, DstAny: true},
 				// #9504: a reject, as `application any` (split, TCP first) and as a UDP

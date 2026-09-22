@@ -435,6 +435,38 @@ func junosHostPolicyStricterThanCoarseGate(action PolicyAction, m PolicyMatch) (
 	return false, ""
 }
 
+// junosHostIKEFullAdmissionTokens returns effective meta-service tokens on the
+// overlapping zones' effective interfaces that make an IKE overlap broad enough
+// to require a shape-specific remedy. `all` expands to IKE/IPsec, while
+// `any-service` bypasses the named-service union entirely.
+func junosHostIKEFullAdmissionTokens(cfg *Config, zones []string) []string {
+	seen := make(map[string]bool)
+	add := func(svcs []string) {
+		for _, raw := range svcs {
+			switch s := strings.ToLower(strings.TrimSpace(raw)); s {
+			case "all", "any-service":
+				seen[s] = true
+			}
+		}
+	}
+	for _, zoneName := range zones {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		for _, ref := range zone.Interfaces {
+			svc, _, _ := zone.InterfaceHostInboundEffective(ref)
+			add(svc)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for token := range seen {
+		out = append(out, token)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // validateJunosHostDirectDeliveryWarnings emits a WARN-only commit-time message
 // for each `to-zone junos-host` security policy — zone-pair or global — that is
 // stricter than the coarse kernel host-inbound gate can enforce on the DIRECT
@@ -450,7 +482,9 @@ func junosHostPolicyStricterThanCoarseGate(action PolicyAction, m PolicyMatch) (
 // (junos_host_local_policy), which a direct host-bound packet never reaches.
 // So a configured deny (or source-scoped permit) to junos-host is silently
 // unenforced on the primary host-bound path — a false sense of security this
-// warning surfaces at commit.
+// warning surfaces at commit. DNAT/static-NAT-to-self and GRE-inner IKE
+// delegated by Stage 11 still follows the coarse admission pending the
+// Stage-11 junos-host enforcement follow-up (#10585).
 //
 // It is never an error: the config is legal Junos, and the actual enforcement
 // fix (withhold the IP from the local set / mirror the policy into nft) is a
@@ -462,6 +496,114 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 	if cfg == nil {
 		return nil
 	}
+	// #10524: the IKE shield was removed from the kernel render, but an
+	// application-any DENY on an IKE-admitting ingress still deserves an
+	// explicit commit advisory for the direct primary path. Do not infer the
+	// policy from a program-level HasApplicationAnyDeny bit: that bit is
+	// aggregate for the whole zone and could attribute a sibling policy.
+	// Instead, join each policy's own application-any projected term to the
+	// zone(s) it applies to and to the IKE-admission netdev subset. This advisory
+	// is intentionally computed before the global RenderedPolicyKeys suppression
+	// below; exact per-zone emission provenance still warns when coverage is only
+	// partial, and names the policy/netdev intersection.
+	projection := BuildJunosHostDenyProjection(cfg)
+	var warnings []string
+	policyLabels := make(map[string]string)
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil || zpp.ToZone != junosHostSelfZone {
+			continue
+		}
+		for _, p := range zpp.Policies {
+			if p != nil {
+				policyLabels[JunosHostZonePairPolicyKey(zpp.FromZone, p.Name)] =
+					fmt.Sprintf("%q (from-zone %q)", p.Name, zpp.FromZone)
+			}
+		}
+	}
+	for _, p := range cfg.Security.GlobalPolicies {
+		if p != nil && IsHostToZoneScope(p.Match.ToZones) {
+			policyLabels[JunosHostGlobalPolicyKey(p.Name)] = fmt.Sprintf("global %q", p.Name)
+		}
+	}
+	feedBound := junosHostFeedBoundNames(cfg)
+	overlapNetdevs := make(map[string]map[string]bool)
+	overlapZones := make(map[string]map[string]bool)
+	for _, prog := range projection.Programs {
+		if !prog.HasApplicationAnyDeny || !prog.CoarseAdmitsIKE {
+			continue
+		}
+		ingress := make(map[string]bool, len(prog.IngressNetdevs))
+		for _, nd := range prog.IngressNetdevs {
+			ingress[nd] = true
+		}
+		ikeNetdevs := make([]string, 0, len(prog.IKEExemptNetdevs))
+		for _, nd := range prog.IKEExemptNetdevs {
+			if ingress[nd] {
+				ikeNetdevs = append(ikeNetdevs, nd)
+			}
+		}
+		if len(ikeNetdevs) == 0 {
+			continue
+		}
+		for _, term := range junosHostEffectiveTerms(cfg, prog.Zone, feedBound) {
+			if !term.appAny || (term.action != PolicyDeny && term.action != PolicyReject) ||
+				!projection.RenderedApplicationAnyPolicyKeysByZone[prog.Zone][term.key] {
+				continue
+			}
+			nds := overlapNetdevs[term.key]
+			if nds == nil {
+				nds = make(map[string]bool)
+				overlapNetdevs[term.key] = nds
+			}
+			for _, nd := range ikeNetdevs {
+				nds[nd] = true
+			}
+			zones := overlapZones[term.key]
+			if zones == nil {
+				zones = make(map[string]bool)
+				overlapZones[term.key] = zones
+			}
+			zones[prog.Zone] = true
+		}
+	}
+	overlapKeys := make([]string, 0, len(overlapNetdevs))
+	for key := range overlapNetdevs {
+		overlapKeys = append(overlapKeys, key)
+	}
+	sort.Strings(overlapKeys)
+	for _, key := range overlapKeys {
+		netdevs := make([]string, 0, len(overlapNetdevs[key]))
+		for nd := range overlapNetdevs[key] {
+			netdevs = append(netdevs, nd)
+		}
+		sort.Strings(netdevs)
+		zones := make([]string, 0, len(overlapZones[key]))
+		for zone := range overlapZones[key] {
+			zones = append(zones, zone)
+		}
+		sort.Strings(zones)
+		label := policyLabels[key]
+		if label == "" {
+			label = fmt.Sprintf("%q", key)
+		}
+		serviceRemedy := "remove `ike`/`ipsec` from host-inbound-traffic or " +
+			"narrow/review the policy if that admission is not intended"
+		if fullTokens := junosHostIKEFullAdmissionTokens(cfg, zones); len(fullTokens) > 0 {
+			serviceRemedy += fmt.Sprintf(
+				"; also narrow/remove coarse `%s` host-inbound admission",
+				strings.Join(fullTokens, "`/`"))
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"security policy %s has an application-any DENY/REJECT to-zone "+
+				"junos-host overlapping coarse IKE admission on netdev(s) %s "+
+				"(zone(s) %s). The fine junos-host rule governs denied IKE on the "+
+				"direct host-bound path; secondary DNAT/static-NAT-to-self and "+
+				"GRE-inner IKE still follows the Stage-11 coarse admission pending "+
+				"follow-up #%d. For the direct-path overlap, %s (#10524; see "+
+				"docs/host-inbound-service-matrix.md)",
+			label, strings.Join(netdevs, ", "), strings.Join(zones, ", "),
+			10585, serviceRemedy))
+	}
 	// #4146: the representable ordered DENY class is now ENFORCED on the direct
 	// host-bound path by the kernel nft `xpf_hostinbound` chain
 	// (BuildJunosHostDenyProjection). Suppress the parity warning for exactly the
@@ -470,8 +612,7 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 	// partial-coverage remainder). Rendered means: the policy applies only to
 	// enforceable ingress zones and EVERY such zone's whole program is
 	// representable (§3.3 / §8 inv-12).
-	rendered := BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys
-	var warnings []string
+	rendered := projection.RenderedPolicyKeys
 	msg := func(who, reason string) string {
 		return fmt.Sprintf(
 			"security policy %s expresses a %s to-zone junos-host that the kernel "+

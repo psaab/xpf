@@ -2198,42 +2198,50 @@ helper never sees it, so a helper crash cannot lock management out).
   BEFORE the ND/PMTUD accepts and the residual full established accept, so a denied
   source's NEW *and* original-direction-established inbound (including its
   ND/PMTUD) are dropped — matching Rust's per-hit re-eval/teardown. ESP/AH (proto
-  50/51) are always exempt; IKE 500/4500 is shielded when the ingress interface
-  coarse-admits `ike`; ident-reset TCP/113 keeps its RST when the interface's
+  50/51) are always exempt. **#10524 removes the terminal IKE 500/4500 ACCEPT
+  shield:** an `application any` DENY now reaches the fine subchain and governs
+  denied IKE; a source not covered by that DENY returns from the subchain and
+  continues to the coarse IKE service admission below it. This is a deletion,
+  not a reorder: an IKE ACCEPT below the jump would be dead and would violate
+  the no-fine-accept invariant.
+  Ident-reset TCP/113 intentionally keeps its terminal RST when the interface's
   effective coarse verdict is the RST (ident-reset set AND not `any-service`).
+  Unlike the deleted IKE ACCEPT, a terminal RST refuses the connection and cannot
+  re-admit denied traffic, so this is an explicit retained disposition.
   #3226: `all` no longer shadows ident-reset — it EXPANDS to a set containing
-  ident-reset, so the kernel chain really does emit the reject rule and the
-  shield must carve TCP/113 out (`HostInboundServiceTokenExpansion`).
-  - **Per-interface scope of the IKE / ident shield (#5565).** The shield is
-    scoped to the SPECIFIC netdevs whose EFFECTIVE per-interface host-inbound set
-    (`InterfaceHostInboundEffective`: the interface override where declared,
-    else the zone-level set — #6515) admits the
-    exemption — `JunosHostDenyProgram.IKEExemptNetdevs` / `IdentResetNetdevs`,
-    each a subset of the program's `IngressNetdevs`. A per-INTERFACE `ike` /
-    `ident-reset` override therefore shields only the interface(s) that configured
-    it (`iifname "<that-netdev>" ...`), never the whole zone iifname set — a
-    least-privilege override on one interface is not widened to a sibling that did
-    not configure it. A genuinely ZONE-LEVEL exception (authored on the zone's own
-    `host-inbound-traffic`) is folded into every interface's effective set, so its
-    subset equals `IngressNetdevs` and the shield stays zone-wide (no regression).
-    The zone-wide `application any` DROP itself is unaffected — the deny is a zone
-    policy and still scopes by the full zone iifname set; only the ACCEPT/RST
-    exemption ahead of it is narrowed. Before #5565 the shield used a single
-    zone-wide `CoarseAdmitsIKE` / `CoarseIdentResets` bit derived by unioning
-    every per-interface override, so one interface's `ike` falsely admitted IKE
-    on every interface in the zone.
-  - **Operator note — exempt tuples survive an `application any` deny.** On an
+  ident-reset, so the kernel chain really does emit the reject rule
+  (`HostInboundServiceTokenExpansion`).
+  - **Per-interface scope of the retained ident RST and IKE overlap advisory
+    (#5565/#10524).** `IdentResetNetdevs` remains scoped to the SPECIFIC netdevs
+    whose EFFECTIVE per-interface host-inbound set (`InterfaceHostInboundEffective`:
+    the interface override where declared, else the zone-level set — #6515)
+    answers ident with an RST. `IKEExemptNetdevs` remains the corresponding
+    metadata subset for the commit-time overlap advisory; it no longer renders
+    an IKE ACCEPT. Both are subsets of `IngressNetdevs`. A per-INTERFACE override
+    therefore never widens either diagnostic/scope calculation to a sibling that
+    did not configure it. A genuinely ZONE-LEVEL exception is folded into every
+    interface's effective set, so its subset equals `IngressNetdevs`.
+    The zone-wide `application any` DROP itself is unaffected — the deny is a
+    zone policy and still scopes by the full zone iifname set.
+  - **Operator note — IKE overlap is now warned at commit (#10524).** On an
     **IKE-admitting** zone, `from-zone Z to-zone junos-host { match source-address
-    BAD; match application any; then deny; }` does **NOT** stop BAD's IKE / IPsec
-    NAT-T (UDP 500/4500): the userspace IPsec-passthrough stage returns BEFORE the
-    fine junos-host policy, and the kernel decrypts host-terminated IPsec before
-    any deny — so 500/4500 is admitted regardless of the deny. Likewise on an
-    **ident-resetting** zone (`system-services ident-reset`, not `all`) the same
-    deny still answers BAD's TCP/113 with a RST, not a silent drop. This is
-    faithful to the Rust runtime (Stage-11 passthrough / the coarse ident-reset
-    terminal both run pre-fine), not a bug. To actually deny IKE/ident from a
-    source, remove the coarse admission (drop `ike` / `ident-reset` from the
-    zone's `host-inbound-traffic`) rather than relying on a junos-host `deny`.
+    BAD; match application any; then deny; }` drops BAD's IKE/NAT-T
+    (UDP 500/4500) in the fine subchain on the **direct primary host-bound
+    path**. The commit advisory still names the policy and overlapping
+    IKE-admission netdevs even though the DENY is rendered and the ordinary
+    #4168 warning is suppressed. Other sources remain admitted by the coarse
+    IKE service after the fine subchain returns. DNAT/static-NAT-to-self and
+    GRE-inner IKE on the Stage-11 secondary path still follows the coarse
+    admission and can remain admitted pending the Stage-11 junos-host
+    enforcement follow-up (#10585). To refuse IKE broadly, remove
+    `ike`/`ipsec` or narrow/remove the authored `all`/`any-service` admission
+    named by the warning; to refuse only selected sources, retain/review the
+    app-any DENY and its #10524 advisory. An IKE-tuple-scoped deny remains
+    unrepresentable and keeps its existing warning because the IPsec path owns
+    that tuple.
+    On an **ident-resetting** zone (`system-services ident-reset`, not `all`) the
+    same deny still answers BAD's TCP/113 with a RST by deliberate coarse
+    disposition, not an admit.
 - **Observability.** `xpf_host_inbound_junos_host_denies_total{scope,family}`
   (nft named counters, distinct from the coarse
   `xpf_host_inbound_kernel_denies_total`). This does **not** populate per-Junos-

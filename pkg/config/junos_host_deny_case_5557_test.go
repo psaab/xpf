@@ -7,10 +7,10 @@ import "testing"
 // every host-inbound token before admitting (unionHostInboundTokens /
 // lowerTokens in pkg/dataplane/userspace and the Rust classify_system_service),
 // so a lenient-loaded UPPER-case `IKE`/`IPSEC`/`ALL` is admitted (and
-// `IDENT-RESET` RST-marked) on the wire. The junos-host coarse `application
-// any` shield must reach the SAME verdict, or it drops the very IKE/NAT-T (udp
-// 500/4500) and ident (tcp 113 RST) traffic enforcement admits. Only `ALL`/
-// `any-service` are packet-wide full-admits; `IKE`/`IPsec` admit udp 500/4500.
+// the projected coarse metadata must reach the SAME verdict, or the warning
+// scope / retained ident RST can drift from the traffic enforcement. Only
+// `ALL`/`any-service` are packet-wide full-admits; `IKE`/`IPsec` admit udp
+// 500/4500.
 //
 // This mirrors the lower-case TestJunosHostExemptionFlags with upper-case
 // tokens. Reverting the case-fold (junosHostSvcAdmitsIKE / the note() loop /
@@ -33,23 +33,23 @@ func TestJunosHostExemptionFlagsCaseInsensitive_5557(t *testing.T) {
 	// IKE / IPsec / full-admit are all case-insensitive coarse-admits for IKE.
 	for _, tok := range []string{"IKE", "IPsec", "ALL", "Any-Service"} {
 		if p := mk(tok); !p.CoarseAdmitsIKE {
-			t.Errorf("system-services %q: want CoarseAdmitsIKE (enforcement admits, shield must too)", tok)
+			t.Errorf("system-services %q: want CoarseAdmitsIKE (enforcement and warning metadata must agree)", tok)
 		}
 	}
 	// Upper-case ident-reset must set the RST verdict, matching enforcement.
 	if p := mk("IDENT-RESET"); !p.CoarseIdentResets {
 		t.Error("system-services IDENT-RESET: want CoarseIdentResets")
 	}
-	// A zone-level upper-case IKE service must scope the exemption to a netdev
-	// (the CoarseAdmitsIKE bit follows len(IKEExemptNetdevs)).
+	// A zone-level upper-case IKE service must populate warning metadata for a
+	// netdev (the CoarseAdmitsIKE bit follows len(IKEExemptNetdevs)).
 	if p := mk("IKE"); len(p.IKEExemptNetdevs) == 0 {
-		t.Error("system-services IKE: want a scoped IKE-exempt netdev, got none")
+		t.Error("system-services IKE: want a scoped IKE-admission metadata netdev, got none")
 	}
 }
 
 // TestHostInboundFullAdmitServiceCaseInsensitive_5557 pins the SSOT predicate
-// itself. Enforcement lower-cases before calling it, but the coarse-shield and
-// the commit-time full-admit advisory feed it the raw authored case; a
+// itself. Enforcement lower-cases before calling it, but the coarse metadata
+// and the commit-time full-admit advisory feed it the raw authored case; a
 // case-sensitive `== "all"` let an upper-case `ALL` escape both. Reverting to
 // the raw comparison makes these assertions RED.
 func TestHostInboundFullAdmitServiceCaseInsensitive_5557(t *testing.T) {
@@ -72,12 +72,10 @@ func TestHostInboundFullAdmitServiceCaseInsensitive_5557(t *testing.T) {
 // TestHostInboundServiceTokenExpansionCaseInsensitive_5557_3226 carries the
 // #5557 case-fold contract onto the surface #3226 moved `all` to. Enforcement
 // lower-cases every token (unionHostInboundTokens / lowerTokens in
-// pkg/dataplane/userspace, the Rust classify_system_service), but the coarse
-// junos-host shield feeds this helper the RAW authored case. A case-sensitive
+// pkg/dataplane/userspace, the Rust classify_system_service), but the
+// projection feeds this helper the RAW authored case. A case-sensitive
 // `== "all"` would leave a lenient-loaded upper-case `ALL` unexpanded, so the
-// shield would not see the `ike` / `ident-reset` the expansion contains and
-// would drop the very IKE it exists to exempt — the #5557 failure mode on a new
-// surface.
+// #10524 IKE overlap metadata would miss the `ike`/`ident-reset` expansion.
 func TestHostInboundServiceTokenExpansionCaseInsensitive_5557_3226(t *testing.T) {
 	for _, tok := range []string{"all", "ALL", "All", " all "} {
 		got := HostInboundServiceTokenExpansion(tok)
@@ -94,7 +92,7 @@ func TestHostInboundServiceTokenExpansionCaseInsensitive_5557_3226(t *testing.T)
 			}
 		}
 		if !sawIKE || !sawIdent {
-			t.Errorf("HostInboundServiceTokenExpansion(%q) must contain ike and ident-reset (the coarse-shield exemptions), got %v", tok, got)
+			t.Errorf("HostInboundServiceTokenExpansion(%q) must contain ike and ident-reset (the coarse-admission metadata expansion), got %v", tok, got)
 		}
 	}
 	// Every other token — including the full-admit escape hatch, which is not a

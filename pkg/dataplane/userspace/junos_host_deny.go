@@ -37,19 +37,18 @@ type JunosHostProgram struct {
 	// first-match order.
 	RulesV4 []config.JunosHostDenyRule
 	RulesV6 []config.JunosHostDenyRule
-	// CoarseAdmitsIKE / CoarseIdentResets / HasApplicationAnyDeny drive the
-	// daemon's fine-eligible-L4 exemption rules ahead of an `application any`
-	// drop (§6.6). CoarseAdmitsIKE / CoarseIdentResets are true iff the
-	// corresponding netdev subset below is non-empty.
+	// CoarseAdmitsIKE / CoarseIdentResets are projection metadata. The daemon
+	// uses CoarseIdentResets with HasApplicationAnyDeny for the retained ident
+	// RST; CoarseAdmitsIKE and IKEExemptNetdevs are retained for projection
+	// parity/tests and warning metadata, not rendered.
 	CoarseAdmitsIKE       bool
 	CoarseIdentResets     bool
 	HasApplicationAnyDeny bool
 	// IKEExemptNetdevs / IdentResetNetdevs are the SUBSET of IngressIfnames whose
 	// effective per-interface host-inbound set admits IKE / RSTs ident (#5565).
-	// The daemon scopes the IKE / ident exemption shield to these netdevs, so a
-	// per-interface `ike`/`ident-reset` override never widens to a sibling
-	// interface in the same zone. A zone-level exception yields the full
-	// IngressIfnames set (zone-wide, no regression). Sorted subsets.
+	// The daemon uses IdentResetNetdevs for the retained ident RST scope;
+	// IKEExemptNetdevs is warning metadata and is not emitted as an IKE ACCEPT.
+	// Both subsets are sorted and scoped to IngressIfnames.
 	IKEExemptNetdevs  []string
 	IdentResetNetdevs []string
 }

@@ -42,11 +42,12 @@ import (
 //     runtime has no implicit junos-host default-deny (policy.rs
 //     evaluate_junos_host_policy_l3_aware, policymatch.matchJunosHost), and
 //     neither does this program.
-//   - Fine-eligible L4 domain: ESP/AH (proto 50/51) are always exempt; IKE
-//     500/4500 is exempt when the ingress zone's coarse host-inbound admits ike;
-//     ident-reset TCP/113 is exempt only when the zone's effective coarse verdict
-//     is the RST (ident-reset set AND not all/any-service). The daemon renders
-//     these as exemption rules ahead of an `application any` drop.
+//   - Fine-eligible metadata: ESP/AH (proto 50/51) are always exempt; the
+//     IKE subset feeds the #10524 overlap advisory, while ident-reset TCP/113
+//     is exempt only when the effective coarse verdict is the RST
+//     (ident-reset set AND not all/any-service). The daemon renders only the
+//     retained ident RST ahead of an `application any` drop; it never renders
+//     an IKE ACCEPT.
 
 // junosHostSelfZone is the reserved to-zone token that names the firewall's own
 // host (RE) traffic context. Mirrors policymatch.JunosHostZone.
@@ -154,37 +155,38 @@ type JunosHostDenyProgram struct {
 	// order. A non-empty list never ends in a JunosHostReturn.
 	RulesV4 []JunosHostDenyRule
 	RulesV6 []JunosHostDenyRule
-	// CoarseAdmitsIKE / CoarseIdentResets drive the daemon's fine-eligible-L4
-	// exemption rules ahead of an `application any` drop (§6.6). They are true
-	// iff at least one ingress netdev in the zone admits the exemption
-	// (len(IKEExemptNetdevs) / len(IdentResetNetdevs) > 0) — NOT a zone-wide
-	// union of every per-interface override (#5565).
+	// CoarseAdmitsIKE / CoarseIdentResets describe effective coarse metadata for
+	// fine-eligible L4. CoarseIdentResets drives the retained terminal ident RST;
+	// CoarseAdmitsIKE plus IKEExemptNetdevs identifies #10524 overlap eligibility.
+	// The former IKE ACCEPT shield was deleted.
 	CoarseAdmitsIKE   bool
 	CoarseIdentResets bool
 	// IKEExemptNetdevs / IdentResetNetdevs are the SUBSET of IngressNetdevs whose
-	// EFFECTIVE per-interface host-inbound set admits IKE (udp 500/4500) /
-	// answers TCP/113 with a RST (#5565). The daemon scopes the IKE / ident
-	// exemption shield to these netdevs instead of the whole zone iifname set, so
-	// a per-INTERFACE `ike` / `ident-reset` override is never widened to a sibling
-	// interface in the same zone that did not configure it. A genuinely
-	// zone-level exception (authored on the zone's own host-inbound-traffic)
-	// admits on every interface, so its subset equals IngressNetdevs and the
-	// shield stays zone-wide (no regression). Sorted; each a subset of
-	// IngressNetdevs.
+	// EFFECTIVE per-interface host-inbound set admits IKE (udp 500/4500) / answers
+	// TCP/113 with a RST (#5565). The daemon uses IdentResetNetdevs for the
+	// retained ident RST scope; IKEExemptNetdevs remains config-projection
+	// metadata for the #10524 commit advisory and is not rendered as an IKE ACCEPT.
+	// Sorted; each is a subset of IngressNetdevs.
 	IKEExemptNetdevs  []string
 	IdentResetNetdevs []string
 	// HasApplicationAnyDeny is true when the program contains a rendered
-	// `application any` rule with a DENY-class verdict, so the daemon knows to
-	// emit the IKE/ident exemption shields ahead of it.
+	// `application any` rule with a DENY-class verdict. The daemon uses this
+	// aggregate shape together with CoarseIdentResets to retain the ident RST;
+	// the warning validator joins individual policy provenance separately.
 	HasApplicationAnyDeny bool
 }
 
 // JunosHostDenyProjection is the whole-config result: the per-zone programs the
 // daemon renders, plus the set of junos-host policy keys that rendered an
 // enforced kernel rule (so the #4168 warning is suppressed for exactly those).
+// RenderedApplicationAnyPolicyKeysByZone is narrower provenance for #10524:
+// it records application-any DENY/REJECT keys that emitted a rule in each
+// surviving zone, even when that zone has partial netdev coverage and therefore
+// cannot enter the global RenderedPolicyKeys suppression set.
 type JunosHostDenyProjection struct {
-	Programs           []JunosHostDenyProgram
-	RenderedPolicyKeys map[string]bool
+	Programs                               []JunosHostDenyProgram
+	RenderedPolicyKeys                     map[string]bool
+	RenderedApplicationAnyPolicyKeysByZone map[string]map[string]bool
 }
 
 // JunosHostZonePairPolicyKey / JunosHostGlobalPolicyKey are the stable identity
@@ -227,7 +229,10 @@ type junosHostTerm struct {
 // DROP-only form. It is the SSOT consumed by both the daemon nft codegen (via
 // the pkg/dataplane/userspace wrapper) and the #4168 commit warning.
 func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
-	out := JunosHostDenyProjection{RenderedPolicyKeys: map[string]bool{}}
+	out := JunosHostDenyProjection{
+		RenderedPolicyKeys:                     map[string]bool{},
+		RenderedApplicationAnyPolicyKeysByZone: map[string]map[string]bool{},
+	}
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return out
 	}
@@ -304,17 +309,31 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 			// ahead of a deny no longer makes the program un-representable.
 			prog, emitted = junosHostProjectProgram(zoneName, ifaceRefs, terms, zone.TCPRst)
 			prog.IngressNetdevs = netdevs
-			// #5565: scope the fine-eligible-L4 (IKE / ident) exemption to the
-			// SPECIFIC netdevs whose effective per-interface host-inbound set
-			// admits it, NOT the whole zone. A per-interface `ike`/`ident-reset`
-			// override then shields only the interface that configured it; a
-			// zone-level exception still covers every netdev (its subset equals
-			// netdevs). The CoarseAdmits* bits follow the subsets so the daemon
-			// never emits a shield with no scope.
+			// #5565: scope the fine-eligible metadata to the SPECIFIC netdevs whose
+			// effective per-interface host-inbound set admits it, NOT the whole
+			// zone. IdentResetNetdevs scopes the retained terminal RST; the
+			// IKEExemptNetdevs subset names the netdevs for the #10524 overlap
+			// advisory. A zone-level exception still covers every netdev (its
+			// subset equals netdevs). The CoarseAdmits* bits follow the subsets so
+			// projection metadata stays aligned with coarse admission.
 			prog.IKEExemptNetdevs, prog.IdentResetNetdevs =
 				junosHostZoneExemptNetdevs(cfg, zoneName, zone, netdevs)
 			prog.CoarseAdmitsIKE = len(prog.IKEExemptNetdevs) > 0
 			prog.CoarseIdentResets = len(prog.IdentResetNetdevs) > 0
+		}
+		// #10524 exact provenance: retain the app-any DENY/REJECT keys that
+		// emitted a rule in THIS surviving zone. This intentionally ignores
+		// fullyScoped / global RenderedPolicyKeys status; partial coverage still
+		// needs the overlap advisory for the netdevs where the rule exists.
+		if emitsRules && representable {
+			appAnyKeys := make(map[string]bool)
+			for _, t := range terms {
+				if emitted[t.key] && t.appAny &&
+					(t.action == PolicyDeny || t.action == PolicyReject) {
+					appAnyKeys[t.key] = true
+				}
+			}
+			out.RenderedApplicationAnyPolicyKeysByZone[zoneName] = appAnyKeys
 		}
 		// Bookkeeping for the warning.
 		for _, t := range terms {
@@ -702,7 +721,8 @@ func junosHostProjectAddrMatch(set []string, anyFam, excluded, emptyBothFamilies
 
 // junosHostSvcAdmitsIKE reports whether an EFFECTIVE per-interface host-inbound
 // system-services set coarse-admits IKE/NAT-T (udp 500/4500) — the `ike`/`ipsec`
-// token or a full admit.
+// token or a full admit. The result feeds projection metadata and the #10524
+// overlap warning; it does not authorize an IKE render in the fine window.
 func junosHostSvcAdmitsIKE(svc []string) bool {
 	for _, s := range svc {
 		// Match enforcement, which lower-cases every token before admitting
@@ -710,8 +730,7 @@ func junosHostSvcAdmitsIKE(svc []string) bool {
 		// Rust classify_system_service). The sibling protocol path in this file
 		// already normalizes (junosHostReduceApp, line ~776); the service path must
 		// too or a lenient-loaded upper-case `IKE`/`IPSEC`/`ALL` is admitted by
-		// enforcement yet missed here, so the coarse `application any` shield
-		// drops the very IKE/NAT-T it was supposed to exempt (#5557).
+		// enforcement yet missed here, so the #10524 overlap warning is skipped.
 		s = strings.ToLower(strings.TrimSpace(s))
 		if HostInboundFullAdmitService(s) {
 			return true
@@ -719,9 +738,8 @@ func junosHostSvcAdmitsIKE(svc []string) bool {
 		// #3226: `all` is no longer a full admit — it EXPANDS to the named
 		// system-service union, which contains `ike`/`ipsec` (udp 500/4500).
 		// Walk the expansion rather than string-comparing the authored token,
-		// or an `all` zone loses its IKE exemption here while enforcement still
-		// admits IKE, and the coarse `application any` shield drops the very
-		// IKE/NAT-T it exists to exempt — the #5565 failure mode, reopened.
+		// or an `all` zone loses its IKE metadata while enforcement still admits
+		// IKE and the #10524 warning becomes a false negative.
 		for _, e := range HostInboundServiceTokenExpansion(s) {
 			if e == "ike" || e == "ipsec" {
 				return true
@@ -742,18 +760,18 @@ func junosHostSvcAdmitsIKE(svc []string) bool {
 // A netdev admits IKE / RSTs ident if ANY interface ref whose host-bound traffic
 // arrives on it (its own logical unit, or — for a VLAN subunit riding a physical
 // parent — the parent) admits it. The union mirrors the coarse host-inbound gate
-// (which keys on the interface's effective set, InterfaceHostInboundEffective) so
-// the shield never false-denies a configured per-interface override, while a
-// sibling interface that configured no exception is left out of the subset. A
-// genuinely zone-level exception (authored on the zone's own
-// host-inbound-traffic) is folded into every interface's effective set, so its
-// subset equals `netdevs` and the shield stays zone-wide.
+// (which keys on the interface's effective set, InterfaceHostInboundEffective)
+// so IKE warning metadata and the retained ident RST scope never miss a
+// configured per-interface override, while a sibling interface that configured
+// no exception is left out. A genuinely zone-level exception (authored on the
+// zone's own host-inbound-traffic) is folded into every interface's effective
+// set, so its subset equals `netdevs`.
 //
 // The netdev→ref row walk mirrors JunosHostZoneIngressNetdevs exactly (physical
 // row + one row per unit, plus the physical parent for a VLAN subunit) so the
 // two agree on which ref feeds which netdev; results are filtered to `netdevs`
 // so a cross-zone-ambiguous parent excluded from the iifname scope is never
-// shielded.
+// included in warning metadata or ident RST scope.
 func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, netdevs []string) (ikeNetdevs, identNetdevs []string) {
 	// #8862: hoisted. junosHostLinuxName rebuilds the tunnel-name map on every
 	// call and that map walks every interface and every unit, so resolving one
@@ -772,16 +790,15 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 	// #7173: this UNIONS the verdicts of VLAN siblings that share one physical
 	// parent — addRow calls note(parent, ...) for every unit — so a parent's
 	// entry is the union of what each of its units admits, not any single
-	// unit's. That is deliberate and it errs toward OVER-shielding: an
-	// exemption one unit needs is applied to the parent, so a sibling unit is
-	// shielded where it did not strictly have to be. It is safe in the
-	// direction that matters because the exempted services are authenticated
-	// (IKE) or self-limiting (ident-reset) and the units share a zone, so the
-	// union cannot admit anything the zone's own policy does not already allow.
+	// unit's. That is deliberate and errs toward OVER-INCLUSIVE metadata: an
+	// exemption one unit needs is applied to the parent, so IKE warning metadata
+	// and retained ident-RST scope include a sibling where they did not strictly
+	// have to. The IKE metadata only broadens an advisory; only the retained
+	// ident-RST verdict is self-limiting and must refuse that sibling safely.
 	//
 	// Recorded here rather than only in the issue: the natural "fix" is to make
-	// the parent entry per-unit, which would narrow the shield and is the wrong
-	// direction for a defense-in-depth surface.
+	// the parent entry per-unit, which would narrow metadata and retained-RST
+	// scope; that is a separate #5565 hardening decision.
 	type verdict struct{ ike, ident, fullAdmit bool }
 	byNetdev := make(map[string]*verdict, len(netdevs))
 	note := func(nd, ref string) {
@@ -801,7 +818,8 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 			// Case-fold to match enforcement (see junosHostSvcAdmitsIKE): a
 			// lenient-loaded upper-case `ALL`/`IDENT-RESET` must set the same
 			// coarse verdict here as the dataplane/Rust classifier reaches, or
-			// the shield diverges from what is actually admitted (#5557).
+			// the warning metadata / retained ident RST scope diverges from
+			// what is actually admitted (#5557).
 			s = strings.ToLower(strings.TrimSpace(s))
 			if HostInboundFullAdmitService(s) {
 				v.fullAdmit = true
