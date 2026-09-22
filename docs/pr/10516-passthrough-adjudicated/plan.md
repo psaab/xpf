@@ -838,7 +838,7 @@ Per-miss work on the worker:
 Flood bar (§6, §10): 1Mpps spoofed ESP-in-UDP flood to a DNAT external —
 workers sustain line processing, sa_miss counter linear with offered load,
 sampled exceptions bounded (~3900/s at N=256), no worker stall, no
-cross-worker cacheline traffic beyond the counter (per-binding atomics).
+cross-worker cacheline traffic beyond the shared IpsecSaStore atomics.
 
 ### 5.9 Perf budget (numeric)
 
@@ -1296,10 +1296,15 @@ mkdir -p "$run"
 : "${INGRESS_IF:?set INGRESS_IF to the fixture ingress interface}"
 : "${PACKET_PCAP:?set PACKET_PCAP to the fixed nonzero-SPI miss pcap}"
 curl -fsS "$METRICS_URL" >"$run/metrics.before"
-sudo perf stat -a -e cycles,instructions,cache-misses \
-  -o "$run/perf.txt" -- \
-  tcpreplay --intf1 "$INGRESS_IF" --loop=60 --pps=1000000 "$PACKET_PCAP" \
-  >"$run/generator.log" 2>&1
+set +e
+sudo timeout --signal=TERM --kill-after=5s 60s \
+  perf stat -a -e cycles,instructions,cache-misses \
+    -o "$run/perf.txt" -- \
+    tcpreplay --intf1 "$INGRESS_IF" --loop=0 --pps=1000000 "$PACKET_PCAP" \
+    >"$run/generator.log" 2>&1
+rc=$?
+set -e
+test "$rc" -eq 124
 curl -fsS "$METRICS_URL" >"$run/metrics.after"
 ```
 

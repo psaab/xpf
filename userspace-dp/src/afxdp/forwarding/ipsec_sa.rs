@@ -144,21 +144,28 @@ pub(in crate::afxdp) struct IpsecSaSnapshot {
     entries: FastMap<IpsecSaKey, IpsecSaEpoch>,
     generation: u64,
     stale: bool,
+    /// Hard readiness/outage transition fence. Any mismatch invalidates the
+    /// loaded batch, even when the queried key is retained.
     stale_epoch: u64,
+    /// Selective deletion fence. Mismatch invalidates only keys removed from
+    /// the current map, using `removed_keys` to retain remove→re-add history.
+    removal_epoch: u64,
+    removed_keys: FastMap<IpsecSaKey, u64>,
 }
 
-/// Read-mostly SA store. The monitor/control side is the sole writer; workers
-/// load one immutable snapshot per RX batch and perform plain hash lookups.
-/// `stale_epoch` advances ONLY on stale-state transitions (fresh→stale or
-/// stale→fresh), never on benign inserts/removals/redumps, so an in-flight
-/// batch keeps its verdict across routine monitor traffic (rekey-overlap P6:
-/// a NEWSA landing mid-batch must not Stale-deny the remainder).
+/// `stale_epoch` advances on stale-state transitions and `removal_epoch`
+/// advances on publications that remove an observed SA. Additive NEWSA/UPDSA
+/// updates and unchanged redumps keep both epochs, so an in-flight batch can
+/// retain its positive verdict during rekey overlap. `removed_keys` retains
+/// per-key deletion history when a key is removed and re-added before the
+/// batch completes.
 /// `revoked` is the teardown fence: set before the monitor join, it denies
 /// lookups even if a racing in-flight dump publishes fresh state.
 pub(in crate::afxdp) struct IpsecSaStore {
     snapshot: arc_swap::ArcSwap<IpsecSaSnapshot>,
     insertion_order: AtomicU64,
     stale_epoch: AtomicU64,
+    removal_epoch: AtomicU64,
     revoked: AtomicBool,
     writer: Mutex<()>,
     pub(in crate::afxdp) counters: IpsecSaCounters,
@@ -189,9 +196,12 @@ impl IpsecSaStore {
                 generation: 0,
                 stale: true,
                 stale_epoch: 0,
+                removal_epoch: 0,
+                removed_keys: FastMap::default(),
             }),
             insertion_order: AtomicU64::new(0),
             stale_epoch: AtomicU64::new(0),
+            removal_epoch: AtomicU64::new(0),
             revoked: AtomicBool::new(false),
             writer: Mutex::new(()),
             counters: IpsecSaCounters::default(),
@@ -208,32 +218,109 @@ impl IpsecSaStore {
         self.snapshot.load_full()
     }
 
-    #[inline]
     fn publish_snapshot(&self, mut snapshot: IpsecSaSnapshot) {
-        // Stamp, never bump: only stale-state transitions advance
-        // `stale_epoch` (see mark_stale/reset_for_monitor_start and the
-        // stale→fresh arm of publish_full_dump). Benign publications reuse
-        // the current epoch so loaded batches keep their verdict.
+        // Stamp ordinary publications with the current epochs. Fenced paths
+        // use the next-epoch helper, which releases each changed epoch only
+        // after its replacement snapshot is visible.
         snapshot.stale_epoch = self.stale_epoch.load(Ordering::Acquire);
+        snapshot.removal_epoch = self.removal_epoch.load(Ordering::Acquire);
         self.snapshot.store(Arc::new(snapshot));
     }
 
     #[inline]
-    fn bump_stale_epoch(&self) {
-        self.stale_epoch.fetch_add(1, Ordering::AcqRel);
+    fn next_stale_epoch(&self) -> u64 {
+        self.stale_epoch
+            .load(Ordering::Relaxed)
+            .wrapping_add(1)
     }
+
+    #[inline]
+    fn next_removal_epoch(&self) -> u64 {
+        self.removal_epoch
+            .load(Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
+    #[inline]
+    fn publish_snapshot_at_epochs(
+        &self,
+        mut snapshot: IpsecSaSnapshot,
+        stale_epoch: u64,
+        removal_epoch: u64,
+    ) {
+        snapshot.stale_epoch = stale_epoch;
+        snapshot.removal_epoch = removal_epoch;
+        self.snapshot.store(Arc::new(snapshot));
+    }
+
+    #[inline]
+    fn publish_snapshot_with_fences(
+        &self,
+        snapshot: IpsecSaSnapshot,
+        stale_fence: bool,
+        removal_fence: bool,
+    ) {
+        self.publish_snapshot_with_fences_hook(snapshot, stale_fence, removal_fence, || {});
+    }
+
+    #[inline]
+    fn publish_snapshot_with_fences_hook<F>(
+        &self,
+        snapshot: IpsecSaSnapshot,
+        stale_fence: bool,
+        removal_fence: bool,
+        after_snapshot: F,
+    ) where
+        F: FnOnce(),
+    {
+        let next_stale_epoch = if stale_fence {
+            self.next_stale_epoch()
+        } else {
+            self.stale_epoch.load(Ordering::Relaxed)
+        };
+        let next_removal_epoch = if removal_fence {
+            self.next_removal_epoch()
+        } else {
+            self.removal_epoch.load(Ordering::Relaxed)
+        };
+        // Publish the replacement snapshot first. Each release epoch store is
+        // the corresponding revocation linearization point; an acquiring
+        // reader that observes it must therefore load this snapshot, never
+        // the old one.
+        self.publish_snapshot_at_epochs(snapshot, next_stale_epoch, next_removal_epoch);
+        after_snapshot();
+        if stale_fence {
+            self.stale_epoch
+                .store(next_stale_epoch, Ordering::Release);
+        }
+        if removal_fence {
+            self.removal_epoch
+                .store(next_removal_epoch, Ordering::Release);
+        }
+    }
+
+    #[cfg(test)]
+    fn publish_snapshot_with_removal_fence_paused(
+        &self,
+        snapshot: IpsecSaSnapshot,
+        snapshot_published: &std::sync::Barrier,
+        release_epoch: &std::sync::Barrier,
+    ) {
+        self.publish_snapshot_with_fences_hook(snapshot, false, true, || {
+            drop(snapshot_published.wait());
+            drop(release_epoch.wait());
+        });
+    }
+
     pub(in crate::afxdp) fn mark_stale(&self) {
         let _writer = self.lock_writer();
         let current = self.snapshot.load_full();
         if current.stale {
             return;
         }
-        // Fresh→stale transition: advance the fence epoch so every batch
-        // holding a pre-transition snapshot denies from here on.
-        self.bump_stale_epoch();
         let mut next = (*current).clone();
         next.stale = true;
-        self.publish_snapshot(next);
+        self.publish_snapshot_with_fences(next, true, false);
     }
 
     #[cfg(test)]
@@ -254,16 +341,28 @@ impl IpsecSaStore {
         if self.revoked.load(Ordering::Acquire) {
             return IpsecSaLookup::Stale;
         }
-        // Fence ONLY on stale-state transitions. Benign inserts, removals,
-        // and routine drift redumps share the snapshot's epoch, so a batch
-        // remainder keeps its Hit/Miss verdict across routine monitor
-        // traffic. DELSA-freshness inside one batch is within monitor-event
-        // latency (§5.5); the packet is unmarked q1 either way, FORWARD
-        // still fences, INPUT still hits XFRM enforcement — and a rekey
-        // NEWSA landing mid-batch must not Stale-deny the overlap window
-        // (§5.10/§7-P6 zero-spike acceptance).
+        // A hard stale-state transition invalidates every lookup in the
+        // loaded batch, even when the queried key survives recovery.
         if self.stale_epoch.load(Ordering::Acquire) != snapshot.stale_epoch {
             return IpsecSaLookup::Stale;
+        }
+        // Removal fences are selective so a rekey-overlap batch can retain a
+        // positive verdict for a surviving/new SA. Tombstones preserve the
+        // fence if a removed key is re-added before this batch is drained.
+        if self.removal_epoch.load(Ordering::Acquire) != snapshot.removal_epoch {
+            let current = self.snapshot.load();
+            if current.stale || current.generation == 0 {
+                return IpsecSaLookup::Stale;
+            }
+            if snapshot.entries.contains_key(&key)
+                && (!current.entries.contains_key(&key)
+                    || current
+                        .removed_keys
+                        .get(&key)
+                        .is_some_and(|epoch| *epoch > snapshot.removal_epoch))
+            {
+                return IpsecSaLookup::Stale;
+            }
         }
         Self::lookup_snapshot(snapshot, key)
     }
@@ -325,37 +424,55 @@ impl IpsecSaStore {
         let _writer = self.lock_writer();
         let current = self.snapshot.load();
         let generation = current.generation.saturating_add(1).max(1);
-        // Stale→fresh is a stale-state transition: fence batches holding a
-        // pre-recovery snapshot. Fresh→fresh (routine 30s drift redump) must
-        // NOT bump — it is benign monitor traffic, not an outage.
-        if current.stale {
-            self.bump_stale_epoch();
-        }
         let collisions = multi_source_collision_count(&entries);
         self.counters.record_multi_source_collisions(collisions);
         let entries = self.normalize_dump_entries(entries);
         let entries = cap_entries(entries, &self.counters);
-        self.publish_snapshot(IpsecSaSnapshot {
+        let deleted_keys: Vec<IpsecSaKey> = current
+            .entries
+            .keys()
+            .filter(|key| !entries.contains_key(key))
+            .copied()
+            .collect();
+        let removal_fence = !deleted_keys.is_empty();
+        let mut removed_keys = current.removed_keys.clone();
+        if removal_fence {
+            record_removed_keys(
+                &mut removed_keys,
+                deleted_keys,
+                self.next_removal_epoch(),
+            );
+        }
+        // Stale→fresh and fresh→fresh deletion are both revocation
+        // transitions. A fresh redump with no deletion is benign drift sync.
+        let next = IpsecSaSnapshot {
             entries,
             generation,
             stale: false,
             stale_epoch: 0,
-        });
+            removal_epoch: 0,
+            removed_keys,
+        };
+        self.publish_snapshot_with_fences(next, current.stale, removal_fence);
     }
-
     pub(in crate::afxdp) fn reset_for_monitor_start(&self) {
         let _writer = self.lock_writer();
         // A (re)started monitor establishes a new baseline. Publish the
         // generation-zero stale fence while revocation is still asserted,
         // then clear the independent teardown fence. There is never a
         // ready-looking window in which old readers can race a reset.
-        self.bump_stale_epoch();
-        self.publish_snapshot(IpsecSaSnapshot {
-            entries: FastMap::default(),
-            generation: 0,
-            stale: true,
-            stale_epoch: 0,
-        });
+        self.publish_snapshot_with_fences(
+            IpsecSaSnapshot {
+                entries: FastMap::default(),
+                generation: 0,
+                stale: true,
+                stale_epoch: 0,
+                removal_epoch: 0,
+                removed_keys: FastMap::default(),
+            },
+            true,
+            false,
+        );
         self.revoked.store(false, Ordering::Release);
     }
 
@@ -390,13 +507,32 @@ impl IpsecSaStore {
                 generation: self.next_insertion_order(),
             },
         );
-        self.publish_snapshot(IpsecSaSnapshot {
-            entries: cap_entries(entries, &self.counters),
+        let entries = cap_entries(entries, &self.counters);
+        let deleted_keys: Vec<IpsecSaKey> = current
+            .entries
+            .keys()
+            .filter(|existing| !entries.contains_key(existing))
+            .copied()
+            .collect();
+        let removal_fence = !deleted_keys.is_empty();
+        let mut removed_keys = current.removed_keys.clone();
+        if removal_fence {
+            record_removed_keys(
+                &mut removed_keys,
+                deleted_keys,
+                self.next_removal_epoch(),
+            );
+        }
+        let next = IpsecSaSnapshot {
+            entries,
             generation,
             // Incremental NEWSA/UPDSA observations never clear a stale fence.
             stale: current.stale,
             stale_epoch: 0,
-        });
+            removal_epoch: 0,
+            removed_keys,
+        };
+        self.publish_snapshot_with_fences(next, false, removal_fence);
         if collision {
             self.counters.record_multi_source_collisions(1);
         }
@@ -410,12 +546,24 @@ impl IpsecSaStore {
         let mut entries = current.entries.clone();
         let removed = entries.remove(&key).is_some();
         if removed {
-            self.publish_snapshot(IpsecSaSnapshot {
-                entries,
-                generation: current.generation,
-                stale: current.stale,
-                stale_epoch: 0,
-            });
+            let mut removed_keys = current.removed_keys.clone();
+            record_removed_keys(
+                &mut removed_keys,
+                [key],
+                self.next_removal_epoch(),
+            );
+            self.publish_snapshot_with_fences(
+                IpsecSaSnapshot {
+                    entries,
+                    generation: current.generation,
+                    stale: current.stale,
+                    stale_epoch: 0,
+                    removal_epoch: 0,
+                    removed_keys,
+                },
+                false,
+                true,
+            );
             self.counters.sa_removes.fetch_add(1, Ordering::Relaxed);
         }
         removed
@@ -430,16 +578,32 @@ impl IpsecSaStore {
         let _writer = self.lock_writer();
         let current = self.snapshot.load_full();
         let mut entries = current.entries.clone();
-        let before = entries.len();
+        let deleted_keys: Vec<IpsecSaKey> = entries
+            .keys()
+            .filter(|key| key.family == family && key.dst == dst && key.spi == spi)
+            .copied()
+            .collect();
         entries.retain(|key, _| !(key.family == family && key.dst == dst && key.spi == spi));
-        let removed = before.saturating_sub(entries.len());
+        let removed = deleted_keys.len();
         if removed != 0 {
-            self.publish_snapshot(IpsecSaSnapshot {
-                entries,
-                generation: current.generation,
-                stale: current.stale,
-                stale_epoch: 0,
-            });
+            let mut removed_keys = current.removed_keys.clone();
+            record_removed_keys(
+                &mut removed_keys,
+                deleted_keys,
+                self.next_removal_epoch(),
+            );
+            self.publish_snapshot_with_fences(
+                IpsecSaSnapshot {
+                    entries,
+                    generation: current.generation,
+                    stale: current.stale,
+                    stale_epoch: 0,
+                    removal_epoch: 0,
+                    removed_keys,
+                },
+                false,
+                true,
+            );
             self.counters
                 .sa_removes
                 .fetch_add(removed as u64, Ordering::Relaxed);
@@ -489,6 +653,29 @@ fn cap_entries(
         counters.sa_evictions.fetch_add(1, Ordering::Relaxed);
     }
     entries
+}
+fn record_removed_keys(
+    removed_keys: &mut FastMap<IpsecSaKey, u64>,
+    keys: impl IntoIterator<Item = IpsecSaKey>,
+    epoch: u64,
+) {
+    for key in keys {
+        removed_keys.insert(key, epoch);
+    }
+    if removed_keys.len() <= IPSEC_SA_SNAPSHOT_CAP {
+        return;
+    }
+    let remove_count = removed_keys.len() - IPSEC_SA_SNAPSHOT_CAP;
+    let mut oldest: Vec<(IpsecSaKey, u64)> = removed_keys
+        .iter()
+        .map(|(key, epoch)| (*key, *epoch))
+        .collect();
+    oldest.sort_unstable_by(|(key_a, epoch_a), (key_b, epoch_b)| {
+        epoch_a.cmp(epoch_b).then_with(|| key_a.cmp(key_b))
+    });
+    for (key, _) in oldest.into_iter().take(remove_count) {
+        removed_keys.remove(&key);
+    }
 }
 
 #[inline]
@@ -1056,6 +1243,9 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     #[test]
     fn multi_source_collision_counter_tracks_wildcard_group() {
         let store = IpsecSaStore::new();
@@ -1085,6 +1275,50 @@ mod tests {
         assert_eq!(store.counters.snapshot().sa_multi_source_collisions, 1);
         store.upsert(third);
         assert_eq!(store.counters.snapshot().sa_multi_source_collisions, 2);
+    }
+    #[test]
+    fn fenced_publication_orders_snapshot_before_epoch() {
+        let store = Arc::new(IpsecSaStore::new());
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+
+        let snapshot_published = Arc::new(Barrier::new(2));
+        let release_epoch = Arc::new(Barrier::new(2));
+        let worker_store = Arc::clone(&store);
+        let worker_snapshot_published = Arc::clone(&snapshot_published);
+        let worker_release_epoch = Arc::clone(&release_epoch);
+        let worker = thread::spawn(move || {
+            let current = worker_store.snapshot.load_full();
+            let mut next_entries = current.entries.clone();
+            next_entries.remove(&key(1));
+            worker_store.publish_snapshot_with_removal_fence_paused(
+                IpsecSaSnapshot {
+                    entries: next_entries,
+                    generation: current.generation,
+                    stale: current.stale,
+                    stale_epoch: current.stale_epoch,
+                    removal_epoch: 0,
+                    removed_keys: {
+                        let mut removed_keys = current.removed_keys.clone();
+                        removed_keys.insert(key(1), worker_store.next_removal_epoch());
+                        removed_keys
+                    },
+                },
+                &worker_snapshot_published,
+                &worker_release_epoch,
+            );
+        });
+
+        // The deleting snapshot is already published, but the release epoch
+        // is deliberately withheld. The old batch may still linearize before
+        // revocation, but it must never see a new epoch with the old map.
+        snapshot_published.wait();
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        release_epoch.wait();
+        worker.join().expect("fenced publication worker");
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
     }
 
 
@@ -1140,10 +1374,9 @@ mod tests {
         let batch = store.load_snapshot();
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
         assert!(store.remove(key(1)));
-        // Routine DELSA/NEWSA publications keep the in-flight batch's
-        // stale epoch unchanged; its key verdict remains Hit.  A refreshed
-        // snapshot observes the removal as a Miss.
-        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        // DELSA is a revocation event: an in-flight batch must deny
+        // immediately, while a refreshed snapshot reports a plain miss.
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
         let refreshed = store.load_snapshot();
         assert_eq!(
             store.lookup_loaded(&refreshed, key(1)),
@@ -1151,19 +1384,37 @@ mod tests {
         );
     }
     #[test]
-    fn loaded_batch_keeps_verdict_across_benign_upsert_and_redump() {
+    fn loaded_batch_keeps_rekey_overlap_key_but_fences_removed_key() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        entries.insert(key(2), IpsecSaEpoch { generation: 2 });
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+
+        assert!(store.remove(key(1)));
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
+        // The replacement/new SA remains valid through the same in-flight
+        // batch, preserving the rekey-overlap zero-miss requirement.
+        assert_eq!(store.lookup_loaded(&batch, key(2)), IpsecSaLookup::Hit);
+    }
+
+    #[test]
+    fn loaded_batch_keeps_verdict_across_additive_upsert_but_fences_redump_delete() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
         entries.insert(key(1), IpsecSaEpoch { generation: 1 });
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
         store.upsert(key(2));
+        // Additive NEWSA does not revoke an in-flight positive batch.
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
 
         let mut redump = FastMap::default();
         redump.insert(key(3), IpsecSaEpoch { generation: 2 });
         store.publish_full_dump(redump);
-        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        // The redump deleted key(1), so the old batch is fenced immediately.
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
         let refreshed = store.load_snapshot();
         assert_eq!(
             store.lookup_loaded(&refreshed, key(1)),
@@ -1183,7 +1434,41 @@ mod tests {
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
         assert_eq!(store.lookup(key(1)), IpsecSaLookup::Stale);
     }
+    #[test]
+    fn loaded_batch_stays_fenced_across_stale_recovery_with_retained_key() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
 
+        store.mark_stale();
+        let mut recovery = FastMap::default();
+        recovery.insert(key(1), IpsecSaEpoch { generation: 2 });
+        store.publish_full_dump(recovery);
+
+        // Hard stale transitions fence the whole old batch, even when the
+        // recovered dump contains the same SA key.
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
+        assert_eq!(store.lookup(key(1)), IpsecSaLookup::Hit);
+    }
+
+    #[test]
+    fn loaded_batch_stays_fenced_across_remove_and_readd() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+
+        assert!(store.remove(key(1)));
+        store.upsert(key(1));
+
+        // Tombstone history fences the old key even after the current map
+        // re-adds it; a newly loaded batch can use the replacement.
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
+        assert_eq!(store.lookup(key(1)), IpsecSaLookup::Hit);
+    }
     #[test]
     fn stopping_monitor_fences_existing_snapshot() {
         let mut monitor = IpsecSaMonitor::new();
