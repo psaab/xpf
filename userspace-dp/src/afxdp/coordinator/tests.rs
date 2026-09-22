@@ -165,6 +165,73 @@ use crate::{
     CoSSchedulerMapSnapshot,
 };
 
+#[test]
+fn snapshot_published_tunnel_rows_join_d11_10485() {
+    use crate::afxdp::ipsec_inner::{
+        adjudicate_ipsec_inner, IpsecInnerAdvisory, IpsecInnerInput,
+    };
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
+        ..Default::default()
+    };
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 42);
+    assert_eq!(
+        view.ipsec_tunnel_rows()
+            .exact("st0")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((9, 10))
+    );
+
+    let packet = [0x45; 20];
+    let decision = adjudicate_ipsec_inner(
+        &view,
+        IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st0",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 10,
+            rx_queue_index: 0,
+            advisory: IpsecInnerAdvisory {
+                snapshot_generation: 42,
+                config_generation: 7,
+                fib_generation: 3,
+                zone_id: 1,
+                if_id: 9,
+            },
+            descriptor: None,
+        },
+    );
+    assert!(
+        decision.is_would_permit(),
+        "published non-empty row must complete the D11/D14 join: {decision:?}"
+    );
+}
+
 /// #6563: a `ForwardingState` that OWNS the given addresses, i.e. they are in
 /// the global local-address membership sets `local_v4`/`local_v6`. The
 /// emit-on-wire source gate admits exactly these.
