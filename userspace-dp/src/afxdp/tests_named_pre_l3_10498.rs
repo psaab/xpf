@@ -11,6 +11,7 @@ fn frame_and_meta() -> (Vec<u8>, UserspaceDpMeta) {
         40_000,
         443,
         TCP_FLAG_SYN,
+        TEST_VLAN50_MAC,
     );
     let meta = txn_meta_v4(11, TCP_FLAG_SYN, frame.len() as u16);
     (frame, meta)
