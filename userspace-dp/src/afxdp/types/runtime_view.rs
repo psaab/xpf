@@ -115,7 +115,7 @@ impl IpsecTunnelRows {
         let mut out = Self::default();
         let mut if_id_claims: BTreeMap<u32, usize> = BTreeMap::new();
         for row in rows {
-            if row.stn.is_empty() || row.if_id == 0 || row.logical_ifindex == 0 {
+            if row.stn.is_empty() || row.if_id == 0 || row.logical_ifindex <= 0 {
                 continue;
             }
             *if_id_claims.entry(row.if_id).or_default() += 1;
@@ -421,5 +421,18 @@ mod tests {
         );
         assert_eq!(second.ipsec_snapshot_generation(), 7);
         assert_eq!(second.ipsec_tunnel_rows().exact("st0").map(|r| r.if_id), Some(9));
+    }
+
+    #[test]
+    fn ipsec_tunnel_rows_reject_nonpositive_logical_ifindex() {
+        let rows = IpsecTunnelRows::new([
+            IpsecTunnelRow { stn: "negative".into(), if_id: 1, logical_ifindex: -1 },
+            IpsecTunnelRow { stn: "zero".into(), if_id: 2, logical_ifindex: 0 },
+            IpsecTunnelRow { stn: "valid".into(), if_id: 3, logical_ifindex: 10 },
+        ]);
+        assert!(rows.exact("negative").is_none());
+        assert!(rows.exact("zero").is_none());
+        assert_eq!(rows.exact("valid").map(|row| row.logical_ifindex), Some(10));
+        assert_eq!(rows.len(), 1);
     }
 }

@@ -1154,6 +1154,24 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
     let snapshot = ConfigSnapshot {
         generation: NEW_GEN,
         fib_generation: NEW_FIB_GEN,
+        zones: vec![crate::protocol::snapshot::ZoneSnapshot {
+            name: "zone1".to_string(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
+            name: "st0.0".to_string(),
+            linux_name: "st0".to_string(),
+            ifindex: 10,
+            zone: "zone1".to_string(),
+            ..Default::default()
+        }],
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![crate::protocol::snapshot::IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
         ..Default::default()
     };
 
@@ -1166,6 +1184,42 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
         .clone()
         .expect("refresh must record the view it published");
     let published = coordinator.ha.runtime.load_full();
+    assert_eq!(published.ipsec_snapshot_generation(), 42);
+    assert_eq!(
+        published
+            .ipsec_tunnel_rows()
+            .exact("st0")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((9, 10))
+    );
+    let packet = [0x45; 20];
+    let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
+        &published,
+        crate::afxdp::ipsec_inner::IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st0",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 10,
+            rx_queue_index: 0,
+            advisory: crate::afxdp::ipsec_inner::IpsecInnerAdvisory {
+                snapshot_generation: 42,
+                config_generation: NEW_GEN,
+                fib_generation: NEW_FIB_GEN,
+                zone_id: 1,
+                if_id: 9,
+            },
+            descriptor: None,
+        },
+    );
+    assert!(
+        decision.is_would_permit(),
+        "refresh_runtime_snapshot publication must complete the D11/D14 join: {decision:?}"
+    );
 
     // THE INVARIANT, part 1: the pair the coordinator intended IS the pair a
     // worker observes — same validation, same forwarding allocation. A publish
