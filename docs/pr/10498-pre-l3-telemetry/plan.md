@@ -1,309 +1,434 @@
 # Plan: dedicated telemetry for named pre-L3 drops (#10498)
 
-Status: DRAFT v1 — for parent-lane plan review. No production code in this round.
+Status: DRAFT v2 — revised after hostile plan review; parent delta review is
+next. No production code in this round.
 
 ## 1. Issue framing
 
 Three named pre-L3 drop sites in
 userspace-dp/src/afxdp/poll_descriptor/mod.rs are silent — no dedicated
-counter, event, or log distinguishes "no traffic" from "traffic dropped":
+counter, event, or log distinguishes the three named reasons from ordinary
+idle traffic:
 
-1. UMEM-slice failure (~L248-253): pushes the descriptor to scratch_recycle
-   and continues with NO counter and not even a touched flag at the site.
+1. UMEM-slice failure (~L248-253): pushes the descriptor to
+   scratch_recycle and continues with no local drop counter and no touched
+   assignment at that site.
 2. Unknown-VLAN drop (~L265-275, causal owner #10313): sets only
    telemetry.counters.touched = true before recycling.
 3. Destination-MAC drop (~L281-290, causal owner #10314): same touched-only
    treatment.
 
-touched is a boolean flush/liveness flag set idempotently at 40+ unrelated
-sites (disposition.rs, icmp.rs, poll_stages.rs, tx/dispatch, cookie_reply,
-reject_reply, nat_exception, flowless_verdict, rx_telemetry); it gates
-BatchCounters::flush and carries no tally. This contradicts the
-docs/engineering-style.md overflow/failure policy row: invariant violation
-at runtime requires bumping a dedicated counter and continuing.
+touched is a boolean flush/liveness flag, not a tally. The current tree has
+57 touched=true setters in the afxdp scope (including tests); they are
+idempotent stores at unrelated RX, disposition, screen, NAT, reject, and TX
+sites. BatchCounters::flush uses the flag only as its early-return gate.
 
-Acceptance (from the issue): one dedicated counter per named drop, surfaced
-in show/telemetry; touched remains liveness-only; drop accounting never
-relies on it.
+The engineering-style.md runtime-failure row at line 639 is narrower than
+the issue wording: it requires a dedicated counter for a rare runtime
+invariant violation/driver bug, which squarely covers the UMEM-slice failure.
+It does not by itself require counters for expected configured admission
+outcomes such as unknown VLAN or destination-MAC rejection. Those two are
+still worth dedicated telemetry by the shipped martian/IPv6 fail-closed
+precedent and because operators need to distinguish those three named
+reasons; this plan does not misstate the style row as a blanket mandate.
+The fail-closed show-surface guidance at lines 642-662 separately supports
+surfacing an actionable reason when a path is deliberately excluded.
+
+Acceptance remains one dedicated counter per named drop, visible in
+show/telemetry, with touched retaining liveness-only semantics. No verdict
+or forwarding behavior changes.
 
 ## 2. Honest scope and value
 
-Value: LOW but real. Silent pre-L3 drops complicate outage triage today —
-an operator cannot tell an idle link from a link whose traffic dies on
-unknown-VLAN or dst-MAC admission. Three attributed counters close exactly
-that triage gap. Nothing more is claimed: this changes no verdict, no
-forwarding behavior, no performance characteristic.
+Value: LOW but real. The three named pre-L3 reasons are currently absent
+from the operator's reason breakdown, so an outage investigator cannot tell
+an idle link from traffic rejected by an unknown VLAN, a destination-MAC
+anti-loop guard, or a UMEM slice failure. This closes the attribution gap
+for these three named reasons only; it does not claim to instrument every
+packet discarded before or after L3. Other silent or debug-only drops remain
+explicitly out of scope below.
 
-Cost: the telemetry pipeline has ~9 touch points per counter (batch slot,
-bump site, flush arm, live atomic, snapshot load, copy/zero/reset parity,
-Go wire field, status render + golden, Prometheus series + docs). Times
-three counters plus unit/visibility tests, this is a medium-sized,
-mechanical, review-heavy change — roughly 27 small edits, each trivial,
-whose risk lives entirely in forgetting one half of a parity pair.
+Cost: the pipeline has 16 named checkpoints per counter when structural
+fields and read surfaces are counted: bump site; BatchCounters slot; flush;
+BindingLiveState field and constructor; BindingLiveSnapshot field and load;
+copy_live_snapshot; zero_unbound_slot; reconcile/reset.rs; Rust wire field;
+Go wire field; Go sum/bridge; status aggregation/render and golden; global
+counter bridge where applicable; Prometheus descriptor/collector; and docs.
+Three counters therefore touch roughly 48 checklist locations plus tests.
+The work is mechanical but review-heavy: a missed copy/reset/wire seam can
+produce a clean zero instead of a visible count.
 
-Honest caveat on the UMEM site: record_rx_descriptor_telemetry runs for
-every descriptor BEFORE the UMEM-slice arm and already sets touched plus
-rx_packets, so the batch still flushes — the loss is attribution, not the
-flush. The issue's "not even a touched flag" is literally true AT THE SITE
-and the fix should still set touched there (every bump site sets it; the
-site must stay correct if rx accounting ever moves), but no flush bug is
-being fixed here.
+The UMEM caveat is important: record_rx_descriptor_telemetry runs for every
+descriptor before the UMEM-slice arm and already sets touched plus RX
+counters, so the current batch still flushes. The requested UMEM counter is
+an attribution fix, not a claim that this particular path currently strands
+a batch. The new bump still sets touched by convention and future-proofing.
 
-## 3. Shipped context (precedent, not invention)
+## 3. Shipped context and live search
 
-The design below copies the #4743/#4768 per-drop-counter chain
-(martian_dropped, ipv6_ext_header_dropped), the closest shipped sibling:
-fail-closed pre-policy drops with per-binding counters, status rows, and
-unconditional Prometheus series. Adjacent precedent:
+The closest shipped chain is #4743/#4768:
 
-- #1187 double-buffer: BatchCounters batch on plain u64, flush deltas to
-  BindingLiveState atomics under Relaxed ordering; nonzero-gated arms avoid
-  MESI ping-pong with coordinator status reads under flood.
-- #3326 host_inbound_denied + #4477 nat_alloc_fail: the GlobalCtr-bridged
-  family — Rust per-binding counts summed in Go (manager_counters.go
-  sumBindingCounters), delta-pushed into GlobalCtr indexes by
-  syncBPFCountersLocked, folded into the aggregate Packets dropped total
-  (totalDrops = policyDenied + screenDrops + hostInboundDenied +
-  natAllocFail), rendered in show security flow statistics, exported as
-  xpf_host_inbound_denies_total-class series.
-- #3343 per-reason screen drops: aggregate + indexed breakout array flushed
-  element-wise; reasons without a published ordinal bump only the aggregate.
-- #2515 / #5190 / #5190-cohort: copy_live_snapshot vs zero_unbound_slot vs
-  reconcile/reset.rs MUST stay field-for-field in step; drift happened
-  twice (stale drop totals on unbound slots), now guarded by poison-harness
-  parity tests.
-- #10313 (unknown-VLAN guard) and #10314 (dst-MAC guard) are CLOSED causal
-  owners; this plan touches their verdicts in NO way and keeps both linked.
-- #4768: martian/ipv6 series are emitted unconditionally (0 is a real "no
-  such drops" signal) so operators can alert without polling status text.
+BatchCounters.martian_dropped / ipv6_ext_header_dropped → nonzero-gated
+flush with Relaxed fetch_add and reset → BindingLiveState AtomicU64 + ctor
+→ BindingLiveSnapshot struct/load → coordinator copy_live_snapshot and
+zero_unbound_slot → reconcile/reset.rs → Rust BindingStatus wire fields
+with serde rename/default → Go BindingStatus json tags →
+sumBindingCounters and the 1/s global-counter bridge → status summary
+aggregation/render and golden → Prometheus descriptor/collector → CLI/API
+and docs. The full source path is enumerated in §4.3 and the blast-radius
+census in §11.
+
+Other relevant precedent:
+
+- #1187 batches plain u64 fields in the owner worker and flushes only
+  nonzero fields into per-binding Relaxed atomics, avoiding per-packet
+  cross-core MESI traffic.
+- #3326 host_inbound_denied and #4477 nat_alloc_fail are configured
+  enforcement drops bridged through Go into GlobalCtr indexes and the
+  aggregate Packets dropped total.
+- #3343 carries an aggregate plus indexed screen-reason array and tests the
+  fixed-length wire array element-wise.
+- #2515/#5190 establish that copy_live_snapshot and zero_unbound_slot must
+  stay in parity. The #5190 census is automatic over serialized fields; it
+  does not need a hand-edited field list for these additions.
+- #10313 and #10314 are CLOSED causal owners. This plan changes neither
+  guard predicate nor verdict.
+
+### Live merged-PR search (required STEP-0 evidence)
+
+The direct GitHub repository query
+`is:pr is:merged #10498` at
+https://github.com/psaab/xpf/pulls?q=is%3Apr+is%3Amerged+%2310498 returned
+0 total. The repository pull-request search
+`repo:psaab/xpf 10498` at
+https://github.com/search?q=repo%3Apsaab%2Fxpf+10498&type=pullrequests
+returned 0 results. A broader merged title query
+`is:pr is:merged "pre-L3"` at
+https://github.com/psaab/xpf/pulls?q=is%3Apr+is%3Amerged+%22pre-L3%22
+returned four unrelated PRs (#6882, #3907, #2424, #1283), none a fix for
+#10498. Local history also shows the #10313/#10314 causal commits but no
+named pre-L3 telemetry plumbing.
 
 ## 4. Concrete design
 
-### 4.1 Counter names, types, placement
+### 4.1 Counter names, types, and placement
 
-Three new u64 slots on BatchCounters
-(userspace-dp/src/afxdp/mod.rs, beside martian_dropped /
-ipv6_ext_header_dropped), each with a doc comment naming the issue,
-the guard owner, and the flush target:
+Use the existing bare-name style (`martian_dropped`,
+`ipv6_ext_header_dropped`) rather than inventing a `pre_l3_` prefix:
 
-- pre_l3_umem_slice_dropped — UMEM-slice None arm (~L248-253).
-- pre_l3_unknown_vlan_dropped — unknown_ingress_vlan arm (~L265-275).
-- pre_l3_dst_mac_dropped — !ingress_destination_mac_accepted arm (~L281-290).
+- `umem_slice_dropped` — the UMEM `slice(...) == None` arm.
+- `unknown_vlan_dropped` — the `unknown_ingress_vlan(...)` arm.
+- `dst_mac_dropped` — the `!ingress_destination_mac_accepted(...)` arm.
 
-Rationale for the pre_l3_ family prefix: 56 scratch_recycle.push sites
-exist in poll_descriptor/mod.rs; bare names (vlan_dropped, mac_dropped)
-will collide with future per-feature counters, while the prefix groups the
-family in status output and series names. Bare-name alternative is open
-question Q4.
+The stage and status labels carry the pre-L3 context; bare names match the
+counter vocabulary already used in this crate and avoid a speculative
+collision rationale. The corresponding Rust/Go wire keys are exactly
+`umem_slice_dropped`, `unknown_vlan_dropped`, and `dst_mac_dropped`.
 
-Type: plain u64 on BatchCounters (batch-local, cache-hot, zeroed on
-flush); AtomicU64 on BindingLiveState (binding_state/mod.rs + ctor init);
-u64 on BindingLiveSnapshot (binding_state/snapshot.rs load Relaxed).
+Each is a plain u64 on BatchCounters (single-owner batch-local state), an
+AtomicU64 on BindingLiveState (Relaxed fetch_add at flush), a u64 field on
+BindingLiveSnapshot, and a u64 field on the Rust and Go BindingStatus wire
+structures. Add the fields beside the existing martian/IPv6 family in each
+like-for-like structure; append the live atomics according to the existing
+layout discipline, then re-measure the layout assertions.
 
-### 4.2 Bump sites (the only hot-path diff)
+### 4.2 Bump sites
 
-At each of the three arms, before scratch_recycle.push(desc.addr):
+At each of the three existing recycle arms, immediately before
+scratch_recycle.push(desc.addr), add the observer-only shape:
 
   telemetry.counters.touched = true;
-  telemetry.counters.pre_l3_X_dropped += 1;
+  telemetry.counters.<reason> += 1;
 
-No helper, no record_* method indirection: the two-line shape is what
-flowless_verdict.rs:63-64 (ipv6_ext_header_dropped) and every disposition
-arm already do. The UMEM arm additionally GAINS touched = true (see the
-section-2 caveat for why this is convention, not a flush fix). Guard order
-(VLAN before MAC before L3) and verdicts are untouched — counters are pure
-observers.
+The UMEM arm gains touched by convention even though RX telemetry has already
+set it earlier in the same descriptor path. No helper or record_* method is
+needed: the two-line shape matches flowless_verdict.rs and disposition.rs.
+Guard order remains VLAN → destination MAC → ARP/NDP → tunnel decapsulation
+→ flow/session → L3 policy; each branch still recycles and continues exactly
+as before.
 
-### 4.3 Emission path (per counter, in order)
+### 4.3 Emission and consumer path
 
-1. flush() arm in userspace-dp/src/afxdp/mod.rs: nonzero-gated
-   live.X.fetch_add(delta, Relaxed) + reset to 0 (#1187 shape).
-2. BindingLiveState AtomicU64 + constructor init (binding_state/mod.rs).
-3. BindingLiveSnapshot load (binding_state/snapshot.rs).
-4. copy_live_snapshot + zero_unbound_slot
-   (coordinator/refresh_bindings.rs) + reconcile/reset.rs clearing —
-   all three, same PR (#2515/#5190 discipline).
-5. Go wire: protocol_binding.go X uint64 with json omitempty; Rust serde
-   default for cross-version safety (older helper omits -> 0).
-6. Status render: format/status_sections.go sum-across-bindings +
-   "Pre-L3 UMEM-slice drops:" / "Pre-L3 unknown-VLAN drops:" /
-   "Pre-L3 dst-MAC drops:" rows + status_summary.golden update.
-7. Prometheus: xpf_userspace_pre_l3_umem_slice_dropped_total and siblings,
-   summed across bindings, emitted unconditionally (#4768 shape).
-8. Docs: docs/junos-cli-reference.md rows beside the Martian / IPv6
-   ext-header drop documentation.
-9. NOT folded into GlobalCtrDrops/totalDrops: martian/ipv6 precedent keeps
-   non-enforcement drops out of Packets dropped (see Q3 for the dissent).
+For each counter, implement and test every checkpoint below:
 
-Scope/cardinality convention preserved: per-binding counters summed to
-operator totals; NO per-VLAN / per-MAC / per-interface labels. Process-wide
-global atomics (status.rs NDP_NA_*/FABRIC_LINK_* pattern) are for rare
-control-plane events, not per-packet drops — explicitly not used here.
+1. BatchCounters field and the one existing drop-arm increment.
+2. `flush`: nonzero gate, `live.field.fetch_add(delta, Relaxed)`, then
+   batch reset to zero.
+3. BindingLiveState AtomicU64 field plus constructor initialization.
+4. BindingLiveSnapshot field plus its Relaxed load.
+5. `copy_live_snapshot` assignment into the bound BindingStatus.
+6. `zero_unbound_slot` clear of an unbound status slot.
+7. `reconcile/reset.rs::reset_binding_counters` clear during reconcile.
+8. Rust BindingStatus serde field with exact rename and default.
+9. Go BindingStatus field with the matching exact json tag and omitempty.
+10. `sumBindingCounters` aggregation across bindings.
+11. The existing status summary one-pass aggregation and status rows, with
+    golden fixture values distinct per row.
+12. Prometheus descriptor registration plus collector emission, summed
+    across bindings and emitted unconditionally (zero is a real signal).
+13. CLI/REST/gRPC show surfaces for the named rows and, for the two folded
+    admission reasons, their global counter breakdowns.
+14. Documentation of status labels, metric names, and Packets dropped
+    scope.
 
-## 5. API preservation
+Global-counter ruling (resolved Q3): unknown VLAN and destination-MAC are
+configuration-driven admission rejects, the same operator-enforcement class
+as folded host-inbound deny. Add two dedicated global indices named
+`GlobalCtrUnknownVLANDrops` and `GlobalCtrDstMACDrops` at the next currently
+free slots (41 and 42 on this baseline; re-check before implementation),
+raise `GlobalCtrMax` accordingly, and update the shared C/Rust/Go map-size
+constants. `userspaceCounterSnapshot` sums both fields; `totalDrops()` adds
+both; `syncBPFCountersLocked` pushes both reason deltas and the aggregate.
+Add the corresponding CLI/API/Prometheus breakdown rows and distinct global
+series (for example `xpf_unknown_vlan_drops_total` and
+`xpf_dst_mac_drops_total`) so GlobalCtrDrops remains a total-with-breakdown.
+Concrete current owners for those checkpoints are `userspace-dp/src/afxdp/mod.rs` (batch/flush), `userspace-dp/src/afxdp/binding_state/mod.rs` and `binding_state/snapshot.rs` (live/snapshot), `userspace-dp/src/afxdp/coordinator/refresh_bindings.rs` plus `coordinator/reconcile/reset.rs` (copy/zero/reset), `userspace-dp/src/protocol/binding.rs` (Rust serde wire), `pkg/dataplane/userspace/protocol_binding.go` and `manager_counters.go` (Go wire/sum/bridge), `pkg/dataplane/userspace/format/status_sections.go` and its golden test (show summary), `pkg/api/metrics_descriptors_userspace_drops.go`, `metrics_userspace.go`, and `metrics.go` (Prometheus descriptors/collector/registration), `pkg/cli/cli_show_flow.go`, `pkg/grpcapi/server_show_flow.go`, and `pkg/grpcapi/server_show_status.go` (operator/API views), plus `docs/junos-cli-reference.md`.
 
-- Rust: BatchCounters and BindingLiveState gain fields; all producers are
-  in-crate (pub(in crate::afxdp)); no public API changes. Flush stays
-  private; no signature changes at bump sites (TelemetryContext already
-  threaded).
-- Wire: additive omitempty JSON fields with serde defaults — old helper vs
-  new manager (and reverse) degrade to 0, no break (protocol_binding.go
-  documents this pattern per field).
-- CLI/REST/Prometheus: additive rows/series only; existing series values
-  unchanged (no refolding of Packets dropped). Golden file update is
-  additive lines.
-- Layout: new BindingLiveState atomics are appended; implementation MUST
-  re-run the layout-guard tests and report any offset/size assert needing
-  re-measurement rather than assuming none exists (see risk C2).
+The UMEM-slice failure is a driver/memory hygiene failure, analogous to
+metadata_errors and the martian/IPv6 non-enforcement family. It receives the
+same status and userspace Prometheus visibility but is deliberately excluded
+from GlobalCtrDrops and gets no GlobalCtr index. Update the Packets dropped
+scope documentation to say explicitly that VLAN/MAC admission drops are
+included while UMEM-slice hygiene is not. This split is intentional and
+per-reason; the rejected uniform NOT-folded default would undercount the two
+configured admission controls.
 
-## 6. Hidden invariants (the plan-review checklist)
+Cardinality stays per-binding and process-global: no VLAN ID, MAC, ifindex,
+or interface labels. The userspace series sum BindingStatus across bindings;
+the two folded global series read their dedicated GlobalCtr offsets.
 
-- H1 Hot-path cost: each bump is ONE branch-predictable u64 increment on
-  the already-borrowed &mut BatchCounters. NO per-packet allocation, NO
-  lock, NO atomic on the packet path (atomics only at flush under
-  Relaxed). The increment sits on the drop arm (cold by definition — drops
-  are the exception), so steady-state forwarding pays nothing.
-- H2 touched stays boolean liveness: no reader may treat it as a tally;
-  no drop accounting may branch on it. Flush's early return on !touched is
-  a MESI optimization, not semantics.
-- H3 Guard order is load-bearing: unknown-VLAN before dst-MAC before ARP/
-  NDP, decap, flow/session, screen, policy. Counter edits must not move,
-  merge, or early-exit any guard.
-- H4 UMEM arm purity: the None arm must not touch area/frame (the slice
-  does not exist); bump-then-recycle only.
-- H5 Flush discipline: nonzero gate, fetch_add, reset to 0 — in that
-  order, per field. A missed reset double-counts; a missing gate adds MESI
-  traffic under flood.
-- H6 Triple parity: copy_live_snapshot, zero_unbound_slot, reconcile/
-  reset.rs clear the same field set; the poison-harness parity test must
-  cover the three new fields or the PR is incomplete.
-- H7 No label cardinality: values aggregated per binding, summed globally.
-  Any per-VLAN/per-MAC breakout proposal fails this invariant and needs a
-  new plan round.
+## 5. API and compatibility preservation
 
-## 7. Risk table (4 classes)
+- Rust internals remain `pub(in crate::afxdp)` with no signature changes;
+  only additive fields and observer increments are required.
+- Rust and Go wire fields are additive, use exact matching names,
+  `serde(default)` on Rust and `omitempty` on Go, and decode absent fields
+  as zero for mixed-version helper/manager rollout.
+- Additive CLI/status/REST/gRPC rows do not remove existing fields. The one
+  intentional semantic change is documented: GlobalCtrDrops gains the two
+  configured admission reasons, while the UMEM hygiene counter remains
+  outside it.
+- BindingLiveState is in-process Arc-shared Rust layout, not a shared-memory
+  or C ABI object. Existing size/offset tests must be run and measured
+  literals updated only if the append changes them; this is not a reason to
+  redesign the pipeline.
+- The Rust JSON-key and Go JSON-decode pins in §8 are mandatory because a
+  serde rename/json tag mismatch otherwise degrades silently to zero.
+
+## 6. Hidden invariants
+
+- H1 Hot-path cost: a drop arm performs one branch-predictable u64
+  increment on the already-borrowed BatchCounters. No allocation, lock, or
+  packet-path atomic is introduced; only the existing per-poll Relaxed flush
+  touches live atomics.
+- H2 touched is liveness only. No reader treats it as a count, and no drop
+  accounting depends on its numeric history. Its early-return role is a
+  flush optimization.
+- H3 Guard order and verdicts are load-bearing and unchanged.
+- H4 The UMEM None arm never dereferences or slices a missing frame; it only
+  bumps the counter and recycles.
+- H5 Flush order is nonzero gate → fetch_add → reset. Missing reset would
+  double-count; missing gate would add cross-core traffic under flood.
+- H6 Copy/reset parity has two distinct guards: the existing #5190 census
+  automatically checks every serialized copy_live_snapshot field against
+  zero_unbound_slot and needs no extension; a new targeted 9956-style
+  round-trip cell checks batch → flush → live → snapshot → copy → status →
+  zero for these three fields; a separate reconcile/reset.rs companion cell
+  checks reset_binding_counters. The latter is required because reset.rs is
+  not covered by the #5190 census and an omission is green today.
+- H7 No labels are added for VLAN, MAC, or interface identity.
+- H8 Owner-worker lifecycle is single-writer: BatchCounters is stack-local
+  to the owner poll loop, bounded by the existing RX batch limits; the live
+  field is read Relaxed by the periodic snapshot. These descriptor drops do
+  not need a Cold-path writer.
+- H9 u64 overflow is not a practical per-poll concern (at most the existing
+  bounded descriptor batch); process-wide wrap is handled by the existing
+  safeDelta/reset convention.
+- H10 Global bridge deltas are disjoint: VLAN and MAC each bump once on the
+  first matching pre-L3 guard; UMEM never enters totalDrops, so no double
+  count or orphaned global term is possible.
+
+## 7. Risk table (exactly four classes)
 
 | # | Class | Risk | Likelihood / effect | Mitigation | Residual |
-|---|-------|------|---------------------|------------|----------|
-| P1 | Packet-path correctness | Counter edit disturbs a guard (reorder, swallowed recycle, verdict change) | Low / HIGH — silent forward/drop flip | Two-line observer-only diff per site; no guard motion; unit tests assert recycle + verdict unchanged; fail-on-revert bump tests | Near zero; review diff is 6 lines of hot path |
-| P2 | Performance | Extra work on the hot path (branch mispredict, cache pressure) | Very low / low — drops arms are cold; increment on hot struct | H1 shape (single u64 += 1, no atomic/alloc/lock); no new branches (bump inside existing arm) | Nil; no perf gate required beyond existing suite |
-| C1 | Compat (wire/layout) | New fields break old-helper/new-manager interop or layout asserts | Low / medium — status skew or test red | omitempty + serde default both directions; run layout-guard + golden tests; report re-measurements explicitly | Near zero; additive-only change |
-| C2 | Compat (reset parity) | New field copied but not cleared (unbound slot shows stale drops) — the exact #2515/#5190 recurrence | Medium (it happened twice) / low — cosmetic stale total | H6 triple-parity + extend poison-harness parity test to the 3 fields; test RED without the reset half | Near zero if the test lands in the same PR |
-| O1 | Operability | Counters land but operators cannot find them (no status row / series / docs) | Low / medium — the issue's triage gap persists | Section 4.3 steps 6-8 mandatory, not follow-up; counter-visibility proof in test plan | Near zero |
-| O2 | Operability | Packets-dropped total confusion: are pre-L3 drops in GlobalCtrDrops or not? | Certain confusion if undocumented / low — triage arithmetic | Explicit NOT-folded decision (Q3 records dissent); docs row states the exclusion like the martian/ipv6 rows do | Documented; revisitable |
-| T1 | Test | Unit tests pin the bump but not the visibility (dead-counter recurrence à la pre-#3326 GlobalCtrHostInboundDeny stuck at 0) | Medium / medium — green suite, blind operator | Counter-visibility proof required: status text + Prometheus series asserted end-to-end, not just the Rust field | Low; mirrors the #3326/#4477 bridge tests |
+|---|---|---|---|---|---|
+| P1 | Packet-path | An observer edit reorders a guard, swallows recycle, or changes a verdict. | Low / HIGH — forward/drop behavior could flip. | Keep the two-line bump inside each existing arm; head tests assert recycle and downstream non-reachability. | Near zero. |
+| P2 | Packet-path | Counter work adds hot-path cost or cache contention. | Very low / low — only taken drop arms increment; live atomics remain batched. | H1/H8; no new branch/alloc/lock/atomic; use the existing cluster-smoke throughput regression lane named at afxdp/mod.rs:337-341. | Low and measurable. |
+| C1 | Compat | Additive Rust/Go fields or two new global indices mismatch mixed versions or layout/map sizes. | Low / medium — silent zero, status skew, or map failure. | Exact wire-name pins, serde default/json omitempty, re-measured layout guards, shared GlobalCtrMax update. | Near zero. |
+| C2 | Compat | A new field is copied but not cleared, or reconcile reset omits it. | Medium / medium — stale unbound totals or reset survivors; this recurrence happened before. | #5190 auto census for copy/zero; targeted 9956 round-trip plus reset.rs companion cell for the three fields. | Low if both cells land. |
+| O1 | Operability | A counter exists but its status/Prometheus/global scope is misleading or undiscoverable. | Medium / medium — triage remains ambiguous or Packets dropped arithmetic lies. | 16-checkpoint checklist; distinct rows/series; explicit VLAN/MAC-included vs UMEM-excluded docs and global breakdowns. | Low. |
+| T1 | Test | All-ones fixtures or fabricated-only tests let wiring mistakes pass, especially at the Rust/Go JSON seam. | Medium / high — green suite with permanent zero telemetry. | Distinct 1/2/3 fixtures, split Rust/Go harnesses, both wire-name pins, and enumerated red-on-revert tripwires in §8. | Low. |
 
-(4 classes: Packet-path, Compat, Operability, Test. Highest real risk is
-C2 by history and T1 by precedent — both handled by named tests, not care.)
+The four classes are Packet-path, Compat, Operability, and Test. Performance
+is intentionally a Packet-path risk, not a fifth class.
 
-## 8. Test plan
+## 8. Test plan and red-on-revert map
 
-Unit (Rust, fail-on-revert style per site, mirroring
-flowless_verdict_tests.rs):
+No cross-language Rust-drop-to-Go-text test exists in the current tree. Keep
+the proof honest by splitting the harnesses while pinning their seam.
 
-- Unknown-VLAN crafted frame (tagged VID with no configured unit on a
-  trunk whose units agree on one zone) through the poll_descriptor head:
-  pre_l3_unknown_vlan_dropped == 1, touched set, descriptor recycled,
-  downstream stages unreached.
-- Dst-MAC reject frame (unicast to foreign MAC): pre_l3_dst_mac_dropped
-  == 1, touched set, recycled. Plus positive controls: broadcast/
-  multicast and expected-MAC frames do NOT bump.
-- UMEM OOB slice (desc.addr/len past area end): pre_l3_umem_slice_dropped
-  == 1, touched set, recycled, no panic.
-- Flush: batch with (1,2,3) across the three slots flushes exactly (1,2,3)
-  into BindingLiveState and resets batch slots to 0; untouched batch
-  flushes nothing.
-- Triple parity: extend the #2515/#5190 poison harness with the three
-  fields — RED if any of copy/zero/reset omits one.
-- Golden: status_summary.golden gains the three rows; Go aggregation test
-  sums them across bindings.
+### Rust packet and lifecycle cells
 
-Counter-visibility proof (the T1 killer, mandatory):
+- Three head cells drive `txn_run_descriptor` / the existing poll-head
+  harness, one for each named arm. Each asserts its target BatchCounters
+  slot is 1, the other two are 0, the descriptor is recycled, and the
+  downstream stage is unreached. Reverting any one bump makes its named head
+  cell RED.
+- The UMEM cell uses a custom XdpDesc variant: metadata remains valid, but
+  the descriptor's frame range is outside the UMEM slice. This proves
+  `umem_slice_dropped` rather than the unrelated `metadata_errors` counter;
+  a naive out-of-bounds fixture that fails metadata parsing is rejected as a
+  vacuous test.
+- Unknown-VLAN uses the existing tagged unknown-VID recycle fixture. Dst-MAC
+  uses the existing wrong-unicast destination fixture plus positive
+  broadcast/multicast and expected-MAC controls.
+- A flush/round-trip cell seeds distinct BatchCounters values (1, 2, 3),
+  flushes into BindingLiveState, snapshots, copies into BindingStatus, and
+  checks each distinct value survives before zero_unbound_slot clears all
+  three. Reverting any flush arm or copy/zero assignment makes the distinct
+  assertion RED.
+- A separate `reconcile/reset.rs` companion cell seeds BindingStatus with
+  (1, 2, 3), calls reset_binding_counters, and asserts all three become 0.
+  Reverting any reset line is RED. The #5190 automatic serialization census
+  remains unchanged; it already covers copy_live_snapshot vs
+  zero_unbound_slot without hand-maintained field additions.
+- Rust wire-name pin serializes a BindingStatus payload with values 1, 2, 3
+  and asserts the exact JSON keys `umem_slice_dropped`,
+  `unknown_vlan_dropped`, and `dst_mac_dropped`. Reverting any serde rename
+  is RED even though a defaulted receiver would otherwise read zero.
 
-- End-to-end: drive one drop of each kind through a status poll; assert
-  the three status-text rows move 0 -> 1 AND the three Prometheus series
-  exist with value 1. Follows the engineering-style.md witness rule: pair
-  each crafted drop frame with a witness frame proving the harness would
-  have observed a pass, and sample the AGGREGATE-capable surface (status
-  text) rather than inferring from absence.
-- Negative: idle poll shows 0s (series present, not absent) — "no traffic"
-  vs "dropped" now distinguishable, which is the issue's entire point.
+### Go fabricated-status and surface cells
 
-No cluster/incus lanes required: all proof runs in userspace unit + Go
-status-render tests. If a lane cannot run in the test env, the PR body
-says so with reason (never a claimed green).
+- The Go status aggregation fixture fabricates three BindingStatus values
+  1, 2, and 3 across different bindings and asserts each named status row
+  renders its own aggregate, never an all-ones or copied field. Removing
+  any sum or render term is RED.
+- The Go Prometheus fixture uses distinct binding values and asserts all
+  three per-binding series are emitted unconditionally with their distinct
+  totals. Removing a descriptor, collector emit, or zero-preserving path is
+  RED.
+- A Go JSON-decode pin feeds the three exact Rust keys with values 1, 2, 3
+  and asserts the Go fields. Reverting any json tag is RED.
+- Global-counter bridge tests use distinct unknown-VLAN and dst-MAC values,
+  assert each new reason index, and assert GlobalCtrDrops includes those two
+  plus the existing enforcement terms but not UMEM. Removing either
+  sum/total/delta term or either new index is RED; repeated polls assert
+  safeDelta idempotence.
+- Status golden data uses distinct values (for example 1, 2, 3), not three
+  ones, so a copy-paste row wiring error cannot pass.
 
-## 9. Out of scope (explicit)
+### Named tripwires
 
-- The other ~53 scratch_recycle.push sites: the issue files three NAMED
-  drops and disclaims "exactly three" (Limits section). No enumeration,
-  no aggregate pre-L3 catch-all in this change.
-- Per-VLAN / per-MAC / per-interface label breakouts (H7 cardinality
-  invariant).
-- Per-drop events or logs (the #3610 tuple-rich event pattern): the issue
-  asks for counters; hot-path logging of drops is a flood-DoS on the log
-  pipeline.
-- XDP-side (kernel/AF_XDP shim) drops before userspace ever sees the
-  descriptor — different layer, different telemetry.
-- Folding into GlobalCtrDrops / Packets dropped (decided NO in 4.3.9;
-  Q3 keeps the appeal window open).
-- Any verdict change to #10313/#10314 guards (causal owners stay linked,
-  untouched).
+| Counter | Rust head | Flush/reset | Wire seam | Go status/metrics |
+|---|---|---|---|---|
+| umem_slice_dropped | UMEM custom-desc head cell | round-trip + reset companion | Rust key + Go decode pin | status row + userspace series; absent from GlobalCtrDrops |
+| unknown_vlan_dropped | tagged unknown-VID head cell | round-trip + reset companion | Rust key + Go decode pin | status/series + GlobalCtrUnknownVLANDrops + folded total |
+| dst_mac_dropped | wrong-unicast head cell | round-trip + reset companion | Rust key + Go decode pin | status/series + GlobalCtrDstMACDrops + folded total |
 
-## 10. Open questions (PLAN-KILL invitations)
+The existing layout-guard suite is the compatibility proof for appended
+AtomicU64s. The existing canonical throughput smoke is the performance
+regression check; no new microbenchmark is proposed.
 
-- Q1 Aggregate vs per-drop: is three counters worth ~27 touch points, or
-  should this collapse to ONE pre_l3_dropped aggregate (possibly with
-  debug-only per-site breakout)? If reviewers judge the surface cost too
-  high for a LOW-impact triage gap, KILL the per-drop design toward the
-  aggregate — the plan survives in reduced form.
-- Q2 UMEM-slice placement: a UMEM-slice failure is a driver/memory
-  invariant violation, not an enforcement/admission drop. Does it belong
-  on the operator surface at all, or in DebugPollCounters only (with just
-  the two admission drops operator-visible)? The engineering-style.md
-  runtime row supports a dedicated counter either way; actionability
-  decides. KILL the third operator counter if unactionable.
-- Q3 GlobalCtrDrops folding: martian/ipv6 precedent says non-enforcement
-  drops stay OUT of Packets dropped; host-inbound/nat-alloc precedent
-  folds enforcement drops IN. Are unknown-VLAN/dst-MAC drops
-  "enforcement" (operator-configured admission) or "hygiene" (martian
-  class)? A wrong call here corrupts Packets-dropped triage arithmetic —
-  argue it now, not in review round 3.
-- Q4 Naming: pre_l3_ family prefix vs bare vlan/mac/umem names? Prefix
-  groups but is longer and without in-tree precedent (existing names are
-  bare: martian_dropped, ipv6_ext_header_dropped). If consistency beats
-  grouping, KILL the prefix.
-- Q5 UMEM-site touched: rx_telemetry already touched the batch before the
-  UMEM arm, so touched = true at the UMEM site is belt-and-braces
-  convention, not behavior. Minimal-diff reviewers may prefer the bare
-  increment. Worth one line of debate; either answer is fine if recorded.
-- Q6 Layout asserts: does BindingLiveState (or its consumers) carry
-  offset/size const asserts that three new AtomicU64s break? The plan
-  assumes append-and-re-measure; if measurement shows a fixed-layout
-  consumer (shared memory, ABI), the placement design needs rework — a
-  legitimate PLAN-KILL of section 4 as written.
-- Q7 Event parity: should unknown-VLAN drops ALSO emit a tuple-rich event
-  like #3610 host-inbound denies (which zone/MAC/VID is dropping)? The
-  issue asks for counters only, and per-packet events on an attacker-
-  triggerable drop are a pipeline-flood risk. Default NO; a YES needs its
-  own rate-limit design and is a scope appeal, not a tweak.
+## 9. Out of scope
 
-## 11. Blast-radius summary (measured)
+- The 57-site census is a boundary, not a promise to instrument all sites:
+  54 executable `scratch_recycle.push` sites occur in mod.rs and 3 in
+  flow_cache_hit.rs; only 3 named pre-L3 heads are in scope. The other
+  mod.rs sites are post-head disposition/flow/session/NAT/screen/TX paths;
+  flow_cache_hit.rs sites are post-L3 fast-path behavior.
+- Known adjacent debug-only or opt-in paths remain out: the junos-host
+  drop arm with touched/debug accounting, and filter terms without an
+  operator count. This plan closes attribution for the three named reasons,
+  not every silent drop in the dataplane.
+- No per-VLAN, per-MAC, per-ifindex, or per-interface labels.
+- No per-packet events or logs. A hostile input can trigger these guards at
+  line rate; event emission would require a separate rate-limit design.
+- No XDP/kernel drops before userspace receives a descriptor.
+- No verdict, forwarding, VLAN classification, destination acceptance, or
+  causal-owner changes for #10313/#10314.
+- No folding of the UMEM hygiene counter into GlobalCtrDrops. VLAN/MAC
+  folding is in scope because Q3 is now resolved and priced.
 
-- Drop sites: 56 scratch_recycle.push sites in poll_descriptor/mod.rs; 3
-  in scope, ~53 explicitly out (section 9).
-- touched setters: 40+ sites across the afxdp tree — flag, not tally;
-  untouched by this plan except the 3 (2 modified + 1 gained) bump lines.
-- BatchCounters: 63 u64 fields + touched + screen_reason_drops array; +3
-  fields, +3 flush arms (64 gated arms today).
-- BindingLiveState: per-binding atomic block; +3 atomics + ctor + snapshot
-  load.
-- Parity surface: 166 copy lines in refresh_bindings.rs across the
-  copy/zero/reset triple — +3 each, test-guarded.
-- Consumers per counter: flush -> live -> snapshot -> BindingStatus ->
-  Go wire -> status render + golden -> Prometheus -> docs (9 touch
-  points x3, plus unit/visibility/golden tests).
-- No verdict, forwarding, config-schema, or public-API consumer is
-  affected; dashboards/docs referencing the NEW names do not exist yet
-  (greenfield surface), while the OLD family rows (Martian, IPv6
-  ext-header, host-inbound, NAT-alloc) document the pattern to copy.
+## 10. Resolved decisions and remaining open questions
+
+Resolved for v2:
+
+- Q1 aggregate vs per-drop: reject one aggregate. The issue acceptance
+  explicitly requires a dedicated counter per named drop; an aggregate would
+  recreate the attribution ambiguity.
+- Q2 UMEM placement: keep UMEM operator-visible in the same batched path.
+  DebugPollCounters is debug-only and cannot satisfy show/telemetry
+  acceptance. The metadata_errors-shaped direct-live path was considered
+  but rejected because it would split the three-counter lifecycle and omit
+  the uniform BindingStatus/Prometheus proof.
+- Q3 GlobalCtrDrops: fold unknown-VLAN and dst-MAC as configured admission
+  rejects with two dedicated GlobalCtr indices and breakdown rows; exclude
+  UMEM as driver/memory hygiene. The documentation must state this split.
+- Q4 naming: use bare `umem_slice_dropped`, `unknown_vlan_dropped`, and
+  `dst_mac_dropped` to match existing counter names; status labels provide
+  the pre-L3 context.
+- Q5 UMEM touched assignment: keep the redundant store at the UMEM arm.
+  `rx_telemetry` currently sets touched earlier, but the one cold-path store
+  preserves the invariant that every counter bump also arms the flush and
+  remains correct if RX accounting is moved. Kill the extra store only if a
+  measured hot-path review shows a real cost; no allocation, lock, or atomic
+  is introduced by this line.
+- Q6 layout/perf: BindingLiveState has no C/shared-memory ABI consumer;
+  append and re-measure existing layout assertions. The existing canonical
+  cluster-smoke throughput lane is the performance check; no new benchmark.
+- Q7 events: default NO. Counters meet the issue, while attacker-triggered
+  per-packet events would churn the bounded forensic event path.
+
+Remaining non-blocking questions (each may still invite PLAN-KILL if its
+answer invalidates the stated value/cost balance):
+
+- Q8 Should the three status labels say “UMEM slice”, “unknown VLAN”, and
+  “destination MAC” without hyphens for CLI parity, or retain the exact
+  guard vocabulary used in this plan? Kill only if the label cannot be made
+  unambiguous without adding labels.
+- Q9 Should the global VLAN/MAC metric help text repeat the userspace
+  per-binding series names, or link them as aggregate/per-binding siblings?
+  Kill the duplicate global series only if an existing global surface can
+  expose the distinct breakdown without a new metric.
+- Q10 Should the Rust wire-name pin be a focused JSON unit test or join an
+  existing protocol compatibility table? Either is acceptable; kill only
+  if the chosen location cannot fail on a serde rename regression.
+- Q11 Should the reset companion cell share one tuple assertion or use three
+  individually named assertions? Keep whichever yields the clearer
+  fail-on-revert message; kill the compact form if it hides the omitted
+  field.
+- Q12 Should the implementation add a one-line comment at each status row
+  linking the GlobalCtrDrops scope decision, or is the central docs row
+  sufficient? Kill the duplicate comments if they drift from the docs.
+
+## 11. Blast-radius summary (re-measured)
+
+The census query was stated and rerun at the v1 tip:
+
+- `grep -n 'scratch_recycle\.push' userspace-dp/src/afxdp/poll_descriptor/mod.rs`
+  returned 55 matching lines; one is a comment, leaving 54 executable code
+  pushes in mod.rs.
+- The same query against
+  `userspace-dp/src/afxdp/poll_descriptor/flow_cache_hit.rs` returned 3
+  executable pushes. Tree-wide total: 57 executable pushes; 3 are the named
+  pre-L3 heads in scope, about 51 other executable mod.rs pushes plus the 3
+  post-L3 flow-cache pushes are out of scope.
+- The census confirms no fourth named pre-L3 drop among the adjacent ARP,
+  IPv6, screen, IPsec, fragment, host-inbound, or metadata-failure paths;
+  those paths have their own counters/events or are explicitly different
+  scope.
+- `touched = true` appears at 57 afxdp setters (including test fixtures);
+  it remains a flag, not a tally.
+- BatchCounters has 63 scalar u64 fields plus touched and the screen-reason
+  array; its flush has 64 nonzero-gated scalar/array arms. The design adds
+  three fields and three arms.
+- Each counter crosses 16 named checkpoints (§2), including both
+  BindingLiveSnapshot and BindingStatus structures, the Rust↔Go wire-name
+  seam, status aggregation, global bridge where applicable, and Prometheus
+  emission. The #5190 census is automatic for copy/zero; reset.rs needs the
+  explicit companion cell.
+- Implementation files are bounded to the existing Rust telemetry structs,
+  three poll-head arms, coordinator snapshot/reset bridge, Rust/Go protocol
+  binding structs, userspace manager/status/metrics/CLI/API surfaces, tests,
+  and docs. No forwarding/config-schema or unrelated packet behavior is
+  changed.
