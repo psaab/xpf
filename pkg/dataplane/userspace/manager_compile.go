@@ -297,13 +297,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)
 	}
-	if epochProvider != nil {
-		permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows := epochProvider(snap.Generation, snap.FIBGeneration)
-		snap.PermitEpoch = permitEpoch
-		snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
-		snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
-		snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
-	}
+	stampCaptureAuthority(snap, epochProvider)
 	snap.partialUpdateEpoch = partialEpoch
 	// #1620: stamp the cold-path sample mask onto the snapshot. The
 	// daemon called SetColdPathSampleMask once at startup with the
@@ -1051,6 +1045,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	next.Config = cfg
 	next.schedulerActiveState = copyPolicySchedulerActiveState(activeCopy)
 	next.schedulerActiveStateSet = true
+	m.refreshCaptureAuthorityLocked(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #6480: rebuild the schedule-affected policy + address-book sections
 	// (threading the cached feed overlay, #2049) and re-apply the StableZoneID

@@ -55,6 +55,21 @@ func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, uint32, ui
 	m.mu.Unlock()
 }
 
+// stampCaptureAuthority applies one provider result to a snapshot. Keeping
+// this copy operation shared prevents full Compile, retained-snapshot refresh,
+// and test-only builder paths from drifting on the four coupled authority
+// fields.
+func stampCaptureAuthority(snap *ConfigSnapshot, provider CaptureEpochProvider) {
+	if snap == nil || provider == nil {
+		return
+	}
+	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows :=
+		provider(snap.Generation, snap.FIBGeneration)
+	snap.PermitEpoch = permitEpoch
+	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
+	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
+	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+}
 
 // refreshCaptureAuthorityLocked refreshes retained snapshots immediately
 // before a deferred/catch-up publish. The retained snapshot may have been
@@ -62,15 +77,10 @@ func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, uint32, ui
 // current provider here prevents rows from retired NFQUEUE handles surviving
 // into the later apply_snapshot.
 func (m *Manager) refreshCaptureAuthorityLocked(snap *ConfigSnapshot) {
-	if m == nil || snap == nil || m.captureEpochProvider == nil {
+	if m == nil || snap == nil {
 		return
 	}
-	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows :=
-		m.captureEpochProvider(snap.Generation, snap.FIBGeneration)
-	snap.PermitEpoch = permitEpoch
-	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
-	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
-	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+	stampCaptureAuthority(snap, m.captureEpochProvider)
 }
 
 // buildSnapshotWithEpochProvider is the additive epoch-aware entry point.
@@ -78,17 +88,12 @@ func (m *Manager) refreshCaptureAuthorityLocked(snap *ConfigSnapshot) {
 // a supervisor-backed provider when the pipeline is active.
 func buildSnapshotWithEpochProvider(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, provider CaptureEpochProvider) (*ConfigSnapshot, error) {
 	snap, err := buildSnapshot(cfg, ucfg, generation, fibGeneration)
-	if err != nil || provider == nil {
+	if err != nil {
 		return snap, err
 	}
-	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows := provider(generation, fibGeneration)
-	snap.PermitEpoch = permitEpoch
-	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
-	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
-	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+	stampCaptureAuthority(snap, provider)
 	return snap, nil
 }
-
 
 func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string) (*ConfigSnapshot, error) {
 	return buildSnapshotWithSchedulerStateAndNATCounters(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, nil)

@@ -57,6 +57,41 @@ func TestSnapshotEpochFeedSerde9506(t *testing.T) {
 	}
 }
 
+// TestCompileStampsCaptureAuthority9506 drives the same snapshot builder and
+// shared authority stamper used by Manager.Compile. The provider's immutable
+// tunnel generation and row must survive the compiler's config-generation
+// allocation inputs and land on the compiled snapshot.
+func TestCompileStampsCaptureAuthority9506(t *testing.T) {
+	provider := func(configGeneration uint64, fibGeneration uint32) (
+		uint64, []QueueEpochSnapshot, uint64, []IpsecTunnelRowSnapshot,
+	) {
+		if configGeneration == 0 || fibGeneration == 0 {
+			t.Fatalf("provider received zero requested authority: config=%d fib=%d",
+				configGeneration, fibGeneration)
+		}
+		return 41,
+			[]QueueEpochSnapshot{{Queue: 1000, Epoch: 9}},
+			17,
+			[]IpsecTunnelRowSnapshot{{STN: "st0", IfID: 9, LogicalIfindex: 10}}
+	}
+
+	snap, err := buildSnapshotWithSchedulerStateAndNATCounters(
+		&config.Config{}, config.UserspaceConfig{}, 7, 3, nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("build compiled snapshot: %v", err)
+	}
+	stampCaptureAuthority(snap, provider)
+	if snap.PermitEpoch != 41 || len(snap.QueueEpochs) != 1 ||
+		snap.QueueEpochs[0].Queue != 1000 ||
+		snap.IpsecTunnelSnapshotGeneration != 17 ||
+		len(snap.IpsecTunnelRows) != 1 ||
+		snap.IpsecTunnelRows[0].STN != "st0" {
+		t.Fatalf("compiled capture authority=%+v, want epoch 41, queue 1000/9, generation 17, st0 row",
+			snap)
+	}
+}
+
 // configUserspaceForEpochTest keeps the nil-config builder path explicit; the
 // epoch feed must be available even before a compiled policy exists.
 func configUserspaceForEpochTest() config.UserspaceConfig { return config.UserspaceConfig{} }
