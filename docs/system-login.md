@@ -518,9 +518,12 @@ Two consequences an operator should know:
 > locked a class out of configuration over gRPC: the `limited` class below
 > could configure at the console and not through the remote `cli`.
 >
-> **On the console `load` remains a stated gap.** It applies arbitrary content
-> whose paths are not known until parsed, which is a different mechanism from
-> the verb gate there.
+> **On the console `load` is content-adjudicated (#9892).** The verb gate
+> there still cannot match a stream it has not parsed, but the `load`
+> handler adjudicates the materialised file or terminal content against the
+> class's configuration regexes (`pkg/cli/cli_config.go:236`) through the
+> same `config.AuthorizeConfigLoad` evaluator the gRPC and REST surfaces
+> share — so the stated gap this note once recorded is closed.
 
 > **UPGRADE NOTE — read this before upgrading if any class carries these
 > statements. Two behaviours change in opposite directions.**
@@ -818,12 +821,37 @@ the family is available: it compiles the *plain* family's patterns, and the
 `-regexps` precedence note there is a warning left for a future implementer,
 not a live code path.
 
-#### `load` is a named gap
+#### `load` is gated on content, not on the verb (#9892)
+
+> **Correction (#10495).** This section previously named `load` a gap because a
+> verb gate cannot match stream content before it is parsed. That premise still
+> holds — the verb gate cannot — but the content-adjudication mechanism now
+> exists on every surface.
 
 `deny-configuration` is matched against configuration-mutation verbs. `load
-merge` / `load override` carry their content in a file or a terminal stream that
-is not parsed at the time the verb is gated, so a verb gate cannot match against
-it. Restricting what an operator may `load` needs a different mechanism.
+merge` / `load override` / `load set` carry their content in a request body over
+gRPC or REST, or in a file or terminal stream on the on-box CLI. That content
+is not parsed at the time the verb is gated, so a verb gate cannot match
+against it. Past materialisation, `config.AuthorizeConfigLoad`
+(`pkg/config/authz_config_load_9892.go:105`) enforces load authorization for
+restricted classes; `load merge` and `load set` have their content rendered to
+`set` lines and matched against the caller's configuration regexes, while
+`load override` is refused as described below. All three dispatch surfaces
+delegate to that one evaluator:
+
+* gRPC `Load`, in `authorizeRPCLoadAndRollback`
+  (`pkg/grpcapi/authz_config_rpc_9633.go:82`);
+* REST `load`, in `authorizeRESTConfigLoad`
+  (`pkg/api/authz_config_regex_9154.go:191`);
+* on-box CLI `load`, after the file or terminal stream is read
+  (`pkg/cli/cli_config.go:236`).
+
+For a class that carries configuration regexes, `load override` is REFUSED
+outright — it replaces the whole candidate, so the paths it deletes cannot be
+enumerated one by one — while `load merge` / `load set` have their content
+rendered to `set` lines with each line matched in turn. The single-evaluator
+shape is deliberate: two renderings of hierarchical content as `set` lines
+drift, and each looks right on its own.
 
 ### Write the body as a block or as `set` — never packed on the line (#6662)
 
