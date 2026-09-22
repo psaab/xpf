@@ -93,16 +93,26 @@ install: build build-ctl
 # forwarding / CoS / NAT / session-correctness regression there must fail
 # `make test`. Before #4006 this target ran only `go test ./...`, giving a
 # false all-clear for the most critical code (a broken Rust dataplane test
-# passed `make test` green). Each prerequisite recipe is a plain command,
-# so a non-zero exit from either leg aborts the target (Make stops at the
-# first failing prerequisite) — a Rust test failure now fails `make test`.
-test: test-go test-rust
-	@echo ""
-	@echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"
-	@echo "  coverage (pkg/dataplane/userspace/fragment_disposition_7494_test.go)"
-	@echo "  SKIPS unprivileged. It is the ONLY behavioural coverage of the shim's"
-	@echo "  control flow, and the #1864 verifier gate does not substitute: two"
-	@echo "  distinct WRONG fixes both pass it. Run 'sudo make test-root' (#9052)."
+# passed `make test` green).
+#
+# Aggregate semantics (#10496): both legs run unconditionally in one serial
+# recipe, and the target fails if either leg failed. A serial prerequisite
+# list would stop at the first failure and never reach the second leg —
+# exactly when the aggregate signal matters most — so the legs are invoked
+# via $(MAKE) with their failure statuses captured, and a trailing exit
+# replays any nonzero status. Under `make -j` this serializes (prereqs would
+# parallelize); GNU make may normalize a failed submake to exit status 2.
+test:
+	@status=0; \
+	$(MAKE) test-go || status=$$?; \
+	$(MAKE) test-rust || status=$$?; \
+	echo ""; \
+	echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"; \
+	echo "  coverage (pkg/dataplane/userspace/fragment_disposition_7494_test.go)"; \
+	echo "  SKIPS unprivileged. It is the ONLY behavioural coverage of the shim's"; \
+	echo "  control flow, and the #1864 verifier gate does not substitute: two"; \
+	echo "  distinct WRONG fixes both pass it. Run 'sudo make test-root' (#9052)."; \
+	exit $$status
 
 # #9052 item 1: the root-capable aggregate. `test-shim-run` was a prerequisite
 # of NOTHING — not of `test`, not of `selftest`, not of any ledger row — so the
