@@ -92,6 +92,7 @@ func (m *Manager) syncSnapshotLocked() error {
 	// gate's decision holds for the copy that will be sent.
 	retained := *m.lastSnapshot
 	resampled := m.resampleUnresolvedSectionsLocked(&retained)
+	m.refreshCaptureAuthorityLocked(&retained)
 	if xskStartup {
 		slog.Info("userspace: publishing deferred same-plan snapshot during XSK startup",
 			"generation", m.lastSnapshot.Generation,

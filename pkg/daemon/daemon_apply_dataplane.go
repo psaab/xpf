@@ -175,18 +175,16 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		}); ok {
 			if mgr := adapter.Manager(); mgr != nil {
 				mgr.SetIngressFoldResolver(buildIngressFoldResolver(cfg))
-				mgr.SetCaptureEpochProvider(func() (uint64, []dpuserspace.QueueEpochSnapshot) {
-					d.ipsecCaptureMu.Lock()
-					pending := d.ipsecCaptureStagePending
-					capture := d.ipsecCapture
-					if pending {
-						capture = d.ipsecCaptureStaged
-					}
-					d.ipsecCaptureMu.Unlock()
-					if capture == nil {
-						return 0, nil
-					}
-					return capture.epochSnapshot()
+				mgr.SetCaptureEpochProvider(func(configGeneration uint64, fibGeneration uint32) (
+					uint64,
+					[]dpuserspace.QueueEpochSnapshot,
+					uint64,
+					[]dpuserspace.IpsecTunnelRowSnapshot,
+				) {
+					return d.ipsecCaptureConfigSnapshot(configGeneration, fibGeneration)
+				})
+				mgr.SetCaptureAuthorityCommitter(func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64) {
+					d.publishIpsecCaptureSnapshotAuthority(configGeneration, fibGeneration, captureGeneration)
 				})
 			}
 		}

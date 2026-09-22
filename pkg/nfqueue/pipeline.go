@@ -132,8 +132,10 @@ type CaptureFrame struct {
 	FragmentKey  *FragmentKey
 	Fragment     *Fragment
 	InnerOverlap bool
-	// The four identities are captured at receive time and must all match the
-	// immutable zone snapshot before an enforcing decision is considered.
+	// SnapshotGeneration is the immutable capture authority. ConfigGeneration
+	// and FIBGeneration are the accepted packet/config authority; they may
+	// advance independently after a same-key snapshot apply.
+	// All four identities must be authoritative before enforcement proceeds.
 	Generation         uint64 // legacy queue/capture generation alias
 	SnapshotGeneration uint64
 	ConfigGeneration   uint64
@@ -1205,6 +1207,17 @@ type ZoneSnapshotOriginValidator interface {
 	ValidateOrigin(origin CaptureOrigin) ZoneReason
 }
 
+// ZoneSnapshotAcceptedGenerationsRef is implemented by zone snapshots whose
+// packet config/FIB authority advances independently of the immutable capture
+// authority reported by Generations. The generation gate compares
+// frame.SnapshotGeneration against the capture authority and
+// frame.ConfigGeneration/frame.FIBGeneration against the accepted authority;
+// snapshots without this interface keep the single-authority comparison.
+// This mirrors Rust D14's two-authority triple check.
+type ZoneSnapshotAcceptedGenerationsRef interface {
+	AcceptedGenerations() (configGen uint64, fibGen uint32)
+}
+
 type ZoneEvaluator interface {
 	Evaluate(origin CaptureOrigin, snap ZoneSnapshotRef) ZoneEvaluation
 }
@@ -1239,13 +1252,19 @@ func validateCapturedGenerations(frame CaptureFrame, origin CaptureOrigin, snap 
 	if snap == nil {
 		return ZoneReasonEvaluatorUnavailable
 	}
-	configGen, fibGen := snap.Generations()
+	captureConfigGen, captureFibGen := snap.Generations()
+	acceptedConfigGen, acceptedFibGen := captureConfigGen, captureFibGen
+	if accepted, ok := snap.(ZoneSnapshotAcceptedGenerationsRef); ok {
+		acceptedConfigGen, acceptedFibGen = accepted.AcceptedGenerations()
+	}
 	if frame.SnapshotGeneration == 0 || frame.ConfigGeneration == 0 || frame.FIBGeneration == 0 ||
-		frame.QueueEpoch == 0 || configGen == 0 || fibGen == 0 {
+		frame.QueueEpoch == 0 || captureConfigGen == 0 || captureFibGen == 0 ||
+		acceptedConfigGen == 0 || acceptedFibGen == 0 {
 		return ZoneReasonUnknownGeneration
 	}
-	if frame.SnapshotGeneration != configGen || frame.ConfigGeneration != configGen ||
-		frame.FIBGeneration != fibGen {
+	if frame.SnapshotGeneration != captureConfigGen ||
+		frame.ConfigGeneration != acceptedConfigGen ||
+		frame.FIBGeneration != acceptedFibGen {
 		return ZoneReasonStaleGeneration
 	}
 	if frame.Generation != 0 && frame.Generation != frame.SnapshotGeneration {

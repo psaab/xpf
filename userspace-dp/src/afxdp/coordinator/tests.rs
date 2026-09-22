@@ -165,6 +165,265 @@ use crate::{
     CoSSchedulerMapSnapshot,
 };
 
+#[test]
+fn snapshot_published_tunnel_rows_join_d11_10485() {
+    use crate::afxdp::ipsec_inner::{
+        adjudicate_ipsec_inner, IpsecInnerAdvisory, IpsecInnerInput,
+    };
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
+        ..Default::default()
+    };
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 42);
+    assert_eq!(
+        view.ipsec_tunnel_rows()
+            .exact("st0")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((9, 10))
+    );
+
+    let packet = [0x45; 20];
+    let decision = adjudicate_ipsec_inner(
+        &view,
+        IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st0",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 10,
+            rx_queue_index: 0,
+            advisory: IpsecInnerAdvisory {
+                snapshot_generation: 42,
+                config_generation: 7,
+                fib_generation: 3,
+                zone_id: 1,
+                if_id: 9,
+            },
+            descriptor: None,
+        },
+    );
+    assert!(
+        decision.is_would_permit(),
+        "published non-empty row must complete the D11/D14 join: {decision:?}"
+    );
+}
+
+#[test]
+fn snapshot_published_empty_tunnel_rows_clear_generation_10485() {
+    use crate::protocol::snapshot::ConfigSnapshot;
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: Vec::new(),
+        ..Default::default()
+    };
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 0);
+    assert!(view.ipsec_tunnel_rows().is_empty());
+}
+
+#[test]
+fn snapshot_stop_inner_clears_published_tunnel_rows_10485() {
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
+        ..Default::default()
+    };
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    assert_eq!(
+        coordinator.ha.runtime.load_full().ipsec_snapshot_generation(),
+        42
+    );
+
+    coordinator.stop_inner(false);
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 0);
+    assert!(view.ipsec_tunnel_rows().is_empty());
+}
+
+#[test]
+fn snapshot_published_duplicate_if_id_rows_deny_claimants_10485() {
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    // st0/st1 share if_id 7 (ambiguous claimants); st2 is an unrelated row.
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![
+            IpsecTunnelRowSnapshot {
+                stn: "st0".to_string(),
+                if_id: 7,
+                logical_ifindex: 10,
+            },
+            IpsecTunnelRowSnapshot {
+                stn: "st1".to_string(),
+                if_id: 7,
+                logical_ifindex: 11,
+            },
+            IpsecTunnelRowSnapshot {
+                stn: "st2".to_string(),
+                if_id: 8,
+                logical_ifindex: 12,
+            },
+        ],
+        ..Default::default()
+    };
+    assert!(!snapshot.ipsec_tunnel_rows.is_empty());
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    // Mid-asserts guard vacuity: the publication itself must be non-empty.
+    assert_eq!(view.ipsec_snapshot_generation(), 42);
+    assert!(!view.ipsec_tunnel_rows().is_empty());
+    // Ambiguous claimants resolve to None while the unrelated row stays usable.
+    assert!(view.ipsec_tunnel_rows().exact("st0").is_none());
+    assert!(view.ipsec_tunnel_rows().exact("st1").is_none());
+    assert_eq!(
+        view.ipsec_tunnel_rows()
+            .exact("st2")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((8, 12))
+    );
+}
+
+#[test]
+fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
+    use crate::afxdp::ipsec_inner::{
+        adjudicate_ipsec_inner, IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput,
+    };
+    use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
+        ..Default::default()
+    };
+    assert!(!snapshot.ipsec_tunnel_rows.is_empty());
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    // Mid-asserts guard vacuity: rows are published before the stale adjudication.
+    assert_eq!(view.ipsec_snapshot_generation(), 42);
+    assert_eq!(
+        view.ipsec_tunnel_rows()
+            .exact("st0")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((9, 10))
+    );
+    let advisory_generation = 41;
+    assert_ne!(advisory_generation, view.ipsec_snapshot_generation());
+
+    let packet = [0x45; 20];
+    let decision = adjudicate_ipsec_inner(
+        &view,
+        IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st0",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 10,
+            rx_queue_index: 0,
+            advisory: IpsecInnerAdvisory {
+                snapshot_generation: advisory_generation,
+                config_generation: 7,
+                fib_generation: 3,
+                zone_id: 1,
+                if_id: 9,
+            },
+            descriptor: None,
+        },
+    );
+    assert!(
+        matches!(
+            decision,
+            IpsecInnerDecision::Deny {
+                stage: "d14_stale_generation",
+                reason: reason::STALE_GENERATION,
+                ..
+            }
+        ),
+        "mismatched advisory generation must deny stale: {decision:?}"
+    );
+}
+
 /// #6563: a `ForwardingState` that OWNS the given addresses, i.e. they are in
 /// the global local-address membership sets `local_v4`/`local_v6`. The
 /// emit-on-wire source gate admits exactly these.
@@ -1087,6 +1346,24 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
     let snapshot = ConfigSnapshot {
         generation: NEW_GEN,
         fib_generation: NEW_FIB_GEN,
+        zones: vec![crate::protocol::snapshot::ZoneSnapshot {
+            name: "zone1".to_string(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
+            name: "st0.0".to_string(),
+            linux_name: "st0".to_string(),
+            ifindex: 10,
+            zone: "zone1".to_string(),
+            ..Default::default()
+        }],
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![crate::protocol::snapshot::IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
         ..Default::default()
     };
 
@@ -1099,6 +1376,42 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
         .clone()
         .expect("refresh must record the view it published");
     let published = coordinator.ha.runtime.load_full();
+    assert_eq!(published.ipsec_snapshot_generation(), 42);
+    assert_eq!(
+        published
+            .ipsec_tunnel_rows()
+            .exact("st0")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((9, 10))
+    );
+    let packet = [0x45; 20];
+    let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
+        &published,
+        crate::afxdp::ipsec_inner::IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st0",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 10,
+            rx_queue_index: 0,
+            advisory: crate::afxdp::ipsec_inner::IpsecInnerAdvisory {
+                snapshot_generation: 42,
+                config_generation: NEW_GEN,
+                fib_generation: NEW_FIB_GEN,
+                zone_id: 1,
+                if_id: 9,
+            },
+            descriptor: None,
+        },
+    );
+    assert!(
+        decision.is_would_permit(),
+        "refresh_runtime_snapshot publication must complete the D11/D14 join: {decision:?}"
+    );
 
     // THE INVARIANT, part 1: the pair the coordinator intended IS the pair a
     // worker observes — same validation, same forwarding allocation. A publish

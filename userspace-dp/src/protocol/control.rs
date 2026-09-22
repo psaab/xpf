@@ -192,13 +192,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // fields and admit/reject against stale queue ownership.
 // v28 -> v29 (#9506 P-MECH): tunnel-row identity, immutable RuntimeView
 // generations, and the closed admit-reason/completion contract are mandatory.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 29;
-
-/// Immutable P-MECH feature floor. Do not alias this to a mutable current
-/// version: it names the first wire version that can represent the contract.
-pub(crate) const MIN_PROTOCOL_PMECH: i32 = 29;
-pub(crate) const MIN_PROTOCOL_PMECH_TUNNEL_ROWS: i32 = 29;
-pub(crate) const MIN_PROTOCOL_PMECH_ADMIT_REASONS: i32 = 29;
+// v29 -> v30 (#10485): the capture-generation stamp paired with tunnel rows
+// prevents same-key config/FIB publishes from reusing stale NFQUEUE identity.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 30;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

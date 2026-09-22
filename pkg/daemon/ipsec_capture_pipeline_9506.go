@@ -81,6 +81,8 @@ type IpsecCapturePipeline struct {
 	pipeline    *nfqueue.CapturePipeline
 	rotation    *ipsecRotation
 	runID       string
+	configGeneration atomic.Uint64
+	fibGeneration    atomic.Uint32
 	requestID   atomic.Uint64
 	active      bool
 	down        bool
@@ -125,6 +127,11 @@ func NewIpsecCapturePipeline(cfg IpsecCapturePipelineConfig) (*IpsecCapturePipel
 		runID:                  runID,
 		deliveredCounterReader: cfg.DeliveredCounterReader,
 	}
+	if len(actor.queues) != 0 {
+		actor.configGeneration.Store(actor.queues[0].ConfigGeneration)
+		actor.fibGeneration.Store(actor.queues[0].FIBGeneration)
+	}
+
 	for queue, epoch := range cfg.QueueEpochs {
 		if queue == 0 || epoch == 0 {
 			return nil, fmt.Errorf("ipsec capture pipeline: invalid queue epoch queue=%d epoch=%d", queue, epoch)
@@ -150,6 +157,19 @@ func NewIpsecCapturePipeline(cfg IpsecCapturePipelineConfig) (*IpsecCapturePipel
 	actor.pipeline = pipeline
 	return actor, nil
 }
+
+// publishSnapshotAuthority updates only the shared config/FIB half of packet
+// advisories. The capture-generation half remains immutable per admitted
+// handle; this split lets same-key config/FIB applies converge without
+// rotating NFQUEUE handles or mutating the receive goroutines' copied rows.
+func (a *IpsecCapturePipeline) publishSnapshotAuthority(configGeneration uint64, fibGeneration uint32) {
+	if a == nil {
+		return
+	}
+	a.configGeneration.Store(configGeneration)
+	a.fibGeneration.Store(fibGeneration)
+}
+
 
 // Start launches the bounded poll/drain actor and one bounded-deadline receive
 // loop per configured NFQUEUE. An actor with no queues is still useful for
@@ -233,12 +253,14 @@ func (a *IpsecCapturePipeline) receiveQueue(ctx context.Context, captureQueue Ip
 			_ = packet.Verdict(nfqueue.VerdictDrop)
 			continue
 		}
+		configGeneration := a.configGeneration.Load()
+		fibGeneration := a.fibGeneration.Load()
 		frame := nfqueue.CaptureFrame{
 			Packet: packet, FlowKey: classification.FlowKey,
 			Generation: captureQueue.Generation,
 			SnapshotGeneration: captureQueue.SnapshotGeneration,
-			ConfigGeneration: captureQueue.ConfigGeneration,
-			FIBGeneration: captureQueue.FIBGeneration,
+			ConfigGeneration: configGeneration,
+			FIBGeneration: fibGeneration,
 			QueueNumber: captureQueue.QueueNumber,
 			QueueEpoch: captureQueue.QueueEpoch,
 		}

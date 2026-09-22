@@ -380,6 +380,7 @@ impl super::Coordinator {
         // removes the chance of one drifting to the state that frees nothing.
         self.purge_remapped_tunnel_sessions(&tunnel_purge_ids, &new_forwarding);
         self.forwarding = new_forwarding;
+        self.set_ipsec_tunnel_rows_from_snapshot(snapshot);
         // #6832 fold r5: the refresh's commit point for the #3651 per-zone
         // counters. Unlike the full reconcile there is no worker bring-up after
         // this swap — a same-plan refresh keeps the live workers — so the swap

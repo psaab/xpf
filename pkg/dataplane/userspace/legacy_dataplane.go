@@ -368,6 +368,16 @@ func (a *LegacyDataPlaneAdapter) BumpFIBGeneration() (uint32, error) {
 	return m.BumpFIBGeneration()
 }
 
+// RepublishCurrentCaptureAuthority forwards the rollback-heal surface to the
+// userspace manager.
+func (a *LegacyDataPlaneAdapter) RepublishCurrentCaptureAuthority() (bool, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, err
+	}
+	return m.RepublishCurrentCaptureAuthority()
+}
+
 // NotifyLinkCycle on the adapter is NOT the live path, exactly as
 // PrepareLinkCycle below is not: the daemon reaches the manager through Link().
 // This method satisfies dataplane.DataPlane, whose NotifyLinkCycle is void

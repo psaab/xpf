@@ -197,6 +197,7 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
+	m.refreshCaptureAuthorityLocked(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #3772 (M9): a transient ip-rule enumeration failure aborts the
 	// overlay publish (fail-closed). The deferred commit above leaves
@@ -295,6 +296,75 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	}
 	slog.Info("userspace: route overlay snapshot published",
 		"generation", next.Generation, "overlay_routes", len(desiredOverlay))
+	return true, nil
+}
+
+// RepublishCurrentCaptureAuthority republishes the manager's retained snapshot
+// with the current capture provider result. It is the rollback-heal surface:
+// unlike a route-only publish, this clones the retained snapshot and changes
+// only its generation/time and capture-authority fields. It does not rebuild
+// routes or policy sections; the standard #9684 unresolved-partial repair is
+// retained so an unknown partial update cannot be rolled back.
+func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.proc == nil || m.proc.Process == nil || m.lastSnapshot == nil ||
+		m.captureEpochProvider == nil {
+		return false, nil
+	}
+	wasDebt := m.snapshotRetryDebtLocked()
+	next := *m.lastSnapshot
+	next.Generation = m.generation + 1
+	next.FIBGeneration = m.readFIBGeneration()
+	next.GeneratedAt = time.Now().UTC()
+	m.refreshCaptureAuthorityLocked(&next)
+	resampled := m.resampleUnresolvedSectionsLocked(&next)
+	if hash, ok := snapshotContentHash(&next); ok &&
+		hash == m.lastSnapshotHash &&
+		m.publishedSnapshot != 0 &&
+		!m.applySnapshotOutcomeUnknown &&
+		m.partialOutcomeUnknown == 0 {
+		return false, nil
+	}
+
+	if err := m.ensureRequiredSnapshotProtocolLocked(&next); err != nil {
+		return false, m.disarmSnapshotProtocolFailClosedLocked(&next, err, false)
+	}
+	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
+		return false, err
+	}
+	publishSnap := next
+	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
+	var status ProcessStatus
+	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
+		return false, fmt.Errorf("republish capture authority: %w", err)
+	}
+
+	// The helper accepted the cloned snapshot. Use the same success bookkeeping
+	// as the other partial publishers, but do not pretend routes or policy were
+	// rebuilt: this call changed only the capture authority.
+	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
+	m.logWgEndpointSetTransitionLocked(&publishSnap, "capture-authority")
+	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
+	m.lastSnapshot = &next
+	m.rebuildNeighborIndex()
+	m.rebuildMonitoredIfindexes()
+	m.publishedSnapshot = next.Generation
+	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	m.markAppliedSnapshotLocked()
+	if h, ok := snapshotContentHash(&next); ok {
+		m.lastSnapshotHash = h
+	}
+	m.resolvePartialOutcomesLocked(resampled)
+	m.armPendingHAStateReplayLocked(wasDebt)
+	if err := m.applyHelperStatusLocked(&status); err != nil {
+		slog.Warn("userspace: failed to sync helper status after capture-authority republish", "err", err)
+	}
+	slog.Info("userspace: capture authority snapshot published",
+		"generation", next.Generation)
 	return true, nil
 }
 

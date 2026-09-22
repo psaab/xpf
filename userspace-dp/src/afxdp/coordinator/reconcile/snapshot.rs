@@ -661,6 +661,7 @@ pub(super) fn apply_snapshot(
     // reconcile) and is exactly what #7209 makes reachable, which is why the
     // filter must move rather than be dropped as dead.
     coord.forwarding = new_forwarding;
+    coord.set_ipsec_tunnel_rows_from_snapshot(snapshot);
     // #6592: ONE worker-visible store carrying both halves. `coord.validation`
     // was assigned at the head of this function and `coord.forwarding` is the
     // reconciled table, so this publishes the new generation's coherent pair
@@ -738,7 +739,9 @@ pub(super) fn apply_snapshot(
 #[cfg(test)]
 mod slow_path_mtu_tests {
     use super::*;
-    use crate::protocol::snapshot::{ConfigSnapshot, InterfaceSnapshot};
+    use crate::protocol::snapshot::{
+        ConfigSnapshot, InterfaceSnapshot, IpsecTunnelRowSnapshot,
+    };
     use crate::slowpath::SlowPathReinjector;
 
     /// A device name ≥ `IFNAMSIZ` (16) so the reinjector worker's `open_tun`
@@ -1106,6 +1109,14 @@ mod slow_path_mtu_tests {
 
         // A snapshot whose largest interface MTU is 9000 -> slow_path_mtu() == 9000.
         let snapshot = ConfigSnapshot {
+            generation: 7,
+            fib_generation: 3,
+            ipsec_tunnel_snapshot_generation: 42,
+            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+                stn: "st0".to_string(),
+                if_id: 9,
+                logical_ifindex: 10,
+            }],
             interfaces: vec![InterfaceSnapshot {
                 mtu: 9000,
                 ..Default::default()
@@ -1121,6 +1132,8 @@ mod slow_path_mtu_tests {
         // apply_snapshot only threads these FDs through to the bring-up phase; a
         // dummy fd (-1) never names a real map and Drop's close(-1) is a harmless
         // EBADF no-op.
+        let mut forwarding = ForwardingState::default();
+        forwarding.ifindex_to_zone_id.insert(10, 1);
         let fds = ReconcileSnapshotFds {
             map_fd: OwnedFd { fd: -1 },
             heartbeat_map_fd: OwnedFd { fd: -1 },
@@ -1130,7 +1143,7 @@ mod slow_path_mtu_tests {
             dnat_table_fd: None,
             dnat_table_v6_fd: None,
             dnat_fds: DnatTableFds::default(),
-            forwarding: ForwardingState::default(),
+            forwarding,
         };
 
         let out = apply_snapshot(
@@ -1145,6 +1158,43 @@ mod slow_path_mtu_tests {
             |_name, _mtu| Ok(()),
         );
         assert!(out.is_some(), "apply_snapshot returns the secured fds");
+
+        let view = coord.ha.runtime.load_full();
+        assert_eq!(view.ipsec_snapshot_generation(), 42);
+        assert_eq!(
+            view.ipsec_tunnel_rows()
+                .exact("st0")
+                .map(|row| (row.if_id, row.logical_ifindex)),
+            Some((9, 10))
+        );
+        let packet = [0x45; 20];
+        let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
+            &view,
+            crate::afxdp::ipsec_inner::IpsecInnerInput {
+                slab_id: 0,
+                inner_packet: &packet,
+                stn: "st0",
+                inner_family: libc::AF_INET as u8,
+                inner_eth_proto: 0x0800,
+                protocol: 6,
+                rel_l4_offset: 20,
+                payload_offset: 20,
+                logical_ifindex: 10,
+                rx_queue_index: 0,
+                advisory: crate::afxdp::ipsec_inner::IpsecInnerAdvisory {
+                    snapshot_generation: 42,
+                    config_generation: 7,
+                    fib_generation: 3,
+                    zone_id: 1,
+                    if_id: 9,
+                },
+                descriptor: None,
+            },
+        );
+        assert!(
+            decision.is_would_permit(),
+            "apply_snapshot publication must complete the D11/D14 join: {decision:?}"
+        );
 
         let sp = coord
             .slow_path

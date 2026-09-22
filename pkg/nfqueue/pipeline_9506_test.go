@@ -117,6 +117,165 @@ func (passZoneSnapshot9506) ResolveSTN(string) ZoneResolution {
 func (passZoneSnapshot9506) Generations() (uint64, uint32) { return 1, 1 }
 func (passZoneSnapshot9506) Current() bool                 { return true }
 
+type splitAuthorityZoneSnapshot9506 struct{}
+
+func (splitAuthorityZoneSnapshot9506) ResolveSTN(string) ZoneResolution {
+	return ZoneResolution{ZoneID: 1, IfID: 7, Reason: ZoneReasonZoned}
+}
+func (splitAuthorityZoneSnapshot9506) Generations() (uint64, uint32) { return 4, 4 }
+func (splitAuthorityZoneSnapshot9506) AcceptedGenerations() (uint64, uint32) {
+	return 9, 7
+}
+func (splitAuthorityZoneSnapshot9506) QueueEpoch(queue uint16) uint64 {
+	if queue == 77 {
+		return 1
+	}
+	return 0
+}
+func (splitAuthorityZoneSnapshot9506) Current() bool { return true }
+func (splitAuthorityZoneSnapshot9506) ValidateOrigin(CaptureOrigin) ZoneReason {
+	return ZoneReasonZoned
+}
+
+type zeroAcceptedAuthorityZoneSnapshot9506 struct {
+	splitAuthorityZoneSnapshot9506
+}
+
+func (zeroAcceptedAuthorityZoneSnapshot9506) AcceptedGenerations() (uint64, uint32) {
+	return 0, 7
+}
+
+func TestCapturePipelineZeroQueueEpochDropsUnknownGeneration10485(t *testing.T) {
+	sink := new(pipelineTestSink)
+	var denyReasons []IpsecInnerReason
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry:      pipelineTestRegistry(t),
+		Phase:         PipelineEnforcing,
+		Sink:          sink,
+		ZoneEvaluator: DefaultZoneEvaluator{},
+		ZoneSnapshot:  splitAuthorityZoneSnapshot9506{},
+		DenyEvents: DenyEventSinkFunc(func(event IpsecInnerDeny) bool {
+			denyReasons = append(denyReasons, event.Reason)
+			return true
+		}),
+		HandoffCap: 2,
+		BatchCap:   2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 3), FlowKey: "zero-queue-epoch",
+		Generation: 4, SnapshotGeneration: 4, ConfigGeneration: 9,
+		FIBGeneration: 7, QueueNumber: 77, QueueEpoch: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(1); got != 1 {
+		t.Fatalf("Drain=%d, want one frame", got)
+	}
+	stats := p.Stats()
+	if stats.ZoneGateUnavailable != 1 || stats.ZoneGateDrops != 1 ||
+		stats.ZoneGateStale != 0 || stats.V1PermitSuppressed != 0 {
+		t.Fatalf("stats=%+v, want one unknown-generation drop", stats)
+	}
+	if len(denyReasons) != 1 || denyReasons[0] != ReasonMissingGeneration {
+		t.Fatalf("deny reasons=%v, want [ReasonMissingGeneration]", denyReasons)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)
+	}
+}
+
+func TestCapturePipelineZeroAcceptedAuthorityDropsUnknownGeneration10485(t *testing.T) {
+	sink := new(pipelineTestSink)
+	var denyReasons []IpsecInnerReason
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry:      pipelineTestRegistry(t),
+		Phase:         PipelineEnforcing,
+		Sink:          sink,
+		ZoneEvaluator: DefaultZoneEvaluator{},
+		ZoneSnapshot:  zeroAcceptedAuthorityZoneSnapshot9506{},
+		DenyEvents: DenyEventSinkFunc(func(event IpsecInnerDeny) bool {
+			denyReasons = append(denyReasons, event.Reason)
+			return true
+		}),
+		HandoffCap: 2,
+		BatchCap:   2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 4), FlowKey: "zero-accepted-authority",
+		Generation: 4, SnapshotGeneration: 4, ConfigGeneration: 9,
+		FIBGeneration: 7, QueueNumber: 77, QueueEpoch: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(1); got != 1 {
+		t.Fatalf("Drain=%d, want one frame", got)
+	}
+	stats := p.Stats()
+	if stats.ZoneGateUnavailable != 1 || stats.ZoneGateDrops != 1 ||
+		stats.ZoneGateStale != 0 || stats.V1PermitSuppressed != 0 {
+		t.Fatalf("stats=%+v, want one unknown-generation drop", stats)
+	}
+	if len(denyReasons) != 1 || denyReasons[0] != ReasonMissingGeneration {
+		t.Fatalf("deny reasons=%v, want [ReasonMissingGeneration]", denyReasons)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)
+	}
+}
+func TestCapturePipelineAcceptedAuthorityCanAdvanceFromCapture9506(t *testing.T) {
+	sink := new(pipelineTestSink)
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry:      pipelineTestRegistry(t),
+		Phase:         PipelineEnforcing,
+		Sink:          sink,
+		ZoneEvaluator: DefaultZoneEvaluator{},
+		ZoneSnapshot:  splitAuthorityZoneSnapshot9506{},
+		HandoffCap:    2,
+		BatchCap:      2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "split-authority",
+		Generation: 4, SnapshotGeneration: 4, ConfigGeneration: 9,
+		FIBGeneration: 7, QueueNumber: 77, QueueEpoch: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(1); got != 1 {
+		t.Fatalf("Drain=%d, want one frame", got)
+	}
+	stats := p.Stats()
+	if stats.ZoneGateDrops != 0 || stats.V1PermitSuppressed != 1 {
+		t.Fatalf("stats=%+v, want accepted split authority and one V1 suppression", stats)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("verdicts=%+v, want one terminal V1 DROP", sink.verdicts)
+	}
+
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 2), FlowKey: "stale-capture",
+		Generation: 5, SnapshotGeneration: 5, ConfigGeneration: 9,
+		FIBGeneration: 7, QueueNumber: 77, QueueEpoch: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(1); got != 1 {
+		t.Fatalf("stale Drain=%d, want one frame", got)
+	}
+	stats = p.Stats()
+	if stats.ZoneGateDrops != 1 || stats.ZoneGateStale != 1 {
+		t.Fatalf("stale stats=%+v, want one stale gate drop", stats)
+	}
+}
+
 type passZoneEvaluator9506 struct{}
 
 func (passZoneEvaluator9506) Evaluate(CaptureOrigin, ZoneSnapshotRef) ZoneEvaluation {

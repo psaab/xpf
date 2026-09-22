@@ -147,6 +147,8 @@ type Daemon struct {
 	ipsecCaptureStagePending      bool
 	ipsecCaptureGeneration        atomic.Uint64
 	ipsecCaptureAuthorityRevision atomic.Uint64
+	ipsecCaptureStageGeneration   uint64
+	ipsecCaptureSnapshotLandedGeneration uint64
 	ipsecOverlay                  atomic.Pointer[xnft.HostInputFenceOverlay]
 	ipsecOverlayAcked             atomic.Pointer[xnft.HostInputFenceOverlay]
 	ipsecOverlayRetryUntil        atomic.Int64

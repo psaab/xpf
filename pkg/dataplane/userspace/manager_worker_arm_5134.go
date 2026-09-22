@@ -67,6 +67,7 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 	next.Generation = nextGeneration
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
+	m.refreshCaptureAuthorityLocked(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 
 	publishSnap := next

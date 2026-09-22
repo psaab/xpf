@@ -272,7 +272,13 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// xdp_main_prog for unsupported capabilities or failed XSK liveness: the
 	// userspace runtime must not require the legacy main XDP pipeline.
 	m.bpfShim.SelectUserspaceXDPShimEntryProgram()
-	result, err := m.bpfShim.CompileUserspaceShim(cfg)
+	var result *dataplane.CompileResult
+	var err error
+	if m.compileUserspaceShimHook != nil {
+		result, err = m.compileUserspaceShimHook(cfg)
+	} else {
+		result, err = m.bpfShim.CompileUserspaceShim(cfg)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +294,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// is retained (m.lastSnapshot is not advanced on the error path).
 	// Capture the authority callback without invoking it under m.mu. The daemon
 	// owns the S4 snapshot and may need its own locks while producing the wire
-	// epochs; the manager lock only protects callback replacement.
+	// epochs and P-MECH rows; the manager lock only protects callback replacement.
 	m.mu.Lock()
 	epochProvider := m.captureEpochProvider
 	m.mu.Unlock()
@@ -297,11 +303,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)
 	}
-	if epochProvider != nil {
-		permitEpoch, queueEpochs := epochProvider()
-		snap.PermitEpoch = permitEpoch
-		snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
-	}
+	stampCaptureAuthority(snap, epochProvider)
 	snap.partialUpdateEpoch = partialEpoch
 	// #1620: stamp the cold-path sample mask onto the snapshot. The
 	// daemon called SetColdPathSampleMask once at startup with the
@@ -1049,6 +1051,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	next.Config = cfg
 	next.schedulerActiveState = copyPolicySchedulerActiveState(activeCopy)
 	next.schedulerActiveStateSet = true
+	m.refreshCaptureAuthorityLocked(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #6480: rebuild the schedule-affected policy + address-book sections
 	// (threading the cached feed overlay, #2049) and re-apply the StableZoneID

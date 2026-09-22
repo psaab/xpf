@@ -507,6 +507,9 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	defer func() {
 		if !captureCommitted && captureStagePending {
 			_ = d.rollbackIpsecCaptureStage(captureOld, captureStaged)
+			if healErr := d.healIpsecCaptureAuthorityAfterRollback(cfg); healErr != nil {
+				retErr = errors.Join(retErr, healErr)
+			}
 		}
 	}()
 	d.policyActivationSecs = daemonMonotonicSeconds()
@@ -540,9 +543,9 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		captureCommitted = true
 	} else {
 		switch {
-		case applyErr != nil:
+		case applyErr != nil && !d.ipsecCaptureSnapshotLandedForStage():
 			captureCommitErr = errors.New("ipsec capture: dataplane snapshot apply failed; staged divert withheld")
-		case !d.hostInboundDataplaneFresh.Load():
+		case !d.hostInboundDataplaneFresh.Load() && !d.ipsecCaptureSnapshotLandedForStage():
 			captureCommitErr = errors.New("ipsec capture: dataplane snapshot publication deferred; staged divert withheld")
 		default:
 			captureCommitErr = d.commitIpsecCaptureStage(captureOld, captureStaged)
