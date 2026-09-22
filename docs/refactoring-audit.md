@@ -118,24 +118,69 @@ function of the branch's own diff, so:
 - on `master` the changed set is empty, so it is structurally silent —
   nobody merging is interrupted by it.
 
-**Changed set.** `git diff --name-only <merge-base> --` (working tree
-included, so uncommitted growth counts) plus untracked files, where
-`<merge-base>` is `git merge-base origin/master HEAD`. Diffing the MERGE
-BASE rather than the base-ref tip is what keeps master's own commits out:
-a file master grew — or shrank — after the fork is not in the branch's
-diff at all.
+**Changed set.** The producer asks Git for a status-bearing, NUL-delimited
+working-tree diff against the merge base, then adds NUL-delimited untracked
+paths:
+
+```bash
+git -c diff.renames=true diff --name-status -z -M90% --diff-filter=d <merge-base> --
+git ls-files --others --exclude-standard -z
+```
+
+`<merge-base>` is `git merge-base origin/master HEAD`. The single-commit
+`git diff` form compares the working tree with the named commit, so staged
+and unstaged edits are both measured. Lowercase `d` excludes deletions;
+additions, copies, modifications, renames, typechanges, unmerged paths, and
+unknown/broken statuses remain in the stream. The probe handles each status
+without changing the three-field output row:
+
+- `A` and `C` are new files (`-` at the base); a copy never lends its
+  source's baseline.
+- `M`, `T`, `X`, and `B` use the same path at the merge base. `X`/`B` also
+  warn on stderr and continue with this conservative, existing behavior.
+- `R<score>\0<source>\0<destination>\0` carries the old path explicitly.
+  The destination is classified and measured; the source supplies its
+  merge-base blob only when the source is audit-eligible. A source outside
+  the audited population therefore enters at zero, while a destination
+  outside it emits nothing.
+- The intended tree-vs-working-tree form reports a conflict as one `M` row.
+  A future caller accidentally supplying index-form `U` plus `M` records is
+  coalesced by destination; a lone `U` is malformed and fails closed.
+
+`-M90%` is intentional: bare `-M` uses Git's 50% default and can pair
+unrelated boilerplate, while `-M100%` loses rename-plus-growth cases. No
+`-C` or copy search is requested, and `diff.renames=true` prevents a local
+configuration from disabling rename recognition. Git's
+`diff.renameLimit` remains its bounded inexact-search policy; when the
+limit degrades a pairing to delete plus add, the destination is conservatively
+new rather than silently inheriting the wrong baseline.
+
+The probe captures and validates both streams before publishing rows. It
+tracks consumed rename sources for the invocation: recreating an old source
+untracked after a staged move is a new file and cannot borrow the baseline a
+second time. Every output row is still
+`<base-LOC|-> <head-LOC> <destination-path>`, sorted in C-locale destination
+order. An unreadable merge-base blob falls back to `-` with a stderr warning;
+an unreadable merge-base commit, malformed NUL stream, or Git producer
+failure is a hard error. Destination paths containing whitespace are rejected
+loudly because the existing three-field protocol cannot represent them;
+source-only whitespace is safe because it is quoted for Git lookup and is
+never emitted.
+
+Diffing the MERGE BASE rather than the base-ref tip is what keeps master's
+own commits out: a file master grew — or shrank — after the fork is not in
+the branch's diff at all.
 
 What that choice gets wrong, stated plainly:
 
-- **Stacked branches inherit their parent's changed set**, because the
-  merge base against `master` is the parent's fork point. Point the child
-  at its parent: `XPF_AUDIT_BASE_REF=<parent-branch>` (or pass the ref as
-  argv[1]).
-- **After a branch merges `origin/master` into itself** the merge base
-  moves forward, so a crossing master caused is attributed to master and
-  the branch goes silent on it. Correct, but it means a crossing that
-  first appears in a merge is announced to nobody; the refresh job is what
-  records it.
+- **Stacked branches inherit their parent's changed set**, because the merge
+  base against `master` is the parent's fork point. Point the child at its
+  parent: `XPF_AUDIT_BASE_REF=<parent-branch>` (or pass the ref as
+  `argv[1]`).
+- **After a branch merges `origin/master` into itself** the merge base moves
+  forward, so a crossing master caused is attributed to master and the branch
+  goes silent on it. Correct, but it means a crossing that first appears in a
+  merge is announced to nobody; the refresh job is what records it.
 - It is a **whole-branch** view: every file the branch ever touched is in
   the set. Deliberate — the rejected alternative, `HEAD~..HEAD`, misses
   every crossing introduced before the last commit.
