@@ -1183,6 +1183,12 @@ pub(super) enum IpsecPassthroughOutcome {
 /// ifindex and from-zone are reused by Stage-11's post-admission local policy
 /// gates (#10525). Keeping this resolution in one helper prevents the coarse
 /// IKE gate and the fine/lo0 gates from disagreeing about attribution.
+/// #6458: the V1-validated stamp drives host-inbound admission only when the
+/// DESTINATION address's owner RG is forwarding-active LOCALLY — the same V2
+/// owner binding the session-miss zone-pair sites apply, resolved for a
+/// host-destined packet from the local address (review MEDIUM: a forged stamped
+/// NEW IKE initiation to a single-primary backup's reth address was Passthrough
+/// AND seeded the #6471 live-exchange table; it now degrades to the fabric zone).
 #[inline]
 pub(super) fn ike_host_inbound_gate_context(
     flow: &SessionFlow,
