@@ -458,6 +458,14 @@ type SyncStats struct {
 	// as DeletesSuppressedPeerIncapable: counted, visible leak over
 	// invisible teardown.
 	DeletesSuppressedPurgeRetirement atomic.Uint64
+	// DeletesSuppressedScopedPolicy counts outgoing SCOPED session deletes
+	// WITHHELD because the peer advertised its capabilities and did NOT
+	// claim #10512 scoped policy deletes (capFlagScopedPolicyDelete).
+	// Such a peer applies deletes by bare tuple, so our scoped delete
+	// would destroy a surviving colliding tenant's session. Same
+	// operational meaning as the other delete suppressors: counted,
+	// visible leak over invisible teardown.
+	DeletesSuppressedScopedPolicy atomic.Uint64
 	// InstallsSuppressedNoPeerInstallTable counts outgoing STAMPED session
 	// installs WITHHELD because the peer advertised its capabilities and
 	// did NOT claim #9752 install-table identity
@@ -1103,6 +1111,10 @@ type SessionSync struct {
 	// suppression warning, same incarnation scoping as deleteSuppressionWarned
 	// (reset alongside it on full disconnect).
 	purgeRetirementSuppressionWarned atomic.Bool
+	// scopedPolicySuppressionWarned latches the #10512 scoped-delete
+	// suppression warning, same incarnation scoping as
+	// deleteSuppressionWarned (reset alongside it on full disconnect).
+	scopedPolicySuppressionWarned atomic.Bool
 	// installTableSuppressionWarned latches the #9752 round 3 stamped-install
 	// suppression warning, same incarnation scoping (reset alongside on
 	// full disconnect).

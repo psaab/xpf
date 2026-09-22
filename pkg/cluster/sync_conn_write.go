@@ -232,6 +232,71 @@ func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) b
 	return true
 }
 
+// suppressScopedDeleteForIncapablePeer reports whether an outgoing SCOPED
+// (domain + expected RT_FLOW id) session delete must be WITHHELD because
+// the peer never advertised capFlagScopedPolicyDelete (#10512).
+//
+// Such a peer applies deletes unconditionally by bare tuple, so our scoped
+// delete would destroy a surviving tenant's session sharing the tuple —
+// the #10512 over+under. Withholding leaves the deleted tenant's session
+// on the peer until it idles out or the upgrade completes — the same
+// visible-leak-over-invisible-teardown trade the #9714/#9752 suppressors
+// make, with its own counter and one-shot warning. Bare deletes are never
+// withheld here; see suppressDeleteForIncapablePeer. A scoped delete is
+// NEVER downgraded to bare for an incapable peer: bare would mis-delete
+// (over+under) or refuse silently-looking; withhold is explicit + counted.
+func (s *SessionSync) suppressScopedDeleteForIncapablePeer(source string) bool {
+	if s == nil {
+		return false
+	}
+	// Default-deny while UNLEARNED (unlike #9714/#9752 delete suppressors):
+	// an old peer decodes the legacy prefix and bare-deletes — the exact
+	// downgrade the NEVER rule forbids — so discovery pass-through is not
+	// an option despite deletes being one-shot. A matched-pair reconnect
+	// may drop a commit-time delete (repaired by bulk reconcile's
+	// authoritative-absent, else idled out); an over-delete of a survivor
+	// is the worse trade by far.
+	if !s.peerCapabilitiesLearned() || !s.ScopedPolicyDeleteCapable() {
+		s.stats.DeletesSuppressedScopedPolicy.Add(1)
+		if s.scopedPolicySuppressionWarned.CompareAndSwap(false, true) {
+			slog.Warn("cluster sync: withholding scoped session deletes — the peer does not advertise "+
+				"#10512 scoped policy deletes, so it would apply them by bare tuple and destroy a surviving "+
+				"tenant's session. That peer will retain sessions this node has revoked until they "+
+				"idle out. Completing the upgrade on both nodes restores delete sync.",
+				"source", source,
+				"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+				"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+		}
+		return true
+	}
+	return false
+}
+
+// dropScopedDeleteForUnverifiedPeer enforces the #10512 NEVER-downgrade
+// invariant at WRITE time: a scoped delete frame (37/61-byte payload) must
+// never be written unless the CURRENT peer incarnation learned capabilities
+// and advertised the scoped bit. Returns true when the frame was a scoped
+// delete dropped here (counted + warned via the suppressor, which
+// re-checks the same condition — the double-check is harmless); bare
+// frames, non-delete frames, and malformed frames always return false.
+func (s *SessionSync) dropScopedDeleteForUnverifiedPeer(msg []byte) bool {
+	if len(msg) < syncHeaderSize+1 {
+		return false
+	}
+	msgType := msg[4]
+	payloadLen := binary.LittleEndian.Uint32(msg[8:12])
+	scoped := (msgType == syncMsgDeleteV4 && payloadLen == 37) ||
+		(msgType == syncMsgDeleteV6 && payloadLen == 61)
+	if !scoped {
+		return false
+	}
+	if s.peerCapabilitiesLearned() && s.ScopedPolicyDeleteCapable() {
+		return false
+	}
+	s.suppressScopedDeleteForIncapablePeer("send_retry")
+	return true
+}
+
 // suppressStampedInstallForIncapablePeer reports whether an outgoing STAMPED
 // session install must be WITHHELD because the peer cannot take it (#9752
 // round 3, hardened round 4).
@@ -696,6 +761,23 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 			// gap open followed by a close (no install can be replayed after
 			// its delete).
 			s.writeMu.Lock()
+			// #10512 write-time gate, INSIDE writeMu immediately before the
+			// write: testBeforeQueuedWrite (above) plus real churn can move
+			// flags after an earlier check, so approval binds to THIS write.
+			// A drop unlocks both mutexes and counts as delivered
+			// (intentional, not a transport failure) so bulk watermarks move.
+			// Race audit: s.mu is deliberately NOT held across the write.
+			// Replacement always closes the selected conn, so a write past
+			// replacement fails and the retry re-gates; learned+incapable
+			// is reachable only via reconnect (new conn) since no downgrade
+			// is re-advertised mid-connection. Holding s.mu across a
+			// blocking write would risk deadlock for no safety gain.
+			if s.dropScopedDeleteForUnverifiedPeer(msg) {
+				s.writeMu.Unlock()
+				s.bulkStartMu.Unlock()
+				delivered = true
+				return
+			}
 			moved := s.noteStreamConnLocked(conn) // #9508: before the write
 			if !writeStarted {
 				s.queuedFrameWriteStarted()

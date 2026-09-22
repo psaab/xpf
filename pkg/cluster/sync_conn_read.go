@@ -992,7 +992,6 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		peerProto := binary.LittleEndian.Uint16(payload[:2])
-		s.peerSnapshotProtocol.Store(uint32(peerProto))
 		// #7147: capability flags ride in the trailing byte under the same
 		// discipline — a 2-byte frame is a pre-#7147 peer, and 0 flags is the
 		// correct reading of it (advertises no capabilities).
@@ -1000,7 +999,6 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if len(payload) >= 3 {
 			peerFlags = payload[2]
 		}
-		s.peerCapabilityFlags.Store(uint32(peerFlags))
 		// #7990: the peer's session-sync WIRE version rides as a trailing u16
 		// under the same discipline — a payload shorter than 5 bytes is a
 		// pre-#7990 peer and leaves 0 = UNKNOWN, which callers must handle
@@ -1009,7 +1007,6 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if len(payload) >= 5 {
 			peerWire = binary.LittleEndian.Uint16(payload[3:5])
 		}
-		s.peerSessionSyncWire.Store(uint32(peerWire))
 		// #9818: the sender's process identity rides after the existing
 		// capabilities fields. Old peers ignore this trailing extension; a
 		// short frame leaves the connection unattributed and therefore on the
@@ -1024,7 +1021,29 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				}
 			}
 		}
+		// noteConn runs for every frame (as before): it may PROMOTE a
+		// pending-retirement connection to current (#9818), so it must
+		// precede the membership gate below — gating first would leave
+		// the promotion unrunnable and the conn to die on timer expiry.
 		s.noteConnPeerCapabilities(conn, peerIdentity)
+		// #10512: arm the GLOBAL learned state only from the current
+		// incarnation's connection (the noteHeartbeatAck discipline): an
+		// in-flight frame from a superseded connection must not re-arm
+		// learned state the advance just cleared. Checked AND stored under
+		// s.mu so a racing install serializes either fully before (then
+		// cleared) or fully after (then rejected). nil conn is the
+		// deliberate unit-test seam and always stores; production read
+		// loops pass their live conn.
+		s.mu.Lock()
+		if conn != nil && !s.connIsCurrentIncarnationLocked(conn) {
+			s.mu.Unlock()
+			slog.Debug("cluster sync: ignoring capabilities from a superseded connection")
+			return
+		}
+		s.peerSnapshotProtocol.Store(uint32(peerProto))
+		s.peerCapabilityFlags.Store(uint32(peerFlags))
+		s.peerSessionSyncWire.Store(uint32(peerWire))
+		s.mu.Unlock()
 		// #9752 round 4: a capable discovery re-arms the bulk. A window that
 		// aborted during the discovery race must not stay latched once the
 		// peer proves capable — the next redrive completes it.

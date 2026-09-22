@@ -170,6 +170,19 @@ const (
 	// installs every session stamp-less, so a stamped install sent there
 	// would silently wrong-table after failover.
 	capFlagInstallTableIdentity uint8 = 1 << 3
+
+	// capFlagScopedPolicyDelete: the sender decodes the #10512 scoped tail
+	// (routing_domain + expected_rt_flow_session_id) on session deletes
+	// and applies them conditionally — only when the current row carries
+	// that identity. Absent => the peer applies deletes by bare tuple, so
+	// a scoped delete sent there would destroy a surviving colliding
+	// tenant's session.
+	//
+	// STAGED: defined, decoded, and gated on the send side, but NOT YET
+	// ADVERTISED — receive still discards the tail, so advertising would
+	// invite scoped frames this binary applies as bare deletes. The apply
+	// slice adds it to localCapabilityFlags atomically with honoring it.
+	capFlagScopedPolicyDelete uint8 = 1 << 4
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -341,6 +354,19 @@ func (s *SessionSync) InstallTableIdentityCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags.Load())&capFlagInstallTableIdentity != 0
+}
+
+// ScopedPolicyDeleteCapable reports whether the peer advertised that it
+// decodes the domain + expected-id tail on session deletes and applies
+// them conditionally (#10512). Unlike PeerDeleteOwnershipCapable, callers
+// MUST default-deny while unlearned (see the suppressor): an old peer
+// decodes the legacy prefix and bare-deletes — pass-through would
+// downgrade every scoped delete in the discovery window.
+func (s *SessionSync) ScopedPolicyDeleteCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags.Load())&capFlagScopedPolicyDelete != 0
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been
