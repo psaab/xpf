@@ -468,7 +468,9 @@ P2 code to open). Any design that needs P2 is Option C and a PLAN-KILL trigger
   ledger code under `p.mu`. Poll does not take `drainMu` while draining the
   separate completion socket (:823-845), so a completion can arrive while
   the row is still `ADMISSION_PENDING`: buffer it as `earlyCompletion` on that
-  row under `p.mu`. When the response arrives, atomically install ADMIT_OK,
+  row under `p.mu`; first arrival wins, while a second pre-ADMIT_OK arrival
+  marks duplicate/FAIL in a bounded row flag/counter and never overwrites the
+  first. When the response arrives, atomically install ADMIT_OK,
   set `pending.deadline = time.Now().Add(AckDeadline)`, and apply the buffered
   completion; a refusal or transport error with a buffered completion
   terminalizes the ledger row Uncertain/FAIL, retaining admission code,
