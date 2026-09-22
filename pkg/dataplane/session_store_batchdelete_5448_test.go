@@ -16,13 +16,15 @@ import (
 type batchDeleteTailDP struct {
 	DataPlane
 
-	missingV4 SessionKey
-	presentV4 map[SessionKey]bool // false once deleted
-	attempted []SessionKey
+	missingV4  SessionKey
+	presentV4  map[SessionKey]bool // false once deleted
+	attempted  []SessionKey
+	retryErrV4 map[SessionKey]error
 
 	missingV6   SessionKeyV6
 	presentV6   map[SessionKeyV6]bool
 	attemptedV6 []SessionKeyV6
+	retryErrV6  map[SessionKeyV6]error
 }
 
 func (m *batchDeleteTailDP) BatchDeleteSessions(keys []SessionKey) (int, error) {
@@ -42,6 +44,9 @@ func (m *batchDeleteTailDP) BatchDeleteSessions(keys []SessionKey) (int, error) 
 
 func (m *batchDeleteTailDP) DeleteSession(k SessionKey) error {
 	m.attempted = append(m.attempted, k)
+	if err, ok := m.retryErrV4[k]; ok {
+		return err
+	}
 	if k == m.missingV4 {
 		return ebpf.ErrKeyNotExist
 	}
@@ -64,6 +69,9 @@ func (m *batchDeleteTailDP) BatchDeleteSessionsV6(keys []SessionKeyV6) (int, err
 
 func (m *batchDeleteTailDP) DeleteSessionV6(k SessionKeyV6) error {
 	m.attemptedV6 = append(m.attemptedV6, k)
+	if err, ok := m.retryErrV6[k]; ok {
+		return err
+	}
 	if k == m.missingV6 {
 		return ebpf.ErrKeyNotExist
 	}
@@ -166,6 +174,180 @@ func TestBatchDeleteV6RetriesTailAfterMissingKey(t *testing.T) {
 	}
 	if deleted != len(keys)-1 {
 		t.Errorf("v6 deleted count = %d, want %d", deleted, len(keys)-1)
+	}
+}
+
+func batchDeleteV4Keys10528() []SessionKey {
+	keys := make([]SessionKey, 5)
+	for i := range keys {
+		keys[i] = SessionKey{
+			Protocol: 6,
+			SrcIP:    [4]byte{10, 0, 0, byte(i)},
+			DstIP:    [4]byte{10, 0, 1, byte(i)},
+			SrcPort:  uint16(1000 + i),
+			DstPort:  80,
+		}
+	}
+	return keys
+}
+
+func batchDeleteV6Keys10528() []SessionKeyV6 {
+	keys := make([]SessionKeyV6, 5)
+	for i := range keys {
+		var src, dst [16]byte
+		src[0], src[15] = 0x20, byte(i)
+		dst[0], dst[15] = 0x30, byte(i)
+		keys[i] = SessionKeyV6{
+			Protocol: 6,
+			SrcIP:    src,
+			DstIP:    dst,
+			SrcPort:  uint16(1000 + i),
+			DstPort:  80,
+		}
+	}
+	return keys
+}
+
+// TestBatchDeleteV4SurfacesPerKeyErrorAfterNotFound proves a hard per-key
+// failure after the batch's missing-key stop is returned, while the rest of
+// the tail is still attempted.
+func TestBatchDeleteV4SurfacesPerKeyErrorAfterNotFound(t *testing.T) {
+	keys := batchDeleteV4Keys10528()
+	errBoom := errors.New("per-key v4 delete failed")
+	dp := &batchDeleteTailDP{
+		missingV4:  keys[1],
+		presentV4:  map[SessionKey]bool{},
+		retryErrV4: map[SessionKey]error{keys[1]: ebpf.ErrKeyNotExist, keys[3]: errBoom},
+	}
+	for i, k := range keys {
+		dp.presentV4[k] = i != 1
+	}
+
+	store := dataPlaneSessionStore{dp: dp}
+	deleted, err := store.batchDeleteV4(scopedV4(keys))
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("batchDeleteV4 error = %v, want %v", err, errBoom)
+	}
+	if deleted != 3 {
+		t.Fatalf("batchDeleteV4 deleted = %d, want 3 successful deletes", deleted)
+	}
+	// The partial is NOT a prefix: the boom key's row is retained (the hole)
+	// while later tail keys were still deleted. Consumers must not treat
+	// [:deleted] as the deleted set (#10598).
+	if !dp.presentV4[keys[3]] {
+		t.Errorf("boom key index 3 was dropped from the table, want retained (failed delete keeps the row)")
+	}
+	for _, idx := range []int{0, 2, 4} {
+		if dp.presentV4[keys[idx]] {
+			t.Errorf("key index %d survived, want deleted", idx)
+		}
+	}
+
+	attempted := make(map[SessionKey]bool, len(dp.attempted))
+	for _, k := range dp.attempted {
+		attempted[k] = true
+	}
+	for _, idx := range []int{2, 4} {
+		if !attempted[keys[idx]] {
+			t.Errorf("key index %d was not attempted after per-key failure", idx)
+		}
+	}
+}
+
+// TestBatchDeleteV6SurfacesPerKeyErrorAfterNotFound is the IPv6 twin.
+func TestBatchDeleteV6SurfacesPerKeyErrorAfterNotFound(t *testing.T) {
+	keys := batchDeleteV6Keys10528()
+	errBoom := errors.New("per-key v6 delete failed")
+	dp := &batchDeleteTailDP{
+		missingV6:  keys[1],
+		presentV6:  map[SessionKeyV6]bool{},
+		retryErrV6: map[SessionKeyV6]error{keys[1]: ebpf.ErrKeyNotExist, keys[3]: errBoom},
+	}
+	for i, k := range keys {
+		dp.presentV6[k] = i != 1
+	}
+
+	store := dataPlaneSessionStore{dp: dp}
+	deleted, err := store.batchDeleteV6(scopedV6(keys))
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("batchDeleteV6 error = %v, want %v", err, errBoom)
+	}
+	if deleted != 3 {
+		t.Fatalf("batchDeleteV6 deleted = %d, want 3 successful deletes", deleted)
+	}
+	// Non-prefix partial, V6 twin of the V4 hole pin above (#10598).
+	if !dp.presentV6[keys[3]] {
+		t.Errorf("v6 boom key index 3 was dropped from the table, want retained (failed delete keeps the row)")
+	}
+	for _, idx := range []int{0, 2, 4} {
+		if dp.presentV6[keys[idx]] {
+			t.Errorf("v6 key index %d survived, want deleted", idx)
+		}
+	}
+
+	attempted := make(map[SessionKeyV6]bool, len(dp.attemptedV6))
+	for _, k := range dp.attemptedV6 {
+		attempted[k] = true
+	}
+	for _, idx := range []int{2, 4} {
+		if !attempted[keys[idx]] {
+			t.Errorf("v6 key index %d was not attempted after per-key failure", idx)
+		}
+	}
+}
+
+// TestBatchDeleteV4IgnoresAllNotFoundPerKey guards the benign recovery case:
+// every retry can race with another deleter and still must report success.
+func TestBatchDeleteV4IgnoresAllNotFoundPerKey(t *testing.T) {
+	keys := batchDeleteV4Keys10528()
+	retryErr := make(map[SessionKey]error, len(keys))
+	for _, k := range keys {
+		retryErr[k] = ebpf.ErrKeyNotExist
+	}
+	dp := &batchDeleteTailDP{
+		missingV4:  keys[0],
+		presentV4:  map[SessionKey]bool{},
+		retryErrV4: retryErr,
+	}
+	for i, k := range keys {
+		dp.presentV4[k] = i != 0
+	}
+
+	store := dataPlaneSessionStore{dp: dp}
+	deleted, err := store.batchDeleteV4(scopedV4(keys))
+	if err != nil {
+		t.Fatalf("batchDeleteV4 returned all-not-found error: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("batchDeleteV4 deleted = %d, want 0", deleted)
+	}
+}
+
+// TestDeleteBatchKnownV4SurfacesRecoveryLoopFailure proves the public known
+// delete boundary preserves a recovery-loop error for its caller.
+func TestDeleteBatchKnownV4SurfacesRecoveryLoopFailure(t *testing.T) {
+	keys := batchDeleteV4Keys10528()
+	errBoom := errors.New("known delete recovery failed")
+	dp := &batchDeleteTailDP{
+		missingV4:  keys[1],
+		presentV4:  map[SessionKey]bool{},
+		retryErrV4: map[SessionKey]error{keys[1]: ebpf.ErrKeyNotExist, keys[3]: errBoom},
+	}
+	for i, k := range keys {
+		dp.presentV4[k] = i != 1
+	}
+	entries := make([]SessionEntryV4, len(keys))
+	for i, k := range keys {
+		entries[i] = SessionEntryV4{Key: k}
+	}
+
+	store := dataPlaneSessionStore{dp: dp}
+	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired, true)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("DeleteBatchKnownV4 error = %v, want %v", err, errBoom)
+	}
+	if deleted != 3 {
+		t.Fatalf("DeleteBatchKnownV4 deleted = %d, want 3 successful deletes", deleted)
 	}
 }
 
