@@ -405,10 +405,10 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
 - M1: `tests_policy_revocation_8356` TCP subset (drive_one_packet cells) flips
   revoke-cells red→green on outcome asserts with new hit guards passing;
   `cargo test --release --bin xpf-userspace-dp -- --test-threads=1
-  tests_policy_revocation_8356` → 65/65 descriptor cells plus one helper-level
-  #9513 proof (66 declarations covered) after Q1 helper move. Revert check:
-  temporarily blank the LAN MAC → the five descriptor hit guards red (not
-  outcome asserts alone); the helper-level #9513 pin has its own revert proof.
+  tests_policy_revocation_8356` → 65/65 descriptor cells; run the helper-level
+  #9513 pin separately. Revert check: temporarily blank the LAN MAC → the five
+  descriptor hit guards red (not outcome asserts alone); the helper-level #9513
+  pin has its own revert proof.
 - M2: `tests_session_hit_authority_9519` → 10/10 (phase-1 `admitted()` tx==1
   passes); DNAT 9382 cells → green on phase-1 + outcome; 9604 reverse cells →
   green on `out.hit==1` + outcome; deny-SYN 13/6 sites → green with LAN arrival
