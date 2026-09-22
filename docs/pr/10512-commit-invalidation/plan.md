@@ -1,11 +1,11 @@
-# DRAFT v2 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
+# DRAFT v3 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
 
-Status: DRAFT v2 (plan-review fold output, design path — no production code in this commit).
+Status: DRAFT v3 (Delta2 R1+R2 fold: bounded gate proof and delete fan-out; no other semantic changes; design path — no production code in this commit).
 Issue: #10512 (OPEN, bug + audit + validated-by:research + source:deep-review).
 Base: `2781465ee3afe52a780d94d2245cb565a1e80548` on `fix/10512-commit-invalidation`; v1 tip `4d2cb2bf6` (in history).
 Lane: Eng10512. Date: 2026-09-22.
 
-## 0. Plan-review fold (round 1 → v2)
+## 0. Plan-review fold (round 1 → v3)
 
 Round-1 verdicts on v1 (both read in full): Rev10512PlanA PLAN-NEEDS-MAJOR
 (F1 mirror GC, F2 bare HA-sync, F3 frozen/admissions, F4 two-phase, F5 fan-out,
@@ -14,6 +14,11 @@ F11 B1 feasibility); Rev10512PlanB PLAN-NEEDS-MAJOR near-KILL (F1 HA leg,
 F2 mirror lifecycle, F3 predicate/admissions, F4 placement, F5 fan-out/skew,
 F6 tests, F7 decided-questions). Convergent: miss mechanics verified, Option A
 direction sound, contracts to close the miss on every path not specified.
+
+Fold-2 (Delta2): Delta1's PLAN-READY findings remain unchanged. Delta2 R1
+adds bounded tuple-gate permits, finalization, liveness, and proof in §2.2;
+R2 adds bounded delete batching, deadlines, completion, and #5578 mapping in
+§2.4/§4. Delta2 R3–R6 are deferred per the parent brief.
 
 Parent SOURCE-DETERMINED closures (closed in this revision, not re-asked):
 
@@ -137,6 +142,8 @@ authoritative-absent and must neither re-push it nor delete the survivor's row
 
 ## 2. Mirror lifecycle (required block 2)
 
+### 2.1 Verb return shape (READ verb, Q1)
+
 `list_sessions_by_policy { policy_ids[], mode: prepublish|legacy,
 before_secs?, families[], classes[] }`
 returns `matches[] { addr_family, routing_domain, tuple, reverse_key,
@@ -210,26 +217,142 @@ Rule (normative): for verb-driven deletes the HELPER owns mirror mutation,
 because only the helper holds the survivor's value (Go cannot re-publish B
 after a bare row delete — it has no B value once the row is gone).
 
-- Shared tuple mutation sequence (load-bearing): the helper owns a bounded,
-  sharded gate keyed by bare `(addr_family, tuple)`. Every helper path that
-  can install, publish, refresh, or delete the mirror (local admission, HA
-  import, refresh, #9526 terminal purge, and this policy delete) must acquire
-  the gate before publishing; ordinary workers wait/retry rather than writing
-  around it. A delete acquires a sequence token/lease for the tuple, then
-  broadcasts `conditional_probe(token)` commands. Workers validate the token
-  and mutate their own single-threaded `SessionTable` without reacquiring the
-  gate; they return bounded acknowledgements. If the captured forward/
-  companion ids still match, the coordinator broadcasts
-  `conditional_remove(token)` commands, collects applied acknowledgements,
-  broadcasts a second bounded survivor probe, chooses a deterministic live
-  survivor (if several), repairs the BPF row while the token remains held,
-  then releases the gate. This uses worker command queues, not nonexistent
-  cross-thread table locks. The READ scan never holds `ServerState`; the gate
-  spans only bounded per-match commands. On timeout, the coordinator marks the
-  token aborting, drains bounded worker acknowledgements, repairs any applied
-  half if possible, and releases the gate only after the token is quiescent;
-  the operation returns a visible failure and never falls back to an unlocked
-  repair.
+- Shared tuple mutation sequence (load-bearing, R1 bounds): the helper owns a
+  sharded gate keyed by bare `(addr_family, tuple)`: 256 shards (power of 2,
+  `FxHash(family, tuple) % 256`), each a `Mutex<HashMap<TupleKey, Arc<GateEntry>>>`
+  capped at 1024 entries (a full shard returns retryable `gate_table_full` and
+  no BPF write). The shard mutex is held only for microsecond
+  lookup/insert/remove. Each entry has `Idle/Publishing(n)/Draining/Held(token)/
+  Finalizing/Aborting` state, atomic publisher count, and atomic install-permit
+  count. A normal BPF publisher first acquires a `PublishPermit`, incrementing
+  the publisher count; that permit remains held through the actual BPF
+  publish/delete syscall and releases only afterward.
+  Permit acquisition performs lookup, state validation, and counter increment
+  while holding that shard mutex; idle removal rechecks `state=Idle` and both
+  counts zero under the same mutex before deleting the map entry. A retained
+  `Arc<GateEntry>` therefore cannot be removed and replaced for the same tuple
+  while a permit exists; no ABA split can bypass serialization.
+  Every worker-local `SessionTable` install/replace/remove calls non-blocking
+  `try_acquire_install`; on success it increments `install_seq`, spans the
+  complete table mutation, and releases afterward without holding a table lock
+  or BPF permit. On `Draining`, `Finalizing`, or `Aborting`, denial defers
+  that tuple's install to the worker's bounded retry slot (five polls/10ms),
+  returns to command draining, and retries after release; it never synchronously
+  blocks the worker that must process a survivor probe. A delete changes `Idle`
+  to `Draining` (blocking new publish permits), waits for publisher count zero,
+  then changes to `Held(token)`. Before the final survivor probe it changes
+  `Held` to `Finalizing`, blocks new install and publish permits, and drains
+  both active counts while workers continue their command loops; the
+  probe→repair→release window therefore has no table mutation or BPF syscall
+  racing it. Distinct tuples proceed in parallel, and idle entries are removed
+  only after all permits release.
+  A delete micro-batch holds at most 64 tuple entries; during `Draining`,
+  transient publisher and install permits are each bounded by `64*W<=8192`,
+  and both counts are zero before `Finalizing` probe/repair. The gate never
+  grows with the full 262144-match capture.
+  Every non-holder BPF publish path for that tuple (local admission, HA import,
+  refresh, and #9526 purge) takes its `PublishPermit` before `publish`/`delete`.
+  The policy-delete coordinator is the sole exception after `Held(token)`:
+  its survivor repair calls token-authorized `publish_under_token(token)` or
+  `delete_under_token(token)`, which validates the current `Held` or
+  `Finalizing` token (or the coordinator-only repair token issued after
+  quiescence) and performs the BPF syscall without acquiring a normal permit.
+  Workers never write around the gate.
+- Install-generation revalidation: each worker-local table mutation uses the
+  non-blocking `InstallPermit` protocol above and returns the observed
+  `install_seq` with its survivor probe. Before the final probe the coordinator
+  switches `Held` to `Finalizing`; new installs receive bounded deferral and
+  keep draining commands, while the coordinator waits at most 20ms for the
+  active install count to reach zero. It then performs the final
+  probe→token-authorized repair while no table mutation can begin; a changed
+  sequence during earlier repair passes forces another pass, up to three
+  passes or the remaining 200ms lease. A continuously changing tuple stays
+  fenced and returns `gate_timeout` rather than releasing with a mirror gap.
+- Token and lease: `TupleToken { seq: u64 per-shard monotonic, epoch: u32
+  coordinator epoch (bumped on restart/reconcile), expiry_ns: u64 monotonic,
+  shard: u8 }`. Gate acquisition is separate from the sequence lease: the
+  batch may spend at most 100ms trying to acquire sorted tuple keys; a
+  `Draining` entry waits at most 20ms for existing `PublishPermit`s to release.
+  Only after publisher count reaches zero does the entry become `Held` and set
+  `expiry_ns` to 200ms from that instant. Workers accept only exact `seq+epoch`
+  with `now < expiry`, else `TokenStale`; the coordinator accepts only acks
+  carrying the issued token. The 200ms sequence budget covers three 20ms
+  command phases plus BPF repair and queue slack; each phase collect has a 20ms
+  deadline. A tuple not acquired, or whose permits do not drain, by the 100ms
+  batch budget is returned as `gate_timeout` without a delete token.
+- Command queues: each delete micro-batch is represented by three batched
+  `WorkerCommand` envelopes (`conditional_probe`, `conditional_remove`, and
+  survivor probe), each carrying at most 64 `(token, match)` items. They use
+  the existing per-worker `Mutex<VecDeque<WorkerCommand>>` via `push_bounded`
+  ONLY (`MAX_PENDING_WORKER_COMMANDS=4096`,
+  `WORKER_COMMAND_DRAIN_BUDGET=256`, worker_queue.rs:80,580). Kick is
+  non-blocking; a refused push, poisoned mutex (`lock_recover`, committed
+  prefix kept), or dead-worker shed maps to a named `per_worker_error` for
+  that batch, never a silent drop. Workers drain at most 256 command
+  envelopes per pass and feed `commands_backlogged` into `did_work`; the
+  delete handler separately caps tuple work at 64 items per phase/pass and
+  yields before the next AF_XDP poll. This is a tuple/work bound, not a
+  timing extrapolation from the full-queue benchmark; implementation must
+  measure the real BPF syscall budget. A micro-batch therefore has at most
+  192 tuple slots per worker across its three phases (see R2), with bounded
+  ring stall.
+- Refresh integration: `refresh_bpf_conntrack_last_seen(..., sessions:
+  &SessionTable, ...)` (bpf_map/mod.rs:1035-1039) keeps `&SessionTable` (no
+  `&mut`, no table lock) and gains `gate: &TupleGate`. Each budgeted cursor
+  tuple calls `gate.try_acquire_publish(tuple)`; the returned
+  `PublishPermit` is held through the `BPF_EXIST` refresh syscall and then
+  released. When the tuple is `Draining`, `Held`, `Finalizing`, or `Aborting`,
+  the refresh
+  skips this pass and retries on the next cursor wrap. Installs, HA imports,
+  and refresh all acquire the same permit before the BPF syscall; an install
+  may update its worker-local table first, but its BPF publish defers for up
+  to five worker polls (at most 10ms), so the survivor probe sees it while
+  no write can bypass the gate. Persistent contention returns retryable
+  `GateContention`/`gate_table_full`, never a drop.
+- Liveness: on phase timeout, worker panic, quarantine, death, or an HA-import
+  race, the coordinator marks the token `Aborting` and blocks new
+  `PublishPermit`s. It first drains live-worker acks for at most 50ms; it does
+  not repair yet. On a confirmed-dead worker, it takes that worker's queue
+  lock and filters each batched envelope in place, removing only items whose
+  `(token, match)` equals this abort; it preserves item order and unrelated
+  token items, dropping an envelope only when it becomes empty. It then marks
+  the worker fenced/non-executable for this epoch; dead queues are not required
+  to become empty. A resurrected worker gets a new coordinator epoch, so stale
+  commands cannot execute. The gate remains
+  `Aborting` until all live-worker acks/queue entries are quiescent. If the
+  original token expires first, the coordinator issues a fresh probe-only
+  recovery token accepted by live workers for survivor reads only (no remove,
+  publish, or permit acquisition), collects those bounded acks, then issues a
+  coordinator-only repair token. After quiescence, it runs that final
+  survivor probe and performs the token-authorized repair (republish B or
+  delete the bare row), then releases the gate. If the final probe/repair
+  cannot complete, it retains the fence and returns visible `gate_timeout` or
+  `per_worker_error`, never an unlocked repair or an early optional repair.
+  Shed queues (`worker_command_queue_shed_total`), poison recoveries, and drops
+  (`worker_command_queue_drops_total`) all force batch `complete=false` (R2).
+- Necessity: conditional-delete plus republish without BPF serialization loses
+  when delete probes (no survivor), concurrent B installs into its table and
+  publishes the bare BPF row, then delete deletes that fresh row. The gate
+  serializes BPF mutations only: a publisher holds its `PublishPermit` through
+  the syscall, while table installs stay worker-local. A concurrent install's
+  BPF publish waits, so the second survivor probe (which reads `SessionTable`,
+  not BPF) sees B and the repair republishes B instead of deleting.
+- Proof sketch: under the gate, `probe, conditional_remove, survivor-probe,
+  publish_under_token/delete_under_token` is atomic with respect to all normal
+  BPF publishers for that tuple: they hold `PublishPermit` through their
+  syscalls and cannot enter while the gate is `Held` or `Finalizing`.
+  Conditional ids make
+  removal equality-only (stale or different ids are no-ops, so tuple reuse
+  cannot over-clear); survivor selection is deterministic over post-remove
+  table contents (which include every concurrent install); each worker's
+  `install_seq` is compared after token-authorized BPF repair, and any change
+  forces another probe/repair before finalization. The repair (`BPF_ANY`
+  republish when a survivor exists, else bare-row delete) validates the Held
+  or Finalizing sequence token (or coordinator-only repair token) and
+  happens before release with no unobserved install. Hence section 2.3 items
+  (1)-(4) follow: helper holds B, mirror carries live B, `ForEach` enumerates
+  B, no phantom A. Abort preserves safety via fence→quiesce→final
+  probe→repair or visible failure; it never releases an early silent partial.
 - The domain-present helper delete path used by `deletePolicyMatchesScoped`
   is collision-aware and identity-conditional. It probes each independently
   installed half under the sequence token. A missing/different forward
@@ -262,6 +385,61 @@ RoutingDomain; (4) no phantom A targeting (A's value is gone from mirror and
 helper). If instead the row carried A's value at delete time (A was last
 publisher), the same sequence replaces it with B's republish, never leaves
 stale A (which would linger to GC expiry and phantom-retarget future sweeps).
+
+### 2.4 Delete-phase fan-out and completion (R2)
+
+- Candidate batching: a complete READ yields at most
+  `MAX_CAPTURE_MATCHES=262144` identities. Go retains them in bounded
+  4096-entry candidate pages and sends sequential delete micro-batches of at
+  most 64 forward matches. It deduplicates their gate keys and acquires
+  distinct gates in canonical `(addr_family, tuple)` order; only after those
+  gates are held does it order conditional work by
+  `(routing_domain, expected_rt_flow_session_id, expected_companion_rt_flow_session_id)`.
+  Thus the worst case is 4096 micro-batches, never one unbounded
+  `262144 × W` broadcast. A micro-batch runs the three phases, performs the
+  final token-authorized survivor repair, then releases all gates before the
+  next micro-batch.
+- Kick/collect: delete uses the same control-handle discipline as READ:
+  validate and kick while locked, unlock, collect lock-free, then attach
+  status. The delete handle has a separate 30s absolute deadline from its
+  first kick. Each micro-batch has the R1 100ms acquire budget and 200ms
+  sequence lease, with 20ms per-phase collection. The coordinator stops
+  issuing new micro-batches at `deadline-300ms`, reserving the worst
+  acquire/lease/abort/final-repair envelope for the active batch; every active
+  batch must finish or enter the fenced abort state by the absolute deadline.
+  At the deadline it reports `complete=false` and never waits indefinitely or
+  queues work after the gate fence. The outer commit keeps `d.applySem` until
+  clear returns; this separate delete deadline bounds that additional hold to
+  30s, while any fenced token cleanup continues without normal/unfenced BPF
+  writes; only the token-authorized final repair may run.
+- Worker fan-out: each micro-batch sends three batched
+  `WorkerCommand` envelopes to each live worker, each envelope carrying at
+  most 64 token/match items. For `W<=128`, that is at most 384 queue pushes
+  and 192 tuple slots per worker per micro-batch; each worker's
+  `MAX_PENDING_WORKER_COMMANDS=4096` queue and 64-tuple-per-phase drain
+  budget remain the hard limits. A refused push, queue poison, dead-worker
+  shed, token expiry, gate-table full, or per-phase ack shortfall records a
+  named `per_worker_error` and terminates that micro-batch safely; no command
+  is silently discarded.
+- Completion: a micro-batch is complete only after every live worker has
+  acknowledged probe/remove/survivor phases and the final repair has run (or
+  every conditional operation was an explicit stale/no-op). The overall
+  delete result is `{batches_applied, batches_noop, per_worker_errors,
+  complete}`; `complete=true` requires every candidate micro-batch to reach a
+  terminal result with no queue, gate, worker, or deadline error. A stale
+  forward remains a successful local no-op and still queues the conditional
+  HA delete; a partial companion remains visible and queues the forward HA
+  delete.
+- Partial mapping and retry: `gate_timeout`, `gate_table_full`,
+  `queue_overflow`, `token_stale`, `worker_dead`, `per_worker_error`,
+  transport failure, or delete deadline produces `complete=false` plus
+  `clearErr` joined into #5578 (config remains committed+active, success line
+  suppressed, safe fan-out for matches-in-hand still attempted). Helper abort
+  follows §2.2's fence→quiesce→final-probe→repair order; it never falls back
+  to a bare or unconditional mirror delete. A retry reuses the same captured
+  domain/tuple/forward and companion RT_FLOW identities, so applied and stale
+  batches are idempotent; the peer still receives only the forward identity
+  and derives its local reverse.
 
 ## 3. Predicate + timing (required block 3)
 
@@ -368,6 +546,7 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
   holds `d.applySem` during READ (daemon_policy_invalidate.go:146-147), so the
   30s maximum is a deliberate apply-window/security tradeoff, not an
   unbounded continuation loop.
+- Lock discipline (Q3 closed): NEVER hold `ServerState` across the scan.
   Control-socket verb (the session socket serves EXACTLY
   ping/sync_session/session-update_ha_state; anything else is refused fast,
   handlers/mod.rs:233-249). Locked phase = validate + broadcast kick +
@@ -387,6 +566,11 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
   | `partial_companion` (forward matched, companion id differed) | safe forward
   removed, replacement companion preserved | `clearErr` joined (visible
   partial outcome); conditional HA forward delete still sent |
+  | delete `complete=false` / `gate_timeout` / `queue_overflow` /
+  `worker_dead` / `token_stale` / `delete_deadline` | some candidate batches
+  applied or no-op, but delete fan-out is not complete | `clearErr` joined into
+  #5578; config remains committed+active, success line suppressed, retry the
+  same identities; never claim convergence or use a bare fallback |
   | `identity_missing` / complete=false / per_worker_errors / timeout /
   transport error / unknown-verb (old helper, handlers/mod.rs:468-471) |
   discovery or protocol integrity NOT positively complete | `clearErr` joined
@@ -603,5 +787,8 @@ Validation body, report + STOP.
   with return shape + rule + proof, (3) predicate+timing §3, (4) bounds+
   failure §4, (5) tests §5 (3 classes × 2 families × 2 producers + guards).
 - [x] No production code touched; plan-only diff.
-- [x] DRAFT v2 plan force-added and committed; branch publication handled
+- [x] Fold-2 Delta2 R1/R2: tuple-gate permits/finalization/liveness/proof and
+  bounded delete batching/deadlines/completion/#5578 mapping are recorded;
+  Delta2 R3–R6 remain deferred per the parent brief.
+- [x] DRAFT v3 plan force-added and committed; branch publication handled
   outside this document.
