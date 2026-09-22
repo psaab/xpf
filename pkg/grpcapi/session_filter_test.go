@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -71,27 +72,30 @@ func TestServerSessionFilterSourceNATPool(t *testing.T) {
 	}
 }
 
-// Numeric protocol filters must match (protoName(47) renders "gre",
-// so a pure name comparison fails numeric operator input — AGY r1
-// Finding 4).
+// Parsed protocol pairs must match by number and preserve protocol 0 as a
+// real filter when hasProto is true.
 func TestProtoFilterMatches(t *testing.T) {
 	for _, tc := range []struct {
-		p      uint8
-		filter string
-		want   bool
+		p, filter uint8
+		hasProto  bool
+		want      bool
 	}{
-		{6, "tcp", true},
-		{6, "TCP", true},
-		{6, "udp", false},
-		{58, "icmpv6", true},
-		{47, "gre", true},
-		{47, "47", true},
-		{89, "89", true},
-		{89, "88", false},
-		{6, "6", true},
+		{6, 6, true, true},
+		{6, 6, false, true},
+		{6, 17, true, false},
+		{58, 58, true, true},
+		{47, 47, true, true},
+		{89, 89, true, true},
+		{89, 88, true, false},
+		{7, 7, true, true},
+		{6, 7, true, false},
+		{6, 0, false, true},
+		{0, 0, true, true},
+		{6, 0, true, false},
 	} {
-		if got := protoFilterMatches(tc.p, tc.filter); got != tc.want {
-			t.Errorf("protoFilterMatches(%d, %q) = %v, want %v", tc.p, tc.filter, got, tc.want)
+		if got := appid.ProtoFilterMatches(tc.p, tc.filter, tc.hasProto); got != tc.want {
+			t.Errorf("ProtoFilterMatches(%d, %d, %t) = %v, want %v",
+				tc.p, tc.filter, tc.hasProto, got, tc.want)
 		}
 	}
 }

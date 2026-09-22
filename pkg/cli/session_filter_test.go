@@ -179,11 +179,38 @@ func TestBuildPeerClearRequestProtocolCoverage(t *testing.T) {
 		{dataplane.ProtoICMPv6, "icmpv6"},
 		{47, "47"}, // numeric forward for named-but-unswitched protocols
 		{89, "89"},
+		{0, "0"}, // HOPOPT must remain present, not "no protocol"
 	} {
-		req := buildPeerClearRequest(&sessionFilter{proto: tc.proto})
+		req := buildPeerClearRequest(&sessionFilter{proto: tc.proto, hasProto: true})
 		if req.Protocol != tc.want {
 			t.Errorf("proto %d forwarded as %q, want %q", tc.proto, req.Protocol, tc.want)
 		}
+	}
+}
+
+func TestBuildPeerClearRequestProtocolZero(t *testing.T) {
+	c := &CLI{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	f := c.parseClearSessionFilter([]string{"protocol", "0"})
+	if f.parseErr != nil || !f.hasProto || f.proto != 0 {
+		t.Fatalf("protocol 0 parse: err=%v proto=%d hasProto=%t; want nil/0/true",
+			f.parseErr, f.proto, f.hasProto)
+	}
+	req := buildPeerClearRequest(&f)
+	if req.Protocol != "0" {
+		t.Fatalf("protocol 0 peer request = %q, want %q", req.Protocol, "0")
+	}
+}
+
+func TestBuildPeerShowRequestProtocolZero(t *testing.T) {
+	c := &CLI{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	f := c.parseSessionFilter([]string{"protocol", "0"})
+	if f.parseErr != nil || !f.hasProto || f.proto != 0 {
+		t.Fatalf("protocol 0 parse: err=%v proto=%d hasProto=%t; want nil/0/true",
+			f.parseErr, f.proto, f.hasProto)
+	}
+	req := buildPeerShowRequest(f)
+	if req.Protocol != "0" {
+		t.Fatalf("protocol 0 peer show request = %q, want %q", req.Protocol, "0")
 	}
 }
 
@@ -215,9 +242,33 @@ func TestSessionFilterParseErrors(t *testing.T) {
 		}
 	}
 
-	// Numeric protocols are accepted (Junos accepts numbers).
-	f := c.parseSessionFilter([]string{"protocol", "47"})
-	if f.parseErr != nil || f.proto != 47 {
-		t.Errorf("numeric protocol: parseErr=%v proto=%d, want nil/47", f.parseErr, f.proto)
+	for _, tc := range []struct {
+		token string
+		proto uint8
+	}{
+		{"gre", 47},
+		{"47", 47},
+		{"sctp", 132},
+		{"ipv6", 41},
+		{"0", 0},
+		{"007", 7},
+		{" tcp ", 6},
+	} {
+		f := c.parseSessionFilter([]string{"protocol", tc.token})
+		if f.parseErr != nil || !f.hasProto || f.proto != tc.proto {
+			t.Errorf("protocol %q: parseErr=%v proto=%d hasProto=%t; want nil/%d/true",
+				tc.token, f.parseErr, f.proto, f.hasProto, tc.proto)
+			continue
+		}
+		if !f.matchesV4(dataplane.SessionKey{Protocol: tc.proto}, dataplane.SessionValue{}) ||
+			!f.matchesV6(dataplane.SessionKeyV6{Protocol: tc.proto}, dataplane.SessionValueV6{}) {
+			t.Errorf("protocol %q did not match v4/v6 protocol %d", tc.token, tc.proto)
+		}
+	}
+	for _, token := range []string{"+6", " 6"} {
+		f := c.parseSessionFilter([]string{"protocol", token})
+		if f.parseErr == nil {
+			t.Errorf("protocol %q: parseErr=nil, want rejection", token)
+		}
 	}
 }

@@ -72,7 +72,8 @@ node1:
 
 **Command:** `show security flow session`
 
-Filters: `protocol tcp|udp|icmp`, `source-prefix X.X.X.X/N`, `destination-prefix X.X.X.X/N`,
+Filters: `protocol tcp|udp|icmp|icmpv6|gre|esp|ipip|ipv6|ospf|egp|igmp|pim|ah|sctp|vrrp`,
+`icmp6`, and aliases `junos-tcp-any|junos-udp-any|junos-icmp-all|junos-ping|junos-icmp6-all|junos-pingv6|junos-gre|junos-ospf|junos-ip-in-ip|junos-ipip`, or canonical numeric `0..255` (case-insensitive names; bare digits only for numerics, so `007` is valid while `+6` and space-padded `6` are not), `source-prefix X.X.X.X/N`, `destination-prefix X.X.X.X/N`,
 `destination-port NNN`, `application-firewall`, etc.
 
 **Strict filter validation (#3439).** Both CLI surfaces and the direct
@@ -121,18 +122,21 @@ dropping the predicate (which would widen the inspected set):
   global wipe that destroys policy evidence. Per-scope hit-count
   clearing is not a supported feature; adding it would require a typed
   RPC with explicit selectors.
-- Direct gRPC `GetSessions` (`pkg/grpcapi/server_sessions.go`) validates
-  the `protocol` token and rejects a negative `offset` (centrally in
-  `GetSessions`, covering both the cursor and legacy paths); both return
-  `codes.InvalidArgument` so an invalid input is distinguishable from an
-  empty result set. Protocol-name filters with no `protoName()` reverse
-  (e.g. `sctp`, `ospf`) match their sessions correctly. The protocol
-  token is resolved via `appid.ProtocolNumberLenient`, which also accepts
-  a display-only name the strict `appid.ProtocolNumber` does not reverse
-  — notably `ipv6` (IP protocol 41), the one-way mapping of #3393 — so a
-  protocol the system still **displays** is never rejected as an invalid
-  filter. The strict `appid.ProtocolNumber` SSOT used by config
-  compilation / policy matching is unchanged (Refs #3393).
+- Direct gRPC `GetSessions` and `ClearSessions`
+  (`pkg/grpcapi/server_sessions.go`) use the shared
+  `appid.ParseProtocolFilterToken` parser and reject malformed protocol
+  tokens, while a negative `offset` is rejected centrally in `GetSessions`
+  for both cursor and legacy paths. These failures return
+  `codes.InvalidArgument`, so invalid input is distinguishable from an empty
+  result set. Protocol names with no `protoName()` reverse (for example,
+  `sctp` and `ospf`) still match their sessions correctly.
+  `ProtocolNumberLenient` equals the strict `ProtocolNumber` resolver for the
+  current tables (`#3393` closed the one-way gap for `ipv6` = 41) and remains
+  the stable filter seam for any future render-only name. The shared parser
+  accepts display-only names such as `ipv6`, numeric values `0..255`, and
+  surrounding whitespace on names, but rejects signed or whitespace-padded
+  numerics and out-of-range values. The strict `appid.ProtocolNumber` SSOT
+  used by config compilation and policy matching is unchanged.
 
 ```
 Session ID: 17179902569, Policy name: allow-everything-out-not-logged/270, HA State: Active, Timeout: 18, Session State: Valid

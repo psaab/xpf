@@ -372,7 +372,8 @@ func (s *Server) setSessionsNodeID(resp *pb.GetSessionsResponse) {
 // sessionFilter holds pre-computed filter state for session iteration.
 type sessionFilter struct {
 	zoneFilter   uint16
-	protoFilter  string
+	proto        uint8
+	hasProto     bool
 	srcNet       *net.IPNet
 	dstNet       *net.IPNet
 	srcPort      uint16
@@ -422,24 +423,6 @@ func (f *sessionFilter) setInputErr(err error) {
 	}
 }
 
-// protoFilterMatches matches a session protocol against an operator
-// filter string: case-insensitive protocol name (tcp/udp/icmp/icmpv6/
-// gre/esp/sctp/...) or a numeric IP protocol ("47" matches GRE sessions
-// even though protoName(47) renders "gre"). Resolution goes through
-// appid.ProtocolNumberLenient so name-only tokens with no protoName()
-// reverse (e.g. "sctp"=132, "ospf"=89) still match their sessions AND a
-// display-only name the strict ProtocolNumber does not reverse
-// ("ipv6"=41, #3393) matches its sessions too. An unknown token (e.g.
-// "tcpip") matches nothing — buildSessionFilter rejects such tokens with
-// InvalidArgument before iteration so an unparseable protocol is
-// surfaced rather than returned as an empty success (#3439 L2).
-func protoFilterMatches(p uint8, filter string) bool {
-	if n, ok := appid.ProtocolNumberLenient(filter); ok {
-		return n == p
-	}
-	return false
-}
-
 // validate reports operator-input errors that must fail the RPC rather
 // than silently match nothing (or, worse for clear paths, match
 // everything).
@@ -453,12 +436,13 @@ func (f *sessionFilter) validate() error {
 	return nil
 }
 
+// ProtocolNumberLenient equals the strict ProtocolNumber for current tables
+// (#3393 closed the last gap, ipv6=41) and remains the stable filter seam.
 func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	f := &sessionFilter{
-		zoneFilter:  uint16(req.Zone),
-		protoFilter: req.Protocol,
-		srcPort:     uint16(req.SourcePort),
-		dstPort:     uint16(req.DestinationPort),
+		zoneFilter: uint16(req.Zone),
+		srcPort:    uint16(req.SourcePort),
+		dstPort:    uint16(req.DestinationPort),
 		// NOTE: every invalid-input branch below must set f.inputErr
 		// instead of silently zeroing the predicate. The clear path
 		// shares this matcher: a request like source_port=65536 or
@@ -475,7 +459,12 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 		zoneIfaces:   make(map[uint16][]string),
 		egressIfaces: make(map[sessionEgressKey]string),
 	}
-	f.hasFilters = f.zoneFilter != 0 || f.protoFilter != "" || req.SourcePrefix != "" ||
+	protoOK := true
+	if req.Protocol != "" {
+		f.proto, protoOK = appid.ParseProtocolFilterToken(req.Protocol)
+		f.hasProto = protoOK
+	}
+	f.hasFilters = f.zoneFilter != 0 || f.hasProto || req.SourcePrefix != "" ||
 		req.DestinationPrefix != "" || f.srcPort != 0 || f.dstPort != 0 ||
 		f.natOnly || f.appFilter != "" || f.ifaceFilter != "" || f.snatPool != ""
 	if f.snatPool != "" && f.cfg != nil {
@@ -490,16 +479,8 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	if req.DestinationPort > 65535 {
 		f.setInputErr(status.Errorf(codes.InvalidArgument, "invalid destination port %d", req.DestinationPort))
 	}
-	// Validate the protocol token. protoFilterMatches returns false for
-	// an unparseable token (e.g. "tcpip"), so an invalid protocol would
-	// otherwise iterate to an empty list and return as a *successful*
-	// RPC — indistinguishable from "no such sessions". Reject it here so
-	// the predicate is never silently inert (and, on the shared clear
-	// path, so a typo'd protocol never widens to clear-all) (#3439 L2).
-	if f.protoFilter != "" {
-		if _, ok := appid.ProtocolNumberLenient(f.protoFilter); !ok {
-			f.setInputErr(status.Errorf(codes.InvalidArgument, "invalid protocol %q", f.protoFilter))
-		}
+	if req.Protocol != "" && !protoOK {
+		f.setInputErr(status.Errorf(codes.InvalidArgument, "invalid protocol %q", req.Protocol))
 	}
 
 	// Parse CIDR prefix filters.
@@ -607,7 +588,7 @@ func (f *sessionFilter) matchV4(key dataplane.SessionKey, val dataplane.SessionV
 	if f.zoneFilter != 0 && val.IngressZone != f.zoneFilter && val.EgressZone != f.zoneFilter {
 		return false
 	}
-	if f.protoFilter != "" && !protoFilterMatches(key.Protocol, f.protoFilter) {
+	if !appid.ProtoFilterMatches(key.Protocol, f.proto, f.hasProto) {
 		return false
 	}
 	if f.srcNet != nil && !f.srcNet.Contains(net.IP(key.SrcIP[:])) {
@@ -652,7 +633,7 @@ func (f *sessionFilter) matchV6(key dataplane.SessionKeyV6, val dataplane.Sessio
 	if f.zoneFilter != 0 && val.IngressZone != f.zoneFilter && val.EgressZone != f.zoneFilter {
 		return false
 	}
-	if f.protoFilter != "" && !protoFilterMatches(key.Protocol, f.protoFilter) {
+	if !appid.ProtoFilterMatches(key.Protocol, f.proto, f.hasProto) {
 		return false
 	}
 	if f.srcNet != nil && !f.srcNet.Contains(net.IP(key.SrcIP[:])) {

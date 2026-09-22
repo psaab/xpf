@@ -156,7 +156,8 @@ func TestSessionFilterMatchV4(t *testing.T) {
 
 	// Protocol filter — should match TCP.
 	fProto := &sessionFilter{
-		protoFilter:  "tcp",
+		proto:        6,
+		hasProto:     true,
 		zoneNames:    make(map[uint16]string),
 		zoneIfaces:   make(map[uint16][]string),
 		egressIfaces: make(map[sessionEgressKey]string),
@@ -165,7 +166,8 @@ func TestSessionFilterMatchV4(t *testing.T) {
 		t.Error("protocol filter tcp should match proto 6")
 	}
 	fProtoUDP := &sessionFilter{
-		protoFilter:  "udp",
+		proto:        17,
+		hasProto:     true,
 		zoneNames:    make(map[uint16]string),
 		zoneIfaces:   make(map[uint16][]string),
 		egressIfaces: make(map[sessionEgressKey]string),

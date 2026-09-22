@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -141,6 +142,53 @@ func (d *multiSessionDP) IterateSessionsV6From(cursor *dataplane.SessionKeyV6, f
 	return nil
 }
 
+func newProtocolMatrixDP() *multiSessionDP {
+	d := &multiSessionDP{Manager: dataplane.New()}
+	for i, proto := range []uint8{6, 6, 17, 47, 132, 0, 7, 41, 255} {
+		d.v4 = append(d.v4, struct {
+			key dataplane.SessionKey
+			val dataplane.SessionValue
+		}{
+			key: dataplane.SessionKey{
+				SrcIP:    [4]byte{10, 0, 3, byte(i + 1)},
+				DstIP:    [4]byte{10, 0, 4, byte(i + 1)},
+				SrcPort:  ntohs(uint16(30000 + i)),
+				DstPort:  ntohs(uint16(1000 + i)),
+				Protocol: proto,
+			},
+			val: dataplane.SessionValue{
+				State:       dataplane.SessStateEstablished,
+				IngressZone: 2,
+				EgressZone:  3,
+				FwdPackets:  uint64(i + 1),
+				FwdBytes:    uint64(100 + i),
+			},
+		})
+	}
+	for i, proto := range []uint8{17, dataplane.ProtoICMPv6} {
+		d.v6 = append(d.v6, struct {
+			key dataplane.SessionKeyV6
+			val dataplane.SessionValueV6
+		}{
+			key: dataplane.SessionKeyV6{
+				SrcIP:    [16]byte{0x20, 0x01, 0xdb, 0x08, byte(i + 1)},
+				DstIP:    [16]byte{0x20, 0x01, 0xdb, 0x09, byte(i + 1)},
+				SrcPort:  ntohs(uint16(40000 + i)),
+				DstPort:  ntohs(uint16(2000 + i)),
+				Protocol: proto,
+			},
+			val: dataplane.SessionValueV6{
+				State:       dataplane.SessStateEstablished,
+				IngressZone: 2,
+				EgressZone:  3,
+				FwdPackets:  uint64(i + 1),
+				FwdBytes:    uint64(200 + i),
+			},
+		})
+	}
+	return d
+}
+
 // TestRESTSessionPrefixPortFilters asserts the #3421 M2 contract: REST
 // session list accepts source/destination prefix and source/destination
 // port filters with gRPC-parity semantics.
@@ -196,19 +244,26 @@ func TestRESTSessionFilterFailsClosed(t *testing.T) {
 	s := &Server{dp: newMultiSessionDP()}
 
 	cases := []struct {
-		name string
-		q    string
-		want int
+		name   string
+		q      string
+		want   int
+		reason string
 	}{
-		{"bad source_prefix", "source_prefix=10.0.0.300/24", 400},
-		{"bad destination_prefix", "destination_prefix=notanip", 400},
-		{"bad source_port", "source_port=abc", 400},
-		{"out-of-range destination_port", "destination_port=70000", 400},
-		{"bad limit", "limit=abc", 400},
-		{"negative offset", "offset=-5", 400},
-		{"bad page_size", "page_size=abc", 400},
-		{"negative page_size", "page_size=-1", 400},
-		{"valid", "source_prefix=10.0.1.0/24&destination_port=443", 200},
+		{"bad source_prefix", "source_prefix=10.0.0.300/24", 400, ""},
+		{"bad destination_prefix", "destination_prefix=notanip", 400, ""},
+		{"bad source_port", "source_port=abc", 400, ""},
+		{"out-of-range destination_port", "destination_port=70000", 400, ""},
+		{"bad limit", "limit=abc", 400, ""},
+		{"negative offset", "offset=-5", 400, ""},
+		{"bad page_size", "page_size=abc", 400, ""},
+		{"negative page_size", "page_size=-1", 400, ""},
+		{"bad protocol", "protocol=tcpip", 400, "invalid protocol filter: tcpip"},
+		{"bogus protocol", "protocol=bogus", 400, "invalid protocol filter: bogus"},
+		{"out-of-range protocol", "protocol=256", 400, "invalid protocol filter: 256"},
+		{"negative protocol", "protocol=-1", 400, "invalid protocol filter: -1"},
+		{"bad signed protocol", "protocol=%2B6", 400, "invalid protocol filter: +6"},
+		{"bad space-padded protocol", "protocol=%206", 400, "invalid protocol filter:  6"},
+		{"valid", "source_prefix=10.0.1.0/24&destination_port=443", 200, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,7 +272,100 @@ func TestRESTSessionFilterFailsClosed(t *testing.T) {
 			if rr.Code != tc.want {
 				t.Fatalf("%s: status %d, want %d; body: %s", tc.name, rr.Code, tc.want, rr.Body.String())
 			}
+			if tc.reason != "" && !strings.Contains(rr.Body.String(), tc.reason) {
+				t.Fatalf("%s: body %q does not contain reason %q", tc.name, rr.Body.String(), tc.reason)
+			}
 		})
+	}
+}
+func TestRESTSessionProtocolErrorPreservesEncodedPlus(t *testing.T) {
+	s := &Server{dp: newMultiSessionDP()}
+	rr := httptest.NewRecorder()
+	s.sessionsHandler(rr, httptest.NewRequest(
+		"GET", "/api/v1/security/sessions?protocol=%2B6", nil,
+	))
+	if rr.Code != 400 {
+		t.Fatalf("protocol=%%2B6: status %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "invalid protocol filter: +6") {
+		t.Fatalf("protocol=%%2B6: body %q does not preserve decoded +6", rr.Body.String())
+	}
+}
+
+func TestRESTInvalidProtocolIncludePeerStopsFanout(t *testing.T) {
+	fake := &fakeClusterSessionService{}
+	s := &Server{
+		dp:               newMultiSessionDP(),
+		clusterSessionFn: func() ClusterSessionService { return fake },
+	}
+	rr := httptest.NewRecorder()
+	s.sessionsHandler(rr, httptest.NewRequest(
+		"GET", "/api/v1/security/sessions?protocol=tcpip&include_peer=true", nil,
+	))
+	if rr.Code != 400 {
+		t.Fatalf("status %d, want 400; body: %s", rr.Code, rr.Body.String())
+	}
+	if fake.peerGetCalled || fake.getCalled {
+		t.Fatal("invalid protocol reached peer fan-out")
+	}
+}
+
+func TestRESTProtocolFilterMatrix(t *testing.T) {
+	cases := []struct {
+		name   string
+		query  string
+		status int
+		count  int
+	}{
+		{"tcp", "protocol=tcp", 200, 2},
+		{"TCP", "protocol=TCP", 200, 2},
+		{"numeric tcp", "protocol=6", 200, 2},
+		{"numeric GRE", "protocol=47", 200, 1},
+		{"gre", "protocol=gre", 200, 1},
+		{"GRE", "protocol=GRE", 200, 1},
+		{"ipv6", "protocol=ipv6", 200, 1},
+		{"zero", "protocol=0", 200, 1},
+		{"255", "protocol=255", 200, 1},
+		{"007", "protocol=007", 200, 1},
+		{"sctp", "protocol=sctp", 200, 1},
+		{"space-padded name", "protocol=%20tcp%20", 200, 2},
+		{"tcpip", "protocol=tcpip", 400, 0},
+		{"bogus", "protocol=bogus", 400, 0},
+		{"256", "protocol=256", 400, 0},
+		{"negative", "protocol=-1", 400, 0},
+		{"space-padded numeric", "protocol=%206", 400, 0},
+		{"signed numeric", "protocol=%2B6", 400, 0},
+		{"absent", "", 200, 11},
+		{"explicit empty", "protocol=", 200, 11},
+	}
+	for _, mode := range []struct {
+		name  string
+		query string
+	}{
+		{"offset", "limit=100"},
+		{"cursor", "page_size=100"},
+	} {
+		for _, tc := range cases {
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
+				query := mode.query
+				if tc.query != "" {
+					query += "&" + tc.query
+				}
+				rr := httptest.NewRecorder()
+				s := &Server{dp: newProtocolMatrixDP()}
+				s.sessionsHandler(rr, httptest.NewRequest(
+					"GET", "/api/v1/security/sessions?"+query, nil,
+				))
+				if rr.Code != tc.status {
+					t.Fatalf("status %d, want %d; body: %s", rr.Code, tc.status, rr.Body.String())
+				}
+				if rr.Code == 200 {
+					if got := len(decodeSessions(t, rr.Body.Bytes()).Sessions); got != tc.count {
+						t.Fatalf("sessions=%d, want %d; body: %s", got, tc.count, rr.Body.String())
+					}
+				}
+			})
+		}
 	}
 }
 

@@ -359,6 +359,7 @@ func TestIngressIdentityDoesNotDisturbEgressMatching4983(t *testing.T) {
 		}
 		f := ingressIdentityFilter(t, "ge-0/0/0")
 		f.proto = 17 // UDP; the key is TCP
+		f.hasProto = true
 		if f.matchesV4(key, val) {
 			t.Error("a protocol mismatch must still reject the session even when the " +
 				"ingress interface matches")
