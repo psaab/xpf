@@ -633,7 +633,9 @@ func peerDeleteRefused(err error) bool {
 // PeerDelete, and a key the helper refuses (a live local session whose owner RG is
 // locally active) is returned in refused and keeps its BPF mirror row. The other
 // keys' mirror rows go one at a time, so a row already gone does not strand the
-// rest. As with the unmarked batch, the helper IPC error itself is best-effort.
+// rest. The peer-marked helper IPC error remains best-effort because the refused
+// and applied sets explicitly protect every mirror row whose outcome is known;
+// unlike the unmarked scoped batch, this path has a distinct #9714 contract.
 func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) (int, []dataplane.ScopedSessionKey, error) {
 	var refused, applied []dataplane.ScopedSessionKey
 	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
@@ -795,8 +797,9 @@ func (m *Manager) ClearAllSessions() (int, int, error) {
 // 5-tuple, so no snapshot read happens under m.mu.
 //
 // It returns the FIRST helper IPC error across all chunks (nil if all
-// succeeded, or if there is no live helper). The best-effort batch callers
-// discard it; ClearAllSessions propagates it so a failed authoritative
+// succeeded, or if there is no live helper). Bare batch callers discard it
+// (#5096); scoped batch callers propagate the equivalent scoped-helper result
+// (#10513); ClearAllSessions propagates it so a failed authoritative
 // revocation is reported rather than reported as success (#5881).
 func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 	// #9364: the BARE form, kept for the callers that genuinely have no value —

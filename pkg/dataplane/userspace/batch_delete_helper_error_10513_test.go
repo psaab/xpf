@@ -2,12 +2,53 @@ package userspace
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 	"golang.org/x/sys/unix"
 )
+
+func removeSessionSocket10513(t *testing.T, rec *syncRec9146) {
+	t.Helper()
+	socketPath := rec.ln.Addr().String()
+	if err := rec.ln.Close(); err != nil {
+		t.Fatalf("close helper listener: %v", err)
+	}
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove helper socket %q: %v", socketPath, err)
+	}
+}
+
+// scopedResultDP10513 embeds the published interface so the production session
+// store can be driven without CAP_BPF. Its scoped methods return the
+// helper-only result that Manager.BatchDeleteSessionsScoped[V6] must produce
+// after a mirror ErrKeyNotExist plus helper failure; the retry counters prove
+// batchDeleteV4/V6 do not misclassify that result as mirror NotFound.
+type scopedResultDP10513 struct {
+	dataplane.DataPlane
+	v4Err, v6Err         error
+	retriesV4, retriesV6 int
+}
+
+func (d *scopedResultDP10513) BatchDeleteSessionsScoped([]dataplane.ScopedSessionKey) (int, error) {
+	return 0, d.v4Err
+}
+func (d *scopedResultDP10513) BatchDeleteSessionsScopedV6([]dataplane.ScopedSessionKeyV6) (int, error) {
+	return 0, d.v6Err
+}
+
+func (d *scopedResultDP10513) DeleteSession(dataplane.SessionKey) error {
+	d.retriesV4++
+	return nil
+}
+
+func (d *scopedResultDP10513) DeleteSessionV6(dataplane.SessionKeyV6) error {
+	d.retriesV6++
+	return nil
+}
 
 // #10513: BatchDeleteSessionsScoped deleted the BPF mirror FIRST, then discarded
 // the helper result (`_ = m.deleteHelperSessionsScopedV4/V6`). Mirror-success +
@@ -40,18 +81,19 @@ func TestBatchDeleteSessionsScopedSurfacesHelperTransportError10513(t *testing.T
 	}
 }
 
-// Arm 2 (semantic refusal): the helper is alive but refuses the delete
-// (unrecognized/ambiguous routing domain, #8636). A refusal answers the
-// request with resp.OK=false; it must surface, not read as success.
-func TestBatchDeleteSessionsScopedSurfacesHelperRefusal10513(t *testing.T) {
+// Arm 2 (semantic refusal): the helper is alive but returns the requested
+// unrecognized-domain token. Current Rust DELETE handling proceeds for an
+// unrecognized wire domain; the recorder injects this stable non-OK response
+// to pin Go's refusal propagation against that base behavior drift.
+func TestBatchDeleteSessionsScopedSurfacesHelperUnrecognizedDomainRefusal10513(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
-	rec.refuseFirst("synced-delete-refused:ambiguous-routing-domain (5-tuple matches 2 routing instances)")
+	rec.refuseFirst("synced-import-refused:routing-domain-unrecognized")
 
 	_, err := m.BatchDeleteSessionsScoped(scopedKeys9364(100007, 1234))
-	if err == nil || !strings.Contains(err.Error(), "synced-delete-refused:ambiguous-routing-domain") {
-		t.Fatalf("BatchDeleteSessionsScoped with a refused helper delete = %v, want the "+
-			"ambiguous-routing-domain refusal to surface — swallowing it reports success "+
-			"while the helper keeps the session (#10513)", err)
+	if err == nil || !strings.Contains(err.Error(), "routing-domain-unrecognized") {
+		t.Fatalf("BatchDeleteSessionsScoped with an unrecognized-domain refusal = %v, "+
+			"want the refusal to surface — swallowing it reports success while the "+
+			"helper keeps the session (#10513)", err)
 	}
 }
 
@@ -93,6 +135,61 @@ func TestBatchDeleteSessionsScopedV6SurfacesHelperRefusal10513(t *testing.T) {
 	}
 }
 
+// surfaceScopedHelperDeleteError is pure and shared by the V4/V6 callers. Pin
+// its transport wrapper with a real ENOENT cause: the stable helper sentinel
+// must remain discoverable, while the session-store NotFound classifier must
+// not see the underlying dial cause.
+func TestSurfaceScopedHelperDeleteErrorStripsENOENT10513(t *testing.T) {
+	for _, family := range []string{"v4", "v6"} {
+		raw := fmt.Errorf("%w: dial session socket: %w",
+			errSessionHelperUnreachable, unix.ENOENT)
+		got := surfaceScopedHelperDeleteError(family, raw)
+		if !errors.Is(got, errSessionHelperUnreachable) {
+			t.Errorf("%s wrapper = %v, lost errSessionHelperUnreachable", family, got)
+		}
+		if errors.Is(got, unix.ENOENT) {
+			t.Errorf("%s wrapper = %v, exposes unix.ENOENT to the mirror retry classifier", family, got)
+		}
+	}
+}
+
+// The Manager's armed-mirror precedence branch returns the helper-only result
+// when BPF reports key-not-found. Feed that result through the production store
+// with an embedded-interface fake: a retry means the store has mistaken the
+// helper failure for mirror NotFound, and the authoritative error is lost.
+func TestScopedStoreDoesNotRetryHelperOnlyResult10513(t *testing.T) {
+	dp := &scopedResultDP10513{
+		v4Err: surfaceScopedHelperDeleteError("v4",
+			fmt.Errorf("%w: dial session socket: %w", errSessionHelperUnreachable, unix.ENOENT)),
+		v6Err: surfaceScopedHelperDeleteError("v6",
+			fmt.Errorf("%w: dial session socket: %w", errSessionHelperUnreachable, unix.ENOENT)),
+	}
+	store := dataplane.NewDataPlaneSessionStore(dp)
+
+	_, err := store.DeleteBatchKnownV4([]dataplane.SessionEntryV4{{
+		Key: key9146(),
+	}}, dataplane.DeleteReasonGCExpired, false)
+	if err != dp.v4Err {
+		t.Fatalf("V4 result = %v, want exact helper-only result %v", err, dp.v4Err)
+	}
+	if dp.retriesV4 != 0 {
+		t.Fatalf("V4 retry count = %d, want 0; helper failure was classified as mirror NotFound", dp.retriesV4)
+	}
+
+	key := dataplane.SessionKeyV6{
+		SrcPort: hostToNetwork16(1234), DstPort: hostToNetwork16(443), Protocol: 6,
+	}
+	_, err = store.DeleteBatchKnownV6([]dataplane.SessionEntryV6{{
+		Key: key,
+	}}, dataplane.DeleteReasonGCExpired, false)
+	if err != dp.v6Err {
+		t.Fatalf("V6 result = %v, want exact helper-only result %v", err, dp.v6Err)
+	}
+	if dp.retriesV6 != 0 {
+		t.Fatalf("V6 retry count = %d, want 0; helper failure was classified as mirror NotFound", dp.retriesV6)
+	}
+}
+
 // The direct Manager tests above prove the helper leg is returned, but the
 // production store has another hazard: batchDeleteV4/V6 treats unix.ENOENT as
 // a mirror not-found, retries per key, and ignores those retry errors. A
@@ -101,7 +198,7 @@ func TestBatchDeleteSessionsScopedV6SurfacesHelperRefusal10513(t *testing.T) {
 // exposing ENOENT to errors.Is.
 func TestDeleteBatchKnownV4DoesNotSwallowMissingHelper10513(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
-	rec.ln.Close()
+	removeSessionSocket10513(t, rec)
 	store := dataplane.NewDataPlaneSessionStore(NewLegacyDataPlaneAdapter(m))
 
 	_, err := store.DeleteBatchKnownV4([]dataplane.SessionEntryV4{{
@@ -122,7 +219,7 @@ func TestDeleteBatchKnownV4DoesNotSwallowMissingHelper10513(t *testing.T) {
 
 func TestDeleteBatchKnownV6DoesNotSwallowMissingHelper10513(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
-	rec.ln.Close()
+	removeSessionSocket10513(t, rec)
 	store := dataplane.NewDataPlaneSessionStore(NewLegacyDataPlaneAdapter(m))
 	key := dataplane.SessionKeyV6{
 		SrcPort: hostToNetwork16(1234), DstPort: hostToNetwork16(443), Protocol: 6,
