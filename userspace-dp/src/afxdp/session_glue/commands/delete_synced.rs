@@ -1,5 +1,36 @@
 use super::super::*;
 
+/// Apply an identity-conditional worker delete. The session id is checked
+/// immediately before dispatching the ordinary teardown so a queued policy
+/// delete cannot remove a tuple reincarnation that replaced the captured row.
+pub(in crate::afxdp::session_glue) fn handle_delete_synced_if_identity(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    key: SessionKey,
+    expected_session_id: u64,
+    now_ns: u64,
+    now_secs: u64,
+    deleted_keys: &mut Vec<SessionKey>,
+    worker_id: u32,
+) {
+    if expected_session_id == 0 || sessions.session_id_for(&key) != expected_session_id {
+        return;
+    }
+    handle_delete_synced(
+        sessions,
+        session_map,
+        forwarding,
+        ha_state,
+        key,
+        now_ns,
+        now_secs,
+        deleted_keys,
+        worker_id,
+    );
+}
+
 /// Apply `WorkerCommand::DeleteSynced`: drop the session and either
 /// republish the kernel session-map alias (if the session table had
 /// an entry to inspect) or just delete the live entry.

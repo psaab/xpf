@@ -543,6 +543,10 @@ pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
+    /// Conditional worker-local teardown for a captured session incarnation.
+    /// The id is checked at command execution, after queue delay, before any
+    /// NAT, steering, cache, or holder teardown.
+    DeleteSyncedIfIdentity { key: SessionKey, session_id: u64 },
     /// #9752: conditional cross-worker delete (purge): delete the entry at
     /// `key` ONLY if it still carries `(domain, check)` AND that stamp is
     /// unresolvable under the recipient's CURRENT registry. Lagging senders,

@@ -1407,6 +1407,20 @@ pub(super) fn apply_worker_commands(
                     worker_id,
                 );
             }
+            WorkerCommand::DeleteSyncedIfIdentity { key, session_id } => {
+                commands::handle_delete_synced_if_identity(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    key,
+                    session_id,
+                    now_ns,
+                    now_secs,
+                    &mut deleted_synced_keys,
+                    worker_id,
+                );
+            }
             WorkerCommand::DeleteSyncedIfTableUnknown { key, domain, check } => {
                 // #9752: conditional purge delete — decline (no-op, not even
                 // `deleted_keys`: the entry survives so its flow-cache permit
