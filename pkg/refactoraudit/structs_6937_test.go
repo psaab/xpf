@@ -60,6 +60,11 @@ func TestStructFloorsMatchShellConstants6937(t *testing.T) {
 // drifted since the historical calibration. These four source literals pin
 // the roles, counts, inclusive floor, and aggregate false-positive shape
 // without making this package depend on the caller's checkout.
+//
+// The role mapping is explicit: Over mirrors the live Engine role (27 fields,
+// 22 types), Under mirrors CompileResult (32 fields, 21 types), and Aggregate
+// mirrors xpfCollector (443 fields, 11 types). Boundary is the independent
+// exact-20 pin that the drifted live rows no longer exercise.
 func TestStructMetricIsTypesNotFields6937(t *testing.T) {
 	dir := t.TempDir()
 	fixtures := []struct {

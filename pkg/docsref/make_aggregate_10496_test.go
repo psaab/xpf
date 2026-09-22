@@ -49,35 +49,36 @@ func validateMakeAggregate(mk string) error {
 	}
 
 	goLeg, rustLeg := -1, -1
-	statusInit := false
+	statusInit := -1
 	for i, line := range recipe {
 		if strings.HasPrefix(line, "@status=0;") || strings.HasPrefix(line, "status=0;") {
-			statusInit = true
-		}
-		if strings.HasPrefix(line, "$(MAKE) test-go ") {
-			if !strings.Contains(line, "|| status=$$?") {
-				return fmt.Errorf("Go leg does not capture failure: %q", line)
+			if statusInit >= 0 {
+				return fmt.Errorf("duplicate status initialization")
 			}
+			statusInit = i
+		}
+		if strings.HasPrefix(line, "$(MAKE) test-go || status=$$?") {
 			if goLeg >= 0 {
 				return fmt.Errorf("duplicate Go leg")
 			}
 			goLeg = i
 		}
-		if strings.HasPrefix(line, "$(MAKE) test-rust ") {
-			if !strings.Contains(line, "|| status=$$?") {
-				return fmt.Errorf("Rust leg does not capture failure: %q", line)
-			}
+		if strings.HasPrefix(line, "$(MAKE) test-rust || status=$$?") {
 			if rustLeg >= 0 {
 				return fmt.Errorf("duplicate Rust leg")
 			}
 			rustLeg = i
 		}
 	}
-	if !statusInit {
+	if goLeg < 0 || rustLeg < 0 {
+		return fmt.Errorf("aggregate legs missing or lack contiguous status capture: "+
+			"test-go=%d test-rust=%d", goLeg, rustLeg)
+	}
+	if statusInit < 0 {
 		return fmt.Errorf("aggregate does not initialize a failure status")
 	}
-	if goLeg < 0 || rustLeg < 0 {
-		return fmt.Errorf("aggregate legs missing: test-go=%d test-rust=%d", goLeg, rustLeg)
+	if statusInit > goLeg {
+		return fmt.Errorf("failure status initializes after the Go leg")
 	}
 	if goLeg >= rustLeg {
 		if goLeg == rustLeg {
@@ -136,6 +137,15 @@ func TestMakefileSerialAggregate10496(t *testing.T) {
 		"\t@echo \"exit $$status\"\n"
 	if err := validateMakeAggregate(brokenCapture); err == nil {
 		t.Fatal("echoed exit passed the aggregate status contract")
+	}
+
+	lateStatus := "test:\n" +
+		"\t$(MAKE) test-go || status=$$?; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\tstatus=0; \\\n" +
+		"\texit $$status\n"
+	if err := validateMakeAggregate(lateStatus); err == nil {
+		t.Fatal("late status initialization passed the aggregate contract")
 	}
 
 	// A missing target is a zero-denominator control: a canary that finds no
