@@ -8025,15 +8025,18 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
         .collect();
     let extraction = executable_lines
         .iter()
-        .position(|line| line.starts_with("let expiry_overflow_deltas: Vec<SessionDelta> = expired_entries"))
+        .position(|line| line.starts_with("expiry_overflow_deltas.extend("))
         .expect("worker loop must extract returned expiry Close records");
     let chunk_loop = executable_lines
         .iter()
-        .position(|line| line.starts_with("for deltas in expiry_overflow_deltas.chunks(256)"))
+        .position(|line| line.starts_with("let mut overflow_chunks = expiry_overflow_deltas.chunks(256)"))
         .expect("worker loop must flush expiry overflow in bounded chunks");
     let flush = executable_lines
         .iter()
-        .position(|line| *line == "flush_drained_session_deltas!(deltas);")
+        .enumerate()
+        .skip(chunk_loop)
+        .find(|(_, line)| **line == "flush_drained_session_deltas!(&deltas[..handled]);")
+        .map(|(index, _)| index)
         .expect("worker loop must route each expiry overflow chunk to global consumers");
     assert!(
         extraction < chunk_loop && chunk_loop < flush,

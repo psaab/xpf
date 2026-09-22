@@ -187,9 +187,7 @@ impl SyncedImportOutcome {
             SyncedImportOutcome::RejectedStandaloneReverse => Some("standalone-reverse"),
             SyncedImportOutcome::RejectedGateBusy => Some("gate-busy"),
             SyncedImportOutcome::RejectedMirrorPublish => Some("mirror-write-failed"),
-            SyncedImportOutcome::RejectedUnknownRoutingDomain => {
-                Some("routing-domain-unrecognized")
-            }
+            SyncedImportOutcome::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
         }
     }
 }
