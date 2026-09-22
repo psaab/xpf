@@ -818,3 +818,26 @@ func TestHostInboundReinjectVersionRefusalAbortsAcceptless9637(t *testing.T) {
 		t.Error("flag must be clear after a version-refusal abort")
 	}
 }
+
+// TestHostInboundDelegatedTUNMissesFineJunosHost10525 is K1: the delegated
+// xpf-usp1 reinject has no kernel junos-host ingress scope. That residual is
+// why the userspace Stage-11 caller must run the fine gate before delegation.
+// The accept-only xpf-usp0 reinject rule is deliberately the sole reinject
+// device reference in xpf_hostinbound; xpf-usp1 must remain destination-ruled.
+func TestHostInboundDelegatedTUNMissesFineJunosHost10525(t *testing.T) {
+	views, unzonedV4, unzonedV6 := reinjectViews9637()
+	_, _, _, programs, wg := parityHostInboundInputs()
+	payload := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, true)
+	if strings.Contains(payload, `"xpf-usp1"`) {
+		t.Fatalf("K1: xpf_hostinbound must not match the delegated xpf-usp1 TUN with "+
+			"a junos-host or reinject accept rule:\n%s", payload)
+	}
+	if !strings.Contains(payload, `iifname "ge-0-0-2"`) ||
+		!strings.Contains(payload, "jump") {
+		t.Fatalf("K1: the representable fine junos-host program must still render its "+
+			"ingress-scoped jump:\n%s", payload)
+	}
+	if !strings.Contains(payload, `"xpf-usp0"`) {
+		t.Fatalf("K1: the gated xpf-usp0 reinject accept must remain rendered:\n%s", payload)
+	}
+}
