@@ -177,7 +177,7 @@ func TestD11MarkerMatchesRejectsMalformedAndWrongSelectors10484(t *testing.T) {
 		want bool
 	}{
 		{"valid-echo-request", valid, true},
-		{"valid-echo-reply", echoReply, true},
+		{"valid-echo-reply", echoReply, false},
 		{"short-ipv4", valid[:19], false},
 		{"wrong-version", func() []byte { p := append([]byte(nil), valid...); p[0] = 0x65; return p }(), false},
 		{"short-ihl", func() []byte { p := append([]byte(nil), valid...); p[0] = 0x44; return p }(), false},
@@ -223,8 +223,17 @@ func TestD11ArmFailedNonceIsOneShotAndNewRunReplacesAfterDisarm10484(t *testing.
 	if !ledger.FinalizeIfTerminal() {
 		t.Fatal("empty run did not finalize before archive")
 	}
+	announceErr = true
 	runC := "attest-cccccccccccccccccccccccccccccccc"
-	if err := armer.Arm(runC, 11, "00112233445566778899aabbccddee11"); err != nil {
+	if err := armer.Arm(runC, 11, "00112233445566778899aabbccddee11"); err == nil {
+		t.Fatal("failed post-disarm announcement unexpectedly armed")
+	}
+	if archived, ok := armer.ArchivedSnapshot(runB); !ok || !archived.Finalized {
+		t.Fatalf("failed arm dropped prior archive: ok=%v snapshot=%+v", ok, archived)
+	}
+	announceErr = false
+	runD := "attest-dddddddddddddddddddddddddddddddd"
+	if err := armer.Arm(runD, 12, "00112233445566778899aabbccddee22"); err != nil {
 		t.Fatalf("post-disarm nonce arm: %v", err)
 	}
 	if archived, ok := armer.ArchivedSnapshot(runB); !ok || !archived.Finalized {
@@ -237,7 +246,7 @@ func TestD11ArmFailedNonceIsOneShotAndNewRunReplacesAfterDisarm10484(t *testing.
 		t.Fatal("third run did not finalize")
 	}
 	if err := armer.Arm(runA, 12, "00112233445566778899aabbccddeeff"); err != errD11ArmActive {
-		t.Fatalf("A->B->C->A reuse error = %v, want %v", err, errD11ArmActive)
+		t.Fatalf("A->B->C(fail)->D->A reuse error = %v, want %v", err, errD11ArmActive)
 	}
 }
 
@@ -460,9 +469,70 @@ func TestD11CompletionOriginMismatchIsUncertainWhileV1Accepts10484(t *testing.T)
 	}
 }
 
+func TestD11AdmissionContractFailureUnwindsPending10484(t *testing.T) {
+	ledger := NewD11AttestationLedger()
+	ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9)
+	frame := CaptureFrame{
+		Packet:  pipelineTestPacket(77, 2, 2, 7, 12),
+		FlowKey: "admission-contract",
+		origin: CaptureOrigin{
+			Family: CaptureFamilyInet, Hook: CaptureHookForward,
+			Owner: "owner", STN: "st0", OwnedIfindex: 7,
+		},
+		originSet: true,
+	}
+	lease := ReinjectLease{RequestID: 12, PermitEpoch: 9, QueueEpoch: 4, QueueNumber: 77}
+	key, err := ledger.Reserve(frame, lease)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if !ledger.UpdateAdmission(key, "ADMIT_OK", false) {
+		t.Fatal("UpdateAdmission failed")
+	}
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing,
+		Sink: new(pipelineTestSink),
+	})
+	if err != nil {
+		t.Fatalf("NewCapturePipeline: %v", err)
+	}
+	item := &pendingReinject{frame: frame, lease: lease, ledger: ledger, ledgerKey: key}
+	p.mu.Lock()
+	p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: item}
+	p.pending[lease.RequestID] = item
+	p.mu.Unlock()
+	failed := p.applyAdmission(item, ReinjectAdmission{
+		RequestID: lease.RequestID + 1, PermitEpoch: lease.PermitEpoch,
+		QueueNumber: lease.QueueNumber, QueueEpoch: lease.QueueEpoch,
+		Family: 1, Hook: 1, OwnedIfindex: 7, Admitted: true,
+	})
+	if failed != item {
+		t.Fatalf("contract failure item = %p, want %p", failed, item)
+	}
+	p.mu.Lock()
+	_, pending := p.pending[lease.RequestID]
+	flow := p.flows[frame.FlowKey]
+	p.mu.Unlock()
+	if pending || (flow != nil && flow.pending != nil) {
+		t.Fatalf("contract failure left pending state: map=%v flow=%p", pending, flow)
+	}
+	record := ledger.Snapshot().Records[0]
+	if record.AdmissionCode != "CONTRACT" || !record.ContractRefusal ||
+		record.TerminalState != "FAIL" {
+		t.Fatalf("contract failure ledger row = %+v", record)
+	}
+}
+
 func TestD11LedgerEarlyDuplicateAndLatePins10484(t *testing.T) {
 	ledger := NewD11AttestationLedger()
 	ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9)
+	if ledger.MarkLate(999) {
+		t.Fatal("unknown late completion unexpectedly matched a D11 row")
+	}
+	if failures := ledger.Snapshot().Failures; len(failures) != 1 ||
+		failures[0].Reason != "unmatched late completion request_id=999" {
+		t.Fatalf("unknown late marker = %+v", failures)
+	}
 	frame := CaptureFrame{
 		Packet:    pipelineTestPacket(77, 2, 2, 7, 12),
 		origin:    CaptureOrigin{Family: CaptureFamilyInet, Hook: CaptureHookForward, Owner: "owner", STN: "st0", OwnedIfindex: 7},
@@ -497,8 +567,11 @@ func TestD11LedgerEarlyDuplicateAndLatePins10484(t *testing.T) {
 		record.EarlyCompletion.RequestID != lease.RequestID {
 		t.Fatalf("duplicate/late record = %+v", record)
 	}
-	if !ledger.FinalizeIfTerminal() {
-		t.Fatal("duplicate terminal row did not finalize")
+	if ledger.FinalizeIfTerminal() {
+		t.Fatal("duplicate/late terminal row finalized")
+	}
+	if !ledger.AllTerminal() {
+		t.Fatal("duplicate/late row was not terminal for close teardown")
 	}
 }
 

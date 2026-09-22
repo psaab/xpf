@@ -1,16 +1,16 @@
-# READY v4: #10484 live re-attestation proving the D11 join before S9.5 relies on the bridge
+# READY v5: #10484 live re-attestation proving the D11 join before S9.5 relies on the bridge
 
-Status: READY v4 after Fold-2 acceptance review. This plan records the
-implemented source contract, its acceptance predicates, and the explicit
-deviations below. The design remains lab-only and default-off; this lane does
-not run cluster/incus commands.
+Status: READY v5 after Fold-3 hostile review. This plan records the implemented
+source contract, its acceptance predicates, and the explicit deviations below.
+The design remains lab-only and default-off; this lane does not run
+cluster/incus commands.
 
-Source grounding: the implementation branch is re-grounded against merge-base
-`5dcaa104fb36637f7b76bdd0b3ba26ea880f1046`. Every source citation below is
-rechecked by symbol and surrounding construct at that base before merge; line
-numbers are navigation hints only and must not be treated as stable identity.
-The Fold-2 implementation is recorded at the branch tip and each deviation is
-observable in the code or harness evidence.
+Source grounding: the implementation branch was rebased onto
+`b8131f1d50415cd4adfb064ec6d716712d83c63c` (origin/master). Every current
+source citation is a symbol/navigation hint; line numbers are not stable
+identity. The Fold-3 hardening is observable in the code or harness evidence:
+pre-arm executable and node gates, request-only marker matching, final
+ledger/set/accounting validation, and clean disarm of dirty terminal runs.
 
 No external provider API, companion script, or S9.5 permit path is introduced.
 The accepted run still requires a live, non-VOID four-cell D11 artifact in a
@@ -796,9 +796,9 @@ live ids only). V1's `authenticated` wording therefore overclaimed. V3 design
 - Q3 (workload shape and binding): `v4_native x2` means two logical marker
   flows: one even/RG1/fw0 and one odd/RG2/fw1 (fixture_probe_indices
   t12-g2-9506.sh:96-102; fixture_measure_traffic :1440-1498; XFRM if_id
-  0x25220001/2). Each flow emits exactly two uniquely identified ICMP echo
-  requests, one per decrypted direction. Each of the four internally selected
-  marker `CaptureFrame`s creates a daemon ledger row with
+  0x25220001/2). The driver emits four one-shot, uniquely labeled ICMP echo
+  probes, one for each decrypted direction on each logical marker flow. Each
+  internally selected marker `CaptureFrame` creates a daemon ledger row with
   node_id, captured bytes digest, origin, and that node's local queue/lease
   identity and observed permit_epoch; request_id is assigned by the trigger
   after capture and lease mint. The D11 observer joins on the composite key
@@ -809,8 +809,8 @@ live ids only). V1's `authenticated` wording therefore overclaimed. V3 design
   XFRM deltas corroborate fixture readiness ONLY. `D11ManifestCap=32` is
   enforced independently per daemon (64 combined upper bound), while the
   harness acceptance selects exactly four total selected rows across both nodes:
-  two packets per marker flow (four selected-frame ledger records, distinct
-  from the four proof-cell rows; not four flows). PROVENANCE_MAX=128
+  one selected-frame ledger record per one-shot traffic label (four records,
+  distinct from the four traffic labels and four proof-cell rows). PROVENANCE_MAX=128
   evict-oldest at :1404-1408 leaves 4x headroom per process; quiesce means no
   concurrent admitters.
   Missing witness/ledger row -> VOID, never infer.
@@ -883,13 +883,11 @@ nonzero delta in routine-only counters (ZoneGateDrops and friends) -> VOID
 - Mode mechanics (exact): add `--d11-reattest` case to arg parse (:19-33);
   D11 branch populates `D11_ROWS_FILE`, assigns `CELL_ROWS_FILE=$D11_ROWS_FILE`,
   and uses existing `CELL_BUFFER_ONLY=1` while collecting; immediately before
-  replay sets `CELL_BUFFER_ONLY=0` and replays the 4-row buffer (:2322-2336;
-  restore demotion
-  :2329-2334 applies to D11 rows identically -- a PASS
-  written before restore is FAIL per section 8); separate gate
-  `D11_CELL_COUNT==4`, pass==4, fail==0, void==0, exit 0; summary
-  T12_D11_SUMMARY (new name; must not collide with T12_G2_SUMMARY :2342);
-  row-count gate (:2338) untouched for the no-arg path. Fixture: MINIMAL
+  replay sets `CELL_BUFFER_ONLY=0` and replays the buffered D11 rows; restore
+  demotion applies to D11 rows identically -- a PASS written before restore is
+  FAIL per section 8. The separate gate requires `EXPECTED_ROW_COUNT==4`,
+  pass==4, fail==0, void==0, exit 0; summary is `T12_D11_SUMMARY`. The
+  no-arg path keeps `EXPECTED_ROW_COUNT==30`. Fixture: MINIMAL
   v4_native x2 via the SAME fix9506_setup/teardown code path (not the full
   30-row T12+G2 workload: that contradiction is resolved -- shared code,
   minimal shape) + shared restore proof. Selftest regression pin (NEW case):
@@ -1047,6 +1045,11 @@ and are part of this READY plan rather than silent changes:
 | VOID provenance surface | The in-process snapshot carries `VoidReason`; the generated RPC schema currently has no field, so the live driver uses explicit cell reasons and refuses to infer a PASS from missing/invalid surfaces. Adding a protobuf field is deferred as a recorded interface deviation, not silently assumed. |
 | Independent byte-identical capture observer | This lane does not add a second packet-byte capture or independent digest path. The live join compares the Go ledger's captured-frame digest against the Rust provenance digest, and the traffic cell verifies the four marker probes. The old observer requirement is therefore not a PASS predicate for this implementation; missing Go/Rust digest or traffic evidence after arm/readiness is FAIL, while pre-arm unavailability remains VOID. |
 | Post-arm admission refusal classification | Once the successful arm/readiness branch selects marker rows, `ADMIT_STALE`, `ADMIT_FULL`, and `ADMIT_SHUTDOWN`, zero captured markers, or unreadable/mismatched Rust, ledger, metrics, or traffic evidence make the selected/admitted/completed join fail and emit FAIL. This is intentional: a refusal or missing measurement after the armed claim breaks it. Setup, fixture, arm, and readiness unavailability before entering that branch remain VOID. |
+| Independent marker identity/key | The D11 traffic commands use `ping -c 1 -e <flow-id> -p <selector>` for four lab-labeled probes. Those flow IDs are execution labels only; they are not treated as ledger join keys. The authoritative join remains `(node_id, request_id, permit_epoch, queue_epoch, queue_number)` plus origin and digest equality. The Go matcher accepts ICMP echo requests only (type 8/code 0), and the lab procedure must retain the `-e`/`-p` command output as traffic evidence. Adding ICMP identifier/sequence fields to the production ledger/Rust schema is deliberately out of scope for this lane. |
+| Node identity collision guard | Before either arm RPC, the driver independently reads each firewall hostname and `/etc/xpf/node-id`, maps the daemon rule (`node-0`, `node-1`, hostname fallback), and requires two non-standalone, distinct expected IDs. The join parser requires each ledger `node_id` to equal its expected node and the final parser repeats node/set/count invariants through rollback. Missing, malformed, or same-node identity is VOID before arm. |
+| Executable attestation ordering | `EXE_CHECK` is computed before the D11 branch; any value other than `MATCH` is a pre-arm VOID and no arm RPC is issued. The hermetic selftest covers MATCH, MISMATCH, and UNAVAILABLE outcomes through the same pure gate helper. |
+| Dirty terminal accounting | Duplicate or late completion evidence keeps `FinalizeIfTerminal` false, so the final ledger cannot claim a clean artifact. A separate `AllTerminal` close predicate still disarms after teardown once every row is terminal, preventing a dirty run from leaving the authority in DRAINING. |
+| Close-state and unmatched-late visibility | No management RPC currently exposes the armer `DISARMED` transition or queue/close ACK sequence. The live rollback instead requires restore success, a per-node final Rust status with a non-attest run identity and `permit_state=CLOSED`, an exact `(run_id,generation,permit_epoch)` join to that node's Go `xpf_ipsec_capture_permit_state{...,state="CLOSED"} 1` witness, final ledger invariants, and the daemon's durable final snapshot. Missing, empty, unrelated-only, or selected-attest-only status/metric evidence is rejected. A completion for an unknown request during an active D11 run is recorded as a bounded ledger failure, so final parsing cannot miss a close-window late event even if actor metrics disappear after teardown. |
 
 Safety invariants for the retained D11-only rollback are: (1) no new D11
 selection after DRAINING; (2) every selected pending lease is either joined to
@@ -1060,9 +1063,10 @@ this lane.
 
 ## 8. Proof cells and kill-gates
 
-PASS requires ALL of: exe_check=MATCH (local==fw0==fw1, t12-g2-9506.sh:1687-1697);
-complete_fixture=1 with stn/xfrm_sa/divert_table all 1 on both nodes
-(:1900-1902); no more than `D11ManifestCap=32` internally selected rows
+PASS requires ALL of: `EXE_CHECK=MATCH` computed before the D11 branch
+(local==fw0==fw1); complete_fixture=1 with stn/xfrm_sa/divert_table all 1 on
+both nodes; expected node identities independently observed and distinct,
+non-standalone, and equal to each final ledger `node_id`; no more than
 per daemon (the D11 run selects exactly four total across both nodes), each
 with node_id, bytes digest + origin + local queue/lease identity
 (including local permit_epoch) + trigger-assigned request_id; the bounded Go
@@ -1079,13 +1083,17 @@ halves, section 6.4); routine-path pollution deltas == 0 (quiesce guard);
 Q4 re-grounding records leg 1 preserved for ordinary/non-trigger frames and
 the trigger-only selection exception; shared restore clean
 (fw0/fw1_config_cmp=1, residue clear, probe errors=0) with D11 rows buffered
-until after restore. The run retains exactly four selected-frame ledger records;
-the mode emits exactly four proof-cell rows, all PASS, zero VOID/FAIL, exit 0.
-VOID (never PASS, never FAIL): exe_check != MATCH; fixture-setup-failed (any
+until after restore. The final parser repeats finalized/truncated/failure,
+row, duplicate/late, terminal, origin, key-set, count, and node invariants
+against the pre-rollback snapshots. The run retains exactly four selected-frame
+ledger records; the mode emits exactly four proof-cell rows, all PASS, zero
+VOID/FAIL, exit 0.
+VOID (never PASS, never FAIL): `EXE_CHECK` != MATCH; fixture-setup-failed (any
 fix9506_setup step incl. RG2 failover); required selector/authority/generation
-precondition unavailable before marker selection; those environmental refusals
-are VOID; after the successful arm/readiness branch, absent or unreadable
-measurement is FAIL as stated above.
+precondition or independently observed distinct node identity unavailable
+before marker selection; those environmental refusals are VOID; after the
+successful arm/readiness branch, absent or unreadable measurement is FAIL as
+stated above.
 Q4 showing default dark intact-but-unverifiable. A VOID run is retained as
 diagnostic evidence but cannot close the issue.
 FAIL (claim broken, not environment): Go ledger or Rust completion joined to a
@@ -1096,8 +1104,10 @@ internal selected row, Go ledger, and Rust provenance; post-arm
 ADMIT_STALE/ADMIT_FULL/ADMIT_SHUTDOWN; BAD_LEASE/BRIDGE/INPUT_HOOK/
 NON_DRY_RUN/NO_GENERATION/TUNNEL_ROW_MISSING after frozen preconditions ->
 FAIL; any Rust-52 among D11 rows; Go-52 or suppressed delta
-!= WouldPermit-count; any Written outcome (either half); PASS emitted before
-restore; `D11_CELL_COUNT != 4`; any selected-frame ledger record silently omitted. Any FAIL kills the run: no close.
+!= WouldPermit-count; any Written outcome (either half); duplicate/late
+completion that leaves the final artifact dirty; PASS emitted before restore;
+`EXPECTED_ROW_COUNT != 4`; any selected-frame ledger record silently omitted.
+Any FAIL kills the run: no close.
 
 PLAN-KILL boundaries (return to owner for re-scope per the merge-gate
 sequencing: #10483 ruling, #10484 before S9.5/counter reliance): the guarded

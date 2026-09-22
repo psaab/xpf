@@ -311,7 +311,7 @@ func d11MarkerMatches(payload []byte, selector [16]byte) bool {
 		return false
 	}
 	icmp := payload[ihl:]
-	if (icmp[0] != 0 && icmp[0] != 8) || icmp[1] != 0 {
+	if icmp[0] != 8 || icmp[1] != 0 {
 		return false
 	}
 	return string(icmp[8+16:8+32]) == string(selector[:])
@@ -544,6 +544,18 @@ func (l *D11AttestationLedger) MarkLate(requestID uint64) bool {
 	defer l.mu.Unlock()
 	key, ok := l.byRequest[requestID]
 	if !ok || l.records[key] == nil {
+		if l.runID == "" || l.finalized {
+			return false
+		}
+		if len(l.records)+len(l.failures) >= D11ManifestCap {
+			l.truncated = true
+			l.snapshotSeq++
+			return false
+		}
+		l.failures = append(l.failures, D11SelectionFailure{
+			Reason: fmt.Sprintf("unmatched late completion request_id=%d", requestID),
+		})
+		l.snapshotSeq++
 		return false
 	}
 	l.records[key].LateAttempts++
@@ -573,7 +585,9 @@ func (l *D11AttestationLedger) Finalize() {
 }
 
 // FinalizeIfTerminal closes the retained run only when every selected record
-// has a terminal disposition. It deliberately leaves the rows queryable.
+// has a clean terminal disposition. Duplicate or late completion evidence is
+// deliberately non-finalizable so rollback cannot report a clean artifact.
+// It deliberately leaves the rows queryable.
 func (l *D11AttestationLedger) FinalizeIfTerminal() bool {
 	if l == nil {
 		return false
@@ -585,12 +599,30 @@ func (l *D11AttestationLedger) FinalizeIfTerminal() bool {
 	}
 	for _, record := range l.records {
 		if record == nil || record.TerminalState == "" ||
-			record.TerminalState == "ADMISSION_PENDING" {
+			record.TerminalState == "ADMISSION_PENDING" ||
+			record.LateAttempts != 0 || record.Duplicate {
 			return false
 		}
 	}
 	l.finalized = true
 	l.snapshotSeq++
+	return true
+}
+// AllTerminal reports whether every selected row has reached a terminal
+// disposition, without declaring the artifact clean. It is used by the close
+// owner to disarm even when duplicate or late evidence makes finalization fail.
+func (l *D11AttestationLedger) AllTerminal() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, record := range l.records {
+		if record == nil || record.TerminalState == "" ||
+			record.TerminalState == "ADMISSION_PENDING" {
+			return false
+		}
+	}
 	return true
 }
 
@@ -935,16 +967,6 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 	}
 }
 
-func (p *CapturePipeline) admissionFailed(item *pendingReinject, code string, cause error) {
-	if p.admissionFailedState(item, code, cause) {
-		if cause != nil {
-			p.uncertain("D11 admission " + code + ": " + cause.Error())
-		} else {
-			p.uncertain("D11 admission " + code)
-		}
-		p.cancelUncertainLease(item.lease)
-	}
-}
 
 func (p *CapturePipeline) admissionFailedState(item *pendingReinject, code string, cause error) bool {
 	if p == nil || item == nil {

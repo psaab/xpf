@@ -646,8 +646,11 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 	}
 
 	t.Run("late completion", func(t *testing.T) {
+		ledger := NewD11AttestationLedger()
+		ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)
 		p, err := NewCapturePipeline(CapturePipelineConfig{
 			Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: new(pipelineTestSink),
+			Attestation: &D11AttestationConfig{Ledger: ledger},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -657,6 +660,10 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 		}
 		if got := p.Stats().LateCompletions; got != 1 {
 			t.Fatalf("LateCompletions=%d, want 1", got)
+		}
+		failures := ledger.Snapshot().Failures
+		if len(failures) != 1 || failures[0].Reason != "unmatched late completion request_id=99" {
+			t.Fatalf("late ledger failures=%+v", failures)
 		}
 	})
 

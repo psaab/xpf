@@ -772,7 +772,8 @@ func (r *ipsecCaptureRuntime) finalizeD11AfterClose() {
 		(arm.State != nfqueue.D11Armed.String() && arm.State != nfqueue.D11Draining.String()) {
 		return
 	}
-	if r.d11Ledger.FinalizeIfTerminal() {
+	if r.d11Ledger.AllTerminal() {
+		_ = r.d11Ledger.FinalizeIfTerminal()
 		r.d11Armer.BeginDrain()
 		r.d11Armer.Disarm()
 	}
