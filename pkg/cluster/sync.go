@@ -1448,12 +1448,22 @@ type SessionSync struct {
 	installTableRecvV6 map[dataplane.SessionKeyV6]recvInstallTable
 	recvGenV4          map[dataplane.SessionKey]uint64
 	recvGenV6          map[dataplane.SessionKeyV6]uint64
+	// recvGenScopedV4/V6 + recvTombScopedV4/V6 are the #10512 scoped
+	// policy-delete receiver spaces, keyed by (domain, tuple) and fully
+	// separate from the bare spaces in both directions (see
+	// deleteGenGuardScopedV4). Guarded by recvGenMu; reclaimed/reset
+	// alongside the bare maps.
+	recvGenScopedV4 map[scopedDeleteKeyV4]uint64
+	recvGenScopedV6 map[scopedDeleteKeyV6]uint64
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
 	// map at its effective cap evicts the oldest tombstone to record a new key instead
 	// of skip-recording it (#9719). Guarded by recvGenMu; retained across same-namespace
 	// resets and cleared by a namespace reset.
 	recvTombV4 genTombstoneOrder[dataplane.SessionKey]
 	recvTombV6 genTombstoneOrder[dataplane.SessionKeyV6]
+	// Scoped tombstone orders (see the recvGenScoped comment above).
+	recvTombScopedV4 genTombstoneOrder[scopedDeleteKeyV4]
+	recvTombScopedV6 genTombstoneOrder[scopedDeleteKeyV6]
 	// applyMu serializes the receive-side session APPLY across receive loops
 	// (#9715).
 	//   - Every installClusterSynced* holds it from the guard, through the
@@ -1901,6 +1911,8 @@ func (s *SessionSync) initGenState() {
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
 	s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
+	s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+	s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the
 	// sender's config-gen never regresses below a value the peer may hold
 	// across this node's restarts within a boot, and create the ordered
