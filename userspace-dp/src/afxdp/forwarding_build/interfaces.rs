@@ -715,8 +715,11 @@ pub(super) fn populate_interfaces(
         }
     }
 
-    // #10503: contested-parent host-inbound fail-closed backstop — SYMMETRY with
-    // the #5659 addressed-empty-zone backstop above. A trunk parent whose units
+    // #10503: contested-ifindex host-inbound fail-closed backstop — SYMMETRY
+    // with the #5659 addressed-empty-zone backstop above. Despite its historical
+    // `contested_parent_ifindexes` name, the finalized #7509 set includes both
+    // fan-UP parent conflicts and same-ifindex row conflicts: neither can be
+    // attributed to one security zone. A trunk parent whose units
     // span zones has its `ifindex_to_zone_id` entry REMOVED (the #7509 contest
     // arms), so untagged ingress on it resolves to zone 0 and
     // `host_inbound_admits(0)` takes the `None => true` global admit arm — every

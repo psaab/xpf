@@ -2129,6 +2129,13 @@ fn contested_trunk_parent_denies_transit_and_host_inbound_10503() {
     };
     let state = build_forwarding_state(&snapshot);
 
+    // Host-bound service traffic on the raw parent is denied by the new
+    // interface-keyed sentinel instead of the zone-only None=>true arm.
+    assert!(
+        !host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "contested parent must DENY host-bound ssh (tcp/22) — #10503"
+    );
+
     // The child zones disagree on the parent, so the parent has no guessed
     // ingress zone. The parent itself is address-less, so #5659 never armed.
     assert!(
@@ -2171,12 +2178,6 @@ fn contested_trunk_parent_denies_transit_and_host_inbound_10503() {
         "zone-0 transit must be attributed to unzoned ingress, not default policy"
     );
 
-    // Host-bound service traffic on the raw parent is denied by the new
-    // interface-keyed sentinel instead of the zone-only None=>true arm.
-    assert!(
-        !host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_TCP, 22, false, 0),
-        "contested parent must DENY host-bound ssh (tcp/22) — #10503"
-    );
     assert!(
         host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_ICMP, 0, false, 3),
         "global ICMP destination-unreachable must remain admitted on the parent"
@@ -2193,6 +2194,151 @@ fn contested_trunk_parent_denies_transit_and_host_inbound_10503() {
     assert!(host_inbound_admits_iface(
         &state, LAN_IFINDEX, lan_zone, PROTO_TCP, 22, false, 0
     ));
+}
+
+// #10503 fold pins: the post-walk guard covers every finalized contested
+// ifindex, including parent fan-UP conflicts, lifeline parents, parent-authored
+// interface overrides, and same-ifindex row conflicts. These are deliberately
+// separate fixtures because each guard must fail closed without changing the
+// other admission contract.
+fn any_service_zone_10503(name: &str, id: u16) -> ZoneSnapshot {
+    ZoneSnapshot {
+        name: name.into(),
+        id,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".into()],
+        ..Default::default()
+    }
+}
+
+fn contested_row_10503(
+    name: &str,
+    linux_name: &str,
+    zone: &str,
+    ifindex: i32,
+    parent_ifindex: i32,
+    is_unit: Option<bool>,
+) -> InterfaceSnapshot {
+    InterfaceSnapshot {
+        name: name.into(),
+        zone: zone.into(),
+        linux_name: linux_name.into(),
+        ifindex,
+        parent_ifindex,
+        is_unit,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn contested_lifeline_parents_keep_unconditional_host_admit_10503() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const PROTO_TCP: u8 = 6;
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", 7), any_service_zone_10503("lan", 8)],
+        interfaces: vec![
+            contested_row_10503("fab0.80", "fab0", "wan", 102, 101, Some(true)),
+            contested_row_10503("fab0.50", "fab0", "lan", 103, 101, Some(true)),
+            contested_row_10503("em0.80", "em0", "wan", 202, 201, Some(true)),
+            contested_row_10503("em0.50", "em0", "lan", 203, 201, Some(true)),
+            contested_row_10503("lo0.80", "lo0", "wan", 302, 301, Some(true)),
+            contested_row_10503("lo0.50", "lo0", "lan", 303, 301, Some(true)),
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    for (parent, label) in [(101, "fab0"), (201, "em0"), (301, "lo0")] {
+        assert!(
+            !state.ifindex_to_zone_id.contains_key(&parent),
+            "{label} contest must remain unzoned"
+        );
+        assert!(
+            !state.ifindex_host_inbound.contains_key(&parent),
+            "{label} lifeline contest must not receive an AF_XDP deny sentinel"
+        );
+        assert!(
+            host_inbound_admits_iface(&state, parent, 0, PROTO_TCP, 22, false, 0),
+            "{label} lifeline must keep unconditional host-bound ssh admission"
+        );
+    }
+}
+
+#[test]
+fn contested_parent_override_preserves_effective_host_admit_10503() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const PARENT: i32 = 401;
+    const PROTO_TCP: u8 = 6;
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", 7), any_service_zone_10503("lan", 8)],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0".into(),
+                zone: "wan".into(),
+                ifindex: PARENT,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["ssh".into()],
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            contested_row_10503("reth0.80", "reth0", "wan", 402, PARENT, Some(true)),
+            contested_row_10503("reth0.50", "reth0", "lan", 403, PARENT, Some(true)),
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&PARENT),
+        "parent-authored override fixture must contest and clear the parent zone"
+    );
+    assert!(
+        state.ifindex_host_inbound.contains_key(&PARENT),
+        "parent-authored host-inbound override must remain present"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, PARENT, 0, PROTO_TCP, 22, false, 0),
+        "parent-authored ssh override must survive contested-parent handling"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, PARENT, 0, PROTO_TCP, 443, false, 0),
+        "parent-authored ssh-only override must not widen to https"
+    );
+}
+
+#[test]
+fn same_ifindex_contest_gets_host_inbound_deny_sentinel_10503() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const SHARED_IFINDEX: i32 = 501;
+    const PROTO_TCP: u8 = 6;
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", 7), any_service_zone_10503("lan", 8)],
+        interfaces: vec![
+            // Structural is_unit=false makes these two rows the same-netdev
+            // identities that reach the same-ifindex contest arm, rather than
+            // the parent fan-UP arm.
+            contested_row_10503("st0.0", "st0", "wan", SHARED_IFINDEX, 0, Some(false)),
+            contested_row_10503("st0.1", "st0", "lan", SHARED_IFINDEX, 0, Some(false)),
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&SHARED_IFINDEX),
+        "same-ifindex rows in different zones must be left unzoned"
+    );
+    assert!(
+        state.ifindex_host_inbound.contains_key(&SHARED_IFINDEX),
+        "same-ifindex contest must receive the empty host-inbound sentinel"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "same-ifindex contest must deny host-bound ssh rather than use None=>true"
+    );
 }
 
 // #3299: `host-inbound-traffic protocols bfd` must admit multi-hop BFD control
