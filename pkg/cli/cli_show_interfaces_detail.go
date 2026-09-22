@@ -107,7 +107,11 @@ func (c *CLI) showInterfacesDetail(filterName string) error {
 			fmt.Printf("  Current address: %s\n", attrs.HardwareAddr)
 		}
 		if zone, ok := ifZoneMap[dispName]; ok {
-			fmt.Printf("  Security zone: %s\n", zone)
+			qualifier := ""
+			if cfg != nil && config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+				qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+			}
+			fmt.Printf("  Security zone: %s%s\n", zone, qualifier)
 		}
 
 		// Logical interface with flags and addresses
@@ -234,7 +238,11 @@ func (c *CLI) showInterfacesRethDetail(cfg *config.Config, maps config.RethShowM
 			}
 			fmt.Println()
 			if zone, ok := ifZone[fmt.Sprintf("%s.%d", reth, ru.Unit)]; ok {
-				fmt.Printf("    Security zone: %s\n", zone)
+				qualifier := ""
+				if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				}
+				fmt.Printf("    Security zone: %s%s\n", zone, qualifier)
 			}
 			if len(ru.V4Addrs) > 0 || len(ru.V6Addrs) > 0 {
 				fmt.Println("    Addresses:")

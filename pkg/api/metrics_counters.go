@@ -621,6 +621,10 @@ func (c *xpfCollector) collectZoneCounters(ch chan<- prometheus.Metric, dp apiRu
 		if zone == nil {
 			continue
 		}
+		if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
+			unpopulated++
+			continue
+		}
 		// No loaded dataplane, no apply result, or a configured zone the last
 		// apply did not assign an id to: nothing has been published for it,
 		// which is the unpopulated state, not an error. REST leaves

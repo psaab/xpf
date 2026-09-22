@@ -3,11 +3,11 @@ package natshow
 import (
 	"context"
 	"fmt"
-	"io"
-	"strings"
-
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"io"
+	"sort"
+	"strings"
 )
 
 // RenderSourceRuleDetail renders detailed source NAT rule information,
@@ -52,8 +52,23 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 	armed := dp != nil && dp.IsLoaded() && cr != nil
 	if armed {
 		zoneByID := make(map[uint16]string, len(cr.ZoneIDs))
-		for name, id := range cr.ZoneIDs {
-			zoneByID[id] = name
+		names := make([]string, 0, len(cr.ZoneIDs))
+		for name := range cr.ZoneIDs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			id := cr.ZoneIDs[name]
+			owner := config.StableZoneIDOwner(names, id)
+			if owner == "" {
+				if _, exists := zoneByID[id]; exists {
+					continue
+				}
+				owner = name
+			}
+			if owner == name {
+				zoneByID[id] = name
+			}
 		}
 		// walkSessionValues re-tests dp/IsLoaded internally. That is a
 		// deliberate double-check, not dead code: `armed` also gates the
@@ -103,9 +118,16 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 			// rendering a name-scoped rule as 0.0.0.0/0.
 			srcMatch := RuleMatchSource(rule)
 			dstMatch := RuleMatchDestination(rule)
+			fromZone, toZone := rs.FromZone, rs.ToZone
+			if config.ZoneQuarantineExcludedReason(fromZone, cfg) != "" {
+				fromZone += " " + config.ZoneQuarantineReferenceQualifier
+			}
+			if config.ZoneQuarantineExcludedReason(toZone, cfg) != "" {
+				toZone += " " + config.ZoneQuarantineReferenceQualifier
+			}
 			fmt.Fprintf(w, "source NAT rule: %s\n", rule.Name)
 			fmt.Fprintf(w, "  Rule-set: %s                        ID: %d\n", rs.Name, ruleIdx)
-			fmt.Fprintf(w, "    From zone: %s    To zone: %s\n", rs.FromZone, rs.ToZone)
+			fmt.Fprintf(w, "    From zone: %s    To zone: %s\n", fromZone, toZone)
 			fmt.Fprintf(w, "    Match:\n")
 			fmt.Fprintf(w, "      Source addresses:      %s\n", srcMatch)
 			fmt.Fprintf(w, "      Destination addresses: %s\n", dstMatch)
@@ -207,7 +229,12 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 		// attribute with. Reporting it once at the scope it actually measures
 		// is the honest form available: the number is real, it was labelled
 		// with the wrong noun.
-		if armed {
+		quarantinedPair := config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+			config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != ""
+		if quarantinedPair {
+			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %s\n\n",
+				rs.Name, config.ZoneQuarantineLiveCountersUnavailable)
+		} else if armed {
 			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %d\n\n",
 				rs.Name, rsSessions[ruleSetKey{rs.FromZone, rs.ToZone}])
 		} else if dp != nil {

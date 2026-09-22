@@ -42,6 +42,13 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func quarantineSecurityZoneText(name string, cfg *config.Config) string {
+	if config.ZoneQuarantineExcludedReason(name, cfg) != "" {
+		return name + " " + config.ZoneQuarantineReferenceQualifier
+	}
+	return name
+}
+
 // screenSYNCookieCounterRows renders the aggregated userspace
 // SYN-cookie counters (moved from server_show.go in #1700).
 func (s *Server) screenSYNCookieCounterRows() string {
@@ -532,7 +539,7 @@ func (s *Server) showScreenIDSOption(req *pb.ShowTextRequest, cfg *config.Config
 					continue
 				}
 				if zone.ScreenProfile == profileName {
-					zones = append(zones, name)
+					zones = append(zones, quarantineSecurityZoneText(name, cfg))
 				}
 			}
 			if len(zones) > 0 {
@@ -559,38 +566,43 @@ func (s *Server) showScreenStatistics(req *pb.ShowTextRequest, cfg *config.Confi
 			if !ok {
 				fmt.Fprintf(buf, "Zone '%s' not found\n", zoneName)
 			} else {
-				fs, err := s.dp.ReadFloodCounters(zoneID)
-				screenProfile := ""
-				if z, ok := cfg.Security.Zones[zoneName]; ok && z != nil { // #3493: nil zone value
-					screenProfile = z.ScreenProfile
-				}
-				switch {
-				case errors.Is(err, dataplane.ErrCounterNotPopulated):
-					// #3651: per-zone flood counters ARE sourced now; this zone
-					// has none published (helper predates the accounting, the
-					// zone lost its hot-path slot, or it never tripped a flood
-					// check). Say so explicitly rather than a misleading 0.
-					fmt.Fprintf(buf, "Screen statistics for zone '%s':\n", zoneName)
-					if screenProfile != "" {
-						fmt.Fprintf(buf, "  Screen profile: %s\n", screenProfile)
+				if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
+					fmt.Fprintf(buf, "Screen statistics for zone '%s':\n", quarantineSecurityZoneText(zoneName, cfg))
+					buf.WriteString(config.ZoneQuarantineScreenCountersLine + "\n")
+				} else {
+					fs, err := s.dp.ReadFloodCounters(zoneID)
+					screenProfile := ""
+					if z, ok := cfg.Security.Zones[zoneName]; ok && z != nil { // #3493: nil zone value
+						screenProfile = z.ScreenProfile
 					}
-					buf.WriteString("  Per-zone flood counters: not available " +
-						"(no per-zone flood counts published for this zone: helper predates " +
-						"per-zone flood accounting, the zone exceeded the dataplane's " +
-						"hot-path slot capacity, or the zone has recorded no flood events)\n")
-					buf.WriteString(s.screenSYNCookieCounterRows())
-				case err != nil:
-					fmt.Fprintf(buf, "Error reading flood counters: %v\n", err)
-				default:
-					fmt.Fprintf(buf, "Screen statistics for zone '%s':\n", zoneName)
-					if screenProfile != "" {
-						fmt.Fprintf(buf, "  Screen profile: %s\n", screenProfile)
+					switch {
+					case errors.Is(err, dataplane.ErrCounterNotPopulated):
+						// #3651: per-zone flood counters ARE sourced now; this zone
+						// has none published (helper predates the accounting, the
+						// zone lost its hot-path slot, or it never tripped a flood
+						// check). Say so explicitly rather than a misleading 0.
+						fmt.Fprintf(buf, "Screen statistics for zone '%s':\n", zoneName)
+						if screenProfile != "" {
+							fmt.Fprintf(buf, "  Screen profile: %s\n", screenProfile)
+						}
+						buf.WriteString("  Per-zone flood counters: not available " +
+							"(no per-zone flood counts published for this zone: helper predates " +
+							"per-zone flood accounting, the zone exceeded the dataplane's " +
+							"hot-path slot capacity, or the zone has recorded no flood events)\n")
+						buf.WriteString(s.screenSYNCookieCounterRows())
+					case err != nil:
+						fmt.Fprintf(buf, "Error reading flood counters: %v\n", err)
+					default:
+						fmt.Fprintf(buf, "Screen statistics for zone '%s':\n", zoneName)
+						if screenProfile != "" {
+							fmt.Fprintf(buf, "  Screen profile: %s\n", screenProfile)
+						}
+						fmt.Fprintf(buf, "  %-30s %s\n", "Counter", "Value")
+						fmt.Fprintf(buf, "  %-30s %d\n", "SYN flood events", fs.SynCount)
+						fmt.Fprintf(buf, "  %-30s %d\n", "ICMP flood events", fs.ICMPCount)
+						fmt.Fprintf(buf, "  %-30s %d\n", "UDP flood events", fs.UDPCount)
+						buf.WriteString(s.screenSYNCookieCounterRows())
 					}
-					fmt.Fprintf(buf, "  %-30s %s\n", "Counter", "Value")
-					fmt.Fprintf(buf, "  %-30s %d\n", "SYN flood events", fs.SynCount)
-					fmt.Fprintf(buf, "  %-30s %d\n", "ICMP flood events", fs.ICMPCount)
-					fmt.Fprintf(buf, "  %-30s %d\n", "UDP flood events", fs.UDPCount)
-					buf.WriteString(s.screenSYNCookieCounterRows())
 				}
 			}
 		}
@@ -615,6 +627,11 @@ func (s *Server) showScreenStatisticsAll(cfg *config.Config, buf *strings.Builde
 		// AFTER all zones rather than silently dropping the zone.
 		var readErr error
 		for _, zoneName := range zones {
+			if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
+				fmt.Fprintf(buf, "Screen statistics for zone '%s':\n", quarantineSecurityZoneText(zoneName, cfg))
+				buf.WriteString(config.ZoneQuarantineScreenCountersLine + "\n\n")
+				continue
+			}
 			zoneID := cr.ZoneIDs[zoneName]
 			fs, err := s.dp.ReadFloodCounters(zoneID)
 			screenProfile := ""
@@ -778,7 +795,7 @@ func (s *Server) showScreenIDSOptionDetail(req *pb.ShowTextRequest, cfg *config.
 					continue
 				}
 				if zone.ScreenProfile == profileName {
-					zones = append(zones, name)
+					zones = append(zones, quarantineSecurityZoneText(name, cfg))
 				}
 			}
 			if len(zones) > 0 {
@@ -842,7 +859,7 @@ func (s *Server) showScreen(cfg *config.Config, buf *strings.Builder) {
 				continue
 			}
 			if zone.ScreenProfile != "" {
-				zonesByProfile[zone.ScreenProfile] = append(zonesByProfile[zone.ScreenProfile], name)
+				zonesByProfile[zone.ScreenProfile] = append(zonesByProfile[zone.ScreenProfile], quarantineSecurityZoneText(name, cfg))
 			}
 		}
 		var names []string

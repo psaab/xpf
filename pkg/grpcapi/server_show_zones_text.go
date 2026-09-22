@@ -40,8 +40,14 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		buf.WriteString("No security zones configured\n")
 		return
 	}
-	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	allZoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
+		allZoneNames = append(allZoneNames, name)
+	}
+	sort.Strings(allZoneNames)
+	quarantined := config.ZoneQuarantineExclusions(allZoneNames)
+	zoneNames := make([]string, 0, len(allZoneNames))
+	for _, name := range allZoneNames {
 		if filter != "" && name != filter {
 			continue
 		}
@@ -53,6 +59,9 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 	}
 	sort.Strings(zoneNames)
 	cr := s.applyResult()
+	if cr != nil && zoneInventoryDiffers(allZoneNames, cr.ZoneIDs) {
+		buf.WriteString(config.ZoneQuarantineDriftNote + "\n")
+	}
 	// #3408: surface a per-zone counter read failure as a warning AFTER all
 	// zones rather than silently dropping the traffic-statistics block.
 	var readErr error
@@ -62,18 +71,38 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 			continue
 		}
 		var zoneID uint16
-		if cr != nil {
+		reason := ""
+		if _, excluded := quarantined[name]; excluded {
+			reason = config.ZoneQuarantineExcludedReason(name, cfg)
+			zoneID = config.StableZoneID(name)
+		} else if cr != nil {
 			zoneID = cr.ZoneIDs[name]
 		}
+		survivor := ""
+		if reason != "" {
+			survivor = config.StableZoneIDOwner(allZoneNames, zoneID)
+		}
 		if zoneID > 0 {
-			fmt.Fprintf(buf, "Zone: %s (id: %d)\n", name, zoneID)
+			if survivor != "" {
+				fmt.Fprintf(buf, "Zone: %s (id: %d) %s\n", name, zoneID,
+					config.ZoneQuarantineIDQualifierFor(survivor))
+			} else {
+				fmt.Fprintf(buf, "Zone: %s (id: %d)\n", name, zoneID)
+			}
 		} else {
 			fmt.Fprintf(buf, "Zone: %s\n", name)
+		}
+		if reason != "" {
+			buf.WriteString(config.ZoneQuarantineHeadlineFor(zoneID, survivor) + "\n")
 		}
 		if zone.Description != "" {
 			fmt.Fprintf(buf, "  Description: %s\n", zone.Description)
 		}
-		fmt.Fprintf(buf, "  Interfaces: %s\n", strings.Join(zone.Interfaces, ", "))
+		if reason != "" {
+			fmt.Fprintf(buf, "  Interfaces: %s %s\n", strings.Join(zone.Interfaces, ", "), config.ZoneQuarantineInterfacesQualifier)
+		} else {
+			fmt.Fprintf(buf, "  Interfaces: %s\n", strings.Join(zone.Interfaces, ", "))
+		}
 		if zone.TCPRst {
 			buf.WriteString("  TCP RST: enabled\n")
 		}
@@ -111,27 +140,16 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 				}
 			}
 		}
-		// Traffic counters
-		if s.dp != nil && s.dp.IsLoaded() && zoneID > 0 {
+		// Traffic counters. Never read the survivor's live counters under a
+		// quarantined name: the builder omits that zone from the dataplane.
+		if reason != "" {
+			buf.WriteString(config.ZoneQuarantineCountersLine + "\n")
+		} else if s.dp != nil && s.dp.IsLoaded() && zoneID > 0 {
 			ingress, errIn := s.dp.ReadZoneCounters(zoneID, 0)
 			egress, errOut := s.dp.ReadZoneCounters(zoneID, 1)
 			switch {
 			case errors.Is(errIn, dataplane.ErrCounterNotPopulated) ||
 				errors.Is(errOut, dataplane.ErrCounterNotPopulated):
-				// #6843: per-zone accounting IS implemented and populated
-				// (#3651). ErrCounterNotPopulated now means the helper has
-				// published nothing for THIS zone, which has three causes: a
-				// pre-#3651 helper, a zone past the helper's hot-path slot
-				// capacity (its traffic really is uncounted), or an idle zone.
-				// Naming "not implemented" was accurate under the #3643 HIDE
-				// and is now actively misleading — with 64+ zones one `show
-				// security zones` prints real byte counts for slotted zones and
-				// "not implemented" for overflowed ones, pointing the operator
-				// at the wrong cause.
-				// #6895: one canonical spelling for all three surfaces — and
-				// this renderer previously had NO #6845 overflow
-				// specialisation, so the same cluster reported slot exhaustion
-				// on the local CLI and the generic three-cause line here.
 				buf.WriteString(zonecounters.UnavailableLineFor(
 					s.zoneCounterLayoutVersion(), s.zoneCounterOverflowActive()) + "\n")
 			case errIn == nil && errOut == nil:
@@ -168,7 +186,11 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 			}
 		}
 		if len(policyRefs) > 0 {
-			fmt.Fprintf(buf, "  Policies: %s\n", strings.Join(policyRefs, ", "))
+			if reason != "" {
+				fmt.Fprintf(buf, "  Policies: %s %s\n", strings.Join(policyRefs, ", "), config.ZoneQuarantinePoliciesQualifier)
+			} else {
+				fmt.Fprintf(buf, "  Policies: %s\n", strings.Join(policyRefs, ", "))
+			}
 		}
 		// Detail: per-interface info
 		if len(zone.Interfaces) > 0 {
@@ -226,6 +248,9 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		// stay byte-identical. Parity with REST (pkg/api/security.go) + gRPC
 		// GetPolicies (#3363).
 		schedActive, haveSched := s.policySchedulerActiveState()
+		if reason != "" {
+			buf.WriteString("  " + config.ZoneQuarantinePoliciesQualifier + "\n")
+		}
 		for _, line := range policymatch.ZoneDetailPolicySummary(cfg, name, schedActive, haveSched) {
 			buf.WriteString(line)
 			buf.WriteString("\n")
@@ -303,13 +328,24 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 		buf.WriteString("Missing interface parameter\n")
 	} else {
 		found := false
-		for zoneName, zone := range cfg.Security.Zones {
+		allZoneNames := make([]string, 0, len(cfg.Security.Zones))
+		for zoneName := range cfg.Security.Zones {
+			allZoneNames = append(allZoneNames, zoneName)
+		}
+		sort.Strings(allZoneNames)
+		for _, zoneName := range allZoneNames {
+			zone := cfg.Security.Zones[zoneName]
 			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
 				continue
 			}
 			for _, iface := range zone.Interfaces {
 				if iface == ifName {
 					fmt.Fprintf(buf, "Interface %s belongs to zone: %s\n", ifName, zoneName)
+					if reason := config.ZoneQuarantineExcludedReason(zoneName, cfg); reason != "" {
+						id := config.StableZoneID(zoneName)
+						survivor := config.StableZoneIDOwner(allZoneNames, id)
+						fmt.Fprintf(buf, "  %s\n", config.ZoneQuarantineTestZoneQualifierFor(id, survivor))
+					}
 					if zone.Description != "" {
 						fmt.Fprintf(buf, "  Description: %s\n", zone.Description)
 					}
@@ -347,6 +383,18 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 		}
 	}
 	return &pb.ShowTextResponse{Output: buf.String()}, nil
+}
+
+func zoneInventoryDiffers(active []string, applied map[string]uint16) bool {
+	if len(active) != len(applied) {
+		return true
+	}
+	for _, name := range active {
+		if _, ok := applied[name]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // zoneCounterOverflowActive reports whether the dataplane says its per-zone

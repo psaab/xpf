@@ -2,14 +2,14 @@ package cli
 
 import (
 	"fmt"
-	"net"
-	"os"
-	"strings"
-
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/routing"
+	"net"
+	"os"
+	"sort"
+	"strings"
 )
 
 // handleTest dispatches test sub-commands (policy, routing, security-zone).
@@ -393,14 +393,25 @@ func (c *CLI) testSecurityZone(args []string) error {
 		fmt.Println("usage: test security-zone interface <name>")
 		return nil
 	}
+	allZoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		allZoneNames = append(allZoneNames, name)
+	}
 
-	for zoneName, zone := range cfg.Security.Zones {
+	sort.Strings(allZoneNames)
+	for _, zoneName := range allZoneNames {
+		zone := cfg.Security.Zones[zoneName]
 		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
 			continue
 		}
 		for _, iface := range zone.Interfaces {
 			if iface == ifName {
 				fmt.Printf("Interface %s belongs to zone: %s\n", ifName, zoneName)
+				if reason := config.ZoneQuarantineExcludedReason(zoneName, cfg); reason != "" {
+					id := config.StableZoneID(zoneName)
+					survivor := config.StableZoneIDOwner(allZoneNames, id)
+					fmt.Printf("  %s\n", config.ZoneQuarantineTestZoneQualifierFor(id, survivor))
+				}
 				if zone.Description != "" {
 					fmt.Printf("  Description: %s\n", zone.Description)
 				}

@@ -396,7 +396,11 @@ func (c *CLI) showInterfaces(args []string) error {
 				fmt.Println(line)
 			}
 
-			fmt.Printf("    Security: Zone: %s\n", li.zoneName)
+			zoneLabel := li.zoneName
+			if config.ZoneQuarantineExcludedReason(li.zoneName, cfg) != "" {
+				zoneLabel += " " + config.ZoneQuarantineInterfacesQualifier
+			}
+			fmt.Printf("    Security: Zone: %s\n", zoneLabel)
 
 			// Host-inbound traffic services (#3654 H05/M03): show the EFFECTIVE
 			// admitted set for THIS logical interface — its per-interface
