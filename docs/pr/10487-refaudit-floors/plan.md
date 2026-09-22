@@ -1,19 +1,29 @@
 ---
-status: DRAFT v1 — awaiting parent-run plan review (Codex + Gemini hostile review). No production code.
+status: DRAFT v2 — delta-review requested after round-1 findings; no production code
 issue: #10487
-phase: single PR — prune 2 dead entries + give accepted entries a re-check/expiry; no production code
-base: origin/master b71c52d60
+phase: single PR — prune 2 dead entries + add a fail-closed live-entry re-check; tooling/tests/docs only
+base: origin/master b71c52d6093f23a7d9c9cca12d00cb40b3dffa8d
 ---
 
 # Plan: Expire refactoring-audit accepted entries that outlive their floors (#10487)
 
 ## 1. Status
 
-DRAFT v1, written 2026-09-21 against `origin/master b71c52d60`.
-STEP-0 liveness confirmed: the issue is live at HEAD, no prior fix exists
-(empty `git log --grep=10487`, empty refaudit/floor grep on `origin/master`,
-no merged or open PR touches it). Work stops after plan commit + push;
-production code lands only after adversarial plan review.
+DRAFT v2, revised 2026-09-21 after the round-1 Codex/Gemini plan review.
+The design verdict was READY-compatible; v2 closes the test, evidence, and
+wording findings before delta re-review. No production code is in scope.
+
+STEP-0 was rerun against fresh `origin/master`: `git fetch origin master`
+left `origin/master` at `b71c52d6093f23a7d9c9cca12d00cb40b3dffa8d`.
+Actual GitHub searches were empty for all of:
+
+- `gh pr list --state merged --search '10487' --limit 100`
+- `gh pr list --state merged --search 'refaudit floor' --limit 100`
+- `gh pr list --state open --search '10487' --limit 100`
+
+There is no prior fix or competing PR. The issue remains OPEN. This branch
+stops after the plan commit and push; implementation waits for parent-run
+delta review.
 
 ## 2. Issue framing
 
@@ -28,43 +38,41 @@ Two of the twelve entries are dead at HEAD: their files were split/shrunk
 below the floor the entry accepts, and nothing noticed:
 
 | Entry (line) | Tier / floor | Head LOC (`wc -l`) | Deficit |
-|---|---|---|---|
+|---|---|---:|---:|
 | `pkg/api/metrics_userspace.go` (:24) | [REFACTOR] / 2000 | 529 | −1471 |
 | `pkg/vrrp/instance.go` (:26) | [WATCH] / 1500 | 825 | −675 |
 
-The `metrics_userspace.go` case is the sharp one: #7700 split the file and
-its scope explicitly required pruning the entry once under the floor; the
-prune never happened, and the gate stayed green because nothing re-checks.
-The decision record has drifted from reality with no signal, exactly the
-failure mode the accepted file's own header claims is impossible
-(`docs/refactoring-audit-accepted.txt:16-18`: "cannot go stale from an
-unrelated file growing elsewhere" — and `docs/refactoring-audit.md:156-157`
-repeats it). Shrinking, not growing, is what stales it.
+The `metrics_userspace.go` case is the sharp one. Issue #7700's scope says
+to prune its entry once the file is under the floor; the split landed and
+the prune never happened. The decision record has drifted from reality with
+no signal, exactly the failure mode the accepted file's own header currently
+claims is impossible (`docs/refactoring-audit-accepted.txt:16-18`, and the
+same claim in `docs/refactoring-audit.md:156-157`). Shrinking, not unrelated
+growth, is what stales it.
 
-Acceptance (from the issue): prune the two dead entries (plus audit the
-remaining ten for the same drift — done, see §4), give accepted entries a
-re-check or expiry, and make re-adding a below-floor entry fail the gate
-(red-on-revert).
+Acceptance from #10487: prune the two dead entries, audit the remaining ten,
+give accepted entries a re-check or expiry, and make re-adding a below-floor
+entry fail the gate (red-on-revert).
 
 ## 3. Scope-value
 
-**In:** prune dead entries; add a re-check that fails (or warns) when an
-accepted path measures below its floor; extend the fail-on-revert pins;
-update the two doc claims that assert accepted entries cannot go stale.
+**In:** prune the two dead entries; add a tree-global, fail-closed live-entry
+re-check; add committed negative controls for re-add, deleted paths, and LOC
+metric parity; correct the accepted-file and engineering-style instructions.
 
 **Value:** closes a silent pre-authorization hole in the repo's hardest
 modularity gate. Today an author regrowing `metrics_userspace.go` from 529
 back past 2000 LOC gets a green gate on a 2010-LOC decision that no longer
 describes the file — the crossing that most needs a fresh written decision
-is the one the gate waves through. The fix restores the invariant the gate
-was built on: every silenced crossing traces to a live decision.
+is the one the gate waves through. The fix restores the invariant that every
+silenced crossing traces to a live decision.
 
-**Not value:** no production behavior changes; no heatmap/freshness changes
-(#7253/#7269 territory); no new thresholds.
+**Not value:** no production behavior; no heatmap/freshness changes
+(#7253/#7269 territory); no new thresholds; no CI system is introduced.
 
 ## 4. Shipped-context (what exists today, with receipts)
 
-Gate decision (all paths at `b71c52d60`):
+### 4.1 Gate decision and consumers
 
 - Floors/tiers: `auditFloor = 1500`, `refactorFloor = 2000`,
   `tierWatch = "[WATCH]"`, `tierRefactor = "[REFACTOR]"`
@@ -74,236 +82,360 @@ Gate decision (all paths at `b71c52d60`):
 - Escape: `isAccepted` matches `a.path == c.path` and
   `a.tier == c.tier || a.tier == tierRefactor` — path+tier only, no LOC
   (`audit_touched_test.go:187-197`).
-- Well-formedness: `TestAcceptedFileWellFormed` checks reason non-empty,
-  no duplicate path+tier, and `classify.sh audited <path>` — **no LOC or
-  existence leg** (`audit_touched_test.go:514-532`). This is the hole.
-- Changed set: `git diff --name-only <merge-base(origin/master,HEAD)>`
-  (`docs/refactoring-audit.md:120-125`); on master the set is empty so the
-  touched gate is structurally silent there — but `TestAcceptedFileWellFormed`
-  reads the committed file + tree, not the diff, so it runs (and can fail)
-  on master too.
+- The accepted file has exactly one code reader, `readAccepted`
+  (`audit_touched_test.go:200-208`), called by the touched gate and
+  `TestAcceptedFileWellFormed`. The fixture in
+  `TestAcceptedCrossingIsTheOnlyEscape` is synthetic, not another reader.
+  Scripts do not consume the accepted file; the refresh job only writes the
+  separate heatmap snapshot.
+- Well-formedness currently checks reason non-empty, duplicate path+tier,
+  and `classify.sh audited <path>` (`audit_touched_test.go:514-532`) — no
+  existence or LOC leg. This is the hole.
 
-Blast-radius census (HEAD, `wc -l` per accepted path; 12 entries, :24–:35):
+### 4.2 Measurement and missing-file semantics (resolved from source)
 
-- DEAD (2/12 = 16.7%): `metrics_userspace.go` 529 < 2000;
+The shared audit library is the metric source of truth:
+
+- `audit_loc()` is exactly `wc -l < "$1"`
+  (`scripts/refactoring-audit-lib.sh:60-72`). It counts byte `0x0a`
+  characters only: a CRLF line contributes one, and a final unterminated
+  line contributes zero. There is no inline-test stripping or CR handling.
+- The generator and touched head column call that same `audit_loc`; touched
+  base uses `git show ... | wc -l`
+  (`scripts/refactoring-audit-touched.sh:100-116`).
+- `audit_is_audited_path()` is pattern-only: extension, root, and skip regex;
+  it never checks that a file exists (`refactoring-audit-lib.sh:122-149`).
+  `classify.sh audited` therefore prints `AUDITED` for an accepted deleted
+  path (`classify.sh:37-46`). The `[ -f ]` check at
+  `refactoring-audit-touched.sh:109` is only a changed-set skip, correct
+  there because deletions cannot cross upward; copying that skip into the
+  re-check would silently revive this bug.
+- `classify.sh loc` delegates to `audit_loc` (`classify.sh:47-50`) and
+  fails non-zero for a missing file. The new Go re-check must fail explicitly
+  on `os.ReadFile`/existence errors rather than rely on that accident or skip.
+
+Implementation choice is now fixed: the re-check reads each accepted path
+from the working tree, rejects a missing/unreadable path, and counts
+`bytes.Count(content, []byte{'\n'})`. A committed parity test compares that
+count to `classify.sh loc` on newline-edge fixtures. This avoids a per-entry
+shell fork in the new helper while pinning exact parity with the shell source
+of truth; `bytes.Count`, not scanner/split-lines counting, is required.
+
+### 4.3 Blast-radius census
+
+HEAD has 12 entries (lines :24-:35):
+
+- DEAD: 2/12 = 16.7% — `metrics_userspace.go` 529 < 2000 and
   `vrrp/instance.go` 825 < 1500.
-- LIVE (10/10 verified ≥ tier floor): `daemon.go` 1942, `metrics.go` 1874,
-  `coordinator/mod.rs` 1875, `compiler_interfaces.go` 2054 (≥1500 under a
-  [WATCH] entry — live; a future [REFACTOR] crossing there would correctly
-  NOT be silenced), `compact_normalize_scope.go` 1794, `authz.go` 1594,
-  `sync.go` 2540, `afxdp/mod.rs` 1678, `forwarding.rs` 1592,
-  `maps_sync.go` 2041. Zero entries point at missing files.
-- Corroboration nuance: the *committed* heatmap still lists
+- LIVE: 10/10 — `daemon.go` 1942, `metrics.go` 1874,
+  `userspace-dp/src/afxdp/coordinator/mod.rs` 1875,
+  `compiler_interfaces.go` 2054 (a live [WATCH] entry; it still does not
+  silence a future [REFACTOR] crossing), `compact_normalize_scope.go` 1794,
+  `authz.go` 1594, `sync.go` 2540, `userspace-dp/src/afxdp/mod.rs` 1678,
+  `userspace-dp/src/afxdp/types/forwarding.rs` 1592, and
+  `maps_sync.go` 2041.
+- MISSING: 0/12. The smallest live margin is 41 LOC
+  (`maps_sync.go`, 2041 vs its 2000 [REFACTOR] floor), so ±1 metric
+  disagreement cannot false-red a current live entry.
+- Corroboration: the committed heatmap still lists
   `metrics_userspace.go` at 2010 (`docs/refactoring-audit-current.txt:21`)
-  while the tree measures 529 — the snapshot is stale in the other
-  direction (freshness-advisory territory, not this issue), and it means a
-  fresh recomputation drops the file from the heatmap exactly as the issue
-  reports.
-- Pre-authorization mechanics (the exploit, concretely): a branch growing
-  `metrics_userspace.go` 529 → 2000+ reports a [REFACTOR] crossing via
-  `thresholdCrossings`, and `isAccepted` matches the dead :24 entry → green.
-  Same shape at 1500 for `instance.go` via :26.
-- No existing expiry/decay/prune mechanism: grep for
-  `expir|decay|prune|stale.*accept` over `pkg/refactoraudit/` finds only the
-  canary's heatmap-row floor check (`audit_canary_test.go:326-329`, a
-  different property) and unrelated deploy-lease code.
-- History: `git log -3` on both dead paths shows only `254ca9939` (lifecycle
-  proof doc); the shrink is old, the deadness is steady-state, not a transient.
+  while the tree measures 529. A fresh heatmap drops it. That snapshot drift
+  is freshness-advisory territory, not a second accepted-file reader.
+- Exploit mechanics: a branch growing `metrics_userspace.go` 529 → 2000+
+  reports a [REFACTOR] crossing and `isAccepted` matches the dead :24 line;
+  the same shape occurs at 1500 for `instance.go` via :26.
+- #7700 is the direct source receipt for the missed prune obligation. No
+  shallow-worktree path-history claim is used as evidence in this plan.
 
 ## 5. Design
 
 ### 5.1 Recommended: fail-closed floor re-check + prune in one PR
 
-Two commits, one PR (order matters — see §5.3):
+Two logical increments, with the prune first so the mechanism's own tree is
+green:
 
-**Commit 1 — prune the two dead entries.** Delete :24 (`metrics_userspace.go`,
-owed since #7700) and :26 (`instance.go`) from
-`docs/refactoring-audit-accepted.txt`. Pure deletion; the remaining ten stay
-byte-identical. Post-prune the file holds 10 live entries.
+**Increment 1 — prune the two dead entries.** Delete :24
+(`pkg/api/metrics_userspace.go`) and :26 (`pkg/vrrp/instance.go`) from
+`docs/refactoring-audit-accepted.txt`. The remaining ten entries stay
+byte-identical. This is a pure data deletion and is independently safe.
 
-**Commit 2 — fail-closed re-check.** Extend `TestAcceptedFileWellFormed`
-(or add a sibling test — open question Q5) with a LOC leg: for each entry,
-measure the file in the working tree with the **same metric the gate uses**
-(open question Q4 pins which), and fail naming the entry when
-`headLOC < floor(tier)` where `floor([REFACTOR]) = 2000`,
-`floor([WATCH]) = 1500`. Boundary: exactly-at-floor is live
-(`1500` satisfies [WATCH]), matching the crossing predicate's `head >= floor`
-half. Deleted-file entries must fail too (open question Q3: whether
-`classify.sh audited` already catches them or the re-check needs an
-existence leg — verify before implementing; do not assume).
+**Increment 2 — add `TestAcceptedEntriesAreLive`.** Keep
+`TestAcceptedFileWellFormed` focused on syntax, reasons, uniqueness, and the
+audited-path classifier. Add a sibling tree-global test/helper that, for
+each parsed entry:
 
-Why fail rather than warn: the issue allows either, but warn-only reproduces
-the advisory pattern #7253 deliberately demoted for the other half — nobody
-is interrupted, so nobody prunes, and #7700 already proved the prune does
-not happen voluntarily. The re-check fires only when a human shrinks a file
-below its accepted floor (rare, deliberate, actionable: prune the entry in
-the same PR), so fail-closed interrupts almost nobody and the interruption
-always names its own fix.
+1. maps tier to floor ([WATCH] 1500; [REFACTOR] 2000);
+2. requires the accepted path to exist and be readable in the **working
+   tree** — missing/deleted/renamed paths are a hard failure, never a skip;
+3. counts raw LOC as `bytes.Count(content, []byte{'\n'})`;
+4. fails with path, tier, measured LOC, and required floor if
+   `headLOC < floor`;
+5. treats exactly-at-floor as live; and
+6. tells a [REFACTOR] entry on a 1500–1999-LOC file to **demote it to
+   [WATCH] or prune it**, rather than blindly saying only "prune". A
+   [WATCH] entry on a ≥2000-LOC file remains live and retains current
+   `isAccepted` tier asymmetry.
 
-### 5.2 Alternatives considered (and why not)
+This is deliberately tree-global and master-loud: `readAccepted` uses
+`os.ReadFile` on the working-tree path, not a committed Git blob, and this
+check does not read the changed set or merge base. The existing touched gate
+stays diff-local and master-silent.
 
-- **A. Prune-only, no mechanism.** Fixes 2/12 but leaves the class open;
-  the next split re-creates it. Rejected: the issue explicitly demands a
-  re-check or expiry.
-- **B. Advisory (warn-only) re-check.** Same predicate, `t.Log` instead of
-  `t.Error`. Rejected as primary (see above), acceptable as a fallback if
-  adversarial review finds a false-red population fail-closed cannot tolerate
-  (e.g. Q6 in-flight branches).
-- **C. Decay metadata in the entry format** (accepted-at LOC/rev, TTL).
-  Heavier: format change, parser change, migration of all 12 entries, and a
-  new semantic (what does "accepted at 2010, now 529" mean that "below floor"
-  does not already say?). The floor comparison already expresses the decay
-  condition with zero format churn. Rejected unless review shows floor-only
-  misfires on a real case.
-- **D. Re-check inside `isAccepted` / the touched gate.** Wrong layer: the
-  touched gate is diff-local and master-silent by design (§4); the deadness
-  property is tree-global. Putting it in the touched path would either never
-  fire on master (useless) or break the #7253 split's locality guarantee.
-  The well-formedness test is the tree-global surface — that is where a
-  tree-global property belongs.
+Why fail rather than warn: the only red is an actionable shrink/split author
+(or a deleted accepted path), and the failure names the exact entry. Warn-only
+would recreate the advisory shape #7253 deliberately demoted; #7700 already
+shows that a voluntary prune is not reliable. A fail-closed [REFACTOR] entry
+that remains 1500–1999 LOC is fixed by demotion or pruning, while an entry
+below 1500 is pruned.
 
-### 5.3 Ordering and master-loudness (load-bearing)
+### 5.2 Alternatives considered
 
-The re-check is deliberately **master-loud**: unlike the touched gate, it
-must fire on master, because a dead licence is a repo-global fact, not a
-branch-local one. Consequences:
+- **Prune-only:** fixes 2/12 but leaves the class open after the next split.
+  Rejected because #10487 explicitly asks for a re-check or expiry.
+- **Warn-only:** avoids a red but leaves the stale licence operational and
+  hides the actionable repair in ordinary non-verbose test output. Rejected
+  as primary.
+- **Accepted-at metadata/TTL:** changes the entry format and all migrations
+  without changing any decision: an entry at 529 is dead whether it was
+  accepted at 1501 or 2010. Rejected; current floor is the sufficient decay
+  condition.
+- **Re-check inside `isAccepted`:** wrong layer. The touched gate's
+  diff-local/master-silent contract must remain intact; tree-global deadness
+  belongs in the tree-global well-formed/live-entry surface.
+- **Shelling out to `touched.sh` for LOC:** wrong vehicle. That script is a
+  changed-set probe and deliberately skips missing paths; parity belongs to
+  `classify.sh loc`/`audit_loc`, as fixed in §4.2.
 
-- Within the PR, the prune must land in the same tree as the mechanism (or
-  first): a mechanism-only tree reds on the two dead entries. Single PR,
-  prune commit first, mechanism second; CI runs on the tip where both hold.
-- Any future split that takes an accepted file below its floor MUST prune the
-  entry in the same PR or master goes red. That is the point (it is the prune
-  #7700 owed), and it is stated in the doc update (§5.4).
-- In-flight branches that shrink an accepted file without pruning will go red
-  on rebase after this lands — small, announced, self-fixing population (Q6).
+### 5.3 Ordering and enforcement surface
 
-### 5.4 Doc updates (same PR)
+The PR uses prune-first ordering (either two commits in one PR or a prune
+commit followed by the mechanism commit). A mechanism-only intermediate tree
+is expected to be red; no CI observes intermediate commits, and the merge
+must land a green tip.
 
-- `docs/refactoring-audit-accepted.txt:16-18` header: qualify "cannot go
-  stale" — it cannot go stale from someone else's *growth*; it CAN go stale
-  from a split/shrink, and the re-check now catches that.
-- `docs/refactoring-audit.md:156-160` escape-hatch paragraph: same
-  qualification + "prune in the same PR that shrinks the file below its
-  floor" rule.
-- `docs/refactoring-audit.md` two-gates table (:98-101): add the re-check row
-  (tree-global, fails build) so the table stays the complete map of
-  fail-closed surfaces.
+This repository has **no CI**: `Makefile:127-131` states that `.github/`
+contains only instructions and no CI exists. The enforcement surface is
+`make test-go`, whose `test-go` recipe invokes the whole Go suite and then
+`-count=1 ./pkg/refactoraudit/` (`Makefile:225-271`).
+`TestMakefileRunsAuditPackageUncached` (`audit_canary_test.go:580-643`)
+pins that wiring, and any new sibling `Test*` automatically runs under it.
+The live-entry check is therefore master-loud when `make test-go` runs on a
+master-shaped tree with an empty changed set.
+
+A shrink-without-prune branch goes red as soon as it runs the new package
+test after pulling the mechanism; project merges rather than rebases, but
+this tree-global check has no merge-base/stacked-branch attribution problem.
+
+### 5.4 Documentation cutover (same PR)
+
+Update every statement that currently treats an accepted entry as permanent
+or merely historical:
+
+- `docs/refactoring-audit-accepted.txt:16-18`: qualify the no-unrelated-
+  growth claim; a split/shrink can stale an entry and the live-entry check
+  catches it.
+- `docs/refactoring-audit-accepted.txt:20-23`: replace "Nothing gates on an
+  entry's continued presence" and "decision record, not state" with the
+  actual rule: an entry may be pruned when no longer live and **must** be
+  pruned in the same PR that takes its file below its tier floor, or the
+  master-loud re-check fails.
+- `docs/refactoring-audit.md:156-160`: document the existence/LOC re-check,
+  demotion-vs-prune rule, and same-PR prune obligation.
+- `docs/refactoring-audit.md:98-101`: add the tree-global accepted-entry
+  check to the two-gates table.
+- `docs/engineering-style.md:614-623`: add the third limb to the current
+  split-or-record guidance: if a previously accepted file is split/shrunk
+  below the accepted tier floor, prune (or demote a [REFACTOR] entry to
+  [WATCH]) in that same PR.
+
+No docs/log history rewrite is needed; this is a forward contract correction.
 
 ## 6. API
 
-None. Test-only + data-file change. No exported symbols change; the only new
-surface is a stricter `TestAcceptedFileWellFormed` (or one new `Test*` in
-`pkg/refactoraudit`) plus two fewer lines in the accepted file. No CLI flags,
-no script argv changes (unless Q4 forces the re-check to shell out to
-`touched.sh` for metric parity — then the contract is the existing
-`<base|-> <head> <path>` row format, unchanged).
+None. Test-only code, data-file pruning, and process documentation. No
+exported symbol, CLI flag, script argument, or production runtime behavior
+changes. The new helper is package-private. The existing accepted-file
+format remains `<tier> <path> <reason...>`.
 
-## 7. Invariants (must hold post-merge; each is pinned by a test in §9)
+## 7. Invariants
 
-1. **Live-decision:** every accepted entry's path measures at or above its
-   tier floor in the tree (`headLOC >= 2000` for [REFACTOR],
-   `>= 1500` for [WATCH]). The two pruned entries are the proof the
-   invariant was violated; the re-check is the proof it cannot recur silently.
-2. **Boundary parity:** at-floor is live, below-floor is dead — the same
-   `>=`/`<` orientation as `thresholdCrossings`' head half, so no file can
-   be simultaneously "crossed" and "dead" or neither.
-3. **Tier asymmetry preserved:** a [WATCH] entry on a file ≥2000
-   (e.g. `compiler_interfaces.go` at 2054) stays live and still does NOT
-   silence a future [REFACTOR] crossing — `isAccepted` is untouched.
-4. **Master-loud / branch-silent split preserved:** the touched gate stays
-   diff-local and master-silent; the re-check stays tree-global and
-   master-loud. Neither predicate reads the other's input.
-5. **Fail-closed parse:** the re-check measures with the gate's LOC metric
-   (Q4); any file it cannot measure fails loudly rather than reading as live.
-6. **Red-on-revert:** re-adding either pruned line byte-identical fails the
-   gate (direct acceptance criterion from the issue).
+1. **Live decision:** every accepted entry names an existing, readable file
+   whose raw LOC is at or above its tier floor. Below 1500 means prune; a
+   [REFACTOR] entry at 1500–1999 must be demoted to [WATCH] or pruned.
+2. **Boundary parity:** a crossing is `base < floor && head >= floor`
+   (`audit_touched_test.go:89`); an accepted entry is dead when `head < floor`.
+   Crossing and dead are mutually exclusive. The steady state
+   `base >= floor && head >= floor` is neither.
+3. **Tier asymmetry:** a [WATCH] entry on a 2000+ file remains live but does
+   not silence a [REFACTOR] crossing (`isAccepted` at :192); a [REFACTOR]
+   entry still implies [WATCH].
+4. **Layer split:** the touched gate remains branch-diff-local and
+   master-silent; the accepted-entry check is tree-global and master-loud.
+   Neither reads the other's input.
+5. **Metric parity:** the Go count is byte-`0x0a` count and agrees with
+   `audit_loc`/`classify.sh loc` for newline-terminated, unterminated, CRLF,
+   and empty files.
+6. **Fail closed:** missing/unreadable accepted paths fail; no classifier or
+   changed-set skip may turn them into a live entry.
+7. **Red-on-revert:** putting either pruned line back in a committed fixture
+   with its below-floor file fails the live-entry test and names that path;
+   removing it is green.
+8. **Regrowth recovery:** after a valid prune, a future branch that grows the
+   file across a floor has no live acknowledgement and must record a fresh
+   decision. This is modulo the existing merge-forward attribution caveat
+   documented at `refactoring-audit.md:133-137`, which is out of scope.
 
-## 8. Risk (4-class)
+## 8. Risk (4 classes)
 
 | Class | Level | Why + mitigation |
 |---|---|---|
-| Gate correctness (false-red) | LOW | Predicate is a strict subset of already-known facts (entry tier × tree LOC); the only reds are true dead entries. Boundary parity (§7.2) removes off-by-one; synthetic boundary cases (1499/1500, 1999/2000) pin it. Residual: metric mismatch (Q4) — mitigated by using the gate's own metric. |
-| Gate correctness (false-green) | NONE | Change strictly narrows silence: every crossing silenced before is still silenced (live entries untouched, `isAccepted` untouched); dead licences additionally red. No new silence introduced. |
-| Compatibility (in-flight branches) | LOW | Branches that shrink an accepted file below its floor without pruning go red on rebase. Population: ~0 expected (only splits do this; the last one was #7700). Self-fixing: prune one line. Announced in the PR body (Q6). |
-| Performance | NONE | ≤12 `wc -l`-scale measurements (or one script call) inside a test that already shells out per entry (`classify.sh` per entry at :526). No hot path; test-only. |
-| Security / robustness | NEGLIGIBLE (positive) | Closes silent pre-authorization of 1471/675 LOC of regrowth headroom. Fail-closed on unmeasurable files (§7.5) prevents a broken probe from reading as live. No new trust boundary; no network/input surface. |
-
-(4 classes: correctness, compatibility, performance, security/robustness.)
+| Correctness | LOW | The predicate is a strict tree fact (tier floor × current raw LOC); synthetic boundary, band, deleted-path, re-add, and metric-parity fixtures pin false-red/false-green edges. The smallest current live margin is 41 LOC. |
+| Compatibility | LOW | Only split/shrink authors with stale entries go red; the repair is one prune or a [REFACTOR]→[WATCH] demotion. No open PR matched #10487 at review time; recheck the open-PR list at implementation time. |
+| Performance | NONE | At most 12 small `ReadFile`/`bytes.Count` operations in an existing Go test package; no runtime or hot-path work. `classify.sh loc` is used only by parity tests. |
+| Security / robustness | POSITIVE | Closes silent pre-authorization of 1471/675 LOC of regrowth headroom. Explicit missing/read errors fail closed; no network or new trust boundary. |
 
 ## 9. Test plan
 
-1. **Synthetic predicate cases** (new `Test*`, same style as
-   `TestThresholdCrossingCases` at :283-374 — predicate, not tree):
-   below-floor [WATCH] (825/1500) reds; below-floor [REFACTOR] (529/2000)
-   reds; at-floor (1500/1500, 2000/2000) green; just-below (1499, 1999) reds;
-   just-above greens; [WATCH] entry on 2054-LOC file green (tier asymmetry).
-   Each case names the mutation it catches.
-2. **Live-tree well-formedness:** `TestAcceptedFileWellFormed` (+ re-check)
-   green on the post-prune tree — the 10 live entries prove it.
-3. **Red-on-revert:** re-add each pruned line byte-identical in a scratch
-   worktree → gate reds naming the file; remove → green. Both files.
-4. **Full package suite:** `go test ./pkg/refactoraudit/...` green
-   (build isolation: `GOCACHE=/dev/shm/gocache-10487 GOTMPDIR=/dev/shm`).
-5. **Metric parity check:** re-check LOC vs `scripts/refactoring-audit-touched.sh`
-   LOC vs `wc -l` on all 12 paths — identical, or the difference documented
-   and the re-check using the gate's metric (Q4).
-6. **CI wiring:** confirm `pkg/refactoraudit` tests run on master CI (if they
-   only run on PR diffs, the master-loud leg needs a wiring change — verify,
-   do not assume).
+### 9.1 Predicate and tier boundaries
+
+Add synthetic cases in the style of `TestThresholdCrossingCases`, but keep
+this pure predicate pin separate from the tree reader:
+
+- [WATCH] at 1499 → dead; at 1500 and 1501 → live;
+- [REFACTOR] at 1999 → dead; at 2000 and 2001 → live;
+- [REFACTOR] at 1500–1999 → fail with demote-to-[WATCH]-or-prune guidance;
+- [WATCH] at 2000+ → live and still not accepted as a [REFACTOR] crossing;
+- unknown tier → fail closed (parser already rejects it).
+
+### 9.2 Committed red-on-revert and live-tree control
+
+`TestAcceptedEntriesAreLive` is a committed negative-control test, not a
+manual scratch observation. Build a temporary fixture root in the existing
+`audit_jobs_test.go`/`runScript` style with audited-looking paths and an
+accepted file:
+
+1. post-prune fixture (the ten live entries or a reduced live fixture) is
+   green;
+2. re-add the exact `metrics_userspace.go` [REFACTOR] line and a 529-line
+   fixture file — the test must report that path/tier dead;
+3. re-add the exact `vrrp/instance.go` [WATCH] line and an 825-line fixture —
+   the test must report that path/tier dead; and
+4. remove each line — the same fixture is green again.
+
+The assertions must inspect the returned errors/path names, so a missing
+helper call or swallowed I/O error cannot pass merely because the fixture
+contains valid syntax. This is the committed fail-on-revert pin for the
+issue's explicit acceptance criterion.
+
+### 9.3 Deleted/renamed path case
+
+In the same fixture family, keep an accepted audited-looking path in the
+accepted file but do not create the file (and separately rename it away).
+`classify.sh audited` is expected to say `AUDITED` because its predicate is
+pattern-only; `TestAcceptedEntriesAreLive` must still fail on the missing
+path. This pins that the new existence leg does not copy the touched probe's
+intentional `[ -f ] || continue` skip.
+
+### 9.4 Go/shell LOC agreement pin
+
+Add committed `TestGoLocMatchesAuditLoc` with temporary files containing:
+`"a\nb\n"` (2), `"a\nb"` (1), CRLF content (one count per `\n`), and empty
+content (0). For every fixture, compare the Go helper's
+`bytes.Count(content, []byte{'\n'})` result to
+`scripts/refactoring-audit-classify.sh loc <path>`. This is the parity pin;
+live-tree comparison of the current 12 newline-terminated files is not
+sufficient and is not used as evidence.
+
+### 9.5 Working-tree/master-shaped wiring
+
+The live-entry test reads `repoRoot/docs/refactoring-audit-accepted.txt`
+and current working-tree files directly; it must not invoke
+`refactoring-audit-touched.sh`, consult `origin/master`, or depend on a
+non-empty diff. Run it on the master-shaped tree where the touched set is
+empty to prove the tree-global leg still executes. Keep the existing
+`TestTouchedFileCrossedModularityThreshold` as the separate diff-local gate.
+`TestMakefileRunsAuditPackageUncached` already proves the package invocation
+under `make test-go` carries `-count=1`; no CI wiring claim or new CI is
+needed.
+
+### 9.6 Full validation and known baseline
+
+- Focused new/sibling tests: `go test ./pkg/refactoraudit -run
+  'TestAcceptedEntriesAreLive|TestGoLocMatchesAuditLoc|TestThreshold...'`.
+- Full package: `GOCACHE=/dev/shm/gocache-10487 GOTMPDIR=/dev/shm go test
+  ./pkg/refactoraudit/...`.
+- Repository enforcement: `GOCACHE=/dev/shm/gocache-10487 GOTMPDIR=/dev/shm
+  make test-go` when the shared package baseline is green.
+
+At plan time the full package command is already red for the unrelated
+calibration test `TestStructMetricIsTypesNotFields6937` (CompileResult is
+32 fields / 21 distinct types, just above its 20-type floor). That #6937
+predicate is orthogonal to this accepted-entry work; the implementation PR
+must not normalize this existing red or claim a green full suite until the
+calibration is repaired/landed. The new tests should be run by name for
+scoped proof, then the full package and `make test-go` are re-run in the
+post-#6937 green window.
 
 ## 10. Out of scope
 
-- Heatmap/freshness changes: the committed snapshot listing
-  `metrics_userspace.go` at 2010 while the tree is 529 is the freshness
-  job's drift (#7253/#7269), fixed by `make audit-refresh`, not by this PR.
-- New thresholds, tier renames, or entry-format changes (rejected option C).
-- `isAccepted` semantics: untouched by design (§7.3).
-- Historical attribution of the #7700 prune debt (issue Limits section:
-  outside the evidence window).
-- Splitting any live large file; pruning any live entry.
-- Auto-prune tooling (a `--prune-dead` flag on the refresh script is a
-  possible follow-up, not this PR).
+- Heatmap/freshness changes: the committed snapshot's stale
+  `metrics_userspace.go` row belongs to `make audit-refresh` and #7253/#7269.
+- New thresholds, tier names, accepted-file syntax, or accepted-at metadata.
+- Changes to `isAccepted` or to the touched gate's changed-set semantics.
+- Historical attribution beyond issue #7700's explicit prune obligation.
+- Splitting any live large file or pruning any live entry.
+- A new CI service, merge queue, or automatic commit hook.
+- Fixing the pre-existing #6937 struct-floor calibration; it is a prerequisite
+  for claiming the full package suite green, not part of #10487.
+- Automatic `--prune-dead` tooling; a refresh-script convenience can be a
+  follow-up after the invariant is proven.
 
-## 11. Open questions for adversarial review
+## 11. Open questions for delta/adversarial review
 
-1. **Fail vs warn?** The issue allows either; §5.1 recommends fail-closed.
-   Is there a false-red population (e.g. generated-file edge, Q4 metric skew)
-   that makes fail-closed net-negative?
-2. **One PR or prune-first?** §5.3 sequences prune-then-mechanism in one PR.
-   Should the prune land alone first (smaller blast radius if the mechanism
-   design changes in review), given the mechanism reds on any tree containing
-   a dead entry?
-3. **Deleted/renamed files:** does `classify.sh audited <path>` fail for a
-   path that no longer exists, or is it pattern-only (roots/skip-regex)?
-   If pattern-only, the re-check needs an explicit existence leg — verify by
-   reading `scripts/refactoring-audit-classify.sh` + `lib.sh`, not by
-   assumption. (Zero missing-file entries today, so this is latent, not live.)
-4. **LOC metric parity:** what exactly does `refactoring-audit-touched.sh`
-   count (`wc -l`? stripped? CR handling?) — and must the re-check shell out
-   to it, or is Go-side `wc -l`-equivalent acceptable? `TestShellFloorsMatchGoConstants`
-   (:581-595) pins the floors across the shell/Go boundary; does anything pin
-   the *metric*?
-5. **Extend `TestAcceptedFileWellFormed` or add a sibling test?** Extension
-   keeps one well-formedness surface but grows a test whose name undersells
-   the new leg; a sibling (`TestAcceptedEntriesAreLive`?) names the property
-   but splits Knuth-style "one test, one property" across two readers of the
-   same file. Which does the repo's test-naming convention prefer?
-6. **In-flight branch window:** is there any live branch that shrinks an
-   accepted file (or a policy requiring a grace/advisory period before a new
-   master-loud red)? Zero open PRs at plan time, but stacked local branches
-   are invisible — is announcement-in-PR-body sufficient?
-7. **Decay metadata after all?** Is floor comparison sufficient as the decay
-   condition, or does review want accepted-at LOC/rev recorded (option C) so
-   a future reader can distinguish "accepted at 2010, shrunk to 529" from
-   "accepted at 1501, shrunk to 529"? What decision would that distinction
-   change?
-8. **Doc wording:** how should the corrected "cannot go stale" claims read?
-   Proposed: "cannot go stale from someone else's growth elsewhere in the
-   tree; it CAN go stale when its own file is split or shrunk below its
-   floor, and the re-check fails until the entry is pruned." Accurate? Complete?
+The source questions about missing paths and LOC are closed in §4.2; these
+are the remaining design choices/review checks (proposed resolutions are
+explicit so review can flip them deliberately):
+
+1. **Fail versus warn:** retain fail-closed, or is there evidence of a real
+   false-red population that justifies advisory behavior? Proposed: fail;
+   warning repeats #7253's known silent-advisory failure.
+2. **One PR versus two:** retain one PR with prune-first logical increments,
+   or land the zero-risk prune as a separate PR before the mechanism? Proposed:
+   one PR, prune-first, because the final tip is the only enforced tree and
+   the mechanism is intentionally red on the intermediate tree.
+3. **Missing-path wording:** is "missing/unreadable accepted path fails
+   closed" sufficient, or should the error distinguish deletion from
+   permission/read failure for operator repair? Proposed: distinguish in the
+   message while keeping one fail-closed outcome.
+4. **Go metric implementation:** the plan chooses `bytes.Count` plus a
+   `classify.sh loc` fixture pin. Should the helper instead shell out for
+   every live entry to eliminate duplicate measurement logic, despite the
+   extra forks? Proposed: keep pure Go; the committed parity test protects
+   the single-byte-count contract.
+5. **Sibling test naming:** retain `TestAcceptedEntriesAreLive` beside
+   `TestAcceptedFileWellFormed`, or fold the live check into the old test?
+   Proposed: sibling, matching the package's separate predicate/gate/filter/
+   well-formedness test surfaces.
+6. **Baseline sequencing:** should implementation wait for #6937's calibration
+   repair before opening the PR, or may it open with named tests plus an
+   explicitly recorded baseline red? Proposed: wait for a green shared
+   package, so a second master-loud red is never normalized.
+7. **In-flight branch policy:** is the durable same-PR prune/demote rule enough
+   notice for a branch that shrinks an accepted file while this lands? Proposed:
+   yes; recheck `gh pr list --state open` at implementation time, with no grace
+   period because the fix is one line and the current open search is empty.
+8. **Documentation wording:** do the proposed edits to accepted.txt:16-23,
+   refactoring-audit.md, and engineering-style.md communicate the three
+   actions (split, record, prune/demote) without implying accepted entries
+   expire by time? Proposed: use the exact same-PR floor rule in all three.
 
 ## 12. Verdict request
 
-PLAN-READY → implement §5.1 (prune + fail-closed re-check + doc updates + §9 tests).
-PLAN-NEEDS-MINOR → tweak per findings; design alternatives in §5.2 are pre-analyzed for fast pivots.
-PLAN-KILL → only if review shows the dead-licence class is load-bearing somewhere this plan has not found.
+PLAN-READY → implement §5.1 with the committed tests in §9 and documentation
+cutover in §5.4.
+
+PLAN-NEEDS-MINOR → adjust only the proposed resolutions/open wording.
+
+PLAN-KILL → only if delta review demonstrates a load-bearing consumer,
+false-red population, or a calibration interaction not found in the source
+study. Current evidence shows none.
