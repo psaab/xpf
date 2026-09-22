@@ -540,11 +540,12 @@ func (m *Manager) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) 
 	// partial count, and the helper delete of an already-absent key is a no-op,
 	// so skipping on error would strand the still-present helper sessions.
 	//
-	// The batch path (policy invalidation, cluster-stale sweep) keeps the
-	// #5096 best-effort contract — the periodic session sync and GC delta
-	// reconcile a transient helper miss — so the helper IPC error is
-	// intentionally discarded here. The operator clear-all path propagates it
-	// instead (ClearAllSessions, #5881).
+	// The bare batch path keeps the #5096 best-effort contract — the periodic
+	// session sync and GC delta reconcile a transient helper miss — so the
+	// helper IPC error is intentionally discarded here. The scoped batch
+	// (#9364, the production path through the adapter) propagates it instead
+	// (#10513, #5578), as does the operator clear-all path (ClearAllSessions,
+	// #5881).
 	_ = m.deleteHelperSessionsV4(keys)
 	return deleted, err
 }
@@ -554,22 +555,64 @@ func (m *Manager) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) 
 // The BPF mirror has no domain axis (#7160), so it takes the bare keys exactly as
 // before; the domain matters only on the HELPER wire, where a bare 5-tuple is
 // resolved by probing every routing instance and REFUSED when two tenants match
-// (#8636). This is the highest-volume delete path on a running box — the
-// conntrack GC retires sessions through it continuously — so it was the half of
-// #9146 that mattered more and the half that was left bare.
+// (#8636). The domain-carrying path is used by conntrack GC and commit-time
+// policy invalidation; it now also surfaces helper failures so an authoritative
+// row left behind by the BPF-first order cannot masquerade as a clean delete
+// (#10513, #5578).
 func (m *Manager) BatchDeleteSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, error) {
 	deleted, err := m.bpfShim.BatchDeleteSessions(bareKeysV4(scoped))
-	// Same best-effort contract as BatchDeleteSessions below: attempt the helper
-	// delete regardless of the mirror result, and discard the helper IPC error.
-	_ = m.deleteHelperSessionsScopedV4(scoped)
-	return deleted, err
+	// Attempt the helper delete regardless of the mirror result (a batch where
+	// a key vanished concurrently still needs its helper rows retired), but
+	// PROPAGATE the helper IPC error (#10513): discarding it reported
+	// commit-clear success while authoritative helper rows remained, and
+	// applyAndSyncCommitted marked the config converged on joined==nil. The
+	// #5578 invalidation contract requires errors to surface; the mirror half
+	// is already deleted here (BPF-first), so surfacing is what keeps a helper
+	// failure from going silent. Precedence: a helper failure wins over a
+	// mirror key-not-found error — a joined error would read as NotFound and
+	// take the batchDeleteV4 per-key retry, which discards helper errors again.
+	// A real mirror error joins with the helper error.
+	helperErr := m.deleteHelperSessionsScopedV4(scoped)
+	if helperErr == nil {
+		return deleted, err
+	}
+	helperErr = surfaceScopedHelperDeleteError("v4", helperErr)
+	if err == nil || dataplane.IsKeyNotFound(err) {
+		return deleted, helperErr
+	}
+	return deleted, errors.Join(err, helperErr)
 }
 
-// BatchDeleteSessionsScopedV6 is the IPv6 analogue (#9364).
+// BatchDeleteSessionsScopedV6 is the IPv6 analogue (#9364). Same #10513
+// propagation contract as the V4 twin: the helper IPC error surfaces (a helper
+// failure wins over any mirror key-not-found error; a real mirror error joins).
 func (m *Manager) BatchDeleteSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, error) {
 	deleted, err := m.bpfShim.BatchDeleteSessionsV6(bareKeysV6(scoped))
-	_ = m.deleteHelperSessionsScopedV6(scoped)
-	return deleted, err
+	helperErr := m.deleteHelperSessionsScopedV6(scoped)
+	if helperErr == nil {
+		return deleted, err
+	}
+	helperErr = surfaceScopedHelperDeleteError("v6", helperErr)
+	if err == nil || dataplane.IsKeyNotFound(err) {
+		return deleted, helperErr
+	}
+	return deleted, errors.Join(err, helperErr)
+}
+
+// surfaceScopedHelperDeleteError preserves the helper classification at the
+// scoped batch boundary without exposing a transport cause such as unix.ENOENT
+// to errors.Is. The session-store batch treats ENOENT as an ordinary mirror
+// not-found and retries per key; if the helper dial's ENOENT crosses that
+// boundary, the retry loop discards the helper error and reports success
+// (#10513). Keep the detailed cause in the message while unwrapping only the
+// stable helper-unreachable sentinel. Application-level helper refusals retain
+// their original error for callers that need the response text.
+func surfaceScopedHelperDeleteError(family string, err error) error {
+	if errors.Is(err, errSessionHelperUnreachable) {
+		return fmt.Errorf("delete %s sessions from userspace helper: %w (%v)",
+			family, errSessionHelperUnreachable, err)
+	}
+	return fmt.Errorf("delete %s sessions from userspace helper: %w", family, err)
 }
 
 // peerDeleteRefusedLocalOwned is the helper's in-band answer to a #9714 peer delete
@@ -590,7 +633,9 @@ func peerDeleteRefused(err error) bool {
 // PeerDelete, and a key the helper refuses (a live local session whose owner RG is
 // locally active) is returned in refused and keeps its BPF mirror row. The other
 // keys' mirror rows go one at a time, so a row already gone does not strand the
-// rest. As with the unmarked batch, the helper IPC error itself is best-effort.
+// rest. The peer-marked helper IPC error remains best-effort because the refused
+// and applied sets explicitly protect every mirror row whose outcome is known;
+// unlike the unmarked scoped batch, this path has a distinct #9714 contract.
 func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) (int, []dataplane.ScopedSessionKey, error) {
 	var refused, applied []dataplane.ScopedSessionKey
 	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
@@ -752,8 +797,9 @@ func (m *Manager) ClearAllSessions() (int, int, error) {
 // 5-tuple, so no snapshot read happens under m.mu.
 //
 // It returns the FIRST helper IPC error across all chunks (nil if all
-// succeeded, or if there is no live helper). The best-effort batch callers
-// discard it; ClearAllSessions propagates it so a failed authoritative
+// succeeded, or if there is no live helper). Bare batch callers discard it
+// (#5096); scoped batch callers propagate the equivalent scoped-helper result
+// (#10513); ClearAllSessions propagates it so a failed authoritative
 // revocation is reported rather than reported as success (#5881).
 func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 	// #9364: the BARE form, kept for the callers that genuinely have no value —
