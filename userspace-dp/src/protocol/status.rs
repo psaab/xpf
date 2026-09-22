@@ -855,6 +855,8 @@ pub(crate) struct ProcessStatus {
     pub ipsec_sa_expiry_removes_total: u64,
     #[serde(rename = "ipsec_sa_evictions_total", default)]
     pub ipsec_sa_evictions_total: u64,
+    #[serde(rename = "ipsec_sa_multi_source_collisions_total", default)]
+    pub ipsec_sa_multi_source_collisions_total: u64,
     #[serde(rename = "ipsec_sa_netlink_enobufs_total", default)]
     pub ipsec_sa_netlink_enobufs_total: u64,
     #[serde(rename = "ipsec_sa_netlink_redumps_total", default)]

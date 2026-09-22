@@ -1247,15 +1247,31 @@ fn reinject_outlet_selection_records_on_matching_status() {
     assert_eq!(r.status().dropped_packets, trusted_drops);
 }
 
-// #9637/#10391 operator narrowing: the filtered chokepoint derives the
-// trusted outlet only after host-inbound gating. The Stage-11 arm is covered
-// by behavioral poll-loop cells below; this test keeps only the chokepoint's
-// production mapping pin.
+// #9637/#10391 operator narrowing: the ForwardCandidate fallback must remain
+// explicitly delegated, while the filtered chokepoint derives Trusted only
+// after host-inbound gating. Stage 11 is covered by behavioral poll-loop cells
+// below and intentionally no longer pins an Adjudicated literal.
 #[test]
 fn reinject_outlet_declared_per_production_site_9637() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let src = std::fs::read_to_string(root.join("src/afxdp/poll_descriptor/mod.rs"))
-        .expect("read reinject call site");
+    let read = |rel: &str| {
+        std::fs::read_to_string(root.join(rel)).expect("read reinject call site")
+    };
+    let fc_src = read("src/afxdp/tx/dispatch/slow_path.rs");
+    let fc_start = fc_src
+        .find("if fallback_to_slow_path {")
+        .expect("ForwardCandidate fallback marker");
+    let fc = &fc_src[fc_start..std::cmp::min(fc_start + 1200, fc_src.len())];
+    assert!(
+        fc.contains("false,"),
+        "FC fallback must pass literal false as host_authorized"
+    );
+    assert!(
+        !fc.contains("reinject_host_authorized("),
+        "FC fallback must not infer authorization from disposition"
+    );
+
+    let src = read("src/afxdp/poll_descriptor/mod.rs");
     let i = src
         .find("if slow_path_admit(&binding.live, decision.resolution.disposition) {")
         .expect("filtered chokepoint marker");
@@ -1383,12 +1399,13 @@ fn build_stage11_esp_udp_frame_10516(spi: u32) -> Vec<u8> {
     let src = Ipv4Addr::new(10, 0, 61, 102);
     let dst = Ipv4Addr::new(10, 0, 61, 1);
     let mut frame = vec![
-        0x02, 0xbf, 0x72, 0x01, 0x00, 0x01, // reth1.0 destination
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fixture destination filled below
         0x02, 0x11, 0x22, 0x33, 0x44, 0x55, // peer source
         0x08, 0x00, // IPv4
         0x45, 0x00, 0x00, 0x00, // total length filled below
         0x00, 0x01, 0x40, 0x00, 64, PROTO_UDP, 0x00, 0x00,
     ];
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_LAN_MAC);
     let payload = [
         spi.to_be_bytes().as_slice(),
         &[0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03],
@@ -1420,14 +1437,10 @@ fn run_stage11_esp_udp_poll_10516(with_sa: bool) -> (
     let spi = 0x1122_3344;
     let frame = build_stage11_esp_udp_frame_10516(spi);
     let mut forwarding = build_forwarding_state(&nat_snapshot());
-    let sa_key = ipsec_sa_key(dst, spi, src);
+    let sa_key = ipsec_sa_key(dst, spi, src).expect("same-family SA fixture");
+    forwarding.ipsec_sa.publish_empty_dump_for_test();
     if with_sa {
         forwarding.ipsec_sa.upsert(sa_key);
-    } else {
-        // Advance the store to a valid empty snapshot so this cell exercises
-        // the no-SA miss rather than the pre-publication stale gate.
-        forwarding.ipsec_sa.upsert(sa_key);
-        forwarding.ipsec_sa.remove(sa_key);
     }
     let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);

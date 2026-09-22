@@ -246,6 +246,10 @@ pub(crate) struct BindingWorker {
     /// sibling `WorkerColdPathAtomics` array and the ~1s tick publish
     /// hook in `worker_runtime.rs::publish`.
     pub(crate) cold_path: super::cold_path_hist::WorkerColdPathCounters,
+    /// #10516: worker-local 1-in-256 sampler phase for sampled IPsec-SA
+    /// admission failures. Kept separate from the cold-path latency phase so
+    /// either sampler's denominator remains truthful.
+    pub(crate) ipsec_sa_miss_sample_phase: u8,
     /// #1376: per-worker/per-binding mirror sampler. Reset on worker
     /// restart and intentionally not synchronized across workers.
     pub(crate) mirror_sample_counter: u64,
@@ -623,6 +627,7 @@ impl BindingWorker {
             // clock_source are populated by the per-worker calibrate
             // in worker_loop entry (post-affinity).
             cold_path: super::cold_path_hist::WorkerColdPathCounters::default(),
+            ipsec_sa_miss_sample_phase: 0,
             mirror_sample_counter: 0,
             bind_meta: WorkerBindMeta {
                 bind_time_ns: {
@@ -762,6 +767,7 @@ impl BindingWorker {
             // clock_source are populated by the per-worker calibrate
             // in worker_loop entry (post-affinity).
             cold_path: super::cold_path_hist::WorkerColdPathCounters::default(),
+            ipsec_sa_miss_sample_phase: 0,
             mirror_sample_counter: 0,
             bind_meta: WorkerBindMeta {
                 bind_time_ns: init_now,
@@ -880,6 +886,7 @@ impl BindingWorker {
             // clock_source are populated by the per-worker calibrate
             // in worker_loop entry (post-affinity).
             cold_path: super::cold_path_hist::WorkerColdPathCounters::default(),
+            ipsec_sa_miss_sample_phase: 0,
             mirror_sample_counter: 0,
             bind_meta: WorkerBindMeta {
                 bind_time_ns: init_now,

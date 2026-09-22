@@ -500,6 +500,7 @@ pub(crate) fn run() -> Result<(), String> {
             ipsec_sa_removes_total: 0,
             ipsec_sa_expiry_removes_total: 0,
             ipsec_sa_evictions_total: 0,
+            ipsec_sa_multi_source_collisions_total: 0,
             ipsec_sa_netlink_enobufs_total: 0,
             ipsec_sa_netlink_redumps_total: 0,
             ipsec_sa_netlink_redump_upserts_total: 0,

@@ -381,6 +381,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.ipsec_sa_removes_total = sa.sa_removes;
     state.status.ipsec_sa_expiry_removes_total = sa.sa_expiry_removes;
     state.status.ipsec_sa_evictions_total = sa.sa_evictions;
+    state.status.ipsec_sa_multi_source_collisions_total = sa.sa_multi_source_collisions;
     state.status.ipsec_sa_netlink_enobufs_total = sa.netlink_enobufs;
     state.status.ipsec_sa_netlink_redumps_total = sa.netlink_redumps;
     state.status.ipsec_sa_netlink_redump_upserts_total = sa.netlink_redump_upserts;

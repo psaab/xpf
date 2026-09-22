@@ -283,9 +283,10 @@ fn process_status_ipsec_sa_counters_roundtrip() {
         ipsec_sa_removes_total: 8,
         ipsec_sa_expiry_removes_total: 9,
         ipsec_sa_evictions_total: 10,
-        ipsec_sa_netlink_enobufs_total: 11,
-        ipsec_sa_netlink_redumps_total: 12,
-        ipsec_sa_netlink_redump_upserts_total: 13,
+        ipsec_sa_multi_source_collisions_total: 11,
+        ipsec_sa_netlink_enobufs_total: 12,
+        ipsec_sa_netlink_redumps_total: 13,
+        ipsec_sa_netlink_redump_upserts_total: 14,
         ..Default::default()
     };
     let value: serde_json::Value =
@@ -301,9 +302,10 @@ fn process_status_ipsec_sa_counters_roundtrip() {
         ("ipsec_sa_removes_total", 8),
         ("ipsec_sa_expiry_removes_total", 9),
         ("ipsec_sa_evictions_total", 10),
-        ("ipsec_sa_netlink_enobufs_total", 11),
-        ("ipsec_sa_netlink_redumps_total", 12),
-        ("ipsec_sa_netlink_redump_upserts_total", 13),
+        ("ipsec_sa_multi_source_collisions_total", 11),
+        ("ipsec_sa_netlink_enobufs_total", 12),
+        ("ipsec_sa_netlink_redumps_total", 13),
+        ("ipsec_sa_netlink_redump_upserts_total", 14),
     ];
     for (key, want) in keys {
         assert_eq!(value[key], want, "wire key {key}");
@@ -319,9 +321,10 @@ fn process_status_ipsec_sa_counters_roundtrip() {
     assert_eq!(back.ipsec_sa_removes_total, 8);
     assert_eq!(back.ipsec_sa_expiry_removes_total, 9);
     assert_eq!(back.ipsec_sa_evictions_total, 10);
-    assert_eq!(back.ipsec_sa_netlink_enobufs_total, 11);
-    assert_eq!(back.ipsec_sa_netlink_redumps_total, 12);
-    assert_eq!(back.ipsec_sa_netlink_redump_upserts_total, 13);
+    assert_eq!(back.ipsec_sa_multi_source_collisions_total, 11);
+    assert_eq!(back.ipsec_sa_netlink_enobufs_total, 12);
+    assert_eq!(back.ipsec_sa_netlink_redumps_total, 13);
+    assert_eq!(back.ipsec_sa_netlink_redump_upserts_total, 14);
 
     let legacy: ProcessStatus = serde_json::from_value(serde_json::json!({}))
         .expect("legacy payload decodes with additive defaults");

@@ -16,7 +16,7 @@ pub(in crate::afxdp) const IPSEC_SA_SNAPSHOT_CAP: usize = 4096;
 /// Compact key used by the data-plane lookup. Addresses are in network byte
 /// order (IPv4 occupies the low four bytes of the u128); `family` prevents
 /// IPv4/IPv6 numeric-tail collisions.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(in crate::afxdp) struct IpsecSaKey {
     pub(in crate::afxdp) family: u8,
     pub(in crate::afxdp) dst: u128,
@@ -59,6 +59,7 @@ pub(in crate::afxdp) struct IpsecSaCounters {
     pub(in crate::afxdp) sa_removes: AtomicU64,
     pub(in crate::afxdp) sa_expiry_removes: AtomicU64,
     pub(in crate::afxdp) sa_evictions: AtomicU64,
+    pub(in crate::afxdp) sa_multi_source_collisions: AtomicU64,
     pub(in crate::afxdp) netlink_enobufs: AtomicU64,
     pub(in crate::afxdp) netlink_redumps: AtomicU64,
     pub(in crate::afxdp) netlink_redump_upserts: AtomicU64,
@@ -76,6 +77,7 @@ pub(crate) struct IpsecSaCounterSnapshot {
     pub(crate) sa_removes: u64,
     pub(crate) sa_expiry_removes: u64,
     pub(crate) sa_evictions: u64,
+    pub(crate) sa_multi_source_collisions: u64,
     pub(crate) netlink_enobufs: u64,
     pub(crate) netlink_redumps: u64,
     pub(crate) netlink_redump_upserts: u64,
@@ -103,6 +105,14 @@ impl IpsecSaCounters {
             }
         }
     }
+    #[inline]
+    fn record_multi_source_collisions(&self, count: u64) {
+        if count != 0 {
+            self.sa_multi_source_collisions
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
 
     #[cfg(test)]
     fn miss_total(&self) -> u64 {
@@ -120,6 +130,7 @@ impl IpsecSaCounters {
             sa_removes: self.sa_removes.load(Ordering::Relaxed),
             sa_expiry_removes: self.sa_expiry_removes.load(Ordering::Relaxed),
             sa_evictions: self.sa_evictions.load(Ordering::Relaxed),
+            sa_multi_source_collisions: self.sa_multi_source_collisions.load(Ordering::Relaxed),
             netlink_enobufs: self.netlink_enobufs.load(Ordering::Relaxed),
             netlink_redumps: self.netlink_redumps.load(Ordering::Relaxed),
             netlink_redump_upserts: self.netlink_redump_upserts.load(Ordering::Relaxed),
@@ -127,22 +138,33 @@ impl IpsecSaCounters {
     }
 }
 
-/// Read-mostly SA store.  `entries` is replaced only by the monitor/control
-/// side; workers load an Arc and perform one hash lookup without a lock.
+/// Immutable payload published as one unit to the packet path. Keeping the
+/// map, generation, and stale fence together prevents a reader from observing
+/// a new map with an old readiness decision.
+#[derive(Clone, Debug)]
+pub(in crate::afxdp) struct IpsecSaSnapshot {
+    entries: FastMap<IpsecSaKey, IpsecSaEpoch>,
+    generation: u64,
+    stale: bool,
+    epoch: u64,
+}
+
+/// Read-mostly SA store. The monitor/control side is the sole writer; workers
+/// load one immutable snapshot per RX batch and perform plain hash lookups.
 pub(in crate::afxdp) struct IpsecSaStore {
-    entries: arc_swap::ArcSwap<FastMap<IpsecSaKey, IpsecSaEpoch>>,
-    generation: AtomicU64,
-    stale: AtomicBool,
-    ready: AtomicBool,
+    snapshot: arc_swap::ArcSwap<IpsecSaSnapshot>,
+    insertion_order: AtomicU64,
+    epoch: AtomicU64,
     pub(in crate::afxdp) counters: IpsecSaCounters,
 }
 impl std::fmt::Debug for IpsecSaStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let snapshot = self.snapshot.load();
         f.debug_struct("IpsecSaStore")
-            .field("generation", &self.generation.load(Ordering::Relaxed))
-            .field("stale", &self.stale.load(Ordering::Relaxed))
-            .field("ready", &self.ready.load(Ordering::Relaxed))
-            .field("entries", &self.entries.load().len())
+            .field("generation", &snapshot.generation)
+            .field("stale", &snapshot.stale)
+            .field("ready", &(snapshot.generation != 0 && !snapshot.stale))
+            .field("entries", &snapshot.entries.len())
             .finish()
     }
 }
@@ -156,61 +178,149 @@ impl Default for IpsecSaStore {
 impl IpsecSaStore {
     pub(in crate::afxdp) fn new() -> Self {
         Self {
-            entries: arc_swap::ArcSwap::from_pointee(FastMap::default()),
-            generation: AtomicU64::new(0),
-            stale: AtomicBool::new(false),
-            ready: AtomicBool::new(false),
+            snapshot: arc_swap::ArcSwap::from_pointee(IpsecSaSnapshot {
+                entries: FastMap::default(),
+                generation: 0,
+                stale: true,
+                epoch: 0,
+            }),
+            insertion_order: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
             counters: IpsecSaCounters::default(),
         }
     }
 
     #[inline]
-    pub(in crate::afxdp) fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+    pub(in crate::afxdp) fn load_snapshot(&self) -> Arc<IpsecSaSnapshot> {
+        self.snapshot.load_full()
     }
 
     #[inline]
+    pub(in crate::afxdp) fn generation(&self) -> u64 {
+        self.snapshot.load().generation
+    }
+
+    #[inline]
+    fn publish_snapshot(&self, mut snapshot: IpsecSaSnapshot) {
+        // Advance before publishing so a reader holding an older batch
+        // snapshot fails closed even during the store/revocation handoff.
+        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        snapshot.epoch = epoch;
+        self.snapshot.store(Arc::new(snapshot));
+    }
+    #[inline]
     pub(in crate::afxdp) fn is_stale(&self) -> bool {
-        self.stale.load(Ordering::Acquire)
+        self.snapshot.load().stale
     }
 
     pub(in crate::afxdp) fn mark_stale(&self) {
-        self.stale.store(true, Ordering::Release);
-        self.ready.store(false, Ordering::Release);
+        let current = self.snapshot.load_full();
+        if current.stale {
+            return;
+        }
+        let mut next = (*current).clone();
+        next.stale = true;
+        self.publish_snapshot(next);
     }
 
     #[inline]
     pub(in crate::afxdp) fn lookup(&self, key: IpsecSaKey) -> IpsecSaLookup {
-        if self.stale.load(Ordering::Acquire) || self.generation.load(Ordering::Acquire) == 0 {
+        let snapshot = self.snapshot.load_full();
+        self.lookup_loaded(&snapshot, key)
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn lookup_loaded(
+        &self,
+        snapshot: &IpsecSaSnapshot,
+        key: IpsecSaKey,
+    ) -> IpsecSaLookup {
+        if self.epoch.load(Ordering::Acquire) != snapshot.epoch {
             return IpsecSaLookup::Stale;
         }
-        if self.entries.load().contains_key(&key) {
+        Self::lookup_snapshot(snapshot, key)
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn lookup_snapshot(
+        snapshot: &IpsecSaSnapshot,
+        key: IpsecSaKey,
+    ) -> IpsecSaLookup {
+        if snapshot.stale || snapshot.generation == 0 {
+            return IpsecSaLookup::Stale;
+        }
+        if snapshot.entries.contains_key(&key) {
             IpsecSaLookup::Hit
         } else {
             IpsecSaLookup::Miss
         }
     }
 
+    #[inline]
+    fn next_insertion_order(&self) -> u64 {
+        self.insertion_order
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
+    fn normalize_dump_entries(
+        &self,
+        entries: FastMap<IpsecSaKey, IpsecSaEpoch>,
+    ) -> FastMap<IpsecSaKey, IpsecSaEpoch> {
+        // A complete dump does not carry a useful relative order between
+        // records. Assign one shared monotonic domain and sort keys first so
+        // cap eviction remains deterministic for equal-age dump records.
+        let mut keys: Vec<IpsecSaKey> = entries.keys().copied().collect();
+        keys.sort_unstable();
+        let mut normalized = FastMap::default();
+        for key in keys {
+            normalized.insert(
+                key,
+                IpsecSaEpoch {
+                    generation: self.next_insertion_order(),
+                },
+            );
+        }
+        normalized
+    }
+
     /// Publish a complete dump. The generation becomes non-zero only after
-    /// the new map is visible, which makes the first successful dump the ready
-    /// gate for data-plane lookups.
+    /// the new map is visible, which makes the first successful dump the
+    /// readiness gate for data-plane lookups.
     pub(in crate::afxdp) fn publish_full_dump(&self, entries: FastMap<IpsecSaKey, IpsecSaEpoch>) {
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-        self.entries.store(Arc::new(cap_entries(entries, generation, &self.counters)));
-        self.stale.store(false, Ordering::Release);
-        self.ready.store(true, Ordering::Release);
+        let generation = self
+            .snapshot
+            .load()
+            .generation
+            .saturating_add(1)
+            .max(1);
+        let collisions = multi_source_collision_count(&entries);
+        self.counters.record_multi_source_collisions(collisions);
+        let entries = self.normalize_dump_entries(entries);
+        let entries = cap_entries(entries, &self.counters);
+        self.publish_snapshot(IpsecSaSnapshot {
+            entries,
+            generation,
+            stale: false,
+            epoch: 0,
+        });
     }
 
     pub(in crate::afxdp) fn reset_for_monitor_start(&self) {
-        self.entries.store(Arc::new(FastMap::default()));
-        self.generation.store(0, Ordering::Release);
-        self.stale.store(true, Ordering::Release);
-        self.ready.store(false, Ordering::Release);
+        self.publish_snapshot(IpsecSaSnapshot {
+            entries: FastMap::default(),
+            generation: 0,
+            stale: true,
+            epoch: 0,
+        });
     }
 
     pub(in crate::afxdp) fn wait_ready(&self, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
-        while !self.ready.load(Ordering::Acquire) {
+        while {
+            let snapshot = self.snapshot.load();
+            snapshot.generation == 0 || snapshot.stale
+        } {
             if std::time::Instant::now() >= deadline {
                 return false;
             }
@@ -220,48 +330,99 @@ impl IpsecSaStore {
     }
 
     pub(in crate::afxdp) fn upsert(&self, key: IpsecSaKey) {
-        let mut next = self.entries.load_full().as_ref().clone();
-        let generation = self.generation.load(Ordering::Acquire).saturating_add(1).max(1);
-        next.insert(key, IpsecSaEpoch { generation });
-        self.generation.store(generation, Ordering::Release);
-        self.entries.store(Arc::new(cap_entries(next, generation, &self.counters)));
-        // NEWSA/UPDSA are incremental observations. They MUST NOT clear a
-        // stale fence: only a successful complete dump proves that no event
-        // was lost and may re-enable positive lookups.
+        let current = self.snapshot.load_full();
+        let collision = current.entries.keys().any(|existing| {
+            existing.family == key.family
+                && existing.dst == key.dst
+                && existing.spi == key.spi
+                && existing.src != key.src
+        });
+        let mut entries = current.entries.clone();
+        let generation = current.generation.saturating_add(1).max(1);
+        entries.insert(
+            key,
+            IpsecSaEpoch {
+                generation: self.next_insertion_order(),
+            },
+        );
+        self.publish_snapshot(IpsecSaSnapshot {
+            entries: cap_entries(entries, &self.counters),
+            generation,
+            // Incremental NEWSA/UPDSA observations never clear a stale fence.
+            stale: current.stale,
+            epoch: 0,
+        });
+        if collision {
+            self.counters.record_multi_source_collisions(1);
+        }
         self.counters.sa_inserts.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(in crate::afxdp) fn remove(&self, key: IpsecSaKey) -> bool {
-        let mut next = self.entries.load_full().as_ref().clone();
-        let removed = next.remove(&key).is_some();
+        let current = self.snapshot.load_full();
+        let mut entries = current.entries.clone();
+        let removed = entries.remove(&key).is_some();
         if removed {
-            self.entries.store(Arc::new(next));
+            self.publish_snapshot(IpsecSaSnapshot {
+                entries,
+                generation: current.generation,
+                stale: current.stale,
+                epoch: 0,
+            });
             self.counters.sa_removes.fetch_add(1, Ordering::Relaxed);
         }
         removed
     }
 
-    pub(in crate::afxdp) fn remove_dst_spi(&self, family: u8, dst: u128, spi: u32) {
-        let mut next = self.entries.load_full().as_ref().clone();
-        let before = next.len();
-        next.retain(|key, _| !(key.family == family && key.dst == dst && key.spi == spi));
-        let removed = before.saturating_sub(next.len());
+    pub(in crate::afxdp) fn remove_dst_spi(
+        &self,
+        family: u8,
+        dst: u128,
+        spi: u32,
+    ) -> u64 {
+        let current = self.snapshot.load_full();
+        let mut entries = current.entries.clone();
+        let before = entries.len();
+        entries.retain(|key, _| !(key.family == family && key.dst == dst && key.spi == spi));
+        let removed = before.saturating_sub(entries.len());
         if removed != 0 {
-            self.entries.store(Arc::new(next));
+            self.publish_snapshot(IpsecSaSnapshot {
+                entries,
+                generation: current.generation,
+                stale: current.stale,
+                epoch: 0,
+            });
             self.counters
                 .sa_removes
                 .fetch_add(removed as u64, Ordering::Relaxed);
         }
+        removed as u64
     }
+
     #[cfg(test)]
     fn entries_len(&self) -> usize {
-        self.entries.load().len()
+        self.snapshot.load().entries.len()
     }
+
+    #[cfg(test)]
+    pub(crate) fn publish_empty_dump_for_test(&self) {
+        self.publish_full_dump(FastMap::default());
+    }
+}
+
+fn multi_source_collision_count(entries: &FastMap<IpsecSaKey, IpsecSaEpoch>) -> u64 {
+    let mut groups: FastMap<(u8, u128, u32), u64> = FastMap::default();
+    for key in entries.keys() {
+        *groups.entry((key.family, key.dst, key.spi)).or_default() += 1;
+    }
+    groups
+        .values()
+        .map(|count| count.saturating_sub(1))
+        .sum()
 }
 
 fn cap_entries(
     mut entries: FastMap<IpsecSaKey, IpsecSaEpoch>,
-    generation: u64,
     counters: &IpsecSaCounters,
 ) -> FastMap<IpsecSaKey, IpsecSaEpoch> {
     if entries.len() <= IPSEC_SA_SNAPSHOT_CAP {
@@ -272,31 +433,33 @@ fn cap_entries(
         .iter()
         .map(|(key, epoch)| (*key, epoch.generation))
         .collect();
-    oldest.sort_unstable_by_key(|(_, epoch)| *epoch);
+    oldest.sort_unstable_by(|(key_a, epoch_a), (key_b, epoch_b)| {
+        epoch_a.cmp(epoch_b).then_with(|| key_a.cmp(key_b))
+    });
     for (key, _) in oldest.into_iter().take(remove_count) {
         entries.remove(&key);
         counters.sa_evictions.fetch_add(1, Ordering::Relaxed);
     }
-    let _ = generation;
     entries
 }
 
 #[inline]
-pub(in crate::afxdp) fn ipsec_sa_key(dst: IpAddr, spi: u32, src: IpAddr) -> IpsecSaKey {
+pub(in crate::afxdp) fn ipsec_sa_key(
+    dst: IpAddr,
+    spi: u32,
+    src: IpAddr,
+) -> Option<IpsecSaKey> {
     let family = match (dst, src) {
         (IpAddr::V4(_), IpAddr::V4(_)) => libc::AF_INET as u8,
         (IpAddr::V6(_), IpAddr::V6(_)) => libc::AF_INET6 as u8,
-        // A mixed-family flow is not a valid SA key.  Retain an explicit
-        // impossible family value so it can never collide with either
-        // address family in the map.
-        _ => 0,
+        _ => return None,
     };
-    IpsecSaKey {
+    Some(IpsecSaKey {
         family,
         dst: ip_to_u128(dst),
         spi,
         src: ip_to_u128(src),
-    }
+    })
 }
 
 #[inline]
@@ -381,12 +544,17 @@ impl IpsecSaMonitor {
     }
 
     pub(in crate::afxdp) fn stop_and_join(&mut self) {
+        // Fence immediately so packets cannot use the old proof while the
+        // monitor is winding down. The second fence below covers a dump that
+        // was already publishing when the stop flag was raised.
+        self.store.mark_stale();
         if let Some(stop) = self.stop.take() {
             stop.store(true, Ordering::Release);
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+        self.store.mark_stale();
     }
 }
 const NLMSG_OVERRUN: u16 = 4;
@@ -597,8 +765,8 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
                 return false;
             }
             if msg_type == XFRM_MSG_NEWSA {
-                if let Some(key) = parse_sa_payload(payload, true) {
-                    entries.insert(key, IpsecSaEpoch { generation: seq as u64 });
+                if let Some((key, _add_time)) = parse_sa_payload_with_epoch(payload, true) {
+                    entries.insert(key, IpsecSaEpoch { generation: 0 });
                 }
             }
             offset += (len + 3) & !3;
@@ -625,18 +793,22 @@ fn apply_xfrm_messages(store: &IpsecSaStore, bytes: &[u8]) -> bool {
             XFRM_MSG_NEWSA | XFRM_MSG_UPDSA => {
                 if let Some(key) = parse_sa_payload(payload, true) {
                     store.upsert(key);
-                } else if let Some((family, dst, spi, _src)) = parse_info_identity(payload) {
-                    // The record is well-formed but ineligible (wrong
-                    // direction/protocol or expired): fail closed by
-                    // removing any previous matching observation.
-                    store.remove_dst_spi(family, ip_to_u128(dst), spi);
+                } else if let Some((family, dst, spi, _src, proto)) = parse_info_identity(payload) {
+                    // A well-formed but ineligible ESP record (wrong
+                    // direction or expired) revokes a prior observation.
+                    // AH and other protocols are unrelated to this ESP cache.
+                    if proto == libc::IPPROTO_ESP as u8 {
+                        store.remove_dst_spi(family, ip_to_u128(dst), spi);
+                    }
                 } else {
                     return true;
                 }
             }
             XFRM_MSG_DELSA => {
-                if let Some((family, dst, spi)) = parse_id_identity(payload) {
-                    store.remove_dst_spi(family, dst, spi);
+                if let Some((family, dst, spi, proto)) = parse_id_identity(payload) {
+                    if proto == libc::IPPROTO_ESP as u8 {
+                        store.remove_dst_spi(family, dst, spi);
+                    }
                 } else {
                     return true;
                 }
@@ -645,15 +817,19 @@ fn apply_xfrm_messages(store: &IpsecSaStore, bytes: &[u8]) -> bool {
                 if payload.len() < XFRM_INFO_LEN + 1 {
                     return true;
                 }
-                if let Some((family, dst, spi, _src)) = parse_info_identity(payload) {
-                    // Both soft and hard expiry revoke the cache proof
-                    // immediately; a later complete dump may re-add a
-                    // replacement SA after rekey.
-                    store.remove_dst_spi(family, ip_to_u128(dst), spi);
-                    store
-                        .counters
-                        .sa_expiry_removes
-                        .fetch_add(1, Ordering::Relaxed);
+                if let Some((family, dst, spi, _src, proto)) = parse_info_identity(payload) {
+                    if proto == libc::IPPROTO_ESP as u8 {
+                        // Both soft and hard expiry revoke the cache proof
+                        // immediately; a later complete dump may re-add a
+                        // replacement SA after rekey.
+                        let removed = store.remove_dst_spi(family, ip_to_u128(dst), spi);
+                        if removed != 0 {
+                            store
+                                .counters
+                                .sa_expiry_removes
+                                .fetch_add(removed, Ordering::Relaxed);
+                        }
+                    }
                 } else {
                     return true;
                 }
@@ -667,11 +843,18 @@ fn apply_xfrm_messages(store: &IpsecSaStore, bytes: &[u8]) -> bool {
 }
 
 fn parse_sa_payload(payload: &[u8], require_direction: bool) -> Option<IpsecSaKey> {
-    let (family, dst, spi, src) = parse_info_identity(payload)?;
+    parse_sa_payload_with_epoch(payload, require_direction).map(|(key, _)| key)
+}
+
+fn parse_sa_payload_with_epoch(
+    payload: &[u8],
+    require_direction: bool,
+) -> Option<(IpsecSaKey, u64)> {
+    let (family, dst, spi, src, proto) = parse_info_identity(payload)?;
     if family != libc::AF_INET as u8 && family != libc::AF_INET6 as u8 {
         return None;
     }
-    if payload.get(56 + 20).copied()? != libc::IPPROTO_ESP as u8 {
+    if proto != libc::IPPROTO_ESP as u8 {
         return None;
     }
     let hard_bytes = read_u64_ne(payload, 96 + 8)?;
@@ -695,29 +878,34 @@ fn parse_sa_payload(payload: &[u8], require_direction: bool) -> Option<IpsecSaKe
     {
         return None;
     }
-    Some(ipsec_sa_key(dst, spi, src))
+    Some((ipsec_sa_key(dst, spi, src)?, add_time))
 }
 
-fn parse_info_identity(payload: &[u8]) -> Option<(u8, IpAddr, u32, IpAddr)> {
+fn parse_info_identity(payload: &[u8]) -> Option<(u8, IpAddr, u32, IpAddr, u8)> {
     if payload.len() < XFRM_INFO_LEN {
         return None;
     }
     let family = u16::from_ne_bytes(payload[212..214].try_into().ok()?) as u8;
     let spi = u32::from_be_bytes(payload[72..76].try_into().ok()?);
+    let proto = payload[76];
     let dst = parse_address(family, payload.get(56..72)?)?;
     let src = parse_address(family, payload.get(80..96)?)?;
-    Some((family, dst, spi, src))
+    Some((family, dst, spi, src, proto))
 }
 
-fn parse_id_identity(payload: &[u8]) -> Option<(u8, u128, u32)> {
+fn parse_id_identity(payload: &[u8]) -> Option<(u8, u128, u32, u8)> {
     if payload.len() < XFRM_MSG_ID_LEN {
         return None;
     }
     let family = u16::from_ne_bytes(payload[20..22].try_into().ok()?) as u8;
+    let proto = payload[22];
     let spi = u32::from_be_bytes(payload[16..20].try_into().ok()?);
     let dst = parse_address(family, payload.get(0..16)?)?;
-    Some((family, ip_to_u128(dst), spi))
+    Some((family, ip_to_u128(dst), spi, proto))
 }
+
+
+
 
 fn parse_address(family: u8, bytes: &[u8]) -> Option<IpAddr> {
     match family as i32 {
@@ -792,13 +980,58 @@ pub(in crate::afxdp) fn apply_xfrm_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn multi_source_collision_counter_tracks_wildcard_group() {
+        let store = IpsecSaStore::new();
+        let dst = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+        let first = ipsec_sa_key(
+            dst,
+            0x1122_3344,
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+        )
+        .expect("same-family SA fixture");
+        let second = ipsec_sa_key(
+            dst,
+            0x1122_3344,
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+        )
+        .expect("same-family SA fixture");
+        let third = ipsec_sa_key(
+            dst,
+            0x1122_3344,
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3)),
+        )
+        .expect("same-family SA fixture");
+        let mut entries = FastMap::default();
+        entries.insert(first, IpsecSaEpoch { generation: 0 });
+        entries.insert(second, IpsecSaEpoch { generation: 0 });
+        store.publish_full_dump(entries);
+        assert_eq!(store.counters.snapshot().sa_multi_source_collisions, 1);
+        store.upsert(third);
+        assert_eq!(store.counters.snapshot().sa_multi_source_collisions, 2);
+    }
+
 
     fn key(n: u32) -> IpsecSaKey {
+        let page = (n / 256) as u8;
+        let host = n as u8;
         ipsec_sa_key(
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, n as u8)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2 + page, host)),
             n,
-            IpAddr::V4(Ipv4Addr::new(198, 51, 100, n as u8)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100 + page, host)),
         )
+        .expect("same-family SA fixture")
+    }
+    #[test]
+    fn mixed_family_key_is_rejected() {
+        assert_eq!(
+            ipsec_sa_key(
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                7,
+                IpAddr::V6("2001:db8::7".parse().expect("v6 fixture")),
+            ),
+            None
+        );
     }
 
     #[test]
@@ -823,6 +1056,29 @@ mod tests {
     }
 
     #[test]
+    fn loaded_batch_snapshot_fences_after_store_update() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        assert!(store.remove(key(1)));
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
+    }
+
+    #[test]
+    fn stopping_monitor_fences_existing_snapshot() {
+        let mut monitor = IpsecSaMonitor::new();
+        let mut entries = FastMap::default();
+        entries.insert(key(1), IpsecSaEpoch { generation: 1 });
+        monitor.store.publish_full_dump(entries);
+        assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Hit);
+        monitor.stop_and_join();
+        assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Stale);
+    }
+
+    #[test]
     fn cap_eviction_is_control_side_only() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
@@ -831,6 +1087,20 @@ mod tests {
         }
         store.publish_full_dump(entries);
         assert_eq!(store.entries_len(), IPSEC_SA_SNAPSHOT_CAP);
+    }
+
+    #[test]
+    fn full_dump_and_incremental_upsert_share_cap_order_domain() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        for n in 0..IPSEC_SA_SNAPSHOT_CAP {
+            entries.insert(key(n as u32), IpsecSaEpoch { generation: 0 });
+        }
+        store.publish_full_dump(entries);
+        let newest = key((IPSEC_SA_SNAPSHOT_CAP + 1) as u32);
+        store.upsert(newest);
+        assert_eq!(store.entries_len(), IPSEC_SA_SNAPSHOT_CAP);
+        assert_eq!(store.lookup(newest), IpsecSaLookup::Hit);
     }
 
     #[test]
@@ -879,6 +1149,7 @@ mod tests {
                 0x1122_3344,
                 IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
             )
+            .expect("same-family SA fixture"),
         );
     }
 
@@ -895,9 +1166,83 @@ mod tests {
                 libc::AF_INET as u8,
                 ip_to_u128(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
                 0x1122_3344,
+                libc::IPPROTO_ESP as u8,
             ))
         );
         assert!(parse_info_identity(&payload).is_none());
+    }
+
+    fn one_netlink_message(msg_type: u16, payload: &[u8]) -> Vec<u8> {
+        let len = NLMSG_HDR_LEN + payload.len();
+        let aligned = (len + 3) & !3;
+        let mut message = vec![0u8; aligned];
+        message[0..4].copy_from_slice(&(len as u32).to_ne_bytes());
+        message[4..6].copy_from_slice(&msg_type.to_ne_bytes());
+        message[NLMSG_HDR_LEN..NLMSG_HDR_LEN + payload.len()].copy_from_slice(payload);
+        message
+    }
+
+    fn xfrm_id_payload(dst: Ipv4Addr, spi: u32, proto: u8) -> Vec<u8> {
+        let mut payload = vec![0u8; XFRM_MSG_ID_LEN];
+        payload[0..4].copy_from_slice(&dst.octets());
+        payload[16..20].copy_from_slice(&spi.to_be_bytes());
+        payload[20..22].copy_from_slice(&(libc::AF_INET as u16).to_ne_bytes());
+        payload[22] = proto;
+        payload
+    }
+
+    fn xfrm_info_payload(dst: Ipv4Addr, spi: u32, proto: u8) -> Vec<u8> {
+        let mut payload = vec![0u8; XFRM_INFO_LEN + 1];
+        payload[56..60].copy_from_slice(&dst.octets());
+        payload[72..76].copy_from_slice(&spi.to_be_bytes());
+        payload[76] = proto;
+        payload[80..84].copy_from_slice(&Ipv4Addr::new(198, 51, 100, 1).octets());
+        payload[212..214].copy_from_slice(&(libc::AF_INET as u16).to_ne_bytes());
+        payload
+    }
+
+    #[test]
+    fn ah_events_do_not_revoke_esp_snapshot_or_count_expiry() {
+        let store = IpsecSaStore::new();
+        let esp = key(1);
+        let mut entries = FastMap::default();
+        entries.insert(esp, IpsecSaEpoch { generation: 1 });
+        store.publish_full_dump(entries);
+
+        let ah_delete = one_netlink_message(
+            XFRM_MSG_DELSA,
+            &xfrm_id_payload(
+                Ipv4Addr::new(192, 0, 2, 1),
+                1,
+                libc::IPPROTO_AH as u8,
+            ),
+        );
+        assert!(!apply_xfrm_messages(&store, &ah_delete));
+        assert_eq!(store.lookup(esp), IpsecSaLookup::Hit);
+
+        let ah_expire = one_netlink_message(
+            XFRM_MSG_EXPIRE,
+            &xfrm_info_payload(
+                Ipv4Addr::new(192, 0, 2, 1),
+                1,
+                libc::IPPROTO_AH as u8,
+            ),
+        );
+        assert!(!apply_xfrm_messages(&store, &ah_expire));
+        assert_eq!(store.lookup(esp), IpsecSaLookup::Hit);
+        assert_eq!(store.counters.snapshot().sa_expiry_removes, 0);
+
+        let esp_expire = one_netlink_message(
+            XFRM_MSG_EXPIRE,
+            &xfrm_info_payload(
+                Ipv4Addr::new(192, 0, 2, 1),
+                1,
+                libc::IPPROTO_ESP as u8,
+            ),
+        );
+        assert!(!apply_xfrm_messages(&store, &esp_expire));
+        assert_eq!(store.lookup(esp), IpsecSaLookup::Miss);
+        assert_eq!(store.counters.snapshot().sa_expiry_removes, 1);
     }
 
     #[test]

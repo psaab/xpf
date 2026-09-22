@@ -96,6 +96,26 @@ use super::poll_stages::{
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
 
+#[inline]
+fn record_ipsec_sa_miss_sample(
+    sample_phase: &mut u8,
+    worker_ctx: &WorkerContext,
+    meta: UserspaceDpMeta,
+) {
+    let current = *sample_phase;
+    *sample_phase = current.wrapping_add(1);
+    if current == 0 {
+        record_exception(
+            worker_ctx.recent_exceptions,
+            &worker_ctx.ident,
+            "ipsec_sa_miss",
+            meta.pkt_len as u32,
+            Some(meta),
+            None,
+            worker_ctx.forwarding,
+        );
+    }
+}
 
 use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
@@ -231,6 +251,9 @@ pub(super) fn poll_binding_process_descriptor(
     // SEPARATE stamps — sharing one would let a filter ACCEPT re-stamp suppress
     // a pending policy re-derivation, and vice versa.
     sessions.set_policy_revalidation_gen(validation.config_generation);
+    // Load the immutable SA payload once for this RX batch. Stage 11 performs
+    // only plain map lookups against this guard, never another ArcSwap load.
+    let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
     let mut received = binding.xsk.rx.receive(available);
     binding.scratch.scratch_recycle.clear();
     binding.scratch.scratch_forwards.clear();
@@ -604,37 +627,6 @@ pub(super) fn poll_binding_process_descriptor(
                             // existing passthrough admission already
                             // authorizes direct delegation.
                             SlowPathOutlet::Delegated
-                        } else if crate::afxdp::forwarding::is_admitted_positive_ike(
-                            packet_frame,
-                            meta.l4_offset as usize,
-                            meta.protocol,
-                            meta.flow_dst_port,
-                        ) {
-                            // #4323/#6471 already admitted this IKE exchange.
-                            // It is the sole non-SA exception, and it is
-                            // deliberately unmarked so Stage 11 can never
-                            // mint the armed q0 authorization token.
-                            SlowPathOutlet::Delegated
-                        } else if crate::afxdp::forwarding::is_malformed_ike(
-                            packet_frame,
-                            meta.l4_offset as usize,
-                            meta.protocol,
-                            meta.flow_dst_port,
-                        ) {
-                            worker_ctx
-                                .forwarding
-                                .ipsec_sa
-                                .counters
-                                .record_miss(crate::afxdp::forwarding::IpsecSaMissReason::MalformedIke);
-                            if let Some(admission) = admission_to_commit.take() {
-                                worker_ctx
-                                    .forwarding
-                                    .nat64
-                                    .frag_overlap
-                                    .fail_admission(admission);
-                            }
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
                         } else {
                             let Some(flow) = flow.as_ref() else {
                                 worker_ctx
@@ -642,6 +634,11 @@ pub(super) fn poll_binding_process_descriptor(
                                     .ipsec_sa
                                     .counters
                                     .record_miss(crate::afxdp::forwarding::IpsecSaMissReason::NoSa);
+                                record_ipsec_sa_miss_sample(
+                                    &mut binding.ipsec_sa_miss_sample_phase,
+                                    worker_ctx,
+                                    meta,
+                                );
                                 if let Some(admission) = admission_to_commit.take() {
                                     worker_ctx
                                         .forwarding
@@ -652,17 +649,36 @@ pub(super) fn poll_binding_process_descriptor(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             };
-                            let Some(spi) = crate::afxdp::forwarding::esp_in_udp_spi(
+                            let flow_dst_port = flow.forward_key.dst_port;
+                            if crate::afxdp::forwarding::is_admitted_positive_ike(
                                 packet_frame,
                                 meta.l4_offset as usize,
-                                meta.flow_dst_port,
-                            ) else {
-                                let reason = crate::afxdp::forwarding::esp_in_udp_miss_reason(
-                                    packet_frame,
-                                    meta.l4_offset as usize,
-                                    meta.flow_dst_port,
+                                meta.protocol,
+                                flow_dst_port,
+                            ) {
+                                // #4323/#6471 already admitted this IKE
+                                // exchange. It is the sole non-SA exception,
+                                // and it is deliberately unmarked so Stage
+                                // 11 can never mint the armed q0 token.
+                                SlowPathOutlet::Delegated
+                            } else if crate::afxdp::forwarding::is_malformed_ike(
+                                packet_frame,
+                                meta.l4_offset as usize,
+                                meta.protocol,
+                                flow_dst_port,
+                            ) {
+                                worker_ctx
+                                    .forwarding
+                                    .ipsec_sa
+                                    .counters
+                                    .record_miss(
+                                        crate::afxdp::forwarding::IpsecSaMissReason::MalformedIke,
+                                    );
+                                record_ipsec_sa_miss_sample(
+                                    &mut binding.ipsec_sa_miss_sample_phase,
+                                    worker_ctx,
+                                    meta,
                                 );
-                                worker_ctx.forwarding.ipsec_sa.counters.record_miss(reason);
                                 if let Some(admission) = admission_to_commit.take() {
                                     worker_ctx
                                         .forwarding
@@ -672,22 +688,24 @@ pub(super) fn poll_binding_process_descriptor(
                                 }
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
-                            };
-                            let key = crate::afxdp::forwarding::ipsec_sa_key(
-                                flow.dst_ip,
-                                spi,
-                                flow.src_ip,
-                            );
-                            match worker_ctx.forwarding.ipsec_sa.lookup(key) {
-                                crate::afxdp::forwarding::IpsecSaLookup::Hit => {
-                                    SlowPathOutlet::Delegated
-                                }
-                                crate::afxdp::forwarding::IpsecSaLookup::Miss => {
-                                    worker_ctx
-                                        .forwarding
-                                        .ipsec_sa
-                                        .counters
-                                        .record_miss(crate::afxdp::forwarding::IpsecSaMissReason::NoSa);
+                            } else {
+                                let Some(spi) = crate::afxdp::forwarding::esp_in_udp_spi(
+                                    packet_frame,
+                                    meta.l4_offset as usize,
+                                    flow_dst_port,
+                                ) else {
+                                    let reason =
+                                        crate::afxdp::forwarding::esp_in_udp_miss_reason(
+                                            packet_frame,
+                                            meta.l4_offset as usize,
+                                            flow_dst_port,
+                                        );
+                                    worker_ctx.forwarding.ipsec_sa.counters.record_miss(reason);
+                                    record_ipsec_sa_miss_sample(
+                                        &mut binding.ipsec_sa_miss_sample_phase,
+                                        worker_ctx,
+                                        meta,
+                                    );
                                     if let Some(admission) = admission_to_commit.take() {
                                         worker_ctx
                                             .forwarding
@@ -697,13 +715,24 @@ pub(super) fn poll_binding_process_descriptor(
                                     }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
-                                }
-                                crate::afxdp::forwarding::IpsecSaLookup::Stale => {
+                                };
+                                let Some(key) = crate::afxdp::forwarding::ipsec_sa_key(
+                                    flow.dst_ip,
+                                    spi,
+                                    flow.src_ip,
+                                ) else {
                                     worker_ctx
                                         .forwarding
                                         .ipsec_sa
                                         .counters
-                                        .record_miss(crate::afxdp::forwarding::IpsecSaMissReason::Stale);
+                                        .record_miss(
+                                            crate::afxdp::forwarding::IpsecSaMissReason::NoSa,
+                                        );
+                                    record_ipsec_sa_miss_sample(
+                                        &mut binding.ipsec_sa_miss_sample_phase,
+                                        worker_ctx,
+                                        meta,
+                                    );
                                     if let Some(admission) = admission_to_commit.take() {
                                         worker_ctx
                                             .forwarding
@@ -713,6 +742,61 @@ pub(super) fn poll_binding_process_descriptor(
                                     }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
+                                };
+                                match worker_ctx
+                                    .forwarding
+                                    .ipsec_sa
+                                    .lookup_loaded(&ipsec_sa_snapshot, key)
+                                {
+                                    crate::afxdp::forwarding::IpsecSaLookup::Hit => {
+                                        SlowPathOutlet::Delegated
+                                    }
+                                    crate::afxdp::forwarding::IpsecSaLookup::Miss => {
+                                        worker_ctx
+                                            .forwarding
+                                            .ipsec_sa
+                                            .counters
+                                            .record_miss(
+                                                crate::afxdp::forwarding::IpsecSaMissReason::NoSa,
+                                            );
+                                        record_ipsec_sa_miss_sample(
+                                            &mut binding.ipsec_sa_miss_sample_phase,
+                                            worker_ctx,
+                                            meta,
+                                        );
+                                        if let Some(admission) = admission_to_commit.take() {
+                                            worker_ctx
+                                                .forwarding
+                                                .nat64
+                                                .frag_overlap
+                                                .fail_admission(admission);
+                                        }
+                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        continue;
+                                    }
+                                    crate::afxdp::forwarding::IpsecSaLookup::Stale => {
+                                        worker_ctx
+                                            .forwarding
+                                            .ipsec_sa
+                                            .counters
+                                            .record_miss(
+                                                crate::afxdp::forwarding::IpsecSaMissReason::Stale,
+                                            );
+                                        record_ipsec_sa_miss_sample(
+                                            &mut binding.ipsec_sa_miss_sample_phase,
+                                            worker_ctx,
+                                            meta,
+                                        );
+                                        if let Some(admission) = admission_to_commit.take() {
+                                            worker_ctx
+                                                .forwarding
+                                                .nat64
+                                                .frag_overlap
+                                                .fail_admission(admission);
+                                        }
+                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        continue;
+                                    }
                                 }
                             }
                         };
