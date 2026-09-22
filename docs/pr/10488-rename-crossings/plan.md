@@ -67,7 +67,7 @@ a developer-friction false positive in a repository validation gate.
 
 | Finding | v1 gap | v2 close-out |
 |---|---|---|
-| A-F1 `U` hidden in reject rule | v1:187 rejected "unsupported statuses" without naming `U` | §4 status table: `U` proven unreachable in `git diff <commit>` form (conflict reports `M`, probe-quoted); specified loud-error-if-observed; conflicted-tree fixture pins zero-delta `M` handling |
+| A-F1 `U` hidden in reject rule | v1:187 rejected "unsupported statuses" without naming `U` | §4 now records the exact command distinction: intended `git diff <commit>` emits one `M` for a conflict; index-form `git diff` can emit duplicate `U+M`, which a defensive parser must coalesce by current path into one M-equivalent row; the fresh real-conflict fixture pins both |
 | A-F2 rename-limit unspecified | v1:211-212 left limit to Git | §4: accept-and-document + §8 smoke criterion (1200-file diff, 5× budget, FP-direction preservation) |
 | A-F3 no dissimilarity control | 10-case table had no below-threshold row | §8: heavy-rewrite ⇒ new-file crossing row (doubles as `-M90%` lower-bound pin) |
 | A-F4 wrong #10487 attribution | v1:385 claimed parser hardening owned by #10487 | §9: corrected — #10487 owns accepted-entry drift/expiry only (issue text + no `docs/pr/*10487*` plan); numeric hardening out of scope for both |
@@ -256,8 +256,8 @@ against today (current: destination-only path → `audit_is_audited_path` +
 | `M` Modified | Same path at merge base | Working dest; row iff audited + `[ -f ]` | None — identical path. INCLUDES conflicted files: the probe's `git diff <commit>` form reports a merge-conflicted file as `M` (probed, §8), never `U`, so marker-inflated working LOC is measured exactly as today |
 | `R` Renamed | Old/source path at merge base (both endpoints audited); Absent (`-`) when the source was excluded/out-of-root (admission to production audit — explicit new boundary policy, see below) | New/destination working path; record src in the consumed-source set (even when dest is excluded, so a restored untracked source cannot reuse the identity) | THE intended fix: `R100 1701→1701` goes from `- 1701` (false WATCH) to `1701 1701` (silent) |
 | `T` Typechange | Same path at merge base | `[ -f ]` guard drops non-regular dests (dangling symlink, submodule, gitlink); row iff audited + regular file | None — identical path. `R+T` combined (rename + file→symlink) surfaces as `A+D`, NOT `R` or `T` (probed, §8: no cross-type pairing) → dest is `A` → `-`; `D` dropped by the filter; dangling symlinks additionally dropped by `[ -f ]`. Residual FP for rename-to-valid-symlink disclosed — byte-identical code path to any `A` today |
-| `U` Unmerged | N/A — unreachable | Loud error with a resolve-conflicts diagnostic IF ever observed | None observable: `U` is provably unreachable in the `git diff <commit>` (worktree-vs-tree) form — the conflict probe reports `M` (`U` appears only in index-involving forms). Error-if-observed is future-proofing with zero availability cost, versus measuring a state that by definition has no single base version. The conflicted-tree fixture (§8) pins the zero-delta `M` handling in both versions |
-| `X` Unknown, `B` Broken pairing | Same path at merge base (today's handling) + stderr warning naming the path | Working dest; row iff audited + `[ -f ]` | None: deliberately today's behavior, not an error. Rationale: `X`/`B` can theoretically appear with uncertain meaning; erroring the whole probe on one such row would turn a single odd path into branch-level infra-red (availability-hostile). Same-path handling degrades safely (miss → `-` → false positive, never suppression), and the stderr warning keeps it visible. Rule of the table: states Git can emit get today's handling or better; only provably-unreachable-and-unmeasurable `U` errors |
+| `U` Unmerged | Not emitted by the intended tree-vs-working-tree command | No independent `U` row. If a future refactor accidentally feeds index-form `U\0path\0M\0path\0`, coalesce the duplicate current path and measure it once with the same-path `M` rules; a lone `U` is a malformed stream and errors | None for the intended producer: the real gate emits one `M` row. Defensive coalescing preserves today's sorted-unique one-row result; never emit two rows |
+| `X` Unknown, `B` Broken pairing | Same path at merge base (today's handling) + stderr warning naming the path | Working dest; row iff audited + `[ -f ]` | None: deliberately today's behavior, not an error. Rationale: `X`/`B` can theoretically appear with uncertain meaning; erroring the whole probe on one such row would turn a single odd path into branch-level infra-red (availability-hostile). Same-path handling degrades safely (miss → `-` → false positive, never suppression), and the stderr warning keeps it visible. `U` is deliberately absent from this rule because it is not an input to the intended producer; only the defensive duplicate-coalescing rule above applies |
 
 The excluded→audited admission rule (`R` from an excluded/out-of-root source
 begins at `-`) is an explicit proposed boundary policy: excluded LOC was never
@@ -302,8 +302,11 @@ row — the destination is not in the audited population.
      fails → hard error (the repo changed under the probe or is corrupt;
      counting garbage as a baseline is never acceptable).
    Reject malformed/truncated records per the layout rules above; handle every
-   well-formed status per the table (no "unsupported status" error for any
-   status Git can emit — the v1 generic reject rule is withdrawn).
+   well-formed status the intended Git command can emit per the table (no
+   "unsupported status" error for any status Git can emit in this command).
+   If a future refactor accidentally feeds index-form `U+M`, coalesce by
+   current path before invoking `emit_touched`; a lone `U` is a malformed
+   stream. The v1 generic reject rule is otherwise withdrawn.
 5. Parse untracked records after the tracked stream: untracked audited path
    with no consumed-source match keeps today's same-path probing (baseline if
    present at base, else `-`); untracked recreation of a CONSUMED rename
@@ -450,11 +453,13 @@ No RPC, config schema, HA serialization, deployment, or public CLI change.
 - **Limit degradation preserves FP direction:** rename-limit exhaustion,
   unrecognized rewrites, and cross-type (`R+T`) pairs all surface destinations
   as `A` → `-`. No degradation path can silence a true crossing.
-- **Conflict behavior unchanged:** conflicted files report `M` in the probe
-  form and are measured with marker-inflated working LOC, exactly as today.
-  No new error path exists for any input Git can actually emit (only the
-  provably-unreachable `U` errors, plus the pre-existing undeterminable-base
-  errors).
+- **Conflict behavior unchanged:** a fresh content-conflict probe shows that
+  `git diff --name-status -z <merge-base> --` reports exactly
+  `M\0f.go\0`, and the producer emits one same-path row with marker-inflated
+  working LOC, exactly as today. The index form (not used by the producer)
+  reports `U\0f.go\0M\0f.go\0`; if ever accidentally supplied, duplicate
+  current paths are coalesced to that one M-equivalent row. No new error path
+  exists for any input the intended producer can emit.
 - **Side effects/order:** establish valid inputs before publishing rows; errors
   remain errors, tracked origins precede untracked-source reconciliation, and
   no Git/index/heatmap/acknowledgement write is performed.
@@ -503,8 +508,8 @@ v2 delta evidence — scratch-repo Git probes (git 2.53.0, hermetic env,
 | Staged mv + 1 unstaged line, `git diff HEAD --name-status -M` | `R099 old.go new.go` | B-F4: pairing survives unstaged growth; similarity from working content |
 | File→symlink, `-z` | `T\0new.go\0` | B-F2: single-path `T`, no score |
 | Rename + file→symlink, `-M HEAD` | `A moved.go` + `D old.go` (no `R`, no `T`) | B-F2: no cross-type pairing; `R+T` = `A+D` |
-| Merge conflict, `git diff --name-status $BASE` | `M f.go` (and `-z`: `M\0f.go\0`) | A-F1/B-F2: `U` unreachable in probe form; conflicts are `M` |
-| Same conflict, `--diff-filter=d --name-status/--name-only` | `U`+`M` / `f.go f.go` in the INDEX form only — N/A to probe form | Scope guard: `U` exists in `git diff` (index) but not `git diff <commit>` (tree) |
+| Fresh real content conflict: intended gate `git diff --name-status -z $BASE --` | Merge exits 1; gate command exits 0 and emits exactly `M\0f.go\0`; `--diff-filter=d` emits the same bytes | A-F1/B-F2: intended producer sees `M`, not `U`; one same-path row with marker-inflated head LOC is the zero-delta contract |
+| Same fresh conflict, index form `git diff --name-status -z --` | Command exits 0 and emits exactly `U\0f.go\0M\0f.go\0`; this stream is NOT an input to the intended producer | Scope guard: if a future refactor accidentally supplies it, coalesce duplicate `f.go` and emit one M-equivalent row; do not count two rows |
 | 30-file inexact rename set, `-c diff.renameLimit=5` | Exit 0, no pairing beyond budget, no nonzero | A-F2: limit degradation = `D+A`, safe direction |
 | Fresh `bash scripts/refactoring-audit.sh \| wc -l` at base | 80 | A-F5: generator == census; artifact staleness proven |
 | `wc -l` artifact + `git log` | 50 rows, last touched `254ca9939` | A-F5: other half of the reconciliation |
@@ -562,7 +567,7 @@ if !strings.Contains(status, "R") || !strings.Contains(status, "old.go") {
 | 16 | `T` file→regular-file (mode/type change, still a file) | Same-path baseline, measured. Pins the `T` row. |
 | 17 | `T` file→symlink (dangling) | No row (`[ -f ]` drops). Identical in both versions — non-regression guard. |
 | 18 | `R+T`: rename + file→symlink | Surfaces `A+D` → dest `-` (dangling: no row at all). Assert observed Git behavior, identical both versions. Documents the disclosed residual. |
-| 19 | Conflicted tree (merge conflict at dest) via `r.script()` | Exit 0 + `M` row with marker-inflated head LOC, identical both versions. Pins the zero-delta `U`-unreachable finding (A-F1). NOT an error case. |
+| 19 | Fresh real content-conflict tree via `r.script()` | Merge setup exits 1 but leaves the conflict; intended gate command exits 0 with exactly one `M\0f.go\0` row and marker-inflated head LOC, identical both versions. The index-only diagnostic is exactly `U\0f.go\0M\0f.go\0`; if accidentally fed, coalesce to one same-path M row. Pins the actual zero-delta contract, not a fictional U producer path. |
 | 20 | Source-only whitespace: base `"old dir/a.go"` 1700 → `pkg/new.go` | Dest row base 1700, silent. Proves quoted source lookup + non-emission. |
 | 21 | Audited dest with whitespace; truncated `-z` tail; `git` producer failure — all via `r.script()` | Each: nonzero exit, no rows on stdout. Catches delimiter, malformed-record, and process-substitution mistakes. (Pre-fix whitespace fails at the Go layer instead — accepted layer move.) |
 | 22 | Merge-base commit present but source blob absent (grafted fixture) via `r.script()` | Exit 0 + `-` dest row + stderr warning naming the path. Pins the B-F3 availability policy (fallback, not infra-red). Pre-fix: same `-` row without warning. |
@@ -668,11 +673,12 @@ never part of this worker's plan-only round.
    the machinery proportionate in round 1. Delta reviewers: does the
    fallback+warning resolution of B-F3 keep that verdict, or does any
    warning-that-isn't-an-error hide rot that should red?
-6. **`U`-errors-if-observed:** `U` is proven unreachable in the probe form, so
-   the choice is pure future-proofing. Is loud-error the right defense, or
-   should a hypothetical future `U` be measured as `M` (today's handling for
-   the conflict state it would describe)? Either is zero-cost today; pick the
-   one that fails better under an unknown future Git.
+6. **Defensive U coalescing:** the intended tree-vs-working-tree command
+   cannot emit `U` for a conflict; the fresh probe proves `M\0f.go\0`, while
+   index-form output is `U\0f.go\0M\0f.go\0`. If a future refactor accidentally
+   changes the input form, should the parser keep the specified duplicate
+   coalescing (one M-equivalent row), or should it fail the stream? A lone
+   `U` is malformed either way; choose the safer future-proof posture.
 7. **`X`/`B` same-path-plus-warning:** v2 deliberately matches today instead
    of erroring, on availability grounds (one odd path must not infra-red the
    branch). Is that the right call for states whose meaning is "Git itself is
