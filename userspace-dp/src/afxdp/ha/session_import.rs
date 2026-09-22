@@ -32,6 +32,8 @@ pub(crate) enum SyncedDeleteOutcome {
     /// Refused because tuple admission could not be acquired before timeout.
     RefusedGateBusy,
     RefusedMirrorDelete,
+    /// Refused because the captured session incarnation or its companion changed.
+    RefusedIdentity,
 }
 
 impl SyncedDeleteOutcome {
@@ -45,6 +47,7 @@ impl SyncedDeleteOutcome {
                 | Self::RefusedConcurrentLocalOwned
                 | Self::RefusedGateBusy
                 | Self::RefusedMirrorDelete
+                | Self::RefusedIdentity
         )
     }
 
@@ -465,6 +468,7 @@ impl crate::afxdp::ha::SessionDomain {
                 false,
                 Some(&fence),
                 false,
+                None,
             );
         }
         let maps = self.bpf_maps.load();
@@ -997,6 +1001,26 @@ impl crate::afxdp::ha::SessionDomain {
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
         self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, true)
+    }
+
+    /// Delete a helper-owned mirror only when the captured forward and companion
+    /// session identities still name the same incarnation (#10512).
+    pub(crate) fn delete_synced_session_if_identity(
+        &self,
+        key: SessionKey,
+        forward_only: bool,
+        expected_session_id: u64,
+        expected_companion_session_id: u64,
+    ) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(
+            key,
+            0,
+            false,
+            forward_only,
+            None,
+            true,
+            Some((expected_session_id, expected_companion_session_id)),
+        )
     }
     /// #9714: a delete sent on behalf of the PEER (`SessionSyncRequest.peer_delete`:
     /// the Go cluster-stale apply and the #6368 install rollback). It is refused for
