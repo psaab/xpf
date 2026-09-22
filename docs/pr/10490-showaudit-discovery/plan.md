@@ -2,7 +2,7 @@
 
 ## Status
 
-**DRAFT v2 — round-1 reviewer adjudication applied; plan-only round.**
+**DRAFT v3 — round-1 reviewer adjudication applied; plan-only round.**
 
 - Base `b71c52d60`; branch `fix/10490-showaudit-discovery`.
 - STEP-0: NOT fixed. The evidence revision
@@ -517,7 +517,7 @@ structured exemptions are the explicitly named `GetZones` and
   not another implementation in this PR.
 - Historical `_Log.md` and review-archive prose.
 
-## Open questions (resolved for DRAFT v2)
+## Open questions (resolved for DRAFT v3)
 
 1. **Wrapper or rename?** Wrapper. The 3 non-builder callers gain no
    gate value from a rename; true rename costs 6 prod + 2 test files +
