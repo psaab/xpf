@@ -88,6 +88,16 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
             }
         }
     }
+    // Self-reversing tuple (forward and companion are the SAME key): the
+    // forward call below removes it and collects its intent, so a second
+    // call would find nothing and fall into the absent branch — which
+    // issues BPF under the abort fence. Drop it: the forward intent's
+    // execution releases a SUPERSET of that branch (derived rows plus every
+    // row the holder holds for the owner, `release_entry`'s held arm), so
+    // nothing — table or alias claims — is stranded.
+    if remove_companion.as_ref().is_some_and(|companion| companion == &item.key) {
+        remove_companion = None;
+    }
     handle_delete_synced_with_guard(
         sessions,
         session_map,

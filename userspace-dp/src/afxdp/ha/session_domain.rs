@@ -808,29 +808,23 @@ impl SessionDomain {
         // contradicting already-removed worker state plus ghost mirrors.
         if !remove_failed {
             phase2_attempted = true;
+            // Absent map degrades to fd -1 (repair sites do the same): the
+            // registry retirement below MUST run even with no kernel map
+            // bound (skipping would strand Worker claims for removed rows);
+            // only the kernel write no-ops, exactly like the old worker path.
             let maps = self.bpf_maps.load();
-            match maps.session_map_fd.as_ref() {
-                // No session map (unit tests, pre-bringup): skip, don't fail.
-                // The old worker path wrote to fd -1 and no-op'd silently;
-                // the mirror verdict below stays the loud signal. Logged so
-                // a production map disappearance is visible, not silent.
-                None => {
-                    eprintln!("xpf-ha: policy batch phase 2 skipped: no session map");
-                }
-                Some(session_map_fd) => {
-                    let stashed = remove_intents
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let map = crate::afxdp::bpf_map::SteeringMap {
-                        fd: session_map_fd.fd,
-                        owners: &self.steering_owners,
-                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
-                    };
-                    if !Self::execute_deferred_redirects(map, &lease, &stashed) {
-                        remove_error = "policy-batch-deferred-failed";
-                        remove_failed = true;
-                    }
-                }
+            let fd = maps.session_map_fd.as_ref().map_or(-1, |fd| fd.fd);
+            let stashed = remove_intents
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let map = crate::afxdp::bpf_map::SteeringMap {
+                fd,
+                owners: &self.steering_owners,
+                holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+            };
+            if !Self::execute_deferred_redirects(map, &lease, &stashed) {
+                remove_error = "policy-batch-deferred-failed";
+                remove_failed = true;
             }
         }
         if remove_failed {
@@ -855,21 +849,20 @@ impl SessionDomain {
             // Skipped when the normal path already attempted it (success or
             // failure — re-execution is idempotent but pure noise).
             if !phase2_attempted {
+                // fd -1 when unbound (see the normal path): retirement runs
+                // regardless; only the kernel write no-ops.
                 let maps = self.bpf_maps.load();
-                if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
-                    let stashed = remove_intents
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let map = crate::afxdp::bpf_map::SteeringMap {
-                        fd: session_map_fd.fd,
-                        owners: &self.steering_owners,
-                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
-                    };
-                    if !Self::execute_deferred_redirects(map, &lease, &stashed) {
-                        eprintln!("xpf-ha: policy batch abort: deferred redirect execution failed");
-                    }
-                } else {
-                    eprintln!("xpf-ha: policy batch abort phase 2 skipped: no session map");
+                let fd = maps.session_map_fd.as_ref().map_or(-1, |fd| fd.fd);
+                let stashed = remove_intents
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let map = crate::afxdp::bpf_map::SteeringMap {
+                    fd,
+                    owners: &self.steering_owners,
+                    holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                };
+                if !Self::execute_deferred_redirects(map, &lease, &stashed) {
+                    eprintln!("xpf-ha: policy batch abort: deferred redirect execution failed");
                 }
             }
             let applied_count: usize = applied_slots

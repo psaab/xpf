@@ -13011,6 +13011,46 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
         assert_eq!(intent.origin, SessionOrigin::ForwardFlow, "intent carries the origin");
         assert_eq!(intent.worker_id, 7, "intent names the collecting worker");
     }
+    // (E) Self-reversing tuple (forward and companion are the SAME key):
+    // removed once, clean, exactly ONE intent — and NO BPF under the fence
+    // (run_item asserts the recorder is empty: without the dedupe the
+    // second call falls into the absent branch and issues BPF there).
+    {
+        let mut sessions = SessionTable::new();
+        let mut key = test_key();
+        key.dst_ip = key.src_ip;
+        key.dst_port = key.src_port;
+        assert_eq!(
+            crate::session::reverse_session_key(&key, NatDecision::default()),
+            key,
+            "fixture must be self-reversing"
+        );
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        assert_ne!(forward_id, 0, "fixture must mint a live identity");
+        let (removed, report, deferred) =
+            run_item(&mut sessions, &key, forward_id, forward_id, Some(key.clone()));
+        assert!(removed, "self-reversing entry must be removed");
+        assert!(
+            !report.partial[0] && !report.refused[0],
+            "self-reversing removal must be clean"
+        );
+        assert_eq!(deferred.len(), 1, "companion deduped: exactly the forward intent");
+        assert_eq!(deferred[0].key, key, "intent must name the removed entry");
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "self-reversing row must be gone"
+        );
+    }
 }
 
 /// #10512 advisory-25: the batch arm stashes redirect-delete intents into

@@ -8389,6 +8389,70 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             "both shared rows must be gone"
         );
     }
+    // (D) Self-reversing tuple (forward and companion are the SAME key):
+    // removed once, Applied (not PartialCompanion) — the companion
+    // removal is subsumed by the forward removal, not a second removal
+    // that finds Absent.
+    {
+        let coordinator = Coordinator::new();
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 224)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 224)),
+            src_port: 42493,
+            dst_port: 42493,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        assert_eq!(
+            reverse_session_key(&key, NatDecision::default()),
+            key,
+            "fixture must be self-reversing"
+        );
+        let mut metadata = test_metadata();
+        metadata.is_reverse = false;
+        let forward = SyncedSessionEntry {
+            key: key.clone(),
+            decision: SessionDecision {
+                resolution: test_resolution(),
+                nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata,
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xF70512,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &forward,
+        );
+        let outcome = coordinator
+            .session_domain()
+            .remove_shared_policy_item(&key, 0xF70512, 0xF70512, Some(&key), false);
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::Applied),
+            "self-reversing removal must be Applied, not partial; got {outcome:?}"
+        );
+        assert!(
+            !coordinator
+                .sessions
+                .synced
+                .lock()
+                .expect("synced map")
+                .contains_key(&key),
+            "self-reversing row must be gone"
+        );
+    }
 }
 
 /// #10512 abort-ordering pin (bounded-abort ruling): when the remove fan-out
@@ -8855,5 +8919,114 @@ fn policy_batch_uncovered_intent_fails_loud_then_quiesces_shared_10512() {
         probes_seen.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "the abort probe must run exactly once (best-effort repair attempted)"
+    );
+}
+
+/// #10512 advisory-25/4: registry retirement must run even with NO kernel
+/// map bound. Mapless batch (no `bpf_maps.store`), pre-claimed Worker(0)
+/// row, mock stashes a covered intent: execution still records the delete
+/// attempt (the recorder intercepts pre-fd-gate) AND retires the claim.
+/// Restore the skip and both asserts fail.
+#[test]
+fn policy_batch_mapless_intent_still_retires_registry_10512() {
+    let mut fixture = fixture_10512_lease(231, 43193, 53193, 0xFF0512, 0xCF0512);
+    // NOTE: no bpf_maps.store — the session map is unbound (fd -1 path).
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Pre-claim the forward row for Worker(0) in the COORDINATOR's registry.
+    let key = fixture.forward.key.clone();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+    fixture
+        .coordinator
+        .steering_owners
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(0),
+            || Ok(()),
+        )
+        .expect("pre-claim publishes");
+    assert_eq!(
+        fixture.coordinator.steering_owners.held_row_count(&key, 0),
+        1,
+        "fixture must pre-claim one row"
+    );
+    let decision = fixture.forward.decision.clone();
+    let metadata = fixture.forward.metadata.clone();
+    let origin = fixture.forward.origin;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands.lock().expect("commands").drain(..).collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch {
+                            items,
+                            intents,
+                            applied,
+                            pending,
+                            ..
+                        } => {
+                            intents
+                                .lock()
+                                .expect("intents")
+                                .push(crate::afxdp::DeferredRedirectDelete {
+                                    key: items[0].key.clone(),
+                                    decision: decision.clone(),
+                                    metadata: metadata.clone(),
+                                    origin,
+                                    worker_id: 0,
+                                });
+                            applied.lock().expect("applied")[0] = true;
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "no conntrack fds: repair fails closed, got complete={complete} outcomes={outcomes:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "mapless execution must succeed and continue to the mirror verdict, got {errors:?}"
+    );
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .any(|record| record.value.is_none() && record.key == key),
+        "mapless execution must still attempt the delete"
+    );
+    assert_eq!(
+        fixture.coordinator.steering_owners.held_row_count(&key, 0),
+        0,
+        "mapless execution must retire the collecting worker's claim"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "normal path must run the shared loop past execution"
     );
 }

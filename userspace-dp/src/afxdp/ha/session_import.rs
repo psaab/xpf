@@ -1072,7 +1072,13 @@ impl crate::afxdp::ha::SessionDomain {
                                 if reverse.session_id != expected {
                                     partial = true;
                                 } else {
-                                    companion_key = Some(derived);
+                                    // Self-reversing (derived == forward key): the
+                                    // forward removal below subsumes it — recording
+                                    // a same-key companion would find Absent and
+                                    // misreport partial.
+                                    if derived != *key {
+                                        companion_key = Some(derived);
+                                    }
                                 }
                             }
                         }
