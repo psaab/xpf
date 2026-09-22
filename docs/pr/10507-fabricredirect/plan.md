@@ -1,182 +1,469 @@
-# DRAFT v1 — Issue #10507: standby FabricRedirect revalidation stamps recorded-egress Permit surviving promotion (fail-open)
+# DRAFT v2 — Issue #10507: standby FabricRedirect revalidation stamps recorded-egress Permit surviving promotion (fail-open)
 
-Status: DRAFT v1 for parent-lane plan review. No production code on this path.
-Worktree: `.claude/worktrees/10507-fabricredirect`, branch `fix/10507-fabricredirect`, base `5049e78c9`.
-Issue: https://github.com/psaab/xpf/issues/10507 (OPEN, no comments at STEP-0 time).
+Status: DRAFT v2 after plan-review round 1. PlanA and PlanB both returned
+PLAN-NEEDS-MAJOR; this revision is a redesign fold, not a wording-only update.
+No production code is changed on this path.
 
-## 1. Problem
+Worktree: `.claude/worktrees/10507-fabricredirect`
+Branch: `fix/10507-fabricredirect`
+STEP-0 source base: `5049e78c9`
+Issue: https://github.com/psaab/xpf/issues/10507 (OPEN, zero comments)
+
+## 1. Problem and security invariant
 
 On a standby node, a peer-owned session hit is judged by M2 zone-policy
-revalidation against the PEER-RECORDED egress zone instead of the live
-to-zone. A Permit stamps `policy_revalidated_gen` at the LIVE config
-generation. Promotion rewrites decision/metadata/liveness but no
-revalidation field, so the stamp survives and the promoted node forwards
-a flow the live policy denies until the next generation-bumping publish
-or session end. Fail-open, High severity.
+revalidation against the PEER-RECORDED egress zone instead of the live to-zone.
+A Permit stamps `policy_revalidated_gen` at the LIVE config generation.
+Promotion rewrites decision/metadata/liveness but no revalidation field, so the
+stamp survives and a promoted node can forward a flow the live policy denies
+until the next generation-bumping publish or session end. This is a High,
+fail-open defect.
 
-## 2. STEP-0 evidence (verified at HEAD `5049e78c9`, not just the `b71c52d6` pin)
+The required invariant is stronger than "clear a stamp when a command arrives":
 
-Pin `b71c52d6` is an ancestor of HEAD. No merged PR references #10507
-(`git log --all --grep=10507` empty; merged-PR search for
-FabricRedirect/recorded-egress/revalidation shows only unrelated work).
-Full chain re-verified from source at HEAD:
+> A Permit derived from a recorded egress may never authorize local forwarding.
+> Packet-time forwarding authority, not worker-command completion, decides
+> whether a recorded stamp may short-circuit M2.
 
-1. Hit path order, `userspace-dp/src/afxdp/session_glue/mod.rs`
-   `resolve_flow_session_decision_with_conntrack`: live FIB re-resolution
-   incl. #326 synced-with-local-egress (L2403-2431) → `enforce_session_ha_resolution`
-   (L2442-2449, peer-owned on standby becomes `HAInactive`) →
-   `redirect_session_via_fabric_if_needed` (L2450-2455, becomes
-   `FabricRedirect`) → returned as `resolved.decision`.
-2. Redirect REPLACES the resolution: `fabric.rs`
-   `resolve_fabric_redirect_from_list` (L500-525) builds a fresh
-   resolution with `egress_ifindex = fabric.parent_ifindex`. The #326
-   real local egress is unreachable at M2; the issue text's "meaningful
-   live_to_id" exists only pre-redirect.
-3. M2 override, `poll_descriptor/policy_revalidation.rs:738-740` keys on
-   `disposition == FabricRedirect` alone and wins at L754, substituting
-   recorded `metadata.egress_zone` for the live to-zone.
-4. Permit stamps the LIVE gen at two sites: forward arm L432-433 and
-   reverse arm L662-663, via `SessionTable::mark_policy_revalidated`
-   (`session/mod.rs:1838-1846`, writes `self.policy_revalidation_gen`).
-5. Promotion preserves the stamp: `refresh_for_ha_transition`
-   (`session/mod.rs:2936-3006`) rewrites decision/metadata/last_seen/
-   `first_held_ns`/`seen_rg_epoch` and touches NO revalidation field.
-   `update_session` (`mod.rs:2622-2873`, the unified refresh/promote
-   funnel) likewise never writes `policy_revalidated_gen` (grep-confirmed:
-   only writers are the two `install.rs` init-to-0 sites plus the stamp).
-6. M2 receives the post-redirect decision: `poll_descriptor/mod.rs:1246`
-   passes `resolved.decision` (no enforce/redirect happens between resolve
-   and M2 in the hit arm).
+The invariant must hold for every session origin, forward and reverse hits,
+known and unknown owner RG, command-applied and command-backlogged states,
+lease expiry/renewal, and shared-map materialization. A FabricPuntSeed's
+separate purpose (preserving a peer return while the flow remains a fabric
+redirect) must survive, but seed survival is not authorization for a changed
+local egress.
 
-Second promotion path with the same hole (hit-driven): `maybe_promote_synced_session`
-(`session_glue/promote.rs:71-162`, requires `ForwardCandidate`) funnels into
-`promote_synced_with_origin` → `update_session` (stamp preserved), and the SAME
-packet's M2 then sees `Fresh` and skips live re-judgment.
+## 2. STEP-0 evidence and source chain
 
-## 3. Blast radius (measured)
+The issue is live at `5049e78c9`. Pin `b71c52d6` is an ancestor. No merged PR
+references #10507 (`git log --all --grep=10507` was empty; the merged-PR search
+for FabricRedirect, recorded-egress, and revalidation returned only unrelated
+work). The GitHub issue is OPEN and has zero comments.
 
-- `FabricRedirect`: 45 files / 158 hits under `userspace-dp/src`.
-- M2 judgment: `poll_descriptor/policy_revalidation.rs` (1143 lines) + 4 files
-  referencing the policy-revalidation fns (`session/mod.rs`,
-  `session/policy_revalidation_8356_tests.rs`,
-  `afxdp/tests_policy_revocation_8356.rs`).
-- Stamp writers: 2 `install.rs` init sites + 1 stamp fn + 2 M2 call sites.
-  Stamp readers: `policy_revalidation_target` only (receiver-local, no wire
-  field per `session/README.md` — no `ProtocolVersion` bump for any fix here).
-- Transition funnels (production callers): `update_session` ←
-  `promote_synced_with_origin` ← `maybe_promote_synced_session` (1 site);
-  `refresh_for_ha_transition` ← `refresh_owner_rgs.rs:67` (activation) +
-  `demote_owner_rgs.rs:111` (demotion). `refresh_for_ha_activation` has NO
-  production callers (tests only).
-- Test surface that must stay green / gets new cells:
-  `tests_policy_revocation_8356`, `policy_revalidation_8356_tests`,
-  `ha_tests`, `tests_fabric_zone_stamp`, `session/tests.rs` (incl. the
-  `reference_refresh_for_ha_transition` differential double at L4897, which
-  MUST mirror any production change to the refresh per the #9856 precedent).
-- Guards that must NOT regress: #7770 punt-seed override (seed entries store
-  post-redirect transport egress; judging transport revokes them),
-  #9513 no-revoke of the standby population on lookup failure,
-  #9604 reverse-companion recorded-from handling.
+The complete chain was re-read from SOURCE:
 
-## 4. Options
+1. `userspace-dp/src/afxdp/session_glue/mod.rs:2403-2431` re-resolves a
+   session hit using local FIB information, including the #326 synced-session
+   path. `:2442-2449` applies HA ownership. On standby, a peer-owned live
+   candidate becomes `HAInactive`; `:2450-2455` calls
+   `redirect_session_via_fabric_if_needed`, returning `FabricRedirect`.
+2. `userspace-dp/src/afxdp/forwarding/fabric.rs:500-525` constructs a fresh
+   redirect resolution whose egress is the fabric parent. This intentionally
+   replaces the useful pre-redirect local egress in the decision presented to
+   M2.
+3. `userspace-dp/src/afxdp/poll_descriptor/policy_revalidation.rs:738-740`
+   keys `to_zone_override` on `disposition == FabricRedirect` alone; `:754`
+   lets recorded `metadata.egress_zone` override the live to-zone.
+4. The forward and reverse Permit exits at `:432-433` and `:662-663` call
+   `SessionTable::mark_policy_revalidated`, which writes the live generation
+   at `session/mod.rs:1838-1846`.
+5. `session/mod.rs:2936-3006` (`refresh_for_ha_transition`) rewrites
+   decision, metadata, liveness, and hold fields but no policy revalidation
+   provenance. `update_session` (`:2622-2873`) likewise does not change the
+   policy stamp. The current production reach of `update_session` is the
+   peer-to-local promote funnel; refresh-local and refresh-for-activation
+   wrappers are test-only callers. Ordinary hit liveness uses `lookup.rs`.
+6. `poll_descriptor/mod.rs:1246` invokes M2 with the resolved post-redirect
+   decision, so the packet path currently has no recorded-vs-live fence before
+   the `Fresh` early return.
+7. A second hole is reverse-first: `policy_revalidation.rs:547-674` loads the
+   stored forward companion, but the existing Permit stamps only the reverse
+   target (`:663`). Clearing or promoting that reverse row does not make the
+   stored forward companion's recorded egress current.
+8. `SessionOrigin` has ten variants in `session/entry.rs:402-440`:
+   `ForwardFlow`, `ReverseFlow`, `LocalMiss`, `MissingNeighborSeed`,
+   `FabricPuntSeed`, `SyncImport`, `SharedMaterialize`, `SharedPromote`,
+   `WorkerLocalImport`, and `TunOrigin`. `is_peer_synced` includes
+   `SyncImport`, `SharedMaterialize`, and `WorkerLocalImport` (`:466-474`),
+   while only the first two are promotable (`:484-486`). Any fix that relies
+   only on promotion misses WorkerLocalImport.
+9. HA publication stores new runtime state before worker commands in
+   `afxdp/ha/state.rs:80-150,200-249`. Workers load runtime before applying a
+   bounded command batch (`worker/loop_body/mod.rs:1031-1072,1382-1415`). The
+   command queue is capped at 4096 and drains at most 256 per pass
+   (`worker_queue.rs:80,528-580,593-623`), so packets can arrive between
+   state publication and Demote/Refresh completion.
+10. Packet-time HA authority includes leases: `types/runtime.rs:469-503`
+    defines `active && lease.active(now_secs)`. `forwarding/ha.rs:263-291`
+    detects transitions using the boolean `active` edge, not a lease expiry
+    followed by active-to-active renewal. Thus lease-only changes cannot rely
+    on an activation command.
+11. Flow-cache RG epoch validation evicts cached descriptors at
+    `afxdp/flow_cache.rs:997-1027`, but it does not invalidate
+    `SessionEntry.policy_revalidated_gen`. The next slow-path packet therefore
+    reaches the insufficient generation-only M2 check, which is exactly where
+    the packet-time provenance fence belongs.
+12. Accepted synced upserts already fail closed: `session/install.rs:424-445`
+    rejects an unauthorized local overwrite, otherwise removes the old entry
+    and constructs a fresh one; `:537-551` sets both filter and policy
+    revalidation to unvalidated, with `policy_revalidated_gen: 0`. Shared
+    materialization calls this reset path at `session_glue/mod.rs:2184-2233`.
+    It does not preserve a receiver stamp. A rejected overwrite preserves the
+    local entry, which is a local-verdict case and is safe.
 
-### Option A (tentative recommendation): invalidate the policy stamp on HA ownership transition
+## 3. Corrected blast radius and census
 
-- A1: in `update_session`'s mutation block, clear
-  `record.entry.policy_revalidated_gen = 0` iff `was_peer_synced &&
-  !origin.is_peer_synced()` (peer→local transition; `was_peer_synced`
-  already computed at L2697). Covers hit-driven promotion through the
-  single unified funnel — present AND future callers — while leaving the
-  per-packet local→local refresh untouched (clearing there would force a
-  cold revalidation per packet: perf catastrophe, explicitly out).
-- A2: in `refresh_for_ha_transition`, clear the stamp unconditionally
-  (both command callers are genuine HA transitions; the fn preserves origin
-  so in-band transition detection is impossible there).
-- Effect: any promotion (command-driven RefreshOwnerRGS or hit-driven
-  maybe_promote) forces exactly one cold live re-judgment on the next hit;
-  Deny revokes without waiting for a publish. All failure directions are
-  fail-closed (extra cold evals only).
-- Costs/notes: already-owned sessions refreshed on UNRELATED activations
-  also re-judge once (bounded, cold, rare — acceptable); demote-side clears
-  are harmless (standby re-stamps a recorded Permit); `SessionOrigin: Copy`
-  must be confirmed for placement after L2720.
+Scope is Rust only: `userspace-dp/src/**/*.rs` contains 45 files and 158
+`FabricRedirect` matches. This is not a count of every file type under `src`.
 
-### Option B: judge standby FabricRedirect hits against the live to-zone
+The M2 production surface is:
 
-Thread the pre-redirect egress (or the stored #326 SyncImport resolution)
-to M2 and discriminate #7770 seeds (origin threading into
-`PolicyJudgmentInput`, both arms). REJECTED as primary: signature churn
-across the hot resolve→M2 path; must not revoke the standby population
-(#9513) or the seeds (#7770); risks sync revoke→re-import churn; any
-mis-discrimination is fail-open (new recorded-as-live population) or
-outage (standby teardown). Larger, riskier, same acceptance.
+- `afxdp/poll_descriptor/policy_revalidation.rs`: cold judgment and the two
+  Permit stamp exits;
+- `afxdp/poll_descriptor/mod.rs`: the one production M2 call site;
+- `session/mod.rs`: stamp storage/read/write helpers and transition mutators;
+- `session/policy_revalidation_8356_tests.rs`;
+- `afxdp/tests_policy_revocation_8356.rs`.
 
-### Option C: separate recorded-verdict stamp (new entry field)
+The four external files referencing the revalidation functions are therefore
+`session/mod.rs`, `session/policy_revalidation_8356_tests.rs`,
+`afxdp/tests_policy_revocation_8356.rs`, and `afxdp/poll_descriptor/mod.rs`.
+`SyncedSessionEntry` has no policy stamp (`afxdp/worker/synced_entry.rs:13-47`),
+so a receiver-local provenance field does not require a wire format or
+ProtocolVersion change.
 
-Robust by construction (recorded judgments can never masquerade), but
-touches the hot `SessionEntry` layout plus all readers/publish paths.
-Heavier than A with no additional acceptance coverage. Revisit only if
-review finds A's site enumeration incomplete.
+Transition census:
 
-## 5. Why A needs plan review (do-not-implement-unreviewed)
+- One production promote funnel: `maybe_promote_synced_session_with_conntrack`
+  (`session_glue/promote.rs:71-162`) calls `promote_synced_with_origin` at
+  `:101`, which calls `update_session`.
+- The resolver invokes that helper for forward hits and for reverse-session
+  installation (`session_glue/mod.rs:2463` and `:2602`); the reverse-install
+  call passes `ReverseFlow` and is a promotion no-op, which is relevant to the
+  reverse-first design.
+- Two production `refresh_for_ha_transition` callers exist:
+  `refresh_owner_rgs.rs:67` and `demote_owner_rgs.rs:111`.
+- `refresh_local` and `refresh_for_ha_activation` are test-only external
+  wrappers; they must remain in differential coverage but are not claimed as
+  packet-path reach.
 
-A is small but its load-bearing claim is SITE COMPLETENESS, and these are
-unresolved at STEP-0 (each a residual fail-open if answered badly):
+## 4. Recommended redesign: packet-time provenance fence
 
-1. `collect_refresh_owner_rgs_items` coverage: is EVERY promotable session
-   (all origins incl. `WorkerLocalImport`/`SharedPromote`/replicas)
-   refreshed on activation? A promotable-but-uncollected session keeps a
-   recorded stamp into local forwarding.
-2. Cross-worker materialization: confirm `materialize_shared_session_hit`
-   installs at gen 0 (shared entries carry no revalidation field) on every
-   worker, and RefreshOwnerRGS fans out per worker.
-3. `upsert_synced` refresh-of-existing-entry: confirm stamp preserve is
-   standby-harmless (recorded pair may be superseded by re-import).
-4. Demote path: `demote_owner_rg` retags local→`SyncImport`, but
-   `refresh_for_ha_transition` is SKIPPED when refreshed disposition is
-   `HAInactive`/`TableUnavailable` (demote_owner_rgs.rs:107-116) — so
-   demote often does NOT clear. Analyzed safe (genuine live-verdict stamp
-   on a copy that now only fabric-forwards to the new owner), but review
-   must concur.
-5. `is_promotable_synced` vs `is_peer_synced` taxonomy: prove no origin can
-   hold a recorded stamp AND become locally-forwarding without passing A1
-   or A2.
-6. Hot-path cost: A1 adds a branch to per-packet `update_session`.
-   Negligible in theory (predictable, mostly-folded); still needs the
-   repo-standard loss-cluster smoke/iperf gate, which this lane cannot run
-   (no cluster commands) — parent validation must cover it.
-7. Adjacent residual (OUT of scope, do not fix here): FIB route flap to a
-   new egress within one config generation also rides a stale live stamp.
-   General #8356 residual, not HA-recorded. Note only.
+### 4.1 Receiver-local stamp provenance
 
-## 6. Regression tests (for the implementing lane)
+Extend the receiver-local policy stamp with a small provenance value, for
+example `PolicyRevalidationKind`:
 
-- Cell 1 (command-driven, mirrors acceptance verbatim): SyncImport session
-  on standby, diverged egress (recorded zone permitted, live zone denied)
-  → forward-hit M2 Permits + stamps → run RefreshOwnerRGS activation →
-  next hit MUST Revoke with NO generation publish. RED pre-fix (M2 skips,
-  forwards).
-- Cell 2 (hit-driven): same setup, RG flips active, promoting packet via
-  `maybe_promote_synced_session` MUST re-judge live on that same packet
-  (Deny/revoke). RED pre-fix.
-- Cell 3 (guard): already-owned live-verdict session survives unrelated-RG
-  activation with at most one extra cold re-judge and NO verdict change
-  (pins A2 over-invalidation as benign).
-- Lock-step: update `reference_refresh_for_ha_transition` alongside A2
-  (differential-test parity, #9856 precedent — not a test-to-pass edit).
-- RED-on-revert firsthand + affected suites green required before PR.
+- `Unvalidated`: constructor/upsert default; generation 0 remains stale;
+- `LiveEgress`: Permit was derived using a current local forwarding egress;
+- `RecordedEgress`: Permit was derived while the current decision was a
+  non-local `FabricRedirect` and therefore used recorded egress by design.
 
-## 7. Verification contract (implementing lane)
+Keep this field local to `SessionEntry`; do not add it to `SyncedSessionEntry`
+or the HA wire. Every constructor and remove-plus-fresh upsert initializes it
+as `Unvalidated`. Change the two Permit exits to pass the kind explicitly.
+`mark_policy_revalidated` must not continue to erase the distinction behind a
+single no-argument API.
 
-- `go`-side untouched; Rust: `cargo test -p userspace-dp` affected suites
-  (session, poll_descriptor, session_glue) green; RED-on-revert demonstrated
-  per cell; rebase on master; PR body `Closes #10507`.
-- Perf: loss-cluster smoke + iperf failover gate for the A1 hot-path branch
-  (parent-run; lane has no cluster access).
-- No wire/format change; no docs beyond the PR body.
+### 4.2 The M2 packet-time gate
 
-## 8. STEP-0 close-out
+Before the existing `Fresh` fast return, evaluate the current packet-time
+resolution and the stamp kind:
 
-- Issue OPEN, body captured, zero comments; live at HEAD (chain above).
-- No production code changed on this path. Next: parent-lane review of
-  this DRAFT, then a MECHANICAL implement lane only if review closes §5.
+1. `LiveEgress + current locally-forwarding resolution` keeps the existing
+   once-per-generation fast path. This does not claim to close the separate
+   same-generation FIB-flap residual.
+2. `RecordedEgress` may short-circuit only while the current resolution is
+   still a non-local fabric redirect. The packet must remain on the fabric
+   redirect path; the recorded Permit never authorizes a local TX.
+3. `RecordedEgress` plus a current `ForwardCandidate` or other locally
+   forwarding candidate is always stale, even when its numeric generation
+   equals the live generation. Run the cold policy walk against the current
+   local egress. A Permit changes the stamp to `LiveEgress`; Deny/Reject
+   revokes the pair before forwarding.
+4. If the current result cannot provide a valid local egress while the caller
+   would otherwise locally forward, fail closed: revoke/drop rather than
+   returning `Decline` and allowing a stale recorded Permit to stand. A
+   current `HAInactive`, `FabricRedirect`, or other non-local result does not
+   authorize local forwarding and keeps the existing standby/seed retention
+   behavior. The existing `egress_ifindex == 0` standby lookup-failure guard
+   remains for the non-local branch; it must not become a local-forward bypass.
+5. `LocalDelivery` remains governed by the existing host-inbound/junos-host
+   path and is not silently converted into a transit zone-pair judgment. The
+   fence must assert that a recorded transit Permit cannot reach local transit
+   forwarding through this arm.
+
+The implementation should expose one helper that answers the combined
+freshness/authority question, rather than sprinkling origin tests beside the
+old generation compare. The helper must receive the packet-time decision (and,
+where needed, current HA resolution) so command completion is not an input.
+The existing M2 call in `poll_descriptor/mod.rs` is the required production
+wiring point.
+
+### 4.3 Reverse-first and reverse-only handling
+
+A reverse hit is authoritative only through its forward companion. When the
+stamp provenance is `RecordedEgress`, the reverse path must obtain the current
+forward resolution before it can promote or reuse a Permit:
+
+- Resolve the stored forward companion with the same local FIB plus HA/lease
+  authority used by the session-hit resolver, not the reverse packet's cached
+  or fabric transport resolution.
+- If the current forward resolution is a valid local forwarding candidate,
+  pass that live forward egress to the policy walk. On Permit, mark the judged
+  forward companion `LiveEgress`; a reverse-row stamp may be synchronized only
+  after that same forward judgment succeeds, but correctness MUST NOT depend on
+  clearing both rows. On Deny/Reject, revoke both sides using the existing
+  pair-aware teardown.
+- If the forward companion is absent, inconsistent, or cannot produce a valid
+  current egress while the packet would be locally forwarded, fail closed; do
+  not return `Decline` and do not promote the reverse row. This is the explicit
+  answer for reverse-only promotion.
+- If the current forward result remains `FabricRedirect`, retain only the
+  non-local seed/redirect behavior. Do not treat that outcome as a local
+  Permit. Fabric return traffic must continue to use the recorded FROM-zone
+  semantics where #7770 requires it.
+
+This makes a reverse packet incapable of clearing only its own stamp while the
+forward companion remains a recorded-egress Permit. The production regression
+must exercise the actual reverse-hit poll path before any eager Refresh command
+is applied.
+
+### 4.4 Gate ordering and ICMP early exits
+
+The provenance/authority fence MUST run immediately after the `flow?` guard
+and before the existing `LocalDelivery` shortcut, reverse dispatch, and
+type-sensitive ICMP exits. The host-inbound/junos-host path remains the
+authority for a genuine `LocalDelivery` result; the transit fence must prove
+that a recorded transit stamp is not being used to authorize that result.
+
+The current forward ICMP guard at `policy_revalidation.rs:351-355` and the
+reverse-companion guard at `:596-600` return `None` before
+`policy_revalidation_target`. That is safe for a `LiveEgress` stamp (the
+existing type-sensitive policy cannot be re-derived without the packet type),
+but it is not safe for `RecordedEgress` after the resolution becomes local.
+The new order is:
+
+1. Inspect stamp provenance and the current packet-time resolution.
+2. If the stamp is `RecordedEgress` and the current result remains
+   `FabricRedirect`/non-local, preserve the existing no-local-authorization
+   behavior; ICMP `Decline` cannot forward locally in this state.
+3. If the current result is locally forwarding, force the live-egress path
+   before the ICMP early exits. When the ICMP verdict may depend on type and
+   this cold helper does not have the type, return `Revoke`/fail closed for a
+   recorded stamp rather than returning `None`. Do not stamp the recorded
+   Permit. For a reverse hit, revoke the pair after the forward-companion
+   check; an absent or unresolvable companion is also fail closed.
+4. A `LiveEgress` stamp keeps the established type-sensitive `Decline`
+   behavior, because that is not a recorded-egress authorization. A
+   `FabricPuntSeed` remains eligible for the explicit non-local seed branch.
+
+Add explicit ICMP cells to the coverage matrix: a recorded forward hit that
+is now locally forwarding must be `Revoke`/drop (or remain non-local), and a
+recorded reverse hit must be pair-fail-closed (or remain non-local). Neither
+may reach the old early `None` path and locally forward.
+
+### 4.5 Defense-in-depth transition resets
+
+Retain the original A1/A2 resets only as defense in depth:
+
+- A1 clears policy provenance on a peer-to-local transition in the production
+  `update_session` promotion funnel. Current production reach is promote-only;
+  this is not a steady-state per-packet branch.
+- A2 clears policy provenance in `refresh_for_ha_transition` for activation and
+  demotion refreshes. The demote `HAInactive`/`TableUnavailable` skip remains
+  a non-forwarding/liveness rule, not the security proof.
+- A1 and A2 must land atomically with the packet-time fence. Either reset alone
+  is insufficient under queue backlog, lease-only transitions, or reverse-first
+  input. The packet-time fence remains correct if commands are delayed, dropped,
+  or never emitted.
+- Harden `collect_refresh_owner_rgs_items` to include every
+  `origin.is_peer_synced()` entry even when `owner_rg_id <= 0` and
+  `fabric_ingress == false`. This closes the known collector omission as
+  defense in depth; it is not a substitute for the packet-time invariant.
+
+
+## 5. Ten-origin coverage table
+
+Legend:
+
+- `LF`: current packet-time resolution is locally forwarding; require a live
+  egress policy walk, then stamp `LiveEgress` on Permit or revoke on Deny.
+- `NR`: current result is non-local redirect/non-forwarding; no recorded Permit
+  is allowed to authorize local forwarding. Preserve redirect only where the
+  origin/path explicitly permits it.
+- `RF`: reverse-first forward-companion fence; resolve and judge the stored
+  forward companion, or fail closed.
+- `SD`: FabricPuntSeed-specific redirect survival; it preserves the peer return
+  only while the flow remains non-local and never authorizes a changed local
+  egress.
+- `TD`: existing TunOrigin/self-origin decline/host semantics; no transit
+  recorded-egress authority.
+- `FC`: fail closed (revoke/drop) when an otherwise-local packet has no valid
+  current forward egress or companion.
+- `IMP`: impossible for a well-formed entry/direction; keep an invariant guard
+  and fail closed if observed.
+
+Columns encode owner-known/unknown (K/U), direction (F/R), and command state
+(A/N = applied/not applied). The fence in each cell is packet-time; A2 command
+completion is never assumed.
+
+| Origin (all ten) | K/F/A | K/F/N | K/R/A | K/R/N | U/F/A | U/F/N | U/R/A | U/R/N |
+|---|---|---|---|---|---|---|---|---|
+| ForwardFlow | LF | LF | RF | RF | LF or FC | LF or FC | RF or FC | RF or FC |
+| ReverseFlow | IMP/FC | IMP/FC | RF/FC | RF/FC | IMP/FC | IMP/FC | RF/FC | RF/FC |
+| LocalMiss | LF | LF | RF | RF | LF or FC | LF or FC | RF or FC | RF or FC |
+| MissingNeighborSeed | LF | LF | RF | RF | LF or FC | LF or FC | RF or FC | RF or FC |
+| FabricPuntSeed | SD or LF | SD or LF | SD/RF | SD/RF | SD or FC | SD or FC | SD/RF or FC | SD/RF or FC |
+| SyncImport | LF | LF | RF | RF | LF or FC | LF or FC | RF or FC | RF or FC |
+| SharedMaterialize | LF | LF | RF | RF | LF or FC | LF or FC | RF or FC | RF or FC |
+| SharedPromote | LF | LF | RF | RF | LF or FC | LF or FC | RF or FC | RF or FC |
+| WorkerLocalImport | LF | LF | RF | RF | LF or FC | LF or FC | RF or FC | RF or FC |
+| TunOrigin | TD | TD | TD | TD | TD | TD | TD | TD |
+
+ICMP overlay for `RecordedEgress` plus a type-dependent policy:
+
+| Hit family | K/F/A | K/F/N | K/R/A | K/R/N | U/F/A | U/F/N | U/R/A | U/R/N |
+|---|---|---|---|---|---|---|---|---|
+| Forward hit | ICMP-FC/NR | ICMP-FC/NR | ICMP-FC/NR | ICMP-FC/NR | ICMP-FC/NR | ICMP-FC/NR | ICMP-FC/NR | ICMP-FC/NR |
+| Reverse hit | ICMP-RF/FC/NR | ICMP-RF/FC/NR | ICMP-RF/FC/NR | ICMP-RF/FC/NR | ICMP-RF/FC/NR | ICMP-RF/FC/NR | ICMP-RF/FC/NR | ICMP-RF/FC/NR |
+
+`ICMP-FC/NR` means a now-local forward hit revokes/drops, while a still
+non-local redirect remains non-authorizing. `ICMP-RF/FC/NR` means a valid
+forward companion is pair-fail-closed when local, an absent/unresolvable
+companion is fail-closed, and a still-non-local redirect remains non-authorizing.
+
+## 6. Corrected review questions and premises
+
+### Q1 — Does activation collection cover every session?
+
+No. `collect_refresh_owner_rgs_items` currently skips
+`owner_rg_id <= 0 && !fabric_ingress` before origin inspection
+(`refresh_owner_rgs.rs:137-140`). Harden it to include all peer-synced rows;
+the packet-time fence still closes the window before a command is applied.
+
+### Q2 — Are cross-worker materialization and fanout sufficient?
+
+Materialization is receiver-local and resets policy validation to generation
+zero through `upsert_synced_with_origin`; `SyncedSessionEntry` carries no policy
+stamp. Refresh fanout reaches live worker queues and records transition debt.
+This proves eventual reset/materialization behavior only, not safety before a
+queued command drains. The packet-time fence closes that stronger requirement.
+
+### Q3 — Does accepted upsert preserve a stamp?
+
+No. That premise was false. Accepted upsert removes and reconstructs the entry,
+initializing `policy_revalidated_gen` to zero. Only a rejected local overwrite
+leaves an existing local entry unchanged, which is a local-verdict case.
+
+### Q4 — Is the skipped demote refresh safe?
+
+Only as a non-forwarding/liveness behavior. A skipped row must not be described
+as carrying a necessarily genuine live verdict. A1/A2 and the packet-time fence
+must land atomically; after a later local candidate appears, LF/RF forces live
+judgment regardless of whether demote/refresh completed.
+
+### Q5 — Is the origin taxonomy airtight?
+
+No, and the fix must not require it to be. The ten variants include three
+peer-synced origins, but only SyncImport and SharedMaterialize are promotable;
+WorkerLocalImport is peer-synced but non-promotable. SharedPromote is local
+post-promotion. TunOrigin is explicitly self-originated and excluded from
+ordinary transit policy. The packet-time provenance fence covers all variants.
+
+### Q6 — Is the hot-path A1 cost claim accurate?
+
+No. Current production `update_session` reach is promotion-only; ordinary
+per-packet liveness uses `session/lookup.rs`. Remove the claim that A1 adds a
+steady-state per-packet branch. A2 may cause bounded cold revalidation after a
+transition. Keep smoke/failover validation as behavioral/performance evidence,
+not as proof of a nonexistent steady-state branch.
+
+### Q7 — Is same-generation FIB flap in scope?
+
+No. A generic stale LIVE-verdict/FIB-change residual remains a separate #8356
+question. The #10507 counterexamples require no FIB change, so this exclusion
+cannot be used to dismiss them.
+
+## 7. Full nine-cell regression matrix
+
+Every security cell must establish a real M2 Permit first, using the actual
+poll path, and assert the observable forwarding or revocation outcome. A test
+that only inspects a cleared field is insufficient. Each security cell gets a
+RED-on-revert run with the packet-time fence reverted. The implementing lane
+must run the full affected test files, not only the expected-to-flip test.
+
+1. **Existing command-driven forward path, hardened.** Standby SyncImport with
+   diverged recorded/live egress: real M2 recorded Permit, then activation
+   Refresh and a next packet without a generation publish. Assert live Deny
+   revokes and no packet forwards. Also run the unchanged-generation hit-driven
+   promotion case and assert the same outcome on the promoting packet. Repeat
+   the forward case with a type-dependent ICMP policy: recorded plus now-local
+   must revoke/drop rather than take the old ICMP `None`/Decline exit.
+2. **Collector skip and inclusion control.** Use owner RG zero with
+   fabric-ingress false and a peer-synced row; prove packet-time LF/FC protects
+   it before Refresh. Pair it with owner RG zero plus fabric-ingress true to pin
+   inclusion in the hardened collector and retain non-local redirect behavior.
+3. **WorkerLocalImport bounded-queue flap.** Keep config generation and FIB
+   fixed. Put transition commands behind at least two 256-command slices; send
+   packets between slices while runtime has changed. A non-promotable
+   WorkerLocalImport must never forward on its recorded Permit. RED on revert.
+4. **Lease expiry and active-to-active renewal.** Let the forwarding lease
+   expire without an active-boolean edge, exercise the recorded standby path,
+   renew active state, and send the first packet after renewal. No activation
+   command may be required for LF/RF to force current policy. RED on revert.
+5. **Applied demote, standby restamp, re-promote, and skipped refresh.** Cover
+   applied demotion followed by a standby recorded Permit and re-promotion;
+   verify A1/A2 clear only as defense while PF supplies authority. Separately
+   cover HAInactive and TableUnavailable refresh skips and assert no local
+   forwarding from their stale recorded stamps. RED on revert.
+6. **Reverse-first/reverse-only promotion.** Store a FabricRedirect forward
+   companion with recorded Permit, switch HA state, and deliver a production
+   reverse hit before Refresh is applied. Resolve the current forward egress;
+   assert live Deny revokes both entries and the reverse packet is not forwarded.
+   If the companion cannot resolve, assert fail-closed rather than Decline.
+   Repeat with a type-dependent ICMP policy: recorded plus now-local must
+   pair-fail-closed before the reverse ICMP `None`/Decline exit. RED on revert.
+7. **FabricPuntSeed and standby lookup-failure guards.** A permitted
+   FabricPuntSeed must continue to admit the peer return while it remains a
+   fabric redirect, across activation/flap transitions, with asserts that no
+   recorded transport Permit authorizes local forwarding. Preserve the
+   `egress_ifindex == 0` standby retention/no-revoke behavior. RED on revert for
+   any accidental local-forward path.
+8. **Shared materialization/re-import.** After a recorded Permit, materialize
+   and accepted-reimport the shared row on another worker. Assert its policy
+   stamp/provenance starts unvalidated and the first packet gets a live policy
+   result. Include a rejected local overwrite control showing local state is not
+   clobbered. RED on revert if a remote stamp is trusted.
+9. **Already-owned unrelated activation.** A locally-owned live Permit survives
+   an unrelated RG activation with stable forwarding/revocation behavior. A2
+   may cause one cold re-judge, but the test asserts the observable verdict,
+   not an implementation field. RED is not expected for this guard-only cell.
+
+Lock-step test doubles:
+
+- `reference_refresh_for_ha_transition` must mirror any A2 stamp/provenance
+  semantics.
+- `reference_update_session` must mirror A1 promotion semantics.
+- Extend `entries_equiv` to compare policy generation and provenance; current
+  equality checks omit `policy_revalidated_gen`, so differential parity alone
+  cannot establish this security property.
+
+## 8. Verification and implementation contract
+
+Production implementation must remain Rust-only and issue-scoped. Use the
+actual package name and manifest:
+
+`cargo test --manifest-path userspace-dp/Cargo.toml -p xpf-userspace-dp`
+
+Run the complete affected test files/modules, including session policy stamp
+lifecycle, real poll-descriptor revocation, HA queue/transition tests, and
+FabricPuntSeed tests. Do not run only the expected-to-flip cell. Demonstrate
+RED-on-revert for the security cells using the same real-M2 tests. Run the
+behavioral HA smoke/failover validation required by the parent lane; the lane
+must not claim it proves a steady-state A1 branch.
+
+No Go code, wire-format field, ProtocolVersion bump, cluster/incus command, or
+external provider API is required by this design. No PR is opened on the
+DESIGN path. Parent/next lane performs delta review before any production edit.
+
+## 9. STEP-0 and review close-out
+
+- Issue #10507 is OPEN with zero comments.
+- The source chain and all matching stamp/transition sites were searched at
+  `5049e78c9`; the rs-only blast count is 45 files / 158 matches.
+- PlanA and PlanB both found v1 PLAN-NEEDS-MAJOR; their blocking counterexamples
+  are now addressed by the packet-time provenance fence, reverse-companion
+  live-resolution requirement, exhaustive origin/owner/direction/command table,
+  corrected upsert/reachability/package premises, and nine-cell matrix.
+- No production code is changed. This DRAFT v2 is ready for delta re-review,
+  not for mechanical implementation without approval.
