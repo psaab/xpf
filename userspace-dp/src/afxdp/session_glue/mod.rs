@@ -1292,39 +1292,31 @@ pub(super) fn apply_worker_commands(
                                     .push("unsupported-address-family".to_string());
                                 return;
                             };
-                            let Some((companion_key, companion_metadata, companion_id)) =
+                            if let Some((companion_key, companion_metadata, companion_id)) =
                                 sessions.policy_companion(key, decision.nat)
-                            else {
-                                errors
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                    .push(format!(
-                                        "companion-missing:{}:{}",
-                                        key.src_ip, key.dst_ip
-                                    ));
-                                return;
-                            };
-                            if companion_id == 0 {
-                                errors
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                    .push(format!(
-                                        "companion-identity-missing:{}:{}",
-                                        key.src_ip, key.dst_ip
-                                    ));
-                                return;
+                            {
+                                if companion_id == 0 {
+                                    errors
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .push(format!(
+                                            "companion-identity-missing:{}:{}",
+                                            key.src_ip, key.dst_ip
+                                        ));
+                                    return;
+                                }
+                                row.reverse_key =
+                                    crate::afxdp::ha::policy_tuple_from_key(&companion_key);
+                                if row.reverse_key.is_none() {
+                                    errors
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .push("unsupported-companion-family".to_string());
+                                    return;
+                                }
+                                row.companion_policy_id = companion_metadata.policy_id;
+                                row.expected_companion_rt_flow_session_id = companion_id;
                             }
-                            row.reverse_key =
-                                crate::afxdp::ha::policy_tuple_from_key(&companion_key);
-                            if row.reverse_key.is_none() {
-                                errors
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                    .push("unsupported-companion-family".to_string());
-                                return;
-                            }
-                            row.companion_policy_id = companion_metadata.policy_id;
-                            row.expected_companion_rt_flow_session_id = companion_id;
                             matches
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())

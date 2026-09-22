@@ -484,18 +484,20 @@ impl SessionDomain {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<(u8, u32, u8, String, u16, String, u16, u64, u64)> =
+            HashSet::new();
         rows.retain(|row| {
-            let key = format!(
-                "{}:{}:{}:{}:{}:{}",
+            seen.insert((
                 row.addr_family,
-                row.tuple.src_ip,
+                row.routing_domain,
+                row.tuple.protocol,
+                row.tuple.src_ip.clone(),
                 row.tuple.src_port,
-                row.tuple.dst_ip,
+                row.tuple.dst_ip.clone(),
                 row.tuple.dst_port,
-                row.expected_rt_flow_session_id
-            );
-            seen.insert(key)
+                row.tuple.tunnel_discriminator,
+                row.expected_rt_flow_session_id,
+            ))
         });
         let mut all_errors = errors
             .lock()
