@@ -14,17 +14,17 @@ package cluster
 // may lose the real secret"), and its security consequence was simply never
 // followed through.
 //
-// The exposure is circular. Session-sync authentication is fixed PER
-// CONNECTION at handshake time (`performSyncHandshake` returns immediately
-// when this node holds no key), and committing a key does NOT restart cluster
-// comms — the restart decision compares `clusterTransportKey`, which excludes
-// the auth key, pinned by TestAuthKeyChangeDoesNotRestartClusterComms_5078.
-// So the connection that carries the PSK to the peer is, by construction, the
-// one that was handshaked while BOTH ends were unkeyed: neither authenticated
-// nor confidential. A passive observer on the control segment learns the key
-// AT THE MOMENT IT IS INTRODUCED, and every subsequent HMAC on that link —
-// heartbeat, fabric gRPC bearer token, session-sync frame MAC — is forgeable
-// by them. The rollout defeats itself on first use.
+// The exposure is circular. Before the key is introduced, session-sync has no
+// local key, so `performSyncHandshake` leaves the connection unauthenticated,
+// and committing a key does NOT restart cluster comms — the restart decision
+// compares `clusterTransportKey`, which excludes the auth key, pinned by
+// TestAuthKeyChangeDoesNotRestartClusterComms_5078. The config-sync message
+// that carries the PSK therefore crosses while that established connection is
+// still unauthenticated. #6628 may promote it in place when the peer answers,
+// but that promotion happens only after the introducing payload crossed. A
+// passive observer on the control segment learns the key AT THE MOMENT IT IS
+// INTRODUCED, and can then forge the HMACs used by heartbeat, fabric gRPC and
+// session-sync. The rollout defeats itself on first use.
 //
 // WHAT THIS CLOSES, AND WHAT IT DOES NOT.
 //
@@ -58,9 +58,9 @@ package cluster
 //   - TestAuthKeyChangeDoesNotRestartClusterComms_5078 pins the opposite of
 //     #6628's fix, because the established connection "must carry the key to
 //     the read-only secondary".
-//   - sync_auth.go's syncAuthDecision comment records that an RG0 secondary
-//     with the read-only gate armed returns ErrClusterReadOnly, so config-sync
-//     is that node's ONLY writer.
+//   - The session-sync rollout guidance records that an RG0 secondary with the
+//     read-only gate armed returns ErrClusterReadOnly, so config-sync is that
+//     node's ONLY writer.
 //
 // `Store.SyncApply` promotes the received tree WHOLESALE and its compile is
 // lenient (`compileTreeLenient` -> `lenientClusterAuthKey`), so #6611's

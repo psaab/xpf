@@ -768,11 +768,10 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // trailer, including the peer's first contact; no process-lifetime auth flag
 // is needed to arm heartbeat enforcement.
 //
-// It does NOT track the session-sync channel. #5078 removed peerAuthSeen from
-// syncAuthDecision, so sync admission no longer consults the sticky flag this
-// string was previously built from. The session-sync residual is called out
-// separately below when a provider reports an established connection that
-// predates keying.
+// It does NOT track the session-sync channel. Session-sync admission is
+// connection-scoped: performSyncHandshake requires the keyed peer to complete
+// the Noise exchange, while the residual below covers an established
+// connection that predates keying.
 //
 // #9717: the line used to stop there. It read "unauthenticated frames rejected"
 // while a session-sync connection established BEFORE the key could still be

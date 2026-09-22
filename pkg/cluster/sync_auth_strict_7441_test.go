@@ -227,18 +227,18 @@ func TestReconcileEvictsWhenTheGraceHasAlreadyElapsed7441(t *testing.T) {
 // executable claim, the constraint #5078 named first: the window must bound a
 // connection's LIFETIME, not its admission.
 //
-// The fixture never runs an accept path. The connection is already established
-// and was admitted while this node was unkeyed — syncAuthDecision let it in
-// because keyConfigured was false at the time. The key arrives afterwards, and
-// the eviction still reaches it. An admission-time check cannot: by the time
+// The fixture never runs an accept path. It builds an ESTABLISHED,
+// unauthenticated connection before enforcement; the key arrives afterwards,
+// and eviction still reaches it. An admission-time check cannot: by the time
 // the key exists there is no admission left to gate.
 func TestEvictionActsOnAnEstablishedConnectionNotAnAdmission7441(t *testing.T) {
-	// Admitted while unkeyed: this is what syncAuthDecision does with no key.
-	if _, accept, _ := syncAuthDecision(false, false, false, false); !accept {
-		t.Fatal("syncAuthDecision no longer admits an unkeyed peer on an unkeyed node; " +
-			"the premise of this fixture — a stream admitted BEFORE the key — is gone")
-	}
 	e := strictEnd(t, "control-link-psk", true, true) // key committed afterwards
+	if !connStillInstalled(e) {
+		t.Fatal("fixture did not install an established connection")
+	}
+	if len(e.ac.authPSK) != 0 {
+		t.Fatal("fixture connection is already authenticated; it is not the population #7441 evicts")
+	}
 	if n := e.s.enforceStrictSessionAuth(); n != 1 {
 		t.Fatalf("evicted %d, want 1: the rule did not reach a connection that was already "+
 			"established when the key was committed, which is the only population #7441 "+
