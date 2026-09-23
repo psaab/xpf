@@ -174,3 +174,74 @@ func queuedMessageTypeForTesting(msg []byte) string {
 	}
 	return "other"
 }
+
+// SetScopedPolicyDeleteCapableForTesting arms learned capability state
+// for the current peer incarnation without a wire round trip: nonzero
+// snapshot protocol (learned) plus a realistic modern flag set, with
+// the scoped bit iff capable. Lets daemon HA cells drive the
+// scoped/bare close routing (#10512 P1).
+func (s *SessionSync) SetScopedPolicyDeleteCapableForTesting(capable bool) {
+	s.peerSnapshotProtocol.Store(1)
+	flags := uint32(capFlagFenceAck | capFlagPeerDeleteOwnership |
+		capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity)
+	if capable {
+		flags |= uint32(capFlagScopedPolicyDelete)
+	}
+	s.peerCapabilityFlags.Store(flags)
+}
+
+// ScopedDeleteJournalEntryForTesting returns the newest journaled scoped
+// v4 delete's (domain, expectedID) for key, parsing the same scoped wire
+// payload used by the reader.
+func (s *SessionSync) ScopedDeleteJournalEntryForTesting(key dataplane.SessionKey) (uint32, uint64, bool) {
+	s.deleteJournalMu.Lock()
+	defer s.deleteJournalMu.Unlock()
+	for i := len(s.scopedDeleteJournal) - 1; i >= 0; i-- {
+		raw := s.scopedDeleteJournal[i]
+		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV4 {
+			continue
+		}
+		got, _, _, domain, expectedID, scoped, ok := parseDeleteV4Wire(raw[syncHeaderSize:])
+		if ok && scoped && got == key {
+			return domain, expectedID, true
+		}
+	}
+	return 0, 0, false
+}
+
+// ScopedDeleteJournalEntryV6ForTesting is the IPv6 twin of
+// ScopedDeleteJournalEntryForTesting.
+func (s *SessionSync) ScopedDeleteJournalEntryV6ForTesting(key dataplane.SessionKeyV6) (uint32, uint64, bool) {
+	s.deleteJournalMu.Lock()
+	defer s.deleteJournalMu.Unlock()
+	for i := len(s.scopedDeleteJournal) - 1; i >= 0; i-- {
+		raw := s.scopedDeleteJournal[i]
+		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV6 {
+			continue
+		}
+		got, _, _, domain, expectedID, scoped, ok := parseDeleteV6Wire(raw[syncHeaderSize:])
+		if ok && scoped && got == key {
+			return domain, expectedID, true
+		}
+	}
+	return 0, 0, false
+}
+
+// DeleteJournalGenerationV6ForTesting returns the newest journaled v6
+// delete generation for key (bare journal; the V6 twin of
+// DeleteJournalGenerationV4ForTesting).
+func (s *SessionSync) DeleteJournalGenerationV6ForTesting(key dataplane.SessionKeyV6) (uint64, bool) {
+	s.deleteJournalMu.Lock()
+	defer s.deleteJournalMu.Unlock()
+	for i := len(s.deleteJournal) - 1; i >= 0; i-- {
+		raw := s.deleteJournal[i]
+		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV6 {
+			continue
+		}
+		got, gen, _, _, _, _, ok := parseDeleteV6Wire(raw[syncHeaderSize:])
+		if ok && got == key {
+			return gen, true
+		}
+	}
+	return 0, false
+}
