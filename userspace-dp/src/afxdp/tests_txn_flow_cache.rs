@@ -1779,7 +1779,12 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
-            ingress_ifindex: 0,
+            // #10628: stamp the OBSERVED LAN ingress (reth1.0, ifindex 24) like
+            // the miss path does. A ForwardFlow forward with (0,0) is
+            // fixture-only: the healed reply-2 hit resolves its from-zone LIVE
+            // from this identity, and (0,0) Declines fail-closed into a pair
+            // revocation on the Stale arm (len 0 instead of 2).
+            ingress_ifindex: 24,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
             fabric_ingress: false,
@@ -1853,6 +1858,13 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
     );
     assert_eq!(batch2.session_creates, 1);
     assert_eq!(dbg2.tx, 1, "self-healed reply forwards as well");
+    assert_eq!(
+        dbg2.policy_revoked_sessions, 0,
+        "the healed hit must PERMIT via the live from-zone, not Decline \
+         fail-closed into a pair revocation (pre-fix: 1, len 0; #10628)"
+    );
+    assert_eq!(sessions.admission_refused(), 0);
+    assert_eq!(sessions.install_partial(), 0);
 }
 
 
