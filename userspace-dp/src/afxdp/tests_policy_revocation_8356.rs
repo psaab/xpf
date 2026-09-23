@@ -4279,6 +4279,12 @@ fn same_generation_reverse_then_forward_kept_9604() {
         "hit-only stamping writes NO forward stamp from the reverse path — a \
          dual-stamp would read Fresh here (#9604)"
     );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&fwd_key),
+        crate::session::PolicyRevalidationKind::Unvalidated,
+        "hit-only stamping writes NO forward provenance either — a dual-stamp \
+         would stamp a kind here (#10507 Delta1 SHOULD)"
+    );
     let mut binding_fwd = binding_for_9604(LAN_IFINDEX, "reth1.0");
     let frame_fwd = build_txn_tcp_syn_frame_v4(
         SRC,
@@ -4921,5 +4927,2038 @@ fn a_revoked_session_bumps_the_release_visible_live_atomic_10021() {
         session_count(&sessions),
         0,
         "the session must be torn down, not merely counted"
+    );
+}
+
+/// #10507 Cell 1 helper: an inactive owner RG (standby). Mirrors the
+/// per-file `inactive_ha_runtime` helpers elsewhere — each test module owns
+/// its own copy.
+fn inactive_rg_10507(watchdog_timestamp: u64) -> HAGroupRuntime {
+    HAGroupRuntime {
+        active: false,
+        watchdog_timestamp,
+        lease: crate::afxdp::HAForwardingLease::Inactive,
+    }
+}
+
+/// #10507 Cell 1 forwarding: fabric (for standby FabricRedirect) + DMZ
+/// (for diverged live egress) + lan -> wan Permit (inherited from the NAT
+/// base). Generation 7 throughout — no publish between phases.
+fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.zones.push(crate::ZoneSnapshot {
+        name: "dmz".to_string(),
+        id: TEST_DMZ_ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        redundancy_group: 1,
+        hardware_addr: "02:bf:72:02:00:01".to_string(),
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "203.0.113.1/24".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        family: "inet".to_string(),
+        ip: "203.0.113.2".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+    });
+
+    // The test destination itself is on-link (same /24 as the DMZ
+    // interface address), so live resolution ARPs for .5 directly. Without
+    // this neighbor the live lookup is MissingNeighbor and the synced-hit
+    // stored fallback reuses WAN — hiding the DMZ divergence the cell must
+    // expose. Seeding .5 keeps the live path a valid ForwardCandidate.
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        family: "inet".to_string(),
+        ip: "203.0.113.5".to_string(),
+        mac: "00:aa:bb:cc:dd:05".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    });
+    build_forwarding_state(&snapshot)
+}
+
+/// #10507 Cell 1: the test flow's destination routes via DMZ (live), while
+/// the peer recorded WAN. Same policy (lan -> wan Permit, default deny)
+/// throughout — divergence is recorded-vs-live egress, not policy edits.
+const DMZ_DST_10507: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 5);
+
+/// #10507 Cell 1 helper: peer-recorded WAN resolution for the SyncImport
+/// install. Stored only for lookup; packet-time re-resolution (standby HA
+/// + fabric) produces the FabricRedirect M2 judges.
+fn syncimport_wan_decision_10507() -> SessionDecision {
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: WAN_IFINDEX,
+        tx_ifindex: WAN_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 80,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+}
+
+/// #10507 Cell 1 helper: recorded peer identity — lan -> wan, no
+/// locally-authored ingress identity, owner RG 1 (the flow's RG).
+fn syncimport_recorded_metadata_10507() -> SessionMetadata {
+    let mut md = metadata(false);
+    md.ingress_ifindex = 0;
+    md.owner_rg_id = 1;
+    md
+}
+
+/// #10507 Cell 1 helper: live DMZ resolution after promotion (valid egress
+/// + neighbor, so an unwired fence would FORWARD here — tx RED).
+fn live_dmz_decision_10507() -> SessionDecision {
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: DMZ_IFINDEX,
+        tx_ifindex: DMZ_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0x05]),
+        src_mac: Some(REVOCATION_DMZ_MAC),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+}
+
+/// #10507 Cell 1 helper: live metadata after promotion — lan -> dmz via
+/// the now-local LAN arrival.
+fn live_dmz_metadata_10507() -> SessionMetadata {
+    let mut md = metadata(false);
+    md.egress_zone = TEST_DMZ_ZONE_ID;
+    md.owner_rg_id = 1;
+    md
+}
+
+/// #10507 Cell 1 (forward, command-driven): standby SyncImport earns a real
+/// M2 recorded Permit THROUGH POLL (standby HA + fabric → FabricRedirect,
+/// recorded lan -> wan Permits, packet punts to fabric — observable
+/// non-local, never a local TX). Then activation Refresh lands without a
+/// generation publish, and the next packet — now locally forwarding via
+/// DMZ — must be revoked by the live lan -> dmz Deny through POLL.
+///
+/// RED-on-revert: with the fence reverted, phase 3 coasts on Fresh and
+/// forwards via DMZ (tx 1, revoked 0). Phase 1 passes in both (setup).
+#[test]
+fn recorded_permit_revoked_after_activation_refresh_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the standby session"
+    );
+    // Phase 1: standby recorded Permit THROUGH POLL. RG 1 (flow owner)
+    // inactive → peer-owned → FabricRedirect; recorded lan -> wan Permits.
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the standby session");
+    assert_eq!(
+        dbg1.policy_revoked_sessions, 0,
+        "phase 1: recorded lan -> wan Permits, nothing revoked"
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(), 1,
+        "phase 1: standby must punt to fabric (observable non-local)"
+    );
+    // NOTE: no `tx == 0` assert here — `tx` counts the fabric punt TX once
+    // flushed, so a punted redirect reports tx 1. Non-locality is proved by
+    // the scratch punt above plus the Recorded (not Live) stamp below: a
+    // locally-forwarded packet would stamp Live, never Recorded.
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        crate::session::PolicyRevalidationTarget::Fresh,
+        "phase 1: the recorded Permit must stamp Fresh"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1: a FabricRedirect Permit must stamp Recorded"
+    );
+    // Phase 2: activation Refresh (no generation publish). A2 revokes
+    // provenance; the numeric generation stays Fresh.
+    assert!(
+        sessions.refresh_for_ha_transition(
+            &key,
+            live_dmz_decision_10507(),
+            live_dmz_metadata_10507(),
+            123_000_000_000,
+        ),
+        "fixture: the activation Refresh must apply"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::Unvalidated,
+        "A2 must revoke provenance on activation refresh"
+    );
+    // Phase 3: promotion packet THROUGH POLL (RG 1 now active, locally
+    // forwarding via DMZ). Fresh binding: phase 1's cached FabricRedirect
+    // must not shield this packet from M2 (production bumps the RG epoch
+    // on flip, invalidating it; the harness holds the epoch fixed, so a
+    // reused binding would cache-hit and skip revalidation entirely).
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "phase 3 must HIT the promoted session");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "phase 3: live lan -> dmz Deny must revoke the recorded Permit (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "phase 3: the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 1 (forward, hit-driven promotion): same poll-path recorded
+/// setup, but NO Refresh command — the promoting packet itself (active HA,
+/// locally forwarding via DMZ) triggers A1 plus the fence and revokes on
+/// the live Deny. Command completion is never assumed.
+#[test]
+fn recorded_permit_revoked_on_promoting_packet_without_refresh_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the standby session"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp Recorded"
+    );
+    // NO Refresh: promote straight through poll (active HA) on a fresh
+    // binding. A1 resets provenance on peer-to-local promote; packet-time
+    // is the stored WAN fallback, so M2 Permits lan -> wan and stamps
+    // Live — correctly judging what it was given, not the invisible DMZ.
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "promoting packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "hit-driven promotion without Refresh must revoke on live Deny (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 1 ICMP helper: an ICMP flow key toward the DMZ divergence
+/// destination (echo identifier as ports, like `icmp_flow_key`).
+fn icmp_flow_key_to_10507(dst: Ipv4Addr) -> crate::session::SessionKey {
+    crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        src_ip: IpAddr::V4(SRC),
+        dst_ip: IpAddr::V4(dst),
+        src_port: ICMP_ID,
+        dst_port: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    }
+}
+
+/// #10507 Cell 1 ICMP helper: the armed generation — same fabric+DMZ FIB
+/// as the base helper plus one box-wide junos-ping Permit (arming the
+/// ICMPv4 type predicate), published as generation 8.
+fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.generation = 8;
+    snapshot.fib_generation = 9;
+    snapshot.zones.push(crate::ZoneSnapshot {
+        name: "dmz".to_string(),
+        id: TEST_DMZ_ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        redundancy_group: 1,
+        hardware_addr: "02:bf:72:02:00:01".to_string(),
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "203.0.113.1/24".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        family: "inet".to_string(),
+        ip: "203.0.113.2".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        family: "inet".to_string(),
+        ip: "203.0.113.5".to_string(),
+        mac: "00:aa:bb:cc:dd:05".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    });
+    snapshot.policies.push(junos_ping_permit());
+    build_forwarding_state(&snapshot)
+}
+
+/// #10507 Cell 1 (forward ICMP): recorded + now-local + type-armed must
+/// revoke, never take the old ICMP `None`/Decline exit. Phase 1 earns a
+/// recorded ICMP Permit through poll (standby, unarmed generation 7 —
+/// `allow-all any` matches echo without a type constraint). A generation
+/// publish then arms the box-wide junos-ping predicate (generation 8) and
+/// the promoting packet (active HA, live DMZ) must fail closed at the
+/// type guard instead of declining.
+///
+/// RED-on-revert: without the fence, the stale recorded row takes the
+/// type-armed Decline and survives (revoked 0). The fence revokes (1).
+/// Option-A resolution (LANDED): Fresh-only A1 preserves Stale Recorded
+/// through the transition, so the promoting packet fails closed here.
+/// An unconditional reset would launder Stale Recorded into the #8618
+/// carve-out (Decline-and-stand) — the Cell-1c RED that forced Option A;
+/// see plan §4.5 and the A1/A2 boundary pins.
+#[test]
+fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
+    let forwarding7 = forwarding_with_fabric_dmz_10507();
+    let key = icmp_flow_key_to_10507(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_ICMP,
+            0,
+            true,
+        ),
+        "fixture must import the standby ICMP session"
+    );
+    assert!(
+        !forwarding7.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "fixture: generation 7 must leave the ICMP predicate unarmed, or \
+         phase 1 declines instead of permitting"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_icmp_echo_frame_v4(
+        SRC, DMZ_DST_10507, 64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding7, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the standby session");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp Recorded"
+    );
+    // Publish generation 8 (arms ICMP) with NO Refresh — the row goes
+    // Stale Recorded. Fresh-only A1 preserves the recorded fence through
+    // the promoting packet's transition (Option A, landed); revocation
+    // below proves it fails closed instead of Declining.
+    let forwarding8 = forwarding_with_fabric_dmz_armed_10507();
+    assert!(
+        forwarding8.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "fixture: generation 8 must arm the ICMP predicate"
+    );
+    sessions.set_policy_revalidation_gen(8);
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_icmp_echo_frame_v4(
+        SRC, DMZ_DST_10507, 64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let mut meta3 = txn_meta_v4(LAN_IFINDEX as u32, 0, frame3.len() as u16);
+    meta3.protocol = PROTO_ICMP;
+    meta3.payload_offset = 42;
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding8, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "promoting packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "recorded + now-local + type-armed must revoke, never Decline (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 6 (reverse-first, resolvable companion): the forward half
+/// earns a recorded Permit through poll (standby, FabricRedirect,
+/// recorded lan -> wan). HA flips active with NO Refresh applied, and the
+/// first packet is the REVERSE reply (live DMZ arrival, locally
+/// forwarding). The reverse fence must re-resolve the stored forward
+/// companion through the live FIB+HA snapshot (DMZ, not the recorded
+/// WAN), cold-judge lan -> dmz, and revoke BOTH halves on Deny — never
+/// forward the reply on the stored recorded Permit.
+///
+/// Fixture notes: the reverse half is installed with a LIVE DMZ ingress
+/// zone (not the recorded-swapped WAN) so the live DMZ arrival is Owner
+/// (`arrival_zone == ingress_zone`) and reaches M2 instead of the foreign
+/// Drop arm. The forward/reverse zone mismatch (forward egress WAN vs
+/// reverse ingress DMZ) is the live divergence under test — recorded WAN
+/// vs live DMZ — and the reverse zones never enter the verdict (GATE 1:
+/// judged by the forward companion only). RED-on-revert: without the
+/// fence the reverse coasts on its Stale row or judges the stored WAN and
+/// survives (revoked 0, count 2).
+#[test]
+fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let fwd_key = flow_key_to(DMZ_DST_10507);
+    let rev_key =
+        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            fwd_key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the forward half"
+    );
+    // Reverse half: stored MissingNeighbor LAN (no .102 neighbor in this
+    // snapshot — still would-forward for gate intent), live DMZ ingress
+    // for Owner authority on the live DMZ arrival (see doc above).
+    let rev_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: LAN_IFINDEX,
+        tx_ifindex: LAN_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let mut rev_metadata = metadata(true);
+    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
+    rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    rev_metadata.ingress_ifindex = 0;
+    rev_metadata.owner_rg_id = 1;
+    assert!(
+        sessions.upsert_synced(
+            rev_key.clone(),
+            rev_decision,
+            rev_metadata,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the reverse half"
+    );
+    // Phase 1: forward standby Permit through poll (RG 1 inactive →
+    // FabricRedirect, recorded lan -> wan Permits, stamps forward
+    // Recorded; reverse untouched).
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&fwd_key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp the forward half Recorded"
+    );
+    // Phase 3 (no phase 2 Refresh — reverse-first): the reply arrives
+    // DMZ through poll on a fresh binding (active HA). The fence
+    // re-resolves the forward companion live (DMZ) and revokes the pair
+    // on lan -> dmz Deny.
+    let ha_state = txn_ha_state();
+    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
+    dmz_binding.interface = Arc::<str>::from("reth2.0");
+    let rev_frame = build_txn_tcp_syn_frame_v4(
+        DMZ_DST_10507, SRC, DPORT, SPORT, TCP_ACK,
+        REVOCATION_DMZ_MAC,
+    );
+    let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut dmz_binding, &mut sessions, &forwarding, &ha_state, &rev_frame, rev_meta, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT the session");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "reverse-first with live-Deny forward must revoke the pair (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked reply must not forward");
+    assert_eq!(
+        session_count(&sessions), 0,
+        "pair-aware teardown must delete forward AND reverse"
+    );
+}
+
+
+/// #10507 Cell 6 (reverse ICMP): recorded forward + now-local reverse +
+/// type-armed forward protocol must pair-fail-closed before the reverse
+/// ICMP `None`/Decline exit. Phase 1 earns a forward recorded ICMP Permit
+/// (standby, unarmed gen 7); a publish arms ICMP (gen 8, Stale Recorded
+/// preserved Fresh-only); the reverse reply (active, live DMZ arrival,
+/// locally forwarding) must revoke the pair at the type guard.
+///
+/// RED-on-revert: pre-fence reverse takes the type-armed Decline and both
+/// halves survive (revoked 0, count 2).
+#[test]
+fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
+    let forwarding7 = forwarding_with_fabric_dmz_10507();
+    let fwd_key = icmp_flow_key_to_10507(DMZ_DST_10507);
+    let rev_key =
+        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            fwd_key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_ICMP,
+            0,
+            true,
+        ),
+        "fixture must import the forward ICMP half"
+    );
+    let rev_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: LAN_IFINDEX,
+        tx_ifindex: LAN_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let mut rev_metadata = metadata(true);
+    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
+    rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    rev_metadata.ingress_ifindex = 0;
+    rev_metadata.owner_rg_id = 1;
+    assert!(
+        sessions.upsert_synced(
+            rev_key.clone(),
+            rev_decision,
+            rev_metadata,
+            122_000_000_000,
+            PROTO_ICMP,
+            0,
+            true,
+        ),
+        "fixture must import the reverse ICMP half"
+    );
+    // Phase 1: forward standby ICMP Permit (unarmed gen 7, recorded).
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_icmp_echo_frame_v4(
+        SRC, DMZ_DST_10507, 64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding7, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&fwd_key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp the forward half Recorded"
+    );
+    // Publish gen 8 (arms ICMP). NO Refresh: forward stays Stale Recorded
+    // (Fresh-only A1/A2 preserve it through the later promote); reverse
+    // stays Stale Unvalidated. The reverse reply must pair-fail-closed
+    // at the type guard via the companion (forward non-live + intent).
+    let forwarding8 = forwarding_with_fabric_dmz_armed_10507();
+    sessions.set_policy_revalidation_gen(8);
+    let ha_state = txn_ha_state();
+    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
+    dmz_binding.interface = Arc::<str>::from("reth2.0");
+    let rev_frame = build_icmp_echo_frame_v4(
+        DMZ_DST_10507, SRC, 64,
+        REVOCATION_DMZ_MAC,
+    );
+    let mut rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, 0, rev_frame.len() as u16);
+    rev_meta.protocol = PROTO_ICMP;
+    rev_meta.payload_offset = 42;
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut dmz_binding, &mut sessions, &forwarding8, &ha_state, &rev_frame, rev_meta, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "recorded forward + local reverse + type-armed must pair-fail-closed (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked reply must not forward");
+    assert_eq!(
+        session_count(&sessions), 0,
+        "pair fail-closed must delete forward AND reverse"
+    );
+}
+
+/// #10507 Cell 2 (packet-time): an unknown-owner (RG 0), non-fabric,
+/// peer-synced row is fenced before any Refresh lands. Pre-fix the
+/// collector skipped exactly this shape (`owner <= 0 && !fabric`), so an
+/// activation Refresh never rewrote it; post-fix it is included, but the
+/// packet-time fence (not command completion) is the security proof.
+/// Same DMZ divergence as Cell 1, but owner RG 0 throughout and NO
+/// Refresh — the promoting packet alone must revoke on live Deny.
+///
+/// RED-on-revert: without the fence the Fresh row coasts and forwards
+/// via live DMZ (tx 1, revoked 0).
+#[test]
+fn unknown_owner_peer_synced_fenced_before_refresh_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let mut md = syncimport_recorded_metadata_10507();
+    md.owner_rg_id = 0;
+    md.fabric_ingress = false;
+    assert!(
+        sessions.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            md.clone(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the unknown-owner standby session"
+    );
+    // Phase 1: standby recorded Permit through poll (resolution owner RG
+    // 1 inactive → FabricRedirect; metadata owner 0 is irrelevant to
+    // packet-time HA, which keys off the resolution, not the metadata).
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp Recorded"
+    );
+    // NO Refresh (pre-fix it would never have covered this row anyway):
+    // the promoting packet (active HA, live DMZ) must revoke on Deny.
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "promoting packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "unknown-owner peer-synced must be fenced before Refresh (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 9 GUARD (no RED expected): a locally-owned live Permit
+/// survives an unrelated RG activation with stable observable behavior.
+/// Two flows (owners RG 1 and RG 2, DST 8.8.8.8 via the WAN gateway
+/// neighbor so permitted packets actually forward) earn Live Fresh stamps
+/// through poll; a wider-scan activation Refresh then touches BOTH (A2
+/// resets Fresh → Unvalidated); the next packets cold re-judge once and
+/// re-Permit — no revocation, both keep forwarding. The test asserts the
+/// observable verdict (revoked/tx/count), not the transient kind field.
+#[test]
+fn unrelated_activation_keeps_owned_permits_stable_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let dst98 = Ipv4Addr::new(8, 8, 8, 8);
+    let mut keys = Vec::new();
+    for (owner, sport) in [(1, SPORT), (2, SPORT + 1)] {
+        let mut k = flow_key_to(dst98);
+        k.src_port = sport;
+        let mut md = metadata(false);
+        md.owner_rg_id = owner;
+        assert!(
+            sessions.install_with_protocol_with_origin(
+                k.clone(),
+                decision(WAN_IFINDEX),
+                md,
+                SessionOrigin::ForwardFlow,
+                122_000_000_000,
+                PROTO_TCP,
+                0,
+            ),
+            "fixture must install the RG-{owner} flow"
+        );
+        let frame = build_txn_tcp_syn_frame_v4(
+            SRC, dst98, sport, DPORT, TCP_ACK,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+        let (_batch, dbg) = txn_run_descriptor_checked(
+            &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+        );
+        assert_eq!(dbg.session_hit, 1, "RG-{owner} setup must HIT");
+        assert_eq!(dbg.policy_revoked_sessions, 0, "RG-{owner} setup Permits");
+        keys.push((k, sport));
+    }
+    for (k, _) in &keys {
+        let mut md = metadata(false);
+        md.owner_rg_id = if *k == keys[0].0 { 1 } else { 2 };
+        assert!(
+            sessions.refresh_for_ha_transition(k, decision(WAN_IFINDEX), md, 123_000_000_000),
+            "fixture: Refresh must apply"
+        );
+    }
+    let mut binding2 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding2.interface = Arc::<str>::from("reth1.0");
+    for (k, sport) in &keys {
+        let frame = build_txn_tcp_syn_frame_v4(
+            SRC, dst98, *sport, DPORT, TCP_ACK,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+        let (_batch, dbg) = txn_run_descriptor_checked(
+            &mut binding2, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+        );
+        assert_eq!(dbg.session_hit, 1, "re-judge must HIT ({k:?})");
+        assert_eq!(
+            dbg.policy_revoked_sessions, 0,
+            "an unrelated activation must not revoke owned Permits ({k:?})"
+        );
+        assert_eq!(dbg.tx, 1, "re-permitted packet must forward ({k:?})");
+    }
+    assert_eq!(session_count(&sessions), 2, "both sessions must survive");
+}
+
+/// #10507 Cell 7a (seed, no local auth from transport Permit): a
+/// FabricPuntSeed earns a recorded Permit through poll (standby,
+/// FabricRedirect, recorded lan -> wan, punts — never locally forwards).
+/// Activation Refresh lands (no generation publish) and the next packet —
+/// now locally forwarding via DMZ — must be revoked by live lan -> dmz
+/// Deny. The seed's recorded transport authorization never becomes a
+/// local forwarding authorization. Same DMZ divergence as Cell 1, seed
+/// origin instead of SyncImport.
+///
+/// RED-on-revert: without the fence phase 3 coasts Fresh and forwards
+/// via DMZ (tx 1, revoked 0).
+#[test]
+fn seed_recorded_permit_revoked_after_activation_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let mut md = syncimport_recorded_metadata_10507();
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            md,
+            SessionOrigin::FabricPuntSeed,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "fixture must install the seed session"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the seed");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(), 1,
+        "phase 1: seed must punt (observable non-local)"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp Recorded"
+    );
+    assert!(
+        sessions.refresh_for_ha_transition(
+            &key,
+            live_dmz_decision_10507(),
+            live_dmz_metadata_10507(),
+            123_000_000_000,
+        ),
+        "fixture: Refresh must apply"
+    );
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "phase 3 must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "seed transport Permit must not authorize local forwarding (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 shared helper: the NoRoute snapshot — same generation 7, but
+/// the 203.0.113.5 test flow is truly unroutable (no DMZ/static/default
+/// route covering it, and not on-link: the DMZ interface carries no
+/// addresses). The DMZ zone/interface row stays (arrival resolution +
+/// ledger), so a DMZ arrival still zones correctly while the forward
+/// lookup fails → non-local. FIB generation bumped (FIB-only flap).
+fn forwarding_noroute_10507() -> ForwardingState {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 10;
+    snapshot.zones.push(crate::ZoneSnapshot {
+        name: "dmz".to_string(),
+        id: TEST_DMZ_ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        redundancy_group: 1,
+        hardware_addr: "02:bf:72:02:00:01".to_string(),
+        // No addresses: present for arrival-zone/ledger resolution, but the
+        // test flow is not on-link — with no static/default route covering
+        // it, the lookup genuinely fails (NoRoute, not connected).
+        addresses: Vec::new(),
+        ..Default::default()
+    });
+    snapshot.routes.retain(|r| r.destination != "0.0.0.0/0");
+    build_forwarding_state(&snapshot)
+}
+
+/// #10507 Cell 6 (reverse, companion unresolvable live): build the pair
+/// and earn the forward Recorded Permit through poll (standby,
+/// FabricRedirect, recorded lan -> wan), then switch the live snapshot to
+/// NoRoute for the forward flow (same gen 7, FIB-only flap — the forward
+/// companion cannot produce a valid current egress) and drive the reverse
+/// reply (live DMZ arrival, locally forwarding toward LAN). The reverse
+/// fence must fail closed (revoke the pair) rather than Decline on the
+/// unresolvable companion.
+///
+/// RED-on-revert: pre-fence reverse judges the stored WAN companion
+/// (lan -> wan Permit), stamps the reverse half, and both survive
+/// (revoked 0, count 2).
+#[test]
+fn reverse_unresolvable_forward_fails_closed_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let fwd_key = flow_key_to(DMZ_DST_10507);
+    let rev_key =
+        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            fwd_key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the forward half"
+    );
+    let rev_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: LAN_IFINDEX,
+        tx_ifindex: LAN_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let mut rev_metadata = metadata(true);
+    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
+    rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    rev_metadata.ingress_ifindex = 0;
+    rev_metadata.owner_rg_id = 1;
+    assert!(
+        sessions.upsert_synced(
+            rev_key.clone(),
+            rev_decision,
+            rev_metadata,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the reverse half"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&fwd_key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp the forward half Recorded"
+    );
+    let forwarding_nr = forwarding_noroute_10507();
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(&forwarding_nr, IpAddr::V4(DMZ_DST_10507)).disposition,
+        ForwardingDisposition::NoRoute,
+        "fixture: forward live must be NoRoute (unresolvable companion)"
+    );
+    let ha_state = txn_ha_state();
+    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
+    dmz_binding.interface = Arc::<str>::from("reth2.0");
+    let rev_frame = build_txn_tcp_syn_frame_v4(
+        DMZ_DST_10507, SRC, DPORT, SPORT, TCP_ACK,
+        REVOCATION_DMZ_MAC,
+    );
+    let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut dmz_binding, &mut sessions, &forwarding_nr, &ha_state, &rev_frame, rev_meta, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "unresolvable forward companion must fail closed, never Decline (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked reply must not forward");
+    assert_eq!(
+        session_count(&sessions), 0,
+        "fail-closed must delete forward AND reverse"
+    );
+}
+
+/// #10507 Cell 7b (seed egress-0 retention, poll): a permitted seed whose
+/// stored decision is NoRoute/egress-0 (the #9513 import shape —
+/// `decision(0)`, no cached WAN to fall back to) earns a recorded Permit
+/// through poll (standby FabricRedirect, recorded lan -> wan, punts),
+/// then the live snapshot flaps to NoRoute for the flow (same gen 7) and
+/// the forward hit coasts: Fresh Recorded + non-local → no revocation,
+/// session survives, packet drops on NoRoute. GUARD (no RED expected —
+/// pre-fence Fresh also coasts for non-local); the RED for Cell 7 is 7a.
+/// Existing #9513 pins Stale-Unvalidated + NoRoute → Decline; this pins
+/// Fresh-Recorded + NoRoute → coast with a seed/egress-0 store.
+#[test]
+fn recorded_nonlocal_noroute_retained_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision(0),
+            syncimport_recorded_metadata_10507(),
+            SessionOrigin::FabricPuntSeed,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "fixture must install the egress-0 seed session"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(), 1,
+        "phase 1: seed must punt (observable non-local)"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp Recorded"
+    );
+    let forwarding_nr = forwarding_noroute_10507();
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(&forwarding_nr, IpAddr::V4(DMZ_DST_10507)).disposition,
+        ForwardingDisposition::NoRoute,
+        "fixture: live must be NoRoute (non-local retention)"
+    );
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding_nr, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "the NoRoute packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 0,
+        "Fresh Recorded + non-local must coast (retention, never revoke)"
+    );
+    assert_eq!(dbg3.tx, 0, "NoRoute drops (no forward, no revoke)");
+    assert_eq!(session_count(&sessions), 1, "the session must survive");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "coasting must not re-stamp"
+    );
+}
+
+/// #10507 Cell 8c (reimported row judges live): an accepted reimport wipes
+/// any prior verdict (even local Live) to generation-0/Unvalidated; the
+/// first packet then cold-judges the LIVE egress through poll and revokes
+/// on lan -> dmz Deny. A trusted remote stamp would coast and forward.
+///
+/// RED-on-revert: without the reset the row stays Fresh Live and the live
+/// packet coasts (revoked 0, tx 1, count 1).
+#[test]
+fn reimported_row_judges_live_egress_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    // Prior local Live verdict (to prove the reimport wipes it).
+    let mut md0 = metadata(false);
+    md0.owner_rg_id = 1;
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            md0,
+            SessionOrigin::ForwardFlow,
+            121_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "fixture must install the local flow"
+    );
+    sessions.mark_policy_revalidated(&key, crate::session::PolicyRevalidationKind::LiveEgress);
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        crate::session::PolicyRevalidationTarget::Fresh
+    );
+    // Accepted reimport (shared materialization path): wipes to 0/Unvalidated.
+    assert!(
+        sessions.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture: the reimport must be accepted"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        crate::session::PolicyRevalidationTarget::Stale(key.clone()),
+        "reimport must reset generation to 0 (stale)"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::Unvalidated,
+        "reimport must reset provenance (never trust remote)"
+    );
+    // First packet through poll (active, live DMZ): cold Deny → revoke.
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    assert_eq!(dbg.session_hit, 1, "first packet must HIT the reimported row");
+    assert_eq!(
+        dbg.policy_revoked_sessions, 1,
+        "reimported row must judge live egress (Deny → revoke, #10507)"
+    );
+    assert_eq!(dbg.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 8d (recorded → materialize → live): worker A earns a real
+/// recorded Permit through poll (standby FabricRedirect, recorded lan ->
+/// wan, punts). Worker B (a second table, simulating another worker)
+/// accepted-reimports the shared row via `upsert_synced_with_origin`
+/// (`SharedMaterialize`) — which wipes any receiver stamp to
+/// generation-0/Unvalidated (never trusts remote). Worker B's first
+/// packet through poll (active, live DMZ) then cold-judges live and
+/// revokes on lan -> dmz Deny. The rejected-overwrite control (8b)
+/// proves a rejection preserves local Live; this proves acceptance
+/// never preserves remote.
+///
+/// RED-on-revert (combined): without the reset AND without the fence, a
+/// trusted remote Fresh coasts and forwards (revoked 0, tx 1). Either
+/// alone still revokes here (reset → Stale cold Deny; fence → Fresh
+/// Recorded forced Deny) — defense in depth, either suffices.
+#[test]
+fn materialized_recorded_row_judges_live_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    // Worker A: standby recorded Permit through poll.
+    let mut sessions_a = SessionTable::new();
+    sessions_a.set_policy_revalidation_gen(7);
+    assert!(
+        sessions_a.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import on worker A"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding_a = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding_a.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding_a, &mut sessions_a, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "worker A must HIT");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "worker A Permits (recorded)");
+    assert_eq!(
+        sessions_a.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "worker A must stamp Recorded"
+    );
+    // Worker B: accepted materialization wipes to 0/Unvalidated (never
+    // trusts worker A's Recorded stamp — nothing rides the wire).
+    let mut sessions_b = SessionTable::new();
+    sessions_b.set_policy_revalidation_gen(7);
+    assert!(
+        sessions_b.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: key.clone(),
+                decision: syncimport_wan_decision_10507(),
+                metadata: syncimport_recorded_metadata_10507(),
+                origin: SessionOrigin::SharedMaterialize,
+                now_ns: 122_000_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+            true,
+        ),
+        "fixture: worker-B materialization must be accepted"
+    );
+    assert_eq!(
+        sessions_b.policy_revalidation_target(&key),
+        crate::session::PolicyRevalidationTarget::Stale(key.clone()),
+        "materialization must reset generation (never trust remote)"
+    );
+    assert_eq!(
+        sessions_b.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::Unvalidated,
+        "materialization must reset provenance (never trust remote)"
+    );
+    // Worker B first packet through poll (active, live DMZ): live Deny.
+    let ha_state = txn_ha_state();
+    let mut binding_b = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding_b.interface = Arc::<str>::from("reth1.0");
+    let frame_b = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta_b = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_b.len() as u16);
+    let (_batch_b, dbg_b) = txn_run_descriptor_checked(
+        &mut binding_b, &mut sessions_b, &forwarding, &ha_state, &frame_b, meta_b, true,
+    );
+    assert_eq!(dbg_b.session_hit, 1, "worker B first packet must HIT");
+    assert_eq!(
+        dbg_b.policy_revoked_sessions, 1,
+        "materialized row must judge live egress (Deny → revoke, #10507)"
+    );
+    assert_eq!(dbg_b.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions_b), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 4 (lease expiry → renewal, no active edge, no commands):
+/// the forwarding lease expires while `active` stays true (no boolean
+/// edge, no Demote/Refresh commands — lease-only standby), the recorded
+/// standby path is exercised through poll (FabricRedirect, recorded lan
+/// -> wan Permit, punts), the lease renews active-to-active (still no
+/// edge, still no commands), and the first packet after renewal — now
+/// locally forwarding via DMZ — must be revoked on live lan -> dmz Deny.
+/// LF forces current policy with no activation command required.
+///
+/// RED-on-revert: without the fence the Fresh row coasts and forwards
+/// via DMZ (tx 1, revoked 0).
+#[test]
+fn lease_renewal_forces_live_policy_without_command_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the standby session"
+    );
+    // Expired lease with active boolean still true (no edge): RG 1 reads
+    // standby (`active && lease.active(now)` fails on the lapsed positive
+    // deadline) with no Demote command ever issued. Until-1 is a genuine
+    // expiry (positive past, not the never-valid Until-0 sentinel); the
+    // assert pins `now > 1` so the deadline is strictly in the past for
+    // both the fixed test clock (122) and wall monotonic time.
+    assert!(crate::afxdp::monotonic_nanos() / 1_000_000_000 > 1);
+    let mut ha_expired = txn_ha_state();
+    ha_expired.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 0,
+            lease: crate::afxdp::HAForwardingLease::ActiveUntil(1),
+        },
+    );
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_expired, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "expired-lease standby must HIT");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "recorded Permit, nothing revoked");
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(), 1,
+        "expired lease must punt (standby behavior without an active edge)"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "standby must stamp Recorded"
+    );
+    // Renewal: active-to-active (boolean true → true, no edge), fresh
+    // lease, NO activation command. The fence — not command completion —
+    // decides the next packet.
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "first post-renewal packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "renewal with no command must still revoke on live Deny (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 5a (command-driven demote → standby Permit → re-promote
+/// revoke): install local ForwardFlow (DMZ flow, Stale Unvalidated), apply
+/// DemoteOwnerRGS through the real `handle_demote_owner_rgs` funnel
+/// (unshared map, no BPF — local becomes peer; Stale preserved
+/// Fresh-only), earn a recorded Permit through poll (standby
+/// FabricRedirect, recorded lan -> wan, punts), re-promote through the
+/// real `handle_refresh_owner_rgs` funnel (A2 Fresh→Unvalidated,
+/// defense), then the promotion packet through poll (active, live DMZ)
+/// must be revoked on lan -> dmz Deny (fence authoritative). Fence
+/// without A2 is pinned by the no-Refresh siblings (1b/6/4).
+///
+/// RED-on-revert: without the fence phase 3 coasts Fresh and forwards
+/// via DMZ (tx 1, revoked 0).
+#[test]
+fn demote_standby_permit_repromote_revokes_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let mut md0 = metadata(false);
+    md0.owner_rg_id = 1;
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            md0,
+            SessionOrigin::ForwardFlow,
+            121_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "fixture must install the local flow"
+    );
+    // Applied demotion (RG 1 → demoted) through the real funnel.
+    let mut ha_demoted = txn_ha_state();
+    ha_demoted.insert(1, inactive_rg_10507(122));
+    let neighbors = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+    let mut cancelled = Vec::new();
+    let mut cancelled_seen = rustc_hash::FxHashSet::default();
+    crate::afxdp::session_glue::handle_demote_owner_rgs_for_test(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_demoted,
+        &neighbors,
+        vec![1],
+        122_000_000_000,
+        122,
+        &mut cancelled,
+        &mut cancelled_seen,
+    );
+    let (_, _, demoted_origin) = sessions.entry_with_origin(&key).expect("demoted row must exist");
+    assert_eq!(
+        demoted_origin, SessionOrigin::SyncImport,
+        "demote must convert local ForwardFlow to peer SyncImport"
+    );
+    // Standby recorded Permit through poll (RG 1 inactive → FabricRedirect).
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_demoted, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "standby must HIT after demote");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "standby Permits (recorded)");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "standby must stamp Recorded"
+    );
+    // Re-promotion through the real Refresh funnel (RG 1 active again).
+    let ha_state = txn_ha_state();
+    crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &forwarding,
+        &ha_state,
+        &neighbors,
+        vec![1],
+        123_000_000_000,
+        123,
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::Unvalidated,
+        "re-promote Refresh (A2) must reset Fresh → Unvalidated (defense)"
+    );
+    // Promotion packet through poll (active, live DMZ): fence → Deny → revoke.
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "promotion packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "re-promote must revoke on live Deny (fence authoritative, #10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 Cell 5b GUARD (HAInactive skip preserves kind, no RED — a
+/// skipped NonLocal row coasts in both; retention rides on 7b/gate/5152):
+/// earn a recorded Permit through poll (standby FabricRedirect with
+/// fabric, recorded lan -> wan), then run the real Refresh funnel with a
+/// no-fabric snapshot (inactive owner stays HAInactive instead of
+/// redirecting, per the #5152 fixture note). The funnel must SKIP the
+/// liveness/kind rewrite for HAInactive (not reset Recorded→Unvalidated
+/// and not re-stamp liveness) — the skip is a non-forwarding rule, and no
+/// local forwarding may flow from the preserved stale recorded stamp
+/// (it stays NonLocal and coasts).
+#[test]
+fn refresh_skips_hainactive_preserving_recorded_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the standby session"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp Recorded"
+    );
+    // No-fabric Refresh funnel with the owner still inactive: re-resolves
+    // HAInactive (not FabricRedirect) → must SKIP (preserve Recorded).
+    let forwarding_nofab = forwarding_with_lan_rule(Some("permit"));
+    let neighbors = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+    crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &forwarding_nofab,
+        &ha_standby,
+        &neighbors,
+        vec![1],
+        123_000_000_000,
+        123,
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "HAInactive skip must preserve Recorded (no A2 reset when skipped)"
+    );
+    // Post-skip retention poll: same flow with a no-fabric DMZ snapshot
+    // (valid DMZ FIB, owner RG 1 still inactive → HAInactive, never
+    // FabricRedirect without fabric to convert to). Fresh Recorded +
+    // non-local coasts: no revocation, session survives, HAInactive drops
+    // (no local forward, no punt without fabric).
+    let forwarding_nofab_dmz = {
+        let mut snapshot = policy_deny_snapshot();
+        snapshot.generation = 7;
+        snapshot.fib_generation = 9;
+        snapshot.policies.push(PolicyRuleSnapshot {
+            name: "lan-out".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: Vec::new(),
+            action: "permit".into(),
+            ..Default::default()
+        });
+        snapshot.zones.push(crate::ZoneSnapshot {
+            name: "dmz".to_string(),
+            id: TEST_DMZ_ZONE_ID,
+            host_inbound_configured: true,
+            host_inbound_system_services: vec!["any-service".to_string()],
+            ..Default::default()
+        });
+        snapshot.interfaces.push(InterfaceSnapshot {
+            name: "reth2.0".to_string(),
+            zone: "dmz".to_string(),
+            linux_name: "ge-0-0-2".to_string(),
+            ifindex: DMZ_IFINDEX,
+            redundancy_group: 1,
+            hardware_addr: "02:bf:72:02:00:01".to_string(),
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "203.0.113.1/24".to_string(),
+                scope: 0,
+            }],
+            ..Default::default()
+        });
+        snapshot.routes.push(RouteSnapshot {
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "203.0.113.0/24".to_string(),
+            next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+        });
+        snapshot.neighbors.push(NeighborSnapshot {
+            interface: "ge-0-0-2".to_string(),
+            ifindex: DMZ_IFINDEX,
+            family: "inet".to_string(),
+            ip: "203.0.113.2".to_string(),
+            mac: "00:aa:bb:cc:dd:ee".to_string(),
+            state: "reachable".to_string(),
+            router: true,
+            link_local: false,
+        });
+        snapshot.neighbors.push(NeighborSnapshot {
+            interface: "ge-0-0-2".to_string(),
+            ifindex: DMZ_IFINDEX,
+            family: "inet".to_string(),
+            ip: "203.0.113.5".to_string(),
+            mac: "00:aa:bb:cc:dd:05".to_string(),
+            state: "reachable".to_string(),
+            router: false,
+            link_local: false,
+        });
+        build_forwarding_state(&snapshot)
+    };
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding_nofab_dmz, &ha_standby, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "skipped HAInactive packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 0,
+        "skipped HAInactive must coast (retention, never revoke)"
+    );
+    assert_eq!(dbg3.tx, 0, "HAInactive drops (no local forward from stale Recorded)");
+    assert_eq!(session_count(&sessions), 1, "the skipped session must survive");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "coasting must not re-stamp the preserved Recorded kind"
+    );
+}
+
+/// #10507 Cell 3 (WorkerLocalImport backlog flap, 3 slices, no promote):
+/// a non-promotable peer row earns a recorded Permit through poll
+/// (standby FabricRedirect, recorded lan -> wan, punts). The activation
+/// Refresh is then queued 769th behind 768 no-op filler commands (three
+/// full 256-command slices); one slice drains (256 fillers, Refresh still
+/// 513 deep — behind two full slices), runtime flips active WITHOUT any
+/// command applying to this flow, and the between-slices packet (live
+/// DMZ) must be revoked on lan -> dmz Deny. WorkerLocalImport never
+/// promotes (no A1 resetting the proof away); only the packet-time fence
+/// stands between the recorded Permit and local forwarding. Config
+/// generation and FIB stay fixed throughout (gen 7).
+///
+/// RED-on-revert: without the fence the Fresh row coasts and forwards
+/// via DMZ (tx 1, revoked 0) despite 513 queued commands.
+#[test]
+fn worker_local_import_backlog_flap_fenced_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: key.clone(),
+                decision: syncimport_wan_decision_10507(),
+                metadata: syncimport_recorded_metadata_10507(),
+                origin: SessionOrigin::WorkerLocalImport,
+                now_ns: 122_000_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+            true,
+        ),
+        "fixture must import the WorkerLocalImport row"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits (recorded)");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp Recorded"
+    );
+    // Backlog: 768 no-op demotes (3 slices) + the activation Refresh last
+    // (769th). Drain exactly one 256-slice; Refresh stays 513 deep.
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    {
+        let mut q = commands.lock().expect("commands lock");
+        for _ in 0..768 {
+            q.push_back(crate::afxdp::WorkerCommand::DemoteOwnerRGS {
+                owner_rgs: vec![999],
+            });
+        }
+        q.push_back(crate::afxdp::WorkerCommand::RefreshOwnerRGS {
+            owner_rgs: vec![1],
+        });
+    }
+    let neighbors = std::sync::Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+    let mut scratch = std::collections::VecDeque::new();
+    let results = crate::afxdp::session_glue::apply_worker_commands(
+        &commands,
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &txn_ha_state(),
+        &neighbors,
+        0,
+        &mut scratch,
+    );
+    assert!(
+        results.commands_backlogged,
+        "after one slice 513 commands (incl. Refresh) must remain queued"
+    );
+    assert_eq!(
+        commands.lock().expect("commands lock").len(), 513,
+        "slice 1 must drain exactly 256 (769 - 256 = 513 remain)"
+    );
+    // Between-slices packet (active runtime, live DMZ, Refresh still
+    // queued): fence forces live Deny → revoke. No command applied.
+    let ha_state = txn_ha_state();
+    let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding3.interface = Arc::<str>::from("reth1.0");
+    let frame3 = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "between-slices packet must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "backlog flap with 513 queued must still revoke on live Deny (#10507)"
+    );
+    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
+    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+}
+
+/// #10507 reverse non-seed FabricRedirect retention (GUARD, broad branch):
+/// a SyncImport pair earns a forward recorded Permit through poll (standby
+/// FabricRedirect, recorded lan -> wan, punts). With the SAME standby HA
+/// (still peer-owned, no promotion, no Refresh — forward live stays
+/// FabricRedirect), the reverse reply (live DMZ arrival, locally
+/// forwardable toward LAN) must be retained: no revocation, both halves
+/// survive, and NEITHER row is re-stamped (retention returns before cold,
+/// unlike a Permit which would stamp the reverse half Fresh). This pins
+/// the plan-required broad retention branch (any FabricRedirect retains,
+/// per §4.2.4/§4.3 — Cell 1 phase 1 covers forward-hit SyncImport
+/// retention; #7770 covers seed; this covers reverse-hit non-seed).
+/// RED via stamp (pre-fence cold Permits stored WAN and stamps reverse
+/// Fresh; retention stamps nothing).
+#[test]
+fn reverse_syncimport_redirect_retained_without_stamp_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let fwd_key = flow_key_to(DMZ_DST_10507);
+    let rev_key =
+        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    assert!(
+        sessions.upsert_synced(
+            fwd_key.clone(),
+            syncimport_wan_decision_10507(),
+            syncimport_recorded_metadata_10507(),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the forward half"
+    );
+    let rev_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: LAN_IFINDEX,
+        tx_ifindex: LAN_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let mut rev_metadata = metadata(true);
+    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
+    rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    rev_metadata.ingress_ifindex = 0;
+    rev_metadata.owner_rg_id = 1;
+    assert!(
+        sessions.upsert_synced(
+            rev_key.clone(),
+            rev_decision,
+            rev_metadata,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "fixture must import the reverse half"
+    );
+    let mut ha_standby = txn_ha_state();
+    ha_standby.insert(1, inactive_rg_10507(122));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg1) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+    );
+    assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
+    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits (recorded)");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&fwd_key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "phase 1 must stamp the forward half Recorded"
+    );
+    // Same standby HA (still peer-owned, no promotion): reverse reply with
+    // forward live still FabricRedirect (peer-owned, redirect, non-local).
+    // Retention: admit without revoking, stamp neither half.
+    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
+    dmz_binding.interface = Arc::<str>::from("reth2.0");
+    let rev_frame = build_txn_tcp_syn_frame_v4(
+        DMZ_DST_10507, SRC, DPORT, SPORT, TCP_ACK,
+        REVOCATION_DMZ_MAC,
+    );
+    let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
+    let (_batch3, dbg3) = txn_run_descriptor_checked(
+        &mut dmz_binding, &mut sessions, &forwarding, &ha_standby, &rev_frame, rev_meta, true,
+    );
+    assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT");
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 0,
+        "non-seed FabricRedirect retention must not revoke"
+    );
+    assert_eq!(session_count(&sessions), 2, "both halves must survive retention");
+    assert_eq!(
+        sessions.policy_revalidation_kind(&fwd_key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "retention must not re-stamp the forward half"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&rev_key),
+        crate::session::PolicyRevalidationKind::Unvalidated,
+        "retention must not stamp the reverse half (stays Unvalidated)"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        crate::session::PolicyRevalidationTarget::Stale(rev_key.clone()),
+        "reverse stays Stale (no Permit stamp on retention)"
+    );
+}
+
+/// #10507 rule-4 helper: would-forward disposition with NO valid egress.
+/// M2 must fail closed (force cold + revoke on Decline) even for a Fresh
+/// Live stamp — never coast, never Decline-and-stand.
+fn noegress_forward_decision_10507() -> SessionDecision {
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+}
+
+/// #10507 rule-4 M2-direct pin: a Fresh Live stamp cannot authorize
+/// forwarding without a valid egress. Drives the real M2 entry with a
+/// hand-built NoEgress decision against a real table/FIB snapshot: the
+/// gate forces cold, the cold walk Declines on egress 0, and
+/// fail-closed returns a revocation struct — never coast, never
+/// Decline-None.
+///
+/// WHY M2-DIRECT (not poll): LocalForwardingNoEgress is unreachable at
+/// M2 via the descriptor path by construction — the hit resolver
+/// refreshes stored resolution live before M2; cached fast-path and
+/// fallback both require egress>0 (session_glue/mod.rs:169); live
+/// would-forward always carries valid egress (fib.rs:562-573, and
+/// ifindex<=0 returns NoRoute); every live egress-0 arm is NonLocal
+/// (NoRoute/DiscardRoute/NextTableUnsupported/TableUnavailable); and
+/// the sole production M2 caller is the poll hit path
+/// (poll_descriptor/mod.rs:1654). Firsthand: a stored-NoEgress +
+/// Fresh-Live install coasted (revoked 0) because live refresh
+/// overwrote stored with valid DMZ pre-M2. A poll pin for this arm is
+/// impossible by the construction above; gate units + mapping unit
+/// + this M2 wiring pin jointly cover the adjudicated arm.
+///
+/// RED-on-revert: gate always-coast reads Fresh and coasts (None).
+/// The projection is Some (revocation struct) iff M2 revokes, so
+/// presence plus the canonical key below is exact.
+#[test]
+fn forward_noegress_m2_revokes_despite_fresh_live_10507() {
+    let forwarding = forwarding_with_fabric_dmz_10507();
+    let key = flow_key_to(DMZ_DST_10507);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let mut md0 = metadata(false);
+    md0.owner_rg_id = 1;
+    md0.ingress_ifindex = LAN_IFINDEX as u32;
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key.clone(),
+            noegress_forward_decision_10507(),
+            md0.clone(),
+            SessionOrigin::ForwardFlow,
+            121_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "fixture must install the no-egress flow"
+    );
+    sessions.mark_policy_revalidated(&key, crate::session::PolicyRevalidationKind::LiveEgress);
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        crate::session::PolicyRevalidationTarget::Fresh,
+        "fixture: the row must read Fresh Live before M2"
+    );
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(SRC),
+        dst_ip: IpAddr::V4(DMZ_DST_10507),
+        forward_key: key.clone(),
+    };
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, 0);
+    let (canonical_key, judged_decision) =
+        super::poll_descriptor::revalidate_zone_policy_revocation_for_test(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &md0,
+            noegress_forward_decision_10507(),
+            Some(&flow),
+            meta,
+            false,
+        )
+        .expect(
+            "Fresh Live + no-egress must revoke (Some), never coast/Decline-None (#10507 rule 4)"
+        );
+    assert_eq!(
+        canonical_key, key,
+        "the revocation must name the judged session"
+    );
+    assert_eq!(
+        judged_decision.resolution.egress_ifindex, 0,
+        "the judged decision must carry the NoEgress context"
     );
 }

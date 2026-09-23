@@ -168,7 +168,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// misses the deleted policy's own. Placement is the design: this is a READ,
 	// so it cannot re-admit anything, and moving it any later re-opens the
 	// window. See daemon_policy_invalidate_capture.go.
-	d.capturePolicyInvalidationLocked(cfg)
+	d.captureAndStagePolicyRenameAncestry(cfg)
 	if rt := d.dataplane(); rt != nil {
 		if adapter, ok := rt.(interface {
 			Manager() *dpuserspace.Manager
@@ -1239,6 +1239,18 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	rt := d.dataplane()
 	if rt == nil {
 		return
+	}
+	// Compile consumes single-use rename metadata after copying it onto the
+	// first full-apply snapshot. This direct same-commit replay is the one
+	// intentional exception: restore that exact snapshot's metadata before
+	// ApplyConfig so the deferred-MAC retry cannot lose the ancestry/rebind
+	// contract, while ordinary later partial republishes remain stripped.
+	if provider, ok := rt.(interface {
+		Manager() *dpuserspace.Manager
+	}); ok {
+		if mgr := provider.Manager(); mgr != nil {
+			mgr.RestagePolicyRenameAncestryForReplay()
+		}
 	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)
 	// #9725: this re-apply can remove the last link even when it reports an

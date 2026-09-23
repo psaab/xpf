@@ -14,8 +14,8 @@ import (
 // service accepts (tcp/udp dport, icmp echo-request), system-services all,
 // protocols all, ident-reset (tcp-reset), empty default-deny zone, unzoned
 // addrs, junos-host DENY (application-any, narrow-app, saddr, saddr!=,
-// permit-subtract, IKE + ident shields), WireGuard port, dual-stack, named
-// counters; and a full lo0 filter with host + CIDR interval sets, th port
+// permit-subtract, retained ident RST), WireGuard port, dual-stack, named
+// counters. #10524 deliberately does not render the former IKE shield ACCEPT.
 // single/set/range/except, v4 + v6 (nibble-spanning) DSCP, icmp type+code,
 // tcp-flags mask, ip frag + v6 exthdr frag, log, count, reject pair, discard,
 // accept, fall-through.

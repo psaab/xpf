@@ -12,6 +12,8 @@ pub(in crate::afxdp) use pbr::*;
 mod ipsec;
 pub(in crate::afxdp) use ipsec::*;
 mod mss;
+mod ipsec_sa;
+pub(in crate::afxdp) use ipsec_sa::*;
 pub(in crate::afxdp) use mss::*;
 mod ha;
 pub(in crate::afxdp) use ha::*;

@@ -299,9 +299,7 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 	zoneNames := make(map[uint16]string)
 	var appNames map[uint16]string
 	if cr := s.applyResult(); cr != nil {
-		for name, id := range cr.ZoneIDs {
-			zoneNames[id] = name
-		}
+		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 		appNames = cr.AppNames
 	}
 

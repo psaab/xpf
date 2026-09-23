@@ -4,9 +4,9 @@ use crate::nat64::Nat64ReverseInfo;
 use rustc_hash::{FxHashMap, FxHashSet, FxSeededState};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// #2364: session-index maps keyed by attacker-controllable values (the
 /// externally-chosen 5-tuple `SessionKey`, per-IP `IpAddr`) use a SEEDED
@@ -50,10 +50,10 @@ type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, FxSeededState>
 // translated_session_key, reverse_canonical_key, reverse_wire_key,
 // reply_matches_forward_session) live in session/key.rs. Re-exporting
 // at pub(crate) keeps the existing crate::session::* surface intact.
-pub(crate) mod pptp;
-pub(crate) mod pptp_control;
 mod discriminator;
 mod key;
+pub(crate) mod pptp;
+pub(crate) mod pptp_control;
 // #7188: `WireDiscriminator` is exported alongside the class enum because the
 // HA session-sync receiver has to distinguish "the peer stated a class" from
 // "the peer could not state one" — two answers a plain `TunnelDiscriminator`
@@ -62,15 +62,17 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 // #7239: the routing domain's HA-wire encoding. Reserved-zero, three-state
 // decode — #7188's shape, for #7188's reason.
 mod routing_domain_wire;
+pub(crate) use key::*;
 pub(crate) use routing_domain_wire::{
-    QUARANTINED_ROUTING_DOMAIN, WireRoutingDomain, install_table_identity,
-    routing_domain_from_wire,
-    routing_domain_to_wire,
+    QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
     // with the codec's own constant rather than a bare literal.
     WIRE_ABSENT as ROUTING_DOMAIN_WIRE_ABSENT,
+    WireRoutingDomain,
+    install_table_identity,
+    routing_domain_from_wire,
+    routing_domain_to_wire,
 };
-pub(crate) use key::*;
 mod entry;
 pub(crate) use entry::*;
 mod ctx;
@@ -232,7 +234,9 @@ pub(crate) const MAX_SESSION_TIMEOUT_SECS: u64 = (i64::MAX / 1_000_000_000) as u
 pub(crate) const MAX_SESSION_TIMEOUT_NS: u64 = MAX_SESSION_TIMEOUT_SECS * 1_000_000_000;
 
 const _: () = assert!(
-    MAX_SESSION_TIMEOUT_SECS.checked_mul(1_000_000_000).is_some(),
+    MAX_SESSION_TIMEOUT_SECS
+        .checked_mul(1_000_000_000)
+        .is_some(),
     "MAX_SESSION_TIMEOUT_SECS * 1e9 must not overflow u64"
 );
 
@@ -510,7 +514,9 @@ use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 // so the conntrack submodules (install, lookup, expire) keep referencing
 // TCP_FIN/TCP_RST via `super::*`. The session-closing test is the shared
 // `is_closing` predicate.
-use crate::tcp_flags::{TCP_FIN, TCP_RST, has_fin, has_rst, is_closing, is_initial_syn, is_syn_ack};
+use crate::tcp_flags::{
+    TCP_FIN, TCP_RST, has_fin, has_rst, is_closing, is_initial_syn, is_syn_ack,
+};
 
 #[allow(unused_macros)]
 macro_rules! debug_log {
@@ -623,6 +629,54 @@ pub(crate) enum PolicyRevalidationTarget {
     /// No entry this tuple may safely name — the #2120 transient synced-hit
     /// path, or a reused slab slot. Nothing to stamp, nothing to tear down.
     NoLocalEntry,
+}
+/// #10507: receiver-local provenance for the zone-policy stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyRevalidationKind {
+    /// Constructor/upsert default; generation 0 remains stale.
+    Unvalidated,
+    /// Permit derived using a current local forwarding egress.
+    LiveEgress,
+    /// Permit derived from a recorded (non-current) egress: the non-local
+    /// `FabricRedirect` case by design, or a stored forward egress consumed
+    /// on the reverse path (§4.3). Either way it must re-judge before it may
+    /// authorize local forwarding.
+    RecordedEgress,
+}
+
+/// #10507: the packet-time CURRENT forwarding posture the gate judges the
+/// stamp against. Interpreted from the disposition by the afxdp caller, which
+/// owns `ForwardingDisposition` semantics; the gate only combines it with
+/// the single probe below. Intent and egress validity are SEPARATE: a
+/// would-forward disposition without a valid egress is rule-4 fail-closed,
+/// never "non-local".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyGateCurrent {
+    /// Would locally forward with a valid egress (§4.2 rules 1/3).
+    LocalForwarding,
+    /// Would locally forward but has no valid egress (§4.2 rule 4).
+    LocalForwardingNoEgress,
+    /// Non-local: redirect, seed, terminal, or host delivery.
+    NonLocal,
+}
+
+/// #10507: one probe answering the combined freshness/authority question
+/// (§4.2: "one helper ... rather than sprinkling origin tests beside the old
+/// generation compare"). The caller supplies the packet-time posture; every
+/// field below derives from it plus a SINGLE `revalidation_record` probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyGateAnswer {
+    /// Generation-only freshness, exactly what `policy_revalidation_target`
+    /// answers (kept so callers keep one match shape).
+    pub target: PolicyRevalidationTarget,
+    /// Stamped provenance (`Unvalidated` when no entry resolves).
+    pub kind: PolicyRevalidationKind,
+    /// Rules 3/4: run the cold walk even when `target` is `Fresh`.
+    pub force_cold: bool,
+    /// A cold-walk `Decline` must revoke rather than stand.
+    pub fail_closed_decline: bool,
+    /// A type-armed ICMP exit must revoke rather than decline.
+    pub fail_closed_icmp: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -822,6 +876,9 @@ struct SessionEntry {
     /// `SessionEntry` carries no serde, so this is on no wire and is not part of
     /// session identity.
     policy_revalidated_gen: u64,
+    /// #10507: receiver-local provenance for the zone-policy stamp. This is
+    /// intentionally not carried on the HA wire.
+    policy_revalidation_kind: PolicyRevalidationKind,
     /// #2120: the RG epoch (`rg_epochs[owner_rg_id]`, or the node-level
     /// `rg_epochs[0]` for `owner_rg_id <= 0`) recorded the last time this
     /// entry was self-healed (the expire pass observed this node START
@@ -910,6 +967,21 @@ struct SessionEntry {
     /// derived state, like `established`: `SessionEntry` carries no serde,
     /// so this is on no HA wire and a peer re-derives its own budget.
     last_icmp_error_tat: u64,
+}
+
+/// Snapshot of one live half after a policy rebind. The worker uses this
+/// narrow copy to restamp the shared-session and BPF mirrors without exposing
+/// the worker-owned `SessionEntry`.
+#[derive(Clone, Debug)]
+pub(crate) struct PolicyRebindEntry {
+    pub(crate) key: SessionKey,
+    pub(crate) decision: SessionDecision,
+    pub(crate) metadata: SessionMetadata,
+    pub(crate) origin: SessionOrigin,
+    pub(crate) protocol: u8,
+    pub(crate) tcp_flags: u8,
+    pub(crate) session_id: u64,
+    pub(crate) tcp_close_class: u8,
 }
 
 /// #2501: per-session traffic accounting, split by direction. A `Copy`
@@ -1679,10 +1751,8 @@ impl SessionTable {
         let Some(record) = self.revalidation_record(key) else {
             return FilterRevalidationTarget::NoLocalEntry;
         };
-        let live = FilterRevalidationStamp::live(
-            self.filter_revalidation_gen,
-            logical_ingress_ifindex,
-        );
+        let live =
+            FilterRevalidationStamp::live(self.filter_revalidation_gen, logical_ingress_ifindex);
         if record.entry.filter_revalidated == live {
             FilterRevalidationTarget::Fresh
         } else {
@@ -1729,7 +1799,8 @@ impl SessionTable {
     /// foreign packet on the session's own admitting interface — which has no
     /// `PolicyRevalidationTarget::Stale(key)` to read the key from.
     pub(crate) fn revalidation_canonical_key(&self, key: &SessionKey) -> Option<SessionKey> {
-        self.revalidation_record(key).map(|record| record.key.clone())
+        self.revalidation_record(key)
+            .map(|record| record.key.clone())
     }
 
     /// #7212 test view: the CANONICAL key the probe resolves, or `None` when it
@@ -1781,7 +1852,6 @@ impl SessionTable {
             record.entry.filter_revalidated = FilterRevalidationStamp::UNVALIDATED;
         }
     }
-
 
     /// #7212 test view: the boolean half of
     /// [`SessionTable::stale_filter_revalidation_key`]. A `.is_some()` over the
@@ -1835,6 +1905,11 @@ impl SessionTable {
     /// which took a bug to get right (#7212, #8114 item 2). Only the staleness
     /// COMPARISON differs, and it is made here against the generation-only
     /// stamp.
+    ///
+    /// #10507: production now answers through `policy_revalidation_gate`
+    /// (freshness AND authority, one probe); this accessor is retained for
+    /// test assertions of the generation-only stamp shape.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn policy_revalidation_target(&self, key: &SessionKey) -> PolicyRevalidationTarget {
         let Some(record) = self.revalidation_record(key) else {
             return PolicyRevalidationTarget::NoLocalEntry;
@@ -1846,20 +1921,104 @@ impl SessionTable {
         }
     }
 
-    /// #8356: record that this entry's zone-policy verdict has been re-derived
-    /// under the live generation. Takes the CANONICAL key, so it is a
-    /// primary-index write; idempotent, and a miss is a no-op (the session was
-    /// torn down between the probe and here).
-    pub(crate) fn mark_policy_revalidated(&mut self, key: &SessionKey) {
+    /// #10507: resolve the entry this WIRE tuple names and answer freshness
+    /// AND authority against the packet-time posture, in ONE probe.
+    ///
+    /// `force_cold` is rule 3 (+ the rule-4 Fresh sub-case): a non-live stamp
+    /// plus a would-forward packet is always stale, even generation-equal
+    /// (the A1/A2 reset shape). A Fresh stamp plus a would-forward packet
+    /// without a valid egress is likewise always stale, even `LiveEgress`:
+    /// rule 4 is fail-closed, never a fast-path coast. (A stale no-egress
+    /// packet already runs cold via the `Stale` arm; no force bit is needed.)
+    /// `fail_closed_decline` fires on fenced authority: `Recorded` + intent
+    /// (fresh or stale — recorded authorization exists to fence), Fresh
+    /// non-live + intent (rule-3 forced, incl. A1/A2 reset), or ANY
+    /// no-egress (rule 4 unconditional). Only a stale with-egress walk with
+    /// no recorded authorization — stale `Live` or never-validated stale
+    /// `Unvalidated` (#8618) — keeps `Decline` (#9513 survives; its
+    /// no-route retention is `NonLocal`, not no-egress).
+    /// `fail_closed_icmp` is §4.4 rule 3: recorded + now-local + type-armed
+    /// revokes, as does the generation-equal `Unvalidated` stamp (the A1/A2
+    /// reset case), and any no-egress packet even when live or stale. A
+    /// never-validated stale WITH-EGRESS entry keeps the #8618 decline: it
+    /// carries no derived Permit, so no recorded authorization exists to
+    /// fence, and revoking it would reintroduce the manufactured-DENY harm
+    /// #8618 accepted its residual to avoid.
+    pub(crate) fn policy_revalidation_gate(
+        &self,
+        key: &SessionKey,
+        current: PolicyGateCurrent,
+    ) -> PolicyGateAnswer {
+        let Some(record) = self.revalidation_record(key) else {
+            return PolicyGateAnswer {
+                target: PolicyRevalidationTarget::NoLocalEntry,
+                kind: PolicyRevalidationKind::Unvalidated,
+                force_cold: false,
+                fail_closed_decline: false,
+                fail_closed_icmp: false,
+            };
+        };
+        let fresh = record.entry.policy_revalidated_gen == self.policy_revalidation_gen;
+        let kind = record.entry.policy_revalidation_kind;
+        let target = if fresh {
+            PolicyRevalidationTarget::Fresh
+        } else {
+            PolicyRevalidationTarget::Stale(record.key.clone())
+        };
+        let non_live = !matches!(kind, PolicyRevalidationKind::LiveEgress);
+        let intent = !matches!(current, PolicyGateCurrent::NonLocal);
+        let no_egress = matches!(current, PolicyGateCurrent::LocalForwardingNoEgress);
+        // Rule 4 is unconditional: any would-forward disposition without a
+        // valid egress fails closed, regardless of freshness or kind. #9513's
+        // lookup-failure retention lives on the `NonLocal` branch (NoRoute,
+        // HAInactive, redirect with egress 0), never here. Recorded
+        // authorization exists to fence whether fresh or stale; Unvalidated
+        // fences only when fresh (A1/A2 reset — a prior verdict was
+        // distrusted), never when never-validated stale (#8618).
+        let fenced_provenance = matches!(kind, PolicyRevalidationKind::RecordedEgress)
+            || (matches!(kind, PolicyRevalidationKind::Unvalidated) && fresh);
+        PolicyGateAnswer {
+            target,
+            kind,
+            force_cold: fresh && intent && (non_live || no_egress),
+            fail_closed_decline: no_egress || (intent && fenced_provenance),
+            fail_closed_icmp: no_egress || (intent && fenced_provenance),
+        }
+    }
+
+    /// #10507: the receiver-local provenance paired with the zone policy
+    /// stamp. The hit-row fast path answers freshness+authority through
+    /// [`SessionTable::policy_revalidation_gate`] (one probe on the hit key);
+    /// this single-probe accessor serves the reverse forward-companion check,
+    /// which names a DIFFERENT key and therefore costs its own hash by
+    /// necessity, not a double hash. A missing entry is conservatively
+    /// unvalidated.
+    pub(crate) fn policy_revalidation_kind(
+        &self,
+        key: &SessionKey,
+    ) -> PolicyRevalidationKind {
+        self.revalidation_record(key)
+            .map(|record| record.entry.policy_revalidation_kind)
+            .unwrap_or(PolicyRevalidationKind::Unvalidated)
+    }
+
+    /// #8356/#10507: record that this entry's zone-policy verdict has been
+    /// re-derived under the live generation and retain how that verdict was
+    /// derived. Takes the CANONICAL key; a miss is a no-op.
+    pub(crate) fn mark_policy_revalidated(
+        &mut self,
+        key: &SessionKey,
+        kind: PolicyRevalidationKind,
+    ) {
         let live_gen = self.policy_revalidation_gen;
         if let Some(handle) = self.key_to_handle.get(key).copied()
             && let Some(record) = self.entries.get_mut(handle as usize)
             && record.key == *key
         {
             record.entry.policy_revalidated_gen = live_gen;
+            record.entry.policy_revalidation_kind = kind;
         }
     }
-
 
     /// #3527: install the per-screened-zone half-open (`tcp_opening_ns`)
     /// timeout overrides (zone id → ns), driven from each zone's `syn-flood
@@ -2111,7 +2270,8 @@ impl SessionTable {
         // the wrong one of such a pair is a mistake this campaign has already
         // made once. Counting inside the resolver cannot pick the wrong site.
         let Some(handle) = self.handle_for_key(key) else {
-            self.lookup_miss_no_handle.fetch_add(1, AtomicOrdering::Relaxed);
+            self.lookup_miss_no_handle
+                .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
         };
         let Some(record) = self.entries.get(handle as usize) else {
@@ -2147,7 +2307,8 @@ impl SessionTable {
         // which is a weaker and true claim. If the per-function split is ever
         // actually wanted, it needs new fields — do not infer it from these.
         let Some(handle) = self.handle_for_key(key) else {
-            self.lookup_miss_no_handle.fetch_add(1, AtomicOrdering::Relaxed);
+            self.lookup_miss_no_handle
+                .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
         };
         let Some(record) = self.entries.get_mut(handle as usize) else {
@@ -2258,7 +2419,10 @@ impl SessionTable {
     /// << 48`, in the high 16 bits of every id it mints. So a non-zero id whose high
     /// bits differ was adopted from the publisher (for a local session's replica,
     /// the installer). An id minted here, or 0, is not carried.
-    pub(in crate::session) fn session_id_carried_from_another_worker(&self, session_id: u64) -> bool {
+    pub(in crate::session) fn session_id_carried_from_another_worker(
+        &self,
+        session_id: u64,
+    ) -> bool {
         const NAMESPACE_MASK: u64 = 0xFFFF_u64 << 48;
         session_id != 0 && (session_id & NAMESPACE_MASK) != self.session_id_worker_hi
     }
@@ -2266,7 +2430,9 @@ impl SessionTable {
     /// #9412: the live entry's close class on the HA wire (`0` if open or
     /// absent), for the Open deltas that re-announce an existing session.
     pub(crate) fn close_class_wire_for(&self, key: &SessionKey) -> u8 {
-        self.entry_by_key(key).map(|e| e.tcp_close_class_wire()).unwrap_or(0)
+        self.entry_by_key(key)
+            .map(|e| e.tcp_close_class_wire())
+            .unwrap_or(0)
     }
 
     /// #8125: the session's OWN inactivity window, in whole seconds, for the
@@ -2360,8 +2526,8 @@ impl SessionTable {
                 if age > expires_after {
                     return false;
                 }
-                let refresh_after = expires_after.max(SESSION_KEEPALIVE_DIVISOR)
-                    / SESSION_KEEPALIVE_DIVISOR;
+                let refresh_after =
+                    expires_after.max(SESSION_KEEPALIVE_DIVISOR) / SESSION_KEEPALIVE_DIVISOR;
                 age >= refresh_after
             }
             None => return false,
@@ -2487,7 +2653,11 @@ impl SessionTable {
     /// Volume, against #8593: at most one delta per class TRANSITION, and a
     /// retransmitted FIN in the same class emits nothing. A session can
     /// therefore emit at most three over its life (CLOSING, TIME_WAIT, RST).
-    pub(in crate::session) fn emit_close_state_update(&mut self, matched_key: &SessionKey, class_before: u8) {
+    pub(in crate::session) fn emit_close_state_update(
+        &mut self,
+        matched_key: &SessionKey,
+        class_before: u8,
+    ) {
         let Some(matched) = self.entry_by_key(matched_key) else {
             return;
         };
@@ -2524,21 +2694,24 @@ impl SessionTable {
         // The metadata clone bumps the bound policy-counter Arc (#5445). That is
         // acceptable here only because this runs on a class transition, never
         // on the per-packet path.
-        let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Update,
-        key: forward_key.clone(),
-        decision: forward.decision,
-        metadata: forward.metadata.clone(),
-        origin: forward.origin,
-        fabric_redirect_sync: false,
-        created_ns: forward.created_ns,
-        last_seen_ns: forward.last_seen_ns,
-        counters: SessionCounters::default(),
-        observed_tos: forward.observed_tos,
-        observed_tcp_flags: forward.observed_tcp_flags,
-        session_id: forward.session_id,
-        bulk_resync: false,
-        tcp_close_class: class_after,
-        purge_retirement: false, };
+        let delta = SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Update,
+            key: forward_key.clone(),
+            decision: forward.decision,
+            metadata: forward.metadata.clone(),
+            origin: forward.origin,
+            fabric_redirect_sync: false,
+            created_ns: forward.created_ns,
+            last_seen_ns: forward.last_seen_ns,
+            counters: SessionCounters::default(),
+            observed_tos: forward.observed_tos,
+            observed_tcp_flags: forward.observed_tcp_flags,
+            session_id: forward.session_id,
+            bulk_resync: false,
+            tcp_close_class: class_after,
+            purge_retirement: false,
+        };
         self.push_delta(delta);
     }
 
@@ -2609,8 +2782,7 @@ impl SessionTable {
                 // ONE fin.
                 entry.fin_peer |= fin;
                 entry.last_seen_ns = now_ns;
-                entry.expires_after_ns =
-                    tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
+                entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
                 shortened = true;
             }
         }
@@ -2718,8 +2890,7 @@ impl SessionTable {
         let old_owner_rg = record.entry.metadata.owner_rg_id;
         // #10310: a WorkerLocalImport replica is not counted, but a promote
         // to a local origin becomes one logical limit-session unit.
-        let old_counted =
-            !old_is_reverse && install::session_limit_origin_counted(old_origin);
+        let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
         if !ha_activation {
             let new_peer = origin.is_peer_synced();
             // Reject: both peer-synced (refresh_local on a synced entry) OR peer
@@ -2757,6 +2928,8 @@ impl SessionTable {
         // #3527: resolve the per-zone half-open override before borrowing the
         // record mutably (the timeout selection below cannot re-borrow self).
         let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
+        // #10507 A1: live policy generation for the Fresh-only reset below.
+        let live_policy_gen = self.policy_revalidation_gen;
         {
             let record = self
                 .entries
@@ -2765,6 +2938,25 @@ impl SessionTable {
             record.entry.decision = decision;
             record.entry.metadata = metadata.clone();
             record.entry.origin = origin;
+            // #10507 A1 (Main-approved deviation from §4.5 unconditional —
+            // Option A, Stale retains its fence): a peer-to-local promotion
+            // revokes provenance only when Fresh. A Fresh Recorded Permit
+            // must not coast into local forwarding — reset to Unvalidated
+            // so the next local packet cold-judges. A Stale row already
+            // re-judges via the Stale arm; resetting Stale Recorded to
+            // Unvalidated would launder a fenced recorded authorization
+            // into the never-validated carve-out (Decline instead of
+            // fail-closed on type-armed ICMP / unidentified arrival).
+            // Preserving the Stale kind keeps the Recorded fence through
+            // the transition. Fresh behavior is bit-identical to
+            // unconditional; packet-time fencing stays authoritative.
+            if was_peer_synced
+                && !origin.is_peer_synced()
+                && record.entry.policy_revalidated_gen == live_policy_gen
+            {
+                record.entry.policy_revalidation_kind =
+                    PolicyRevalidationKind::Unvalidated;
+            }
             // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #3046: RST is sticky — once observed it keeps the entry on the
@@ -2840,8 +3032,7 @@ impl SessionTable {
         }
         // #10310: keep count maintenance balanced across in-place origin
         // transitions (notably WorkerLocalImport -> local promotion).
-        let new_counted =
-            !metadata.is_reverse && install::session_limit_origin_counted(origin);
+        let new_counted = !metadata.is_reverse && install::session_limit_origin_counted(origin);
         if new_counted && !old_counted {
             self.session_limit_inc(key.src_ip, key.dst_ip);
         } else if old_counted && !new_counted {
@@ -2900,23 +3091,119 @@ impl SessionTable {
             // #9412: a promote re-announces the session, so it carries the close
             // class the entry already holds.
             let tcp_close_class = self.close_class_wire_for(key);
-            self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, tcp_close_class,
-            purge_retirement: false,
-            kind: SessionDeltaKind::Open,
-            key: key.clone(),
-            decision,
-            metadata,
-            origin,
-            fabric_redirect_sync: false,
-            created_ns,
-            last_seen_ns: now_ns,
-            counters,
-            observed_tos,
-            observed_tcp_flags,
-            session_id,
-            bulk_resync: false, });
+            self.push_delta(SessionDelta {
+                provenance: crate::session::ExportProvenance::Incremental,
+                tcp_close_class,
+                purge_retirement: false,
+                kind: SessionDeltaKind::Open,
+                key: key.clone(),
+                decision,
+                metadata,
+                origin,
+                fabric_redirect_sync: false,
+                created_ns,
+                last_seen_ns: now_ns,
+                counters,
+                observed_tos,
+                observed_tcp_flags,
+                session_id,
+                bulk_resync: false,
+            });
         }
         true
+    }
+
+    /// Rebind both halves of a retained policy session to the new rule
+    /// identity selected by commit-time rematching. Policy and zone fields are
+    /// not secondary-index inputs, so the update is atomic with respect to the
+    /// worker's single-writer session table.
+    pub(crate) fn rebind_policy_pair(
+        &mut self,
+        key: &SessionKey,
+        policy_id: u32,
+        policy_counter_idx: u32,
+        policy_counter: std::sync::Arc<crate::policy::PolicyRuleCounter>,
+        ingress_zone: u16,
+        egress_zone: u16,
+    ) -> bool {
+        let Some(forward) = self.entry_by_key(key) else {
+            return false;
+        };
+        if forward.metadata.is_reverse {
+            return false;
+        }
+        let companion_key = reverse_session_key(key, forward.decision.nat);
+        if companion_key != *key {
+            let Some(companion) = self.entry_by_key(&companion_key) else {
+                return false;
+            };
+            if !companion.metadata.is_reverse {
+                return false;
+            }
+        }
+
+        // A non-NAT flow has an identical reverse key. Mutate it once; a
+        // second pass would swap the zones back and leave the pair unchanged.
+        let mut rebound = false;
+        if let Some(record) = self.entry_by_key_mut(key) {
+            record.metadata.policy_id = policy_id;
+            record.metadata.policy_counter_idx = policy_counter_idx;
+            record.metadata.policy_counter = Some(policy_counter.clone());
+            record.metadata.ingress_zone = ingress_zone;
+            record.metadata.egress_zone = egress_zone;
+            rebound = true;
+        }
+        if companion_key != *key {
+            if let Some(record) = self.entry_by_key_mut(&companion_key) {
+                record.metadata.policy_id = policy_id;
+                record.metadata.policy_counter_idx = policy_counter_idx;
+                record.metadata.policy_counter = Some(policy_counter);
+                record.metadata.ingress_zone = egress_zone;
+                record.metadata.egress_zone = ingress_zone;
+                rebound = true;
+            }
+        }
+        rebound
+    }
+
+    /// Return the live forward/reverse halves after a policy rebind so mirror
+    /// layers can be restamped with the same policy identity.
+    pub(crate) fn policy_rebind_pair_entries(
+        &self,
+        key: &SessionKey,
+    ) -> Option<Vec<PolicyRebindEntry>> {
+        let forward = self.entry_by_key(key)?;
+        if forward.metadata.is_reverse {
+            return None;
+        }
+        let companion_key = reverse_session_key(key, forward.decision.nat);
+        if companion_key != *key {
+            let companion = self.entry_by_key(&companion_key)?;
+            if !companion.metadata.is_reverse {
+                return None;
+            }
+        }
+
+        let mut entries = Vec::with_capacity(2);
+        let mut append_entry = |candidate: &SessionKey| {
+            if let Some(entry) = self.entry_by_key(candidate) {
+                entries.push(PolicyRebindEntry {
+                    key: candidate.clone(),
+                    decision: entry.decision,
+                    metadata: entry.metadata.clone(),
+                    origin: entry.origin,
+                    protocol: candidate.protocol,
+                    tcp_flags: entry.observed_tcp_flags,
+                    session_id: entry.session_id,
+                    tcp_close_class: entry.tcp_close_class_wire(),
+                });
+            }
+        };
+        append_entry(key);
+        if companion_key != *key {
+            append_entry(&companion_key);
+        }
+        Some(entries)
     }
 
     /// Thin wrapper for local-only refresh (non-HA-activation path).
@@ -2951,6 +3238,7 @@ impl SessionTable {
 
     /// Convenience: refresh for HA activation (always updates regardless
     /// of origin). Preserves existing origin.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn refresh_for_ha_activation(
         &mut self,
         key: &SessionKey,
@@ -3025,6 +3313,8 @@ impl SessionTable {
             self.remove_forward_nat_index_parts(key, handle, old_nat, old_is_reverse);
             remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
         }
+        // #10507 A2: live policy generation for the Fresh-only reset below.
+        let live_policy_gen = self.policy_revalidation_gen;
 
         {
             let record = self
@@ -3033,6 +3323,12 @@ impl SessionTable {
                 .expect("handle validated above");
             record.entry.decision = decision;
             record.entry.metadata = metadata;
+            // #10507 A2 (Main-approved deviation, Option A — see A1): Fresh-only.
+            // Stale retains its Recorded fence; Fresh resets to force cold.
+            // Packet-time fencing remains authoritative if delayed/skipped.
+            if record.entry.policy_revalidated_gen == live_policy_gen {
+                record.entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+            }
             // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #2120: promotion refresh re-stamps `last_seen_ns` (the entry
@@ -3454,9 +3750,7 @@ impl SessionTable {
                 );
             }
         }
-        if !is_reverse
-            && let Some(l3_key) = l3_reverse_key_for_forward(key, nat)
-        {
+        if !is_reverse && let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
             // #10130: this index is a gate, not a reverse session lookup. It
             // intentionally carries no L4 identity and no collision telemetry;
             // the packet itself has no ports, and the caller re-validates the
@@ -3518,7 +3812,11 @@ impl SessionTable {
         // key is dropped only once its bucket empties. This is what leaves a
         // surviving colliding session's return path intact when the other
         // closes (the single-value map wiped the whole key and stranded it).
-        nat_index_bucket_remove(&mut self.nat_reverse_index, &reverse_wire_key(key, nat), handle);
+        nat_index_bucket_remove(
+            &mut self.nat_reverse_index,
+            &reverse_wire_key(key, nat),
+            handle,
+        );
         nat_index_bucket_remove(
             &mut self.nat_reverse_index,
             &reverse_canonical_key(key, nat),
@@ -3667,11 +3965,7 @@ fn nat_index_bucket_remove(
     }
 }
 
-fn l3_reverse_bucket_remove(
-    map: &mut SeededL3ReverseIndex,
-    key: &L3ReverseKey,
-    handle: u32,
-) {
+fn l3_reverse_bucket_remove(map: &mut SeededL3ReverseIndex, key: &L3ReverseKey, handle: u32) {
     if let Some(bucket) = map.get_mut(key) {
         bucket.retain(|h| *h != handle);
         if bucket.is_empty() {

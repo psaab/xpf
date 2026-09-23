@@ -565,7 +565,7 @@ func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 	err := m.syncDeleteV4Locked(key, val, valErr == nil)
 	m.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("delete v4 session from userspace helper: %w", err)
+		return surfaceSingularHelperDeleteError("v4", err)
 	}
 	return nil
 }
@@ -593,7 +593,6 @@ func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.Ses
 	}
 	return nil
 }
-
 
 // syncDeleteV4LockedMarked is syncDeleteV4Locked with the #9714 peer mark set on
 // both helper requests (the key and its reverse companion). It reports whether the
@@ -637,7 +636,7 @@ func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 	err := m.syncDeleteV6Locked(key, val, valErr == nil)
 	m.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("delete v6 session from userspace helper: %w", err)
+		return surfaceSingularHelperDeleteError("v6", err)
 	}
 	return nil
 }
@@ -657,7 +656,6 @@ func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.S
 	}
 	return nil
 }
-
 
 // syncDeleteV6LockedMarked is the IPv6 analogue of syncDeleteV4LockedMarked (#9714).
 func (m *Manager) syncDeleteV6LockedMarkedErr(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer, forwardOnly bool) (bool, error) {
@@ -886,6 +884,18 @@ func surfaceScopedHelperDeleteError(family string, err error) error {
 	return fmt.Errorf("delete %s sessions from userspace helper: %w", family, err)
 }
 
+// surfaceSingularHelperDeleteError is the singular DeleteSession analogue of
+// surfaceScopedHelperDeleteError. Transport failures retain the stable helper
+// sentinel but do not expose a raw dial ENOENT to the session-store recovery
+// classifier (#10528).
+func surfaceSingularHelperDeleteError(family string, err error) error {
+	if errors.Is(err, errSessionHelperUnreachable) {
+		return fmt.Errorf("delete %s session from userspace helper: %w (%v)",
+			family, errSessionHelperUnreachable, err)
+	}
+	return fmt.Errorf("delete %s session from userspace helper: %w", family, err)
+}
+
 // peerDeleteRefusedLocalOwned is the helper's in-band answer to a #9714 peer delete
 // it refused: SYNCED_DELETE_REFUSED_PREFIX plus the reason
 // (userspace-dp/src/server/handlers/sync_session.rs).
@@ -926,20 +936,60 @@ func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.Scope
 	return len(applied), refused, nil
 }
 
+// BatchDeletePeerSyncedSessionsExactScoped is the exact peer-delete projection
+// used by SessionStore's DeleteBatchKnownExactV4/V6 path (#10598). It returns
+// mirror keys whose delete call actually succeeded and the helper-applied set;
+// already-absent mirror rows are excluded from the first set.
+func (m *Manager) BatchDeletePeerSyncedSessionsExactScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) ([]dataplane.ScopedSessionKey, []dataplane.ScopedSessionKey, error) {
+	var refused, applied []dataplane.ScopedSessionKey
+	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
+	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKey) error {
+		return m.bpfShim.DeleteSession(sk.Key)
+	})
+	return deleted, applied, err
+}
+
+// BatchDeletePeerSyncedSessionsExactScopedV6 is the IPv6 analogue.
+func (m *Manager) BatchDeletePeerSyncedSessionsExactScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) ([]dataplane.ScopedSessionKeyV6, []dataplane.ScopedSessionKeyV6, error) {
+	var refused, applied []dataplane.ScopedSessionKeyV6
+	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, forwardOnly, &refused, &applied)
+	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKeyV6) error {
+		return m.bpfShim.DeleteSessionV6(sk.Key)
+	})
+	return deleted, applied, err
+}
+
+// deleteAppliedMirrorRows deletes the BPF mirror row of every key the helper
+// EXPLICITLY APPLIED (#9714 review round 2, finding 1).
+//
+// It used to be deleteUnrefusedMirrorRows and take the COMPLEMENT — every key not
+// in `refused` — which is a different set and a larger one. "Not refused" also
+// contains a request whose transport failed and a request the batch never sent at
+// all after an unreachable helper (errSessionSyncNotAttempted). Deleting on that
+// complement removed the mirror rows of sessions the helper still holds, and the
+// mirror does not heal: the refresh path writes with BPF_EXIST specifically so it
+// will not recreate a deleted entry. Silence is not assent.
+//
+// Rows go one at a time, and a row that is already gone is not an error, so one
+// missing row does not strand the rest.
 func deleteAppliedMirrorRows[K comparable](applied []K, del func(K) error) (int, error) {
-	deleted := 0
+	deleted, err := deleteAppliedMirrorRowsExact(applied, del)
+	return len(deleted), err
+}
+
+// deleteAppliedMirrorRowsExact returns the keys whose mirror delete actually
+// succeeded, excluding benign already-absent rows. It preserves input order.
+func deleteAppliedMirrorRowsExact[K comparable](applied []K, del func(K) error) ([]K, error) {
+	deleted := make([]K, 0, len(applied))
 	var firstErr error
 	for _, key := range applied {
-		if err := del(key); err != nil {
-			if errors.Is(err, ebpf.ErrKeyNotExist) {
-				continue
-			}
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+		switch err := del(key); {
+		case err == nil:
+			deleted = append(deleted, key)
+		case errors.Is(err, ebpf.ErrKeyNotExist):
+		case firstErr == nil:
+			firstErr = err
 		}
-		deleted++
 	}
 	return deleted, firstErr
 }
@@ -1101,6 +1151,7 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 			// pre-#9364 bare request, bit-identical.
 			req := m.buildSessionSyncRequestV4(
 				"mirror_delete_batch", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
+			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)
@@ -1182,6 +1233,7 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 			// #9364: name the domain — see the V4 twin.
 			req := m.buildSessionSyncRequestV6(
 				"mirror_delete_batch", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
+			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)

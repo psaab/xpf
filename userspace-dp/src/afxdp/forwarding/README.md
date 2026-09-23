@@ -1002,7 +1002,7 @@ coverage would require the shim to surface an "AH present" signal
 instead of walking past the header — out of scope here, and
 unnecessary given the local-dest shunt.
 
-### Host-inbound ordering: ESP/AH exempt, IKE gated on a live exchange (#3616 Option A + #4323 Option B + #6471)
+### Host-inbound ordering: IKE admission and SA-gated ESP-in-UDP (#10516 + #4323 Option B + #6471)
 
 Stage 11 runs BEFORE the per-zone host-inbound admission gate
 (`host_inbound_admits_iface`) and, on a match, short-circuits the poll
@@ -1010,13 +1010,14 @@ loop (`Passthrough`/`Denied`), so a packet it claims never reaches the
 later local-delivery gate. Within Stage 11 the admission split is by
 class (`classify_ipsec_admission`):
 
-- **ESP (50) / AH (51) and the IPsec data plane are unconditionally
-  EXEMPT** — always passed through (`Passthrough`), regardless of the
-  zone's `host-inbound-traffic system-services ike`/`ipsec`. The
-  negotiated SA is the authorization (Junos parity), mirroring the
-  kernel chain's global `meta l4proto { 50, 51 } accept`. ESP-in-UDP on
-  4500 (a non-zero ESP SPI in the first payload word) and the 1-byte
-  NAT-T keepalive are demuxed as data plane and stay exempt too.
+- **Raw ESP (50) / AH (51) do not reach the Stage-11 arm in production.**
+  The descriptor flow parser has no raw-protocol tuple, so these packets are
+  flowless and return `NotClaimed`; outer raw ESP is also shunted to the
+  kernel before userspace. The arm nevertheless fails closed if a non-UDP
+  protocol ever reaches it, rather than minting a passthrough outlet.
+- **ESP-in-UDP requires an eligible inbound SA.** A matching `(family, dst,
+  SPI, src)` snapshot entry reaches only the delegated outlet; no-SA, stale,
+  truncated, keepalive, and malformed paths recycle without reinjection.
 - **A NEW inbound IKE initiation is GATED (#4323 Option B).** The FIRST
   packet of a new IKE exchange — an ISAKMP header whose **Responder
   SPI/cookie is all-zero** (IKEv2 IKE_SA_INIT request / IKEv1 Main- or
@@ -1049,8 +1050,8 @@ class (`classify_ipsec_admission`):
   sliding idle reap; NOT HA-synced (the primary path's kernel conntrack
   for host-terminated IKE is not synced either — same failover posture);
   an xpfd restart drops the seeds, which self-heal on the next admitted
-  initiation or firewall-outbound IKE packet, with the ESP data plane
-  exempt throughout.
+  initiation or firewall-outbound IKE packet; ESP-in-UDP remains subject to
+  the live SA snapshot gate.
 - **Eviction is O(1) (#6747).** The victim used to be found with
   `entries.iter().min_by_key(seen)` — a full traversal of all 4096
   entries plus the empty hashbrown slots, under a lock `matches` takes on
@@ -1082,11 +1083,11 @@ gates NEW inbound IKE on `system-services ike`/`ipsec`, and lets
 established/return IKE ride `ct established,related accept` first.
 `TestHostInboundFilterExemptsIPsecAndV6Errors` guards that ordering. The
 SECONDARY AF_XDP path (Stage 11) is reached only when IPsec is NOT
-shunted to the kernel: DNAT/static-NAT-to-self IKE, native-GRE inner
-IPsec whose inner destination is a firewall-local address (redirected to
-the XSK and decapped in userspace), and transit/NAT IPv4 AH and IKE
-(UDP 500/4500) that the shim steered to the helper. The #4323 gate
-closes the NEW-inbound-IKE host-inbound parity gap on this path, and the
+shunted to the kernel: DNAT/static-NAT-to-self IKE and ESP-in-UDP,
+native-GRE inner UDP-4500 whose destination is firewall-local, and transit
+UDP 500/4500 that the shim steered to the helper. Raw ESP/AH and GRE-inner
+raw ESP/AH remain flowless `NotClaimed`; the #4323 gate closes the
+NEW-inbound-IKE host-inbound parity gap on this reachable path, and the
 #6471 live-exchange discriminator closes the residual established-parity
 gap (a forged non-zero Responder SPI can no longer mint "established"
 the way kernel conntrack NEW/ESTABLISHED cannot be faked on the primary
@@ -1099,28 +1100,27 @@ packet's destination is an address the firewall itself answers for
 (`ForwardingState::owns_configured_ip(flow.dst_ip)` — the configured
 interface IPs incl. the SNAT/WAN IP and VIPs, PLUS the static-NAT/DNAT
 externals appended to `local_v*`). Before #5620 the stage claimed ANY
-ESP/AH/IKE packet the shim steered to the helper regardless of
-destination, so a TRANSIT UDP/500, UDP/4500 or IPv4 AH packet routed to
-a remote host was reinjected to the local XFRM stack and SKIPPED transit
-zone-policy enforcement (codex-review-181 M03; raw outer ESP was never
-affected because the shim shunts it to the kernel unconditionally, so
-only the shim-steered UDP-IKE and IPv4-AH transit classes were
-reachable).
+ESP-in-UDP/IKE packet the shim steered to the helper regardless of
+destination, so a TRANSIT UDP/500 or UDP/4500 packet routed to a remote host
+was reinjected to the local XFRM stack and SKIPPED transit zone-policy
+enforcement (codex-review-181 M03; raw outer ESP was never affected because
+the shim shunts it to the kernel, and raw ESP/AH are flowless to Stage 11).
 
 Stage 11 runs BEFORE NAT resolution (only native-GRE decap precedes it),
 so `flow.dst_ip` is the RAW on-the-wire destination. Gating on the raw
 dst is nonetheless correct for the DNAT/static-NAT-to-self cases: the NAT
 externals are already members of `local_v*` (appended in
 `forwarding_build`), so `owns_configured_ip` recognises a DNAT-to-self
-external without needing the post-NAT address. GRE-inner-local IPsec is
-likewise covered — the decapped inner destination is a firewall
-interface address. A remote/transit destination is owned by nobody here,
-so the packet returns `NotClaimed` and continues to normal transit
-forwarding + zone policy. The predicate runs BEFORE the #4323
-host-inbound admission block, which only makes sense for genuinely
-host-inbound (local-destined) IKE. Regression-guarded by
-`stage_ipsec_passthrough_rejects_remote_transit_dst_5620` (remote dst →
-NotClaimed) and `stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620`
+external without needing the post-NAT address. GRE-inner-local UDP-4500 is
+likewise covered — the decapped inner destination is a firewall interface
+address. GRE-inner raw ESP/AH remains flowless and `NotClaimed`. A
+remote/transit destination is owned by nobody here, so the packet returns
+`NotClaimed` and continues to normal transit forwarding + zone policy. The
+predicate runs BEFORE the #4323 host-inbound admission block, which only
+makes sense for genuinely host-inbound (local-destined) IKE. Regression-
+guarded by `stage_ipsec_passthrough_rejects_remote_transit_dst_5620`
+(remote dst → NotClaimed) and
+`stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620`
 (local / WAN-IP / DNAT-to-self dst → Passthrough).
 
 **Zone resolution.** The gate resolves the LOGICAL ingress ifindex +

@@ -619,12 +619,11 @@ func (c *xpfCollector) collectZoneCounters(ch chan<- prometheus.Metric, dp apiRu
 	// reports per_zone_counters_available:false for, pinned by
 	// TestZoneUnpopulatedGaugeMatchesRESTAvailability — the two surfaces must
 	// not drift.
-	// Quarantine divergence (#10489, temporary): a quarantined name is omitted
-	// here and counts as unpopulated, while REST zonesHandler still reports the
-	// survivor's counters under the loser until #10530 lands the existing-field
-	// half (#10531 owns structured quarantine presence). The parity pin uses
-	// ordinary zones and stays green; quarantined configs diverge by design
-	// until the follow-ups land.
+	// The REST handler applies the same quarantine disposition: the authored
+	// loser remains in the inventory but is marked unavailable instead of
+	// reusing the survivor's live counters. This keeps the gauge and REST
+	// availability count aligned for colliding configs; structured presence
+	// remains an independent API concern.
 	for zoneName, zone := range cfg.Security.Zones {
 		if zone == nil {
 			continue

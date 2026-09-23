@@ -17,6 +17,8 @@ var _ = peerSyncedSessionDeleter(nil)
 type peerSyncedSessionDeleteContract interface {
 	BatchDeletePeerSyncedSessionsScoped([]ScopedSessionKey, bool) (int, []ScopedSessionKey, error)
 	BatchDeletePeerSyncedSessionsScopedV6([]ScopedSessionKeyV6, bool) (int, []ScopedSessionKeyV6, error)
+	BatchDeletePeerSyncedSessionsExactScoped([]ScopedSessionKey, bool) ([]ScopedSessionKey, []ScopedSessionKey, error)
+	BatchDeletePeerSyncedSessionsExactScopedV6([]ScopedSessionKeyV6, bool) ([]ScopedSessionKeyV6, []ScopedSessionKeyV6, error)
 	DeletePeerSyncedSession(SessionKey, bool) (bool, error)
 	DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error)
 	DeletePeerSyncedSessionScoped(SessionKey, uint32, uint64) (bool, error)

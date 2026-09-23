@@ -71,6 +71,9 @@ pub(crate) enum ReconcileError {
     /// carries the preserved typed [`ReconcileStage::SpawnWorkerFailed`]
     /// identity (was its stage `String`).
     WorkerSpawn(ReconcileStage),
+    /// #10516: the XFRM-SA monitor did not complete its first full GETSA dump
+    /// before dataplane-ready. The reconcile fails closed before worker launch.
+    IpsecSaNotReady(ReconcileStage),
     /// #5143: a worker SPAWNED successfully on the POST-TEARDOWN path but its
     /// IN-THREAD XSK/UMEM bind did not bring up its full planned binding set
     /// (a partial/empty bind), or it never reported startup readiness within
@@ -81,8 +84,7 @@ pub(crate) enum ReconcileError {
     /// Like `WorkerSpawn` this is raised AFTER teardown (the queue set has no
     /// XSK-bound worker), so the handler fails closed and does NOT persist the
     /// broken snapshot. #6244: carries the preserved typed
-    /// [`ReconcileStage::WorkerBindIncomplete`] identity (was its stage
-    /// `String`).
+    /// [`ReconcileStage::WorkerBindIncomplete`] identity (was its stage `String`).
     WorkerBindIncomplete(ReconcileStage),
 }
 
@@ -92,13 +94,15 @@ impl std::fmt::Display for ReconcileError {
             ReconcileError::Integrity(err) => write!(f, "{err}"),
             ReconcileError::MapSetup(stage) => write!(f, "map setup failed ({stage})"),
             ReconcileError::WorkerSpawn(stage) => write!(f, "worker spawn failed ({stage})"),
+            ReconcileError::IpsecSaNotReady(stage) => {
+                write!(f, "ipsec sa monitor not ready ({stage})")
+            }
             ReconcileError::WorkerBindIncomplete(stage) => {
                 write!(f, "worker bind incomplete ({stage})")
             }
         }
     }
 }
-
 /// State preserved across `stop_inner(false)` that the later phases
 /// need to consume. `had_live_workers` lives entirely inside
 /// `teardown.rs` (it gates the 500ms mlx5 quiesce sleep alongside the
@@ -432,6 +436,9 @@ impl Coordinator {
         // a retry/last-good path).
         bringup_result.map_err(|err| match err {
             bringup::WorkerBringUpError::Spawn(stage) => ReconcileError::WorkerSpawn(stage),
+            bringup::WorkerBringUpError::IpsecSaNotReady(stage) => {
+                ReconcileError::IpsecSaNotReady(stage)
+            }
             bringup::WorkerBringUpError::BindIncomplete(stage) => {
                 ReconcileError::WorkerBindIncomplete(stage)
             }

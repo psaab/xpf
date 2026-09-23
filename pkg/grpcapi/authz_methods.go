@@ -106,6 +106,7 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	"GetNATDestination":        config.PermView,
 	"GetScreen":                config.PermView,
 	"GetEvents":                config.PermView,
+	"GetD11AttestationLedger":  config.PermMaint,
 	"GetInterfaces":            config.PermView,
 	"ShowInterfacesDetail":     config.PermView,
 	"GetDHCPLeases":            config.PermView,

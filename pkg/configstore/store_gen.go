@@ -36,8 +36,31 @@ var ErrCandidateGenerationConflict = errors.New(
 //     `s.candidate = …` reassignment is immediately followed by a bump —
 //     verified by code audit — plus the generation-conflict tests that would
 //     fail if a reset silently kept a stale token.
+//
+// bumpCandidateGenLocked advances the generation for a candidate replacement
+// or discard. Only the currently edited candidate lineage is retired; older
+// committed generations remain available to their apply transactions.
 func (s *Store) bumpCandidateGenLocked() {
+	old := s.candidateGen
+	delete(s.pendingRenameAncestry, old)
 	s.candidateGen++
+}
+
+// bumpCandidatePromotionLocked advances the candidate generation after a
+// successful promotion. The pre-promotion generation's lineage is consumed by
+// the binder (commitWithGenBinding), which transfers ownership to the daemon
+// copy and retires the store entry immediately, in all apply outcomes.
+func (s *Store) bumpCandidatePromotionLocked() {
+	s.candidateGen++
+}
+func (s *Store) bumpCandidateMutationLocked() {
+	old := s.candidateGen
+	descriptors := s.pendingRenameAncestry[old]
+	delete(s.pendingRenameAncestry, old)
+	s.candidateGen++
+	if len(descriptors) > 0 {
+		s.pendingRenameAncestry[s.candidateGen] = descriptors
+	}
 }
 
 // activeSnapshot is one immutable publication of the active generation +

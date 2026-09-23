@@ -312,6 +312,51 @@
         }
       ]
     },
+    "icmp-unknown-application": {
+      "default_policy": "deny",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/p-icmp",
+          "name": "p-icmp",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_addresses": [
+            "any"
+          ],
+          "destination_addresses": [
+            "any"
+          ],
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "app-icmp"
+          ],
+          "application_terms": [
+            {
+              "name": "app-icmp",
+              "protocol": "icmp"
+            }
+          ],
+          "action": "permit"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 50675,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 20665,
+          "host_inbound_configured": true
+        }
+      ]
+    },
     "junos-host-fragment-associated-deny": {
       "default_policy": "deny",
       "rules": [

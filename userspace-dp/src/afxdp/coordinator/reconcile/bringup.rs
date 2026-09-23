@@ -51,6 +51,9 @@ pub(super) enum WorkerBringUpError {
     /// `pthread_create` EAGAIN/ENOMEM). #6244: carries the preserved typed
     /// [`ReconcileStage::SpawnWorkerFailed`] identity (was a stage `String`).
     Spawn(ReconcileStage),
+    /// The XFRM-SA monitor did not complete its first full dump before the
+    /// dataplane-ready deadline. No worker launch is attempted.
+    IpsecSaNotReady(ReconcileStage),
     /// #5143: a worker SPAWNED successfully but its in-thread XSK/UMEM bind
     /// did not bring up its FULL planned binding set (a partial/empty bind), or
     /// it never reported readiness within the bounded deadline. HEARTBEAT !=
@@ -172,6 +175,22 @@ pub(super) fn bring_up_workers(
     // `resolver: None`) — the invariant is attempt-before-launch, NOT
     // resolver-must-exist, so the resolver is NEVER threaded into
     // `spawn_workers`.
+    // #10516: the first complete GETSA dump is part of dataplane readiness,
+    // not merely a background best-effort task. A generation-zero store
+    // remains defense-in-depth on every worker, but it must not report a
+    // ready dataplane before the monitor has established its baseline.
+    ensure_ipsec_sa_monitor(coord);
+    if !coord
+        .neighbors
+        .ipsec_sa_monitor
+        .store
+        .wait_ready(Duration::from_secs(5))
+    {
+        coord.neighbors.stop_and_join_ipsec_sa_monitor();
+        let stage = ReconcileStage::IpsecSaNotReady;
+        coord.last_reconcile_stage = stage.clone();
+        return Err(WorkerBringUpError::IpsecSaNotReady(stage));
+    }
     let _ = ensure_resolver(coord);
     // Phase: SPAWN. The startup-report channel is created HERE, in the shell,
     // and the SENDER is passed BY REFERENCE into the spawn loop (each worker
@@ -573,6 +592,35 @@ pub(in crate::afxdp) fn replay_late_synced_sessions(
     }
 }
 
+/// #10516: spawn the shared raw-NETLINK_XFRM SA monitor before workers.
+/// Both lifecycle handles stay empty on spawn failure so the next reconcile
+/// retries and workers retain the generation-zero deny fence.
+pub(in crate::afxdp) fn ensure_ipsec_sa_monitor(coord: &mut Coordinator) {
+    if coord.neighbors.ipsec_sa_monitor.stop.is_some()
+        || coord.neighbors.ipsec_sa_monitor.join.is_some()
+    {
+        return;
+    }
+    coord
+        .neighbors
+        .ipsec_sa_monitor
+        .store
+        .reset_for_monitor_start();
+    let stop = Arc::new(AtomicBool::new(false));
+    let store = coord.neighbors.ipsec_sa_monitor.store.clone();
+    let stop_for_thread = stop.clone();
+    match spawn_supervised_aux("xfrm-sa-monitor", move || {
+        crate::afxdp::forwarding::ipsec_sa_monitor_loop(store, stop_for_thread)
+    }) {
+        Ok(join) => {
+            coord.neighbors.ipsec_sa_monitor.stop = Some(stop);
+            coord.neighbors.ipsec_sa_monitor.join = Some(join);
+        }
+        Err(err) => {
+            eprintln!("xpf-userspace-dp: XFRM-SA monitor spawn failed: {err}; retrying");
+        }
+    }
+}
 
 /// #6240 phase: RESOLVER (best-effort, ATTEMPTED before worker launch). Spawn
 /// the shared on-demand neighbor resolver so every worker's
@@ -585,6 +633,7 @@ pub(in crate::afxdp) fn replay_late_synced_sessions(
 /// handle (`Some` when installed/already-present, `None` when the spawn failed)
 /// so the ordering/best-effort contract is directly unit-testable. Verbatim
 /// move of the pre-#6240 inline block.
+
 pub(in crate::afxdp) fn ensure_resolver(coord: &mut Coordinator) -> Option<Arc<NeighborResolver>> {
     // #1769: spawn the shared on-demand neighbor resolver BEFORE the
     // worker spawn loop so every worker captures a clone of the resolver

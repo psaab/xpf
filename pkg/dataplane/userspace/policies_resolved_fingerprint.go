@@ -74,3 +74,38 @@ func PolicyResolvedFingerprints(cfg *config.Config) map[string]string {
 	}
 	return out
 }
+
+// PolicyResolvedIdentityStrippedFingerprints returns fingerprints of the
+// resolved rule content with stable-name and runtime-id identity fields
+// removed. It is used only to validate an explicit rename ancestry relation;
+// ordinary delete/add pairs must not infer continuity from matching content.
+func PolicyResolvedIdentityStrippedFingerprints(cfg *config.Config) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+	if err != nil {
+		return nil
+	}
+	perKey := make(map[string][]string, len(rules))
+	for _, rule := range rules {
+		key := stablePolicyRuleID(rule.FromZone, rule.ToZone, rule.Name)
+		rule.RuleID = ""
+		rule.PolicyID = 0
+		rule.Name = ""
+		rule.FromZone = ""
+		rule.ToZone = ""
+		blob, err := json.Marshal(rule)
+		if err != nil {
+			return nil
+		}
+		perKey[key] = append(perKey[key], string(blob))
+	}
+	out := make(map[string]string, len(perKey))
+	for key, parts := range perKey {
+		sort.Strings(parts)
+		sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+		out[key] = hex.EncodeToString(sum[:])
+	}
+	return out
+}

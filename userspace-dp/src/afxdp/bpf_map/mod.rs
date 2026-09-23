@@ -282,7 +282,9 @@ fn session_key_for_row(row: &SteeringRow) -> SessionKey {
     let map_key = unsafe { std::mem::transmute::<SteeringRow, UserspaceSessionMapKey>(*row) };
     let ip = |bytes: [u8; 16]| {
         if map_key.addr_family == libc::AF_INET as u8 {
-            IpAddr::V4(std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
+            IpAddr::V4(std::net::Ipv4Addr::new(
+                bytes[0], bytes[1], bytes[2], bytes[3],
+            ))
         } else {
             IpAddr::V6(std::net::Ipv6Addr::from(bytes))
         }
@@ -657,6 +659,20 @@ struct BpfSessionValueV6 {
     routing_domain: u32,
 }
 
+#[inline]
+fn restamp_bpf_value_v4(value: &mut BpfSessionValueV4, metadata: &SessionMetadata) {
+    value.policy_id = metadata.policy_id;
+    value.ingress_zone = metadata.ingress_zone;
+    value.egress_zone = metadata.egress_zone;
+}
+
+#[inline]
+fn restamp_bpf_value_v6(value: &mut BpfSessionValueV6, metadata: &SessionMetadata) {
+    value.policy_id = metadata.policy_id;
+    value.ingress_zone = metadata.ingress_zone;
+    value.egress_zone = metadata.egress_zone;
+}
+
 // #4983: WHERE the ingress-identity pair sits, not just how big the struct is.
 //
 // `bpf_conntrack_struct_sizes_match_c` cannot see a REORDER. Swapping the two
@@ -781,7 +797,6 @@ thread_local! {
     static CONNTRACK_PUBLISHES: std::cell::RefCell<Vec<ConntrackPublishRecord>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
-
 
 /// #6965/#8105: clear this thread's recorder so a sampling test starts from a
 /// known-empty state.
@@ -1028,8 +1043,13 @@ fn delete_bpf_conntrack_entry_raw(
 ) -> bool {
     match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
         (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
-            let bpf_key =
-                bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
+            let bpf_key = bpf_session_key_v4(
+                src.octets(),
+                dst.octets(),
+                key.src_port,
+                key.dst_port,
+                key.protocol,
+            );
             let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
                     conntrack_v4_fd,
@@ -1039,8 +1059,13 @@ fn delete_bpf_conntrack_entry_raw(
             rc >= 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
         }
         (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
-            let bpf_key =
-                bpf_session_key_v6(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
+            let bpf_key = bpf_session_key_v6(
+                src.octets(),
+                dst.octets(),
+                key.src_port,
+                key.dst_port,
+                key.protocol,
+            );
             let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
                     conntrack_v6_fd,
@@ -1107,6 +1132,163 @@ pub(crate) fn clear_bpf_conntrack_maps(
 }
 
 
+/// #10590 test seam: one policy-restamp attempt, as the dataplane ATTEMPTED
+/// it. Recorded after the family/address validation passes — a mismatched key
+/// fails closed without touching any map (see the MIN-7 doc on the mismatch
+/// cell in `bpf_map_tests.rs`) and is not an attempt — and before the
+/// `fd < 0` early-true, so the `-1` control records its two attempts too.
+///
+/// Thread-local, like `SESSION_MAP_WRITES` above (#8105): a process-global
+/// counter would race every parallel test driving a restamp, and the writer
+/// is production code that cannot take a lock. Each sampler drives its rebind
+/// synchronously on its own test thread, so its attempts and only its
+/// attempts land in its own vector. The fail hook defaults to off; tests arm
+/// it per-test after clearing.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RestampAttemptRecord {
+    pub(super) addr_family: u8,
+    pub(super) fd: c_int,
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESTAMP_ATTEMPTS: std::cell::RefCell<Vec<RestampAttemptRecord>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESTAMP_FAIL_ON_ATTEMPT: std::cell::RefCell<Option<u64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn clear_restamp_attempts() {
+    RESTAMP_ATTEMPTS.with(|records| records.borrow_mut().clear());
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow_mut() = None);
+}
+
+#[cfg(test)]
+pub(super) fn restamp_attempts() -> Vec<RestampAttemptRecord> {
+    RESTAMP_ATTEMPTS.with(|records| records.borrow().clone())
+}
+
+/// #10590 T5: fail exactly the Nth restamp attempt on this thread (1-based),
+/// leaving every other attempt's real semantics untouched. Same-family halves
+/// share one conntrack fd, so a bogus fd fails BOTH halves — only this hook
+/// can express exactly-one-false and kill an `all` -> `any` mutant.
+#[cfg(test)]
+pub(super) fn fail_restamp_attempt_on(n: u64) {
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow_mut() = Some(n));
+}
+
+/// Record one attempt; returns whether the T5 hook fails this attempt.
+#[cfg(test)]
+fn record_restamp_attempt(addr_family: u8, fd: c_int) -> bool {
+    let attempt = RESTAMP_ATTEMPTS.with(|records| {
+        let mut records = records.borrow_mut();
+        records.push(RestampAttemptRecord { addr_family, fd });
+        records.len() as u64
+    });
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow() == Some(attempt))
+}
+
+/// Restamp only policy metadata in an existing conntrack row. This is a
+/// read/modify/write: counters, timestamps, NAT state and session identity
+/// remain owned by the live row during a policy rename.
+pub(super) fn restamp_bpf_conntrack_policy(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    metadata: &SessionMetadata,
+) -> bool {
+    if key.addr_family as i32 == libc::AF_INET {
+        let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
+            return false;
+        };
+        // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
+        #[cfg(test)]
+        if record_restamp_attempt(key.addr_family, conntrack_v4_fd) {
+            return false;
+        }
+        // Unit tests and builds without a pinned conntrack map deliberately
+        // pass -1. There is no map state to restamp, so this is not a failure.
+        if conntrack_v4_fd < 0 {
+            return true;
+        }
+        let bpf_key = bpf_session_key_v4(
+            src.octets(),
+            dst.octets(),
+            key.src_port,
+            key.dst_port,
+            key.protocol,
+        );
+        let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+        let found = unsafe {
+            libbpf_sys::bpf_map_lookup_elem(
+                conntrack_v4_fd,
+                (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
+            )
+        };
+        if found != 0 {
+            return false;
+        }
+        restamp_bpf_value_v4(&mut value, metadata);
+        let updated = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v4_fd,
+                (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                (&value as *const BpfSessionValueV4).cast::<c_void>(),
+                libbpf_sys::BPF_EXIST as u64,
+            )
+        };
+        return updated == 0;
+    }
+    if key.addr_family as i32 == libc::AF_INET6 {
+        let (IpAddr::V6(src), IpAddr::V6(dst)) = (key.src_ip, key.dst_ip) else {
+            return false;
+        };
+        // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
+        #[cfg(test)]
+        if record_restamp_attempt(key.addr_family, conntrack_v6_fd) {
+            return false;
+        }
+        if conntrack_v6_fd < 0 {
+            return true;
+        }
+        let bpf_key = bpf_session_key_v6(
+            src.octets(),
+            dst.octets(),
+            key.src_port,
+            key.dst_port,
+            key.protocol,
+        );
+        let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+        let found = unsafe {
+            libbpf_sys::bpf_map_lookup_elem(
+                conntrack_v6_fd,
+                (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
+            )
+        };
+        if found != 0 {
+            return false;
+        }
+        restamp_bpf_value_v6(&mut value, metadata);
+        let updated = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v6_fd,
+                (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                (&value as *const BpfSessionValueV6).cast::<c_void>(),
+                libbpf_sys::BPF_EXIST as u64,
+            )
+        };
+        return updated == 0;
+    }
+    false
+}
 /// Update `last_seen` in BPF conntrack entries for active userspace sessions.
 ///
 /// The userspace helper owns session lifetime in its own SessionTable, but
@@ -1183,7 +1365,6 @@ pub(super) fn mirrored_counters(
     )
 }
 
-
 /// What one budgeted refresh slice observed, beyond advancing the cursor.
 ///
 /// #7919: the slice already walks this worker's forward entries, so the largest
@@ -1216,150 +1397,167 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
 
     // #8125 added `expires_after_ns` to this callback; #7919 binds the walk's
     // return so the observed max can ride back with the cursor.
-    let next = sessions.iter_with_idle_budgeted(cursor, budget, now_ns, |key, _decision, metadata, idle_ns, counters, expires_after_ns| {
-        // Only refresh forward entries — reverse entries mirror the forward.
-        // #2501: the forward SessionEntry carries BOTH directions' counters
-        // (the reverse entry shares them via the canonical forward key the
-        // hot path accounts under), so the forward-only mirror surfaces the
-        // full fwd+rev volume.
-        if metadata.is_reverse {
-            return;
-        }
-        // Read the origin alongside the table row. Refresh must retain the
-        // normal packet/counter behavior for every replica; after the lookup,
-        // it re-stamps only bit 9 from authoritative provenance so a stale
-        // sibling read cannot resurrect a cleared local-origin bit.
-        let origin = sessions.entry_with_origin(key).map(|(_, _, origin)| origin);
-        // #7919: sample BEFORE the map work and independently of whether the
-        // BPF lookup below succeeds — this measures what the worker's TABLE
-        // holds, which is the question. Folding it in after a successful update
-        // would make an unmirrored session read as no volume, which is the
-        // conflation being investigated.
-        max_session_volume = max_session_volume
-            .max(counters.fwd_packets.saturating_add(counters.rev_packets));
-        // #3395: re-resolve the live-row policy_id from the bound rule handle
-        // against the current rule table (frozen-at-install id would mis-map
-        // after a live policy reorder).
-        let reresolved_policy_id = policy
-            .reresolve_session_policy_id(metadata.policy_counter.as_ref(), metadata.policy_id);
-        match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
-            (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
-                let bpf_key = bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
-                let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
-                let rc = unsafe {
-                    libbpf_sys::bpf_map_lookup_elem(
-                        conntrack_v4_fd,
-                        (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
-                        (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
-                    )
-                };
-                if rc == 0 {
-                    // Compute last_seen from session's actual idle, not now.
-                    let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
-                    value.last_seen = actual_last_seen;
-                    // #3395: re-stamp the re-resolved current positional policy_id
-                    // so a live policy reorder no longer mis-attributes this
-                    // established session's row.
-                    value.policy_id = reresolved_policy_id;
-                    // #8125: re-stamp the session's OWN window. The publisher
-                    // stamps a constant 1800 at install, so without this the
-                    // column reports the Junos established-timeout default for
-                    // every session whatever window is in force — including a
-                    // half-closed session on a 30 s (or configured 3 s) closing
-                    // window, where the reap behaviour differs by an order of
-                    // magnitude and the column does not.
-                    //
-                    // Zero is not written: it would render as an immediate
-                    // expiry the session is not on. The walk only reaches
-                    // occupied slots, so a zero here means the window itself is
-                    // unset rather than the entry being absent.
-                    if expires_after_ns > 0 {
-                        value.timeout = (expires_after_ns / 1_000_000_000) as u32;
-                    }
-                    // #2501: surface live per-session volume so `show security
-                    // flow session` reports real byte/packet counts.
-                    // #7919: an all-zero entry is a SIBLING WORKER's replica of
-                    // a live session and must not overwrite the owner's volume.
-                    let (fp, fb, rp, rb) = mirrored_counters(
-                        (
-                            value.fwd_packets,
-                            value.fwd_bytes,
-                            value.rev_packets,
-                            value.rev_bytes,
-                        ),
-                        &counters,
+    let next = sessions.iter_with_idle_budgeted(
+        cursor,
+        budget,
+        now_ns,
+        |key, _decision, metadata, idle_ns, counters, expires_after_ns| {
+            // Only refresh forward entries — reverse entries mirror the forward.
+            // #2501: the forward SessionEntry carries BOTH directions' counters
+            // (the reverse entry shares them via the canonical forward key the
+            // hot path accounts under), so the forward-only mirror surfaces the
+            // full fwd+rev volume.
+            if metadata.is_reverse {
+                return;
+            }
+            // Read the origin alongside the table row. Refresh must retain the
+            // normal packet/counter behavior for every replica; after the lookup,
+            // it re-stamps only bit 9 from authoritative provenance so a stale
+            // sibling read cannot resurrect a cleared local-origin bit.
+            let origin = sessions.entry_with_origin(key).map(|(_, _, origin)| origin);
+            // #7919: sample BEFORE the map work and independently of whether the
+            // BPF lookup below succeeds — this measures what the worker's TABLE
+            // holds, which is the question. Folding it in after a successful update
+            // would make an unmirrored session read as no volume, which is the
+            // conflation being investigated.
+            max_session_volume =
+                max_session_volume.max(counters.fwd_packets.saturating_add(counters.rev_packets));
+            // #3395: re-resolve the live-row policy_id from the bound rule handle
+            // against the current rule table (frozen-at-install id would mis-map
+            // after a live policy reorder).
+            let reresolved_policy_id = policy
+                .reresolve_session_policy_id(metadata.policy_counter.as_ref(), metadata.policy_id);
+            match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
+                (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+                    let bpf_key = bpf_session_key_v4(
+                        src.octets(),
+                        dst.octets(),
+                        key.src_port,
+                        key.dst_port,
+                        key.protocol,
                     );
-                    value.fwd_packets = fp;
-                    value.fwd_bytes = fb;
-                    value.rev_packets = rp;
-                    value.rev_bytes = rb;
-                    // The lookup value may carry an origin bit from a stale
-                    // sibling read. Re-stamp only that bit from the live table
-                    // provenance before the full-value BPF_EXIST write.
-                    value.flags = refresh_cluster_synced_flags(value.flags, origin);
-                    let _ = unsafe {
-                        libbpf_sys::bpf_map_update_elem(
+                    let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+                    let rc = unsafe {
+                        libbpf_sys::bpf_map_lookup_elem(
                             conntrack_v4_fd,
                             (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
-                            (&value as *const BpfSessionValueV4).cast::<c_void>(),
-                            libbpf_sys::BPF_EXIST as u64, // avoid recreating deleted entries
+                            (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
                         )
                     };
-                }
-            }
-            (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
-                let bpf_key = bpf_session_key_v6(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
-                let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
-                let rc = unsafe {
-                    libbpf_sys::bpf_map_lookup_elem(
-                        conntrack_v6_fd,
-                        (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
-                        (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
-                    )
-                };
-                if rc == 0 {
-                    let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
-                    value.last_seen = actual_last_seen;
-                    // #3395: re-stamp the re-resolved current positional policy_id
-                    // (see v4 arm).
-                    value.policy_id = reresolved_policy_id;
-                    // #8125: re-stamp the session's own window (see v4 arm).
-                    if expires_after_ns > 0 {
-                        value.timeout = (expires_after_ns / 1_000_000_000) as u32;
+                    if rc == 0 {
+                        // Compute last_seen from session's actual idle, not now.
+                        let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
+                        value.last_seen = actual_last_seen;
+                        // #3395: re-stamp the re-resolved current positional policy_id
+                        // so a live policy reorder no longer mis-attributes this
+                        // established session's row.
+                        value.policy_id = reresolved_policy_id;
+                        // #8125: re-stamp the session's OWN window. The publisher
+                        // stamps a constant 1800 at install, so without this the
+                        // column reports the Junos established-timeout default for
+                        // every session whatever window is in force — including a
+                        // half-closed session on a 30 s (or configured 3 s) closing
+                        // window, where the reap behaviour differs by an order of
+                        // magnitude and the column does not.
+                        //
+                        // Zero is not written: it would render as an immediate
+                        // expiry the session is not on. The walk only reaches
+                        // occupied slots, so a zero here means the window itself is
+                        // unset rather than the entry being absent.
+                        if expires_after_ns > 0 {
+                            value.timeout = (expires_after_ns / 1_000_000_000) as u32;
+                        }
+                        // #2501: surface live per-session volume so `show security
+                        // flow session` reports real byte/packet counts.
+                        // #7919: an all-zero entry is a SIBLING WORKER's replica of
+                        // a live session and must not overwrite the owner's volume.
+                        let (fp, fb, rp, rb) = mirrored_counters(
+                            (
+                                value.fwd_packets,
+                                value.fwd_bytes,
+                                value.rev_packets,
+                                value.rev_bytes,
+                            ),
+                            &counters,
+                        );
+                        value.fwd_packets = fp;
+                        value.fwd_bytes = fb;
+                        value.rev_packets = rp;
+                        value.rev_bytes = rb;
+                        // The lookup value may carry an origin bit from a stale
+                        // sibling read. Re-stamp only that bit from the live table
+                        // provenance before the full-value BPF_EXIST write.
+                        value.flags = refresh_cluster_synced_flags(value.flags, origin);
+                        let _ = unsafe {
+                            libbpf_sys::bpf_map_update_elem(
+                                conntrack_v4_fd,
+                                (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                                (&value as *const BpfSessionValueV4).cast::<c_void>(),
+                                libbpf_sys::BPF_EXIST as u64, // avoid recreating deleted entries
+                            )
+                        };
                     }
-                    // #2501: surface live per-session volume (see v4 arm).
-                    // #7919: an all-zero entry is a SIBLING WORKER's replica of
-                    // a live session and must not overwrite the owner's volume.
-                    let (fp, fb, rp, rb) = mirrored_counters(
-                        (
-                            value.fwd_packets,
-                            value.fwd_bytes,
-                            value.rev_packets,
-                            value.rev_bytes,
-                        ),
-                        &counters,
+                }
+                (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+                    let bpf_key = bpf_session_key_v6(
+                        src.octets(),
+                        dst.octets(),
+                        key.src_port,
+                        key.dst_port,
+                        key.protocol,
                     );
-                    value.fwd_packets = fp;
-                    value.fwd_bytes = fb;
-                    value.rev_packets = rp;
-                    value.rev_bytes = rb;
-                    // Keep refresh provenance aligned with the live session;
-                    // this prevents a sibling read/clear/write from restoring
-                    // a deletable peer-origin stamp.
-                    value.flags = refresh_cluster_synced_flags(value.flags, origin);
-                    let _ = unsafe {
-                        libbpf_sys::bpf_map_update_elem(
+                    let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+                    let rc = unsafe {
+                        libbpf_sys::bpf_map_lookup_elem(
                             conntrack_v6_fd,
                             (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
-                            (&value as *const BpfSessionValueV6).cast::<c_void>(),
-                            libbpf_sys::BPF_EXIST as u64,
+                            (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
                         )
                     };
+                    if rc == 0 {
+                        let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
+                        value.last_seen = actual_last_seen;
+                        // #3395: re-stamp the re-resolved current positional policy_id
+                        // (see v4 arm).
+                        value.policy_id = reresolved_policy_id;
+                        // #8125: re-stamp the session's own window (see v4 arm).
+                        if expires_after_ns > 0 {
+                            value.timeout = (expires_after_ns / 1_000_000_000) as u32;
+                        }
+                        // #2501: surface live per-session volume (see v4 arm).
+                        // #7919: an all-zero entry is a SIBLING WORKER's replica of
+                        // a live session and must not overwrite the owner's volume.
+                        let (fp, fb, rp, rb) = mirrored_counters(
+                            (
+                                value.fwd_packets,
+                                value.fwd_bytes,
+                                value.rev_packets,
+                                value.rev_bytes,
+                            ),
+                            &counters,
+                        );
+                        value.fwd_packets = fp;
+                        value.fwd_bytes = fb;
+                        value.rev_packets = rp;
+                        value.rev_bytes = rb;
+                        // Keep refresh provenance aligned with the live session;
+                        // this prevents a sibling read/clear/write from restoring
+                        // a deletable peer-origin stamp.
+                        value.flags = refresh_cluster_synced_flags(value.flags, origin);
+                        let _ = unsafe {
+                            libbpf_sys::bpf_map_update_elem(
+                                conntrack_v6_fd,
+                                (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                                (&value as *const BpfSessionValueV6).cast::<c_void>(),
+                                libbpf_sys::BPF_EXIST as u64,
+                            )
+                        };
+                    }
                 }
+                _ => {}
             }
-            _ => {}
-        }
-    });
+        },
+    );
     RefreshSliceOutcome {
         cursor: next,
         max_session_volume,

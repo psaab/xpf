@@ -573,8 +573,8 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 // indistinguishable to the HA peer, the delete reason, and the operator log —
 // the choice of producer changes WHICH sessions are deleted, never HOW.
 //
-// The delete reuses the companion-aware DeleteBatchKnownV4/V6 (forward entry +
-// reverse companion + any dynamic DNAT/NAT64 companion) and propagates each
+// The delete reuses the companion-aware DeleteBatchKnownExactV4/V6 (forward
+// entry + reverse companion + any dynamic DNAT/NAT64 companion) and propagates
 // deletion to the HA peer through the same #2468 delete-sync channel the GC
 // delete callback uses, so a session dropped on the owner is dropped on the
 // standby too and cannot resurrect on failover.
@@ -659,32 +659,50 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 	var errs []error
 	v4Cleared := 0
 	if len(c.v4) > 0 {
-		if n, err := store.DeleteBatchKnownV4(c.v4, reason, false); err != nil {
+		exact, err := store.DeleteBatchKnownExactV4(c.v4, reason, false)
+		n := len(exact)
+		if err != nil {
 			slog.Warn("policy session invalidation: v4 clear failed",
-				"reason", reason, "policies", c.targets, "matched", len(c.v4), "err", err)
+				"reason", reason, "policies", c.targets,
+				"matched", len(c.v4), "deleted", n, "err", err)
 			errs = append(errs, fmt.Errorf("policy session invalidation (%s): v4 delete: %w", what, err))
 		} else {
 			v4Cleared = n
+			if n != len(c.v4) {
+				slog.Warn("policy session invalidation: v4 delete count mismatch",
+					"reason", reason, "policies", c.targets,
+					"matched", len(c.v4), "deleted", n,
+					"hint", "concurrent expiry or an already-absent row may explain the gap; hard delete failures are reported separately")
+			}
 		}
 		if syncPeer {
-			for _, e := range c.v4 {
-				ss.QueueDeleteV4(e.Key, false)
+			for _, key := range exact {
+				ss.QueueDeleteV4(key, false)
 			}
 		}
 	}
 
 	v6Cleared := 0
 	if len(c.v6) > 0 {
-		if n, err := store.DeleteBatchKnownV6(c.v6, reason, false); err != nil {
+		exact, err := store.DeleteBatchKnownExactV6(c.v6, reason, false)
+		n := len(exact)
+		if err != nil {
 			slog.Warn("policy session invalidation: v6 clear failed",
-				"reason", reason, "policies", c.targets, "matched", len(c.v6), "err", err)
+				"reason", reason, "policies", c.targets,
+				"matched", len(c.v6), "deleted", n, "err", err)
 			errs = append(errs, fmt.Errorf("policy session invalidation (%s): v6 delete: %w", what, err))
 		} else {
 			v6Cleared = n
+			if n != len(c.v6) {
+				slog.Warn("policy session invalidation: v6 delete count mismatch",
+					"reason", reason, "policies", c.targets,
+					"matched", len(c.v6), "deleted", n,
+					"hint", "concurrent expiry or an already-absent row may explain the gap; hard delete failures are reported separately")
+			}
 		}
 		if syncPeer {
-			for _, e := range c.v6 {
-				ss.QueueDeleteV6(e.Key, false)
+			for _, key := range exact {
+				ss.QueueDeleteV6(key, false)
 			}
 		}
 	}

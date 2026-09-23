@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"golang.org/x/sys/unix"
 )
@@ -48,6 +49,25 @@ func (d *scopedResultDP10513) DeleteSession(dataplane.SessionKey) error {
 func (d *scopedResultDP10513) DeleteSessionV6(dataplane.SessionKeyV6) error {
 	d.retriesV6++
 	return nil
+}
+
+// singularRecoveryDP10528 forces a mirror NotFound from the batch leg and
+// delegates the recovery retry to the real singular Manager.DeleteSession.
+// Closing the helper socket between those legs reproduces the narrow
+// helper-dies-during-recovery race (#10528).
+type singularRecoveryDP10528 struct {
+	dataplane.DataPlane
+	manager *Manager
+	retries int
+}
+
+func (d *singularRecoveryDP10528) BatchDeleteSessions([]dataplane.SessionKey) (int, error) {
+	return 0, ebpf.ErrKeyNotExist
+}
+
+func (d *singularRecoveryDP10528) DeleteSession(dataplane.SessionKey) error {
+	d.retries++
+	return d.manager.DeleteSession(key9146())
 }
 
 // #10513: BatchDeleteSessionsScoped deleted the BPF mirror FIRST, then discarded
@@ -191,11 +211,11 @@ func TestScopedStoreDoesNotRetryHelperOnlyResult10513(t *testing.T) {
 }
 
 // The direct Manager tests above prove the helper leg is returned, but the
-// production store has another hazard: batchDeleteV4/V6 treats unix.ENOENT as
-// a mirror not-found, retries per key, and ignores those retry errors. A
-// missing helper socket must therefore be tested through DeleteBatchKnown*;
-// the surfaced wrapper must preserve errSessionHelperUnreachable without
-// exposing ENOENT to errors.Is.
+// production store has another hazard: after a mirror NotFound it retries
+// remaining keys per key, surfacing non-NotFound errors and ignoring only
+// sessionNotFound. A missing helper socket must therefore be tested through
+// DeleteBatchKnown*; the surfaced wrapper must preserve errSessionHelperUnreachable
+// without exposing ENOENT to errors.Is.
 func TestDeleteBatchKnownV4DoesNotSwallowMissingHelper10513(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
 	removeSessionSocket10513(t, rec)
@@ -214,6 +234,30 @@ func TestDeleteBatchKnownV4DoesNotSwallowMissingHelper10513(t *testing.T) {
 		t.Fatalf("DeleteBatchKnownV4 exposed unix.ENOENT in its error chain: %v; "+
 			"batchDeleteV4 classifies ENOENT as mirror NotFound and would discard "+
 			"the helper failure on its per-key retry (#10513)", err)
+	}
+}
+
+// TestDeleteBatchKnownV4SurfacesHelperENOENTDuringRecovery10528 pins the
+// helper-dies-between-batch-and-retry precedence boundary. The singular
+// Manager wrapper must hide raw ENOENT while retaining the helper sentinel, so
+// batchDeleteV4 cannot misclassify the transport failure as mirror NotFound.
+func TestDeleteBatchKnownV4SurfacesHelperENOENTDuringRecovery10528(t *testing.T) {
+	m, rec := newSyncOnlyManager9146(t)
+	removeSessionSocket10513(t, rec)
+	dp := &singularRecoveryDP10528{manager: m}
+	store := dataplane.NewDataPlaneSessionStore(dp)
+
+	_, err := store.DeleteBatchKnownV4([]dataplane.SessionEntryV4{{
+		Key: key9146(),
+	}}, dataplane.DeleteReasonGCExpired, true)
+	if !errors.Is(err, errSessionHelperUnreachable) {
+		t.Fatalf("DeleteBatchKnownV4 recovery error = %v, want errSessionHelperUnreachable", err)
+	}
+	if errors.Is(err, unix.ENOENT) {
+		t.Fatalf("DeleteBatchKnownV4 recovery error exposed unix.ENOENT: %v", err)
+	}
+	if dp.retries != 1 {
+		t.Fatalf("singular recovery retries = %d, want 1", dp.retries)
 	}
 }
 

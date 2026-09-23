@@ -56,6 +56,30 @@ fn zone_snapshot_host_inbound_fields_roundtrip() {
     assert!(legacy.host_inbound_protocols.is_empty());
 }
 
+#[test]
+fn zone_set_validated_omits_false_and_roundtrips_true_10510() {
+    let default_value =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize default snapshot");
+    assert!(
+        default_value.get("zone_set_validated").is_none(),
+        "default wire fixture must omit the absent zone-set marker"
+    );
+
+    let snapshot = ConfigSnapshot {
+        zone_set_validated: true,
+        ..ConfigSnapshot::default()
+    };
+    let value = serde_json::to_value(&snapshot).expect("serialize validated snapshot");
+    assert_eq!(value["zone_set_validated"], true);
+    let decoded: ConfigSnapshot =
+        serde_json::from_value(value).expect("decode validated snapshot");
+    assert!(decoded.zone_set_validated);
+
+    let legacy: ConfigSnapshot =
+        serde_json::from_value(default_value).expect("decode default wire fixture");
+    assert!(!legacy.zone_set_validated);
+}
+
 // #3082: the references-missing-profile set is an additive, skew-tolerant wire
 // field. A snapshot from an OLD Go binary that does not emit
 // `screen_missing_profile_zones` must still decode (the field defaults to
@@ -268,6 +292,68 @@ fn process_status_neighbor_phase3_counters_roundtrip() {
     assert_eq!(legacy.neighbor_netlink_redump_upserts_total, 0);
     assert_eq!(legacy.neighbor_pending_keys, 0);
     assert_eq!(legacy.neg_neigh_keys, 0);
+}
+
+#[test]
+fn process_status_ipsec_sa_counters_roundtrip() {
+    let status = ProcessStatus {
+        ipsec_sa_miss_dropped_packets_total: 1,
+        ipsec_sa_miss_no_sa_total: 2,
+        ipsec_sa_miss_truncated_total: 3,
+        ipsec_sa_miss_malformed_ike_total: 4,
+        ipsec_sa_miss_keepalive_total: 5,
+        ipsec_sa_snapshot_stale_deny_total: 6,
+        ipsec_sa_inserts_total: 7,
+        ipsec_sa_removes_total: 8,
+        ipsec_sa_expiry_removes_total: 9,
+        ipsec_sa_evictions_total: 10,
+        ipsec_sa_multi_source_collisions_total: 11,
+        ipsec_sa_netlink_enobufs_total: 12,
+        ipsec_sa_netlink_redumps_total: 13,
+        ipsec_sa_netlink_redump_upserts_total: 14,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    let keys = [
+        ("ipsec_sa_miss_dropped_packets_total", 1u64),
+        ("ipsec_sa_miss_no_sa_total", 2),
+        ("ipsec_sa_miss_truncated_total", 3),
+        ("ipsec_sa_miss_malformed_ike_total", 4),
+        ("ipsec_sa_miss_keepalive_total", 5),
+        ("ipsec_sa_snapshot_stale_deny_total", 6),
+        ("ipsec_sa_inserts_total", 7),
+        ("ipsec_sa_removes_total", 8),
+        ("ipsec_sa_expiry_removes_total", 9),
+        ("ipsec_sa_evictions_total", 10),
+        ("ipsec_sa_multi_source_collisions_total", 11),
+        ("ipsec_sa_netlink_enobufs_total", 12),
+        ("ipsec_sa_netlink_redumps_total", 13),
+        ("ipsec_sa_netlink_redump_upserts_total", 14),
+    ];
+    for (key, want) in keys {
+        assert_eq!(value[key], want, "wire key {key}");
+    }
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.ipsec_sa_miss_dropped_packets_total, 1);
+    assert_eq!(back.ipsec_sa_miss_no_sa_total, 2);
+    assert_eq!(back.ipsec_sa_miss_truncated_total, 3);
+    assert_eq!(back.ipsec_sa_miss_malformed_ike_total, 4);
+    assert_eq!(back.ipsec_sa_miss_keepalive_total, 5);
+    assert_eq!(back.ipsec_sa_snapshot_stale_deny_total, 6);
+    assert_eq!(back.ipsec_sa_inserts_total, 7);
+    assert_eq!(back.ipsec_sa_removes_total, 8);
+    assert_eq!(back.ipsec_sa_expiry_removes_total, 9);
+    assert_eq!(back.ipsec_sa_evictions_total, 10);
+    assert_eq!(back.ipsec_sa_multi_source_collisions_total, 11);
+    assert_eq!(back.ipsec_sa_netlink_enobufs_total, 12);
+    assert_eq!(back.ipsec_sa_netlink_redumps_total, 13);
+    assert_eq!(back.ipsec_sa_netlink_redump_upserts_total, 14);
+
+    let legacy: ProcessStatus = serde_json::from_value(serde_json::json!({}))
+        .expect("legacy payload decodes with additive defaults");
+    assert_eq!(legacy.ipsec_sa_miss_dropped_packets_total, 0);
+    assert_eq!(legacy.ipsec_sa_netlink_redump_upserts_total, 0);
 }
 
 // #2375: round-trip + backward-compat pin for the pending_neigh

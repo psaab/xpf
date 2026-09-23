@@ -2,7 +2,9 @@
 // handlers.rs lines 309-342 (preserves the nested match on
 // sync_req.operation).
 
-use super::super::helpers::{build_synced_session_entry, build_synced_session_key, SyncedKeyIntent};
+use super::super::helpers::{
+    SyncedKeyIntent, build_synced_session_entry, build_synced_session_key,
+};
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
     SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
@@ -335,6 +337,11 @@ pub(super) fn handle(
                         false
                     }
                 };
+                let delete_tunnel_variants = |key| {
+                    domain
+                        .delete_synced_tunnel_variants(key, sync_req.peer_delete, forward_only)
+                        .keeps_caller_rows()
+                };
                 let mut refused = false;
                 // #7160 (#2387): a bare-5-tuple delete (the `clear security
                 // flow session` / batch-revoke path) carries no ingress
@@ -400,12 +407,20 @@ pub(super) fn handle(
                 // ambiguity probe, where it could be refused for naming too many
                 // tenants when it had named exactly one.
                 let bare = resolved_domain.is_none();
+                let purge_tunnel_variants = tunnel_variant_purge_applies(
+                    sync_req.purge_tunnel_variants,
+                    sync_req.protocol,
+                    sync_req.tunnel_discriminator,
+                );
                 let mut matched: Vec<u32> = Vec::new();
                 if bare {
                     // Domain 0 is a CANDIDATE like any other, not a special case
-                    // evaluated first and deleted before the rest are counted. That
-                    // ordering was the whole defect.
-                    if domain.synced_session_contains(&key) {
+                    // evaluated first and deleted before the rest are counted.
+                    if if purge_tunnel_variants {
+                        domain.synced_tunnel_variant_contains(&key)
+                    } else {
+                        domain.synced_session_contains(&key)
+                    } {
                         matched.push(0);
                     }
                     for rd in view.routing_domains() {
@@ -414,14 +429,26 @@ pub(super) fn handle(
                         }
                         let mut scoped = key.clone();
                         scoped.routing_domain = rd;
-                        if domain.synced_session_contains(&scoped) {
+                        let present = if purge_tunnel_variants {
+                            domain.synced_tunnel_variant_contains(&scoped)
+                        } else {
+                            domain.synced_session_contains(&scoped)
+                        };
+                        if present {
                             matched.push(rd);
                         }
                     }
                 }
                 if !bare {
-                    // The request named its domain. Exactly one authority, no probe.
-                    refused |= delete(key.clone());
+                    // A policy-invalidation GRE delete carries no trustworthy
+                    // discriminator from the BPF mirror. Purge every variant
+                    // only when the explicit trailing flag is present; generic
+                    // GC/operator deletes retain exact/under-match semantics.
+                    refused |= if purge_tunnel_variants {
+                        delete_tunnel_variants(key.clone())
+                    } else {
+                        delete(key.clone())
+                    };
                 } else {
                     match matched.as_slice() {
                         // No shared authority anywhere for this tuple.
@@ -435,10 +462,13 @@ pub(super) fn handle(
                         // shared-map publish — so "no shared entry" does NOT mean
                         // "no session". An authoritative delete keeps its plain-miss
                         // kernel cleanup, which is the behaviour operators rely on
-                        // for a stale row.
                         [] => {
                             if !sync_req.peer_delete {
-                                refused |= delete(key.clone());
+                                refused |= if purge_tunnel_variants {
+                                    delete_tunnel_variants(key.clone())
+                                } else {
+                                    delete(key.clone())
+                                };
                             }
                         }
                         // Exactly one domain holds it, so the bare tuple names it
@@ -446,7 +476,11 @@ pub(super) fn handle(
                         [rd] => {
                             let mut scoped = key.clone();
                             scoped.routing_domain = *rd;
-                            refused |= delete(scoped);
+                            refused |= if purge_tunnel_variants {
+                                delete_tunnel_variants(scoped)
+                            } else {
+                                delete(scoped)
+                            };
                         }
                         // Ambiguous: the tuple names a live session in more than one
                         // tenant and nothing in this request says which. Refuse
@@ -483,5 +517,45 @@ pub(super) fn handle(
     }
     if let Some(lease) = mutation_lease {
         lease.complete(crate::afxdp::HelperMutationOutcome::from_response(response));
+    }
+}
+
+/// #10511 MIN-10: the tunnel-variant wildcard fires ONLY for a GRE delete
+/// whose discriminator reads zero — the BPF-mirror shape where the row cannot
+/// be re-identified. Every other protocol, every nonzero discriminator, and
+/// every request without the flag takes the exact-match path, so the wildcard
+/// can never widen beyond the GRE0 rows the Go capture marks.
+fn tunnel_variant_purge_applies(
+    purge_tunnel_variants: bool,
+    protocol: u8,
+    tunnel_discriminator: u64,
+) -> bool {
+    purge_tunnel_variants
+        && protocol == crate::ip_proto::PROTO_GRE
+        && tunnel_discriminator == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_variant_purge_fires_only_for_gre_zero_10511() {
+        assert!(tunnel_variant_purge_applies(
+            true,
+            crate::ip_proto::PROTO_GRE,
+            0
+        ));
+        assert!(!tunnel_variant_purge_applies(true, 6, 0));
+        assert!(!tunnel_variant_purge_applies(
+            true,
+            crate::ip_proto::PROTO_GRE,
+            7
+        ));
+        assert!(!tunnel_variant_purge_applies(
+            false,
+            crate::ip_proto::PROTO_GRE,
+            0
+        ));
     }
 }

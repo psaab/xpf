@@ -99,26 +99,33 @@ type ClusterSessionService interface {
 // unavailable snapshot is omitted from /metrics. run_id, generation, and
 // permit_epoch are the join key shared with the Rust s5_reinject status block.
 type IpsecCaptureWitness struct {
-	Available          bool
-	RunID              string
-	ActorActive        bool
-	PermitState        string
-	PermitEpoch        uint64
-	Generation         uint64
-	Consumed           uint64
-	Adjudicated        uint64
-	Reinjected         uint64
-	Written            uint64
-	Uncertain          uint64
-	LateCompletions    uint64
-	Timeouts           uint64
-	Stale              uint64
-	Cancelled          uint64
-	Refused            uint64
+	Available       bool
+	RunID           string
+	ActorActive     bool
+	PermitState     string
+	PermitEpoch     uint64
+	Generation      uint64
+	Consumed        uint64
+	Adjudicated     uint64
+	Reinjected      uint64
+	Written         uint64
+	Uncertain       uint64
+	LateCompletions uint64
+	Timeouts        uint64
+	Stale           uint64
+	Cancelled       uint64
+	Refused         uint64
+	// D11 identity is separate so cumulative process counters never get
+	// relabeled as an attestation-run counter.
+	D11Available       bool
+	D11RunID           string
+	D11Generation      uint64
+	D11PermitEpoch     uint64
+	D11Suppressed      uint64
+	D11Deny52          uint64
 	DeliveredAvailable bool
 	Delivered          uint64
 }
-
 type CompileHealthSnapshot struct {
 	EverSucceeded    bool
 	FailureCount     uint64

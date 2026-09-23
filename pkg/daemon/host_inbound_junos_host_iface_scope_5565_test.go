@@ -53,8 +53,9 @@ func junosHostTwoIfaceZoneConfig() *config.Config {
 	return cfg
 }
 
-// junosHostShieldLines returns the junos-host DROP-subchain lines that render an
-// exemption shield matching `match` (e.g. "udp dport { 500, 4500 } accept").
+// junosHostShieldLines returns the fine-window exemption lines matching `match`
+// (e.g. the retained ident RST). #10524 deliberately removes the IKE ACCEPT,
+// so IKE callers now expect this helper to return no matching lines.
 func junosHostShieldLines(payload, match string) []string {
 	var out []string
 	for _, l := range junosHostSection(payload) {
@@ -65,15 +66,11 @@ func junosHostShieldLines(payload, match string) []string {
 	return out
 }
 
-// TestJunosHostIKEExemptionScopedToConfiguringInterface is the #5565 fail-on-
-// revert guard: a per-INTERFACE `ike` host-inbound override on ONE interface
-// (ge-0/0/1.0) must render the IKE 500/4500 exemption shield scoped to THAT
-// interface's netdev only (ge-0-0-1) — never the whole zone iifname set. The
-// sibling ge-0/0/2.0, which configured no `ike`, must NOT be exempted. The
-// zone-wide `application any` DROP still applies to BOTH netdevs (the deny is a
-// zone policy). Revert the fix (zone-wide CoarseAdmitsIKE + whole-zone iif) and
-// the shield widens to `{ "ge-0-0-1", "ge-0-0-2" }`, admitting IKE on the
-// sibling — the sibling-not-exempted assertion FAILS.
+// TestJunosHostIKEExemptionScopedToConfiguringInterface is the #5565/#10524
+// guard: the projection still computes the IKE-exempt subset for the
+// per-interface coarse admission, but the daemon MUST NOT render a terminal
+// IKE accept that bypasses the zone-wide fine DROP. The sibling remains part of
+// the zone jump and DROP scope, while the subset metadata stays ge-0-0-1.
 func TestJunosHostIKEExemptionScopedToConfiguringInterface(t *testing.T) {
 	cfg := junosHostTwoIfaceZoneConfig()
 	cfg.Security.Zones["untrust"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
@@ -90,17 +87,12 @@ func TestJunosHostIKEExemptionScopedToConfiguringInterface(t *testing.T) {
 	if got := strings.Join(p.IKEExemptNetdevs, ","); got != "ge-0-0-1" {
 		t.Fatalf("IKEExemptNetdevs = %q, want ge-0-0-1 (only the interface that configured ike)", got)
 	}
-	// Exactly one IKE shield, scoped to ge-0-0-1 alone.
+	// #10524: no IKE ACCEPT remains in the fine window; the old expected
+	// shield was a pin of the explicit-deny bypass. The subset is retained in
+	// the projection for the commit advisory and coarse-gate safety reasoning.
 	shields := junosHostShieldLines(payload, "udp dport { 500, 4500 } accept")
-	if len(shields) != 1 {
-		t.Fatalf("want exactly 1 IKE shield line, got %d:\n%s", len(shields), strings.Join(shields, "\n"))
-	}
-	if want := `iifname "ge-0-0-1" udp dport { 500, 4500 } accept`; strings.TrimSpace(shields[0]) != want {
-		t.Fatalf("IKE shield = %q, want %q", strings.TrimSpace(shields[0]), want)
-	}
-	// The sibling ge-0-0-2 must NOT appear on any IKE shield (the #5565 leak).
-	if strings.Contains(shields[0], "ge-0-0-2") {
-		t.Fatalf("per-interface ike override widened to sibling ge-0-0-2:\n%s", shields[0])
+	if len(shields) != 0 {
+		t.Fatalf("IKE shield must be deleted, got %d:\n%s", len(shields), strings.Join(shields, "\n"))
 	}
 	// The zone-wide `application any` DROP still covers BOTH interfaces.
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
@@ -149,12 +141,11 @@ func TestJunosHostIdentResetScopedToConfiguringInterface(t *testing.T) {
 	}
 }
 
-// TestJunosHostZoneLevelIKEExemptionStaysZoneWide is the no-regression peer: an
-// exception authored at ZONE scope (on the zone's own host-inbound-traffic,
-// applying to every interface) must keep the shield zone-wide — scoped to the
-// full iifname set { ge-0-0-1, ge-0-0-2 } — because every interface genuinely
-// admits IKE. #5565 narrows only a PER-INTERFACE override, never a zone-level
-// one.
+// TestJunosHostZoneLevelIKEExemptionStaysZoneWide is the #5565 projection
+// peer after the #10524 fix: a zone-level IKE exception still computes the
+// full IKEExemptNetdevs subset, but no terminal IKE ACCEPT is rendered. The
+// zone-wide application-any DROP therefore governs denied IKE on both
+// interfaces; the subset remains available to the overlap advisory.
 func TestJunosHostZoneLevelIKEExemptionStaysZoneWide(t *testing.T) {
 	cfg := junosHostTwoIfaceZoneConfig()
 	cfg.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{"ping", "ike"}
@@ -167,11 +158,7 @@ func TestJunosHostZoneLevelIKEExemptionStaysZoneWide(t *testing.T) {
 		t.Fatalf("IKEExemptNetdevs = %q, want ge-0-0-1,ge-0-0-2 (zone-level ike covers every interface)", got)
 	}
 	shields := junosHostShieldLines(payload, "udp dport { 500, 4500 } accept")
-	if len(shields) != 1 {
-		t.Fatalf("want exactly 1 IKE shield line, got %d:\n%s", len(shields), strings.Join(shields, "\n"))
-	}
-	want := `iifname { "ge-0-0-1", "ge-0-0-2" } udp dport { 500, 4500 } accept`
-	if strings.TrimSpace(shields[0]) != want {
-		t.Fatalf("zone-level IKE shield = %q, want zone-wide %q", strings.TrimSpace(shields[0]), want)
+	if len(shields) != 0 {
+		t.Fatalf("zone-level IKE shield must be deleted, got %d:\n%s", len(shields), strings.Join(shields, "\n"))
 	}
 }

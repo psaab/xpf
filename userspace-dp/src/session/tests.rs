@@ -4389,6 +4389,13 @@ fn reference_update_session(
     let was_peer_synced = entry.origin.is_peer_synced();
     entry.decision = decision;
     entry.metadata = metadata.clone();
+    // #10507: mirror A1's Fresh-only reset (Main-approved Option A).
+    if was_peer_synced
+        && !origin.is_peer_synced()
+        && entry.policy_revalidated_gen == table.policy_revalidation_gen()
+    {
+        entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+    }
     entry.origin = origin;
     // #9856: mirror update_session — install_epoch is write-once per incarnation, no re-stamp.
     entry.last_seen_ns = now_ns;
@@ -4461,6 +4468,8 @@ fn entries_equiv(a: &SessionTable, b: &SessionTable, key: &SessionKey) -> bool {
                 && ea.closing == eb.closing
                 && ea.reset == eb.reset
                 && ea.wheel_tick == eb.wheel_tick
+                && ea.policy_revalidated_gen == eb.policy_revalidated_gen
+                && ea.policy_revalidation_kind == eb.policy_revalidation_kind
         }
         (None, None) => true,
         _ => false,
@@ -4906,6 +4915,10 @@ fn reference_refresh_for_ha_transition(
     };
     entry.decision = decision;
     entry.metadata = metadata;
+    // #10507: mirror A2's Fresh-only reset (Main-approved Option A).
+    if entry.policy_revalidated_gen == table.policy_revalidation_gen() {
+        entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+    }
     // #9856: mirror refresh_for_ha_transition — install_epoch is write-once, no re-stamp.
     entry.last_seen_ns = now_ns;
     table.restore_entry(key.clone(), entry);

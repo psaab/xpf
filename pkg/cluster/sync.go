@@ -5,16 +5,16 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/dhcpserver"
 	"log/slog"
 	"maps"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/psaab/xpf/pkg/dataplane"
-	"github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/dhcpserver"
 )
 
 // syncMagic identifies cluster session-sync protocol packets.
@@ -842,6 +842,14 @@ type SessionSync struct {
 	// during ordered handoff operations.
 	incrementalPauseDepth atomic.Int32
 
+	// OnPeerCapabilitiesChanged fires after a peer capability advertisement is
+	// decoded. Callers use it to re-arm capability-gated sidecars that may have
+	// been queued before discovery.
+	OnPeerCapabilitiesChanged func()
+	// OnConfigReceivedWithAncestry is the additive callback for config payloads
+	// carrying rename provenance. It is preferred when wired; legacy peers and
+	// tests continue through OnConfigReceived.
+	OnConfigReceivedWithAncestry func(configText string, ancestry []configstore.RenameDescriptor) error
 	// OnConfigReceived is called when a config sync message arrives from the
 	// peer. It returns nil ONLY when the config was actually applied (or is
 	// already the active config); a non-nil error means the apply did not take
@@ -1274,15 +1282,15 @@ type SessionSync struct {
 	// cannot land ahead of the marker. The queue's existing order and install
 	// generations then remain authoritative for session opens followed by
 	// closes in the gap.
-	bulkStartMu         sync.Mutex
-	bulkSendMu          sync.Mutex
-	bulkSendNext        atomic.Uint64
+	bulkStartMu  sync.Mutex
+	bulkSendMu   sync.Mutex
+	bulkSendNext atomic.Uint64
 	// bulkSnapshotGenMu serializes an authoritative table snapshot read and its
 	// install-generation decisions with queue-time delete-generation draws. A
 	// close observed while the source is reading therefore linearizes either
 	// before the snapshot or after every snapshot row is stamped, never between
 	// a row read and its stamp (#10284).
-	bulkSnapshotGenMu sync.Mutex
+	bulkSnapshotGenMu   sync.Mutex
 	pendingBulkAckEpoch atomic.Uint64
 	pendingBulkAckSince atomic.Int64
 	bulkEverCompleted   atomic.Bool
@@ -1762,8 +1770,9 @@ type SessionSync struct {
 // configApplyItem is one config-sync payload queued for ordered apply by the
 // single-consumer configApplyLoop (#3931).
 type configApplyItem struct {
-	gen  uint64
-	text string
+	gen      uint64
+	text     string
+	ancestry []configstore.RenameDescriptor
 	// incarnation is the peer boot the payload arrived under (#5084), taken
 	// from the connection that carried it. Zero = un-incarnated: the payload
 	// is never dropped on incarnation grounds (plan §6 rule 4).
@@ -2240,9 +2249,9 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 		fallbackPrimary = s.IsPrimaryFn()
 	}
 	snap := &zoneOwnershipSnapshot{
-		zones:          make(map[uint16]bool, len(m)),
+		zones:           make(map[uint16]bool, len(m)),
 		fallbackPrimary: fallbackPrimary,
-		mapGen:         gen,
+		mapGen:          gen,
 	}
 	for zoneID := range m {
 		snap.zones[zoneID] = s.ShouldSyncZone(zoneID)

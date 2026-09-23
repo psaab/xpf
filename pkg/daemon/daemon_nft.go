@@ -1549,9 +1549,9 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// reply direction is admitted ahead of the fine DROP; the denied source's
 		// original-direction established inbound falls through to the DROP below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
-		// (3) Fine junos-host programs: per ingress zone, the exemption shields
-		// and an iifname-scoped jump to the zone's first-match subchain (#9504).
-		// Placed before the ND/PMTUD accepts (§6.4).
+		// (3) Fine junos-host programs: per ingress zone, the retained ident-RST
+		// shield and an iifname-scoped jump to the zone's first-match subchain
+		// (#9504). Placed before the ND/PMTUD accepts (§6.4).
 		for i, p := range programs {
 			emitJunosHostProgramJump(&rules, i, p)
 		}
@@ -1726,33 +1726,38 @@ func renderWireGuardPortSpec(ports []uint16) string {
 }
 
 // emitJunosHostProgramJump appends one ingress zone's entry into its fine
-// `to-zone junos-host` program (#4146): the fine-eligible-L4 exemption shields
-// (ahead of an `application any` deny-class rule), then an iifname-scoped jump
-// to the zone's subchain. The subchain holds the first-match rules and a permit
-// RETURNS from it (#9504), so no fine accept is ever emitted and the coarse
-// host-inbound gate below stays the sole admit authority (Rust
+// `to-zone junos-host` program (#4146): the ident exemption shield (ahead of an
+// `application any` deny-class rule), then an iifname-scoped jump to the zone's
+// subchain. There is deliberately NO IKE shield (#10524): the fine DENY governs
+// denied sources' IKE, and non-denied IKE reaches the coarse gate below via the
+// subchain's implicit return. The subchain holds the first-match rules and a
+// permit RETURNS from it (#9504), so no fine accept is ever emitted and the
+// coarse host-inbound gate below stays the sole admit authority (Rust
 // poll_descriptor/mod.rs:138).
 func emitJunosHostProgramJump(rules *[]string, index int, p dpuserspace.JunosHostProgram) {
-	if p.HasApplicationAnyDeny {
-		if p.CoarseAdmitsIKE {
-			// The coarse gate admits IKE (udp 500/4500) from any source, and the
-			// userspace IPsec passthrough reinjects it before the fine policy, so
-			// the fine drop must not swallow it. #5565: scope the shield to the
-			// SPECIFIC netdevs whose effective per-interface host-inbound set admits
-			// IKE (IKEExemptNetdevs), NOT the whole zone iifname set — a per-
-			// interface `ike` override must not leak to a sibling interface. A
-			// zone-level `ike` yields the full IngressIfnames set (zone-wide).
-			ikeIif := nftIifnameSet(p.IKEExemptNetdevs)
-			*rules = append(*rules, "    iifname "+ikeIif+" udp dport { 500, 4500 } accept")
-		}
-		if p.CoarseIdentResets {
-			// The effective coarse verdict for TCP/113 is a RST (ident-reset set AND
-			// not all/any-service); preserve it ahead of the silent drop. #5565:
-			// scope to IdentResetNetdevs (the interfaces that configured
-			// ident-reset), never the whole zone.
-			identIif := nftIifnameSet(p.IdentResetNetdevs)
-			*rules = append(*rules, "    iifname "+identIif+" tcp dport 113 reject with tcp reset")
-		}
+	// #10524: NO IKE shield here. The pre-fix code emitted an `iifname
+	// <IKEExemptNetdevs> udp dport { 500, 4500 } accept` whenever the program
+	// held an `application any` deny and the coarse gate admitted IKE.
+	// IKEExemptNetdevs is a subset of IngressIfnames with no src/dst guard, so
+	// the shield matched a subset of the jump below and its terminal accept
+	// silently re-admitted denied IKE before the fine DROP could run — an
+	// explicit-deny bypass, and a fine accept violating the no-fine-accept
+	// invariant. Deleted, not reordered: below the jump it would be dead (the
+	// subchain drops first). Overlap of an app-any deny with coarse IKE
+	// admission draws a commit warning (the #10524 advisory in
+	// validateJunosHostDirectDeliveryWarnings).
+	if p.HasApplicationAnyDeny && p.CoarseIdentResets {
+		// #10524 disposition — ident shield KEPT. Same subset/terminal shape as
+		// the deleted IKE shield, but its verdict is `reject with tcp reset`,
+		// which still REFUSES the connection: unlike an accept it cannot
+		// re-admit traffic to the host stack, so the deny's security property
+		// holds either way. It preserves the coarse-advertised RST for TCP/113
+		// (ident-reset set AND not all/any-service); deleting it would remap
+		// denied ident from RST to silent drop, a verdict-shape change outside
+		// the #10524 accept-bypass scope. #5565: scope to IdentResetNetdevs
+		// (the interfaces that configured ident-reset), never the whole zone.
+		identIif := nftIifnameSet(p.IdentResetNetdevs)
+		*rules = append(*rules, "    iifname "+identIif+" tcp dport 113 reject with tcp reset")
 	}
 	*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" jump "+xnft.HostInboundJunosHostChainName(index, p.Zone))
 }

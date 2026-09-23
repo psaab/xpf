@@ -153,18 +153,17 @@ func TestJunosHostWholeProgramGate(t *testing.T) {
 	}
 }
 
-// TestJunosHostExemptionFlags proves the coarse-admit exemption flags: an
-// ike-admitting zone sets CoarseAdmitsIKE; an ident-reset zone sets
-// CoarseIdentResets; a full-admit (`any-service`) zone shadows ident-reset (the
-// bare accept answers TCP/113 before the reject rule, so there is no RST
-// verdict to protect).
+// TestJunosHostExemptionFlags proves the coarse-admission metadata: an
+// ike-admitting zone sets CoarseAdmitsIKE (used by the #10524 overlap warning);
+// an ident-reset zone sets CoarseIdentResets (used by the retained terminal
+// RST); a full-admit (`any-service`) zone shadows ident-reset (the bare accept
+// answers TCP/113 before the reject rule, so there is no RST verdict to protect).
 //
 // #3226: `system-services all` is no longer a full admit — it EXPANDS to the
 // named-service union, which contains `ident-reset`, so the host-inbound chain
-// really does emit `tcp dport 113 reject with tcp reset` for an `all` zone and
-// the shield must carve TCP/113 out. The `{all, ident-reset}` row therefore
-// flipped from "shadowed" to "resets"; `{any-service, ident-reset}` keeps the
-// original shadowing property.
+// really does emit `tcp dport 113 reject with tcp reset` for an `all` zone.
+// The `{all, ident-reset}` row therefore flipped from "shadowed" to "resets";
+// `{any-service, ident-reset}` keeps the original shadowing property.
 func TestJunosHostExemptionFlags(t *testing.T) {
 	mk := func(svc ...string) config1Program {
 		cfg := jhTestConfig()
@@ -187,7 +186,7 @@ func TestJunosHostExemptionFlags(t *testing.T) {
 		t.Error("{any-service, ident-reset} zone: 113 is coarse-accepted (shadowed) — must NOT be treated as RST (no fail-open)")
 	}
 	// #3226: `all` expands to the named union INCLUDING ident-reset, so the
-	// kernel chain does emit the RST rule and the shield must not drop it.
+	// retained ident RST remains aligned with the coarse service answer.
 	if p := mk("all", "ident-reset"); !p.CoarseIdentResets {
 		t.Error("{all, ident-reset} zone: `all` expands to include ident-reset, so 113 IS reset — want CoarseIdentResets (#3226)")
 	}
@@ -195,9 +194,10 @@ func TestJunosHostExemptionFlags(t *testing.T) {
 		t.Error("`all` alone expands to include ident-reset — want CoarseIdentResets (#3226)")
 	}
 	// #3226 fail-CLOSED guard: `all` must still coarse-admit IKE via the
-	// expansion. Losing this makes the shield drop the IKE/NAT-T it exempts.
+	// expansion, so the #10524 overlap metadata and coarse service admission
+	// remain in sync.
 	if p := mk("all"); !p.CoarseAdmitsIKE {
-		t.Error("`all` zone: expansion contains ike — want CoarseAdmitsIKE (#3226, else the shield drops IKE)")
+		t.Error("`all` zone: expansion contains ike — want CoarseAdmitsIKE (#3226)")
 	}
 }
 

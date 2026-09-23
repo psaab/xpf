@@ -135,6 +135,7 @@ const preSecureTunnelProtocolVersion = 4
 // Issue #9506 moved the current snapshot wire to v28 for q0 capture
 // authority; its P-MECH D14 tunnel-row identity extension moved it to v29,
 // and the same-key capture-generation fence moved it to v30.
+// Issue #10510 moved it to v31 for the validated zone identity marker.
 // #10512 moves the session-control wire to v31 (helper-first policy READ
 // and identity-conditional mirror verbs). secure_tunnel still does not
 // change, so this cell pins the current shared protocol floor at v31.

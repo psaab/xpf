@@ -45,6 +45,7 @@ const (
 	BpfrxService_GetNATDestination_FullMethodName         = "/xpf.v1.BpfrxService/GetNATDestination"
 	BpfrxService_GetScreen_FullMethodName                 = "/xpf.v1.BpfrxService/GetScreen"
 	BpfrxService_GetEvents_FullMethodName                 = "/xpf.v1.BpfrxService/GetEvents"
+	BpfrxService_GetD11AttestationLedger_FullMethodName   = "/xpf.v1.BpfrxService/GetD11AttestationLedger"
 	BpfrxService_GetInterfaces_FullMethodName             = "/xpf.v1.BpfrxService/GetInterfaces"
 	BpfrxService_ShowInterfacesDetail_FullMethodName      = "/xpf.v1.BpfrxService/ShowInterfacesDetail"
 	BpfrxService_GetDHCPLeases_FullMethodName             = "/xpf.v1.BpfrxService/GetDHCPLeases"
@@ -107,6 +108,7 @@ type BpfrxServiceClient interface {
 	GetNATDestination(ctx context.Context, in *GetNATDestinationRequest, opts ...grpc.CallOption) (*GetNATDestinationResponse, error)
 	GetScreen(ctx context.Context, in *GetScreenRequest, opts ...grpc.CallOption) (*GetScreenResponse, error)
 	GetEvents(ctx context.Context, in *GetEventsRequest, opts ...grpc.CallOption) (*GetEventsResponse, error)
+	GetD11AttestationLedger(ctx context.Context, in *GetD11AttestationLedgerRequest, opts ...grpc.CallOption) (*GetD11AttestationLedgerResponse, error)
 	GetInterfaces(ctx context.Context, in *GetInterfacesRequest, opts ...grpc.CallOption) (*GetInterfacesResponse, error)
 	ShowInterfacesDetail(ctx context.Context, in *ShowInterfacesDetailRequest, opts ...grpc.CallOption) (*ShowInterfacesDetailResponse, error)
 	GetDHCPLeases(ctx context.Context, in *GetDHCPLeasesRequest, opts ...grpc.CallOption) (*GetDHCPLeasesResponse, error)
@@ -404,6 +406,16 @@ func (c *bpfrxServiceClient) GetEvents(ctx context.Context, in *GetEventsRequest
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetEventsResponse)
 	err := c.cc.Invoke(ctx, BpfrxService_GetEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *bpfrxServiceClient) GetD11AttestationLedger(ctx context.Context, in *GetD11AttestationLedgerRequest, opts ...grpc.CallOption) (*GetD11AttestationLedgerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetD11AttestationLedgerResponse)
+	err := c.cc.Invoke(ctx, BpfrxService_GetD11AttestationLedger_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -740,6 +752,7 @@ type BpfrxServiceServer interface {
 	GetNATDestination(context.Context, *GetNATDestinationRequest) (*GetNATDestinationResponse, error)
 	GetScreen(context.Context, *GetScreenRequest) (*GetScreenResponse, error)
 	GetEvents(context.Context, *GetEventsRequest) (*GetEventsResponse, error)
+	GetD11AttestationLedger(context.Context, *GetD11AttestationLedgerRequest) (*GetD11AttestationLedgerResponse, error)
 	GetInterfaces(context.Context, *GetInterfacesRequest) (*GetInterfacesResponse, error)
 	ShowInterfacesDetail(context.Context, *ShowInterfacesDetailRequest) (*ShowInterfacesDetailResponse, error)
 	GetDHCPLeases(context.Context, *GetDHCPLeasesRequest) (*GetDHCPLeasesResponse, error)
@@ -860,6 +873,9 @@ func (UnimplementedBpfrxServiceServer) GetScreen(context.Context, *GetScreenRequ
 }
 func (UnimplementedBpfrxServiceServer) GetEvents(context.Context, *GetEventsRequest) (*GetEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetEvents not implemented")
+}
+func (UnimplementedBpfrxServiceServer) GetD11AttestationLedger(context.Context, *GetD11AttestationLedgerRequest) (*GetD11AttestationLedgerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetD11AttestationLedger not implemented")
 }
 func (UnimplementedBpfrxServiceServer) GetInterfaces(context.Context, *GetInterfacesRequest) (*GetInterfacesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetInterfaces not implemented")
@@ -1428,6 +1444,24 @@ func _BpfrxService_GetEvents_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BpfrxService_GetD11AttestationLedger_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetD11AttestationLedgerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BpfrxServiceServer).GetD11AttestationLedger(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BpfrxService_GetD11AttestationLedger_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BpfrxServiceServer).GetD11AttestationLedger(ctx, req.(*GetD11AttestationLedgerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _BpfrxService_GetInterfaces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetInterfacesRequest)
 	if err := dec(in); err != nil {
@@ -1978,6 +2012,10 @@ var BpfrxService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetEvents",
 			Handler:    _BpfrxService_GetEvents_Handler,
+		},
+		{
+			MethodName: "GetD11AttestationLedger",
+			Handler:    _BpfrxService_GetD11AttestationLedger_Handler,
 		},
 		{
 			MethodName: "GetInterfaces",

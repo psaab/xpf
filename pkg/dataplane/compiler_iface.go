@@ -12,6 +12,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/networkd"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // defaultSynFloodAttackThreshold is the Junos SRX default attack-threshold
@@ -417,12 +418,17 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
 
 	for _, addr := range add {
 		if err := addrAddSeam(link, addr); err != nil {
-			if !strings.Contains(err.Error(), "exists") {
-				slog.Warn("failed to add address to interface",
-					"addr", addr.IPNet.String(), "name", ifaceName, "err", err)
+			// EEXIST means the address was already there — the host did not
+			// move, so it is NOT a mutation. errors.Is unwraps the netlink
+			// errno even when annotated with NLMSGERR_ATTR TLV text; the
+			// string check is a belt-and-suspenders match for wrappers that
+			// only expose Error().
+			if errors.Is(err, unix.EEXIST) ||
+				strings.Contains(err.Error(), "file exists") {
+				continue
 			}
-			// An "exists" error means the address was already there — the host
-			// did not move, so it is NOT a mutation.
+			slog.Warn("failed to add address to interface",
+				"addr", addr.IPNet.String(), "name", ifaceName, "err", err)
 			continue
 		}
 		changed = true

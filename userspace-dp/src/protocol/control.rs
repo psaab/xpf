@@ -194,6 +194,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // generations, and the closed admit-reason/completion contract are mandatory.
 // v29 -> v30 (#10485): the capture-generation stamp paired with tunnel rows
 // prevents same-key config/FIB publishes from reusing stale NFQUEUE identity.
+// v30 -> v31 (#10510): `zone_set_validated` authenticates a populated,
+// collision-free zone identity set before removed-zone purge. A v30 helper
+// cannot distinguish a quarantined/legacy partial map from a real disappearance;
+// exact equality refuses the mixed pair rather than retaining stale sessions.
 pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 31;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
@@ -359,7 +363,6 @@ pub(crate) struct ControlRequest {
     pub fabrics: Option<Vec<FabricSnapshot>>,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SlowPathStatus {
     #[serde(default)]
@@ -443,6 +446,10 @@ pub(crate) struct S5ReinjectProvenance {
     pub outcome: String,
     #[serde(default)]
     pub bytes_written: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_digest: Vec<u8>,
+    #[serde(default)]
+    pub reason: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -542,6 +549,8 @@ impl From<crate::slowpath_reinject_9506::ReinjectStatusSnapshot> for S5ReinjectS
                     stn: row.stn,
                     outcome: row.outcome,
                     bytes_written: row.bytes_written,
+                    frame_digest: row.frame_digest.to_vec(),
+                    reason: row.reason,
                 })
                 .collect(),
             delivered_available: value.delivered_available,
@@ -1186,6 +1195,12 @@ pub(crate) struct SessionSyncRequest {
     /// The rename MUST match the Go struct tag (same file).
     #[serde(rename = "install_table_check", default)]
     pub install_table_check: u32,
+    /// #10509: a BPF-mirror GRE delete cannot name its keyed/PPTP
+    /// discriminator because the on-map ABI omits that sync-only field. This
+    /// trailing additive flag asks the helper to purge every discriminator
+    /// variant for the stated tuple/domain rather than under-matching `None`.
+    #[serde(rename = "purge_tunnel_variants", default)]
+    pub purge_tunnel_variants: bool,
 }
 /// #10512: policy invalidation discovery request. `mode=prepublish` has no
 /// creation-time cutoff; `mode=legacy` applies `before_secs` against the

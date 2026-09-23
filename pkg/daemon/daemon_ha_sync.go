@@ -13,6 +13,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -440,22 +441,78 @@ func (d *Daemon) syncConfigToPeer() {
 // that gap can still let one already-authorized increment through. It is a
 // steady-state property, not a mutual-exclusion guarantee.) Adding an ungated
 // push here would break it outright.
+func (d *Daemon) activeConfigSnapshotForPeer() (*config.Config, string, []configstore.RenameDescriptor) {
+	if d == nil || d.store == nil {
+		return nil, "", nil
+	}
+	d.pendingRenameMu.Lock()
+	defer d.pendingRenameMu.Unlock()
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return nil, "", nil
+	}
+	configText := d.store.ShowActive()
+	activeGen, _ := d.store.ActiveSnapshot()
+	pending := d.pendingRenameApplies[activeGen]
+	ancestry := append([]configstore.RenameDescriptor(nil), pending.descriptors...)
+	return cfg, configText, ancestry
+}
+
+// activeConfigSnapshotAndReserveForPeer samples the active tree and reserves
+// its wire generation while pendingRenameMu is held. A later commit therefore
+// reserves a strictly newer generation even if this caller pauses before the
+// socket write; the eventual receiver high-water rejects any stale payload
+// that arrives after the newer one. expectedHash, when nonzero, must match
+// the sampled text before the reservation is consumed.
+func (d *Daemon) activeConfigSnapshotAndReserveForPeer(
+	ss *cluster.SessionSync,
+	expectedHash uint64,
+) (*config.Config, string, []configstore.RenameDescriptor, uint64) {
+	if d == nil || d.store == nil || ss == nil {
+		return nil, "", nil, 0
+	}
+	d.pendingRenameMu.Lock()
+	defer d.pendingRenameMu.Unlock()
+	cfg := d.store.ActiveConfig()
+	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.ConfigSync {
+		return nil, "", nil, 0
+	}
+	configText := d.store.ShowActive()
+	if configText == "" || (expectedHash != 0 && configGenerationHash(configText) != expectedHash) {
+		return nil, "", nil, 0
+	}
+	activeGen, _ := d.store.ActiveSnapshot()
+	pending := d.pendingRenameApplies[activeGen]
+	ancestry := append([]configstore.RenameDescriptor(nil), pending.descriptors...)
+	return cfg, configText, ancestry, ss.ReserveConfigGen()
+}
+
 func (d *Daemon) pushConfigToPeer() {
 	ss := d.getSessionSync()
 	if ss == nil {
 		return
 	}
-	// Check if config sync is enabled.
-	cfg := d.store.ActiveConfig()
-	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.ConfigSync {
+	// The snapshot and generation reservation share pendingRenameMu; release
+	// it before queueing because QueueConfig may await a key and perform I/O.
+	if d.configSyncPushForTest != nil {
+		_, configText, _ := d.activeConfigSnapshotForPeer()
+		if configText == "" {
+			return
+		}
+		d.configSyncPushForTest()
+		d.noteConfigSharedWithPeer(configText) // #9530
+		if d.syncPeerConnected.Load() {
+			d.markConfigSyncPushed(configText)
+		}
 		return
 	}
-	// Get the active config tree as text.
-	configText := d.store.ShowActive()
-	if configText == "" {
+	cfg, configText, ancestry, reservedGen := d.activeConfigSnapshotAndReserveForPeer(ss, 0)
+	if cfg == nil || reservedGen == 0 {
 		return
 	}
-	ss.QueueConfig(configText)
+	if !ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen) {
+		return
+	}
 	d.noteConfigSharedWithPeer(configText) // #9530
 	// #5863: record the reconcile marker so the level-triggered reconciler
 	// treats this generation as already pushed on the current connection
@@ -570,15 +627,12 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		slog.Debug("cluster: config-sync reconcile skip (uptime below stability threshold)", "reason", reason)
 		return
 	}
-	if d.store == nil {
-		return
-	}
-	cfg := d.store.ActiveConfig()
+	cfg, configText, ancestry := d.activeConfigSnapshotForPeer()
+	var reservedGen uint64
 	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.ConfigSync {
 		slog.Debug("cluster: config-sync reconcile skip (config sync disabled)", "reason", reason)
 		return
 	}
-	configText := d.store.ShowActive()
 	if configText == "" {
 		return
 	}
@@ -601,6 +655,22 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	d.configSyncPushedEpoch = epoch
 	d.configSyncPushedGen = gen
 	d.configSyncMu.Unlock()
+	if d.configSyncPushForTest == nil {
+		latestCfg, latestText, latestAncestry, latestReservedGen :=
+			d.activeConfigSnapshotAndReserveForPeer(ss, gen)
+		if latestCfg == nil {
+			// The active tree changed while the marker was being claimed.
+			// Leave the marker clear; the next level-triggered pass samples
+			// and reserves the new tree in the correct order.
+			d.configSyncMu.Lock()
+			if d.configSyncPushedEpoch == epoch && d.configSyncPushedGen == gen {
+				d.configSyncHasPushed = false
+			}
+			d.configSyncMu.Unlock()
+			return
+		}
+		configText, ancestry, reservedGen = latestText, latestAncestry, latestReservedGen
+	}
 
 	slog.Info("cluster: config-sync reconcile pushing config to peer",
 		"reason", reason, "epoch", epoch, "generation", gen, "size", len(configText))
@@ -609,7 +679,17 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		d.noteConfigSharedWithPeer(configText)
 		return
 	}
-	ss.QueueConfig(configText)
+	if !ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen) {
+		// The capability-gated sidecar may still be waiting for peer
+		// discovery, or the write may have failed. Let the capability callback
+		// or the next reconcile attempt claim this generation again.
+		d.configSyncMu.Lock()
+		if d.configSyncPushedEpoch == epoch && d.configSyncPushedGen == gen {
+			d.configSyncHasPushed = false
+		}
+		d.configSyncMu.Unlock()
+		return
+	}
 	d.noteConfigSharedWithPeer(configText) // #9530
 }
 
@@ -647,17 +727,15 @@ func (d *Daemon) configSyncReconcileLoop(ctx context.Context) {
 // re-push once this node settles into secondary (M-2/#4151).
 var errConfigSyncRejectedPrimary = errors.New("config sync rejected: this node is RG0 primary")
 
-// handleConfigSync processes a config received from the cluster peer.
-// Config sync is unidirectional: primary → secondary only. If this node
-// is the RG0 primary (config authority), incoming config is rejected to
-// prevent a reconnecting secondary from overwriting the authoritative config.
-//
-// It returns nil ONLY when the config was actually applied (or already matches
-// the active config); a non-nil error means the apply did not take effect. The
-// config high-water mark advances ONLY on a nil return (M-2/#4151), so a
-// rejection or a compile/promote failure leaves the standby eligible for the
-// primary's re-push instead of being silently stranded on the prior config.
+// handleConfigSync keeps the legacy callback shape for tests and old peers.
 func (d *Daemon) handleConfigSync(configText string) error {
+	return d.handleConfigSyncWithAncestry(configText, nil)
+}
+
+func (d *Daemon) handleConfigSyncWithAncestry(
+	configText string,
+	ancestry []configstore.RenameDescriptor,
+) error {
 	if d.cluster != nil && d.cluster.IsLocalPrimary(0) {
 		slog.Warn("cluster: rejecting config sync (this node is RG0 primary)")
 		return errConfigSyncRejectedPrimary
@@ -698,8 +776,8 @@ func (d *Daemon) handleConfigSync(configText string) error {
 	// exists to evict it — #5078's "an admitted peer must not re-arm the
 	// window". The hook is shared with #6629's eventual node-local posture; see
 	// preserveNodeLocalChassis for the contract.
-	if _, err := d.syncAndApply(context.Background(), configText,
-		preserveNodeLocalChassis(d.activeTreeForNodeLocal())); err != nil {
+	if _, err := d.syncAndApplyWithAncestry(context.Background(), configText,
+		preserveNodeLocalChassis(d.activeTreeForNodeLocal()), ancestry); err != nil {
 		slog.Error("cluster: config sync apply failed", "err", err)
 		return err
 	}

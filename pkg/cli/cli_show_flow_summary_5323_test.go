@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -85,5 +86,64 @@ func TestLocalFlowSessionSummaryUnknownMax(t *testing.T) {
 	})
 	if !strings.Contains(out, "Maximum-sessions: unknown") {
 		t.Fatalf("local summary missing unknown fallback:\n%s", out)
+	}
+}
+
+type quarantineSummaryCLIDP10530 struct {
+	*dataplane.Manager
+	result *dataplane.ApplyResult
+	id     uint16
+}
+
+func (d *quarantineSummaryCLIDP10530) IsLoaded() bool { return true }
+
+func (d *quarantineSummaryCLIDP10530) LastApplyResult() *dataplane.ApplyResult {
+	return d.result.Clone()
+}
+
+func (d *quarantineSummaryCLIDP10530) IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	key := dataplane.SessionKey{Protocol: 6}
+	val := dataplane.SessionValue{IngressZone: d.id, EgressZone: d.id}
+	fn(key, val)
+	return nil
+}
+
+func (d *quarantineSummaryCLIDP10530) IterateSessionsV6(func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
+	return nil
+}
+
+func TestLocalFlowSessionSummaryQuarantineDisplayAtPrint10530(t *testing.T) {
+	store := newPolicyHitCountCLIStore(t, true)
+	cfg := store.ActiveConfig()
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust"},
+		"z174":  {Name: "z174"},
+		"z214":  {Name: "z214"},
+	}
+	id := config.StableZoneID("z174")
+	result := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+		"trust": config.StableZoneID("trust"),
+		"z174":  id,
+		"z214":  id,
+	}}
+	c := &CLI{
+		store: store,
+		dp: &quarantineSummaryCLIDP10530{
+			Manager: dataplane.New(),
+			result:  result,
+			id:      id,
+		},
+	}
+	out := captureStdout(t, func() {
+		if err := c.showFlowSession([]string{"summary", "zone", "z214"}); err != nil {
+			t.Fatalf("showFlowSession summary: %v", err)
+		}
+	})
+	wantPair := "z174 " + config.ZoneQuarantineReferenceQualifier + "->z174 " + config.ZoneQuarantineReferenceQualifier
+	if !strings.Contains(out, wantPair) {
+		t.Fatalf("quarantined summary did not annotate resolved survivor pair at print time:\n%s", out)
+	}
+	if !strings.Contains(out, "1\n") {
+		t.Fatalf("quarantined summary lost the admitted session count:\n%s", out)
 	}
 }

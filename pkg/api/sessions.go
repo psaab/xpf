@@ -1017,12 +1017,16 @@ func (s *Server) sessionZonePairHandler(w http.ResponseWriter, r *http.Request) 
 	defer release()
 	r = r.WithContext(walkCtx)
 
-	// Build zone ID -> name reverse map
+	// Build zone ID -> name reverse map. A colliding apply result carries both
+	// names for one id, while the dataplane installed only the sorted-first
+	// survivor; config.SurvivorZoneNames keeps telemetry deterministic.
 	zoneNames := make(map[uint16]string)
+	var cfg *config.Config
+	if s.store != nil {
+		cfg = s.store.ActiveConfig()
+	}
 	if cr := s.applyResult(); cr != nil {
-		for name, id := range cr.ZoneIDs {
-			zoneNames[id] = name
-		}
+		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 	}
 
 	type zpKey struct{ from, to uint16 }
@@ -1248,15 +1252,16 @@ func (s *Server) buildSessionView() sessionView {
 	}
 	cr := s.applyResult()
 	if cr != nil {
-		for name, id := range cr.ZoneIDs {
-			v.zoneNames[id] = name
-		}
+		v.zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, v.cfg)
 		v.policyNames = cr.PolicyNames
 		v.appNames = cr.AppNames
 	}
 	if v.cfg != nil && cr != nil {
 		for zoneName, zone := range v.cfg.Security.Zones {
 			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
+				continue
+			}
+			if config.ZoneQuarantineExcludedReason(zoneName, v.cfg) != "" {
 				continue
 			}
 			if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {

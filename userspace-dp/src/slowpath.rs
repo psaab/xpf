@@ -687,6 +687,10 @@ pub struct SlowPathReinjector {
     /// Dual-outlet (#9637): both TUNs take the same desired MTU;
     /// `reconcile_mtu` reprograms both and records the minimum live value.
     mtu: AtomicI64,
+    /// Test-only queue-observation seam for outlet routing cells. Each
+    /// successful queue send records whether its `PacketQueue` was Delegated.
+    #[cfg(test)]
+    test_enqueued_delegated: Mutex<Vec<bool>>,
 }
 
 /// #9637 F3 (GPT-1 form): one dual-outlet startup-handshake step as pure logic.
@@ -897,6 +901,8 @@ impl SlowPathReinjector {
             status_delegated,
             mtu_retry: Mutex::new(MtuRetryState::default()),
             mtu: AtomicI64::new(mtu as i64),
+            #[cfg(test)]
+            test_enqueued_delegated: Mutex::new(Vec::new()),
         })
     }
 
@@ -958,6 +964,8 @@ impl SlowPathReinjector {
             status_delegated,
             mtu_retry: Mutex::new(MtuRetryState::default()),
             mtu: AtomicI64::new(mtu as i64),
+            #[cfg(test)]
+            test_enqueued_delegated: Mutex::new(Vec::new()),
         }
     }
 
@@ -1205,6 +1213,11 @@ impl SlowPathReinjector {
             flow_tag: 0,
         }) {
             Ok(()) => {
+                #[cfg(test)]
+                self.test_enqueued_delegated
+                    .lock()
+                    .expect("test outlet observation")
+                    .push(matches!(queue, PacketQueue::Delegated));
                 if let Some(class) = admission_class(queue) {
                     self.reinject_core.record_class_admitted(class);
                 }
@@ -1492,6 +1505,17 @@ impl SlowPathReinjector {
     /// projections.
     pub fn delegated_status(&self) -> SlowPathStatus {
         self.status_delegated.snapshot()
+    }
+    /// Test-only observation of successfully queued packet classes. `true`
+    /// means the packet carried `PacketQueue::Delegated`; `false` means the
+    /// trusted/adjudicated queue. This keeps outlet cells independent from
+    /// the shared delegated status, which both queue APIs use.
+    #[cfg(test)]
+    pub(crate) fn test_enqueued_delegated(&self) -> Vec<bool> {
+        self.test_enqueued_delegated
+            .lock()
+            .expect("test outlet observation")
+            .clone()
     }
 }
 

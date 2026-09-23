@@ -557,6 +557,70 @@ pub(crate) struct PolicyRuleSnapshot {
     pub match_to_zones: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct PolicyRenameAncestry {
+    #[serde(rename = "source_rule_id", default)]
+    pub source_rule_id: String,
+    #[serde(rename = "destination_rule_id", default)]
+    pub destination_rule_id: String,
+    #[serde(rename = "source_from_zone", default)]
+    pub source_from_zone: String,
+    #[serde(rename = "source_to_zone", default)]
+    pub source_to_zone: String,
+    #[serde(rename = "destination_from_zone", default)]
+    pub destination_from_zone: String,
+    #[serde(rename = "destination_to_zone", default)]
+    pub destination_to_zone: String,
+    #[serde(rename = "source_from_zone_id", default)]
+    pub source_from_zone_id: u16,
+    #[serde(rename = "source_to_zone_id", default)]
+    pub source_to_zone_id: u16,
+    #[serde(rename = "destination_from_zone_id", default)]
+    pub destination_from_zone_id: u16,
+    #[serde(rename = "destination_to_zone_id", default)]
+    pub destination_to_zone_id: u16,
+    #[serde(rename = "source_from_zone_any", default)]
+    pub source_from_zone_any: bool,
+    #[serde(rename = "source_to_zone_any", default)]
+    pub source_to_zone_any: bool,
+    #[serde(rename = "destination_from_zone_any", default)]
+    pub destination_from_zone_any: bool,
+    #[serde(rename = "destination_to_zone_any", default)]
+    pub destination_to_zone_any: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct PolicySessionRebind {
+    #[serde(default)]
+    pub family: String,
+    #[serde(rename = "src_ip", default)]
+    pub src_ip: String,
+    #[serde(rename = "dst_ip", default)]
+    pub dst_ip: String,
+    #[serde(rename = "src_port", default)]
+    pub src_port: u16,
+    #[serde(rename = "dst_port", default)]
+    pub dst_port: u16,
+    #[serde(default)]
+    pub protocol: u8,
+    #[serde(rename = "routing_domain", default)]
+    pub routing_domain: u32,
+    #[serde(rename = "policy_id", default)]
+    pub policy_id: u32,
+    #[serde(rename = "rule_id", default)]
+    pub rule_id: String,
+    #[serde(rename = "ingress_zone", default)]
+    pub ingress_zone: u16,
+    #[serde(rename = "egress_zone", default)]
+    pub egress_zone: u16,
+    // Trailing-additive #10509 metadata. This is the canonical opaque
+    // TunnelDiscriminator::to_wire value from the Go SessionValue. A missing,
+    // zero, or unparsable value is not a valid retention key; callers fail
+    // closed by deleting the pair rather than aliasing tunnel sessions.
+    #[serde(rename = "tunnel_discriminator", default)]
+    pub tunnel_discriminator: u64,
+}
+
 /// #1606: snapshot row for a unique address-book content.
 /// Multiple Junos-declared book names whose canonical CIDR sets
 /// are identical share one row + one ID. `name` is diagnostic-

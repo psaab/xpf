@@ -50,6 +50,8 @@ mod prerouting_scope;
 mod policy_revalidation;
 #[cfg(test)]
 pub(crate) use policy_revalidation::revalidate_zone_policy_declines_for_test;
+#[cfg(test)]
+pub(crate) use policy_revalidation::revalidate_zone_policy_revocation_for_test;
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;
@@ -88,14 +90,55 @@ use session_hit_authority::{
 
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
-    SynCookieAckOutcome, reinject_ipsec_passthrough, stage_classify_fabric_ingress,
-    stage_ipsec_passthrough_check, stage_link_layer_classify, stage_native_gre_decap,
-    stage_parse_flow_and_learn, stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss,
-    stage_wg_decap,
+    SynCookieAckOutcome, ike_host_inbound_gate_context, reinject_ipsec_passthrough,
+    stage_classify_fabric_ingress, stage_ipsec_passthrough_check, stage_link_layer_classify,
+    stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check,
+    stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
 };
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
 
+#[inline]
+pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
+    protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
+}
+#[inline]
+fn stage11_declared_frame(packet_frame: &[u8], meta: UserspaceDpMeta) -> &[u8] {
+    let Some(declared_end) =
+        declared_l3_end(packet_frame, meta.l3_offset as usize, meta.addr_family)
+    else {
+        // A malformed/truncated L3 declaration cannot provide an authoritative
+        // boundary. Give every Stage-11 classifier an empty view so UDP/IKE/
+        // ESP-in-UDP parsing fails closed instead of borrowing Ethernet slack.
+        return &packet_frame[..0];
+    };
+    packet_frame.get(..declared_end).unwrap_or(&packet_frame[..0])
+}
+
+#[inline]
+fn record_ipsec_sa_miss_sample(
+    sample_phase: &mut u8,
+    worker_ctx: &WorkerContext,
+    meta: UserspaceDpMeta,
+) {
+    let current = *sample_phase;
+    *sample_phase = current.wrapping_add(1);
+    if current == 0 {
+        // Keep sampled exceptions under one bounded key. The reason-specific
+        // atomics above are authoritative; dynamically splitting this
+        // deliberately sparse diagnostic stream would make its cardinality
+        // unbounded without improving the packet-path verdict.
+        record_exception(
+            worker_ctx.recent_exceptions,
+            &worker_ctx.ident,
+            "ipsec_sa_miss",
+            meta.pkt_len as u32,
+            Some(meta),
+            None,
+            worker_ctx.forwarding,
+        );
+    }
+}
 
 use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
@@ -105,7 +148,7 @@ use resolver_enqueue::try_enqueue_resolver;
 
 use policy_revalidation::{revalidate_zone_policy_on_session_hit, tun_origin_reverse_exempt};
 use filter::{
-    collect_revoked_flow_cache_keys, emit_input_filter_log_match,
+    apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit,
     evaluate_non_pbr_input_filter, evaluate_non_pbr_input_filter_counters_cached,
     evaluate_non_pbr_input_filter_log_only, filter_terminal,
@@ -231,6 +274,9 @@ pub(super) fn poll_binding_process_descriptor(
     // SEPARATE stamps — sharing one would let a filter ACCEPT re-stamp suppress
     // a pending policy re-derivation, and vice versa.
     sessions.set_policy_revalidation_gen(validation.config_generation);
+    // Load the immutable SA payload once for this RX batch. Stage 11 performs
+    // only plain map lookups against this guard, never another ArcSwap load.
+    let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
     let mut received = binding.xsk.rx.receive(available);
     binding.scratch.scratch_recycle.clear();
     binding.scratch.scratch_forwards.clear();
@@ -559,9 +605,23 @@ pub(super) fn poll_binding_process_descriptor(
                 // Responder-SPI-nonzero IKE packet matching NO seeded live
                 // exchange faces the same gate — a forged Responder SPI no
                 // longer rides the established exemption on a closed zone.
+                // Only an IPsec candidate pays for the authoritative
+                // declared-end trim; ordinary traffic keeps its zero-extra-
+                // work Stage-11 fall-through.
+                let stage11_packet_frame = match flow.as_ref() {
+                    Some(flow)
+                        if crate::afxdp::forwarding::is_ipsec_traffic(
+                            meta.protocol,
+                            flow.forward_key.dst_port,
+                        ) =>
+                    {
+                        stage11_declared_frame(packet_frame, meta)
+                    }
+                    _ => packet_frame,
+                };
                 match stage_ipsec_passthrough_check(
                     flow.as_ref(),
-                    packet_frame,
+                    stage11_packet_frame,
                     meta,
                     ingress_zone_override,
                     &binding.live,
@@ -597,8 +657,344 @@ pub(super) fn poll_binding_process_descriptor(
                             }
                             admission_to_commit = admission;
                         }
-                        let accepted =
-                            reinject_ipsec_passthrough(packet_frame, meta, &binding.live, worker_ctx);
+                        if stage11_raw_protocol_requires_drop(meta.protocol) {
+                            // Raw ESP/AH has no UDP-4500 SA proof.  Even
+                            // when the generic passthrough gate admits it,
+                            // Stage 11 must deny rather than minting q0.
+                            worker_ctx.forwarding.ipsec_sa.counters.record_miss(
+                                crate::afxdp::forwarding::IpsecSaMissReason::Truncated,
+                            );
+                            record_ipsec_sa_miss_sample(
+                                &mut binding.ipsec_sa_miss_sample_phase,
+                                worker_ctx,
+                                meta,
+                            );
+                            if let Some(admission) = admission_to_commit.take() {
+                                worker_ctx
+                                    .forwarding
+                                    .nat64
+                                    .frag_overlap
+                                    .fail_admission(admission);
+                            }
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        let outlet = {
+                            let Some(flow) = flow.as_ref() else {
+                                worker_ctx
+                                    .forwarding
+                                    .ipsec_sa
+                                    .counters
+                                    .record_miss(crate::afxdp::forwarding::IpsecSaMissReason::NoSa);
+                                record_ipsec_sa_miss_sample(
+                                    &mut binding.ipsec_sa_miss_sample_phase,
+                                    worker_ctx,
+                                    meta,
+                                );
+                                if let Some(admission) = admission_to_commit.take() {
+                                    worker_ctx
+                                        .forwarding
+                                        .nat64
+                                        .frag_overlap
+                                        .fail_admission(admission);
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            };
+                            let flow_dst_port = flow.forward_key.dst_port;
+                            if crate::afxdp::forwarding::is_admitted_positive_ike(
+                                stage11_packet_frame,
+                                meta.l4_offset as usize,
+                                meta.protocol,
+                                flow_dst_port,
+                            ) {
+                                // #4323/#6471 already admitted this IKE
+                                // exchange. It is the sole non-SA exception,
+                                // and it is deliberately unmarked so Stage
+                                // 11 can never mint the armed q0 token.
+                                SlowPathOutlet::Delegated
+                            } else if crate::afxdp::forwarding::is_malformed_ike(
+                                stage11_packet_frame,
+                                meta.l4_offset as usize,
+                                meta.protocol,
+                                flow_dst_port,
+                            ) {
+                                worker_ctx
+                                    .forwarding
+                                    .ipsec_sa
+                                    .counters
+                                    .record_miss(
+                                        crate::afxdp::forwarding::IpsecSaMissReason::MalformedIke,
+                                    );
+                                record_ipsec_sa_miss_sample(
+                                    &mut binding.ipsec_sa_miss_sample_phase,
+                                    worker_ctx,
+                                    meta,
+                                );
+                                if let Some(admission) = admission_to_commit.take() {
+                                    worker_ctx
+                                        .forwarding
+                                        .nat64
+                                        .frag_overlap
+                                        .fail_admission(admission);
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            } else {
+                                let Some(spi) = crate::afxdp::forwarding::esp_in_udp_spi(
+                                    stage11_packet_frame,
+                                    meta.l4_offset as usize,
+                                    flow_dst_port,
+                                    stage11_packet_frame.len(),
+                                ) else {
+                                    let reason =
+                                        crate::afxdp::forwarding::esp_in_udp_miss_reason(
+                                            stage11_packet_frame,
+                                            meta.l4_offset as usize,
+                                            flow_dst_port,
+                                            stage11_packet_frame.len(),
+                                        );
+                                    worker_ctx.forwarding.ipsec_sa.counters.record_miss(reason);
+                                    record_ipsec_sa_miss_sample(
+                                        &mut binding.ipsec_sa_miss_sample_phase,
+                                        worker_ctx,
+                                        meta,
+                                    );
+                                    if let Some(admission) = admission_to_commit.take() {
+                                        worker_ctx
+                                            .forwarding
+                                            .nat64
+                                            .frag_overlap
+                                            .fail_admission(admission);
+                                    }
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                };
+                                let Some(key) = crate::afxdp::forwarding::ipsec_sa_key(
+                                    flow.dst_ip,
+                                    spi,
+                                    flow.src_ip,
+                                ) else {
+                                    worker_ctx
+                                        .forwarding
+                                        .ipsec_sa
+                                        .counters
+                                        .record_miss(
+                                            crate::afxdp::forwarding::IpsecSaMissReason::NoSa,
+                                        );
+                                    record_ipsec_sa_miss_sample(
+                                        &mut binding.ipsec_sa_miss_sample_phase,
+                                        worker_ctx,
+                                        meta,
+                                    );
+                                    if let Some(admission) = admission_to_commit.take() {
+                                        worker_ctx
+                                            .forwarding
+                                            .nat64
+                                            .frag_overlap
+                                            .fail_admission(admission);
+                                    }
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                };
+                                match worker_ctx
+                                    .forwarding
+                                    .ipsec_sa
+                                    .lookup_loaded(&ipsec_sa_snapshot, key)
+                                {
+                                    crate::afxdp::forwarding::IpsecSaLookup::Hit => {
+                                        SlowPathOutlet::Delegated
+                                    }
+                                    crate::afxdp::forwarding::IpsecSaLookup::Miss => {
+                                        worker_ctx
+                                            .forwarding
+                                            .ipsec_sa
+                                            .counters
+                                            .record_miss(
+                                                crate::afxdp::forwarding::IpsecSaMissReason::NoSa,
+                                            );
+                                        record_ipsec_sa_miss_sample(
+                                            &mut binding.ipsec_sa_miss_sample_phase,
+                                            worker_ctx,
+                                            meta,
+                                        );
+                                        if let Some(admission) = admission_to_commit.take() {
+                                            worker_ctx
+                                                .forwarding
+                                                .nat64
+                                                .frag_overlap
+                                                .fail_admission(admission);
+                                        }
+                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        continue;
+                                    }
+                                    crate::afxdp::forwarding::IpsecSaLookup::Stale => {
+                                        worker_ctx
+                                            .forwarding
+                                            .ipsec_sa
+                                            .counters
+                                            .record_miss(
+                                                crate::afxdp::forwarding::IpsecSaMissReason::Stale,
+                                            );
+                                        record_ipsec_sa_miss_sample(
+                                            &mut binding.ipsec_sa_miss_sample_phase,
+                                            worker_ctx,
+                                            meta,
+                                        );
+                                        if let Some(admission) = admission_to_commit.take() {
+                                            worker_ctx
+                                                .forwarding
+                                                .nat64
+                                                .frag_overlap
+                                                .fail_admission(admission);
+                                        }
+                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        continue;
+                                    }
+                                }
+                            }
+                        };
+                        // #10525: Stage 11 claims DNAT-to-self IKE before the
+                        // ordinary LocalDelivery arms. Re-run the same lo0
+                        // and `to-zone junos-host` gates here, before the
+                        // delegated reinject. The kernel lo0 chain still
+                        // enforces its own terms; this userspace gate is
+                        // required for the delegated xpf-usp1 path, whose
+                        // iifname is intentionally outside kernel junos-host
+                        // ingress scopes.
+                        let is_positive_ike = flow.as_ref().is_some_and(|flow| {
+                            crate::afxdp::forwarding::is_admitted_positive_ike(
+                                stage11_packet_frame,
+                                meta.l4_offset as usize,
+                                meta.protocol,
+                                flow.forward_key.dst_port,
+                            )
+                        });
+                        let pending_ike_seed = if is_positive_ike {
+                            let flow = flow.as_ref().expect("positive IKE has a parsed flow");
+                            crate::afxdp::forwarding::ike_initiation_spi(
+                                stage11_packet_frame,
+                                meta.l4_offset as usize,
+                                flow.forward_key.dst_port,
+                            )
+                            .map(|initiator_spi| {
+                                crate::afxdp::forwarding::IkeExchangeKey::new(
+                                    initiator_spi,
+                                    flow.src_ip,
+                                    flow.dst_ip,
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        if is_positive_ike {
+                            let flow = flow.as_ref().expect("positive IKE has a parsed flow");
+                            let (ingress_logical, from_zone_id, ingress_zone_override) =
+                                ike_host_inbound_gate_context(
+                                    flow,
+                                    meta,
+                                    ingress_zone_override,
+                                    now_secs,
+                                    worker_ctx,
+                                );
+                            // #10525/#9529: Stage 11's passthrough decision
+                            // carries NatDecision::default, so the wire
+                            // destination is also the post-translation
+                            // policy destination here. Keep lo0 on the wire
+                            // tuple, exactly like the normal LocalDelivery
+                            // path; the fine policy sees the same tuple.
+                            let policy_dst =
+                                host_bound_policy_dst(flow, flow.forward_key.dst_port, None, None);
+                            debug_assert_eq!(
+                                policy_dst,
+                                (flow.dst_ip, flow.forward_key.dst_port),
+                                "#9529: Stage-11 IKE gate must judge wire == post-translation tuple"
+                            );
+                            let (lo0_action, lo0_log) = apply_lo0_filter_action(
+                                worker_ctx.forwarding,
+                                crate::afxdp::frame::term_match_extra_from_frame(
+                                    stage11_packet_frame,
+                                    meta,
+                                ),
+                                Some(flow),
+                                meta,
+                                ingress_logical,
+                                ingress_zone_override,
+                                now_ns,
+                            );
+                            if filter_terminal(
+                                &mut binding.tx_pipeline,
+                                worker_ctx.forwarding,
+                                worker_ctx.event_stream,
+                                binding.ifindex,
+                                stage11_packet_frame,
+                                meta,
+                                flow,
+                                telemetry.counters,
+                                lo0_action,
+                                lo0_log,
+                                now_ns,
+                            ) {
+                                telemetry.dbg.local += 1;
+                                telemetry.dbg.policy_deny += 1;
+                                telemetry.counters.touched = true;
+                                if let Some(admission) = admission_to_commit.take() {
+                                    worker_ctx
+                                        .forwarding
+                                        .nat64
+                                        .frag_overlap
+                                        .fail_admission(admission);
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                            if matches!(
+                                junos_host_local_policy(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    &mut binding.tx_pipeline,
+                                    binding.ifindex,
+                                    stage11_packet_frame,
+                                    telemetry.counters,
+                                    flow,
+                                    meta,
+                                    policy_dst,
+                                    from_zone_id,
+                                    desc.len as u64,
+                                    now_ns,
+                                ),
+                                JunosHostLocalPolicy::Dropped
+                            ) {
+                                telemetry.dbg.local += 1;
+                                telemetry.dbg.policy_deny += 1;
+                                telemetry.counters.touched = true;
+                                if let Some(admission) = admission_to_commit.take() {
+                                    worker_ctx
+                                        .forwarding
+                                        .nat64
+                                        .frag_overlap
+                                        .fail_admission(admission);
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                        }
+                        let accepted = reinject_ipsec_passthrough(
+                            packet_frame,
+                            meta,
+                            &binding.live,
+                            worker_ctx,
+                            outlet,
+                        );
+                        if accepted {
+                            // #10525/#6471: a NEW IKE seed becomes visible
+                            // only after both userspace fine gates and the
+                            // reinject admission succeed. A denied IKE can
+                            // therefore never mint an established follow-up.
+                            if let Some(seed) = pending_ike_seed {
+                                worker_ctx.ike_exchanges.seed(seed, now_ns);
+                            }
+                        }
                         if let Some(admission) = admission_to_commit {
                             let tracker = &worker_ctx.forwarding.nat64.frag_overlap;
                             if accepted {
@@ -709,6 +1105,10 @@ pub(super) fn poll_binding_process_descriptor(
                     std::sync::Arc<crate::policy::PolicyRuleCounter>,
                 > = None;
                 let mut apply_nat_on_fabric = false;
+                // #10566: miss-path evaluators count before the common seed;
+                // the established-hit arm below overwrites this with the
+                // explicit result of `evaluate_input_filter_on_session_hit`.
+                let mut seed_packet_already_counted = true;
                 // #1861 §5.4: true when a session install was attempted
                 // for this packet's decision and refused (max_sessions).
                 // Gates the flow-cache population below — caching a
@@ -756,6 +1156,11 @@ pub(super) fn poll_binding_process_descriptor(
                 // only need eventual cross-thread visibility. NUM_SHARDS relaxed
                 // loads, on this cold cache-miss/resolve path only.
                 let neighbor_epoch_snapshot = worker_ctx.dynamic_neighbors.snapshot_shard_epochs();
+                // Per-packet proof consumed by the filtered reinject
+                // chokepoint below. It is set only by the host-inbound gate
+                // pass arms (or the owner-only solicited-reply exemption);
+                // an unproven LocalDelivery therefore cannot select Trusted.
+                let mut host_inbound_gate_proof = false;
                 let mut decision = if let Some(flow) = flow.as_ref() {
                 if let Some(mut resolved) = resolve_flow_session_decision_with_conntrack(
                         sessions,
@@ -1003,7 +1408,7 @@ pub(super) fn poll_binding_process_descriptor(
                         // discard/reject keeps its counted/logged semantics.
                         // A route transition overrides only an ordinary
                         // Accept, including the per-packet route-filter arm.
-                        let ordinary_input_filter_hit =
+                        let (ordinary_input_filter_hit, ordinary_input_already_counted) =
                             evaluate_input_filter_on_session_hit(
                                 worker_ctx.forwarding,
                                 sessions,
@@ -1013,43 +1418,55 @@ pub(super) fn poll_binding_process_descriptor(
                                 meta,
                                 Some(authority_zone),
                             );
-                        let input_filter_hit = match ordinary_input_filter_hit {
-                            Some(hit)
-                                if hit.eval.action == crate::filter::FilterAction::Accept =>
-                            {
-                                if let Some(route) = stale_pbr_route {
-                                    // The ordinary evaluator may have stamped
-                                    // this entry fresh on its Accept path.
-                                    if let Some(revoked_key) = route.revoked_key.as_ref() {
-                                        sessions.clear_filter_revalidation(revoked_key);
+                        let (input_filter_hit, input_already_counted) =
+                            match ordinary_input_filter_hit {
+                                Some(hit)
+                                    if hit.eval.action == crate::filter::FilterAction::Accept =>
+                                {
+                                    if let Some(route) = stale_pbr_route {
+                                        // The ordinary evaluator may have stamped
+                                        // this entry fresh on its Accept path.
+                                        if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                            sessions.clear_filter_revalidation(revoked_key);
+                                        }
+                                        (
+                                            Some(SessionHitInputFilterEval {
+                                                eval: NonPbrInputFilterEval {
+                                                    action: crate::filter::FilterAction::Discard,
+                                                    cached_log: None,
+                                                },
+                                                revoked_key: route.revoked_key,
+                                                log_source: FilterLogSource::Pbr,
+                                            }),
+                                            // #10566: route override is synthesized
+                                            // without a counted evaluator.
+                                            false,
+                                        )
+                                    } else {
+                                        (Some(hit), ordinary_input_already_counted)
                                     }
-                                    Some(SessionHitInputFilterEval {
-                                        eval: NonPbrInputFilterEval {
-                                            action: crate::filter::FilterAction::Discard,
-                                            cached_log: None,
-                                        },
-                                        revoked_key: route.revoked_key,
-                                        log_source: FilterLogSource::Pbr,
-                                    })
-                                } else {
-                                    Some(hit)
                                 }
-                            }
-                            Some(hit) => Some(hit),
-                            None => stale_pbr_route.map(|route| {
-                                if let Some(revoked_key) = route.revoked_key.as_ref() {
-                                    sessions.clear_filter_revalidation(revoked_key);
-                                }
-                                SessionHitInputFilterEval {
-                                    eval: NonPbrInputFilterEval {
-                                        action: crate::filter::FilterAction::Discard,
-                                        cached_log: None,
-                                    },
-                                    revoked_key: route.revoked_key,
-                                    log_source: FilterLogSource::Pbr,
-                                }
-                            }),
-                        };
+                                Some(hit) => (Some(hit), ordinary_input_already_counted),
+                                None => (
+                                    stale_pbr_route.map(|route| {
+                                        if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                            sessions.clear_filter_revalidation(revoked_key);
+                                        }
+                                        SessionHitInputFilterEval {
+                                            eval: NonPbrInputFilterEval {
+                                                action: crate::filter::FilterAction::Discard,
+                                                cached_log: None,
+                                            },
+                                            revoked_key: route.revoked_key,
+                                            log_source: FilterLogSource::Pbr,
+                                        }
+                                    }),
+                                    // #10566: neither a static ACCEPT nor a
+                                    // synthesized PBR discard was counted.
+                                    false,
+                                ),
+                            };
+                        seed_packet_already_counted = input_already_counted;
                         if let Some(input_filter_hit) = input_filter_hit {
                             let input_filter_eval = input_filter_hit.eval;
                             let input_filter_revoked_key = input_filter_hit.revoked_key;
@@ -1251,19 +1668,25 @@ pub(super) fn poll_binding_process_descriptor(
                         }
                         let zone_policy_revocation = match foreign_arrival_zone {
                             None => revalidate_zone_policy_on_session_hit(
-                                    worker_ctx.forwarding,
-                                    sessions,
-                                    &resolved.key,
-                                    &resolved.metadata,
-                                    resolved.decision,
-                                    Some(flow),
-                                    meta,
-                                    // #9384: THIS packet's fabric ingress. The from-zone
-                                    // is resolved live from the arrival interface, and a
-                                    // fabric-punted packet arrives on the fabric link —
-                                    // not in the flow's zone — so it keeps the entry's
-                                    // recorded zone instead.
-                                    packet_fabric_ingress,
+                                worker_ctx.forwarding,
+                                sessions,
+                                &resolved.key,
+                                &resolved.metadata,
+                                resolved.decision,
+                                Some(flow),
+                                meta,
+                                // #9384: THIS packet's fabric ingress. The from-zone
+                                // is resolved live from the arrival interface, and a
+                                // fabric-punted packet arrives on the fabric link —
+                                // not in the flow's zone — so it keeps the entry's
+                                // recorded zone instead.
+                                packet_fabric_ingress,
+                                fabric_link_ingress,
+                                worker_ctx.ha_state,
+                                worker_ctx.dynamic_neighbors,
+                                now_secs,
+                                meta.ingress_ifindex as i32,
+                                ha_startup_grace_until_secs,
                             ),
                             Some(arrival_zone) => match foreign_hit_verdict(
                                 worker_ctx.forwarding,
@@ -1409,6 +1832,12 @@ pub(super) fn poll_binding_process_descriptor(
                             // lo0 always answers — so the deny arm cannot fire
                             // for it, and the accept arm runs unchanged).
                             let gated = if solicited_exempt {
+                                // The owner-only TUN-origin reverse exemption
+                                // is an explicit host-inbound proof: the forward
+                                // companion was already proven as firewall-
+                                // originated, while lo0/TTL/input-filter gates
+                                // remain in force (#10038).
+                                host_inbound_gate_proof = true;
                                 Some(lo0_action_for_solicited_reply(
                                     worker_ctx.forwarding,
                                     ingress_logical,
@@ -1525,6 +1954,12 @@ pub(super) fn poll_binding_process_descriptor(
                                 // (discard/reject). An accepted flow with a lo0
                                 // `then log` term still emits and falls through.
                                 Some((lo0_action, lo0_log)) => {
+                                    if !solicited_exempt {
+                                        // `Some` from the gated helper proves
+                                        // host-inbound admission for ordinary
+                                        // HIT LocalDelivery packets.
+                                        host_inbound_gate_proof = true;
+                                    }
                                     if filter_terminal(
                                         &mut binding.tx_pipeline,
                                         worker_ctx.forwarding,
@@ -2706,6 +3141,9 @@ pub(super) fn poll_binding_process_descriptor(
                                 // (discard/reject). An accepted lo0 `then log`
                                 // flow still emits and falls through.
                                 Some((lo0_action, lo0_log)) => {
+                                    // Reaching the admitted arm proves the H2
+                                    // host-inbound gate passed for this packet.
+                                    host_inbound_gate_proof = true;
                                     if filter_terminal(
                                         &mut binding.tx_pipeline,
                                         worker_ctx.forwarding,
@@ -5164,7 +5602,11 @@ pub(super) fn poll_binding_process_descriptor(
                             desc.len as u64,
                             now_ns,
                         ) {
-                            FlowlessLocalVerdict::Deliver => {}
+                            FlowlessLocalVerdict::Deliver => {
+                                // Flowless Deliver is the shared H2 pass result;
+                                // carry its proof to the reinject chokepoint.
+                                host_inbound_gate_proof = true;
+                            }
                             FlowlessLocalVerdict::HostInboundDeny => {
                                 telemetry.dbg.local += 1;
                                 // #3610/M07: own debug counter, not policy_deny.
@@ -5781,6 +6223,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 flow_cache_owner_rg_id,
                                 session_ingress_zone,
                                 flow_cache_install_failed,
+                                seed_packet_already_counted,
                                 flow_cache_policy_counter_idx,
                                 &flow_cache_policy_counter,
                                 filter_match_extra,
@@ -7309,6 +7752,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 SlowPathOutlet::Adjudicated
                             } else if reinject_host_authorized(
                                 decision.resolution.disposition,
+                                host_inbound_gate_proof,
                             ) {
                                 SlowPathOutlet::Trusted
                             } else {

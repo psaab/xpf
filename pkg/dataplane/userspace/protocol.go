@@ -332,6 +332,11 @@ const (
 	// `ipsec_tunnel_rows` fences rows against same-key config/FIB publishes.
 	// A v29 helper can decode the rows but cannot prove that the packet's
 	// admitted handle generation is the one in the RuntimeView.
+	// v30 -> v31 (#10510): `zone_set_validated` authenticates the populated,
+	// collision-free zone identity set before Rust derives removed-zone ids.
+	// A v30 helper cannot distinguish a quarantined/legacy partial map from a
+	// real zone disappearance and can retain stale peer sessions; exact
+	// equality refuses the mixed pair.
 	ProtocolVersion = 31
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
@@ -395,7 +400,7 @@ const (
 	// was collision resolution against #6722's parallel v5, not a fourth change
 	// to this contract — see the ProtocolVersion comment above.)
 
-	MinProtocolSecureTunnelRefusal = 7
+	MinProtocolSecureTunnelRefusal   = 7
 	InjectPacketTupleProtocolVersion = 1
 	TypeUserspace                    = "userspace"
 
@@ -584,6 +589,51 @@ type QueueEpochSnapshot struct {
 	Queue uint16 `json:"queue"`
 	Epoch uint64 `json:"epoch"`
 }
+
+// Rename operation. It is additive wire state; absent ancestry means the
+// helper retains the historical teardown behavior.
+type PolicyRenameAncestry struct {
+	SourceRuleID        string `json:"source_rule_id"`
+	DestinationRuleID   string `json:"destination_rule_id"`
+	SourceFromZone      string `json:"source_from_zone,omitempty"`
+	SourceToZone        string `json:"source_to_zone,omitempty"`
+	DestinationFromZone string `json:"destination_from_zone,omitempty"`
+	DestinationToZone   string `json:"destination_to_zone,omitempty"`
+	// Numeric ids are captured from the validated old/new snapshots. Rust
+	// checks them against the session's recorded zones and the destination
+	// forwarding map; names alone are not an identity proof across snapshots.
+	SourceFromZoneID       uint16 `json:"source_from_zone_id,omitempty"`
+	SourceToZoneID         uint16 `json:"source_to_zone_id,omitempty"`
+	DestinationFromZoneID  uint16 `json:"destination_from_zone_id,omitempty"`
+	DestinationToZoneID    uint16 `json:"destination_to_zone_id,omitempty"`
+	SourceFromZoneAny      bool   `json:"source_from_zone_any,omitempty"`
+	SourceToZoneAny        bool   `json:"source_to_zone_any,omitempty"`
+	DestinationFromZoneAny bool   `json:"destination_from_zone_any,omitempty"`
+	DestinationToZoneAny   bool   `json:"destination_to_zone_any,omitempty"`
+}
+
+// PolicySessionRebind is a pre-publication Go verdict joined to a canonical
+// forward tuple. Rust consumes it during rotation to restamp both pair halves.
+//
+// TunnelDiscriminator is trailing-additive JSON metadata. It is the opaque
+// TunnelDiscriminator value already carried by SessionValue and used to build
+// the Rust SessionKey. Older readers omit/ignore this field; Rust treats a
+// missing or invalid value as non-retainable and deletes the pair.
+type PolicySessionRebind struct {
+	Family              string `json:"family"`
+	SrcIP               string `json:"src_ip"`
+	DstIP               string `json:"dst_ip"`
+	SrcPort             uint16 `json:"src_port,omitempty"`
+	DstPort             uint16 `json:"dst_port,omitempty"`
+	Protocol            uint8  `json:"protocol"`
+	RoutingDomain       uint32 `json:"routing_domain,omitempty"`
+	PolicyID            uint32 `json:"policy_id"`
+	RuleID              string `json:"rule_id"`
+	IngressZone         uint16 `json:"ingress_zone"`
+	EgressZone          uint16 `json:"egress_zone"`
+	TunnelDiscriminator uint64 `json:"tunnel_discriminator,omitempty"`
+}
+
 // IpsecTunnelRowSnapshot is one per-admitted-tunnel P-MECH identity row (#10485,
 // design section 1.1 D1). The daemon publishes one row per admitted tunnel:
 // STN is always the authored vpn.BindInterface, IfID is the ownership-checked
@@ -617,18 +667,23 @@ type ConfigSnapshot struct {
 	// the latter advances for ordinary config/FIB publishes, while the former
 	// advances only when admitted NFQUEUE handles rotate. Rust D14 compares its
 	// packet snapshot-generation advisory against this exact capture authority.
-	IpsecTunnelSnapshotGeneration uint64 `json:"ipsec_tunnel_snapshot_generation,omitempty"`
-	Summary         SnapshotSummary          `json:"summary"`
-	Capabilities    UserspaceCapabilities    `json:"capabilities"`
-	MapPins         UserspaceMapPins         `json:"map_pins"`
-	Zones           []ZoneSnapshot           `json:"zones,omitempty"`
-	Interfaces      []InterfaceSnapshot      `json:"interfaces,omitempty"`
-	Fabrics         []FabricSnapshot         `json:"fabrics,omitempty"`
-	TunnelEndpoints []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
-	Neighbors       []NeighborSnapshot       `json:"neighbors,omitempty"`
-	Routes          []RouteSnapshot          `json:"routes,omitempty"`
-	Flow            FlowSnapshot             `json:"flow,omitempty"`
-	DefaultPolicy   string                   `json:"default_policy,omitempty"`
+	IpsecTunnelSnapshotGeneration uint64                `json:"ipsec_tunnel_snapshot_generation,omitempty"`
+	Summary                       SnapshotSummary       `json:"summary"`
+	Capabilities                  UserspaceCapabilities `json:"capabilities"`
+	MapPins                       UserspaceMapPins      `json:"map_pins"`
+	Zones                         []ZoneSnapshot        `json:"zones,omitempty"`
+	// ZoneSetValidated is true only when the producer supplied a populated
+	// zone set and completed duplicate/collision validation without
+	// quarantining a zone. Rust uses it to derive removed-zone ids; absent or
+	// false is a fail-closed no-op for old/ambiguous producers.
+	ZoneSetValidated bool                     `json:"zone_set_validated,omitempty"`
+	Interfaces       []InterfaceSnapshot      `json:"interfaces,omitempty"`
+	Fabrics          []FabricSnapshot         `json:"fabrics,omitempty"`
+	TunnelEndpoints  []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
+	Neighbors        []NeighborSnapshot       `json:"neighbors,omitempty"`
+	Routes           []RouteSnapshot          `json:"routes,omitempty"`
+	Flow             FlowSnapshot             `json:"flow,omitempty"`
+	DefaultPolicy    string                   `json:"default_policy,omitempty"`
 	// WgSteeredListenPorts (#9587) is the bounded SET of WireGuard listen
 	// ports the shim steers onto its AF_XDP WireGuard path (at most
 	// config.MaxSteeredWireGuardPorts, selected by config.SplitSteeredPorts):
@@ -672,12 +727,16 @@ type ConfigSnapshot struct {
 	// fields rather than silently preserving either stale-ownership behavior.
 	LearnedRouteImportCapped bool `json:"learned_route_import_capped,omitempty"`
 
-	DefaultLogSessionInit  bool                         `json:"default_log_session_init,omitempty"`
-	DefaultLogSessionClose bool                         `json:"default_log_session_close,omitempty"`
-	Policies               []PolicyRuleSnapshot         `json:"policies,omitempty"`
+	DefaultLogSessionInit  bool                 `json:"default_log_session_init,omitempty"`
+	DefaultLogSessionClose bool                 `json:"default_log_session_close,omitempty"`
+	Policies               []PolicyRuleSnapshot `json:"policies,omitempty"`
+	// PolicyRematchExtensive enables the conditional retain/rebind rotation arm.
+	PolicyRematchExtensive bool                         `json:"policy_rematch_extensive,omitempty"`
+	PolicyRenameAncestry   []PolicyRenameAncestry       `json:"policy_rename_ancestry,omitempty"`
+	PolicySessionRebinds   []PolicySessionRebind        `json:"policy_session_rebinds,omitempty"`
+	DestinationNAT         []DestinationNATRuleSnapshot `json:"destination_nat_rules,omitempty"`
 	SourceNAT              []SourceNATRuleSnapshot      `json:"source_nat_rules,omitempty"`
 	StaticNAT              []StaticNATRuleSnapshot      `json:"static_nat_rules,omitempty"`
-	DestinationNAT         []DestinationNATRuleSnapshot `json:"destination_nat_rules,omitempty"`
 	NAT64                  []NAT64RuleSnapshot          `json:"nat64_rules,omitempty"`
 	Nptv6                  []Nptv6RuleSnapshot          `json:"nptv6_rules,omitempty"`
 	Screens                []ScreenProfileSnapshot      `json:"screens,omitempty"`

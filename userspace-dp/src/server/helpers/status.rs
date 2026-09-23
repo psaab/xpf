@@ -373,6 +373,23 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.neighbor_netlink_enobufs_total = r.netlink_enobufs;
     state.status.neighbor_netlink_redumps_total = r.netlink_redumps;
     state.status.neighbor_netlink_redump_upserts_total = r.netlink_redump_upserts;
+    // #10516: XFRM-SA snapshot gate counters. Read the shared monitor
+    // atomics once per status refresh; Stage 11 never traverses this path.
+    let sa = state.afxdp.ipsec_sa_counters();
+    state.status.ipsec_sa_miss_dropped_packets_total = sa.sa_miss_dropped_packets;
+    state.status.ipsec_sa_miss_no_sa_total = sa.sa_miss_no_sa;
+    state.status.ipsec_sa_miss_truncated_total = sa.sa_miss_truncated;
+    state.status.ipsec_sa_miss_malformed_ike_total = sa.sa_miss_malformed_ike;
+    state.status.ipsec_sa_miss_keepalive_total = sa.sa_miss_keepalive;
+    state.status.ipsec_sa_snapshot_stale_deny_total = sa.sa_snapshot_stale_deny;
+    state.status.ipsec_sa_inserts_total = sa.sa_inserts;
+    state.status.ipsec_sa_removes_total = sa.sa_removes;
+    state.status.ipsec_sa_expiry_removes_total = sa.sa_expiry_removes;
+    state.status.ipsec_sa_evictions_total = sa.sa_evictions;
+    state.status.ipsec_sa_multi_source_collisions_total = sa.sa_multi_source_collisions;
+    state.status.ipsec_sa_netlink_enobufs_total = sa.netlink_enobufs;
+    state.status.ipsec_sa_netlink_redumps_total = sa.netlink_redumps;
+    state.status.ipsec_sa_netlink_redump_upserts_total = sa.netlink_redump_upserts;
     // #1771 §2.6: per-binding-summed gauges — distinct unresolved
     // next-hop keys in pending_neigh + keys in the negative caches.
     state.status.neighbor_pending_keys = state.afxdp.neighbor_pending_keys_total();

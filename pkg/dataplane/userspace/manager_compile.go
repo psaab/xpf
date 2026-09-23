@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -305,15 +306,31 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	}
 	stampCaptureAuthority(snap, epochProvider)
 	snap.partialUpdateEpoch = partialEpoch
-	// #1620: stamp the cold-path sample mask onto the snapshot. The
-	// daemon called SetColdPathSampleMask once at startup with the
-	// validated CLI flag value (or nil for "use default"). A nil
-	// pointer here leaves the wire field absent (omitempty), which
-	// the Rust receiver unwrap_or-s to 0xff per plan §4.3.
+	// The daemon stages provenance immediately before this Compile call, while
+	// holding its apply semaphore. Copy it onto this exact snapshot and consume
+	// the manager staging slot so a later partial republish cannot inherit a
+	// single-use commit's ancestry or rebinds.
 	m.mu.Lock()
+	ancestry, rebinds := m.takeStagedRenameMetadataLocked()
+	replayInFlight := m.deferredReplayInFlight
+	m.deferredReplayInFlight = false
+	snap.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
+	snap.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
 	snap.ColdPathSampleMask = m.coldPathSampleMask
 	m.mu.Unlock()
-	return m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
+	compiled, applyErr := m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
+	if replayInFlight {
+		m.mu.Lock()
+		if applyErr == nil {
+			m.clearDeferredReplayMetadataLocked()
+		} else {
+			// Keep the exact accepted attempt cached so the debt retry can
+			// restage it after a transient replay failure.
+			m.deferredReplayInFlight = false
+		}
+		m.mu.Unlock()
+	}
+	return compiled, applyErr
 }
 
 // applyCompiledSnapshot is everything Compile does after the XDP shim is
@@ -427,6 +444,18 @@ func (m *Manager) applyCompiledSnapshot(
 	// #3719: record + alarm any StableZoneID collision the builder quarantined
 	// (lenient / HA-sync / pre-#3075-persisted path). The colliding zone was
 	// already dropped from snap; this surfaces the degraded-isolation state.
+	if m.deferWorkers {
+		// Stamp the workerless contract before any pending-startup branch can
+		// retain this snapshot; deferred MAC replays must never arm workers
+		// early just because startup publication is also deferred.
+		snap.DeferWorkers = true
+	}
+	if snap.DeferWorkers {
+		// Cache the exact workerless compile attempt before any startup,
+		// protocol, or publish branch can fail. The daemon may still run the
+		// same-commit MAC replay after that transient error.
+		m.rememberDeferredReplayMetadataLocked(snap)
+	}
 	m.recordZoneIDCollisionsLocked(snap.zoneIDCollisions)
 	m.clusterHA = cfg != nil && cfg.Chassis.Cluster != nil
 	m.seedHAGroupInventoryLocked(cfg)
@@ -523,6 +552,7 @@ func (m *Manager) applyCompiledSnapshot(
 				return result, fmt.Errorf("clear userspace HA state (deferred startup): %w", err)
 			}
 		}
+		m.pendingFullSnapshotMetadata = true
 		m.lastSnapshot = snap
 		// #9637-D1/F1-B: this success did NOT publish (pendingXSKStartup) — mark
 		// it so freshness gates (daemon hostInboundDataplaneFresh, fed via
@@ -537,7 +567,8 @@ func (m *Manager) applyCompiledSnapshot(
 		// userspace_ingress_ifaces, so the kernel attachment set may follow.
 		// The publish is deferred, not skipped — this branch still returns nil
 		// and its snapshot is what every later reader enforces.
-		m.syncInterfaceAttachments(result, snap)
+		detachErr := m.syncInterfaceAttachments(result, snap)
+		m.noteDetachDebtLocked(result, detachErr)
 		m.cfg = ucfg
 		m.publishHAWatchdogSnapshotLocked()
 		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
@@ -569,9 +600,6 @@ func (m *Manager) applyCompiledSnapshot(
 		// next operator apply. Idempotent when the loop already runs.
 		m.ensureStatusLoopLocked()
 		return result, m.disarmSnapshotProtocolFailClosedLocked(snap, err, samePlanRefresh)
-	}
-	if m.deferWorkers {
-		snap.DeferWorkers = true
 	}
 	var status ProcessStatus
 	if err := m.disarmBeforeUnsupportedPublishLocked(snap); err != nil {
@@ -607,13 +635,18 @@ func (m *Manager) applyCompiledSnapshot(
 	// so the later status/HA/forwarding steps — every one of which can fail
 	// AFTER the snapshot is already the authority — cannot strand a stale
 	// attachment for an interface the applied snapshot no longer adjudicates.
-	m.syncInterfaceAttachments(result, snap)
+	detachErr := m.syncInterfaceAttachments(result, snap)
+	m.noteDetachDebtLocked(result, detachErr)
+	if detachErr != nil {
+		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
+	}
 	// #1197 v4: apply_snapshot succeeded — userspace-dp has the
 	// new neighbors. NOW rebuild listener caches; before this
 	// point the index would shadow events for entries the
 	// dataplane hadn't accepted.
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
+	m.pendingFullSnapshotMetadata = false
 	m.publishedSnapshot = snap.Generation
 	m.publishedPlanKey = newPlanKey
 	// #2079: this full apply_snapshot succeeded — record the applied
@@ -795,6 +828,11 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 				}
 				m.adoptPublishedGenerationLocked(&adopted, adopted.Generation)
 				m.lastSnapshot = &adopted
+				// The helper outcome is unknown: this retained full snapshot
+				// may already have been consumed, but it may also be unsent.
+				// Keep one-shot commit metadata available until a later
+				// publication or status catch-up resolves the ambiguity.
+				m.pendingFullSnapshotMetadata = true
 				if !adoptedRetainedIdentity || !spawnedIdentityDiverged {
 					m.cfg = adopted.Userspace
 				}
@@ -1044,6 +1082,13 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return fmt.Errorf("userspace: refusing snapshot publish to incompatible helper: %w", err)
 	}
 	next := *m.lastSnapshot
+	// A full snapshot can be retained before its first apply_snapshot when
+	// startup publication is deferred or the apply outcome is unknown. If this
+	// scheduler publish is the first accepted publication, keep its single-use
+	// rename metadata; otherwise this partial republish consumes it.
+	if !m.pendingFullSnapshotMetadata {
+		stripSingleUseCommitMetadata(&next)
+	}
 	nextGeneration := m.generation + 1
 	next.Generation = nextGeneration
 	next.FIBGeneration = m.readFIBGeneration()
@@ -1100,6 +1145,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
+	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&next)
 	// #2079: full apply_snapshot succeeded — record the applied snapshot.
 	m.markAppliedSnapshotLocked()
@@ -1118,30 +1164,73 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	return nil
 }
 
-func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snapshot *ConfigSnapshot) {
+func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snapshot *ConfigSnapshot) error {
 	if result == nil {
-		return
+		return nil
 	}
+	result.DetachedWithErrors = nil
 	allowed := make(map[int]bool)
 	for _, ifindex := range buildUserspaceIngressIfindexes(snapshot) {
 		allowed[int(ifindex)] = true
 	}
-	for ifindex := range m.bpfShim.XDPLinks() {
+	// The retained snapshot is now authoritative at both call sites. If an
+	// older arm-(a) failure left debt for an interface this snapshot accepts,
+	// clear it only here — after acceptance. AttachXDP runs before acceptance
+	// and must not clear debt, or a later pre-publish failure could reopen a
+	// fence pinhole for the previous-good snapshot (#5485, #10519).
+	allowedIfindexes := make([]int, 0, len(allowed))
+	for ifindex := range allowed {
+		allowedIfindexes = append(allowedIfindexes, ifindex)
+	}
+	sort.Ints(allowedIfindexes)
+	m.bpfShim.ReconcileDetachDebt(allowedIfindexes)
+
+	var detachErrs []error
+	failed := make(map[int]struct{})
+	xdpLinks := m.bpfShim.XDPLinks()
+	xdpIfindexes := make([]int, 0, len(xdpLinks))
+	for ifindex := range xdpLinks {
+		xdpIfindexes = append(xdpIfindexes, ifindex)
+	}
+	sort.Ints(xdpIfindexes)
+	for _, ifindex := range xdpIfindexes {
 		if allowed[ifindex] {
 			continue
 		}
 		if err := m.bpfShim.DetachXDP(ifindex); err != nil {
-			slog.Warn("userspace: detach XDP from non-data interface failed", "ifindex", ifindex, "err", err)
+			slog.Error("userspace: detach XDP from non-data interface failed",
+				"ifindex", ifindex, "err", err)
+			detachErrs = append(detachErrs,
+				fmt.Errorf("detach XDP from obsolete ifindex %d: %w", ifindex, err))
+			failed[ifindex] = struct{}{}
 		}
 	}
-	for ifindex := range m.bpfShim.TCLinks() {
+	tcLinks := m.bpfShim.TCLinks()
+	tcIfindexes := make([]int, 0, len(tcLinks))
+	for ifindex := range tcLinks {
+		tcIfindexes = append(tcIfindexes, ifindex)
+	}
+	sort.Ints(tcIfindexes)
+	for _, ifindex := range tcIfindexes {
 		if allowed[ifindex] {
 			continue
 		}
 		if err := m.bpfShim.DetachTC(ifindex); err != nil {
-			slog.Warn("userspace: detach TC from non-data interface failed", "ifindex", ifindex, "err", err)
+			slog.Error("userspace: detach TC from non-data interface failed",
+				"ifindex", ifindex, "err", err)
+			detachErrs = append(detachErrs,
+				fmt.Errorf("detach TC from obsolete ifindex %d: %w", ifindex, err))
+			failed[ifindex] = struct{}{}
 		}
 	}
+	if len(failed) > 0 {
+		result.DetachedWithErrors = make([]int, 0, len(failed))
+		for ifindex := range failed {
+			result.DetachedWithErrors = append(result.DetachedWithErrors, ifindex)
+		}
+		sort.Ints(result.DetachedWithErrors)
+	}
+	return errors.Join(detachErrs...)
 }
 
 func configHasScheduledPolicy(cfg *config.Config) bool {

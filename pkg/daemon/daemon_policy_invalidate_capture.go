@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -73,17 +74,25 @@ import (
 // call itself — by capturing at the last statement before it. It is strictly
 // narrower than the pre-#6948 window (the whole post-activation apply tail).
 
+// pendingRenameApply binds config ancestry to the exact promoted active
+// generation, which is the transaction key. Ownership transferred from the
+// store at bind time in commitWithGenBinding; the daemon copy is the sole
+// owner afterward, retained for peer retry/reconnect and pruned by the next
+// commit's bind.
+type pendingRenameApply struct {
+	descriptors []configstore.RenameDescriptor
+}
+
 // policyInvalidationPlan is the (old, new) config pair a commit-class apply
 // will diff for the commit-time session invalidation. The apply's CALLER arms
 // it before calling applyConfigLocked, because only the caller holds the
 // pre-commit active config — by the time the apply runs, the store has already
 // promoted the new one. capturePolicyInvalidationLocked consumes it at the
 // publication boundary.
-//
-// Mutated under d.applySem, like every other apply-scoped Daemon field.
 type policyInvalidationPlan struct {
-	oldCfg *config.Config
-	newCfg *config.Config
+	oldCfg      *config.Config
+	newCfg      *config.Config
+	renameApply *pendingRenameApply
 }
 
 // capturedSessions is one change class's pre-publication candidate set: the
@@ -123,6 +132,10 @@ type policyInvalidationCapture struct {
 	deleted  capturedSessions
 	modified capturedSessions
 	deflt    capturedSessions
+	// renamed rows are retained and re-bound by the next Rust snapshot; they
+	// must never enter any delete bucket.
+	renamed        []dpuserspace.PolicySessionRebind
+	renameAncestry []dpuserspace.PolicyRenameAncestry
 
 	// readErr is the userspace helper READ failure, if any (P9): ONE
 	// error for the one scan — never aliased into both v4Err/v6Err
@@ -136,7 +149,18 @@ type policyInvalidationCapture struct {
 // armPolicyInvalidationPlan records the config pair the next applyConfigLocked
 // should capture for. Caller holds d.applySem.
 func (d *Daemon) armPolicyInvalidationPlan(oldCfg, newCfg *config.Config) {
-	d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: newCfg}
+	d.armPolicyInvalidationPlanWithRename(oldCfg, newCfg, nil)
+}
+
+func (d *Daemon) armPolicyInvalidationPlanWithRename(
+	oldCfg, newCfg *config.Config,
+	renameApply *pendingRenameApply,
+) {
+	d.policyInvalidationPlan = &policyInvalidationPlan{
+		oldCfg:      oldCfg,
+		newCfg:      newCfg,
+		renameApply: renameApply,
+	}
 }
 
 // capturePolicyInvalidationLocked takes the pre-publication candidate snapshot.
@@ -182,18 +206,34 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	// active-state (#4343) is evaluated at a single instant for both configs,
 	// exactly as clearSessionsForModifiedPolicies does.
 	now := time.Now()
+	oldSched := d.policySchedulerActiveStateForApplyLocked(plan.oldCfg, now)
+	newSched := d.policySchedulerActiveStateForApplyLocked(plan.newCfg, now)
 	deleted := deletedPolicyRuntimeIDs(plan.oldCfg, plan.newCfg)
-	modified := changedPolicyRuntimeIDs(plan.oldCfg, plan.newCfg,
-		d.policySchedulerActiveStateForApplyLocked(plan.oldCfg, now),
-		d.policySchedulerActiveStateForApplyLocked(plan.newCfg, now))
+	modified := changedPolicyRuntimeIDs(plan.oldCfg, plan.newCfg, oldSched, newSched)
+	feedOverlay := d.feedSnapshotsForConfig(plan.newCfg)
 	deflt := defaultPolicyChangeRuntimeIDs(plan.oldCfg, plan.newCfg)
 
 	capture := &policyInvalidationCapture{}
+	var renameBindings map[uint32]policyRenameBinding
+	if plan.renameApply != nil && plan.newCfg != nil && plan.newCfg.Security.PolicyRematchExtensive {
+		var valid bool
+		renameBindings, capture.renameAncestry, valid = expandPolicyRenameAncestry(
+			plan.oldCfg, plan.newCfg, plan.renameApply.descriptors)
+		if !valid {
+			renameBindings = nil
+			capture.renameAncestry = nil
+		}
+		for oldID, binding := range renameBindings {
+			binding.policyInactiveFn = dpuserspace.PolicyInactiveFn(newSched)
+			binding.feedOverlay = feedOverlay
+			renameBindings[oldID] = binding
+		}
+	}
 	capture.deleted.targets = len(deleted)
 	capture.modified.targets = len(modified)
 	capture.deflt.targets = len(deflt)
 
-	if len(deleted)+len(modified)+len(deflt) == 0 {
+	if len(deleted)+len(modified)+len(deflt) == 0 && len(renameBindings) == 0 {
 		// Nothing to invalidate on this commit — record the empty capture so the
 		// clears know one was taken and skip the session-table scan entirely.
 		d.policyInvalidationCapture = capture
@@ -291,27 +331,33 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 
 	// ONE pass per address family for all three classes. The classes are
 	// disjoint by construction — changedPolicyRuntimeIDs skips ids that
-	// deletedPolicyRuntimeIDs reports, and DefaultPolicySentinelID is never
-	// emitted for a configured policy — so the switch's first-match order is a
-	// statement of that disjointness, not a precedence rule that hides an
-	// overlap.
-	//
-	// Reverse entries are skipped for the same reason the legacy path skips
-	// them: DeleteBatchKnownV4/V6 expands each forward entry to its reverse and
-	// DNAT/NAT64 companions, and a reverse row carries the same policy_id, so
-	// including it would double-delete and, for a NAT'd flow, target the
-	// translated tuple instead of the install key.
 	capture.v4Err = store.ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
+		if binding, ok := renameBindings[val.PolicyID]; ok {
+			if record, permitted := rematchRenamedV4(plan.oldCfg, plan.newCfg, binding, key, val); permitted {
+				capture.renamed = append(capture.renamed, record)
+			} else {
+				capture.deleted.v4 = append(capture.deleted.v4, dataplane.SessionEntryV4{
+					Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+				})
+			}
+			return true
+		}
 		switch {
 		case idInSet(deleted, val.PolicyID):
-			capture.deleted.v4 = append(capture.deleted.v4, dataplane.SessionEntryV4{Key: key, Value: val})
+			capture.deleted.v4 = append(capture.deleted.v4, dataplane.SessionEntryV4{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		case idInSet(modified, val.PolicyID):
-			capture.modified.v4 = append(capture.modified.v4, dataplane.SessionEntryV4{Key: key, Value: val})
+			capture.modified.v4 = append(capture.modified.v4, dataplane.SessionEntryV4{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		case idInSet(deflt, val.PolicyID):
-			capture.deflt.v4 = append(capture.deflt.v4, dataplane.SessionEntryV4{Key: key, Value: val})
+			capture.deflt.v4 = append(capture.deflt.v4, dataplane.SessionEntryV4{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		}
 		return true
 	})
@@ -319,13 +365,29 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		if val.IsReverse != 0 {
 			return true
 		}
+		if binding, ok := renameBindings[val.PolicyID]; ok {
+			if record, permitted := rematchRenamedV6(plan.oldCfg, plan.newCfg, binding, key, val); permitted {
+				capture.renamed = append(capture.renamed, record)
+			} else {
+				capture.deleted.v6 = append(capture.deleted.v6, dataplane.SessionEntryV6{
+					Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+				})
+			}
+			return true
+		}
 		switch {
 		case idInSet(deleted, val.PolicyID):
-			capture.deleted.v6 = append(capture.deleted.v6, dataplane.SessionEntryV6{Key: key, Value: val})
+			capture.deleted.v6 = append(capture.deleted.v6, dataplane.SessionEntryV6{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		case idInSet(modified, val.PolicyID):
-			capture.modified.v6 = append(capture.modified.v6, dataplane.SessionEntryV6{Key: key, Value: val})
+			capture.modified.v6 = append(capture.modified.v6, dataplane.SessionEntryV6{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		case idInSet(deflt, val.PolicyID):
-			capture.deflt.v6 = append(capture.deflt.v6, dataplane.SessionEntryV6{Key: key, Value: val})
+			capture.deflt.v6 = append(capture.deflt.v6, dataplane.SessionEntryV6{
+				Key: key, Value: val, PurgeTunnelVariants: !capturedTunnelDiscriminatorValid(key.Protocol, val.TunnelDiscriminator),
+			})
 		}
 		return true
 	})
@@ -337,6 +399,37 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	}
 
 	d.policyInvalidationCapture = capture
+}
+
+// captureAndStagePolicyRenameAncestry is the ONE production handoff from the
+// pre-publication capture to the dataplane's rename staging: take the capture
+// (which consumes the armed plan), then hand any rename ancestry + rebind
+// records to the dataplane before it publishes the new snapshot. The
+// dataplane without the staging interface (or a capture without rename rows)
+// receives empty slices, which is a no-op by construction.
+//
+// The dataplane-apply path calls this at the last statement before it
+// publishes the new policy snapshot (see the #6948 placement comment at the
+// call site); the HA joint test's apply seam calls this same helper rather
+// than re-implementing the transfer, so the staging logic has exactly one
+// implementation and the test reds if it is removed. Caller holds d.applySem.
+func (d *Daemon) captureAndStagePolicyRenameAncestry(cfg *config.Config) {
+	d.capturePolicyInvalidationLocked(cfg)
+	rt := d.dataplane()
+	if rt == nil {
+		return
+	}
+	var ancestry []dpuserspace.PolicyRenameAncestry
+	var rebinds []dpuserspace.PolicySessionRebind
+	if captured := d.policyInvalidationCapture; captured != nil {
+		ancestry = captured.renameAncestry
+		rebinds = captured.renamed
+	}
+	if setter, ok := rt.(interface {
+		SetPolicyRenameAncestry([]dpuserspace.PolicyRenameAncestry, []dpuserspace.PolicySessionRebind)
+	}); ok {
+		setter.SetPolicyRenameAncestry(ancestry, rebinds)
+	}
 }
 
 func idInSet(ids map[uint32]struct{}, id uint32) bool {

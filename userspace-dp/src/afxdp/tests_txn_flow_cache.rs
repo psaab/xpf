@@ -1,8 +1,8 @@
 // transactional flow-cache admission, hit reclassification, and pool/reply-repair.
 //
 // Split out of afxdp/tests.rs (#4840) as a sibling `#[path]` test module
-// loaded from afxdp/mod.rs. Pure code motion: every #[test] fn is moved
-// verbatim; shared test-support helpers live in afxdp/tests_support.rs.
+// loaded from afxdp/mod.rs. Pre-existing tests remain verbatim; #10566
+// regression cells below pin seed charging and cache-declined per-packet behavior.
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
@@ -307,7 +307,494 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
     );
 }
 
+/// #10566: a SYN-admitted TCP flow seeds on its first ACK. The SYN is counted
+/// on the session-miss path but is not cache-eligible; the ACK is a
+/// session-hit/static-ACCEPT seed and must charge its captured INPUT handles
+/// before the next ACK replays them from the cache.
+#[test]
+fn txn_flow_cache_seed_charges_static_input_then_count_10566() {
+    use std::sync::atomic::Ordering;
 
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces[0].filter_input_v4 = "count-in".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "count-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "count-all".to_string(),
+            action: "accept".to_string(),
+            count: "c-all".to_string(),
+            ..Default::default()
+        }],
+    }];
+
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let input_counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&24)
+        .expect("input filter compiled for ifindex 24")
+        .terms
+        .first()
+        .expect("one term")
+        .counter
+        .clone();
+
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        1,
+        "SYN session-miss count must establish the one-packet base"
+    );
+    assert_eq!(
+        input_counter.bytes.load(Ordering::Relaxed),
+        syn_meta.pkt_len as u64,
+        "SYN seed must charge its metadata packet length"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "SYN is not cache-eligible; the first ACK must be the seed"
+    );
+
+    let ack = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        0x10,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        2,
+        "ACK seed must charge the captured static INPUT then-count exactly once"
+    );
+    assert_eq!(
+        input_counter.bytes.load(Ordering::Relaxed),
+        (syn_meta.pkt_len as u64) + (ack_meta.pkt_len as u64),
+        "ACK seed must extend the byte total by its metadata packet length"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        1,
+        "the first ACK must install the cache entry after its seed charge"
+    );
+
+    let (_, ack_hit_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert!(
+        ack_hit_dbg.tx >= 1,
+        "second ACK must forward through the flow-cache fast path"
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        3,
+        "cache hit must replay the INPUT then-count from the corrected seed base"
+    );
+    assert_eq!(
+        input_counter.bytes.load(Ordering::Relaxed),
+        (syn_meta.pkt_len as u64) + (2 * ack_meta.pkt_len as u64),
+        "cache hit must replay the ACK metadata packet length"
+    );
+}
+
+/// #10566 decline canary: a DSCP-sensitive INPUT filter is evaluated and
+/// counted on every session hit, while the 5-tuple cache correctly declines the
+/// flow because DSCP is not part of its key. This pins both cache decline and
+/// per-packet counting; it does not exercise seed-charge suppression because
+/// no cache entry is admitted.
+#[test]
+fn txn_flow_cache_per_packet_input_declines_cache_10566() {
+    use std::sync::atomic::Ordering;
+
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces[0].filter_input_v4 = "count-dscp".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "count-dscp".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "count-all-dscp-zero".to_string(),
+            dscp_values: vec![0],
+            action: "accept".to_string(),
+            count: "c-all".to_string(),
+            ..Default::default()
+        }],
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let input_counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&24)
+        .expect("DSCP-sensitive input filter compiled")
+        .terms
+        .first()
+        .expect("one term")
+        .counter
+        .clone();
+
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        1,
+        "DSCP-sensitive SYN count establishes the base"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the DSCP-sensitive SYN must not create a cache entry"
+    );
+
+    let ack = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        0x10,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        2,
+        "per-packet ACK evaluation must count once"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the DSCP-sensitive filter must keep this flow out of the cache"
+    );
+    let (_, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert!(dbg.tx >= 1, "the third per-packet session hit must forward");
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        3,
+        "the third per-packet session hit must add exactly one count"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the third per-packet session hit must not seed a cache entry"
+    );
+}
+
+/// #10566 miss-path suppression pin: UDP is cache-eligible on its first
+/// packet, so a session-miss evaluator counts P1 before the seed stage and
+/// `stage_flow_cache_seed` must not charge the captured handles again. P2 then
+/// replays the cached handle once (1 -> 2). This is the GREEN oracle for an
+/// unconditional seed-charge mutant; the legacy #3777 ACK-first cell is
+/// baseline-red under #10605.
+#[test]
+fn txn_flow_cache_udp_miss_seed_suppresses_duplicate_input_count_10566() {
+    use std::sync::atomic::Ordering;
+
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces[0].filter_input_v4 = "count-in".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "count-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "count-all".to_string(),
+            action: "accept".to_string(),
+            count: "c-all".to_string(),
+            ..Default::default()
+        }],
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let input_counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&24)
+        .expect("input filter compiled for ifindex 24")
+        .terms
+        .first()
+        .expect("one term")
+        .counter
+        .clone();
+
+    let udp = build_udp_frame_v4_full(
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        64,
+    );
+    let mut udp_meta = txn_meta_v4(24, 0, (udp.len() - 14) as u16);
+    udp_meta.protocol = crate::ip_proto::PROTO_UDP;
+    udp_meta.tcp_flags = 0;
+
+    let (_, miss_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &udp,
+        udp_meta,
+        true,
+    );
+    assert!(miss_dbg.tx >= 1, "UDP miss seed must forward");
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        1,
+        "UDP miss evaluator must count P1 exactly once before seeding"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        1,
+        "UDP's cache-eligible miss must seed the flow cache"
+    );
+
+    let (_, hit_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &udp,
+        udp_meta,
+        true,
+    );
+    assert!(hit_dbg.tx >= 1, "UDP hit must forward");
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        2,
+        "UDP cache hit must replay the INPUT count once (1 -> 2)"
+    );
+}
+
+/// #10566 folded-counter pin: a static INPUT `then count` plus
+/// `then forwarding-class` term is re-walked into cached TX selection. The
+/// constructor removes that handle from the dedicated replay set, so seed
+/// charging must use the original capture while each hit replays the folded
+/// handle exactly once.
+#[test]
+fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
+    use std::sync::atomic::Ordering;
+
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces[0].filter_input_v4 = "count-fc-in".to_string();
+    snapshot.interfaces[1].cos_shaping_rate_bytes_per_sec = 10_000_000;
+    snapshot.interfaces[1].cos_shaping_burst_bytes = 256_000;
+    snapshot.interfaces[1].cos_scheduler_map = "wan-map".to_string();
+    snapshot.class_of_service = Some(ClassOfServiceSnapshot {
+        forwarding_classes: vec![
+            CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            },
+            CoSForwardingClassSnapshot {
+                name: "expedited-forwarding".into(),
+                queue: 1,
+            },
+        ],
+        schedulers: vec![
+            CoSSchedulerSnapshot {
+                name: "be-sched".into(),
+                ..Default::default()
+            },
+            CoSSchedulerSnapshot {
+                name: "ef-sched".into(),
+                ..Default::default()
+            },
+        ],
+        scheduler_maps: vec![CoSSchedulerMapSnapshot {
+            name: "wan-map".into(),
+            entries: vec![
+                CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "best-effort".into(),
+                    scheduler: "be-sched".into(),
+                },
+                CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "expedited-forwarding".into(),
+                    scheduler: "ef-sched".into(),
+                },
+            ],
+        }],
+        ..Default::default()
+    });
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "count-fc-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "count-and-fc".to_string(),
+            action: "accept".to_string(),
+            count: "c-all".to_string(),
+            forwarding_class: "expedited-forwarding".to_string(),
+            ..Default::default()
+        }],
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let input_counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&24)
+        .expect("folded input filter compiled for ifindex 24")
+        .terms
+        .first()
+        .expect("one term")
+        .counter
+        .clone();
+
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        1,
+        "SYN miss must count the folded INPUT term once"
+    );
+    assert_eq!(txn_flow_cache_entries(&binding), 0);
+
+    let ack = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        0x10,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    let _ = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        2,
+        "folded INPUT count must charge the original capture on the ACK seed"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        1,
+        "the ACK must seed a folded forwarding-class cache entry"
+    );
+    assert_eq!(
+        binding
+            .scratch
+            .scratch_forwards
+            .last()
+            .and_then(|record| record.cos_queue_id),
+        Some(1),
+        "the seed must retain the folded expedited-forwarding class"
+    );
+
+    let _ = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        3,
+        "the folded counter must replay exactly once on the cache hit"
+    );
+}
 /// #3778 RED-on-revert: a CoS behavior-aggregate (DSCP) classifier is
 /// per-packet in vSRX, but the cached TX-selection froze the SEED packet's
 /// queue (the flow-cache key excludes DSCP). Packet 1 (DSCP 0) seeds the cache

@@ -550,8 +550,11 @@ func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 				t.Fatal(err)
 			}
 			frame := CaptureFrame{
-				Packet:  pipelineTestPacket(77, 2, 2, 7, 1),
-				FlowKey: "extended-outcome",
+				Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "extended-outcome",
+				origin: CaptureOrigin{
+					Family: CaptureFamilyInet, Hook: CaptureHookForward,
+					OwnedIfindex: 7,
+				}, originSet: true,
 			}
 			pending := &pendingReinject{
 				frame:    frame,
@@ -564,7 +567,7 @@ func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 			p.mu.Unlock()
 			if !p.resolveCompletion(ReinjectCompletion{
 				RequestID: 1, PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1,
-				Outcome: tc.outcome,
+				Family: 1, Hook: 1, OwnedIfindex: 7, Outcome: tc.outcome,
 			}) {
 				t.Fatal("resolveCompletion returned false")
 			}
@@ -612,6 +615,10 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 			}
 			frame := CaptureFrame{
 				Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "disposition",
+				origin: CaptureOrigin{
+					Family: CaptureFamilyInet, Hook: CaptureHookForward,
+					OwnedIfindex: 7,
+				}, originSet: true,
 			}
 			pending := &pendingReinject{
 				frame:    frame,
@@ -624,7 +631,7 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 			p.mu.Unlock()
 			completion := ReinjectCompletion{
 				RequestID: 1, PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1,
-				Outcome: tc.outcome,
+				Family: 1, Hook: 1, OwnedIfindex: 7, Outcome: tc.outcome,
 			}
 			if tc.outcome == CompletionWritten {
 				completion.BytesWritten = uint32(len(frame.Packet.Payload()))
@@ -639,8 +646,11 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 	}
 
 	t.Run("late completion", func(t *testing.T) {
+		ledger := NewD11AttestationLedger()
+		ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)
 		p, err := NewCapturePipeline(CapturePipelineConfig{
 			Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: new(pipelineTestSink),
+			Attestation: &D11AttestationConfig{Ledger: ledger},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -650,6 +660,10 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 		}
 		if got := p.Stats().LateCompletions; got != 1 {
 			t.Fatalf("LateCompletions=%d, want 1", got)
+		}
+		failures := ledger.Snapshot().Failures
+		if len(failures) != 1 || failures[0].Reason != "unmatched late completion request_id=99" {
+			t.Fatalf("late ledger failures=%+v", failures)
 		}
 	})
 

@@ -75,6 +75,17 @@ func (a *LegacyDataPlaneAdapter) Manager() *Manager {
 	return a.manager
 }
 
+// SetPolicyRenameAncestry forwards daemon pre-publication provenance through
+// the compatibility adapter to the Manager snapshot builder.
+func (a *LegacyDataPlaneAdapter) SetPolicyRenameAncestry(
+	ancestry []PolicyRenameAncestry,
+	rebinds []PolicySessionRebind,
+) {
+	if m := a.Manager(); m != nil {
+		m.SetPolicyRenameAncestry(ancestry, rebinds)
+	}
+}
+
 // AppliedNATView exposes the manager's last-applied NAT view through the
 // adapter so the gRPC/REST/CLI deterministic-mapping lookup (#5794) can
 // reach it via a single narrow interface (no packet-path I/O). Returns an
@@ -896,6 +907,25 @@ func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsScopedV6(scoped []
 		return 0, nil, err
 	}
 	return m.BatchDeletePeerSyncedSessionsScopedV6(scoped, forwardOnly)
+}
+
+// BatchDeletePeerSyncedSessionsExactScoped forwards the exact #10598 peer
+// delete result to the session store.
+func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsExactScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) ([]dataplane.ScopedSessionKey, []dataplane.ScopedSessionKey, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.BatchDeletePeerSyncedSessionsExactScoped(scoped, forwardOnly)
+}
+
+// BatchDeletePeerSyncedSessionsExactScopedV6 forwards the IPv6 analogue.
+func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsExactScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) ([]dataplane.ScopedSessionKeyV6, []dataplane.ScopedSessionKeyV6, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.BatchDeletePeerSyncedSessionsExactScopedV6(scoped, forwardOnly)
 }
 
 // DeletePeerSyncedSession forwards the #9714 single-key peer delete.

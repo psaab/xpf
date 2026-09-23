@@ -1488,3 +1488,43 @@ func TestNftRuleFromTermFlexMatchUnrepresentableMatchesNothing7722(t *testing.T)
 			"this control the match-nothing assertions above prove nothing", got)
 	}
 }
+
+// TestLo0DNATToSelfIKEIsGlobalInputMatch10525 is K2: lo0 terms are evaluated
+// at input priority 0 without an ingress-device predicate. A delegated
+// xpf-usp1 IKE still reaches this kernel oracle with its raw VIP tuple, and a
+// matching lo0 discard therefore remains enforced by the kernel plane.
+func TestLo0DNATToSelfIKEIsGlobalInputMatch10525(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.System.Lo0FilterInputV4 = "protect-re"
+	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
+		"protect-re": {
+			Name: "protect-re",
+			Terms: []*config.FirewallFilterTerm{{
+				Name:             "drop-ike",
+				DestAddresses:    []string{"203.0.113.9/32"},
+				Protocols:        []string{"udp"},
+				DestinationPorts: []string{"500"},
+				Action:           "discard",
+			}},
+		},
+	}
+	payload := buildLo0FilterPayload(cfg, cfg.System.Lo0FilterInputV4, "")
+	if got := nftHookInputPriority(t, "K2 lo0", payload); got != nftLo0FilterPriority {
+		t.Fatalf("K2: lo0 payload priority %d != %d", got, nftLo0FilterPriority)
+	}
+	found := false
+	for _, line := range strings.Split(payload, "\n") {
+		if strings.Contains(line, "203.0.113.9") && strings.Contains(line, "dport 500") {
+			found = true
+			if strings.Contains(line, "iifname") {
+				t.Fatalf("K2: lo0 tuple rule must not be narrowed by iifname:\n%s", line)
+			}
+			if !strings.Contains(line, "drop") {
+				t.Fatalf("K2: lo0 IKE tuple must render a terminating drop:\n%s", line)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("K2: lo0 payload lost the raw VIP UDP/500 discard tuple:\n%s", payload)
+	}
+}

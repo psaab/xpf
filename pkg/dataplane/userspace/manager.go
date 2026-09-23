@@ -159,9 +159,9 @@ type Manager struct {
 	// restartTimerFn overrides how a crash restart is armed. Production leaves
 	// it nil (time.AfterFunc); a test injects a synchronous or recording timer.
 	// Per-Manager, not a package var — see scheduleRestartTimer.
-	restartTimerFn func(time.Duration, func())
-	cfg            config.UserspaceConfig
-	clusterHA      bool
+	restartTimerFn            func(time.Duration, func())
+	cfg                       config.UserspaceConfig
+	clusterHA                 bool
 	captureEpochProvider      CaptureEpochProvider
 	captureAuthorityCommitter func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
 	// helperHAStatePublished records whether THIS helper process has been sent a
@@ -234,6 +234,16 @@ type Manager struct {
 	lastStatusSeq uint64
 	lastSnapshot  *ConfigSnapshot
 	lastApply     *dataplane.ApplyResult
+	// policyRenameAncestry and policySessionRebinds are daemon-provided
+	// pre-publication metadata consumed by the Rust rotation path.
+	policyRenameAncestry []PolicyRenameAncestry
+	policySessionRebinds []PolicySessionRebind
+	// deferredReplay* is populated only after a worker-deferred full snapshot
+	// has been accepted into lastSnapshot. It is the exact compile attempt that
+	deferredReplayAncestry []PolicyRenameAncestry
+	deferredReplayRebinds  []PolicySessionRebind
+	deferredReplayReady    bool
+	deferredReplayInFlight bool
 	// lastSnapshotRejectReasons holds the #3261 diagnostic: the reasons the
 	// most recently built snapshot carries unrepresentable policy content that
 	// the helper integrity preflight rejects (previous-good retained, or
@@ -427,6 +437,12 @@ type Manager struct {
 	consecutiveFailedAutoRebinds int
 	publishedSnapshot            uint64
 	publishedPlanKey             string
+	// pendingFullSnapshotMetadata marks a complete snapshot retained before
+	// its first apply_snapshot, including unknown-outcome retry debt. Partial
+	// republishes must preserve single-use commit metadata only while this
+	// latch is set; generation inequality alone is not sufficient because FIB
+	// bumps advance lastSnapshot.Generation without publishing a full snapshot.
+	pendingFullSnapshotMetadata bool
 	// appliedSnapshot is the config + generation the helper has
 	// ACTUALLY applied via a successful full apply_snapshot — the
 	// generation the helper echoes back as
@@ -570,9 +586,15 @@ type Manager struct {
 	// buildDesiredLocalAddressSets so tests can inject a transient
 	// enumeration failure (#3924). Production leaves it nil.
 	addrListForLocalSyncHook addrListHook
-	// localAddressCapacityAlarm latches the #9646 capacity refusal text while it
-	// persists, so the 1/s status poll alarms once per transition. Guarded by mu.
+	// localAddressCapacityAlarm latches the #9646 capacity refusal text while
+	// it persists, so the 1/s status poll alarms once per transition. Guarded
+	// by mu.
 	localAddressCapacityAlarm string
+	// detachDebtAlarm latches the #10519 obsolete-attachment reconciliation
+	// error while any detach debt persists. Guarded by mu; the acceptance
+	// paths call noteDetachDebtLocked immediately after reconciliation and
+	// before recordApplyResultLocked stamps DetachedWithErrors.
+	detachDebtAlarm string
 
 	mode               DataplaneMode // current active runtime mode
 	configuredMode     DataplaneMode // user-configured desired mode (from config)

@@ -3098,6 +3098,8 @@ fn ike_v4_frame_spis(natt_marker: bool, initiator_spi: u64, responder_spi: u64) 
     frame.extend_from_slice(&[0x00, 0x20, 0x22, 0x08]);
     frame.extend_from_slice(&0u32.to_be_bytes()); // message id
     frame.extend_from_slice(&0u32.to_be_bytes()); // length (filler)
+    let udp_len = (frame.len() - 34) as u16;
+    frame[38..40].copy_from_slice(&udp_len.to_be_bytes());
     frame
 }
 
@@ -3112,6 +3114,8 @@ fn esp_in_udp_v4_frame() -> Vec<u8> {
     frame[23] = PROTO_UDP;
     frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]); // ESP SPI (non-zero)
     frame.extend_from_slice(&[0u8; 16]); // ESP seq + start of payload
+    let udp_len = (frame.len() - 34) as u16;
+    frame[38..40].copy_from_slice(&udp_len.to_be_bytes());
     frame
 }
 
@@ -3290,10 +3294,9 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
          drop), not reach the IKE daemon (#4323)",
     );
 
-    // NEW inbound IKE on the PERMIT zone → admitted (passthrough) AND the
-    // exchange is SEEDED (#6471), so its established follow-ups are
-    // recognized below. The `ike_v4_frame` initiator SPI is
-    // 0x1122334455667788; the flow is 192.0.2.10 -> 10.0.61.1.
+    // NEW inbound IKE on the PERMIT zone → admitted (passthrough). Stage 11
+    // no longer seeds here: #10525 moves the side effect into the poll-loop
+    // caller, after the lo0 and fine policy gates pass.
     let permit_flow = ipsec_flow(libc::AF_INET, PROTO_UDP, 500);
     assert!(
         matches!(
@@ -3310,16 +3313,18 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
         ),
         "NEW inbound IKE from a zone listing `ike` must be admitted (Passthrough)",
     );
-    assert!(
-        ike_exchanges.matches(
-            &crate::afxdp::forwarding::IkeExchangeKey::new(
-                0x1122_3344_5566_7788,
-                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
-                IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
-            ),
-            TEST_NOW_NS,
+    assert_eq!(
+        ike_exchanges.len(),
+        0,
+        "#10525: stage admission alone must not seed before the caller's fine gates"
+    );
+    ike_exchanges.seed(
+        crate::afxdp::forwarding::IkeExchangeKey::new(
+            0x1122_3344_5566_7788,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
         ),
-        "#6471: an ADMITTED NEW inbound IKE must seed the live-exchange table          (a denied initiation must NOT seed — asserted by the forged-SPI deny          cases in `stage_ipsec_passthrough_gates_forged_responder_spi_6471`)",
+        TEST_NOW_NS,
     );
 
     // NEW NAT-T IKE (UDP 4500 + non-ESP marker, Responder SPI == 0) on the

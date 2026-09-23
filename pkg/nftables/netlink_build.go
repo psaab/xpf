@@ -737,10 +737,10 @@ func (p *nlPlan) iifnameMatch(names []string) []expr.Any {
 	// #9903 F-126: a kernel interface name is at most 15 bytes (IFNAMSIZ-1,
 	// NUL-padded to 16). ifname16 below copies without a length check, so a
 	// longer name fills the field with no NUL and the compare key can never
-	// match — the iifname-scoped jump (junos-host, IKE/ident shields,
-	// ingress scoping, reinject accept) goes dead while sibling rules from
-	// the same generation still install. Fail the plan CLOSED (#6512
-	// posture) rather than installing the never-matching rule. This
+	// match — the iifname-scoped jump (junos-host), retained ident-RST scope,
+	// ingress scoping, or reinject accept) goes dead while sibling rules from
+	// the same generation still install. Fail the plan CLOSED
+	// (#6512 posture) rather than installing the never-matching rule. This
 	// validates EVERY element before either shape is constructed, so one
 	// invalid member fails the whole set build — the tradeoff is
 	// deliberate: a partially-installed generation is worse than a refused

@@ -59,7 +59,9 @@ func newPushGateDaemon(t *testing.T, cl *cluster.Manager) *Daemon {
 		startTime: time.Now().Add(-60 * time.Second),
 	}
 	d.sessionSync = &cluster.SessionSync{}
-	// markConfigSyncPushed is reached only when a peer connection is up.
+	d.configSyncPushForTest = func() {}
+	// The production route sees this test-only hook as an in-process transport
+	// and still runs the push-time RG0 authority gate before invoking it.
 	d.syncPeerConnected.Store(true)
 	d.syncPeerConnEpoch.Add(1)
 	return d

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -337,18 +338,31 @@ type ipsecReinjectSubmitter interface {
 	Close() error
 }
 
+type d11AuthorityOverride struct {
+	runID       string
+	generation  uint64
+	permitEpoch uint64
+	permitOpen  bool
+	rows        []nfqueue.ReinjectQueueEpoch
+}
+
 type ipsecCaptureRuntime struct {
-	supervisor     *ipsecSupervisor
-	handles        []ipsecQueueHandle
-	queues         []IpsecCaptureQueue
-	registry       *nfqueue.OriginRegistry
-	actor          *IpsecCapturePipeline
-	submitter      ipsecReinjectSubmitter
-	spec           xnft.IpsecDivertSpec
-	runID          string
-	stageGeneration uint64
-	zoneSnapshot   *pmechZoneSnapshot
+	supervisor          *ipsecSupervisor
+	handles             []ipsecQueueHandle
+	queues              []IpsecCaptureQueue
+	registry            *nfqueue.OriginRegistry
+	actor               *IpsecCapturePipeline
+	submitter           ipsecReinjectSubmitter
+	spec                xnft.IpsecDivertSpec
+	runID               string
+	stageGeneration     uint64
+	zoneSnapshot        *pmechZoneSnapshot
 	authorityMu         sync.Mutex
+	d11Override         *d11AuthorityOverride
+	d11Armer            *nfqueue.D11AttestationArmer
+	d11Ledger           *nfqueue.D11AttestationLedger
+	d11RunID            string
+	d11Invalidate       func(string)
 	announced           bool
 	announcedRunID      string
 	announcedGeneration uint64
@@ -553,10 +567,48 @@ func (d *Daemon) ipsecCaptureSnapshotLandedForStage() bool {
 		d.ipsecCaptureSnapshotLandedGeneration == d.ipsecCaptureStageGeneration
 }
 
-
 func (r *ipsecCaptureRuntime) authoritySnapshot() (string, uint64, uint64, bool, []nfqueue.ReinjectQueueEpoch) {
-	if r == nil || r.supervisor == nil {
+	if r == nil {
 		return "", 0, 0, false, nil
+	}
+	r.authorityMu.Lock()
+	defer r.authorityMu.Unlock()
+	return r.authoritySnapshotLocked()
+}
+
+func (r *ipsecCaptureRuntime) authoritySnapshotLocked() (string, uint64, uint64, bool, []nfqueue.ReinjectQueueEpoch) {
+	if r == nil {
+		return "", 0, 0, false, nil
+	}
+	runID, generation, permitEpoch, permitOpen, rows := r.normalAuthoritySnapshotLocked()
+	if override := r.d11Override; override != nil {
+		if !override.permitOpen {
+			// A D11 close must revoke exactly the selected join key even if
+			// the shared supervisor still reports OPEN for a newer owner.
+			return override.runID, override.generation, override.permitEpoch, false,
+				append([]nfqueue.ReinjectQueueEpoch(nil), override.rows...)
+		}
+		if permitOpen && permitEpoch == override.permitEpoch &&
+			generation == override.generation && sameReinjectQueueEpochs(rows, override.rows) {
+			return override.runID, override.generation, override.permitEpoch, true,
+				append([]nfqueue.ReinjectQueueEpoch(nil), override.rows...)
+		}
+		// A revoke, queue rotation, or generation change invalidates the
+		// attestation override. Never re-announce stale OPEN authority.
+		r.d11Override = nil
+		if r.d11Invalidate != nil {
+			r.d11Invalidate("D11 authority drift")
+		}
+	}
+	return runID, generation, permitEpoch, permitOpen, rows
+}
+
+func (r *ipsecCaptureRuntime) normalAuthoritySnapshotLocked() (string, uint64, uint64, bool, []nfqueue.ReinjectQueueEpoch) {
+	if r == nil {
+		return "", 0, 0, false, nil
+	}
+	if r.supervisor == nil {
+		return r.runID, r.generation(), 0, false, nil
 	}
 	permit := r.supervisor.loadPermit()
 	if permit == nil {
@@ -592,7 +644,7 @@ func (r *ipsecCaptureRuntime) announceAuthorityLocked() error {
 	if r == nil || r.submitter == nil {
 		return nil
 	}
-	runID, generation, permitEpoch, permitOpen, wireRows := r.authoritySnapshot()
+	runID, generation, permitEpoch, permitOpen, wireRows := r.authoritySnapshotLocked()
 	if r.announced && r.announcedRunID == runID && r.announcedGeneration == generation &&
 		r.announcedPermit == permitEpoch && r.announcedOpen == permitOpen &&
 		sameReinjectQueueEpochs(r.announcedRows, wireRows) {
@@ -611,6 +663,150 @@ func (r *ipsecCaptureRuntime) announceAuthorityLocked() error {
 	return nil
 }
 
+func (r *ipsecCaptureRuntime) installD11AuthorityOverride(runID string, permitEpoch uint64) error {
+	if r == nil || r.submitter == nil {
+		return errors.New("ipsec capture: D11 reinject authority unavailable")
+	}
+	r.authorityMu.Lock()
+	defer r.authorityMu.Unlock()
+	_, generation, currentEpoch, open, rows := r.authoritySnapshotLocked()
+	if !open || currentEpoch == 0 || currentEpoch != permitEpoch {
+		return fmt.Errorf("ipsec capture: D11 authority is not OPEN at epoch %d", permitEpoch)
+	}
+	r.d11Override = &d11AuthorityOverride{
+		runID: runID, generation: generation, permitEpoch: permitEpoch,
+		permitOpen: true, rows: append([]nfqueue.ReinjectQueueEpoch(nil), rows...),
+	}
+	r.d11RunID = runID
+	if err := r.announceAuthorityLocked(); err != nil {
+		r.d11Override = nil
+		_ = r.announceAuthorityLocked()
+		return fmt.Errorf("ipsec capture: D11 announce: %w", err)
+	}
+	return nil
+}
+
+func (r *ipsecCaptureRuntime) clearD11AuthorityOverride() error {
+	if r == nil {
+		return nil
+	}
+	r.authorityMu.Lock()
+	defer r.authorityMu.Unlock()
+	override := r.d11Override
+	if override == nil {
+		return nil
+	}
+	if r.submitter == nil {
+		return errors.New("ipsec capture: D11 close authority unavailable")
+	}
+	rows := append([]nfqueue.ReinjectQueueEpoch(nil), override.rows...)
+	if err := r.submitter.AnnounceReinject(
+		override.runID, override.generation, override.permitEpoch, false, rows,
+	); err != nil {
+		return err
+	}
+	r.announced = true
+	r.announcedRunID = override.runID
+	r.announcedGeneration = override.generation
+	r.announcedPermit = override.permitEpoch
+	r.announcedOpen = false
+	r.announcedRows = append(r.announcedRows[:0], rows...)
+	r.d11Override = nil
+	return nil
+}
+
+// rollbackD11 fences the selected run before actor teardown. It drains the
+// pipeline's pending leases under the D11 permit epoch, but deliberately keeps
+// the attestation authority override installed until queue/listener teardown
+// has completed; the close owner clears and re-announces CLOSED authority only
+// after that boundary.
+func (r *ipsecCaptureRuntime) rollbackD11() error {
+	if r == nil {
+		return nil
+	}
+	r.authorityMu.Lock()
+	override := r.d11Override
+	var runID string
+	var permitEpoch uint64
+	if override != nil {
+		runID, permitEpoch = override.runID, override.permitEpoch
+	}
+	r.authorityMu.Unlock()
+	if override == nil {
+		return nil
+	}
+	var firstErr error
+	if r.d11Armer != nil && r.d11Armer.Status().RunID == runID {
+		r.d11Armer.BeginDrain()
+	}
+	if r.actor != nil && r.actor.pipeline != nil {
+		if err := r.actor.pipeline.CancelForD11Drain(permitEpoch); err != nil {
+			firstErr = err
+		}
+		if err := r.actor.pipeline.DrainD11(permitEpoch, 500*time.Millisecond); err != nil &&
+			firstErr == nil {
+			firstErr = err
+		}
+	}
+	// The override remains installed until close has completed queue/listener
+	// teardown. Clearing it earlier would publish normal authority while the
+	// old generation is still being retired.
+	return firstErr
+}
+
+// finalizeD11AfterClose retains the completed ledger rows and disarms only
+// after the close owner cleared the selected authority and all pending leases
+// became terminal.
+func (r *ipsecCaptureRuntime) finalizeD11AfterClose() {
+	if r == nil || r.d11Armer == nil || r.d11Ledger == nil || r.d11RunID == "" {
+		return
+	}
+	r.authorityMu.Lock()
+	overrideActive := r.d11Override != nil
+	r.authorityMu.Unlock()
+	if overrideActive {
+		return
+	}
+	arm := r.d11Armer.Status()
+	if arm.RunID != r.d11RunID ||
+		(arm.State != nfqueue.D11Armed.String() && arm.State != nfqueue.D11Draining.String()) {
+		return
+	}
+	if r.d11Ledger.AllTerminal() {
+		_ = r.d11Ledger.FinalizeIfTerminal()
+		r.d11Armer.BeginDrain()
+		r.d11Armer.Disarm()
+	}
+}
+
+func (d *Daemon) d11WitnessAuthority(runtime *ipsecCaptureRuntime) (nfqueue.D11AttestationArmStatus, bool) {
+	if d == nil || runtime == nil || d.d11Armer == nil {
+		return nfqueue.D11AttestationArmStatus{}, false
+	}
+	runtime.authorityMu.Lock()
+	runID, _, permitEpoch, open, _ := runtime.authoritySnapshotLocked()
+	overrideActive := runtime.d11Override != nil
+	runtime.authorityMu.Unlock()
+	arm := d.d11Armer.Status()
+	return arm, overrideActive && open &&
+		runID == arm.RunID && permitEpoch == arm.PermitEpoch &&
+		arm.State == nfqueue.D11Armed.String()
+}
+
+func (d *Daemon) d11AuthorityCurrentForRuntime(runtime *ipsecCaptureRuntime) bool {
+	_, current := d.d11WitnessAuthority(runtime)
+	return current
+}
+
+func (d *Daemon) d11AuthorityCurrent() bool {
+	if d == nil {
+		return false
+	}
+	d.ipsecCaptureMu.Lock()
+	runtime := d.ipsecCapture
+	d.ipsecCaptureMu.Unlock()
+	return d.d11AuthorityCurrentForRuntime(runtime)
+}
 func sameReinjectQueueEpochs(a, b []nfqueue.ReinjectQueueEpoch) bool {
 	if len(a) != len(b) {
 		return false
@@ -622,15 +818,17 @@ func sameReinjectQueueEpochs(a, b []nfqueue.ReinjectQueueEpoch) bool {
 	}
 	return true
 }
-
 func (r *ipsecCaptureRuntime) close() error {
 	if r == nil {
 		return nil
 	}
+	var firstErr error
+	if err := r.rollbackD11(); err != nil {
+		firstErr = err
+	}
 	if r.zoneSnapshot != nil {
 		r.zoneSnapshot.current.Store(false)
 	}
-	var firstErr error
 	wasActive := false
 	if r.actor != nil {
 		wasActive = r.actor.Status().Active
@@ -651,11 +849,6 @@ func (r *ipsecCaptureRuntime) close() error {
 			}
 		}
 	}
-	if r.submitter != nil {
-		if err := r.submitter.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
 	if r.supervisor != nil {
 		for _, handle := range r.handles {
 			if err := r.supervisor.retireQueue(handle, true, true); err != nil &&
@@ -664,6 +857,32 @@ func (r *ipsecCaptureRuntime) close() error {
 			}
 		}
 	}
+	// The close owner clears the D11 join key only after actor/listener,
+	// queue, and supervisor retirement have completed. This sends an explicit
+	// CLOSED frame for the selected run while the reinject submitter is still
+	// available. The shared S4 permit is intentionally untouched here:
+	// finalizePermitClose has no production caller in this owner and must not
+	// be invented in an old-generation capture close.
+	revokeErr := r.clearD11AuthorityOverride()
+	if revokeErr != nil {
+		// A transient announce failure must not strand a live D11 authority;
+		// retry once before closing the submitter, then report the retained
+		// override so the caller can quarantine the generation.
+		retryErr := r.clearD11AuthorityOverride()
+		if retryErr != nil {
+			slog.Warn("ipsec capture: D11 CLOSED authority revoke failed after retry",
+				"err", retryErr)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("D11 CLOSED authority revoke: %w (retry: %v)", revokeErr, retryErr)
+			}
+		}
+	}
+	if r.submitter != nil {
+		if err := r.submitter.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	r.finalizeD11AfterClose()
 	return firstErr
 }
 
@@ -973,6 +1192,38 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	for _, handle := range handles {
 		queueEpochs[handle.Number] = handle.Epoch
 	}
+	var stagedRuntime *ipsecCaptureRuntime
+	attestation := (*nfqueue.D11AttestationConfig)(nil)
+	if d.d11Armer != nil && d.d11Ledger != nil {
+		attestation = &nfqueue.D11AttestationConfig{
+			Armer: d.d11Armer, Ledger: d.d11Ledger,
+			AuthorityCurrent: func() bool {
+				return d.d11AuthorityCurrentForRuntime(stagedRuntime)
+			},
+			OriginValid: func(origin nfqueue.CaptureOrigin) bool {
+				for _, handle := range handles {
+					family := nfqueue.CaptureFamilyInet
+					if handle.Key.Family == ipsecFamilyBridge {
+						family = nfqueue.CaptureFamilyBridge
+					}
+					hook := nfqueue.CaptureHookForward
+					if handle.Key.Hook == ipsecHookInput {
+						hook = nfqueue.CaptureHookInput
+					}
+					if origin.Family == family && origin.Hook == hook &&
+						origin.Owner == handle.Key.Owner &&
+						origin.STN == handle.Key.STN &&
+						origin.OwnedIfindex == uint32(handle.Key.Ifindex) {
+						return true
+					}
+				}
+				return false
+			},
+		}
+	}
+	denyEvents := nfqueue.DenyEventSinkFunc(func(event nfqueue.IpsecInnerDeny) bool {
+		return event.Reason.Valid()
+	})
 	actor, actorErr := ipsecCaptureNewPipeline(IpsecCapturePipelineConfig{
 		Supervisor:  d.ipsecS4,
 		Registry:    registry,
@@ -986,6 +1237,8 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			FragmentSlots:  128,
 			FragmentPieces: 128,
 			Submitter:      submitter,
+			Attestation:    attestation,
+			DenyEvents:     denyEvents,
 			ZoneEvaluator:  nfqueue.DefaultZoneEvaluator{},
 			ZoneSnapshot:   zoneSnapshot,
 		},
@@ -1014,17 +1267,28 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		spec.LabelSchema = xnft.IpsecDivertLabelSchema9506
 	}
 	staged = &ipsecCaptureRuntime{
-		supervisor:       d.ipsecS4,
-		handles:          handles,
-		queues:           queues,
-		registry:         registry,
-		actor:            actor,
-		submitter:        submitter,
-		spec:             spec,
-		runID:            actor.Status().RunID,
-		stageGeneration:  generation,
-		zoneSnapshot:     zoneSnapshot,
+		supervisor:      d.ipsecS4,
+		handles:         handles,
+		queues:          queues,
+		registry:        registry,
+		actor:           actor,
+		submitter:       submitter,
+		spec:            spec,
+		runID:           actor.Status().RunID,
+		stageGeneration: generation,
+		zoneSnapshot:    zoneSnapshot,
+		d11Armer:        d.d11Armer,
+		d11Ledger:       d.d11Ledger,
+		d11Invalidate: func(reason string) {
+			if d.d11Armer != nil {
+				d.d11Armer.BeginDrain()
+			}
+			if d.d11Ledger != nil {
+				d.d11Ledger.MarkVoid(reason)
+			}
+		},
 	}
+	stagedRuntime = staged
 	d.ipsecCaptureStaged = staged
 	d.ipsecCaptureStagePending = true
 	return old, staged, nil

@@ -13599,3 +13599,158 @@ fn worker_list_family_filter_selects_v4_v6_10512() {
     );
     assert_eq!(rows.len(), 2, "empty families must select both");
 }
+#[test]
+fn removed_zone_ids_require_validated_sets_and_detect_cross_generation_reuse_10510() {
+    let mut old = ForwardingState::default();
+    old.zone_id_to_name.insert(1, "lan".to_string());
+    old.zone_id_to_name.insert(2, "wan".to_string());
+    old.zone_set_validated = true;
+
+    let mut vanished = ForwardingState::default();
+    vanished.zone_id_to_name.insert(2, "wan".to_string());
+    vanished.zone_set_validated = true;
+    let removed = removed_zone_ids_for_rotation(&old, &vanished);
+    assert!(
+        removed.contains(&1),
+        "a genuinely vanished old zone must be purged"
+    );
+    assert!(!removed.contains(&2), "an unchanged zone must survive");
+
+    let mut reused = ForwardingState::default();
+    reused.zone_id_to_name.insert(1, "dmz".to_string());
+    reused.zone_id_to_name.insert(2, "wan".to_string());
+    reused.zone_set_validated = true;
+    let reused_ids = removed_zone_ids_for_rotation(&old, &reused);
+    assert!(
+        reused_ids.contains(&1),
+        "reusing an old stable id for another name is a removed identity"
+    );
+
+    let mut unvalidated_old = old.clone();
+    unvalidated_old.zone_set_validated = false;
+    assert!(
+        removed_zone_ids_for_rotation(&unvalidated_old, &vanished).is_empty(),
+        "legacy/quarantined old snapshots must fail closed to no purge"
+    );
+    let empty_new = ForwardingState {
+        zone_set_validated: true,
+        ..ForwardingState::default()
+    };
+    assert!(
+        removed_zone_ids_for_rotation(&old, &empty_new).is_empty(),
+        "an empty producer map is not evidence that every zone vanished"
+    );
+}
+
+/// #10507 Cell 2: a peer-synced row with unknown owner RG (0) and no
+/// fabric-ingress marker is refresh-eligible (the hardened collector
+/// includes every `is_peer_synced` origin). Pre-fix the skip
+/// (`owner <= 0 && !fabric_ingress`, no origin check) dropped it, so an
+/// activation Refresh never rewrote it — the packet-time fence (sibling
+/// poll cell) remains the security proof when this command is delayed.
+///
+/// RED-on-revert: reverting the origin check re-skips this row and the
+/// lookup below finds nothing.
+#[test]
+fn collector_includes_peer_synced_unknown_owner_without_fabric_10507() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut md = test_metadata();
+    md.owner_rg_id = 0;
+    md.fabric_ingress = false;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        md,
+        SessionOrigin::SyncImport,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let items = super::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &test_forwarding_state(),
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::new()),
+        now_secs,
+    );
+    assert!(
+        items.iter().any(|(item_key, ..)| *item_key == key),
+        "a peer-synced RG-0/non-fabric row must be refresh-eligible (#10507)"
+    );
+}
+
+/// #10507 Cell 2 CONTROL: a LOCAL row with unknown owner and no fabric
+/// marker is still skipped (not HA-managed). The hardening widens
+/// eligibility to peer-synced origins only — it must not sweep local
+/// miss-installed rows into activation refresh. Passes pre- and post-fix.
+#[test]
+fn collector_still_skips_local_unknown_owner_without_fabric_10507() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut md = test_metadata();
+    md.owner_rg_id = 0;
+    md.fabric_ingress = false;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        md,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let items = super::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &test_forwarding_state(),
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::new()),
+        now_secs,
+    );
+    assert!(
+        !items.iter().any(|(item_key, ..)| *item_key == key),
+        "a local RG-0/non-fabric row must stay out of activation refresh (control)"
+    );
+}
+
+/// #10507 Cell 2 CONTROL: unknown owner WITH a fabric-ingress marker was
+/// always included (the old skip required `!fabric_ingress`) and stays
+/// included. Non-local redirect retention for this shape is pinned by the
+/// seed cells (Cell 7) and the #7770 suite. Passes pre- and post-fix.
+#[test]
+fn collector_includes_unknown_owner_with_fabric_10507() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut md = test_metadata();
+    md.owner_rg_id = 0;
+    md.fabric_ingress = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        md,
+        SessionOrigin::SyncImport,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let items = super::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &test_forwarding_state(),
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::new()),
+        now_secs,
+    );
+    assert!(
+        items.iter().any(|(item_key, ..)| *item_key == key),
+        "an RG-0/fabric row must be refresh-eligible (control)"
+    );
+}
