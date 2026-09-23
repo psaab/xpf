@@ -9456,3 +9456,89 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
         "clear must empty the shared forward-wire map"
     );
 }
+
+/// P3: a failing BPF sweep fails the clear WITHOUT touching
+/// authority — shared rows are retained for retry, and the verb
+/// reports ok=false (never a masked complete).
+#[test]
+fn clear_mirror_bpf_failure_retains_authority_10512() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0xC1EA9,
+        tcp_close_class: 0,
+    };
+    crate::afxdp::shared_ops::publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    // i32::MAX: a bound-but-bogus fd (EBADF on first syscall, #10590
+    // precedent) — exercises the production error leg unprivileged.
+    coordinator.bpf_maps.store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+        conntrack_v4_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
+        conntrack_v6_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
+        ..Default::default()
+    }));
+    let domain = coordinator.session_domain();
+    let err = domain.clear_mirror().expect_err("BPF failure must fail the clear");
+    assert!(
+        err.contains("conntrack"),
+        "error must name the failing sweep, got {err}"
+    );
+    assert!(
+        coordinator.sessions.synced.lock().expect("synced").contains_key(&key),
+        "failed clear must retain shared authority"
+    );
+}
+
+/// P4: over-cap single-shot fails closed touching nothing (the
+/// take(cap+1) snapshot bounds the transient Vec, proven here with a
+/// 1-row cap against 2 rows).
+#[test]
+fn clear_mirror_over_cap_fails_closed_untouched_10512() {
+    let coordinator = Coordinator::new();
+    for domain in [7u32, 8u32] {
+        let mut key = test_key();
+        key.routing_domain = domain;
+        let entry = SyncedSessionEntry {
+            key,
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xC1EA9000 + domain as u64,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &entry,
+        );
+    }
+    let domain = coordinator.session_domain();
+    let err = domain
+        .clear_mirror_with_cap(1)
+        .expect_err("2 rows over a 1-row cap must fail");
+    assert_eq!(err, "clear-cap-exceeded");
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("synced").len(),
+        2,
+        "over-cap clear must touch nothing"
+    );
+}

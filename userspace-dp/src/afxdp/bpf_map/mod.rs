@@ -1062,10 +1062,13 @@ pub(crate) fn delete_bpf_conntrack_entry_under_gate(
     delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key)
 }
 
-pub(crate) fn clear_bpf_conntrack_maps(conntrack_v4_fd: c_int, conntrack_v6_fd: c_int) -> (usize, usize) {
-    fn clear_one(fd: c_int, key_size: usize) -> usize {
+pub(crate) fn clear_bpf_conntrack_maps(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+) -> Result<(usize, usize), &'static str> {
+    fn clear_one(fd: c_int, key_size: usize, what: &'static str) -> Result<usize, &'static str> {
         if fd < 0 {
-            return 0;
+            return Ok(0);
         }
         let mut key = vec![0u8; key_size];
         let mut next = vec![0u8; key_size];
@@ -1076,21 +1079,31 @@ pub(crate) fn clear_bpf_conntrack_maps(conntrack_v4_fd: c_int, conntrack_v6_fd: 
                 libbpf_sys::bpf_map_get_next_key(fd, current, next.as_mut_ptr().cast::<c_void>())
             };
             if rc != 0 {
-                break;
+                // libbpf returns -errno: ENOENT is the clean end of
+                // iteration; anything else is a real scan failure (a
+                // half-swept map converges on retry — deletes are
+                // idempotent — but this call reports the failure).
+                if rc == -libc::ENOENT {
+                    break;
+                }
+                return Err(what);
             }
-            let _ = unsafe {
+            let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(fd, next.as_ptr().cast::<c_void>())
             };
+            if rc != 0 {
+                return Err(what);
+            }
             deleted += 1;
             key.copy_from_slice(&next);
             current = key.as_ptr().cast::<c_void>();
         }
-        deleted
+        Ok(deleted)
     }
-    (
-        clear_one(conntrack_v4_fd, std::mem::size_of::<BpfSessionKeyV4>()),
-        clear_one(conntrack_v6_fd, std::mem::size_of::<BpfSessionKeyV6>()),
-    )
+    Ok((
+        clear_one(conntrack_v4_fd, std::mem::size_of::<BpfSessionKeyV4>(), "conntrack-v4-clear")?,
+        clear_one(conntrack_v6_fd, std::mem::size_of::<BpfSessionKeyV6>(), "conntrack-v6-clear")?,
+    ))
 }
 
 

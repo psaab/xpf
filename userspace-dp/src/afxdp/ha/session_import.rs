@@ -458,12 +458,32 @@ impl crate::afxdp::ha::SessionDomain {
     }
 
 
+    /// Hard cap on one clear snapshot (P4): take(cap+1) bounds the
+    /// transient key Vec even against a hostile table (262144 × ~72B ≈
+    /// 18MB max); over-cap fails closed touching nothing.
+    pub(crate) const CLEAR_MIRROR_KEY_CAP: usize = 262_144;
+
     pub(crate) fn clear_mirror(&self) -> Result<(usize, usize), &'static str> {
+        self.clear_mirror_with_cap(Self::CLEAR_MIRROR_KEY_CAP)
+    }
+
+    pub(crate) fn clear_mirror_with_cap(&self, cap: usize) -> Result<(usize, usize), &'static str> {
         let fence = crate::afxdp::bpf_map::global_tuple_gate().begin_clear()?;
         let keys: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
             .keys()
+            .take(cap.saturating_add(1))
             .cloned()
             .collect();
+        if keys.len() > cap {
+            return Err("clear-cap-exceeded");
+        }
+        // BPF sweep FIRST (P3): on failure nothing is touched
+        // (fail-closed, retryable) — authority clears only after the
+        // kernel sweep lands.
+        let maps = self.bpf_maps.load();
+        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let counts = crate::afxdp::bpf_map::clear_bpf_conntrack_maps(v4_fd, v6_fd)?;
         for key in keys {
             let _ = self.delete_synced_session_gen_marked(
                 key,
@@ -475,10 +495,6 @@ impl crate::afxdp::ha::SessionDomain {
                 0,
             );
         }
-        let maps = self.bpf_maps.load();
-        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
-        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
-        let counts = crate::afxdp::bpf_map::clear_bpf_conntrack_maps(v4_fd, v6_fd);
         lock_shared_recover(&self.sessions.synced).clear();
         lock_shared_recover(&self.sessions.nat).clear();
         lock_shared_recover(&self.sessions.forward_wire).clear();
