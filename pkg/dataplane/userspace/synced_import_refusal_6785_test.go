@@ -418,9 +418,9 @@ func TestSyncedMirrorFailureAccountingIsSingleSourced6785(t *testing.T) {
 	}
 	body := code.String()
 
-	if n := strings.Count(body, "m.noteSyncedMirrorFailureLocked(err)"); n != 2 {
+	if n := strings.Count(body, "m.noteSyncedMirrorFailureLocked(err)"); n != 4 {
 		t.Fatalf("noteSyncedMirrorFailureLocked is called %d times, want exactly "+
-			"2 (the v4 and v6 cluster installs) — a path that accounts its own "+
+			"4 (the v4 and v6 cluster installs plus the v4 and v6 mirror installs) — a path that accounts its own "+
 			"mirror failure has its own copy of the #5247 classification", n)
 	}
 	// The classification must not ALSO appear inline: a call plus a surviving
