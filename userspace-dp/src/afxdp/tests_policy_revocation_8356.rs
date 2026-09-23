@@ -6892,12 +6892,12 @@ fn noegress_forward_decision_10507() -> SessionDecision {
 /// WHY M2-DIRECT (not poll): LocalForwardingNoEgress is unreachable at
 /// M2 via the descriptor path by construction — the hit resolver
 /// refreshes stored resolution live before M2; cached fast-path and
-/// fallback both require egress>0 (session_glue/mod.rs:172); live
+/// fallback both require egress>0 (session_glue/mod.rs:169); live
 /// would-forward always carries valid egress (fib.rs:562-573, and
 /// ifindex<=0 returns NoRoute); every live egress-0 arm is NonLocal
 /// (NoRoute/DiscardRoute/NextTableUnsupported/TableUnavailable); and
 /// the sole production M2 caller is the poll hit path
-/// (poll_descriptor/mod.rs:1518). Firsthand: a stored-NoEgress +
+/// (poll_descriptor/mod.rs:1654). Firsthand: a stored-NoEgress +
 /// Fresh-Live install coasted (revoked 0) because live refresh
 /// overwrote stored with valid DMZ pre-M2. A poll pin for this arm is
 /// impossible by the construction above; gate units + mapping unit
