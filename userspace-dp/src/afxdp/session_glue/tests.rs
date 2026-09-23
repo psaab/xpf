@@ -7661,8 +7661,11 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
     sessions.stamp_leak_incarnation(&key, 41);
     let incumbent_incarnation = sessions.leak_incarnation(&key);
     assert_eq!(incumbent_incarnation, Some(41));
+    // The lookup query key is intentionally divergent from the shared
+    // canonical replica key; the materializer must protect the incumbent
+    // canonical row, not assume the query key names it.
     let mut resolved = ResolvedSessionLookup {
-        key: ResolvedSessionKey::Canonical(key.clone()),
+        key: ResolvedSessionKey::QueryKey,
         lookup: SessionLookup {
             decision: test_decision(),
             metadata: test_metadata(),
@@ -7694,6 +7697,205 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
         "a refused clobber must not rewrite the incumbent leak provenance"
     );
 }
+
+/// Build a fabric-wire shared hit whose canonical replica collides with a
+/// distinct incumbent row. The origin is parameterized so the safe path and
+/// #10613 repro use the same divergent-key fixture.
+fn resolve_shared_hit_clobber_fixture_10582(
+    shared_origin: SessionOrigin,
+) -> (
+    SessionTable,
+    ResolvedFlowSessionDecision,
+    SessionKey,
+    SessionDecision,
+    SessionMetadata,
+) {
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x02],
+        },
+    );
+    let key = test_key();
+    let mut decision = test_decision();
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    };
+    let wire_key = forward_wire_key(&key, decision.nat);
+    let mut sessions = SessionTable::new();
+    let placeholder_metadata = SessionMetadata {
+        fabric_ingress: true,
+        ..test_metadata()
+    };
+    let mut incumbent_decision = test_decision();
+    incumbent_decision.resolution.egress_ifindex = 99;
+    incumbent_decision.resolution.tx_ifindex = 99;
+    let incumbent_metadata = SessionMetadata {
+        ingress_zone: 91,
+        egress_zone: 92,
+        policy_id: 777,
+        ..test_metadata()
+    };
+    assert!(sessions.install_with_protocol_with_origin(
+        wire_key.clone(),
+        decision,
+        placeholder_metadata,
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        incumbent_decision.clone(),
+        incumbent_metadata.clone(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    sessions.stamp_leak_incarnation(&key, 41);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    shared_forward_wire_sessions
+        .lock()
+        .expect("shared forward-wire lock")
+        .insert(
+            wire_key.clone(),
+            SyncedSessionEntry {
+                key: key.clone(),
+                decision: test_decision(),
+                metadata: test_metadata(),
+                leak_incarnation: 99,
+                origin: shared_origin,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_FLAG_ACK,
+                generation: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+        );
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &[],
+        &forwarding,
+        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+        &Arc::new(ShardedNeighborMap::new()),
+        &SessionFlow {
+            src_ip: wire_key.src_ip,
+            dst_ip: wire_key.dst_ip,
+            forward_key: wire_key,
+        },
+        2_000_000,
+        1_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        24,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("fabric-wire shared hit must resolve");
+    (
+        sessions,
+        resolved,
+        key,
+        incumbent_decision,
+        incumbent_metadata,
+    )
+}
+
+#[test]
+fn resolve_shared_hit_clobber_sets_install_failed_10582_r4() {
+    let (sessions, resolved, key, incumbent_decision, incumbent_metadata) =
+        resolve_shared_hit_clobber_fixture_10582(SessionOrigin::WorkerLocalImport);
+    assert!(
+        resolved.install_failed,
+        "resolve must carry the refused canonical clobber into the seed gate"
+    );
+    assert_eq!(
+        sessions.len(),
+        2,
+        "wire placeholder and canonical incumbent must both survive"
+    );
+    let (actual_decision, actual_metadata, actual_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("canonical incumbent must survive resolve");
+    assert_eq!(
+        actual_decision.resolution.egress_ifindex,
+        incumbent_decision.resolution.egress_ifindex,
+        "resolve-level clobber must preserve incumbent decision"
+    );
+    assert_eq!(
+        actual_metadata.policy_id,
+        incumbent_metadata.policy_id,
+        "resolve-level clobber must preserve incumbent metadata"
+    );
+    assert_eq!(
+        actual_origin,
+        SessionOrigin::ForwardFlow,
+        "resolve-level clobber must preserve incumbent origin"
+    );
+    assert_eq!(
+        sessions.leak_incarnation(&key),
+        Some(41),
+        "resolve-level clobber must preserve incumbent provenance"
+    );
+}
+/// #10613 repro: a promotable shared origin can overwrite the incumbent after
+/// materialization reports `install_failed`; this remains ignored until the
+/// production fix skips promotion on that refusal.
+#[test]
+#[ignore = "#10613: resolve promotion overwrites a divergent incumbent after install_failed"]
+fn resolve_shared_hit_sync_import_clobbers_incumbent_10613_repro() {
+    let (sessions, resolved, key, incumbent_decision, incumbent_metadata) =
+        resolve_shared_hit_clobber_fixture_10582(SessionOrigin::SyncImport);
+    assert!(
+        resolved.install_failed,
+        "the repro must still carry the refused clobber into the seed gate"
+    );
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "#10613 fixture must stay promotable after live re-resolution"
+    );
+    let (actual_decision, actual_metadata, actual_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("canonical incumbent must remain addressable");
+    assert_eq!(
+        actual_decision.resolution.egress_ifindex,
+        incumbent_decision.resolution.egress_ifindex,
+        "#10613: promotion must not overwrite the incumbent decision"
+    );
+    assert_eq!(
+        actual_metadata.policy_id,
+        incumbent_metadata.policy_id,
+        "#10613: promotion must not overwrite the incumbent metadata"
+    );
+    assert_eq!(
+        actual_origin,
+        SessionOrigin::ForwardFlow,
+        "#10613: promotion must not overwrite the incumbent origin"
+    );
+}
+
 
 /// A shared-hit materialization refreshes the local row before policy
 /// revalidation, so the next policy-generation probe sees a real stale target.

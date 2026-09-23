@@ -1701,6 +1701,10 @@ pub(super) fn poll_binding_process_descriptor(
                             // (#6457) and the revoked 5-tuple keeps forwarding
                             // off a cached RewriteDescriptor with no session row.
                             //
+                            // A canonical-less, sessionless revocation
+                            // intentionally skips teardown and flow-cache
+                            // eviction: there is no local owner/cache slot to
+                            // evict.
                             // `canonical_key` is the key the revalidation
                             // resolved — NOT `resolved.key`, which is the WIRE
                             // tuple and, on the NAT reverse-translated alias

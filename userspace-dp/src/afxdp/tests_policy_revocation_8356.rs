@@ -189,9 +189,14 @@ fn metadata(is_reverse: bool) -> SessionMetadata {
     }
 }
 
+struct PollObservables {
+    fresh: bool,
+}
+
 struct Outcome {
     sessions: SessionTable,
     revoked: u64,
+    observables: Option<PollObservables>,
 }
 
 /// Pre-install ONE established session — stamped UNVALIDATED, exactly what an
@@ -257,9 +262,14 @@ fn drive_one_packet_with_action(
         batch.validated_packets, 1,
         "the descriptor must pass validation before policy re-derivation"
     );
+    let fresh = matches!(
+        sessions.policy_revalidation_target(&flow_key_to(dst)),
+        PolicyRevalidationTarget::Fresh
+    );
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: Some(PollObservables { fresh }),
     }
 }
 
@@ -315,6 +325,7 @@ fn drive_one_packet_no_route_9513() -> Outcome {
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: None,
     }
 }
 
@@ -462,7 +473,97 @@ fn owner_tcp_permit_hit_remains_admitted_10582_t3() {
         1,
         "the ordinary owner hit must retain its local session"
     );
+    let observables = out.observables.expect("T3 poll observables");
+    assert!(observables.fresh, "permit hit must re-stamp the local row Fresh");
 }
+/// Drive a shared-only hit through the real descriptor body. The shared-family
+/// upsert is allowed past the local cap, but the live default deny must drop the
+/// packet before `stage_flow_cache_seed`; the target row must stay absent.
+fn drive_shared_hit_10582_t1_t2(policy_generation: u64) -> (SessionTable, BindingWorker, DebugPollCounters) {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(1);
+    sessions.set_policy_revalidation_gen(policy_generation);
+    let filler = SessionKey {
+        src_port: 40_000,
+        ..flow_key_to(DST)
+    };
+    assert!(sessions.install_with_protocol_with_origin(
+        filler,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let key = flow_key_to(DST);
+    let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    shared_sessions.lock().expect("shared sessions").insert(
+        key.clone(),
+        SyncedSessionEntry {
+            key: key.clone(),
+            decision: decision(WAN_IFINDEX),
+            metadata: metadata(false),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+    );
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor_with_shared_sessions(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &shared_sessions,
+    );
+    (sessions, binding, dbg)
+}
+
+#[test]
+fn at_cap_shared_hit_poll_handler_drops_without_seed_10582_t1() {
+    let (sessions, binding, dbg) = drive_shared_hit_10582_t1_t2(7);
+    assert_eq!(dbg.session_hit, 1, "the real poll body must reach shared-hit handling");
+    assert_eq!(dbg.policy_revoked_sessions, 1, "live deny must drop the shared hit");
+    assert!(binding.scratch.scratch_forwards.is_empty(), "denied hit must not forward");
+    assert_eq!(txn_flow_cache_entries(&binding), 0, "denied hit must not seed flow cache");
+    assert!(
+        sessions.entry_with_origin(&flow_key_to(DST)).is_none(),
+        "the denied shared-hit target must remain absent; the filler explains the cap row"
+    );
+}
+
+#[test]
+fn scheduler_generation_shared_hit_poll_handler_drops_without_seed_10582_t2() {
+    let (sessions, binding, dbg) = drive_shared_hit_10582_t1_t2(8);
+    assert_eq!(dbg.session_hit, 1, "the generation-bumped hit must reach handler revalidation");
+    assert_eq!(dbg.policy_revoked_sessions, 1, "generation-bumped live deny must drop");
+    assert!(binding.scratch.scratch_forwards.is_empty(), "denied hit must not forward");
+    assert_eq!(txn_flow_cache_entries(&binding), 0, "denied hit must not seed flow cache");
+    assert!(
+        sessions.entry_with_origin(&flow_key_to(DST)).is_none(),
+        "the denied generation-bumped target must remain absent; the filler explains the cap row"
+    );
+}
+
 
 /// The `deny` point of the same three-way axis, driven through the action-taking
 /// path rather than the bool one.
@@ -700,6 +801,7 @@ fn drive_one_icmp_packet(permit_lan: bool, with_type_constrained_permit: bool) -
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: None,
     }
 }
 
@@ -2006,6 +2108,7 @@ fn drive_moved_interface_9384(
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: None,
     }
 }
 
