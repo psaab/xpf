@@ -151,6 +151,25 @@ func deletedPolicyRuntimeIDs(oldCfg, newCfg *config.Config) map[uint32]struct{} 
 // keep forwarding under the now-revoked authorization, so the caller MUST join
 // this into the commit/sync/rollback result rather than let it be lost to a log
 // line (#5578).
+// captureReadErr joins a capture's READ failures (#10512, #5578): an
+// incomplete READ yields a partial candidate set, and the clear that
+// follows must surface the gap — not report nil while stale-authorized
+// sessions keep forwarding. v4/v6 often carry the same READ error (one
+// RPC serves both); dedup so the commit does not print it twice.
+func captureReadErr(c *policyInvalidationCapture, what string) error {
+	if c == nil {
+		return nil
+	}
+	var errs []error
+	if c.v4Err != nil {
+		errs = append(errs, fmt.Errorf("policy session invalidation (%s): %w", what, c.v4Err))
+	}
+	if c.v6Err != nil && c.v6Err != c.v4Err {
+		errs = append(errs, fmt.Errorf("policy session invalidation (%s): %w", what, c.v6Err))
+	}
+	return errors.Join(errs...)
+}
+
 func (d *Daemon) clearSessionsForDeletedPolicies(oldCfg, newCfg *config.Config) error {
 	// #6948: when the apply took a pre-publication capture, delete exactly what
 	// it observed. The capture read the session table while the rows still
@@ -158,7 +177,8 @@ func (d *Daemon) clearSessionsForDeletedPolicies(oldCfg, newCfg *config.Config) 
 	// post-activation admission nor the helper's #3395 live-row re-stamp can
 	// contaminate. See daemon_policy_invalidate_capture.go.
 	if c := d.policyInvalidationCapture; c != nil {
-		return d.deleteInvalidatedSessions(c.deleted, dataplane.DeleteReasonPolicyDeleted, "deleted")
+		return errors.Join(captureReadErr(c, "deleted"),
+			d.deleteInvalidatedSessions(c.deleted, dataplane.DeleteReasonPolicyDeleted, "deleted"))
 	}
 	return d.clearSessionsForPolicyIDs(
 		deletedPolicyRuntimeIDs(oldCfg, newCfg),
@@ -204,7 +224,8 @@ func (d *Daemon) clearSessionsForModifiedPolicies(oldCfg, newCfg *config.Config)
 	// be inherited by a different policy, and the #3395 refresh re-stamps this
 	// policy's own rows to its NEW id — so it consumes the same capture.
 	if c := d.policyInvalidationCapture; c != nil {
-		return d.deleteInvalidatedSessions(c.modified, dataplane.DeleteReasonPolicyModified, "modified (policy-rematch)")
+		return errors.Join(captureReadErr(c, "modified (policy-rematch)"),
+			d.deleteInvalidatedSessions(c.modified, dataplane.DeleteReasonPolicyModified, "modified (policy-rematch)"))
 	}
 	now := time.Now()
 	oldSched := d.policySchedulerActiveStateForApplyLocked(oldCfg, now)
@@ -276,7 +297,8 @@ func (d *Daemon) clearSessionsForDefaultPolicyChange(oldCfg, newCfg *config.Conf
 	// exactly once, at one instant, on the same side of the publication
 	// boundary. A per-class read would put them on different sides of it.
 	if c := d.policyInvalidationCapture; c != nil {
-		return d.deleteInvalidatedSessions(c.deflt, dataplane.DeleteReasonDefaultPolicyChanged, "default-policy changed")
+		return errors.Join(captureReadErr(c, "default-policy changed"),
+			d.deleteInvalidatedSessions(c.deflt, dataplane.DeleteReasonDefaultPolicyChanged, "default-policy changed"))
 	}
 	return d.clearSessionsForPolicyIDs(
 		defaultPolicyChangeRuntimeIDs(oldCfg, newCfg),
