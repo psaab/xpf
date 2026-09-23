@@ -62,6 +62,10 @@ mod first_policy_purge_rotation_9526_tests;
 #[path = "expiry_shared_retire_10419_tests.rs"]
 mod expiry_shared_retire_10419_tests;
 
+#[cfg(test)]
+#[path = "bpf_ok_teardown_10590_tests.rs"]
+mod bpf_ok_teardown_10590_tests;
+
 /// Decode the trailing #10509 discriminator without ever turning an absent
 /// value into a GRE `None` class. Go captures from the BPF conntrack mirror,
 /// whose ABI omits this sync-only field, so a production GRE row arrives as

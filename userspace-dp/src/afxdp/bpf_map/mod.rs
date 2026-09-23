@@ -965,6 +965,68 @@ pub(super) fn delete_bpf_conntrack_entry(
     }
 }
 
+/// #10590 test seam: one policy-restamp attempt, as the dataplane ATTEMPTED
+/// it. Recorded after the family/address validation passes — a mismatched key
+/// fails closed without touching any map (see the MIN-7 doc on the mismatch
+/// cell in `bpf_map_tests.rs`) and is not an attempt — and before the
+/// `fd < 0` early-true, so the `-1` control records its two attempts too.
+///
+/// Thread-local, like `SESSION_MAP_WRITES` above (#8105): a process-global
+/// counter would race every parallel test driving a restamp, and the writer
+/// is production code that cannot take a lock. Each sampler drives its rebind
+/// synchronously on its own test thread, so its attempts and only its
+/// attempts land in its own vector. The fail hook defaults to off; tests arm
+/// it per-test after clearing.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RestampAttemptRecord {
+    pub(super) addr_family: u8,
+    pub(super) fd: c_int,
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESTAMP_ATTEMPTS: std::cell::RefCell<Vec<RestampAttemptRecord>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESTAMP_FAIL_ON_ATTEMPT: std::cell::RefCell<Option<u64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn clear_restamp_attempts() {
+    RESTAMP_ATTEMPTS.with(|records| records.borrow_mut().clear());
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow_mut() = None);
+}
+
+#[cfg(test)]
+pub(super) fn restamp_attempts() -> Vec<RestampAttemptRecord> {
+    RESTAMP_ATTEMPTS.with(|records| records.borrow().clone())
+}
+
+/// #10590 T5: fail exactly the Nth restamp attempt on this thread (1-based),
+/// leaving every other attempt's real semantics untouched. Same-family halves
+/// share one conntrack fd, so a bogus fd fails BOTH halves — only this hook
+/// can express exactly-one-false and kill an `all` -> `any` mutant.
+#[cfg(test)]
+pub(super) fn fail_restamp_attempt_on(n: u64) {
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow_mut() = Some(n));
+}
+
+/// Record one attempt; returns whether the T5 hook fails this attempt.
+#[cfg(test)]
+fn record_restamp_attempt(addr_family: u8, fd: c_int) -> bool {
+    let attempt = RESTAMP_ATTEMPTS.with(|records| {
+        let mut records = records.borrow_mut();
+        records.push(RestampAttemptRecord { addr_family, fd });
+        records.len() as u64
+    });
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow() == Some(attempt))
+}
+
 /// Restamp only policy metadata in an existing conntrack row. This is a
 /// read/modify/write: counters, timestamps, NAT state and session identity
 /// remain owned by the live row during a policy rename.
@@ -978,6 +1040,11 @@ pub(super) fn restamp_bpf_conntrack_policy(
         let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
+        // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
+        #[cfg(test)]
+        if record_restamp_attempt(key.addr_family, conntrack_v4_fd) {
+            return false;
+        }
         // Unit tests and builds without a pinned conntrack map deliberately
         // pass -1. There is no map state to restamp, so this is not a failure.
         if conntrack_v4_fd < 0 {
@@ -1016,6 +1083,11 @@ pub(super) fn restamp_bpf_conntrack_policy(
         let (IpAddr::V6(src), IpAddr::V6(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
+        // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
+        #[cfg(test)]
+        if record_restamp_attempt(key.addr_family, conntrack_v6_fd) {
+            return false;
+        }
         if conntrack_v6_fd < 0 {
             return true;
         }
