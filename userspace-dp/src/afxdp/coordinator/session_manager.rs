@@ -73,6 +73,11 @@ pub(in crate::afxdp) struct SessionManager {
     /// `session_delete_stale_ignored_total()`.
     pub(in crate::afxdp) install_stale_ignored: AtomicU64,
     pub(in crate::afxdp) delete_stale_ignored: AtomicU64,
+    /// #10512 scoped HA deletes refused on identity mismatch (the under-lock
+    /// entry carries a different RT_FLOW id than captured — a replacement
+    /// installed after capture). Surfaced via
+    /// `Coordinator::session_delete_refused_identity_total()`.
+    pub(in crate::afxdp) delete_refused_identity: AtomicU64,
     /// #10512: policy-delete micro-batch gate-lease holds: count, total hold
     /// nanoseconds, and max single hold. The average (total/count) is the
     /// empirical leg of the tree-consistent timing position (ms-typical
@@ -252,6 +257,7 @@ impl SessionManager {
             synced_import_unpublished: AtomicU64::new(0),
             synced_reverse_rederived: AtomicU64::new(0),
             delete_stale_ignored: AtomicU64::new(0),
+            delete_refused_identity: AtomicU64::new(0),
             delete_dropped_released: AtomicU64::new(0),
             tunnel_purge_reservations_released: AtomicU64::new(0),
             import_cap_drops: AtomicU64::new(0),

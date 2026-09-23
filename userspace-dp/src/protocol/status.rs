@@ -599,6 +599,10 @@ pub(crate) struct ProcessStatus {
     /// Additive / defaulted for backward compatibility.
     #[serde(rename = "session_delete_stale_ignored", default)]
     pub session_delete_stale_ignored: u64,
+    /// #10512 scoped HA deletes refused on identity mismatch.
+    /// Additive / defaulted for backward compatibility.
+    #[serde(rename = "session_delete_refused_identity", default)]
+    pub session_delete_refused_identity: u64,
     /// #10512: policy-delete micro-batches that reached a Finalizing gate
     /// lease. With the two hold fields below, the empirical leg of the
     /// tree-consistent timing position: average hold must read ms-typical.

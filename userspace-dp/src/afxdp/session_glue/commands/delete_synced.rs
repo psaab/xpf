@@ -111,6 +111,8 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
         false,
         false,
         &mut *deferred_redirects,
+        0,
+        None,
     );
     if let Some(companion) = remove_companion {
         handle_delete_synced_with_guard(
@@ -126,7 +128,9 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
         false,
         false,
         &mut *deferred_redirects,
-        );
+        0,
+        None,
+    );
     }
     true
 }
@@ -234,6 +238,42 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
         true,
         true,
         &mut Vec::new(),
+        0,
+        None,
+    );
+}
+
+/// #10512 scoped HA worker teardown: identity-conditional twin of
+/// [`handle_delete_synced`] — the entry goes only when its live session
+/// id still matches the captured one.
+pub(in crate::afxdp::session_glue) fn handle_delete_synced_conditional(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    key: SessionKey,
+    expected_id: u64,
+    now_ns: u64,
+    now_secs: u64,
+    deleted_keys: &mut Vec<SessionKey>,
+    worker_id: u32,
+    companion: Option<SessionKey>,
+) {
+    handle_delete_synced_with_guard(
+        sessions,
+        session_map,
+        forwarding,
+        ha_state,
+        key,
+        now_ns,
+        now_secs,
+        deleted_keys,
+        worker_id,
+        true,
+        true,
+        &mut Vec::new(),
+        expected_id,
+        companion,
     );
 }
 fn handle_delete_synced_with_guard(
@@ -249,7 +289,21 @@ fn handle_delete_synced_with_guard(
     enforce_peer_owner: bool,
     remove_mirror: bool,
     deferred_redirects: &mut Vec<DeferredRedirectDelete>,
+    expected_id: u64,
+    // #10512 scoped companion: torn down in this same handler after the
+    // forward (never a standalone command — a declined forward must leave
+    // it untouched). Unconditional once the forward matched (plan-literal;
+    // same-thread atomic on the worker).
+    companion: Option<SessionKey>,
 ) {
+    // #10512 scoped HA delete: only the captured incarnation may go — a
+    // replacement installed after the shared remove (queue delay) keeps
+    // its row. Zero disables (legacy unconditional path). First: a
+    // mismatched entry belongs to a different incarnation entirely, so no
+    // other guard may even read it.
+    if expected_id != 0 && sessions.session_id_for(&key) != expected_id {
+        return;
+    }
     let (delete_alias, existing_origin) = match sessions.probe_with_origin(&key) {
         Some((lookup, origin)) => (Some(lookup), Some(origin)),
         None => (None, None),
@@ -375,5 +429,28 @@ fn handle_delete_synced_with_guard(
         // NAT and forward-wire aliases were claimed by this worker too, and releasing
         // just the key left them claimed by a holder that will never name them again.
         release_all_session_rows(session_map, &key);
+    }
+    // Scoped companion (see param doc): same-handler teardown after the
+    // forward, unconditional (legacy parity — the standalone reverse
+    // command it replaces never checked either). Reached only when the
+    // forward matched (mismatch returned at the top), so a declined
+    // forward leaves both halves untouched.
+    if let Some(companion_key) = companion {
+        handle_delete_synced_with_guard(
+            sessions,
+            session_map,
+            forwarding,
+            ha_state,
+            companion_key,
+            now_ns,
+            now_secs,
+            deleted_keys,
+            worker_id,
+            enforce_peer_owner,
+            remove_mirror,
+            deferred_redirects,
+            0,
+            None,
+        );
     }
 }

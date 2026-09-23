@@ -248,6 +248,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.session_install_stale_ignored_total();
     state.status.session_delete_stale_ignored =
         state.afxdp.session_delete_stale_ignored_total();
+    state.status.session_delete_refused_identity =
+        state.afxdp.session_delete_refused_identity_total();
     state.status.policy_batch_count = state.afxdp.policy_batch_count_total();
     state.status.policy_batch_hold_ns = state.afxdp.policy_batch_hold_ns_total();
     state.status.policy_batch_hold_max_ns = state.afxdp.policy_batch_hold_max_ns();

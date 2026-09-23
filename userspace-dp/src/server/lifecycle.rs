@@ -454,6 +454,7 @@ pub(crate) fn run() -> Result<(), String> {
             server_handler_panics: 0,
             session_install_stale_ignored: 0,
             session_delete_stale_ignored: 0,
+            session_delete_refused_identity: 0,
             policy_batch_count: 0,
             policy_batch_hold_ns: 0,
             policy_batch_hold_max_ns: 0,

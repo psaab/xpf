@@ -472,6 +472,7 @@ impl crate::afxdp::ha::SessionDomain {
                 false,
                 Some(&fence),
                 false,
+                0,
             );
         }
         let maps = self.bpf_maps.load();
@@ -995,7 +996,7 @@ impl crate::afxdp::ha::SessionDomain {
     ) -> SyncedDeleteOutcome {
         // Helper-local deletes (tunnel-remap purge, GC) are authoritative and
         // carry no peer install generation — apply unconditionally.
-        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, false)
+        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, false, 0)
     }
 
     pub(crate) fn delete_synced_session_mirror(
@@ -1003,7 +1004,7 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, true)
+        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, true, 0)
     }
 
     /// #10512: one micro-batch match's SHARED-store conditional remove. The
@@ -1137,7 +1138,7 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, false)
+        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, false, 0)
     }
 
     pub(crate) fn delete_peer_synced_session_mirror(
@@ -1145,7 +1146,21 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true)
+        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true, 0)
+    }
+
+    /// #10512 scoped HA peer delete: like
+    /// [`Self::delete_peer_synced_session_mirror`], but the shared removal
+    /// only proceeds when the under-lock entry still carries the expected
+    /// RT_FLOW identity (a replacement installed after capture is
+    /// refused, never torn down).
+    pub(crate) fn delete_peer_synced_session_mirror_scoped(
+        &self,
+        key: SessionKey,
+        forward_only: bool,
+        expected_id: u64,
+    ) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true, expected_id)
     }
 
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
@@ -1170,6 +1185,7 @@ impl crate::afxdp::ha::SessionDomain {
             forward_only,
             None,
             false,
+            0,
         );
     }
 
@@ -1184,6 +1200,9 @@ impl crate::afxdp::ha::SessionDomain {
         forward_only: bool,
         clear_fence: Option<&crate::afxdp::bpf_map::ClearFence>,
         strict_mirror: bool,
+        // #10512 scoped HA delete: only the captured incarnation may go.
+        // Zero disables (legacy unconditional path).
+        expected_id: u64,
     ) -> SyncedDeleteOutcome {
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
@@ -1213,6 +1232,25 @@ impl crate::afxdp::ha::SessionDomain {
                 .delete_stale_ignored
                 .fetch_add(1, Ordering::Relaxed);
             return SyncedDeleteOutcome::RefusedStaleGeneration;
+        }
+        // #10512 scoped HA delete, early (fail fast before gate/BPF; the
+        // under-lock recheck below stays authoritative): without a matching
+        // shared authority, idempotent cleanup must not run — BPF publishes
+        // before shared maps, so "no shared entry" can mean a live session
+        // mid-install whose rows cleanup would erase. Absent converges
+        // silently (StaleForward, uncounted); a LIVE different incarnation
+        // refuses loudly (RefusedIdentity + counter).
+        if expected_id != 0 {
+            match candidate_entry.as_ref() {
+                None => return SyncedDeleteOutcome::StaleForward,
+                Some(entry) if entry.session_id != expected_id => {
+                    self.sessions
+                        .delete_refused_identity
+                        .fetch_add(1, Ordering::Relaxed);
+                    return SyncedDeleteOutcome::RefusedIdentity;
+                }
+                Some(_) => {}
+            }
         }
         let mut gate_keys = vec![key.clone()];
         if !forward_only {
@@ -1278,6 +1316,15 @@ impl crate::afxdp::ha::SessionDomain {
             &self.sessions.owner_rg_indexes,
             &key,
             |current| {
+                // #10512 scoped HA delete: only the captured incarnation may
+                // go — a replacement installed after capture (same key, new
+                // id) is refused, never torn down. Evaluated first: identity
+                // is the stronger claim, and a mismatched entry belongs to a
+                // different tenant incarnation entirely. Zero disables.
+                if expected_id != 0 && current.session_id != expected_id {
+                    under_lock_outcome = Some(SyncedDeleteOutcome::RefusedIdentity);
+                    return false;
+                }
                 // #2170: a stale delete must not remove a NEWER same-key entry.
                 if current.generation != 0
                     && delete_gen != 0
@@ -1322,11 +1369,15 @@ impl crate::afxdp::ha::SessionDomain {
                             .delete_stale_ignored
                             .fetch_add(1, Ordering::Relaxed);
                     }
+                    SyncedDeleteOutcome::RefusedIdentity => {
+                        self.sessions
+                            .delete_refused_identity
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     SyncedDeleteOutcome::Applied
                     | SyncedDeleteOutcome::RefusedLocalOwned
                     | SyncedDeleteOutcome::RefusedGateBusy
                     | SyncedDeleteOutcome::RefusedMirrorDelete
-                    | SyncedDeleteOutcome::RefusedIdentity
                     | SyncedDeleteOutcome::StaleForward
                     | SyncedDeleteOutcome::PartialCompanion => {
                         debug_assert!(false, "an applied/early refusal cannot be under-lock");
@@ -1502,18 +1553,37 @@ impl crate::afxdp::ha::SessionDomain {
             // #1790/#1807: recover-and-push instead of silently skipping a
             // poisoned queue (same policy as update_ha_state).
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);
-            let forward_command = WorkerCommand::DeleteSynced(key.clone());
+            // #10512: the identity travels to the worker so a replacement
+            // installed during queue delay survives the drain. Legacy paths
+            // (expected_id 0) keep emitting plain DeleteSynced — same bytes,
+            // same existing match sites, zero behavior delta.
+            let forward_command = if expected_id != 0 {
+                // #10512: the identity + coordinator-derived companion travel
+                // to the worker so a replacement installed during queue delay
+                // survives the drain (forward mismatch skips both).
+                WorkerCommand::DeleteSyncedConditional {
+                    key: key.clone(),
+                    expected_id,
+                    companion: reverse_key.clone(),
+                }
+            } else {
+                WorkerCommand::DeleteSynced(key.clone())
+            };
             let queued = worker_queue::push_bounded(&mut pending, forward_command);
             // #9560 round 3: the REVERSE half's result was discarded. Both halves carry
             // the same consequence for the worker that misses one — its local session
             // entry, its flow-cache slots and its steering claims for that key all stay
             // — so both are checked, and either drop raises that worker's out-of-band
             // delete epoch below.
+            // Scoped deletes carry their companion INSIDE the conditional
+            // command (torn down only after a forward match) — no
+            // standalone reverse, which would fire even when the forward
+            // declines and kill a replacement's reverse.
             let reverse_queued = match &reverse_key {
-                Some(reverse_key) => {
+                Some(reverse_key) if expected_id == 0 => {
                     worker_queue::push_bounded(&mut pending, WorkerCommand::DeleteSynced(reverse_key.clone()))
                 }
-                None => true,
+                _ => true,
             };
             // Release the command queue before touching allocator mutexes: the
             // two are unrelated locks and holding both would invent an ordering.

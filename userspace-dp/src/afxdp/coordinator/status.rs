@@ -345,6 +345,11 @@ impl super::Coordinator {
         self.sessions.delete_stale_ignored.load(Ordering::Relaxed)
     }
 
+    /// #10512 scoped HA deletes refused on identity mismatch.
+    pub fn session_delete_refused_identity_total(&self) -> u64 {
+        self.sessions.delete_refused_identity.load(Ordering::Relaxed)
+    }
+
     /// #10512: micro-batches that reached a Finalizing gate lease (holds
     /// recorded). Average hold = `policy_batch_hold_ns_total / count`.
     pub fn policy_batch_count_total(&self) -> u64 {

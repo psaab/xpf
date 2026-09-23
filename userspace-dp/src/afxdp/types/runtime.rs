@@ -704,6 +704,18 @@ pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
+    /// #10512 scoped HA delete: like `DeleteSynced`, but the worker removes
+    /// the entry ONLY when its live session id still matches — a
+    /// replacement installed after the shared remove (queue delay) keeps
+    /// its row. The coordinator-derived reverse companion rides along and
+    /// tears down in the SAME handler after a forward match — never a
+    /// standalone command (a declined forward must leave the reverse
+    /// untouched, or a replacement's reverse dies with it).
+    DeleteSyncedConditional {
+        key: SessionKey,
+        expected_id: u64,
+        companion: Option<SessionKey>,
+    },
     DeletePolicyBatch {
         items: Vec<PolicyDeleteItem>,
         /// Per-worker applied slot: `applied[i]` when THIS worker removed

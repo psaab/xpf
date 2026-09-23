@@ -9030,3 +9030,139 @@ fn policy_batch_mapless_intent_still_retires_registry_10512() {
         "normal path must run the shared loop past execution"
     );
 }
+
+/// #10512 scoped HA delete, matched: the entry carrying the captured
+/// identity is removed (Applied), and the worker fan-out carries the
+/// conditional command with the coordinator-derived companion (no
+/// standalone reverse).
+#[test]
+fn scoped_peer_delete_matched_removes_and_fans_out_conditional_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(232, 43293, 53293, 0xF10512, 0xC10512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(
+            fixture.forward.key.clone(),
+            false,
+            fixture.forward.session_id,
+        );
+    // Applied in production; RefusedMirrorDelete here (no BPF fds in unit
+    // tests, and scoped deletes are mirror-strict). Either way the
+    // identity matched and the shared removal + fan-out below ran.
+    assert!(
+        matches!(
+            outcome,
+            SyncedDeleteOutcome::Applied | SyncedDeleteOutcome::RefusedMirrorDelete
+        ),
+        "matched scoped delete must apply (modulo test-env mirror), got {outcome:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "matched forward row must be gone"
+    );
+    let queued: Vec<WorkerCommand> = commands.lock().expect("commands").drain(..).collect();
+    assert_eq!(queued.len(), 1, "exactly the conditional fan-out, got {queued:?}");
+    match &queued[0] {
+        WorkerCommand::DeleteSyncedConditional {
+            key,
+            expected_id,
+            companion,
+        } => {
+            assert_eq!(key, &fixture.forward.key, "command must name the forward");
+            assert_eq!(
+                *expected_id, fixture.forward.session_id,
+                "command must carry the captured identity"
+            );
+            assert_eq!(
+                companion.as_ref(),
+                Some(&fixture.reverse.key),
+                "command must carry the derived companion (no standalone reverse)"
+            );
+        }
+        other => panic!("expected DeleteSyncedConditional, got {other:?}"),
+    }
+}
+
+/// #10512 scoped HA delete, mismatched: a live different incarnation
+/// survives (RefusedIdentity + counter), shared and worker state untouched.
+#[test]
+fn scoped_peer_delete_mismatched_survives_and_counts_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(233, 43393, 53393, 0xF20512, 0xC20512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let before = fixture
+        .coordinator
+        .session_delete_refused_identity_total();
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(
+            fixture.forward.key.clone(),
+            false,
+            0xDEADBEEF,
+        );
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
+        "mismatched scoped delete must refuse identity, got {outcome:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "live entry must survive a mismatched delete"
+    );
+    assert_eq!(
+        fixture
+            .coordinator
+            .session_delete_refused_identity_total(),
+        before + 1,
+        "identity refusal must count"
+    );
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "a refused delete must fan out nothing"
+    );
+}
+
+/// #10512 scoped HA delete, absent forward: StaleForward with NO side
+/// effects — no worker fan-out (BPF cleanup would erase a live row in a
+/// publish-before-shared window, so the short-circuit precedes it).
+#[test]
+fn scoped_peer_delete_absent_is_stale_without_side_effects_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(234, 43493, 53493, 0xF30512, 0xC30512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let mut missing = fixture.forward.key.clone();
+    missing.src_port = missing.src_port.wrapping_add(1);
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(missing, false, 0xF30512);
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::StaleForward),
+        "absent scoped delete must be StaleForward, got {outcome:?}"
+    );
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "an absent scoped delete must fan out nothing"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "an absent scoped delete must touch nothing"
+    );
+}

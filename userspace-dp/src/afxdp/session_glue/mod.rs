@@ -1424,6 +1424,21 @@ pub(super) fn apply_worker_commands(
                     worker_id,
                 );
             }
+            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion } => {
+                commands::handle_delete_synced_conditional(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    key,
+                    expected_id,
+                    now_ns,
+                    now_secs,
+                    &mut deleted_synced_keys,
+                    worker_id,
+                    companion,
+                );
+            }
             WorkerCommand::DeletePolicyBatch {
                 items,
                 applied,

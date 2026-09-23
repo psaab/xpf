@@ -13146,3 +13146,157 @@ fn policy_delete_batch_arm_stashes_intents_without_bpf_10512() {
         "arm must issue no BPF under or after the fence"
     );
 }
+
+/// #10512 scoped HA worker race: a queued conditional delete arriving after
+/// a same-key replacement must decline — BOTH the forward replacement and
+/// its reverse survive (no standalone reverse fires for scoped deletes).
+#[test]
+fn scoped_worker_delete_mismatched_keeps_both_halves_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut companion_metadata = test_metadata();
+    companion_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        companion_metadata.clone(),
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let stale_forward_id = sessions.session_id_for(&key);
+    // Replacement installs before the queued delete drains: same keys, new
+    // incarnations.
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        companion_metadata,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let live_forward_id = sessions.session_id_for(&key);
+    let live_companion_id = sessions.session_id_for(&companion);
+    assert_ne!(live_forward_id, stale_forward_id, "reinstall must re-identify");
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .expect("commands lock")
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: stale_forward_id,
+            companion: Some(companion.clone()),
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        live_forward_id,
+        "replacement forward must survive a stale conditional delete"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        live_companion_id,
+        "replacement reverse must survive: no standalone reverse fires when the forward declines"
+    );
+}
+
+/// #10512 scoped HA worker apply: a matched conditional delete removes
+/// both the forward and its carried companion in the one handler.
+#[test]
+fn scoped_worker_delete_matched_removes_both_halves_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut companion_metadata = test_metadata();
+    companion_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        companion_metadata,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let forward_id = sessions.session_id_for(&key);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .expect("commands lock")
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: forward_id,
+            companion: Some(companion.clone()),
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        0,
+        "matched forward must be gone"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        0,
+        "carried companion must be gone with its matched forward"
+    );
+}

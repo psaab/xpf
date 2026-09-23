@@ -97,7 +97,7 @@ pub(super) fn handle(
             // it is exact, not a guess.
             if !matches!(
                 sync_req.operation.as_str(),
-                "delete" | "mirror_delete" | "mirror_delete_batch"
+                "delete" | "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
             ) {
                 domain.note_unknown_routing_domain_import();
                 response.ok = false;
@@ -116,6 +116,7 @@ pub(super) fn handle(
             | "mirror_delete_batch"
             | "mirror_clear_chunk"
             | "mirror_delete_policy_batch"
+            | "mirror_delete_scoped"
     );
     if epoch_scoped && !domain.accepts_helper_epoch(sync_req.helper_epoch) {
         response.ok = false;
@@ -125,7 +126,7 @@ pub(super) fn handle(
     // Exact `(epoch, operation_id, mutation_id)` replays return the recorded
     // response summary. A new operation id carrying a known mutation id is a
     // repair/retry-after-unknown-outcome and deliberately proceeds.
-    let mutation_lease = if epoch_scoped
+    let mut mutation_lease = if epoch_scoped
         && !sync_req.operation_id.is_empty()
         && !sync_req.mutation_id.is_empty()
     {
@@ -148,6 +149,18 @@ pub(super) fn handle(
     } else {
         None
     };
+    // #10512 scoped verb requires its identity (plan §2.1: zero forward id
+    // is identity-missing, never an unconditional delete). Fail fast before
+    // key building; the mutation lease completes here (taken, so the tail
+    // below no-ops) exactly as on the success path.
+    if sync_req.operation.as_str() == "mirror_delete_scoped" && sync_req.session_id == 0 {
+        response.ok = false;
+        response.error = "identity-missing".to_string();
+        if let Some(lease) = mutation_lease.take() {
+            lease.complete(crate::afxdp::HelperMutationOutcome::from_response(response));
+        }
+        return;
+    }
     match sync_req.operation.as_str() {
         "upsert" | "mirror_upsert" | "mirror_publish_only" if resolved_domain.is_none() => {
             domain.note_unknown_routing_domain_import();
@@ -282,22 +295,31 @@ pub(super) fn handle(
         // the 5-tuple did not already name. Two different fields, one rule —
         // fail closed where an identity is PUBLISHED, fail open where one is
         // only RETRACTED.
-        "delete" | "mirror_delete" | "mirror_delete_batch" => match build_synced_session_key(
+        "delete" | "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped" => match build_synced_session_key(
             &sync_req,
             resolved_domain.unwrap_or(0),
             SyncedKeyIntent::Delete,
         ) {
             Ok(key) => {
                 let forward_only = sync_req.forward_only;
+                let scoped = sync_req.operation.as_str() == "mirror_delete_scoped";
                 let strict_mirror = matches!(
                     sync_req.operation.as_str(),
-                    "mirror_delete" | "mirror_delete_batch"
+                    "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
                 );
                 let mut mirror_delete_error = false;
                 let mut delete = |key| {
                     let outcome = if sync_req.peer_delete {
                         if strict_mirror {
-                            domain.delete_peer_synced_session_mirror(key, forward_only)
+                            if scoped {
+                                domain.delete_peer_synced_session_mirror_scoped(
+                                    key,
+                                    forward_only,
+                                    sync_req.session_id,
+                                )
+                            } else {
+                                domain.delete_peer_synced_session_mirror(key, forward_only)
+                            }
                         } else {
                             domain.delete_peer_synced_session(key, forward_only)
                         }
