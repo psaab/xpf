@@ -7046,6 +7046,61 @@ mod routing_domain_delete_7160 {
         );
     }
 
+    /// Policy-list with no request body fails closed (missing, never an
+    /// unbounded scan).
+    #[test]
+    fn policy_list_missing_request_fails_closed_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let list = req("list_sessions_by_policy");
+        let response = run_request(state.clone(), list);
+        assert!(
+            !response.ok && response.error.contains("missing session policy list request"),
+            "missing body must fail closed, got ok={} err={:?}",
+            response.ok,
+            response.error
+        );
+    }
+
+    /// Empty policy ids through the full server path return the
+    /// authoritative empty (complete, no matches, no continuation) —
+    /// pins socket → handler → coordinator → response delegation.
+    #[test]
+    fn policy_list_empty_ids_authoritative_empty_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut list = req("list_sessions_by_policy");
+        list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
+            policy_ids: Vec::new(),
+            mode: "prepublish".to_string(),
+            ..Default::default()
+        });
+        let response = run_request(state.clone(), list);
+        assert!(response.ok, "authoritative empty must be ok: {:?}", response.error);
+        assert!(
+            response.session_policy_complete,
+            "empty ids must complete"
+        );
+        assert!(
+            response.session_policy_matches.is_empty(),
+            "empty ids must match nothing"
+        );
+        assert!(
+            response.session_policy_continuation.is_empty(),
+            "empty ids continue nothing"
+        );
+    }
+
     /// Default-domain scoped delete amid a tenant collision: only the
     /// default row goes (stated domain 1 selects it exactly).
     #[test]

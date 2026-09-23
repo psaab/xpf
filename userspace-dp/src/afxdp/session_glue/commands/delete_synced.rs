@@ -276,7 +276,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_conditional(
         companion,
     );
 }
-fn handle_delete_synced_with_guard(
+pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
@@ -423,13 +423,16 @@ fn handle_delete_synced_with_guard(
                 worker_id,
             });
         }
-    } else {
+    } else if remove_mirror {
         // #9560 round 3: the local entry is already gone, so there is no decision to
         // derive this session's rows from — and the bare key is only ONE of them. Its
         // NAT and forward-wire aliases were claimed by this worker too, and releasing
         // just the key left them claimed by a holder that will never name them again.
         release_all_session_rows(session_map, &key);
     }
+    // Deferred mode (remove_mirror == false): the already-gone branch
+    // issues NO BPF here — phase 2 executes the covering forward intent
+    // instead ("NO BPF under this fence, ever").
     // Scoped companion (see param doc): same-handler teardown after the
     // forward, unconditional (legacy parity — the standalone reverse
     // command it replaces never checked either). Reached only when the

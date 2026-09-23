@@ -1160,6 +1160,12 @@ impl crate::afxdp::ha::SessionDomain {
         forward_only: bool,
         expected_id: u64,
     ) -> SyncedDeleteOutcome {
+        // Fail closed: zero is identity-missing (plan §2.1), never an
+        // unconditional delete. The callee treats 0 as "no check" for
+        // legacy callers; this scoped entry point must not inherit that.
+        if expected_id == 0 {
+            return SyncedDeleteOutcome::RefusedIdentity;
+        }
         self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true, expected_id)
     }
 

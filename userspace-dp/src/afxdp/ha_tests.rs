@@ -9166,3 +9166,293 @@ fn scoped_peer_delete_absent_is_stale_without_side_effects_10512() {
         "an absent scoped delete must touch nothing"
     );
 }
+
+/// #10512 scoped entry with zero identity refuses WITHOUT touching the
+/// table: 0 is identity-missing (plan §2.1), and the callee's legacy
+/// "0 disables the check" must not leak through this API.
+#[test]
+fn scoped_peer_delete_zero_identity_refuses_without_side_effects_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(235, 43593, 53593, 0xF40512, 0xC40512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(fixture.forward.key.clone(), false, 0);
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
+        "zero-identity scoped delete must refuse, got {outcome:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "a zero-identity scoped delete must touch nothing"
+    );
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "a zero-identity scoped delete must fan out nothing"
+    );
+}
+
+/// Pump every listed worker queue once through the real dispatch loop.
+fn pump_list_queues10512(
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+) {
+    for (q, t) in queues.iter().zip(tables.iter_mut()) {
+        if q.lock().expect("queue").is_empty() {
+            continue;
+        }
+        let forwarding = ForwardingState::default();
+        let ha_state = BTreeMap::new();
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        crate::afxdp::session_glue::apply_worker_commands(
+            q,
+            t,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &neighbors,
+            0,
+            &mut VecDeque::new(),
+        );
+    }
+}
+
+/// Run list_sessions_by_policy on a thread while the main thread pumps
+/// the worker queues until it returns. Deterministic: the pump runs
+/// until the call finishes, so acks always land before the 250ms
+/// worker-ack deadline (duration varies, outcome does not).
+fn call_list_with_pump10512(
+    domain: &super::ha::SessionDomain,
+    req: &crate::protocol::SessionPolicyListRequest,
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+) -> (
+    Vec<crate::protocol::SessionPolicyMatch>,
+    bool,
+    Vec<String>,
+    String,
+) {
+    let d = domain.clone();
+    let r = req.clone();
+    let handle = std::thread::spawn(move || d.list_sessions_by_policy(&r));
+    while !handle.is_finished() {
+        pump_list_queues10512(queues, tables);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    handle.join().expect("list thread")
+}
+
+fn install_list_row10512(
+    sessions: &mut SessionTable,
+    key: &SessionKey,
+    policy_id: u32,
+    now_ns: u64,
+) {
+    let mut meta = test_metadata();
+    meta.policy_id = policy_id;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        meta,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+}
+
+fn list_req_ha10512(policy_ids: Vec<u32>) -> crate::protocol::SessionPolicyListRequest {
+    crate::protocol::SessionPolicyListRequest {
+        policy_ids,
+        mode: "prepublish".to_string(),
+        before_secs: None,
+        families: Vec::new(),
+        classes: Vec::new(),
+        continuation: String::new(),
+        ..Default::default()
+    }
+}
+
+/// Coordinator fan-out merges rows across workers and dedups the same
+/// (key, identity) replica found in two tables.
+#[test]
+fn coord_list_fans_out_merges_and_dedups_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut coordinator = Coordinator::new();
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    let q1 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+    coordinator.workers.register(
+        1,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q1.clone())),
+        None,
+    );
+    let mut t0 = SessionTable::new();
+    let mut t1 = SessionTable::new();
+    let shared = test_key();
+    install_list_row10512(&mut t0, &shared, 5, now_ns);
+    // Same key first-installed in the second table: both fresh tables
+    // mint id 1, so this is a true (key, id) replica.
+    install_list_row10512(&mut t1, &shared, 5, now_ns);
+    let mut other = test_key();
+    other.src_port = other.src_port.wrapping_add(7);
+    install_list_row10512(&mut t1, &other, 6, now_ns);
+
+    let domain = coordinator.session_domain();
+    let (rows, complete, errs, cont) = call_list_with_pump10512(
+        &domain,
+        &list_req_ha10512(vec![5, 6]),
+        &[q0, q1],
+        &mut [t0, t1],
+    );
+    assert!(errs.is_empty(), "clean fan-out must error nothing, got {errs:?}");
+    assert!(complete, "pumped fan-out must complete");
+    assert!(cont.is_empty(), "two rows need no continuation");
+    assert_eq!(rows.len(), 2, "merged rows with the replica deduped");
+    let mut policies: Vec<u32> = rows.iter().map(|r| r.policy_id).collect();
+    policies.sort_unstable();
+    assert_eq!(policies, vec![5, 6]);
+}
+
+/// Coordinator pages beyond 4096 rows: first page + continuation, then
+/// the terminal page (complete, no continuation).
+#[test]
+fn coord_list_pages_beyond_4096_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut coordinator = Coordinator::new();
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+    let mut table = SessionTable::new();
+    for i in 0..4100u32 {
+        let mut key = test_key();
+        key.src_port = 10000u16.wrapping_add(i as u16);
+        install_list_row10512(&mut table, &key, 5, now_ns);
+    }
+    let domain = coordinator.session_domain();
+    let (page1, complete1, errs1, cont1) = call_list_with_pump10512(
+        &domain,
+        &list_req_ha10512(vec![5]),
+        std::slice::from_ref(&q0),
+        std::slice::from_mut(&mut table),
+    );
+    assert!(errs1.is_empty(), "page 1 must error nothing, got {errs1:?}");
+    assert_eq!(page1.len(), 4096, "first page holds PAGE_ROWS");
+    assert!(!complete1, "partial page must not report complete");
+    assert!(!cont1.is_empty(), "partial page must continue");
+    // Terminal page needs no pump (continuation resumes the capture).
+    let mut req2 = list_req_ha10512(vec![5]);
+    req2.continuation = cont1;
+    let (page2, complete2, errs2, cont2) = domain.list_sessions_by_policy(&req2);
+    assert!(errs2.is_empty(), "page 2 must error nothing, got {errs2:?}");
+    assert_eq!(page2.len(), 4, "terminal page holds the rest");
+    assert!(complete2, "terminal page must complete");
+    assert!(cont2.is_empty(), "terminal page continues nothing");
+    let mut ids: std::collections::HashSet<u64> = page1
+        .iter()
+        .chain(page2.iter())
+        .map(|r| r.expected_rt_flow_session_id)
+        .collect();
+    assert_eq!(ids.len(), 4100, "all rows distinct across pages");
+}
+
+/// An unpumped (stalled) worker trips the 250ms ack deadline: the READ
+/// is incomplete with a worker-ack-timeout error, never a hang.
+#[test]
+fn coord_list_unacked_worker_times_out_incomplete_10512() {
+    let mut coordinator = Coordinator::new();
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+    let domain = coordinator.session_domain();
+    let (rows, complete, errs, _) = domain.list_sessions_by_policy(&list_req_ha10512(vec![5]));
+    assert!(rows.is_empty(), "unacked scan must return no rows");
+    assert!(!complete, "unacked scan must not complete");
+    assert!(
+        errs.iter().any(|e| e.starts_with("worker-ack-timeout")),
+        "unacked scan must name the timeout, got {errs:?}"
+    );
+}
+
+/// Empty policy ids return the authoritative empty without fanning out
+/// (no workers needed, no errors).
+#[test]
+fn coord_list_empty_ids_returns_authoritative_empty_10512() {
+    let coordinator = Coordinator::new();
+    let domain = coordinator.session_domain();
+    let (rows, complete, errs, cont) = domain.list_sessions_by_policy(&list_req_ha10512(Vec::new()));
+    assert!(rows.is_empty());
+    assert!(complete, "empty ids must complete");
+    assert!(errs.is_empty(), "empty ids must error nothing, got {errs:?}");
+    assert!(cont.is_empty());
+}
+
+/// clear_mirror enumerates helper-owned rows natively: the same bare
+/// tuple in two routing domains are distinct keys and one clear
+/// removes every row, leaving all shared maps empty (#5304).
+#[test]
+fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
+    let coordinator = Coordinator::new();
+    let base = test_key();
+    for domain in [7u32, 8u32] {
+        let mut key = base.clone();
+        key.routing_domain = domain;
+        let entry = SyncedSessionEntry {
+            key,
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xC1EA9000 + domain as u64,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &entry,
+        );
+    }
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("synced").len(),
+        2,
+        "fixture must hold both domain rows"
+    );
+    let domain = coordinator.session_domain();
+    let counts = domain.clear_mirror().expect("clear must succeed");
+    assert_eq!(counts, (0, 0), "no BPF maps bound in unit tests");
+    assert!(
+        coordinator.sessions.synced.lock().expect("synced").is_empty(),
+        "clear must empty the shared synced map"
+    );
+    assert!(
+        coordinator.sessions.nat.lock().expect("nat").is_empty(),
+        "clear must empty the shared nat map"
+    );
+    assert!(
+        coordinator.sessions.forward_wire.lock().expect("wire").is_empty(),
+        "clear must empty the shared forward-wire map"
+    );
+}

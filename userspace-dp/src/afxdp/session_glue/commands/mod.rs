@@ -20,6 +20,10 @@ pub(in crate::afxdp::session_glue) use delete_synced::{
     handle_remove_policy_item,
 };
 pub(in crate::afxdp::session_glue) use demote_owner_rgs::handle_demote_owner_rgs;
+// Fence-invariant cell (deferred-absent issues no BPF): direct access to
+// the guard; production callers use the wrappers above.
+#[cfg(test)]
+pub(in crate::afxdp::session_glue) use delete_synced::handle_delete_synced_with_guard;
 pub(in crate::afxdp::session_glue) use export_owner_rg_sessions::handle_export_owner_rg_sessions;
 pub(in crate::afxdp::session_glue) use refresh_owner_rgs::handle_refresh_owner_rgs;
 pub(in crate::afxdp::session_glue) use upsert_synced::handle_upsert_synced;

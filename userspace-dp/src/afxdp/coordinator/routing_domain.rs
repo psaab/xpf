@@ -47,15 +47,6 @@ impl Coordinator {
             .map_or(0, |entry| entry.session_id)
     }
 
-    /// Test seam: every key in the shared synced map.
-    #[cfg(test)]
-    pub(crate) fn synced_session_keys_for_test(&self) -> Vec<crate::session::SessionKey> {
-        crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced)
-            .keys()
-            .cloned()
-            .collect()
-    }
-
     /// Test seam: the routing domains of every entry in the shared synced map.
     /// A count cannot tell "imported under the domain the sender stated" from
     /// "imported under the one this node derived", and that distinction is the

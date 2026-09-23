@@ -13300,3 +13300,251 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
         "carried companion must be gone with its matched forward"
     );
 }
+
+/// Deferred-absent issues no BPF: with remove_mirror == false the
+/// already-gone branch must not touch the kernel map — phase 2 executes
+/// the covering forward intent instead ("NO BPF under this fence, ever").
+#[test]
+fn deferred_absent_branch_issues_no_bpf_10512() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key(); // never installed: absent
+    let map = SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD);
+    let mut deleted_keys = Vec::new();
+    let mut deferred = Vec::new();
+    clear_session_map_writes();
+    super::commands::handle_delete_synced_with_guard(
+        &mut sessions,
+        map,
+        &ForwardingState::default(),
+        &BTreeMap::new(),
+        key,
+        now_ns,
+        now_ns / 1_000_000_000,
+        &mut deleted_keys,
+        0,
+        false,
+        false,
+        &mut deferred,
+        0,
+        None,
+    );
+    assert!(
+        session_map_writes().is_empty(),
+        "deferred absent branch must issue no BPF"
+    );
+    assert!(
+        deferred.is_empty(),
+        "absent branch queues no phase-2 intent"
+    );
+}
+
+/// Drive one ListSessionsByPolicy worker command through the real
+/// dispatch loop; returns (rows, errors, pending-left).
+fn run_list_scan10512(
+    sessions: &mut SessionTable,
+    req: crate::protocol::SessionPolicyListRequest,
+) -> (
+    Vec<crate::protocol::SessionPolicyMatch>,
+    Vec<String>,
+    usize,
+) {
+    let collected = Arc::new(Mutex::new(crate::afxdp::PolicyReadCollector::default()));
+    let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let pending = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let commands = Arc::new(Mutex::new(VecDeque::from([
+        crate::afxdp::WorkerCommand::ListSessionsByPolicy {
+            request: req,
+            collected: Arc::clone(&collected),
+            overflow: Arc::clone(&overflow),
+            errors: Arc::clone(&errors),
+            pending: Arc::clone(&pending),
+        },
+    ])));
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    let rows = collected
+        .lock()
+        .expect("collector")
+        .take_rows();
+    let errs = errors.lock().expect("errors").clone();
+    let left = pending.load(Ordering::Acquire);
+    (rows, errs, left)
+}
+
+fn list_req10512(
+    policy_ids: Vec<u32>,
+    mode: &str,
+    before_secs: Option<u64>,
+    classes: Vec<String>,
+) -> crate::protocol::SessionPolicyListRequest {
+    crate::protocol::SessionPolicyListRequest {
+        policy_ids,
+        mode: mode.to_string(),
+        before_secs,
+        families: Vec::new(),
+        classes,
+        continuation: String::new(),
+        ..Default::default()
+    }
+}
+
+/// Worker scan returns only the requested policy, carrying the live
+/// RT_FLOW identity the conditional delete needs. Zero policy ids are
+/// never wanted (no wildcard row).
+#[test]
+fn worker_list_returns_matching_policy_with_identity_10512() {
+    let now_ns = monotonic_nanos();
+    let mut sessions = SessionTable::new();
+    let key5 = test_key();
+    let mut key6 = test_key();
+    key6.src_port = key6.src_port.wrapping_add(1);
+    let mut meta5 = test_metadata();
+    meta5.policy_id = 5;
+    let mut meta6 = test_metadata();
+    meta6.policy_id = 6;
+    assert!(sessions.install_with_protocol_with_origin(
+        key5.clone(),
+        test_decision(),
+        meta5,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        key6.clone(),
+        test_decision(),
+        meta6,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let live5 = sessions.session_id_for(&key5);
+    assert_ne!(live5, 0, "fixture must mint a live identity");
+    let (rows, errs, left) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, Vec::new()),
+    );
+    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert_eq!(left, 0, "worker must ack the scan");
+    assert_eq!(rows.len(), 1, "only the requested policy is returned");
+    assert_eq!(rows[0].policy_id, 5);
+    assert_eq!(
+        rows[0].expected_rt_flow_session_id, live5,
+        "row must carry the live identity"
+    );
+}
+
+/// Legacy cutoff: created after before_secs is fenced; zero is
+/// unbounded; None in legacy mode errors without scanning.
+#[test]
+fn worker_list_legacy_cutoff_zero_unbounded_nil_rejected_10512() {
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let mut meta = test_metadata();
+    meta.policy_id = 5;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        meta,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    // Created "now" >> 1: fenced out.
+    let (rows, _, left) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", Some(1), Vec::new()),
+    );
+    assert!(rows.is_empty(), "row created after the fence must be cut");
+    assert_eq!(left, 0, "fenced scan still acks");
+    // Zero: unbounded, returned.
+    let (rows, _, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", Some(0), Vec::new()),
+    );
+    assert_eq!(rows.len(), 1, "zero before_secs must be unbounded");
+    // Far future: returned.
+    let (rows, _, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", Some(now_secs + 3600), Vec::new()),
+    );
+    assert_eq!(rows.len(), 1, "row created before the fence must return");
+    // None in legacy mode: caller bug, error, no scan.
+    let (rows, errs, left) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", None, Vec::new()),
+    );
+    assert!(rows.is_empty(), "nil-fence scan must return nothing");
+    assert!(
+        errs.iter().any(|e| e == "legacy-before-secs-missing"),
+        "nil fence must error, got {errs:?}"
+    );
+    assert_eq!(left, 0, "rejected scan still acks");
+}
+
+/// Classes:["forward"] excludes reverse rows from discovery (the
+/// producers' contract — the delete expands companions itself).
+#[test]
+fn worker_list_forward_class_excludes_reverse_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let mut fwd_meta = test_metadata();
+    fwd_meta.policy_id = 5;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        fwd_meta,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let rev = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut rev_meta = test_metadata();
+    rev_meta.policy_id = 5;
+    rev_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        rev,
+        test_decision(),
+        rev_meta,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let live = sessions.session_id_for(&key);
+    let (rows, errs, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, vec!["forward".to_string()]),
+    );
+    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert_eq!(rows.len(), 1, "only the forward row is discovered");
+    assert_eq!(
+        rows[0].expected_rt_flow_session_id, live,
+        "the discovered row must be the forward"
+    );
+}
