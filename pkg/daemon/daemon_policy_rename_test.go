@@ -698,10 +698,10 @@ func TestZoneNamesByIDRejectsCollisions10592(t *testing.T) {
 
 // N3d-query: port-scoped rematch through the evaluator. The renamed rule
 // admits only junos-https (TCP/443): 443 retains, 444 falls to default-deny.
-// Dropping networkPort at the rematch query sites (:356/:389) breaks the
+// Dropping networkPort at the rematch query sites (:361/:394) breaks the
 // app match (ports arrive network-order) and flips both directions.
 // N3d-DNAT: the rematch query consults the TRANSLATED port for DNAT rows
-// (daemon_policy_rename.go:360/:392), while the record keeps wire ports. The
+// (daemon_policy_rename.go:365/:397), while the record keeps wire ports. The
 // renamed rule admits only junos-https (TCP/443): a row translated to 443
 // retains even though its wire port is 444; translated 444 denies. Dropping
 // the translated-port consult queries wire 444 for both and flips retained→denied.
@@ -774,7 +774,7 @@ func TestRematchPortScopedV4V610592(t *testing.T) {
 	}
 	// Wire-native ports (BPF yields network bytes read natively): host 443
 	// arrives as 0xBB01, host 444 as 0xBC01. Dropping networkPort at the
-	// rematch query sites (:356/:389) breaks the app match both ways.
+	// rematch query sites (:361/:394) breaks the app match both ways.
 	v4key := func(wirePort uint16) dataplane.SessionKey {
 		return dataplane.SessionKey{
 			SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
