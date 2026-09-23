@@ -573,6 +573,21 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                 }
             }
         };
+    // #10605: tunnel-egress decisions are endpoint-pinned and table-free — the
+    // miss path stamps them (0,0) by rule (`install_table_stamp_for_miss`),
+    // not by absence of a PBR term. Re-deriving the PBR term's identity here
+    // would mismatch the installed (0,0) on EVERY first hit (install leaves
+    // the stamp UNVALIDATED, so the second packet always revalidates) and
+    // revoke every PBR-steered tunnel flow on its second packet. Mirror the
+    // miss rule: a tunneled decision wants (0,0), unresolvable or not (the
+    // tunnel never consulted the table, so there is no table identity to go
+    // stale — exactly the miss arm's `else (0,0)`).
+    let (desired_identity, table, native_unresolvable) =
+        if decision.resolution.tunnel_endpoint_id != 0 {
+            ((0, 0), None, false)
+        } else {
+            (desired_identity, table, native_unresolvable)
+        };
     let target = crate::afxdp::session_glue::resolution_target_for_session(flow, decision);
     if native_unresolvable {
         return Some(SessionHitPbrRouteRevalidation {
