@@ -195,15 +195,19 @@ pub(crate) const WG_STEERED_PORT_SET_MAX: usize = 8;
 /// (`UserspaceCtrl.wg_ports`, programmed from
 /// `ConfigSnapshot.wg_steered_listen_ports`) and hands it to the worker, which
 /// adjudicates the inner packet in the pipeline (#8274). For a steered port a
-/// record reaches this socket only on a path the shim does not cover, and
-/// #8274 deliberately kept delivering it there (docs/log/8274.md, "The
-/// residual, stated rather than closed"). A record for ANY OTHER port is never
+/// record reaches this socket on a path the shim does not cover, or on a
+/// covered path during a degraded window (#9594). Delivery there is
+/// posture-gated, not blanket: only firewall-local inner destinations reach
+/// the TUN; transit is refused and counted (docs/log/8274.md, "The residual,
+/// narrowed by Half A (#10527)"). A record for ANY OTHER port is never
 /// claimed: it reaches the kernel on every path, and writing its plaintext to
 /// the TUN gave an authenticated peer the kernel's forwarding path with no
 /// zone policy, no session and no counters. That write is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WgKernelTransport {
-    /// A steered port: deliver to the TUN, as before #9521.
+    /// A steered port: consult the kernel-path posture, then deliver only
+    /// firewall-local inner destinations to the TUN (#9594 covered/degraded,
+    /// #10527 uncovered — transit drops and counts rx_degraded_transit_drops).
     Deliver,
     /// Any other port: authenticate the record (so key confirmation, the replay
     /// window and endpoint roaming behave as for a keepalive), then drop it and

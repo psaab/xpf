@@ -35,9 +35,12 @@
 //!     type byte. type 1 → `consume_initiation_create_response` + send
 //!     the response; type 2 → `consume_response`; type 3 (cookie) →
 //!     drop+count (S7); type 4 (transport) → `try_decap` (the engine
-//!     AllowedIPs-gates the inner src) → write the plaintext inner IP to
-//!     the `wgN` TUN, where the kernel routes it — ONLY on a steered
-//!     port's thread (#9587: every selected port). Any other port's thread
+//!     AllowedIPs-gates the inner src) → consult the kernel-path posture
+//!     (Covered/Uncovered/Unknown ingress × firewall-local-vs-transit inner:
+//!     local delivers, transit drops+counts #9594/#10527) → write a delivered
+//!     plaintext inner IP to the `wgN` TUN, where the kernel routes it — ONLY
+//!     on a steered port's thread (#9587: every selected port). Any other
+//!     port's thread
 //!     drops the authenticated record and counts
 //!     `rx_unsteered_transport_drops` (#9521), because the kernel would
 //!     forward that plaintext with no zone policy.
