@@ -331,6 +331,7 @@ func TestStatusPartialRepublishStripsConsumedRenameMetadataAfterFIBBump(t *testi
 			sent.PolicyRenameAncestry, sent.PolicySessionRebinds)
 	}
 }
+
 // TestStatusPartialRepublishPreservesRenameMetadataWhenFullPending pins the
 // latch-TRUE (preserve) side of the status-path branch in syncSnapshotLocked
 // (process_status.go): when a FIB bump advanced lastSnapshot.Generation without

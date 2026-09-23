@@ -10,10 +10,12 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/policymatch"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"golang.org/x/sync/semaphore"
+	"net"
 	"strings"
 	"testing"
 )
@@ -623,6 +625,126 @@ func TestApplyAndSyncCommittedSurfacesInvalidationError(t *testing.T) {
 	if got != compiled {
 		t.Fatalf("applyAndSyncCommitted returned config %p, want the committed config %p "+
 			"(a non-fatal invalidation error must not drop the commit)", got, compiled)
+	}
+}
+
+// N3c: capture-level scheduler/feed stamping. The capture loop stamps
+// each binding with policyInactiveFn(newSched) + feedOverlay; these cells pin
+// the OBSERVED capture behavior (renamed iff active+resolving). Feed overlay
+// honoring itself is pinned at unit level below (a populated feed Manager is
+// covered by the feeds package + 5036/9588 tests, not rebuilt here).
+func TestCaptureRenameStampingSchedulerAndFeed10592(t *testing.T) {
+	captureWith := func(t *testing.T, sched *config.SchedulerConfig, feedName string, keepAlternate bool) *policyInvalidationCapture {
+		t.Helper()
+		oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+		newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+		if sched != nil {
+			oldCfg.Security.Policies[1].Policies[0].SchedulerName = sched.Name
+			newCfg.Security.Policies[1].Policies[0].SchedulerName = sched.Name
+			oldCfg.Schedulers = map[string]*config.SchedulerConfig{sched.Name: sched}
+			newCfg.Schedulers = map[string]*config.SchedulerConfig{sched.Name: sched}
+		}
+		if feedName != "" {
+			for _, cfg := range []*config.Config{oldCfg, newCfg} {
+				cfg.Security.Policies[1].Policies[0].Match.SourceAddresses = []string{feedName}
+			}
+		}
+		if !keepAlternate {
+			// Isolate feed/scheduler semantics from alternate-permit fallback.
+			for _, cfg := range []*config.Config{oldCfg, newCfg} {
+				cfg.Security.Policies[1].Policies = cfg.Security.Policies[1].Policies[:1]
+			}
+		}
+		oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+		key := dataplane.SessionKey{
+			SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+			SrcPort: 1234, DstPort: 443, Protocol: 6,
+		}
+		dp := &policyInvalTestDP{
+			v4: map[dataplane.SessionKey]dataplane.SessionValue{
+				key: {
+					State:       dataplane.SessStateEstablished,
+					PolicyID:    oldID,
+					IngressZone: config.StableZoneID("lan"),
+					EgressZone:  config.StableZoneID("wan"),
+				},
+			},
+			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+		}
+		d := &Daemon{}
+		d.setDataplane(dp)
+		d.armPolicyInvalidationPlanWithRename(oldCfg, newCfg, &pendingRenameApply{
+			descriptors: []configstore.RenameDescriptor{
+				policyRenameDescriptor("p-old", "p-new"),
+			},
+		})
+		d.capturePolicyInvalidationLocked(newCfg)
+		capture := d.policyInvalidationCapture
+		if capture == nil {
+			t.Fatal("rename apply did not produce a pre-publication capture")
+		}
+		return capture
+	}
+	t.Run("scheduler-active-retains", func(t *testing.T) {
+		capture := captureWith(t,
+			&config.SchedulerConfig{Name: "biz", Daily: true, AllDay: true}, "", true)
+		if len(capture.renamed) != 1 {
+			t.Fatalf("active-scheduler renamed rows = %d, want 1", len(capture.renamed))
+		}
+	})
+	t.Run("scheduler-inactive-drops", func(t *testing.T) {
+		capture := captureWith(t,
+			&config.SchedulerConfig{Name: "biz", StartDate: "2000-01-01", StopDate: "2000-01-02"}, "", true)
+		// The inactive renamed rule must not retain; retention via the
+		// match-any alternate (no scheduler) is correct and expected.
+		for _, row := range capture.renamed {
+			if row.RuleID == "lan->wan/p-new" {
+				t.Fatalf("inactive-scheduler renamed rule retained: %+v", row)
+			}
+		}
+	})
+	t.Run("feed-unresolved-drops", func(t *testing.T) {
+		// Feed-backed name with a nil feed manager: overlay is nil, the name
+		// cannot resolve, the row is not retained. (populated-Manager
+		// plumbing is covered by feeds + 5036/9588 tests.)
+		capture := captureWith(t, nil, "bad-actors", false)
+		if len(capture.renamed) != 0 {
+			t.Fatalf("unresolved-feed renamed rows = %d, want 0: %+v", len(capture.renamed), capture.renamed)
+		}
+	})
+}
+
+// N3c feed unit: the evaluator honors a hand-injected feed overlay
+// (feed-backed name + overlay resolves) and denies without it. Capture-level
+// stamping of the overlay is pinned by the scheduler matrix above (same loop).
+func TestFeedOverlayRenameEvaluatorUnit10592(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.SourceAddresses = []string{"bad-actors"}
+	}
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")},
+	)
+	if !ok {
+		t.Fatal("valid policy ancestry rejected")
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	binding := bindings[oldID]
+	mkQuery := func() policymatch.Query {
+		return policymatch.Query{
+			FromZone: "lan", ToZone: "wan",
+			SrcIP: net.ParseIP("203.0.113.7"), DstIP: net.ParseIP("10.0.0.20"),
+			Protocol: "tcp", SrcPort: 40000, DstPort: 443,
+		}
+	}
+	withOverlay := binding
+	withOverlay.feedOverlay = map[string][]string{"bad-actors": {"203.0.113.0/24"}}
+	if _, permitted := permittedRenameResult(newCfg, withOverlay, mkQuery()); !permitted {
+		t.Fatal("feed-backed name with overlay was not retained")
+	}
+	if _, permitted := permittedRenameResult(newCfg, binding, mkQuery()); permitted {
+		t.Fatal("feed-backed name without overlay was retained")
 	}
 }
 
