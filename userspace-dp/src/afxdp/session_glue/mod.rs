@@ -2603,7 +2603,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);
         }
-        let metadata = if keep_transient {
+        let metadata = if keep_transient || materialize_install_failed {
             resolved.metadata
         } else {
             maybe_promote_synced_session_with_conntrack(

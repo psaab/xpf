@@ -7710,19 +7710,46 @@ fn resolve_shared_hit_clobber_fixture_10582(
     SessionDecision,
     SessionMetadata,
 ) {
+    resolve_shared_hit_clobber_fixture_with_paths(shared_origin, 99, 12)
+}
+
+fn resolve_shared_hit_clobber_fixture_with_paths(
+    shared_origin: SessionOrigin,
+    incumbent_egress_ifindex: i32,
+    candidate_egress_ifindex: i32,
+) -> (
+    SessionTable,
+    ResolvedFlowSessionDecision,
+    SessionKey,
+    SessionDecision,
+    SessionMetadata,
+) {
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
-        ifindex: 12,
+        ifindex: candidate_egress_ifindex,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });
     forwarding.neighbors.insert(
-        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        (candidate_egress_ifindex, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
         NeighborEntry {
             mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x02],
         },
     );
+    // The candidate path needs a local egress row or live re-resolution
+    // degrades to FabricRedirect (non-promotable) and the fence goes
+    // untested. Mirror 12's WAN row; a no-op for the base (99, 12) pins.
+    forwarding.egress.entry(candidate_egress_ifindex).or_insert(EgressInterface {
+        bind_ifindex: 11,
+        vlan_id: 80,
+        mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
+        zone_id: TEST_WAN_ZONE_ID,
+        redundancy_group: 1,
+        primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+        primary_v6: None,
+    });
     let key = test_key();
     let mut decision = test_decision();
     decision.nat = NatDecision {
@@ -7737,8 +7764,8 @@ fn resolve_shared_hit_clobber_fixture_10582(
         ..test_metadata()
     };
     let mut incumbent_decision = test_decision();
-    incumbent_decision.resolution.egress_ifindex = 99;
-    incumbent_decision.resolution.tx_ifindex = 99;
+    incumbent_decision.resolution.egress_ifindex = incumbent_egress_ifindex;
+    incumbent_decision.resolution.tx_ifindex = incumbent_egress_ifindex;
     let incumbent_metadata = SessionMetadata {
         ingress_zone: 91,
         egress_zone: 92,
@@ -7768,6 +7795,9 @@ fn resolve_shared_hit_clobber_fixture_10582(
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut shared_decision = test_decision();
+    shared_decision.resolution.egress_ifindex = candidate_egress_ifindex;
+    shared_decision.resolution.tx_ifindex = candidate_egress_ifindex;
     shared_forward_wire_sessions
         .lock()
         .expect("shared forward-wire lock")
@@ -7775,7 +7805,7 @@ fn resolve_shared_hit_clobber_fixture_10582(
             wire_key.clone(),
             SyncedSessionEntry {
                 key: key.clone(),
-                decision: test_decision(),
+                decision: shared_decision,
                 metadata: test_metadata(),
                 leak_incarnation: 99,
                 origin: shared_origin,
@@ -7860,10 +7890,10 @@ fn resolve_shared_hit_clobber_sets_install_failed_10582_r4() {
     );
 }
 /// #10613 repro: a promotable shared origin can overwrite the incumbent after
-/// materialization reports `install_failed`; this remains ignored until the
-/// production fix skips promotion on that refusal.
+/// materialization reports `install_failed`. UN-IGNORED: the production fence
+/// (skip promotion on that refusal) makes this cell pass; reverting the fence
+/// must fail it (base pins: incumbent 99 overwritten by live-12 candidate).
 #[test]
-#[ignore = "#10613: resolve promotion overwrites a divergent incumbent after install_failed"]
 fn resolve_shared_hit_sync_import_clobbers_incumbent_10613_repro() {
     let (sessions, resolved, key, incumbent_decision, incumbent_metadata) =
         resolve_shared_hit_clobber_fixture_10582(SessionOrigin::SyncImport);
@@ -7896,6 +7926,271 @@ fn resolve_shared_hit_sync_import_clobbers_incumbent_10613_repro() {
     );
 }
 
+/// Own non-ignored #10613 repro: the locally-owned ForwardFlow incumbent is 12
+/// while the shared SyncImport candidate arrives on the 99 path. Materialization
+/// refuses the canonical clobber, so the refusal must fence SyncImport promotion.
+#[test]
+fn resolve_shared_hit_sync_import_fence_preserves_incumbent_10613() {
+    let (sessions, resolved, key, incumbent_decision, incumbent_metadata) =
+        resolve_shared_hit_clobber_fixture_with_paths(SessionOrigin::SyncImport, 12, 99);
+    assert!(
+        resolved.install_failed,
+        "the refused SyncImport repair must remain non-cacheable"
+    );
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the shared candidate should still resolve promotable via live re-resolution"
+    );
+    let (actual_decision, actual_metadata, actual_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("the canonical incumbent must survive");
+    assert_eq!(
+        actual_decision.resolution.egress_ifindex,
+        incumbent_decision.resolution.egress_ifindex,
+        "the refusal fence must retain the incumbent decision"
+    );
+    assert_eq!(
+        actual_metadata.policy_id,
+        incumbent_metadata.policy_id,
+        "the refusal fence must retain the incumbent metadata"
+    );
+    assert_eq!(
+        actual_origin,
+        SessionOrigin::ForwardFlow,
+        "the refusal fence must retain the incumbent origin"
+    );
+}
+
+/// Worker-local replicas are already non-promotable; the new refusal fence
+/// must not alter their existing safe resolve behavior.
+#[test]
+fn resolve_shared_hit_worker_local_import_stays_safe_10613() {
+    let (sessions, resolved, key, incumbent_decision, incumbent_metadata) =
+        resolve_shared_hit_clobber_fixture_10582(SessionOrigin::WorkerLocalImport);
+    assert!(resolved.install_failed);
+    let (actual_decision, actual_metadata, actual_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("the canonical incumbent must survive");
+    assert_eq!(
+        actual_decision.resolution.egress_ifindex,
+        incumbent_decision.resolution.egress_ifindex
+    );
+    assert_eq!(actual_metadata.policy_id, incumbent_metadata.policy_id);
+    assert_eq!(actual_origin, SessionOrigin::ForwardFlow);
+}
+
+/// SharedMaterialize is the twin promotable origin of SyncImport. A refused
+/// materialization must fence its SharedPromote transition as well.
+#[test]
+fn resolve_shared_materialize_refusal_fences_promotion_10613() {
+    let (sessions, resolved, key, incumbent_decision, incumbent_metadata) =
+        resolve_shared_hit_clobber_fixture_10582(SessionOrigin::SharedMaterialize);
+    assert!(resolved.install_failed);
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "#10613 twin fixture must stay promotable after live re-resolution"
+    );
+    assert_eq!(resolved.origin, SessionOrigin::SharedMaterialize);
+    let (actual_decision, actual_metadata, actual_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("the canonical incumbent must survive");
+    assert_eq!(
+        actual_decision.resolution.egress_ifindex,
+        incumbent_decision.resolution.egress_ifindex
+    );
+    assert_eq!(actual_metadata.policy_id, incumbent_metadata.policy_id);
+    assert_eq!(actual_origin, SessionOrigin::ForwardFlow);
+}
+
+/// #10613 (R3 fixture): no-incumbent twin of
+/// `resolve_shared_hit_clobber_fixture_with_paths` — identical fabric
+/// forwarding (candidate route/neighbor/egress) and identical shared
+/// SyncImport publish, but NO local rows installed. The shared hit therefore
+/// materializes and resolves promotable (ForwardCandidate) instead of
+/// refusing, pinning resolve-level success promotion in the same forwarding
+/// shape the refusal cells use.
+fn resolve_shared_hit_no_incumbent_fixture_10613() -> (
+    SessionTable,
+    ResolvedFlowSessionDecision,
+    SessionKey,
+) {
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x02],
+        },
+    );
+    forwarding.egress.entry(12).or_insert(EgressInterface {
+        bind_ifindex: 11,
+        vlan_id: 80,
+        mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
+        zone_id: TEST_WAN_ZONE_ID,
+        redundancy_group: 1,
+        primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+        primary_v6: None,
+    });
+    let key = test_key();
+    let mut decision = test_decision();
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    };
+    let wire_key = forward_wire_key(&key, decision.nat);
+    let mut sessions = SessionTable::new();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut shared_decision = test_decision();
+    shared_decision.resolution.egress_ifindex = 12;
+    shared_decision.resolution.tx_ifindex = 12;
+    shared_forward_wire_sessions
+        .lock()
+        .expect("shared forward-wire lock")
+        .insert(
+            wire_key.clone(),
+            SyncedSessionEntry {
+                key: key.clone(),
+                decision: shared_decision,
+                metadata: test_metadata(),
+                leak_incarnation: 99,
+                origin: SessionOrigin::SyncImport,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_FLAG_ACK,
+                generation: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+        );
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &[],
+        &forwarding,
+        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+        &Arc::new(ShardedNeighborMap::new()),
+        &SessionFlow {
+            src_ip: wire_key.src_ip,
+            dst_ip: wire_key.dst_ip,
+            forward_key: wire_key,
+        },
+        2_000_000,
+        1_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        24,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("no-incumbent shared hit must resolve");
+    (sessions, resolved, key)
+}
+
+/// #10613 (consumer-lens R3): the shared-hit SUCCESS path must still promote
+/// at resolve level. The demoted-local test pins resolve→promote only for the
+/// local-hit path (empty shared maps); this cell pins shared present +
+/// materialize succeeds → SharedPromote, so a future over-broad fence (e.g.
+/// `|| shared_was_present`) fails loudly instead of killing legit promotion
+/// while every refusal cell stays green.
+#[test]
+fn resolve_shared_hit_success_promotes_at_resolve_10613() {
+    let (sessions, resolved, key) = resolve_shared_hit_no_incumbent_fixture_10613();
+    assert!(
+        !resolved.install_failed,
+        "no incumbent means no refusal; the upsert must succeed"
+    );
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "#10613 success fixture must stay promotable after live re-resolution"
+    );
+    assert_eq!(sessions.len(), 1, "the shared hit must be installed");
+    let (_, _, origin) = sessions
+        .entry_with_origin(&key)
+        .expect("the materialized row must be installed");
+    assert_eq!(
+        origin,
+        SessionOrigin::SharedPromote,
+        "shared-hit success must promote at resolve level"
+    );
+}
+
+/// The incumbent's leak incarnation is evidence for the refused repair and
+/// must remain 41 after the resolve path returns.
+#[test]
+fn resolve_shared_hit_refusal_preserves_leak_41_10613() {
+    let (sessions, resolved, key, _, _) =
+        resolve_shared_hit_clobber_fixture_10582(SessionOrigin::SyncImport);
+    assert!(resolved.install_failed);
+    assert_eq!(sessions.leak_incarnation(&key), Some(41));
+}
+
+/// Direct `maybe_promote` control (helper level, NOT through resolve): a
+/// successful SyncImport still promotes to SharedPromote when the local table
+/// has no incumbent collision. Resolve-level success wiring is pinned by
+/// `resolve_shared_hit_success_promotes_at_resolve_10613`, not here.
+#[test]
+fn sync_import_legitimate_promotion_remains_enabled_10613() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = test_decision();
+    let metadata = test_metadata();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let promoted = maybe_promote_synced_session(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+        },
+        &[],
+        &test_forwarding_state_with_fabric(),
+        &key,
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        false,
+        2_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    );
+    assert_eq!(promoted, metadata);
+    let (_, _, origin) = sessions
+        .entry_with_origin(&key)
+        .expect("the promoted entry must remain installed");
+    assert_eq!(origin, SessionOrigin::SharedPromote);
+}
 
 /// A shared-hit materialization refreshes the local row before policy
 /// revalidation, so the next policy-generation probe sees a real stale target.
