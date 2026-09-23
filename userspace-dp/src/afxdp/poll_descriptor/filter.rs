@@ -810,7 +810,6 @@ pub(super) fn evaluate_input_filter_on_session_hit(
     }
 }
 
-
 /// #7212/#8114: derive the flow's STATIC input-filter verdict and, on a DENY,
 /// re-run the ordinary counted/logged evaluator so the packet is charged to its
 /// matching `then count` terms and produces its `then log` record exactly once.

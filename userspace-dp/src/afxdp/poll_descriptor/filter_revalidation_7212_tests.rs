@@ -358,7 +358,7 @@ fn static_discard_revokes_a_stale_stamped_session_7212() {
     let flow = v4_flow(5201);
     let mut sessions = table_with_session(&flow, 7, None);
 
-    let hit = evaluate_input_filter_on_session_hit(
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
         &forwarding,
         &mut sessions,
         &flow.forward_key,
@@ -366,9 +366,12 @@ fn static_discard_revokes_a_stale_stamped_session_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
-    )
-    .0
-    .expect("a newly-denied stale session must produce a verdict");
+    );
+    let hit = hit.expect("a newly-denied stale session must produce a verdict");
+    assert!(
+        already_counted,
+        "stale DENY must report its counted evaluator"
+    );
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert!(
         hit.revoked_key.as_ref() == Some(&flow.forward_key),
@@ -596,18 +599,41 @@ fn detaching_the_filter_revokes_nothing_7212() {
     let flow = v4_flow(5201);
     let mut sessions = table_with_session(&flow, 7, None);
 
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
+    assert!(hit.is_none());
     assert!(
-        evaluate_input_filter_on_session_hit(
-            &forwarding,
-            &mut sessions,
-            &flow.forward_key,
-            &frame(),
-            Some(&flow),
-            meta(LAN_IFINDEX as u32, 0, false),
-            Some(TEST_LAN_ZONE_ID),
-        )
-        .0
-        .is_none()
+        !already_counted,
+        "no-filter session hit must report no counted evaluator"
+    );
+}
+
+#[test]
+fn no_flow_hit_reports_no_counted_evaluator_10566() {
+    let forwarding =
+        forwarding_with_input_filter(LAN_IFINDEX, false, vec![deny_term("no-5201", "5201")]);
+    let flow = v4_flow(5201);
+    let mut sessions = SessionTable::new();
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        None,
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
+    assert!(hit.is_none(), "no-flow input cannot produce a filter verdict");
+    assert!(
+        !already_counted,
+        "no-flow session hit must report no counted evaluator"
     );
 }
 
@@ -1264,14 +1290,13 @@ fn a_sessionless_resolved_decision_still_applies_a_static_deny_8114() {
     let forwarding =
         forwarding_with_input_filter(LAN_IFINDEX, false, vec![deny_term("no-5201", "5201")]);
     let flow = v4_flow(5201);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
 
     // No install: this is the whole point. The table publishes a live
     // generation, so the ONLY thing that distinguishes this from the
     // established-session cells above is the absence of the entry.
-    let mut sessions = SessionTable::new();
-    sessions.set_filter_revalidation_gen(7);
-
-    let hit = evaluate_input_filter_on_session_hit(
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
         &forwarding,
         &mut sessions,
         &flow.forward_key,
@@ -1279,11 +1304,14 @@ fn a_sessionless_resolved_decision_still_applies_a_static_deny_8114() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
-    )
-    .0
-    .expect(
+    );
+    let hit = hit.expect(
         "a resolved decision with no local entry must still be judged by the \
          ingress filter — master forwarded it",
+    );
+    assert!(
+        already_counted,
+        "NoLocalEntry DENY must report its counted evaluator"
     );
     assert_eq!(
         hit.eval.action,
