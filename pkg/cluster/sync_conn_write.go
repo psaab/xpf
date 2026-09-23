@@ -205,6 +205,78 @@ func (s *SessionSync) QueueDeleteV4(key dataplane.SessionKey, forwardOnly bool) 
 	}
 }
 
+// QueueDeleteScopedV4 queues a SCOPED (domain + expected RT_FLOW id)
+// policy delete (#10512). Gates: #9714 peer-delete ownership AND the
+// scoped capability. UNKNOWN (unlearned) journals as deferred debt —
+// never withheld (withholding here would discard the delete on every
+// disconnect window); only learned-incapable withholds. Scoped is never
+// downgraded to bare. On queue failure the frame journals the same way.
+func (s *SessionSync) QueueDeleteScopedV4(domain uint32, key dataplane.SessionKey, expectedID uint64) {
+	// Identity-missing (plan §2.1): a scoped delete without an identity
+	// names nothing — fail closed LOUDLY before capability checks,
+	// generation draws, or journaling (a frame the receiver would reject
+	// as malformed must never be created).
+	if expectedID == 0 {
+		s.stats.Errors.Add(1)
+		slog.Error("cluster sync: scoped delete without expected identity (caller bug); dropping",
+			"source", "delete_scoped_v4", "domain", domain)
+		return
+	}
+	if s.suppressDeleteForIncapablePeer("delete_scoped_v4") {
+		return
+	}
+	if !s.peerCapabilitiesLearned() {
+		s.enqueueScopedV4(domain, key, expectedID)
+		return
+	}
+	if s.suppressScopedDeleteForIncapablePeer("delete_scoped_v4") {
+		return
+	}
+	s.enqueueScopedV4(domain, key, expectedID)
+}
+
+// enqueueScopedV4 draws a fresh generation, encodes, and queues-or-journals
+// one scoped delete. Shared by the unlearned-defer and capable-send paths
+// (which differ only in gating, decided by the caller).
+func (s *SessionSync) enqueueScopedV4(domain uint32, key dataplane.SessionKey, expectedID uint64) {
+	gen := s.takeDeleteGenScopedV4(domain, key)
+	msg := encodeDeleteScopedV4(key, gen, false, domain, expectedID)
+	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_scoped_v4") {
+		s.journalScopedDelete(msg)
+	}
+}
+
+// QueueDeleteScopedV6 is the IPv6 twin of QueueDeleteScopedV4.
+func (s *SessionSync) QueueDeleteScopedV6(domain uint32, key dataplane.SessionKeyV6, expectedID uint64) {
+	// Identity-missing (plan §2.1): fail closed loudly (see the v4 twin).
+	if expectedID == 0 {
+		s.stats.Errors.Add(1)
+		slog.Error("cluster sync: scoped delete without expected identity (caller bug); dropping",
+			"source", "delete_scoped_v6", "domain", domain)
+		return
+	}
+	if s.suppressDeleteForIncapablePeer("delete_scoped_v6") {
+		return
+	}
+	if !s.peerCapabilitiesLearned() {
+		s.enqueueScopedV6(domain, key, expectedID)
+		return
+	}
+	if s.suppressScopedDeleteForIncapablePeer("delete_scoped_v6") {
+		return
+	}
+	s.enqueueScopedV6(domain, key, expectedID)
+}
+
+// enqueueScopedV6 is the IPv6 twin of enqueueScopedV4.
+func (s *SessionSync) enqueueScopedV6(domain uint32, key dataplane.SessionKeyV6, expectedID uint64) {
+	gen := s.takeDeleteGenScopedV6(domain, key)
+	msg := encodeDeleteScopedV6(key, gen, false, domain, expectedID)
+	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_scoped_v6") {
+		s.journalScopedDelete(msg)
+	}
+}
+
 // suppressForwardOnlyDeleteForIncapablePeer reports whether an outgoing
 // FORWARD-ONLY session delete must be WITHHELD because the peer never
 // advertised capFlagPurgeRetirementForwardOnly (#9752).
@@ -272,14 +344,16 @@ func (s *SessionSync) suppressScopedDeleteForIncapablePeer(source string) bool {
 	return false
 }
 
-// dropScopedDeleteForUnverifiedPeer enforces the #10512 NEVER-downgrade
+// holdScopedDeleteForUnverifiedPeer enforces the #10512 NEVER-downgrade
 // invariant at WRITE time: a scoped delete frame (37/61-byte payload) must
 // never be written unless the CURRENT peer incarnation learned capabilities
-// and advertised the scoped bit. Returns true when the frame was a scoped
-// delete dropped here (counted + warned via the suppressor, which
-// re-checks the same condition — the double-check is harmless); bare
-// frames, non-delete frames, and malformed frames always return false.
-func (s *SessionSync) dropScopedDeleteForUnverifiedPeer(msg []byte) bool {
+// and advertised the scoped bit. UNLEARNED frames are re-journaled as
+// deferred debt (a later learn-trigger flushes them); only
+// LEARNED-INCAPABLE frames are dropped + counted (withhold — that peer
+// will never take them). Returns true when the frame was held here (by
+// either disposition); bare, non-delete, and malformed frames, plus
+// verified scoped frames, return false.
+func (s *SessionSync) holdScopedDeleteForUnverifiedPeer(msg []byte) bool {
 	if len(msg) < syncHeaderSize+1 {
 		return false
 	}
@@ -292,6 +366,12 @@ func (s *SessionSync) dropScopedDeleteForUnverifiedPeer(msg []byte) bool {
 	}
 	if s.peerCapabilitiesLearned() && s.ScopedPolicyDeleteCapable() {
 		return false
+	}
+	if !s.peerCapabilitiesLearned() {
+		// Transient: keep as deferred debt (takes deleteJournalMu; no
+		// reverse edge exists — journal paths never take s.mu/writeMu).
+		s.journalScopedDelete(msg)
+		return true
 	}
 	s.suppressScopedDeleteForIncapablePeer("send_retry")
 	return true
@@ -485,6 +565,41 @@ func (s *SessionSync) journalDelete(msg []byte) {
 	}
 }
 
+// journalScopedDelete stores a scoped delete frame as deferred debt for
+// learn-triggered replay (plan §1.3 literal). Same cap/evict/count/resync
+// discipline as journalDelete, in the separate scoped slice so the bare
+// flush never touches scoped bytes.
+func (s *SessionSync) journalScopedDelete(msg []byte) {
+	s.deleteJournalMu.Lock()
+	cap := s.scopedDeleteJournalCap
+	if cap <= 0 {
+		cap = deleteJournalDefaultCap
+	}
+	armed := false
+	if len(s.scopedDeleteJournal) >= cap {
+		s.scopedDeleteJournal = s.scopedDeleteJournal[1:]
+		s.stats.DeletesDropped.Add(1)
+		armed = s.armDeleteResync()
+	}
+	s.scopedDeleteJournal = append(s.scopedDeleteJournal, msg)
+	s.deleteJournalMu.Unlock()
+	if armed {
+		slog.Warn("cluster sync: scoped delete journal full, evicted oldest delete and armed full bulk resync to reconcile standby",
+			"deletes_dropped_total", s.stats.DeletesDropped.Load(),
+			"journal_cap", cap)
+	}
+
+	// Post-append re-check (learn/flush race): a flush that took an empty
+	// journal just before this append would otherwise strand the debt
+	// with no later trigger (caps arrive once per conn). Flush whenever
+	// learned — the flush itself drops (incapable) or sends (capable);
+	// either ordering settles exactly once (take+nil under the journal
+	// mutex). Unlearned debt waits for the next learn.
+	if s.peerCapabilitiesLearned() {
+		s.flushScopedDeleteJournal()
+	}
+}
+
 func (s *SessionSync) flushDeleteJournal() {
 	s.deleteJournalMu.Lock()
 	journal := s.deleteJournal
@@ -525,6 +640,55 @@ func (s *SessionSync) flushDeleteJournal() {
 		return
 	}
 	slog.Info("cluster sync: flushed delete journal", "total", len(journal), "flushed", flushed)
+}
+
+// flushScopedDeleteJournal replays deferred scoped deletes — ONLY when the
+// current peer positively advertised the scoped bit. Called on the
+// learn-trigger (caps arm); also safe to call spuriously (empty or
+// unverified drains nothing). Unverified (unlearned) debt is RETAINED,
+// not dropped: a later learn-trigger flushes it. Learned-incapable debt
+// is DROPPED + counted (withhold semantics — the peer will never take
+// it; bulk reconcile bounds the resulting staleness). Failed enqueues
+// re-journal the tail like the bare flush.
+func (s *SessionSync) flushScopedDeleteJournal() {
+	if !s.peerCapabilitiesLearned() {
+		return
+	}
+	if hook := s.testBeforeScopedJournalTake; hook != nil {
+		s.testBeforeScopedJournalTake = nil
+		hook()
+	}
+	if !s.ScopedPolicyDeleteCapable() {
+		s.deleteJournalMu.Lock()
+		dropped := len(s.scopedDeleteJournal)
+		s.scopedDeleteJournal = nil
+		s.deleteJournalMu.Unlock()
+		if dropped > 0 {
+			s.stats.DeletesSuppressedScopedPolicy.Add(uint64(dropped))
+			slog.Warn("cluster sync: dropped deferred scoped deletes for an incapable peer",
+				"dropped", dropped)
+		}
+		return
+	}
+	s.deleteJournalMu.Lock()
+	journal := s.scopedDeleteJournal
+	s.scopedDeleteJournal = nil
+	s.deleteJournalMu.Unlock()
+	if len(journal) == 0 {
+		return
+	}
+	var flushed int
+	for i, msg := range journal {
+		if s.queueMessage(msg, &s.stats.DeletesSent, "scoped_journal_flush") {
+			flushed++
+			continue
+		}
+		s.rejournalScopedTail(journal[i:])
+		slog.Warn("cluster sync: scoped delete journal flush could not enqueue, re-journaled un-sent tail",
+			"total", len(journal), "flushed", flushed, "unsent_tail", len(journal)-i)
+		return
+	}
+	slog.Info("cluster sync: flushed scoped delete journal", "total", len(journal), "flushed", flushed)
 }
 
 // rejournalTail re-inserts the un-sent delete tail at the FRONT of the
@@ -578,6 +742,41 @@ func (s *SessionSync) rejournalTail(tail [][]byte) {
 		merged = append(merged, s.deleteJournal[dropped-len(tail):]...)
 	}
 	s.deleteJournal = merged
+}
+
+// rejournalScopedTail is the scoped-journal twin of rejournalTail: FIFO
+// prepend with oldest-first eviction, DeletesDropped counting, and bulk
+// resync arming. The retained deletes replay on the next learn-triggered
+// flush to a capable peer.
+func (s *SessionSync) rejournalScopedTail(tail [][]byte) {
+	if len(tail) == 0 {
+		return
+	}
+	s.deleteJournalMu.Lock()
+	defer s.deleteJournalMu.Unlock()
+	capN := s.scopedDeleteJournalCap
+	if capN <= 0 {
+		capN = deleteJournalDefaultCap
+	}
+	total := len(tail) + len(s.scopedDeleteJournal)
+	if total <= capN {
+		merged := make([][]byte, 0, total)
+		merged = append(merged, tail...)
+		merged = append(merged, s.scopedDeleteJournal...)
+		s.scopedDeleteJournal = merged
+		return
+	}
+	dropped := total - capN
+	s.stats.DeletesDropped.Add(uint64(dropped))
+	s.armDeleteResync() // #5450: see the bare twin.
+	merged := make([][]byte, 0, capN)
+	if dropped < len(tail) {
+		merged = append(merged, tail[dropped:]...)
+		merged = append(merged, s.scopedDeleteJournal...)
+	} else {
+		merged = append(merged, s.scopedDeleteJournal[dropped-len(tail):]...)
+	}
+	s.scopedDeleteJournal = merged
 }
 
 // SendLivenessKeepalive writes a sync-level heartbeat to the active peer
@@ -772,7 +971,7 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 			// is reachable only via reconnect (new conn) since no downgrade
 			// is re-advertised mid-connection. Holding s.mu across a
 			// blocking write would risk deadlock for no safety gain.
-			if s.dropScopedDeleteForUnverifiedPeer(msg) {
+			if s.holdScopedDeleteForUnverifiedPeer(msg) {
 				s.writeMu.Unlock()
 				s.bulkStartMu.Unlock()
 				delivered = true

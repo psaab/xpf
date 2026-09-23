@@ -125,6 +125,14 @@ func (m *mockGCDP) DeleteWithCompanionsV6(key dataplane.SessionKeyV6, reason dat
 	return m.DeleteKnownV6(key, val, reason, false)
 }
 
+func (m *mockGCDP) DeleteClusterScopedV4(dataplane.SessionKey, uint32, uint64) error {
+	return nil // GC never issues scoped deletes; stub satisfies SessionStore.
+}
+
+func (m *mockGCDP) DeleteClusterScopedV6(dataplane.SessionKeyV6, uint32, uint64) error {
+	return nil
+}
+
 func (m *mockGCDP) ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput) (dataplane.ClusterBulkReconcileResult, error) {
 	return dataplane.ClusterBulkReconcileResult{}, nil
 }
@@ -375,6 +383,14 @@ func (s *runtimeDomainSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV
 	return nil
 }
 
+func (s *runtimeDomainSessionStore) DeleteClusterScopedV4(dataplane.SessionKey, uint32, uint64) error {
+	return nil // GC never issues scoped deletes; stub satisfies SessionStore.
+}
+
+func (s *runtimeDomainSessionStore) DeleteClusterScopedV6(dataplane.SessionKeyV6, uint32, uint64) error {
+	return nil
+}
+
 func (s *runtimeDomainSessionStore) ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput) (dataplane.ClusterBulkReconcileResult, error) {
 	return dataplane.ClusterBulkReconcileResult{}, nil
 }
@@ -436,6 +452,14 @@ func (s *partialDeleteSessionStore) DeleteWithCompanionsV4(dataplane.SessionKey,
 	return nil
 }
 func (s *partialDeleteSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason, bool) error {
+	return nil
+}
+
+func (s *partialDeleteSessionStore) DeleteClusterScopedV4(dataplane.SessionKey, uint32, uint64) error {
+	return nil // GC never issues scoped deletes; stub satisfies SessionStore.
+}
+
+func (s *partialDeleteSessionStore) DeleteClusterScopedV6(dataplane.SessionKeyV6, uint32, uint64) error {
 	return nil
 }
 func (s *partialDeleteSessionStore) ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput) (dataplane.ClusterBulkReconcileResult, error) {

@@ -39,12 +39,12 @@ type SessionExportRequest struct {
 }
 
 type SessionPolicyListRequest struct {
-	PolicyIDs    []uint32 `json:"policy_ids,omitempty"`
-	Mode         string   `json:"mode,omitempty"`
-	BeforeSecs   *uint64  `json:"before_secs,omitempty"`
-	Families     []uint8  `json:"families,omitempty"`
-	Classes      []string `json:"classes,omitempty"`
-	Continuation string   `json:"continuation,omitempty"`
+	PolicyIDs    []uint32      `json:"policy_ids,omitempty"`
+	Mode         string        `json:"mode,omitempty"`
+	BeforeSecs   *uint64       `json:"before_secs,omitempty"`
+	Families     WireUint8List `json:"families,omitempty"`
+	Classes      []string      `json:"classes,omitempty"`
+	Continuation string        `json:"continuation,omitempty"`
 }
 
 type SessionPolicyTuple struct {

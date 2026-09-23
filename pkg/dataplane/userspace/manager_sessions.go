@@ -521,6 +521,18 @@ func deleteScopeValV6(routingDomain uint32) *dataplane.SessionValueV6 {
 	return &dataplane.SessionValueV6{RoutingDomain: routingDomain}
 }
 
+// scopedWireDomain encodes a scoped-delete domain for the HA wire (#10512):
+// the scoped verb always STATES its domain (never absent), so domain 0
+// rides as Rust's WIRE_DEFAULT_INSTANCE marker (1, DEFAULT stated) rather
+// than 0 (ABSENT, derive/probe — which could probe another tenant's row
+// on a collision). Nonzero domains ride raw.
+func scopedWireDomain(domain uint32) uint32 {
+	if domain == 0 {
+		return 1
+	}
+	return domain
+}
+
 func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 	// Read the value BEFORE asking the helper to delete so the request names the
 	// session's routing domain and can also delete its pre-installed reverse
@@ -682,6 +694,55 @@ func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey, forwardOnly 
 	return false, nil
 }
 
+// DeletePeerSyncedSessionScoped deletes the session row carrying the
+// expected RT_FLOW identity on behalf of the PEER (#10512). The helper
+// answers FIRST with the explicit domain + identity (no local mirror
+// probe gates it — a probe could misattribute a colliding tuple); it
+// deletes only the matching incarnation and refuses otherwise (keeping
+// rows, reporting true). Scope comes from the wire (authoritative).
+func (m *Manager) DeletePeerSyncedSessionScoped(key dataplane.SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return false, errSessionHelperUnreachable
+	}
+	defer m.mu.Unlock()
+	refused, err := m.syncDeleteScopedV4Locked(key, domain, expectedID)
+	if err != nil {
+		return false, err
+	}
+	if refused {
+		return true, nil
+	}
+	return false, nil
+}
+
+// syncDeleteScopedV4Locked issues one identity-conditional peer delete
+// (#10512) via the distinct mirror_delete_scoped verb with req.session_id
+// = the expected originator identity (NOT the local mirror's id) and
+// scope from the wire domain (NOT a local probe, which could name another
+// tenant's row). A distinct verb, not a mirror_delete flag: the builder
+// already stamps session_id from local values on every request, so
+// presence-gating would condition all peer deletes on the wrong id.
+// ForwardOnly false: the peer derives its own reverse.
+func (m *Manager) syncDeleteScopedV4Locked(key dataplane.SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	if m.proc == nil {
+		return false, errSessionHelperUnreachable
+	}
+	req := m.buildSessionSyncRequestV4("mirror_delete_scoped", key, deleteScopeVal(domain))
+	req.PeerDelete = true
+	req.RTFlowSessionID = expectedID
+	req.RoutingDomain = scopedWireDomain(domain)
+	err := m.syncSessionRequestLocked(req)
+	if err != nil {
+		if peerDeleteRefused(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
 // DeletePeerSyncedSessionV6 is the IPv6 analogue of DeletePeerSyncedSession (#9714).
 func (m *Manager) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6, forwardOnly bool) (bool, error) {
 	val, valErr := m.bpfShim.GetSessionV6(key)
@@ -697,6 +758,43 @@ func (m *Manager) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6, forwardO
 	}
 	if refused {
 		return true, nil
+	}
+	return false, nil
+}
+
+// DeletePeerSyncedSessionScopedV6 is the IPv6 analogue of DeletePeerSyncedSessionScoped (#10512).
+func (m *Manager) DeletePeerSyncedSessionScopedV6(key dataplane.SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return false, errSessionHelperUnreachable
+	}
+	defer m.mu.Unlock()
+	refused, err := m.syncDeleteScopedV6Locked(key, domain, expectedID)
+	if err != nil {
+		return false, err
+	}
+	if refused {
+		return true, nil
+	}
+	return false, nil
+}
+
+// syncDeleteScopedV6Locked is the IPv6 analogue of syncDeleteScopedV4Locked (#10512).
+func (m *Manager) syncDeleteScopedV6Locked(key dataplane.SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	if m.proc == nil {
+		return false, errSessionHelperUnreachable
+	}
+	req := m.buildSessionSyncRequestV6("mirror_delete_scoped", key, deleteScopeValV6(domain))
+	req.PeerDelete = true
+	req.RTFlowSessionID = expectedID
+	req.RoutingDomain = scopedWireDomain(domain)
+	err := m.syncSessionRequestLocked(req)
+	if err != nil {
+		if peerDeleteRefused(err) {
+			return true, nil
+		}
+		return false, err
 	}
 	return false, nil
 }

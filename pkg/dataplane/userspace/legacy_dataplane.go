@@ -907,6 +907,15 @@ func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSession(key dataplane.SessionKe
 	return m.DeletePeerSyncedSession(key, forwardOnly)
 }
 
+// DeletePeerSyncedSessionScoped forwards the #10512 scoped single-key peer delete.
+func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionScoped(key dataplane.SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, err
+	}
+	return m.DeletePeerSyncedSessionScoped(key, domain, expectedID)
+}
+
 // DeletePeerSyncedSessionV6 forwards the IPv6 analogue (#9714).
 func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6, forwardOnly bool) (bool, error) {
 	m, err := a.managerOrErr()
@@ -914,6 +923,15 @@ func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionV6(key dataplane.Session
 		return false, err
 	}
 	return m.DeletePeerSyncedSessionV6(key, forwardOnly)
+}
+
+// DeletePeerSyncedSessionScopedV6 forwards the IPv6 analogue (#10512).
+func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionScopedV6(key dataplane.SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, err
+	}
+	return m.DeletePeerSyncedSessionScopedV6(key, domain, expectedID)
 }
 
 func (a *LegacyDataPlaneAdapter) SessionSyncSweepProfile() (bool, time.Duration, time.Duration) {

@@ -35,6 +35,21 @@ type peerRecorderDP struct {
 	refuseV4 map[ScopedSessionKey]bool
 	events   []string
 	iterV4   []SessionEntryV4
+	// #10512: scoped single-key peer deletes received (key + domain + id).
+	peerScopedV4 []scopedPeerCallV4
+	peerScopedV6 []scopedPeerCallV6
+}
+
+type scopedPeerCallV4 struct {
+	key    SessionKey
+	domain uint32
+	id     uint64
+}
+
+type scopedPeerCallV6 struct {
+	key    SessionKeyV6
+	domain uint32
+	id     uint64
 }
 
 func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKey, forwardOnly bool) (int, []ScopedSessionKey, error) {
@@ -62,6 +77,16 @@ func (d *peerRecorderDP) DeletePeerSyncedSession(k SessionKey, forwardOnly bool)
 }
 
 func (d *peerRecorderDP) DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error) {
+	return false, nil
+}
+
+func (d *peerRecorderDP) DeletePeerSyncedSessionScoped(k SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	d.peerScopedV4 = append(d.peerScopedV4, scopedPeerCallV4{key: k, domain: domain, id: expectedID})
+	return false, nil
+}
+
+func (d *peerRecorderDP) DeletePeerSyncedSessionScopedV6(k SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	d.peerScopedV6 = append(d.peerScopedV6, scopedPeerCallV6{key: k, domain: domain, id: expectedID})
 	return false, nil
 }
 

@@ -20,21 +20,48 @@ func scopedGenKeyV6(port uint16) dataplane.SessionKeyV6 {
 	return k
 }
 
-// Scoped takes draw fresh from the global counter (always out-ranks) and
-// never touch bare sender stamps.
-func TestTakeDeleteGenScopedDrawsFresh10512(t *testing.T) {
+// Scoped takes draw fresh strictly greater than the install they cancel
+// (evicting the stamp); unstamped draws 0 legacy fallback (fresh on
+// overflow). Bare sender stamps never disturbed.
+func TestTakeDeleteGenScopedKeyed10512(t *testing.T) {
 	s := &SessionSync{}
 	key := scopedGenKeyV4(5001)
+	val := dataplane.SessionValue{RoutingDomain: 7}
+	s.stampInstallGenV4(key, &val)
+	installGen := val.Generation
+	if installGen == 0 {
+		t.Fatal("FIXTURE: install stamp must be nonzero")
+	}
 	g1 := s.takeDeleteGenScopedV4(7, key)
-	g2 := s.takeDeleteGenScopedV4(8, key)
-	g3 := s.takeDeleteGenScopedV6(7, scopedGenKeyV6(5001))
-	if g1 == 0 || g2 <= g1 || g3 <= g2 {
-		t.Fatalf("scoped takes must draw fresh monotonic gens, got %d %d %d", g1, g2, g3)
+	if g1 <= installGen {
+		t.Fatalf("scoped take %d must out-rank its install %d", g1, installGen)
+	}
+	if again := s.takeDeleteGenScopedV4(7, key); again != 0 {
+		t.Fatalf("take after eviction returned %d, want 0", again)
+	}
+	if got := s.takeDeleteGenScopedV4(7, scopedGenKeyV4(5009)); got != 0 {
+		t.Fatalf("unstamped scoped take = %d, want 0", got)
+	}
+	if got := s.takeDeleteGenScopedV4(8, key); got != 0 {
+		t.Fatalf("other-domain scoped take = %d, want 0 (per-domain stamps)", got)
 	}
 	s.genSentMu.Lock()
-	defer s.genSentMu.Unlock()
-	if len(s.genSentV4) != 0 || len(s.genSentV6) != 0 {
-		t.Fatal("scoped takes must not disturb bare sender stamps")
+	s.genSentOverflowScopedV4 = true
+	s.genSentMu.Unlock()
+	if got := s.takeDeleteGenScopedV4(7, scopedGenKeyV4(5010)); got == 0 {
+		t.Fatal("overflow-latched scoped take must draw fresh, got 0")
+	}
+	s.genSentMu.Lock()
+	bareStamps := len(s.genSentV4)
+	s.genSentMu.Unlock()
+	if bareStamps != 1 {
+		t.Fatalf("bare stamps = %d, want exactly the install's 1", bareStamps)
+	}
+	key6 := scopedGenKeyV6(5001)
+	val6 := dataplane.SessionValueV6{RoutingDomain: 7}
+	s.stampInstallGenV6(key6, &val6)
+	if g := s.takeDeleteGenScopedV6(7, key6); g <= val6.Generation {
+		t.Fatalf("scoped v6 take %d must out-rank its install %d", g, val6.Generation)
 	}
 }
 
@@ -149,12 +176,17 @@ func TestScopedGenCapEvictsOldestTombstone10512(t *testing.T) {
 	}
 }
 
-// V6 twin: fresh takes + guard ordering on the scoped v6 space.
+// V6 twin: keyed takes + guard ordering on the scoped v6 space.
 func TestDeleteGenScopedV6Orders10512(t *testing.T) {
 	s := &SessionSync{}
 	key := scopedGenKeyV6(5006)
-	if s.takeDeleteGenScopedV6(7, key) == 0 {
-		t.Fatal("scoped v6 take must draw fresh")
+	val := dataplane.SessionValueV6{RoutingDomain: 7}
+	s.stampInstallGenV6(key, &val)
+	if val.Generation == 0 {
+		t.Fatal("FIXTURE: install stamp must be nonzero")
+	}
+	if s.takeDeleteGenScopedV6(7, key) <= val.Generation {
+		t.Fatal("scoped v6 take must out-rank its install")
 	}
 	if !s.deleteGenGuardScopedV6(7, key, 100) {
 		t.Fatal("first scoped v6 delete must apply")
@@ -224,5 +256,17 @@ func TestScopedInstallRefusedAfterDeleteTombstoneV610512(t *testing.T) {
 	}
 	if _, apply := s.installGenGuardScopedV6(7, key, 150); !apply {
 		t.Fatal("newer v6 install must be accepted")
+	}
+}
+
+// Default-domain normalization: a wire-marker-1 install stamps the
+// logical-0 scoped space, so a logical-0 take draws fresh (not 0).
+func TestScopedStampTakeDefaultDomain10512(t *testing.T) {
+	s := &SessionSync{}
+	key := scopedGenKeyV4(5020)
+	val := dataplane.SessionValue{RoutingDomain: 1} // WIRE_DEFAULT_INSTANCE, stated.
+	s.stampInstallGenV4(key, &val)
+	if g := s.takeDeleteGenScopedV4(0, key); g <= val.Generation {
+		t.Fatalf("default-domain take %d must out-rank its install %d", g, val.Generation)
 	}
 }

@@ -19,6 +19,8 @@ type peerSyncedSessionDeleteContract interface {
 	BatchDeletePeerSyncedSessionsScopedV6([]ScopedSessionKeyV6, bool) (int, []ScopedSessionKeyV6, error)
 	DeletePeerSyncedSession(SessionKey, bool) (bool, error)
 	DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error)
+	DeletePeerSyncedSessionScoped(SessionKey, uint32, uint64) (bool, error)
+	DeletePeerSyncedSessionScopedV6(SessionKeyV6, uint32, uint64) (bool, error)
 }
 
 func assertPeerSyncedSessionDeleteContract(c peerSyncedSessionDeleteContract) peerSyncedSessionDeleter {

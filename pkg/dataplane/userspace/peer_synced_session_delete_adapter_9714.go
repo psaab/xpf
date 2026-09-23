@@ -25,4 +25,6 @@ type peerSyncedSessionDeleter interface {
 	BatchDeletePeerSyncedSessionsScopedV6([]dataplane.ScopedSessionKeyV6, bool) (int, []dataplane.ScopedSessionKeyV6, error)
 	DeletePeerSyncedSession(dataplane.SessionKey, bool) (bool, error)
 	DeletePeerSyncedSessionV6(dataplane.SessionKeyV6, bool) (bool, error)
+	DeletePeerSyncedSessionScoped(dataplane.SessionKey, uint32, uint64) (bool, error)
+	DeletePeerSyncedSessionScopedV6(dataplane.SessionKeyV6, uint32, uint64) (bool, error)
 }

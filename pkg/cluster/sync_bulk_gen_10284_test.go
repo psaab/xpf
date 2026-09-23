@@ -136,7 +136,7 @@ func TestBulkSnapshotCloseAfterReadDeletesOnReceiver10284(t *testing.T) {
 				installs = append(installs, v.Generation)
 			}
 		case syncMsgDeleteV4:
-			k, gen, _, _, _, ok := parseDeleteV4Wire(buf.payload)
+			k, gen, _, _, _, _, ok := parseDeleteV4Wire(buf.payload)
 			if !ok {
 				t.Fatalf("captured delete frame does not decode")
 			}
@@ -262,7 +262,7 @@ func TestBulkSnapshotCloseDuringSourceReadDeletesOnReceiver10284(t *testing.T) {
 				installGen = val.Generation
 			}
 		case syncMsgDeleteV4:
-			k, gen, _, _, _, ok := parseDeleteV4Wire(buf.payload)
+			k, gen, _, _, _, _, ok := parseDeleteV4Wire(buf.payload)
 			if !ok {
 				t.Fatal("source-race delete frame does not decode")
 			}
@@ -352,7 +352,7 @@ func TestBulkSnapshotCloseAfterReadDeletesOnReceiverV6_10284(t *testing.T) {
 				installGen = val.Generation
 			}
 		case syncMsgDeleteV6:
-			k, gen, _, _, _, ok := parseDeleteV6Wire(buf.payload)
+			k, gen, _, _, _, _, ok := parseDeleteV6Wire(buf.payload)
 			if !ok {
 				t.Fatal("captured v6 delete frame does not decode")
 			}

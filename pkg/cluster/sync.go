@@ -1243,6 +1243,14 @@ type SessionSync struct {
 	deleteJournalMu  sync.Mutex
 	deleteJournal    [][]byte
 	deleteJournalCap int
+	// scopedDeleteJournal is the #10512 deferred scoped-delete debt: scoped
+	// frames that could not be queued (disconnected/full) wait here — never
+	// in the bare journal — and flush only after the current peer
+	// positively advertises the scoped bit (learn-triggered), so no
+	// cross-incarnation raw replay can downgrade them. Same mutex, cap
+	// discipline, and overflow resync-arming as the bare journal.
+	scopedDeleteJournal    [][]byte
+	scopedDeleteJournalCap int
 	lastPeerRxMono   atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
 	// peerHeartbeatAckEver latches when the CURRENTLY connected peer proves it
 	// understands syncMsgHeartbeat by replying syncMsgHeartbeatAck. It gates
@@ -1394,6 +1402,13 @@ type SessionSync struct {
 	genSentMu  sync.Mutex
 	genSentV4  map[dataplane.SessionKey]uint64
 	genSentV6  map[dataplane.SessionKeyV6]uint64
+	// genSentScopedV4/V6 stamp per-(domain, tuple) install generations for
+	// scoped policy deletes (#10512, plan §1.2 keyed sender state):
+	// takeDeleteGenScoped draws fresh strictly greater than the last
+	// install it cancels. Guarded by genSentMu; same cap/overflow
+	// discipline as the bare stamp maps.
+	genSentScopedV4 map[scopedDeleteKeyV4]uint64
+	genSentScopedV6 map[scopedDeleteKeyV6]uint64
 	// genSentOverflowV4/V6 latch, per family and for the life of the process, that
 	// the stamp map has ever been at its effective cap and skipped a key (#9719).
 	// After that, a delete for an unstamped key may be for a live session whose
@@ -1401,6 +1416,10 @@ type SessionSync struct {
 	// Guarded by genSentMu.
 	genSentOverflowV4 bool
 	genSentOverflowV6 bool
+	// genSentOverflowScopedV4/V6 are the #9719 overflow latches for the
+	// scoped stamp maps (see genSentOverflowV4). Guarded by genSentMu.
+	genSentOverflowScopedV4 bool
+	genSentOverflowScopedV6 bool
 	// sentGenGuardCap/recvGenGuardCap are the effective sender/receiver-side
 	// generation-guard caps (#9915 F-044): genGuardMapDefaultCap until demand
 	// growth doubles them toward genGuardMapCap. Zero means never grown.
@@ -1726,6 +1745,11 @@ type SessionSync struct {
 	// would be written, exercising the watermark failure path without
 	// disconnecting the active connection in production.
 	testBeforeQueuedWrite func()
+	// testBeforeScopedJournalTake runs in flushScopedDeleteJournal after
+	// the capability re-check and before the journal take, then nils
+	// itself (testBeforeQueuedWrite shape). Test-only; pins the
+	// caps-store-vs-append race deterministically.
+	testBeforeScopedJournalTake func()
 	// testDHCPPreCommit, when non-nil, runs after DHCP decode+filter and
 	// before the commit, with NO locks held (so the test may drive reset
 	// + replacement paths from the hook rendezvous). Test-only hook for

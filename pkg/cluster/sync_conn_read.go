@@ -192,17 +192,25 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDeleteV4:
 		s.stats.DeletesReceived.Add(1)
 		if s.sessions != nil {
-			key, gen, forwardOnly, _, _, ok := parseDeleteV4Wire(payload)
+			key, gen, forwardOnly, domain, expectedID, scoped, ok := parseDeleteV4Wire(payload)
 			if ok {
-				s.deleteClusterSyncedV4(key, gen, forwardOnly)
+				if scoped {
+					s.deleteClusterSyncedScopedV4(domain, key, gen, expectedID)
+				} else {
+					s.deleteClusterSyncedV4(key, gen, forwardOnly)
+				}
 			}
 		}
 	case syncMsgDeleteV6:
 		s.stats.DeletesReceived.Add(1)
 		if s.sessions != nil {
-			key, gen, forwardOnly, _, _, ok := parseDeleteV6Wire(payload)
+			key, gen, forwardOnly, domain, expectedID, scoped, ok := parseDeleteV6Wire(payload)
 			if ok {
-				s.deleteClusterSyncedV6(key, gen, forwardOnly)
+				if scoped {
+					s.deleteClusterSyncedScopedV6(domain, key, gen, expectedID)
+				} else {
+					s.deleteClusterSyncedV6(key, gen, forwardOnly)
+				}
 			}
 		}
 	case syncMsgBulkStart:
@@ -1044,6 +1052,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.peerCapabilityFlags.Store(uint32(peerFlags))
 		s.peerSessionSyncWire.Store(uint32(peerWire))
 		s.mu.Unlock()
+		// #10512 learn-trigger: learning completed (capable or not) —
+		// flush unconditionally and let the flush retain (unlearned),
+		// drop + count (incapable), or send (capable) internally.
+		// Gating this call on capability here would strand the
+		// incapable-drop path unreachable.
+		s.flushScopedDeleteJournal()
 		// #9752 round 4: a capable discovery re-arms the bulk. A window that
 		// aborted during the discovery race must not stay latched once the
 		// peer proves capable — the next redrive completes it.

@@ -62,51 +62,62 @@ func TestScopedDeleteWithheldWhileUnlearned10512(t *testing.T) {
 	}
 }
 
-// Write-time gate, direct: a scoped frame for an unverified peer drops
-// (counted); for a verified peer it passes; bare/non-delete/malformed
-// frames never drop here.
-func TestDropScopedDeleteForUnverifiedPeer10512(t *testing.T) {
+// Write-time gate, direct: unlearned re-journals (deferred, uncounted);
+// learned-incapable drops + counts; capable passes; bare/non-delete/
+// malformed frames never hold here.
+func TestHoldScopedDeleteForUnverifiedPeer10512(t *testing.T) {
 	scoped := encodeDeleteScopedV4(scopedCodecKeyV4(), 1, false, 100007, 0xF10512)
 	scoped6 := encodeDeleteScopedV6(scopedCodecKeyV6(), 1, false, 200007, 0xC10512)
 	bare := encodeDeleteV4(scopedCodecKeyV4(), 1, false)
-	// Unlearned: drop + count.
+	// Unlearned: re-journaled as deferred debt (NOT counted as suppressed).
 	s := &SessionSync{}
-	if !s.dropScopedDeleteForUnverifiedPeer(scoped) {
-		t.Fatal("scoped frame must drop while unlearned")
+	if !s.holdScopedDeleteForUnverifiedPeer(scoped) {
+		t.Fatal("scoped frame must hold while unlearned")
 	}
-	if got := s.stats.DeletesSuppressedScopedPolicy.Load(); got != 1 {
-		t.Fatalf("counter = %d, want 1", got)
+	if got := scopedJournalLen10512(s); got != 1 {
+		t.Fatalf("unlearned frame must re-journal, journal holds %d", got)
 	}
-	// Incapable (learned, no bit): drop.
+	if got := s.stats.DeletesSuppressedScopedPolicy.Load(); got != 0 {
+		t.Fatalf("counter = %d, want 0 (deferred, not dropped)", got)
+	}
+	// Incapable (learned, no bit): the learn-trigger already dropped the
+	// journaled frame (counted); a direct hold drops + counts again.
 	s.handleMessage(nil, syncMsgPeerCapabilities,
 		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership))
-	if !s.dropScopedDeleteForUnverifiedPeer(scoped6) {
+	if got := s.stats.DeletesSuppressedScopedPolicy.Load(); got != 1 {
+		t.Fatalf("counter = %d, want 1 (trigger drop)", got)
+	}
+	if !s.holdScopedDeleteForUnverifiedPeer(scoped6) {
 		t.Fatal("scoped frame must drop for an incapable peer")
+	}
+	if got := s.stats.DeletesSuppressedScopedPolicy.Load(); got != 2 {
+		t.Fatalf("counter = %d, want 2", got)
 	}
 	// Capable: pass through.
 	s.handleMessage(nil, syncMsgPeerCapabilities,
 		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|capFlagScopedPolicyDelete))
-	if s.dropScopedDeleteForUnverifiedPeer(scoped) {
+	if s.holdScopedDeleteForUnverifiedPeer(scoped) {
 		t.Fatal("scoped frame must pass for a capable peer")
 	}
 	// Bare delete, non-delete, malformed: never the gate's business.
-	if s.dropScopedDeleteForUnverifiedPeer(bare) {
-		t.Fatal("bare frame must never drop at the scoped gate")
+	if s.holdScopedDeleteForUnverifiedPeer(bare) {
+		t.Fatal("bare frame must never hold at the scoped gate")
 	}
 	other := make([]byte, syncHeaderSize+1)
 	other[4] = syncMsgHeartbeat
-	if s.dropScopedDeleteForUnverifiedPeer(other) {
-		t.Fatal("non-delete frame must never drop at the scoped gate")
+	if s.holdScopedDeleteForUnverifiedPeer(other) {
+		t.Fatal("non-delete frame must never hold at the scoped gate")
 	}
-	if s.dropScopedDeleteForUnverifiedPeer([]byte{1, 2, 3}) {
-		t.Fatal("malformed frame must never drop at the scoped gate")
+	if s.holdScopedDeleteForUnverifiedPeer([]byte{1, 2, 3}) {
+		t.Fatal("malformed frame must never hold at the scoped gate")
 	}
 }
 
 // Placement pin: a flag flip in testBeforeQueuedWrite — after any
 // queue-time check, before the write — still writes zero bytes. The gate
 // sits inside writeMu immediately before writeFull, so approval binds to
-// this write, not to an earlier observation.
+// this write, not to an earlier observation. The held frame re-journals
+// as deferred debt (unlearned), uncounted.
 func TestScopedWriteGateSeesHookFlipBeforeWrite10512(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	localConn, peerConn := net.Pipe()
@@ -139,8 +150,11 @@ func TestScopedWriteGateSeesHookFlipBeforeWrite10512(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("peer received %d bytes of a scoped delete after the flip", n)
 	}
-	if got := ss.stats.DeletesSuppressedScopedPolicy.Load(); got != 1 {
-		t.Fatalf("DeletesSuppressedScopedPolicy = %d, want 1", got)
+	if got := scopedJournalLen10512(ss); got != 1 {
+		t.Fatalf("flipped frame must re-journal, journal holds %d", got)
+	}
+	if got := ss.stats.DeletesSuppressedScopedPolicy.Load(); got != 0 {
+		t.Fatalf("DeletesSuppressedScopedPolicy = %d, want 0 (deferred, not dropped)", got)
 	}
 }
 
