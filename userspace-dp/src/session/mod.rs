@@ -2011,6 +2011,26 @@ impl SessionTable {
             .map(|record| record.entry.policy_revalidation_kind)
             .unwrap_or(PolicyRevalidationKind::Unvalidated)
     }
+    /// #10635: does this entry carry fenced provenance — a recorded
+    /// authorization (or reset-distrust) the #10507 companion fence may act
+    /// on? Mirrors the gate's `fenced_provenance` rule
+    /// (`policy_revalidation_gate`): `RecordedEgress`, or `Unvalidated`
+    /// at the live generation (A1/A2 reset — a prior verdict was
+    /// distrusted). Stale `Unvalidated` (never validated, #8618) carries
+    /// no recorded authorization: fencing it would manufacture a DENY.
+    /// A missing key is unfenced (the caller decides the no-companion arm).
+    pub(crate) fn policy_revalidation_fenced(&self, key: &SessionKey) -> bool {
+        let Some(record) = self.revalidation_record(key) else {
+            return false;
+        };
+        matches!(
+            record.entry.policy_revalidation_kind,
+            PolicyRevalidationKind::RecordedEgress
+        ) || (matches!(
+            record.entry.policy_revalidation_kind,
+            PolicyRevalidationKind::Unvalidated
+        ) && record.entry.policy_revalidated_gen == self.policy_revalidation_gen)
+    }
 
     /// #8356/#10507: record that this entry's zone-policy verdict has been
     /// re-derived under the live generation and retain how that verdict was

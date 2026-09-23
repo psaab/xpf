@@ -566,3 +566,63 @@ fn rejected_reimport_preserves_local_live_10507() {
         "a rejected overwrite must not disturb local Live provenance"
     );
 }
+
+/// #10635 fold cross-pin: `policy_revalidation_fenced` must equal the gate's
+/// fail-closed bits under `LocalForwarding` intent, over every kind ×
+/// fresh/stale plus the missing-key arm. The reverse fence's no-companion
+/// positions consult `fenced()` on a DIFFERENT key than the gate probed, so
+/// any drift between the two spellings reopens either the b03-F1
+/// manufactured DENY or a fail-open coast. Absolute expectations (not just
+/// relative equality) so a joint drift still fails.
+#[test]
+fn fenced_matches_gate_fail_closed_bits_10635() {
+    // (kind, stale, expect_fenced). Stale-Unvalidated installs gen-0 and is
+    // never marked — the never-validated (#8618) shape, not an aged stamp.
+    let cases = [
+        (PolicyRevalidationKind::Unvalidated, false, true),
+        (PolicyRevalidationKind::Unvalidated, true, false),
+        (PolicyRevalidationKind::LiveEgress, false, false),
+        (PolicyRevalidationKind::LiveEgress, true, false),
+        (PolicyRevalidationKind::RecordedEgress, false, true),
+        (PolicyRevalidationKind::RecordedEgress, true, true),
+    ];
+    for (kind, stale, expect_fenced) in cases {
+        let (mut table, k) = table_with_one_session(41);
+        if !(matches!(kind, PolicyRevalidationKind::Unvalidated) && stale) {
+            table.mark_policy_revalidated(&k, kind);
+        }
+        if stale {
+            table.set_policy_revalidation_gen(42);
+        }
+        let fenced = table.policy_revalidation_fenced(&k);
+        let gate = table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwarding);
+        assert_eq!(
+            fenced, expect_fenced,
+            "fenced({kind:?}, stale={stale}) must be {expect_fenced}"
+        );
+        assert_eq!(
+            fenced, gate.fail_closed_decline,
+            "fenced() must equal the gate Decline bit ({kind:?}, stale={stale})"
+        );
+        assert_eq!(
+            fenced, gate.fail_closed_icmp,
+            "fenced() must equal the gate ICMP bit ({kind:?}, stale={stale})"
+        );
+    }
+    // Missing key: unfenced, and the gate answers all-false.
+    let (table, _) = table_with_one_session(41);
+    let missing = key(999);
+    assert!(
+        !table.policy_revalidation_fenced(&missing),
+        "a missing key is unfenced"
+    );
+    let gate = table.policy_revalidation_gate(&missing, PolicyGateCurrent::LocalForwarding);
+    assert!(
+        !gate.fail_closed_decline,
+        "a missing key never fails Decline closed"
+    );
+    assert!(
+        !gate.fail_closed_icmp,
+        "a missing key never fails ICMP closed"
+    );
+}

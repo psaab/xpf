@@ -1066,6 +1066,9 @@ fn reverse_hit_zone_policy(
     // stale). Combined with intent for the inconsistent-companion arms below.
     let reverse_row_needs_cold =
         rev_force_cold || matches!(rev_target, PolicyRevalidationTarget::Stale(_));
+    // Bound once: the no-companion positions below fence LiveEgress
+    // reverses too (a Live row retains a recorded Permit).
+    let rev_kind = sessions.policy_revalidation_kind(&rev_canonical);
     // #9604 degenerate inversion (key maps to itself): fail closed iff locally-forwarding + cold-needed — no claim this population is impossible.
     if fwd_key == rev_canonical {
         sessions.note_policy_revalidation_loud_decline();
@@ -1076,19 +1079,34 @@ fn reverse_hit_zone_policy(
             None
         };
     }
-    // The companion itself is part of the reverse freshness decision. A
-    // fresh LiveEgress reverse row must still cold-judge if its forward row is
-    // FabricRedirect or otherwise lacks LiveEgress provenance.
+    // The companion itself is part of the reverse freshness decision: a
+    // reverse row must still cold-judge when its forward companion is
+    // FabricRedirect or carries fenced provenance — and without a
+    // companion, when the reverse row itself is fenced or Live.
+    // #10635: `companion_needs_live` keys on FENCED provenance, not bare
+    // !LiveEgress. A never-validated (stale `Unvalidated`) forward carries
+    // no recorded authorization — fencing it manufactures a DENY for a row
+    // that never earned one (#8618): with any type-constrained ICMP permit
+    // configured, GATE 1b returns before stamping, so every locally
+    // admitted forward stays Unvalidated and the first reply of every ICMP
+    // session revoked itself (b03-F1). `RecordedEgress` and fresh
+    // `Unvalidated` (A1/A2 reset-distrust) keep fencing exactly as before.
     let companion_needs_live = if reverse_has_intent {
         match sessions.entry_with_origin(&fwd_key) {
             Some((fwd_decision, _, _)) => {
                 fwd_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
-                    || !matches!(
-                        sessions.policy_revalidation_kind(&fwd_key),
-                        PolicyRevalidationKind::LiveEgress
-                    )
+                    || sessions.policy_revalidation_fenced(&fwd_key)
             }
-            None => true,
+            // No forward companion: fence a FENCED or Live reverse row. A
+            // never-validated reverse (e.g. shared-materialized, gen-0
+            // Unvalidated) has no recorded Permit to protect — revoking it
+            // kills legitimate lone-reverse replies (r02-F3). Recorded and
+            // Live reverses (Cell 6 shape) still fail closed below: a Live
+            // row retains a recorded Permit and must never coast (stale or fresh: the forward ledger is orphaned).
+            None => {
+                sessions.policy_revalidation_fenced(&rev_canonical)
+                    || matches!(rev_kind, PolicyRevalidationKind::LiveEgress)
+            }
         }
     } else {
         false
@@ -1108,7 +1126,14 @@ fn reverse_hit_zone_policy(
         // A locally-forwarding reverse hit with no companion is not allowed
         // to retain a recorded Permit or take the old reverse Decline arm.
         // #9604: no tuple synthesis — zones would degrade to recorded-swapped with no live ledger.
-        return if reverse_inconsistent_fail_closed {
+        // #10635: ...unless the reverse row itself never earned one. A
+        // never-validated (stale `Unvalidated`) reverse carries no recorded
+        // authorization to fence — revoking it kills legitimate
+        // lone-reverse replies (materialized/shared shapes, r02-F3). Coast;
+        // Recorded and Live reverses (Cell 6 shape) still fail closed.
+        let reverse_fenced = sessions.policy_revalidation_fenced(&rev_canonical)
+            || matches!(rev_kind, PolicyRevalidationKind::LiveEgress);
+        return if reverse_fenced && reverse_inconsistent_fail_closed {
             revocation_for_hit(sessions, session_key)
         } else {
             None
@@ -1134,6 +1159,7 @@ fn reverse_hit_zone_policy(
     // the stored forward companion is recorded or otherwise non-live, resolve
     // that companion from the current local FIB plus HA/lease snapshot. A
     // reverse Permit stamps only the reverse row; the forward row remains cold.
+    // Deliberate bare !LiveEgress (not fenced): re-resolution must re-derive any non-live companion.
     let stored_fwd_kind = sessions.policy_revalidation_kind(&fwd_key);
     if reverse_has_intent
         && (fwd_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
