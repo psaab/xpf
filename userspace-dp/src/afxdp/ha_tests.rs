@@ -9665,3 +9665,70 @@ fn remove_shared_session_if_declined_preserves_live_entry_10612() {
         "a Declined removal must not mutate the shared maps"
     );
 }
+
+/// #10612 (D2-remainder): the coordinator purge bumps the fence-drop counter
+/// exactly on actual removals: a present stale entry is removed + counted;
+/// a live replacement (Declined) is preserved. (The Declined leg pins
+/// preservation, not a zero counter-delta — the global counter is shared
+/// with parallel tests; exact Declined-emits-zero was verified firsthand by
+/// a serial run. The matches!(Removed) gate itself is read-verified.)
+#[test]
+fn purge_stale_replay_counts_removals_not_declines_10612() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.zone_id_to_name.insert(TEST_LAN_ZONE_ID, "lan".to_string());
+    forwarding.zone_id_to_name.insert(TEST_WAN_ZONE_ID, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    coordinator.set_forwarding_for_test(forwarding);
+
+    // (a) STALE present -> removed + counted.
+    let stale = synced_entry_port(3000, 0);
+    let mut stale = stale;
+    stale.metadata.ingress_zone = 9;
+    stale.metadata.egress_zone = 10;
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &stale,
+    );
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(
+        &coordinator,
+        std::slice::from_ref(&stale),
+    );
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        drops_after > drops_before,
+        "purge of a present stale entry must bump the fence-drop counter"
+    );
+    assert!(
+        !coordinator.sessions.synced.lock().expect("shared").contains_key(&stale.key),
+        "a present stale entry must be removed by the purge"
+    );
+
+    // (b) LIVE replacement under a stale snapshot entry -> Declined: preserved.
+    let live = synced_entry_port(4000, 0);
+    let live_key = live.key.clone();
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &live,
+    );
+    let mut stale_snapshot = live.clone();
+    stale_snapshot.metadata.ingress_zone = 9;
+    stale_snapshot.metadata.egress_zone = 10;
+    crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(
+        &coordinator,
+        std::slice::from_ref(&stale_snapshot),
+    );
+    assert!(
+        coordinator.sessions.synced.lock().expect("shared").contains_key(&live_key),
+        "a Declined live replacement must survive the purge"
+    );
+}
