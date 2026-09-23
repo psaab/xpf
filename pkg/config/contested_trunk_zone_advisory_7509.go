@@ -16,10 +16,10 @@ import (
 // refuses it before the implicit default policy) instead of being policed
 // under a zone the operator never wrote for it. Host-bound handling is scoped
 // below: a genuine non-lifeline contest uses #10503; an unzoned addressed /
-// unzoned tunnel refusal uses #5659; narrow lifelines and shapes with no
-// sentinel remain admitted; prefix-only / lo0 names are zone-gated (neither
-// sentinel arms there, and kernel lifeline exclusion does not apply). An
-// all-zoned tunnel Disagree admits with neither sentinel.
+// unzoned tunnel refusal uses #5659 or the refused-ifindex #10556 sentinel;
+// narrow lifelines and the remaining address-less non-tunnel refusal stay
+// admitted, while prefix-only / lo0 names are zone-gated (neither sentinel
+// arms there, and kernel lifeline exclusion does not apply).
 // It does not make the consequence LEGIBLE: an operator whose untagged trunk
 // traffic starts being denied has no way to reach "these units share a base
 // netdev and disagree about their zone" without reading source. That is the
@@ -175,8 +175,8 @@ func sharedDeviceHostBoundAdvisory(
 		return zoneGatedHostBoundAdvisory()
 	}
 	if userspaceHostInboundLifeline(cfg, base) {
-		return "Host-bound traffic on this lifeline remains admitted; #5659 " +
-			"deliberately does not arm an empty-zone host-inbound sentinel. "
+		return "Host-bound traffic on this lifeline remains admitted; #5659/#10556 " +
+			"deliberately do not arm an empty-zone host-inbound sentinel. "
 	}
 	if sharedUnitIsAddressedOrTunnel(cfg, base, shared[base]) {
 		return "Host-bound traffic to the firewall itself is denied by the #5659 " +
@@ -227,21 +227,21 @@ func contestedHostBoundAdvisory(
 		return zoneGatedHostBoundAdvisory()
 	}
 	lifeline := userspaceHostInboundLifeline(cfg, base)
-	if interfaceTunnelHasCollapsedUnits(cfg, base, tunnelNames) {
-		return "Host-bound traffic remains admitted: all collapsed tunnel " +
-			"units are zoned, so neither the #5659 empty-zone sentinel nor " +
-			"the #10503 contested-parent sentinel applies. "
-	}
 	if lifeline {
-		return "Host-bound traffic on this lifeline remains admitted; #10503 " +
-			"deliberately does not arm a contested-parent sentinel. "
+		return "Host-bound traffic on this lifeline remains admitted; #10503/#10556 " +
+			"deliberately do not arm a contested-parent or refused-ifindex sentinel. "
+	}
+	if interfaceTunnelHasCollapsedUnits(cfg, base, tunnelNames) {
+		return "Host-bound traffic to the firewall itself is denied by the " +
+			"refused-ifindex host-inbound sentinel (#10556; ICMP errors/PMTUD/ND " +
+			"control messages remain admitted; an explicit per-interface " +
+			"host-inbound stanza still takes precedence). "
 	}
 	return "Host-bound traffic to the firewall itself is denied by the " +
 		"contested-parent host-inbound sentinel (#10503; ICMP errors/PMTUD/ND " +
 		"control messages remain admitted; an explicit per-interface host-inbound " +
 		"stanza still takes precedence). "
 }
-
 
 // contestedTrunkZones returns, per base interface, the sorted distinct zones its
 // contesting units are bound to — only for bases whose units span MORE THAN ONE
@@ -326,7 +326,7 @@ func contestedTrunkZonesWithMaps(
 // denied as unattributed before any policy is consulted (#6682) only when the
 // resulting ingress is fully unzoned; a retained unit zone is policy-evaluated.
 // Host-bound handling is shape-dependent: addressed/tunnel traffic follows the
-// #5659 empty-zone host-inbound path when local-target/tunnel exposure arms it,
+// #5659 empty-zone or #10556 refused-ifindex host-inbound sentinel as applicable,
 // address-less non-tunnel traffic remains on the global `None => true` admit
 // path, and retained-zone traffic is zone-gated. ICMP errors/PMTUD/ND control
 // messages remain admitted, and an explicit per-interface host-inbound stanza
