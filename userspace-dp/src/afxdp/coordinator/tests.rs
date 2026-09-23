@@ -791,11 +791,12 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
 /// for BOTH `clear_synced_state` values (`stop()`/`stop_with_event_stream`
 /// pass `true`).
 ///
-/// Mutants killed: (a) deleting the `!snapshot_installed` deny arms (D13 +
-/// D14) re-reasons the deny as stale → RED on stage+reason; (b) any
-/// true/false teardown asymmetry → RED on the twin. (Clear/publish deletions
+/// Mutants killed: (a) deleting both D13/D14 evaluator-unavailable arms
+/// re-reasons as `d14_stale_generation`; deleting only D13 changes the
+/// expected D13/E28 result to D14/E28 — each is RED on stage+reason; (b) any
+/// true/false teardown asymmetry → RED on the twin. Clear/publish deletions
 /// already fail the field-level `*_10485` stop cell; this leg adds the deny
-/// proof + reason pin for the teardown shape.)
+/// proof + reason pin for the teardown shape.
 #[test]
 fn snapshot_stop_inner_teardown_denies_previously_valid_advisory_10540() {
     use crate::afxdp::ipsec_inner::{
