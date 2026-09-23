@@ -1079,16 +1079,26 @@ fn reverse_hit_zone_policy(
     // The companion itself is part of the reverse freshness decision. A
     // fresh LiveEgress reverse row must still cold-judge if its forward row is
     // FabricRedirect or otherwise lacks LiveEgress provenance.
+    // #10635: `companion_needs_live` keys on FENCED provenance, not bare
+    // !LiveEgress. A never-validated (stale `Unvalidated`) forward carries
+    // no recorded authorization — fencing it manufactures a DENY for a row
+    // that never earned one (#8618): with any type-constrained ICMP permit
+    // configured, GATE 1b returns before stamping, so every locally
+    // admitted forward stays Unvalidated and the first reply of every ICMP
+    // session revoked itself (b03-F1). `RecordedEgress` and fresh
+    // `Unvalidated` (A1/A2 reset-distrust) keep fencing exactly as before.
     let companion_needs_live = if reverse_has_intent {
         match sessions.entry_with_origin(&fwd_key) {
             Some((fwd_decision, _, _)) => {
                 fwd_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
-                    || !matches!(
-                        sessions.policy_revalidation_kind(&fwd_key),
-                        PolicyRevalidationKind::LiveEgress
-                    )
+                    || sessions.policy_revalidation_fenced(&fwd_key)
             }
-            None => true,
+            // No forward companion: fence only a RECORDED reverse row. A
+            // never-validated reverse (e.g. shared-materialized, gen-0
+            // Unvalidated) has no recorded Permit to protect — revoking it
+            // kills legitimate lone-reverse replies (r02-F3). Recorded
+            // reverses (Cell 6 shape) still fail closed below.
+            None => sessions.policy_revalidation_fenced(&rev_canonical),
         }
     } else {
         false
@@ -1108,7 +1118,13 @@ fn reverse_hit_zone_policy(
         // A locally-forwarding reverse hit with no companion is not allowed
         // to retain a recorded Permit or take the old reverse Decline arm.
         // #9604: no tuple synthesis — zones would degrade to recorded-swapped with no live ledger.
-        return if reverse_inconsistent_fail_closed {
+        // #10635: ...unless the reverse row itself never earned one. A
+        // never-validated (stale `Unvalidated`) reverse carries no recorded
+        // authorization to fence — revoking it kills legitimate
+        // lone-reverse replies (materialized/shared shapes, r02-F3). Coast;
+        // recorded reverses (Cell 6 shape) still fail closed.
+        let reverse_fenced = sessions.policy_revalidation_fenced(&rev_canonical);
+        return if reverse_fenced && reverse_inconsistent_fail_closed {
             revocation_for_hit(sessions, session_key)
         } else {
             None
