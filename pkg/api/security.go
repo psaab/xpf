@@ -208,6 +208,9 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 		// Keep an explicitly empty result as an empty display scope. Do not
 		// turn a configured side whose every member was quarantined into the
 		// all-zones wildcard; the qualifier marks it as a scrubbed candidate.
+		// PolicyRule uses omitempty for the plural fields, so a fully-pruned
+		// side may be absent on the wire; consumers must not read empty/missing
+		// plural scope alone as an all-zones wildcard.
 		return pruned, true
 	}
 	// #3408: surface a per-policy counter read failure as HTTP 500 after
@@ -301,8 +304,10 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 				pr.Applications = []string{}
 			}
 			if ruleQuarantined {
-				pr.HitCountersUnavailable = true
 				pr.Description = appendPolicyQualifier(pr.Description)
+				if statsEnabled || rule.Count {
+					pr.HitCountersUnavailable = true
+				}
 			}
 
 			if !ruleQuarantined && (statsEnabled || rule.Count) {
@@ -392,7 +397,11 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 				// a global narrowed to a zone list is not reported as
 				// all-zones. The singular fields keep the first zone for
 				// backward compatibility; the plural fields carry the full
-				// set. Empty for an unscoped global — no regression.
+				// set. Empty for an unscoped global — no regression. Keep
+				// these authored singular fields even when a quarantined
+				// member is pruned from the new plural display copies: this
+				// REST compatibility split intentionally differs from the
+				// runtime snapshot, which regenerates singulars from survivors.
 				MatchFromZone:  config.ScopeSingular(rule.Match.FromZones),
 				MatchToZone:    config.ScopeSingular(rule.Match.ToZones),
 				MatchFromZones: displayFromZones,
@@ -421,8 +430,10 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 				pr.Applications = []string{}
 			}
 			if scopeQuarantined {
-				pr.HitCountersUnavailable = true
 				pr.Description = appendPolicyQualifier(pr.Description)
+				if statsEnabled || rule.Count {
+					pr.HitCountersUnavailable = true
+				}
 			}
 
 			if !scopeQuarantined && (statsEnabled || rule.Count) {

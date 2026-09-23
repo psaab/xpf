@@ -307,14 +307,25 @@ func StableZoneIDOwner(names []string, id uint16) string {
 // three stacks) and events (fallback map) share this one implementation instead
 // of each re-deriving the verdict.
 //
-// A nil cfg carries no verdict, so the map degrades to the plain copy (the
-// pre-#10530 behavior); callers that always have a config never hit that arm.
+// A nil cfg carries no quarantine verdict, so the helper keeps the
+// deterministic sorted-first name for each id (rather than reintroducing map
+// iteration nondeterminism); callers that always have a config never hit that
+// arm.
 // Names absent from cfg (a rename/delete the apply result predates, #3075) are
 // kept: ExcludedReason only fires for names quarantined within cfg's own set.
 func SurvivorZoneNames(zoneIDs map[string]uint16, cfg *Config) map[uint16]string {
+	names := make([]string, 0, len(zoneIDs))
+	for name := range zoneIDs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	m := make(map[uint16]string, len(zoneIDs))
-	for name, id := range zoneIDs {
+	for _, name := range names {
+		id := zoneIDs[name]
 		if cfg != nil && ZoneQuarantineExcludedReason(name, cfg) != "" {
+			continue
+		}
+		if _, exists := m[id]; exists {
 			continue
 		}
 		m[id] = name

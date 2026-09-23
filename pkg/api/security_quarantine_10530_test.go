@@ -167,3 +167,53 @@ func TestPoliciesHandlerQuarantinedRulesMarked10530(t *testing.T) {
 		t.Fatalf("singular scoped-global compatibility field changed: %+v", global.Rules[0])
 	}
 }
+
+func TestPoliciesHandlerQuarantineQualifierWithoutCounterEligibility10530(t *testing.T) {
+	s, ids := quarantinedZonesConfig10530(t)
+	cfg := s.store.ActiveConfig()
+	cfg.Security.PolicyStatsEnabled = false
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{{
+			Name: "loser-no-count", Action: config.PolicyPermit,
+		}},
+	}}
+	cfg.Security.GlobalPolicies = []*config.Policy{{
+		Name: "scoped-global-no-count", Action: config.PolicyDeny,
+		Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"z214", "z174"}},
+	}}
+	s.dp = &descriptorCoverageDP{
+		Manager: dataplane.New(),
+		apply:   &dataplane.ApplyResult{ZoneIDs: ids},
+	}
+
+	rr := httptest.NewRecorder()
+	s.policiesHandler(rr, httptest.NewRequest(http.MethodGet, "/api/v1/security/policies", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("policiesHandler status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Data []PolicyInfo `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode policies response: %v; body=%s", err, rr.Body.String())
+	}
+	var loser, global *PolicyInfo
+	for i := range resp.Data {
+		switch {
+		case resp.Data[i].FromZone == "trust" && resp.Data[i].ToZone == "z214":
+			loser = &resp.Data[i]
+		case resp.Data[i].FromZone == "*":
+			global = &resp.Data[i]
+		}
+	}
+	if loser == nil || len(loser.Rules) != 1 ||
+		loser.Rules[0].HitCountersUnavailable ||
+		!strings.Contains(loser.Rules[0].Description, config.ZoneQuarantinePoliciesQualifier) {
+		t.Fatalf("stats-off quarantined rule disposition = %+v, want qualifier without unavailable flag", loser)
+	}
+	if global == nil || len(global.Rules) != 1 ||
+		global.Rules[0].HitCountersUnavailable ||
+		!strings.Contains(global.Rules[0].Description, config.ZoneQuarantinePoliciesQualifier) {
+		t.Fatalf("stats-off scoped-global disposition = %+v, want qualifier without unavailable flag", global)
+	}
+}

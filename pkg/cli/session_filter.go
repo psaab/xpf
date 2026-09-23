@@ -397,7 +397,7 @@ func (f *sessionFilter) populateIfaceMaps(c *CLI) {
 func (f *sessionFilter) zoneDisplay(id uint16, resolved string) string {
 	if f != nil && f.zoneName != "" && f.zoneID == id && f.cfg != nil &&
 		config.ZoneQuarantineExcludedReason(f.zoneName, f.cfg) != "" {
-		return f.zoneName + " " + config.ZoneQuarantineReferenceQualifier
+		return resolved + " " + config.ZoneQuarantineReferenceQualifier
 	}
 	return resolved
 }

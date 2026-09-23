@@ -44,7 +44,6 @@ func (c *CLI) showSecurityLog(args []string) error {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "zone" {
 			filterZoneName = args[i+1]
-			break
 		}
 	}
 	var cfg *config.Config
@@ -81,18 +80,19 @@ func (c *CLI) showSecurityLog(args []string) error {
 		evZoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 	}
 	zoneName := func(stored string, id uint16) string {
-		if stored != "" {
-			return stored
-		}
-		if n, ok := evZoneNames[id]; ok {
-			if filterZoneQualifier != "" && filter.Zone == id {
-				return n + " " + filterZoneQualifier
+		name := stored
+		if name == "" {
+			if n, ok := evZoneNames[id]; ok {
+				name = n
+			} else {
+				name = fmt.Sprintf("%d", id)
 			}
-			return n
 		}
-		return fmt.Sprintf("%d", id)
+		if filterZoneQualifier != "" && filter.Zone == id {
+			return name + " " + filterZoneQualifier
+		}
+		return name
 	}
-
 	policyName := func(e logging.EventRecord) string {
 		if e.PolicyName != "" {
 			return e.PolicyName

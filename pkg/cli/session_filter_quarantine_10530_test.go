@@ -42,8 +42,20 @@ func TestSessionFilterQuarantineSurvivor10530(t *testing.T) {
 		}
 		filter.zoneName = "z214"
 		filter.zoneID = id
-		if got := filter.zoneDisplay(id, "z174"); got != "z214 "+config.ZoneQuarantineReferenceQualifier {
+		if got := filter.zoneDisplay(id, "z174"); got != "z174 "+config.ZoneQuarantineReferenceQualifier {
 			t.Fatalf("iteration %d quarantined display = %q, want reference-qualified name", i, got)
 		}
+	}
+	ordinary := &sessionFilter{
+		cfg:      cfg,
+		zoneName: "trust",
+		zoneID:   result.ZoneIDs["trust"],
+	}
+	ordinary.populateIfaceMaps(c)
+	if got := ordinary.zoneIfaces[result.ZoneIDs["trust"]]; len(got) != 1 || got[0] != "if-trust" {
+		t.Fatalf("ordinary control interfaces = %v, want if-trust", got)
+	}
+	if got := ordinary.zoneDisplay(result.ZoneIDs["trust"], "trust"); got != "trust" {
+		t.Fatalf("ordinary control display = %q, want trust", got)
 	}
 }

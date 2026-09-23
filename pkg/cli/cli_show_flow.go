@@ -429,8 +429,6 @@ func (c *CLI) showFlowSession(args []string) error {
 			if outZ == "" {
 				outZ = fmt.Sprintf("zone-%d", val.EgressZone)
 			}
-			inZ = f.zoneDisplay(val.IngressZone, inZ)
-			outZ = f.zoneDisplay(val.EgressZone, outZ)
 			byZonePair[inZ+"->"+outZ]++
 			if val.Flags&(dataplane.SessFlagSNAT|dataplane.SessFlagDNAT) != 0 {
 				natCount++
@@ -560,8 +558,6 @@ func (c *CLI) showFlowSession(args []string) error {
 			if outZ == "" {
 				outZ = fmt.Sprintf("zone-%d", val.EgressZone)
 			}
-			inZ = f.zoneDisplay(val.IngressZone, inZ)
-			outZ = f.zoneDisplay(val.EgressZone, outZ)
 			byZonePair[inZ+"->"+outZ]++
 			if val.Flags&(dataplane.SessFlagSNAT|dataplane.SessFlagDNAT) != 0 {
 				natCount++
@@ -630,7 +626,24 @@ func (c *CLI) showFlowSession(args []string) error {
 			}
 			sort.Strings(zpKeys)
 			for _, zp := range zpKeys {
-				fmt.Printf("    %-30s %d\n", zp, byZonePair[zp])
+				displayPair := zp
+				if f.zoneName != "" && f.cfg != nil &&
+					config.ZoneQuarantineExcludedReason(f.zoneName, f.cfg) != "" {
+					survivor := zoneNames[f.zoneID]
+					if survivor != "" {
+						parts := strings.SplitN(zp, "->", 2)
+						if len(parts) == 2 {
+							if parts[0] == survivor {
+								parts[0] = f.zoneDisplay(f.zoneID, parts[0])
+							}
+							if parts[1] == survivor {
+								parts[1] = f.zoneDisplay(f.zoneID, parts[1])
+							}
+							displayPair = parts[0] + "->" + parts[1]
+						}
+					}
+				}
+				fmt.Printf("    %-30s %d\n", displayPair, byZonePair[zp])
 			}
 		}
 
@@ -666,6 +679,8 @@ func (c *CLI) showFlowSession(args []string) error {
 					if outZone == "" {
 						outZone = fmt.Sprintf("%d", se.EgressZone)
 					}
+					inZone = f.zoneDisplay(uint16(se.IngressZone), inZone)
+					outZone = f.zoneDisplay(uint16(se.EgressZone), outZone)
 					natFlag := "-"
 					if se.Nat != "" {
 						if strings.Contains(se.Nat, "SNAT") {
@@ -721,6 +736,8 @@ func (c *CLI) showFlowSession(args []string) error {
 					if outZone == "" {
 						outZone = fmt.Sprintf("%d", se.EgressZone)
 					}
+					inZone = f.zoneDisplay(uint16(se.IngressZone), inZone)
+					outZone = f.zoneDisplay(uint16(se.EgressZone), outZone)
 					inIf := se.IngressInterface
 					if inIf == "" {
 						inIf = inZone

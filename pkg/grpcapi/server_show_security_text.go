@@ -212,7 +212,6 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 	for i := 0; i+1 < len(filterParts); i++ {
 		if filterParts[i] == "zone" {
 			filterZoneName = filterParts[i+1]
-			break
 		}
 	}
 	var cfg *config.Config
@@ -251,16 +250,18 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 		}
 	}
 	zoneName := func(stored string, id uint16) string {
-		if stored != "" {
-			return stored
-		}
-		if n, ok := evZoneNames[id]; ok {
-			if filterZoneQualifier != "" && evFilter.Zone == id {
-				return n + " " + filterZoneQualifier
+		name := stored
+		if name == "" {
+			if n, ok := evZoneNames[id]; ok {
+				name = n
+			} else {
+				name = fmt.Sprintf("%d", id)
 			}
-			return n
 		}
-		return fmt.Sprintf("%d", id)
+		if filterZoneQualifier != "" && evFilter.Zone == id {
+			return name + " " + filterZoneQualifier
+		}
+		return name
 	}
 	for _, e := range events {
 		ts := e.Time.Format("15:04:05")

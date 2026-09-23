@@ -15,7 +15,18 @@ func TestGRPCZoneDetailCallerPrefixContract10530(t *testing.T) {
 	if !strings.Contains(out.String(), config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("gRPC zones-detail quarantined policy block lacks caller qualifier:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "Policy summary") {
+	lines := strings.Split(out.String(), "\n")
+	summaryAdjacent := false
+	for i, line := range lines {
+		if strings.Contains(line, "Policy summary") {
+			if i == 0 || !strings.Contains(lines[i-1], config.ZoneQuarantinePoliciesQualifier) {
+				t.Fatalf("gRPC caller qualifier is not immediately adjacent to SSOT summary:\n%s", out.String())
+			}
+			summaryAdjacent = true
+			break
+		}
+	}
+	if !summaryAdjacent {
 		t.Fatalf("gRPC zones-detail omitted shared policy summary:\n%s", out.String())
 	}
 	var ordinary strings.Builder

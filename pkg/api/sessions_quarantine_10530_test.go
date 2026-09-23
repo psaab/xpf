@@ -46,4 +46,13 @@ func TestBuildSessionViewQuarantineSurvivor10530(t *testing.T) {
 			t.Fatalf("iteration %d survivor interfaces = %v, want only if-survivor", i, got)
 		}
 	}
+	view := s.buildSessionView()
+	if len(view.zoneNames) != 2 ||
+		view.zoneNames[result.ZoneIDs["trust"]] != "trust" ||
+		view.zoneNames[result.ZoneIDs["z174"]] != "z174" {
+		t.Fatalf("ordinary/survivor reverse-map controls = %v, want trust and z174", view.zoneNames)
+	}
+	if got := view.zoneIfaces[result.ZoneIDs["trust"]]; len(got) != 1 || got[0] != "if-trust" {
+		t.Fatalf("ordinary control interfaces = %v, want if-trust", got)
+	}
 }

@@ -17,7 +17,18 @@ func TestZoneDetailCallerPrefixContract10530(t *testing.T) {
 	if !strings.Contains(out, config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("zones-detail quarantined policy block lacks caller qualifier:\n%s", out)
 	}
-	if !strings.Contains(out, "Policy summary") {
+	lines := strings.Split(out, "\n")
+	summaryAdjacent := false
+	for i, line := range lines {
+		if strings.Contains(line, "Policy summary") {
+			if i == 0 || !strings.Contains(lines[i-1], config.ZoneQuarantinePoliciesQualifier) {
+				t.Fatalf("caller qualifier is not immediately adjacent to SSOT summary:\n%s", out)
+			}
+			summaryAdjacent = true
+			break
+		}
+	}
+	if !summaryAdjacent {
 		t.Fatalf("zones-detail omitted shared policy summary:\n%s", out)
 	}
 	ordinary := captureStdout(t, func() {

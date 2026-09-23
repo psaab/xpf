@@ -51,6 +51,35 @@ func TestCLIPolicyTextQuarantineQualifier10530(t *testing.T) {
 			t.Fatalf("showPoliciesDetail: %v", err)
 		}
 	})
+	lineContaining := func(out, needle string) string {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, needle) {
+				return line
+			}
+		}
+		return ""
+	}
+	policyBlockContaining := func(out, name string) string {
+		lines := strings.Split(out, "\n")
+		start := -1
+		for i, line := range lines {
+			if strings.Contains(line, "Policy: "+name) {
+				start = i
+				break
+			}
+		}
+		if start < 0 {
+			return ""
+		}
+		end := len(lines)
+		for i := start + 1; i < len(lines); i++ {
+			if strings.Contains(lines[i], "Policy: ") {
+				end = i
+				break
+			}
+		}
+		return strings.Join(lines[start:end], "\n")
+	}
 	for name, out := range map[string]string{"hit-count": hit, "detail": detail} {
 		if !strings.Contains(out, config.ZoneQuarantinePoliciesQualifier) {
 			t.Fatalf("%s output lacks quarantine qualifier:\n%s", name, out)
@@ -58,8 +87,20 @@ func TestCLIPolicyTextQuarantineQualifier10530(t *testing.T) {
 		if !strings.Contains(out, config.ZoneQuarantineLiveCountersUnavailable) {
 			t.Fatalf("%s output lacks live-counter-unavailable disposition:\n%s", name, out)
 		}
-		if !strings.Contains(out, "loser-rule") {
-			t.Fatalf("%s output silently dropped authored quarantined rule:\n%s", name, out)
+		var loser, global string
+		if name == "hit-count" {
+			loser = lineContaining(out, "loser-rule")
+			global = lineContaining(out, "scoped-global")
+		} else {
+			loser = policyBlockContaining(out, "loser-rule")
+			global = policyBlockContaining(out, "scoped-global")
+		}
+		if !strings.Contains(loser, config.ZoneQuarantinePoliciesQualifier) ||
+			!strings.Contains(loser, config.ZoneQuarantineLiveCountersUnavailable) {
+			t.Fatalf("%s quarantined rule block lost qualifier/disposition binding: %q", name, loser)
+		}
+		if !strings.Contains(global, "z214 "+config.ZoneQuarantinePoliciesQualifier) {
+			t.Fatalf("%s scoped-global row lacks qualified scope member: %q", name, global)
 		}
 	}
 	ordinary := captureStdout(t, func() {

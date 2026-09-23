@@ -48,4 +48,9 @@ func TestBuildSessionFilterQuarantineSurvivor10530(t *testing.T) {
 			t.Fatalf("iteration %d survivor interfaces = %v, want only if-survivor", i, got)
 		}
 	}
+	filter := s.buildSessionFilter(&pb.GetSessionsRequest{})
+	if len(filter.zoneNames) != 2 || filter.zoneNames[result.ZoneIDs["trust"]] != "trust" ||
+		filter.zoneNames[result.ZoneIDs["z174"]] != "z174" {
+		t.Fatalf("ordinary/survivor reverse-map controls = %v, want trust and z174", filter.zoneNames)
+	}
 }
