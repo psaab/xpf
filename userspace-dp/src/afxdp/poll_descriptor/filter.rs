@@ -299,12 +299,11 @@ pub(super) fn evaluate_non_pbr_input_filter_log_only(
     })
 }
 
-/// #3777: capture this cacheable flow's interface INPUT filter `then count`
-/// term handles for replay on every flow-cache HIT. Sibling of
-/// `evaluate_non_pbr_input_filter_log_only` (which captures the `then log`
-/// descriptor). Cold-path counting already charged the seed packet; this only
-/// collects the handles the hit path replays. Returns an empty set when there
-/// is no flow, no input filter, or no `then count` term.
+/// #3777/#10566: capture this cacheable flow's interface INPUT filter `then count`
+/// term handles for replay on every flow-cache HIT. The seed path charges the
+/// handles exactly once (the cold evaluator for misses, or the seed insert arm
+/// for an uncounted established-hit ACCEPT); this helper only collects handles.
+/// Returns an empty set when there is no flow, no input filter, or no `then count` term.
 #[cold]
 #[inline(never)]
 pub(super) fn evaluate_non_pbr_input_filter_counters_cached(
@@ -670,6 +669,13 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
 /// falsify. Forward and reverse are separate entries with separate stamps, so
 /// each direction revalidates against its own interface's filter with no stored
 /// ingress identity at all.
+/// #10566: the second tuple element reports whether a counted evaluator ran
+/// for this packet — i.e. whether the seed packet arrives at the flow-cache
+/// seed ALREADY charged. `true` on the per-packet `Some` arm and on both DENY
+/// `Some` arms; `false` on every uncounted `None` arm (no-flow, no-filter,
+/// `Fresh`, `Stale`-ACCEPT, `NoLocalEntry`-ACCEPT). Named explicitly — never
+/// derived as `hit.is_some()` — so a future counted-`None` arm cannot silently
+/// double-charge at the seed.
 #[inline]
 pub(super) fn evaluate_input_filter_on_session_hit(
     forwarding: &ForwardingState,
@@ -681,8 +687,11 @@ pub(super) fn evaluate_input_filter_on_session_hit(
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
-) -> Option<SessionHitInputFilterEval> {
-    let flow = flow?;
+) -> (Option<SessionHitInputFilterEval>, bool) {
+    let Some(flow) = flow else {
+        // No flow: no lookup ran, nothing counted.
+        return (None, false);
+    };
     let ingress_ifindex = resolve_ingress_logical_ifindex(
         forwarding,
         meta.ingress_ifindex as i32,
@@ -691,8 +700,12 @@ pub(super) fn evaluate_input_filter_on_session_hit(
     .unwrap_or(meta.ingress_ifindex as i32);
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
     // THE single lookup. Both arms below read off this one borrow.
-    let filter =
-        crate::filter::interface_input_filter(&forwarding.filter_state, ingress_ifindex, is_v6)?;
+    let Some(filter) =
+        crate::filter::interface_input_filter(&forwarding.filter_state, ingress_ifindex, is_v6)
+    else {
+        // No filter: nothing to count, nothing counted.
+        return (None, false);
+    };
     if filter.varies_per_packet_within_flow() {
         // #1430/#2362 — unchanged. The extra-build stays after the gate so the
         // no-such-filter case never pays it.
@@ -702,7 +715,9 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         // Pass `routing_eval_follows = false` so it counts on every exit
         // (per-packet, pre-#2620 behavior), even when the filter is
         // route-lookup-affecting.
-        return Some(SessionHitInputFilterEval {
+        // #10566: the counted evaluator ran — the seed must not charge again.
+        return (
+            Some(SessionHitInputFilterEval {
             eval: evaluate_non_pbr_input_filter(
                 forwarding,
                 extra,
@@ -713,7 +728,9 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             ),
             revoked_key: None,
             log_source: FilterLogSource::Input,
-        });
+            }),
+            true,
+        );
     }
     // #7212: a purely STATIC filter.
     //
@@ -754,7 +771,10 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         // The answer for every packet but one per session per (generation,
         // ingress): a single hash and a compare, which is what keeps this
         // affordable on the entire population the feature serves.
-        crate::session::FilterRevalidationTarget::Fresh => None,
+        crate::session::FilterRevalidationTarget::Fresh => {
+            // #10566: already judged under the live pair — nothing counted.
+            (None, false)
+        }
         crate::session::FilterRevalidationTarget::Stale(canonical_key) => {
             revalidate_static_input_filter_on_session_hit(
                 forwarding,
@@ -789,6 +809,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         }
     }
 }
+
 
 /// #7212/#8114: derive the flow's STATIC input-filter verdict and, on a DENY,
 /// re-run the ordinary counted/logged evaluator so the packet is charged to its
@@ -964,22 +985,28 @@ fn sessionless_static_input_filter_verdict(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
-) -> Option<SessionHitInputFilterEval> {
-    static_input_filter_deny_eval(
+) -> (Option<SessionHitInputFilterEval>, bool) {
+    match static_input_filter_deny_eval(
         forwarding,
         filter,
         logical_ingress_ifindex,
         flow,
         meta,
         ingress_zone_override,
-    )
-    .map(
-        |(eval, log_source)| SessionHitInputFilterEval {
-            eval,
-            revoked_key: None,
-            log_source,
-        },
-    )
+    ) {
+        // #10566: DENY ran the counted evaluator (`static_input_filter_deny_eval`
+        // replays WITH counting on both its `Some` exits); ACCEPT derived the
+        // verdict without counting anything.
+        Some((eval, log_source)) => (
+            Some(SessionHitInputFilterEval {
+                eval,
+                revoked_key: None,
+                log_source,
+            }),
+            true,
+        ),
+        None => (None, false),
+    }
 }
 
 /// #7212: the cold tail of [`evaluate_input_filter_on_session_hit`] — the
@@ -1026,7 +1053,7 @@ fn revalidate_static_input_filter_on_session_hit(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
-) -> Option<SessionHitInputFilterEval> {
+) -> (Option<SessionHitInputFilterEval>, bool) {
     // #8114: the verdict derivation moved to `static_input_filter_deny_eval`,
     // shared verbatim with the sessionless path so the two cannot drift on WHAT
     // the verdict is — including the `TermMatchExtra::default()` choice, whose
@@ -1044,16 +1071,17 @@ fn revalidate_static_input_filter_on_session_hit(
         // reason #5858's family purge was rejected — is untouched. Re-stamp so
         // no later packet of this generation re-derives the same verdict.
         sessions.mark_filter_revalidated(&canonical_key, logical_ingress_ifindex);
-        return None;
+        return (None, false);
     };
     // DENY: deliberately NOT re-stamped — see the header. The caller revokes the
     // session; if that ever fails to take, the next packet must re-derive this
     // same DENY and drop, not be forwarded under a "judged" stamp.
-    Some(SessionHitInputFilterEval {
+    // #10566: DENY ran the counted evaluator — this packet is charged.
+    (Some(SessionHitInputFilterEval {
         eval,
         revoked_key: Some(canonical_key),
         log_source,
-    })
+    }), true)
 }
 
 #[cold]

@@ -108,11 +108,11 @@ pub(super) struct RewriteDescriptor {
     #[allow(dead_code)] // populated for future flow-cache fast-path TX
     pub(super) target_binding_index: Option<usize>,
     pub(super) input_filter_log: Option<CachedInputFilterLog>,
-    // #3777: interface INPUT filter `then count` term handles matched by this
+    // #3777/#10566: interface INPUT `then count` term handles matched by this
     // flow's 5-tuple, replayed on every cache HIT so an input `then count`
     // reports the full N-packet load (mirrors `tx_selection.filter_counters`
-    // for the OUTPUT side, #2573). Captured once at seed; the seed packet is
-    // counted by the cold path, so this only carries handles for the hits.
+    // for the OUTPUT side, #2573). Captured once at seed; the seed path
+    // charges it either in the cold evaluator or in the seed insert arm.
     pub(super) input_filter_counters: crate::filter::CachedFilterCounters,
     pub(super) tx_selection: CachedTxSelectionDescriptor,
     pub(super) nat64: bool,

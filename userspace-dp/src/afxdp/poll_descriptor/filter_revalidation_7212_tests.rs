@@ -367,6 +367,7 @@ fn static_discard_revokes_a_stale_stamped_session_7212() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("a newly-denied stale session must produce a verdict");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert!(
@@ -409,7 +410,7 @@ fn a_still_permitted_session_keeps_its_snat_translation_7212() {
         0,
     ));
 
-    let hit = evaluate_input_filter_on_session_hit(
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
         &forwarding,
         &mut sessions,
         &flow.forward_key,
@@ -421,6 +422,10 @@ fn a_still_permitted_session_keeps_its_snat_translation_7212() {
     assert!(
         hit.is_none(),
         "a still-permitted session must produce no verdict, no counter and no log"
+    );
+    assert!(
+        !already_counted,
+        "static ACCEPT revalidation returns no counted evaluator"
     );
     let lookup = sessions
         .lookup(&flow.forward_key, 2_000, 0)
@@ -456,20 +461,21 @@ fn a_fresh_stamp_skips_the_revalidation_entirely_7212() {
     let flow = v4_flow(5201);
     let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
 
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
     assert!(
-        evaluate_input_filter_on_session_hit(
-            &forwarding,
-            &mut sessions,
-            &flow.forward_key,
-            &frame(),
-            Some(&flow),
-            meta(LAN_IFINDEX as u32, 0, false),
-            Some(TEST_LAN_ZONE_ID),
-        )
-        .is_none(),
+        hit.is_none(),
         "a session already revalidated under the live generation must not be \
          re-derived"
     );
+    assert!(!already_counted, "Fresh static ACCEPT has no counted evaluator");
 }
 
 /// inet6 parity. The family selects a different fast map, and a v4-only
@@ -489,6 +495,7 @@ fn static_discard_revokes_an_ipv6_session_7212() {
         meta(LAN_IFINDEX as u32, 0, true),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("v6 verdict");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert!(hit.revoked_key.is_some());
@@ -514,6 +521,7 @@ fn static_discard_resolves_through_the_vlan_logical_unit_7212() {
         meta(VLAN_PARENT_IFINDEX as u32, VLAN_ID as u16, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("the VLAN unit's own filter must be found");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert!(hit.revoked_key.is_some());
@@ -533,7 +541,7 @@ fn term_order_decides_the_static_verdict_7212() {
         let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, terms);
         let flow = v4_flow(5201);
         let mut sessions = table_with_session(&flow, 7, None);
-        let hit = evaluate_input_filter_on_session_hit(
+        let (hit, _) = evaluate_input_filter_on_session_hit(
             &forwarding,
             &mut sessions,
             &flow.forward_key,
@@ -561,7 +569,7 @@ fn source_address_except_inverts_the_static_verdict_7212() {
         let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![term]);
         let flow = v4_flow(5201);
         let mut sessions = table_with_session(&flow, 7, None);
-        let hit = evaluate_input_filter_on_session_hit(
+        let (hit, _) = evaluate_input_filter_on_session_hit(
             &forwarding,
             &mut sessions,
             &flow.forward_key,
@@ -598,6 +606,7 @@ fn detaching_the_filter_revokes_nothing_7212() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
         )
+        .0
         .is_none()
     );
 }
@@ -617,7 +626,7 @@ fn a_per_packet_filter_drops_the_packet_without_revoking_the_session_7212() {
 
     let mut m = meta(LAN_IFINDEX as u32, 0, false);
     m.tcp_flags = crate::tcp_flags::TCP_SYN;
-    let hit = evaluate_input_filter_on_session_hit(
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
         &forwarding,
         &mut sessions,
         &flow.forward_key,
@@ -625,8 +634,12 @@ fn a_per_packet_filter_drops_the_packet_without_revoking_the_session_7212() {
         Some(&flow),
         m,
         Some(TEST_LAN_ZONE_ID),
-    )
-    .expect("a per-packet filter is re-evaluated on every hit");
+    );
+    let hit = hit.expect("a per-packet filter is re-evaluated on every hit");
+    assert!(
+        already_counted,
+        "per-packet session-hit evaluation must report its counted evaluator"
+    );
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert!(
         hit.revoked_key.is_none(),
@@ -736,6 +749,7 @@ fn a_snat_reply_reached_through_the_nat_alias_is_revalidated_7212() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("the reply half must be revalidated through the alias index");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert_eq!(
@@ -807,6 +821,7 @@ fn a_permitted_snat_reply_through_the_nat_alias_is_untouched_7212() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
         )
+        .0
         .is_none(),
         "a permitted reply must produce no verdict"
     );
@@ -874,6 +889,7 @@ fn a_non_first_fragment_of_a_permitted_flow_does_not_revoke_it_7212() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
         )
+        .0
         .is_none(),
         "a fragment must not revoke a flow the filter permits on its 5-tuple"
     );
@@ -914,6 +930,7 @@ fn a_non_first_fragment_still_revokes_a_denied_flow_7212() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("a denied flow must still be revoked when a fragment triggers it");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert_eq!(hit.revoked_key.as_ref(), Some(&flow.forward_key));
@@ -959,6 +976,7 @@ fn a_deny_verdict_does_not_re_stamp_the_session_7212() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("first packet: the session is newly denied");
     assert!(hit.revoked_key.is_some());
     assert!(
@@ -978,6 +996,7 @@ fn a_deny_verdict_does_not_re_stamp_the_session_7212() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("second packet: still denied, not forwarded under a stale-clean stamp");
     assert_eq!(again.eval.action, crate::filter::FilterAction::Discard);
     assert!(again.revoked_key.is_some());
@@ -1064,6 +1083,7 @@ fn a_route_lookup_affecting_filter_is_revalidated_off_its_non_pbr_terms_8114() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect(
         "a PBR term the flow does not match must not cost the revocation its \
          plain deny term earns",
@@ -1188,6 +1208,7 @@ fn a_verdict_on_one_interface_does_not_judge_another_7212() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
         )
+        .0
         .is_none(),
         "A's filter permits this flow"
     );
@@ -1203,6 +1224,7 @@ fn a_verdict_on_one_interface_does_not_judge_another_7212() {
         meta(IF_B as u32, 0, false),
         Some(TEST_WAN_ZONE_ID),
     )
+    .0
     .expect("B's filter must be evaluated — A's verdict says nothing about B");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert_eq!(hit.revoked_key.as_ref(), Some(&flow.forward_key));
@@ -1258,6 +1280,7 @@ fn a_sessionless_resolved_decision_still_applies_a_static_deny_8114() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect(
         "a resolved decision with no local entry must still be judged by the \
          ingress filter — master forwarded it",
@@ -1307,6 +1330,7 @@ fn a_sessionless_resolved_decision_is_forwarded_when_permitted_8114() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
         )
+        .0
         .is_none(),
         "a permitted sessionless packet must forward — no verdict, no counter, \
          no log"
@@ -1344,6 +1368,7 @@ fn a_fresh_stamp_is_not_re_derived_by_the_8114_sessionless_arm_8114() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
         )
+        .0
         .is_none(),
         "a fresh stamp must cost a lookup and a compare, not a filter walk"
     );
@@ -1437,6 +1462,7 @@ fn a_pbr_term_that_discards_revokes_the_session_8114() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("a PBR term that discards must produce a verdict, not a decline");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert_eq!(
@@ -1495,6 +1521,7 @@ fn a_plain_pbr_term_does_not_revoke_the_session_8114() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
         )
+        .0
         .is_none(),
         "a routing-instance term with no drop action PERMITS the flow; revoking \
          here tears down every deliberately VRF-routed session"
@@ -1796,6 +1823,7 @@ fn a_pbr_term_that_rejects_keeps_its_reject_action_8114() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
     )
+    .0
     .expect("a PBR term that rejects must produce a verdict");
     assert!(
         matches!(hit.eval.action, crate::filter::FilterAction::Reject(_)),
