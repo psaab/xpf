@@ -2949,8 +2949,8 @@ fn reap_expired_sessions(
 }
 /// #10591 test seam: execute the production expire+reap pair in one call.
 ///
-/// The worker loop calls `expire_stale_entries_ha` at `:1772`, then
-/// `reap_expired_sessions` at `:1792` (with `retire_expired_missing_neighbor_seeds`,
+/// The worker loop calls `expire_stale_entries_ha`, then
+/// `reap_expired_sessions` (with `retire_expired_missing_neighbor_seeds`,
 /// `session_expires` accounting, and `drain_and_flush_all` between them that
 /// this seam does NOT drive). The window harness must exercise BOTH arms; an
 /// expire-only test leaves cached descriptors alive, while a reap-only test
@@ -2989,7 +2989,7 @@ pub(in crate::afxdp) fn production_sweep_for_test(
 /// #10591 test seam: execute the production commit-time zone purge at the
 /// snapshot-rotation boundary. This keeps the window sibling out of private
 /// `session_glue` helpers while still driving the same old/new set derivation
-/// (`:1282`) and pair-aware purge (`:1405`) that `worker_loop` uses, with the
+/// and pair-aware purge that `worker_loop` uses, with the
 /// same dummy-map/fd/worker-id divergences as `production_sweep_for_test`
 /// (fresh shared maps, no peer commands, no HA delete propagation).
 #[cfg(test)]
