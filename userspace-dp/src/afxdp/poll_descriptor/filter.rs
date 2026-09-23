@@ -581,7 +581,9 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     // revoke every PBR-steered tunnel flow on its second packet. Mirror the
     // miss rule: a tunneled decision wants (0,0), unresolvable or not (the
     // tunnel never consulted the table, so there is no table identity to go
-    // stale — exactly the miss arm's `else (0,0)`).
+    // stale — exactly the miss arm's `else (0,0)`). #10630: this also suppresses
+    // revocation on genuine post-commit PBR retargets for tunnels — accepted
+    // staleness until the PBR identity is stamped alongside the table stamp.
     let (desired_identity, table, native_unresolvable) =
         if decision.resolution.tunnel_endpoint_id != 0 {
             ((0, 0), None, false)

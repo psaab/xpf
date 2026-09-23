@@ -1942,29 +1942,12 @@ fn poll_descriptor_stamps_neighbor_mac_epoch_from_outer_neighbor_shard_not_logic
     neighbors.insert_if_changed((outer_if, outer_nh), NeighborEntry { mac: [0xaa; 6] });
     neighbors.insert_if_changed((outer_if, outer_nh), NeighborEntry { mac: [0xbb; 6] });
 
-    let outer_epoch = neighbors.mac_change_epoch_for(&(outer_if, outer_nh));
-    let logical_epoch = neighbors.mac_change_epoch_for(&(logical_if, outer_nh));
-    // Preconditions: the outer bump advanced the outer shard's epoch, and the
-    // outer and logical ifindexes hash to DIFFERENT shards for this next-hop
-    // (else the test cannot distinguish the outer key from the logical key).
-    assert_ne!(
-        outer_epoch, logical_epoch,
-        "test precondition: the outer-neighbor bump must advance the OUTER shard's \
-         epoch above the untouched logical (362) shard's epoch"
-    );
-    assert_ne!(
-        ShardedNeighborMap::shard_index(&(outer_if, outer_nh)),
-        ShardedNeighborMap::shard_index(&(logical_if, outer_nh)),
-        "test precondition: the outer (12) and logical (362) ifindexes must hash to \
-         DIFFERENT shards for this next-hop"
-    );
-
     // Packet 1 (SYN): the #10270 fail-closed gate admits only SYN on a session
     // miss. PBR steers it into sfmix.inet.0 -> tunnel endpoint 1
     // (ForwardCandidate — same 5-tuple route/policy as the ACK seed below, so
     // the disposition is identical), which the poll installs WITHOUT seeding
-    // (#2363). The neighbor preconditions above are untouched (the SYN does not
-    // touch the neighbor map), so the epoch/shard pins below still hold.
+    // (#2363). Epochs are read AFTER this SYN (below), so the pins cannot hide
+    // a SYN-side neighbor-map disturbance behind a stale pre-read.
     let syn = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 100),
         Ipv4Addr::new(10, 255, 192, 41),
@@ -1992,6 +1975,23 @@ fn poll_descriptor_stamps_neighbor_mac_epoch_from_outer_neighbor_shard_not_logic
         txn_flow_cache_entries(&binding),
         0,
         "the SYN must install the session but NOT seed the flow cache"
+    );
+
+    let outer_epoch = neighbors.mac_change_epoch_for(&(outer_if, outer_nh));
+    let logical_epoch = neighbors.mac_change_epoch_for(&(logical_if, outer_nh));
+    // Preconditions: the outer bump advanced the outer shard's epoch, and the
+    // outer and logical ifindexes hash to DIFFERENT shards for this next-hop
+    // (else the test cannot distinguish the outer key from the logical key).
+    assert_ne!(
+        outer_epoch, logical_epoch,
+        "test precondition: the outer-neighbor bump must advance the OUTER shard's \
+         epoch above the untouched logical (362) shard's epoch"
+    );
+    assert_ne!(
+        ShardedNeighborMap::shard_index(&(outer_if, outer_nh)),
+        ShardedNeighborMap::shard_index(&(logical_if, outer_nh)),
+        "test precondition: the outer (12) and logical (362) ifindexes must hash to \
+         DIFFERENT shards for this next-hop"
     );
 
     // Packet 2 (first ACK = ESTABLISHED, cache-eligible), same 5-tuple,
