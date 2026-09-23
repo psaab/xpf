@@ -1906,3 +1906,113 @@ mod routing_domain;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+/// Test-only worker bundle for server-level policy-list cells: owns the
+/// registered queue and the worker table the pump scans. Zero production
+/// surface (cfg(test)); the only bridge letting server tests drive a
+/// populated coordinator without widening afxdp worker plumbing.
+#[cfg(test)]
+pub(crate) struct ListTestWorker {
+    queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<crate::afxdp::WorkerCommand>>>,
+    table: crate::session::SessionTable,
+}
+
+/// Registers worker `id` with an empty command queue; returns its bundle.
+#[cfg(test)]
+pub(crate) fn register_list_test_worker(coordinator: &mut Coordinator, id: u32) -> ListTestWorker {
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let handle = super::types::WorkerHandle {
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        heartbeat: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        commands: queue.clone(),
+        session_export_ack: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cos_status: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        runtime_atomics: std::sync::Arc::new(super::worker_runtime::WorkerRuntimeAtomics::new()),
+        cold_path_atomics: std::sync::Arc::new(super::cold_path_hist::WorkerColdPathAtomics::new()),
+    };
+    coordinator.workers.register(
+        id,
+        worker_manager::WorkerRuntimeRecord::for_test(handle),
+        None,
+    );
+    ListTestWorker {
+        queue,
+        table: crate::session::SessionTable::new(),
+    }
+}
+
+#[cfg(test)]
+impl ListTestWorker {
+    /// Installs one forward row; returns its live identity.
+    #[cfg(test)]
+    pub(crate) fn install_policy_row(
+        &mut self,
+        key: crate::session::SessionKey,
+        policy_id: u32,
+        now_ns: u64,
+    ) -> u64 {
+        let decision = crate::session::SessionDecision {
+            resolution: super::types::ForwardingResolution {
+                disposition: super::types::ForwardingDisposition::NoRoute,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: crate::nat::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let metadata = crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: true,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        };
+        assert!(self.table.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            metadata,
+            crate::session::SessionOrigin::ForwardFlow,
+            now_ns,
+            crate::afxdp::PROTO_TCP,
+            0x10,
+        ));
+        self.table.session_id_for(&key)
+    }
+
+    /// Single-pass pump (the dispatch the worker loop runs).
+    #[cfg(test)]
+    pub(crate) fn pump(&mut self) {
+        let forwarding = ForwardingState::default();
+        let ha_state = std::collections::BTreeMap::new();
+        let neighbors =
+            std::sync::Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+        super::session_glue::apply_worker_commands(
+            &self.queue,
+            &mut self.table,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &neighbors,
+            0,
+            &mut std::collections::VecDeque::new(),
+        );
+    }
+}

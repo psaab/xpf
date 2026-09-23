@@ -7101,6 +7101,111 @@ mod routing_domain_delete_7160 {
         );
     }
 
+    /// Zero workers with requested ids: the scan is unavailable, not
+    /// empty — complete=false with worker-local-scan-unavailable
+    /// (never an authoritative empty, never unknown-verb).
+    #[test]
+    fn policy_list_zero_workers_with_ids_incomplete_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut list = req("list_sessions_by_policy");
+        list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
+            policy_ids: vec![5],
+            mode: "prepublish".to_string(),
+            ..Default::default()
+        });
+        let response = run_request(state.clone(), list);
+        assert!(
+            !response.session_policy_complete,
+            "zero workers must not complete"
+        );
+        assert!(
+            response
+                .session_policy_per_worker_errors
+                .iter()
+                .any(|e| e == "worker-local-scan-unavailable"),
+            "zero workers must name the unavailable scan, got {:?}",
+            response.session_policy_per_worker_errors
+        );
+        assert!(
+            response.session_policy_matches.is_empty(),
+            "zero workers must match nothing"
+        );
+    }
+
+    /// Populated delegation end-to-end: socket request → dispatch →
+    /// handler → coordinator fan-out → worker scan → response fields.
+    /// A pumped test worker holds one policy-5 row; the response must
+    /// carry it (matches/errors/continuation mapping, not just empty).
+    #[test]
+    fn policy_list_populated_delegation_e2e_10512() {
+        let mut coordinator = afxdp::Coordinator::new();
+        let mut worker =
+            crate::afxdp::register_list_test_worker(&mut coordinator, 0);
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 40001,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let live = worker.install_policy_row(key, 5, 1_000_000_000);
+        assert_ne!(live, 0, "fixture must mint a live identity");
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: coordinator,
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut list = req("list_sessions_by_policy");
+        list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
+            policy_ids: vec![5],
+            mode: "prepublish".to_string(),
+            ..Default::default()
+        });
+        let st = state.clone();
+        let handle = std::thread::spawn(move || run_request(st, list));
+        while !handle.is_finished() {
+            worker.pump();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let response = handle.join().expect("request thread");
+        assert!(response.ok, "populated scan must be ok: {:?}", response.error);
+        assert!(
+            response.session_policy_complete,
+            "pumped scan must complete"
+        );
+        assert_eq!(
+            response.session_policy_matches.len(),
+            1,
+            "exactly the installed row must delegate"
+        );
+        assert_eq!(response.session_policy_matches[0].policy_id, 5);
+        assert_eq!(
+            response.session_policy_matches[0].expected_rt_flow_session_id,
+            live,
+            "delegated row must carry the live identity"
+        );
+        assert!(
+            response.session_policy_per_worker_errors.is_empty(),
+            "clean scan must error nothing, got {:?}",
+            response.session_policy_per_worker_errors
+        );
+        assert!(
+            response.session_policy_continuation.is_empty(),
+            "one row continues nothing"
+        );
+    }
+
     /// Default-domain scoped delete amid a tenant collision: only the
     /// default row goes (stated domain 1 selects it exactly).
     #[test]

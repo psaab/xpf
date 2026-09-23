@@ -13393,13 +13393,14 @@ fn list_req10512(
     policy_ids: Vec<u32>,
     mode: &str,
     before_secs: Option<u64>,
+    families: Vec<u8>,
     classes: Vec<String>,
 ) -> crate::protocol::SessionPolicyListRequest {
     crate::protocol::SessionPolicyListRequest {
         policy_ids,
         mode: mode.to_string(),
         before_secs,
-        families: Vec::new(),
+        families,
         classes,
         continuation: String::new(),
         ..Default::default()
@@ -13442,7 +13443,7 @@ fn worker_list_returns_matching_policy_with_identity_10512() {
     assert_ne!(live5, 0, "fixture must mint a live identity");
     let (rows, errs, left) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "prepublish", None, Vec::new()),
+        list_req10512(vec![5], "prepublish", None, Vec::new(), Vec::new()),
     );
     assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
     assert_eq!(left, 0, "worker must ack the scan");
@@ -13476,26 +13477,26 @@ fn worker_list_legacy_cutoff_zero_unbounded_nil_rejected_10512() {
     // Created "now" >> 1: fenced out.
     let (rows, _, left) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "legacy", Some(1), Vec::new()),
+        list_req10512(vec![5], "legacy", Some(1), Vec::new(), Vec::new()),
     );
     assert!(rows.is_empty(), "row created after the fence must be cut");
     assert_eq!(left, 0, "fenced scan still acks");
     // Zero: unbounded, returned.
     let (rows, _, _) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "legacy", Some(0), Vec::new()),
+        list_req10512(vec![5], "legacy", Some(0), Vec::new(), Vec::new()),
     );
     assert_eq!(rows.len(), 1, "zero before_secs must be unbounded");
     // Far future: returned.
     let (rows, _, _) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "legacy", Some(now_secs + 3600), Vec::new()),
+        list_req10512(vec![5], "legacy", Some(now_secs + 3600), Vec::new(), Vec::new()),
     );
     assert_eq!(rows.len(), 1, "row created before the fence must return");
     // None in legacy mode: caller bug, error, no scan.
     let (rows, errs, left) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "legacy", None, Vec::new()),
+        list_req10512(vec![5], "legacy", None, Vec::new(), Vec::new()),
     );
     assert!(rows.is_empty(), "nil-fence scan must return nothing");
     assert!(
@@ -13539,7 +13540,7 @@ fn worker_list_forward_class_excludes_reverse_10512() {
     let live = sessions.session_id_for(&key);
     let (rows, errs, _) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "prepublish", None, vec!["forward".to_string()]),
+        list_req10512(vec![5], "prepublish", None, Vec::new(), vec!["forward".to_string()]),
     );
     assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
     assert_eq!(rows.len(), 1, "only the forward row is discovered");
@@ -13547,4 +13548,54 @@ fn worker_list_forward_class_excludes_reverse_10512() {
         rows[0].expected_rt_flow_session_id, live,
         "the discovered row must be the forward"
     );
+}
+
+/// Families filter by wire family (T1): real IPv4 + IPv6 rows, [4]
+/// selects only v4, [6] only v6, empty selects both. Identity-pinned
+/// (the row's live id), so a bypassing filter fails on count AND id.
+#[test]
+fn worker_list_family_filter_selects_v4_v6_10512() {
+    let now_ns = monotonic_nanos();
+    let mut sessions = SessionTable::new();
+    let key4 = test_key();
+    let mut key6 = test_key();
+    key6.addr_family = libc::AF_INET6 as u8;
+    key6.src_ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    key6.dst_ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
+    for key in [&key4, &key6] {
+        let mut meta = test_metadata();
+        meta.policy_id = 5;
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            meta,
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+    }
+    let live4 = sessions.session_id_for(&key4);
+    let live6 = sessions.session_id_for(&key6);
+    assert_ne!(live4, 0);
+    assert_ne!(live6, 0);
+    let (rows, errs, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, vec![4], Vec::new()),
+    );
+    assert!(errs.is_empty(), "got {errs:?}");
+    assert_eq!(rows.len(), 1, "[4] must select only v4");
+    assert_eq!(rows[0].expected_rt_flow_session_id, live4);
+    let (rows, errs, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, vec![6], Vec::new()),
+    );
+    assert!(errs.is_empty(), "got {errs:?}");
+    assert_eq!(rows.len(), 1, "[6] must select only v6");
+    assert_eq!(rows[0].expected_rt_flow_session_id, live6);
+    let (rows, _, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, Vec::new(), Vec::new()),
+    );
+    assert_eq!(rows.len(), 2, "empty families must select both");
 }
