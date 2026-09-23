@@ -4650,7 +4650,9 @@ fn junos_host_policy_no_op_without_configured_rule() {
 /// #3019 fail-safe: a junos-host policy is configured for trust, but a flow
 /// from a DIFFERENT ingress zone (untrust) matches no junos-host rule for that
 /// pair → `None` (no implicit default-deny — host-bound traffic from untrust
-/// is unaffected). Also covers the unzoned (id 0) ingress short-circuit.
+/// is unaffected). Also covers unzoned (id 0) ingress against an
+/// exact-pair-only ruleset: no exact pair names zone 0, and with no
+/// from-any/global rule the flow still delivers (#10644).
 #[test]
 fn junos_host_policy_no_match_falls_through_to_today_behavior() {
     let state = parse_policy_state("permit", &[junos_host_deny_snapshot("deny")], &test_zone_name_to_id());
@@ -4670,7 +4672,9 @@ fn junos_host_policy_no_match_falls_through_to_today_behavior() {
         .is_none(),
         "no junos-host rule for this ingress zone: no implicit default-deny"
     );
-    // Unzoned (id 0) ingress is never eligible (mirror #3110).
+    // Unzoned (id 0) ingress matches no exact pair (the #3110 mirroring now
+    // scopes to the exact tier only); with no from-any/global rule the flow
+    // still delivers (#10644).
     assert!(
         evaluate_junos_host_policy(
             &state,
@@ -5651,6 +5655,119 @@ fn from_zone_any_to_junos_host_blocks_host_inbound_from_any_zone() {
             "from-zone any to-zone junos-host must block host-inbound from zone {from}"
         );
     }
+}
+
+#[test]
+fn from_zone_any_to_junos_host_denies_zone_zero_ingress_10644() {
+    // #10644: a `from-zone any to-zone junos-host` deny-all is the operator's
+    // recourse against unzoned (zone-0) host-bound ingress — the docs contract
+    // (`userspace-dataplane-architecture.md`, wildcard zone tiers) says it is
+    // "enforced on the host-bound path too". The `from_id == 0` early return
+    // skipped it, so unzoned trunk units admitted every host-bound service
+    // even under a deny-all. Fail-on-revert: restoring the early return makes
+    // the zone-0 assertions return `None` (deliver) instead of Deny.
+    let state = parse_policy_state(
+        "permit",
+        &[wildcard_rule("host-block", "any", "junos-host", "deny")],
+        &test_zone_name_to_id(),
+    );
+    for from in [0, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, TEST_UNTRUST_ZONE_ID] {
+        let res = evaluate_junos_host_policy(
+            &state,
+            from,
+            "10.0.0.1".parse().expect("src"),
+            "10.0.0.2".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            22,
+            None,
+            64,
+        );
+        assert_eq!(
+            res.map(|r| r.action),
+            Some(PolicyAction::Deny),
+            "from-zone any to-zone junos-host must block host-inbound from zone {from}"
+        );
+    }
+    // The L3-aware entry point (flowless arm) shares the fix: an `any`-app
+    // deny-all matches a flowless zone-0 packet too.
+    let frag = evaluate_junos_host_policy_l3_aware(
+        &state,
+        0,
+        "10.0.0.1".parse().expect("src"),
+        "10.0.0.2".parse().expect("dst"),
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
+    );
+    assert_eq!(
+        frag.map(|r| r.action),
+        Some(PolicyAction::Deny),
+        "from-any junos-host deny-all must block a flowless zone-0 fragment"
+    );
+}
+
+#[test]
+fn zone_zero_junos_host_no_match_still_delivers_10644() {
+    // #10644 lifeline pins: without a matching from-any/global rule, zone-0
+    // host-bound evaluation still returns `None` (deliver) — the fix only
+    // makes configured wildcard/global denies enforceable, it never invents
+    // a default-deny, and zone 0 never matches another zone's exact pair.
+    let empty = parse_policy_state("permit", &[], &test_zone_name_to_id());
+    assert!(
+        evaluate_junos_host_policy(
+            &empty,
+            0,
+            "10.0.0.1".parse().expect("src"),
+            "10.0.0.2".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            22,
+            None,
+            64,
+        )
+        .is_none(),
+        "no junos-host rules: zone-0 host-bound must still deliver"
+    );
+    let exact_only = parse_policy_state(
+        "permit",
+        &[wildcard_rule("trust-only", "trust", "junos-host", "deny")],
+        &test_zone_name_to_id(),
+    );
+    assert!(
+        evaluate_junos_host_policy(
+            &exact_only,
+            0,
+            "10.0.0.1".parse().expect("src"),
+            "10.0.0.2".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            22,
+            None,
+            64,
+        )
+        .is_none(),
+        "zone 0 must not match another zone's exact junos-host pair"
+    );
+    // ...while the exact pair still fires for its own zone (no over-narrowing).
+    assert_eq!(
+        evaluate_junos_host_policy(
+            &exact_only,
+            TEST_TRUST_ZONE_ID,
+            "10.0.0.1".parse().expect("src"),
+            "10.0.0.2".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            22,
+            None,
+            64,
+        )
+        .map(|r| r.action),
+        Some(PolicyAction::Deny),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────

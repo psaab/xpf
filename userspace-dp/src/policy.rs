@@ -3294,11 +3294,13 @@ fn evaluate_policy_result_counted(
     // black-holing a correctly-configured path to fix a case that has not been
     // shown to occur. It still falls through to the default below.
     //
-    // Host-inbound is NOT affected: the LocalDelivery arm adjudicates through
-    // `evaluate_junos_host_policy_l3_aware`, which already declines `from_id ==
-    // 0` on its own, and both production callers of this function are transit
-    // (`ForwardCandidate` and the flowless MissingNeighbor arm). Management on
-    // an unzoned fxp0 cannot be locked out by this.
+    // Host-inbound is NOT affected by THIS arm: the LocalDelivery arm
+    // adjudicates through `evaluate_junos_host_policy_l3_aware`, which for
+    // `from_id == 0` consults only the from-any/global tiers (#10644) — an
+    // unmatched zone-0 host-bound flow still delivers — and both production
+    // callers of this function are transit (`ForwardCandidate` and the
+    // flowless MissingNeighbor arm). Management on an unzoned fxp0 cannot be
+    // locked out by this.
     if from_id == 0 {
         UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return PolicyEvaluationResult {
@@ -3387,9 +3389,10 @@ fn resolve_policy_zone_id(
 /// CONSERVATIVE / FAIL-SAFE semantics, by design (#3019 brief): enforcement is
 /// strictly MATCH-DRIVEN. Returns:
 ///   - `None` when no `junos-host` policy is configured at all
-///     (`has_junos_host_rules == false`), when the ingress zone is unknown
-///     (id 0, mirroring the #3110 unzoned guard), or when no `junos-host` rule
-///     MATCHES the flow.
+///     (`has_junos_host_rules == false`), or when no `junos-host` rule
+///     MATCHES the flow. An unknown ingress zone (id 0) skips only the
+///     exact-pair tier — no exact pair can name it — and still consults the
+///     `from-zone any` and global tiers (#10644).
 ///   - `Some(result)` only when a `to-zone junos-host` rule MATCHES.
 ///
 /// Crucially there is NO implicit default-deny here: an unmatched host-bound
@@ -3477,16 +3480,29 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
     packet_len: u64,
     l4_present: bool,
 ) -> Option<PolicyEvaluationResult> {
-    if !state.has_junos_host_rules || from_id == 0 {
+    // #10644: NO `from_id == 0` early return here. The old entry guard
+    // skipped the from-any/global tiers for unzoned ingress, so a `from-zone
+    // any to-zone junos-host` deny-all — the operator's recourse against
+    // unzoned (zone-0) host-bound ingress, and "enforced on the host-bound
+    // path too" per the docs wildcard-tiers contract — never fired for zone
+    // 0. The zone-0 carve-out now lives on the exact-pair tier only (below):
+    // zone 0 can never match an exact pair, while the wildcard/global tiers
+    // stay eligible for it. Unmatched zone-0 flows still return None
+    // (deliver) — there is still no implicit default-deny.
+    if !state.has_junos_host_rules {
         return None;
     }
     // #6465: fragment-association fail-closed, mirroring
     // `evaluate_policy_result_l3_aware` (#4569) — inert on the L4 path.
     let mut skipped_frag_deny: Option<SkippedFragDeny> = None;
     // Most-specific first: an exact `from-zone <ingress> to-zone junos-host`
-    // pair before the `from-zone any to-zone junos-host` wildcard.
+    // pair before the `from-zone any to-zone junos-host` wildcard. The
+    // `from_id != 0` conjunct is the remainder of the old entry guard: zone
+    // 0 skips this tier only (the `zone_pair_key(0, _)` lookup would miss
+    // anyway — no rule names the unzoned ingress) and still reaches the
+    // from-any and global tiers below.
     let key = zone_pair_key(from_id, JUNOS_HOST_ZONE_ID);
-    if let Some(indices) = state.zone_pair_index.get(&key) {
+    if from_id != 0 && let Some(indices) = state.zone_pair_index.get(&key) {
         for &idx in indices {
             match try_match_rule(
                 &state.rules[idx],
