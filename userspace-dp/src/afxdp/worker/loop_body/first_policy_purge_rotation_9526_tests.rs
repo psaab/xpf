@@ -774,3 +774,131 @@ fn rotation_purge_keeps_unbound_id_zero_outside_the_removed_set_10510() {
     );
     harness.shutdown();
 }
+
+/// #10588 (N1): the nonzero-policy arm. A forward, unbound, SharedPromote row
+/// stamped with the removed zone 3 must SURVIVE the purge when its policy_id
+/// is nonzero — only the `policy_id != 0` exemption saves it (Z=true, S=true,
+/// R=false, B=false). The zone-3 unbound id-0 control must still purge, so
+/// the cell cannot pass vacuously when the purge is omitted.
+#[test]
+fn rotation_purge_keeps_nonzero_policy_id_when_zone_vanishes_10588() {
+    let survivor_key = key(40006);
+    let mut survivor = entry(survivor_key.clone(), false, None);
+    survivor.metadata.policy_id = 1;
+    survivor.metadata.ingress_zone = 3;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SharedPromote;
+    let harness = RotationHarness::start_with_extra(std::slice::from_ref(&survivor));
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let purged = harness.presence();
+    assert!(
+        !purged.unbound,
+        "the removed-zone unbound id-0 row must purge"
+    );
+    assert!(
+        purged.first_forward && purged.first_reverse,
+        "a bound policy session must survive when its policy remains"
+    );
+    assert!(
+        harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&survivor_key),
+        "a nonzero-policy row stamped with the removed zone must survive the purge"
+    );
+    harness.shutdown();
+}
+
+/// #10588 (R1): the reverse arm. A reverse, unbound, id-0, SharedPromote row
+/// stamped with the removed zone 3 must SURVIVE the purge — only the
+/// `is_reverse` exemption saves it (Z=true, S=true, N=false, B=false).
+/// Forward owns the pair; the purge must never take a reverse half directly.
+#[test]
+fn rotation_purge_keeps_reverse_when_zone_vanishes_10588() {
+    let survivor_key = key(40007);
+    let mut survivor = entry(survivor_key.clone(), true, None);
+    survivor.metadata.policy_id = 0;
+    survivor.metadata.ingress_zone = 3;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SharedPromote;
+    let harness = RotationHarness::start_with_extra(std::slice::from_ref(&survivor));
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let purged = harness.presence();
+    assert!(
+        !purged.unbound,
+        "the removed-zone unbound id-0 row must purge"
+    );
+    assert!(
+        purged.first_forward && purged.first_reverse,
+        "a bound policy session must survive when its policy remains"
+    );
+    assert!(
+        harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&survivor_key),
+        "a reverse row stamped with the removed zone must survive the purge"
+    );
+    harness.shutdown();
+}
+
+/// #10588 (B1): the bound arm. A forward, bound (`policy_counter.is_some()`),
+/// id-0, peer-synced row stamped with the removed zone 3 must SURVIVE the
+/// purge — only the bound exemption saves it (Z=true, S=true, N=false,
+/// R=false). This pins the rebind/purge disjointness: rebind owns bound
+/// rows, the removed-zone purge owns unbound id-0 rows.
+#[test]
+fn rotation_purge_keeps_bound_when_zone_vanishes_10588() {
+    let survivor_key = key(40008);
+    let fixture = policy(&[rule("p-first", 0), rule("p-web", 1)]);
+    let counter = fixture
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose the first rule counter");
+    let mut survivor = entry(survivor_key.clone(), false, Some(counter));
+    survivor.metadata.policy_id = 0;
+    survivor.metadata.ingress_zone = 3;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SyncImport;
+    let harness = RotationHarness::start_with_extra(std::slice::from_ref(&survivor));
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let purged = harness.presence();
+    assert!(
+        !purged.unbound,
+        "the removed-zone unbound id-0 row must purge"
+    );
+    assert!(
+        purged.first_forward && purged.first_reverse,
+        "a bound policy session must survive when its policy remains"
+    );
+    let map = harness.synced.lock().expect("shared synced map");
+    let kept = map
+        .get(&survivor_key)
+        .expect("a bound row stamped with the removed zone must survive the purge");
+    assert!(
+        kept.metadata.policy_counter.is_some(),
+        "the surviving bound row must still carry its policy counter"
+    );
+    drop(map);
+    harness.shutdown();
+}
