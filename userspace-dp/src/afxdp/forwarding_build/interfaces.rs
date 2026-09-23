@@ -101,9 +101,10 @@ const UNIT_REFUSED_TRANSIT_RETAINED_10520: &str =
     "Transit is evaluated under the retained zone's policy (zone-gated; the #6682 \
      unzoned-ingress deny does not apply), so its verdict follows that policy.";
 const UNIT_REFUSED_HOST_BOUND_SENTINEL_10520: &str =
-    "Host-bound traffic to the firewall itself is denied by the #5659 empty-zone \
-     host-inbound sentinel (ICMP errors/PMTUD/ND control messages remain admitted; \
-     an explicit per-interface host-inbound stanza still takes precedence).";
+    "Host-bound traffic to the firewall itself is denied by the per-ifindex \
+     empty host-inbound sentinel (#5659/#10556; ICMP errors/PMTUD/ND control \
+     messages remain admitted; an explicit per-interface host-inbound stanza \
+     still takes precedence).";
 const UNIT_REFUSED_HOST_BOUND_CONTESTED_10520: &str =
     "Host-bound traffic to the firewall itself is denied by the contested-parent \
      host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages remain \
@@ -113,8 +114,8 @@ const UNIT_REFUSED_HOST_BOUND_RETAINED_10520: &str =
     "Host-bound traffic follows the retained sibling zone policy (zone-gated unless \
      an explicit per-interface host-inbound override takes precedence).";
 const UNIT_REFUSED_HOST_BOUND_LIFELINE_10520: &str =
-    "Host-bound traffic on this lifeline remains admitted; #5659 deliberately does \
-     not arm an empty-zone host-inbound sentinel.";
+    "Host-bound traffic on this lifeline remains admitted; the #5659/#10556 \
+     guards deliberately do not arm an empty-zone host-inbound sentinel.";
 const UNIT_REFUSED_HOST_BOUND_GATED_10520: &str =
     "Host-bound traffic on this AF_XDP bind-excluded interface remains zone-gated by \
      applicable zone policy; this prefix-only/lo0 name follows the applicable \
@@ -134,9 +135,9 @@ const UNIT_REFUSED_HOST_BOUND_OVERRIDE_10520: &str =
     "Host-bound traffic follows the explicit per-interface host-inbound override; \
      that stanza takes precedence over the empty-zone default.";
 const UNIT_REFUSED_HOST_BOUND_ADMIT_10520: &str =
-    "Host-bound traffic remains admitted: this ifindex has no #5659 empty-zone \
-     host-inbound sentinel, so the global None => true path applies; this includes \
-     address-less non-tunnel refusals and all-zoned tunnel Disagree rows.";
+    "Host-bound traffic remains admitted: this ifindex has no per-ifindex empty \
+     host-inbound sentinel, so the global None => true path applies; this \
+     includes address-less non-tunnel refusals.";
 
 fn unit_refused_transit_warning_10520(retained_zone: bool) -> &'static str {
     if retained_zone {
@@ -210,16 +211,18 @@ mod warning_text_tests_10520 {
 
         assert!(UNIT_REFUSED_HOST_BOUND_SENTINEL_10520.contains("#5659"));
         assert!(UNIT_REFUSED_HOST_BOUND_SENTINEL_10520.contains("ICMP"));
+        assert!(UNIT_REFUSED_HOST_BOUND_SENTINEL_10520.contains("#10556"));
         assert!(UNIT_REFUSED_HOST_BOUND_RETAINED_10520.contains("zone-gated"));
         assert!(UNIT_REFUSED_HOST_BOUND_RETAINED_10520.contains("override"));
-        assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("admitted"));
         assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("#5659"));
+        assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("#10556"));
+        assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("admitted"));
         assert!(UNIT_REFUSED_HOST_BOUND_GATED_10520.contains("zone-gated"));
         assert!(!UNIT_REFUSED_HOST_BOUND_GATED_10520.contains("admitted"));
         assert!(!UNIT_REFUSED_HOST_BOUND_GATED_10520.contains("denied"));
         assert!(UNIT_REFUSED_HOST_BOUND_OVERRIDE_10520.contains("override"));
         assert!(UNIT_REFUSED_HOST_BOUND_ADMIT_10520.contains("None => true"));
-        assert!(UNIT_REFUSED_HOST_BOUND_ADMIT_10520.contains("all-zoned tunnel"));
+        assert!(!UNIT_REFUSED_HOST_BOUND_ADMIT_10520.contains("all-zoned tunnel"));
         assert!(!UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("#10503"));
 
         assert!(UNIT_REFUSED_HOST_BOUND_CONTESTED_10520.contains("#10503"));
@@ -456,9 +459,14 @@ pub(super) fn populate_interfaces(
         i32,
         std::collections::BTreeSet<u16>,
     > = std::collections::BTreeMap::new();
-    // #10520: distinguish the #5659 empty-zone sentinel from an explicit
-    // per-interface host-inbound override. Both occupy `ifindex_host_inbound`,
-    // but only this set may select the #5659 warning sentence.
+    // #10556: only ifindexes with the same local-target/tunnel exposure that
+    // makes #5659 meaningful may receive the refused-ifindex sentinel.
+    let mut host_inbound_exposure_ifindexes: std::collections::BTreeSet<i32> =
+        std::collections::BTreeSet::new();
+    // #5659/#10556: distinguish the per-ifindex empty host-inbound sentinel
+    // from an explicit per-interface host-inbound override. Both occupy
+    // `ifindex_host_inbound`, but only this set may select the sentinel warning
+    // sentence.
     let mut empty_zone_host_inbound_sentinels: std::collections::BTreeSet<i32> =
         std::collections::BTreeSet::new();
     // #10520: the #10503 contested-parent sentinel also shares the map with
@@ -713,9 +721,10 @@ pub(super) fn populate_interfaces(
                 // to pick one rather than guess. Transit is denied as unattributed
                 // before the implicit default policy (#6682). An ordinary
                 // non-lifeline contest denies host-bound traffic with the
-                // contested-parent host-inbound sentinel (#10503), while lifeline
-                // contests and all-zoned interface-level tunnel Disagrees remain
-                // admitted because neither shape has an eligible sentinel.
+                // contested-parent host-inbound sentinel (#10503), while a
+                // lifeline contest remains admitted. Refused-but-not-contested
+                // all-zoned interface-level tunnel Disagrees are covered by the
+                // #10556 refused-ifindex sentinel below.
                 //
                 // This also collapses an asymmetry rather than adding a second
                 // mechanism: the egress half already resolves a contested
@@ -906,6 +915,9 @@ pub(super) fn populate_interfaces(
                 }
             }
         }
+        if registered_local || iface.tunnel {
+            host_inbound_exposure_ifindexes.insert(iface.ifindex);
+        }
         // #5659: empty-zone host-inbound fail-closed backstop — SYMMETRY with
         // the #2391 non-empty-unknown-zone backstop above. That backstop is
         // guarded by `!iface.zone.is_empty()`, so an ADDRESSED interface with an
@@ -984,11 +996,9 @@ pub(super) fn populate_interfaces(
     // while the same ifindex's TRANSIT is denied via
     // `UNZONED_INGRESS_DENIED` (policy.rs). The per-row #5659 sentinel cannot
     // cover an ordinary address-less contest: its rows carry conflicting zones,
-    // so `iface.zone.is_empty()` misses too. An interface-level tunnel whose
-    // logical unit rows are ALL zoned is the deliberate exception: it has no
-    // empty-zone row for either sentinel, so its host-bound traffic stays on the
-    // global admit path even though transit remains refused. The contest set is
-    // only complete after the walk, so it is closed here rather than per row.
+    // so `iface.zone.is_empty()` misses too. A refused all-zoned tunnel reaches
+    // the #10556 refused-ifindex sentinel below; the contest set is only
+    // complete after the walk, so it is closed here rather than per row.
     //
     // Fix: insert an EMPTY `ZoneHostInbound` sentinel keyed by each eligible
     // contested parent's ifindex, so the ingress-interface-keyed
@@ -996,9 +1006,9 @@ pub(super) fn populate_interfaces(
     // ifindex — NOT by inserting at zone id 0 — leaves the genuinely-global
     // zone-0 path untouched, exactly as #5659 does. An existing entry
     // (explicit per-interface override) is never clobbered, and a lifeline name
-    // is never armed. An all-zoned tunnel Disagree reaches `unit_refused_zones`
-    // below and gets no per-row sentinel; this loop remains the existing contest
-    // backstop.
+    // is never armed. Refused-but-not-contested all-zoned tunnel Disagrees reach
+    // `unit_refused_zones` below and receive the #10556 per-row sentinel; this
+    // loop remains the existing contest backstop.
     for ifindex in &contested_parent_ifindexes {
         if state.ifindex_host_inbound.contains_key(ifindex) {
             continue;
@@ -1014,6 +1024,42 @@ pub(super) fn populate_interfaces(
             contested_host_inbound_sentinels.insert(*ifindex);
             slot.insert(Default::default());
         }
+    }
+
+    // #10556: refused-but-not-contested host-inbound fail-closed backstop —
+    // SYMMETRY with #10503. `unit_refused_zones` ifindexes are unzoned by
+    // refusal (not contest), miss #5659 split across two rows (the zoned base
+    // row fails `zone.is_empty()`, the unzoned unit row fails
+    // `registered_local || tunnel`), and miss #10503 (not in the contested
+    // set) → zone-0 None=>true admit. Same per-ifindex empty sentinel, with
+    // retained-zone and exposure guards plus the override/lifeline guards.
+    // No `ifindex_to_zone_id` entry: the ifindex stays unzoned and transit
+    // stays UNZONED_INGRESS_DENIED.
+    for ifindex in unit_refused_zones.keys() {
+        if state.ifindex_to_zone_id.contains_key(ifindex) {
+            // The final ifindex retained a valid zone; host-bound traffic must
+            // remain governed by that zone's admission set.
+            continue;
+        }
+        if !host_inbound_exposure_ifindexes.contains(ifindex) {
+            // Mirror #5659: an address-less, non-tunnel refusal has no
+            // local-delivery exposure to protect.
+            continue;
+        }
+        if contested_parent_ifindexes.contains(ifindex) {
+            // Already armed by #10503 above.
+            continue;
+        }
+        if state.ifindex_host_inbound.contains_key(ifindex) {
+            continue;
+        }
+        if let Some(name) = state.ifindex_to_config_name.get(ifindex) {
+            if is_host_inbound_lifeline(name) {
+                continue;
+            }
+        }
+        empty_zone_host_inbound_sentinels.insert(*ifindex);
+        state.ifindex_host_inbound.entry(*ifindex).or_default();
     }
 
     // #6722: flush the Go builder's egress answer, admitting an ifindex only
@@ -1085,8 +1131,8 @@ pub(super) fn populate_interfaces(
     // unit rows refused. A FULL refusal leaves no ingress-zone entry and takes
     // the #6682 unattributed deny; a retained zone is policy-evaluated instead.
     // Host-bound selection follows built state: a retained zone is zone-gated,
-    // an installed #5659 sentinel denies addressed/tunnel traffic with control
-    // carve-outs, and a full refusal without that sentinel remains on the
+    // an installed #5659/#10556 sentinel denies addressed/tunnel traffic with
+    // control carve-outs, and a full refusal without that sentinel remains on
     // global admit path unless the config name identifies a narrow lifeline;
     // broad prefix-only/lo0 names remain zone-gated in the warning text.
     // The commit-time advisory

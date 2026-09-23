@@ -224,8 +224,8 @@ func TestContestedTrunkLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
 }
 
 // A shared-device warning also has a lifeline shape: the warning still fires,
-// but the host-bound clause must describe the deliberate #5659 admit path
-// rather than claim a #5659 deny or the contested-parent #10503 sentinel.
+// but the host-bound clause must describe the deliberate #5659/#10556 admit
+// path rather than claim a #5659 deny or the contested-parent #10503 sentinel.
 func TestSharedDeviceLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
 	cfg := sharedDeviceCfg7509(t, "fab0", false,
 		map[int]int{0: 0, 100: 100},
@@ -237,7 +237,7 @@ func TestSharedDeviceLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
 		t.Fatalf("expected one shared-device lifeline advisory; got %d: %v",
 			len(got), cfg.Warnings)
 	}
-	for _, want := range []string{"fab0", "UNZONED", "unattributed", "DENIED", "#6682", "#5659", "lifeline", "admitted"} {
+	for _, want := range []string{"fab0", "UNZONED", "unattributed", "DENIED", "#6682", "#5659", "#10556", "lifeline", "admitted"} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("lifeline refusal advisory must name %q; got: %s", want, got[0])
 		}
@@ -500,7 +500,7 @@ func TestSecureTunnelUnitDevicePrecedesTunnelMap7509(t *testing.T) {
 			got, want)
 	}
 }
-func TestAllZonedInterfaceTunnelDisagreeUsesAdmittedHostShape7509(t *testing.T) {
+func TestAllZonedInterfaceTunnelDisagreeUsesRefusedHostShape10556(t *testing.T) {
 	cfg := sharedDeviceCfg7509(t, "st0", true,
 		map[int]int{0: 0, 1: 0},
 		map[string][]string{
@@ -514,16 +514,43 @@ func TestAllZonedInterfaceTunnelDisagreeUsesAdmittedHostShape7509(t *testing.T) 
 			len(got), cfg.Warnings)
 	}
 	for _, want := range []string{
-		"UNZONED", "DENIED", "#6682", "Host-bound traffic remains admitted",
-		"all collapsed tunnel units are zoned",
+		"UNZONED", "DENIED", "#6682", "#10556",
+		"Host-bound traffic to the firewall itself is denied",
 	} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("all-zoned tunnel advisory must name %q; got: %s", want, got[0])
 		}
 	}
 	if strings.Contains(got[0], "UNTAGGED") ||
-		strings.Contains(got[0], "Tagged traffic on each unit") {
-		t.Fatalf("interface-level tunnel advisory must not claim per-unit tagged traffic; got: %s",
+		strings.Contains(got[0], "Tagged traffic on each unit") ||
+		strings.Contains(got[0], "Host-bound traffic remains admitted") {
+		t.Fatalf("interface-level tunnel advisory must describe the refused deny; got: %s",
+			got[0])
+	}
+}
+
+func TestAllZonedLifelineInterfaceTunnelDisagreeUsesLifelineHostShape7509(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "em0", true,
+		map[int]int{0: 0, 1: 0},
+		map[string][]string{
+			"trust":   {"em0.0"},
+			"untrust": {"em0.1"},
+		})
+	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
+	got := warningsMentioning(cfg, "em0")
+	if len(got) != 1 {
+		t.Fatalf("expected one all-zoned lifeline tunnel advisory; got %d: %v",
+			len(got), cfg.Warnings)
+	}
+	for _, want := range []string{
+		"UNZONED", "DENIED", "#6682", "#10503", "#10556", "lifeline", "admitted",
+	} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("lifeline tunnel advisory must name %q; got: %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "Host-bound traffic to the firewall itself is denied") {
+		t.Fatalf("lifeline tunnel advisory must not claim a refused-ifindex deny; got: %s",
 			got[0])
 	}
 }

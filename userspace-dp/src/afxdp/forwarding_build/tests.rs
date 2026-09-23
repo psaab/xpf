@@ -2575,7 +2575,7 @@ fn unit_refused_host_bound_and_partial_transit_10520() {
 }
 
 #[test]
-fn all_zoned_tunnel_disagree_has_no_host_sentinel_10520() {
+fn all_zoned_tunnel_disagree_gets_refused_host_sentinel_10520_10556() {
     use crate::afxdp::forwarding::host_inbound_admits_iface;
 
     let state = build_forwarding_state(&all_zoned_tunnel_disagree_snapshot_10520());
@@ -2584,12 +2584,16 @@ fn all_zoned_tunnel_disagree_has_no_host_sentinel_10520() {
         "all-zoned tunnel Disagree must remain a full refusal for transit"
     );
     assert!(
-        !state.ifindex_host_inbound.contains_key(&61),
-        "all-zoned tunnel Disagree has no empty-zone row for #5659"
+        state.ifindex_host_inbound.contains_key(&61),
+        "refused tunnel Disagree must receive the #10556 host sentinel"
     );
     assert!(
-        host_inbound_admits_iface(&state, 61, 0, 6, 22, false, 0),
-        "all-zoned tunnel Disagree host-bound traffic remains globally admitted"
+        !host_inbound_admits_iface(&state, 61, 0, 6, 22, false, 0),
+        "refused tunnel Disagree host-bound services must be denied"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, 61, 0, 1, 0, false, 3),
+        "global ICMP destination-unreachable must remain admitted"
     );
 }
 
@@ -2652,6 +2656,85 @@ fn native_unit_zero_retains_parent_zone_10520() {
     assert!(
         host_inbound_admits_iface(&state, 41, 7, 6, 22, false, 0),
         "retained native parent host traffic must follow the trust zone"
+    );
+}
+
+// #10556 retained-guard pin (keeps the #10520 number for suite discovery):
+// the existing retained fixtures (partial-31, native-41) carry no exposure,
+// so the exposure guard alone would skip the sentinel even with the retained
+// guard removed. This addressed variant proves the retained guard itself:
+// deleting only `ifindex_to_zone_id.contains_key → continue` arms the
+// sentinel and turns the no-sentinel assertion RED.
+#[test]
+fn retained_exposed_refusal_skips_sentinel_stays_zone_gated_10520_10556() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    const RETAINED_IFINDEX: i32 = 71;
+    const PROTO_TCP: u8 = 6;
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "trust".into(),
+                id: 7,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["ssh".into()],
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "untrust".into(),
+                id: 8,
+                host_inbound_configured: true,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth2".into(),
+                zone: "untrust".into(),
+                linux_name: "reth2".into(),
+                ifindex: RETAINED_IFINDEX,
+                is_unit: Some(false),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "192.0.2.71/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth2.0".into(),
+                zone: "trust".into(),
+                linux_name: "reth2".into(),
+                ifindex: RETAINED_IFINDEX,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&RETAINED_IFINDEX).copied(),
+        Some(7),
+        "exposed retained refusal must keep the agreed unit zone"
+    );
+    assert!(
+        state.local_v4.contains(&Ipv4Addr::new(192, 0, 2, 71)),
+        "retained fixture must carry exposure so only the retained guard skips the sentinel"
+    );
+    assert!(
+        !state.ifindex_host_inbound.contains_key(&RETAINED_IFINDEX),
+        "retained zone must not receive a refusal host sentinel"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, RETAINED_IFINDEX, 7, PROTO_TCP, 22, false, 0),
+        "retained-zone ssh must follow the zone admission set"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, RETAINED_IFINDEX, 7, PROTO_TCP, 443, false, 0),
+        "retained-zone https must remain zone-gated"
     );
 }
 // #10503 fold pins: the post-walk guard covers every finalized contested
@@ -2798,6 +2881,222 @@ fn same_ifindex_contest_gets_host_inbound_deny_sentinel_10503() {
         "same-ifindex contest must deny host-bound ssh rather than use None=>true"
     );
 }
+// #10556 Cell 1: an addressed base can be refused by an unzoned unit sharing
+// its ifindex. The base's zone is nonempty, while the unit has no address, so
+// neither row qualifies for #5659 and the refused ifindex misses #10503.
+// Fail-on-revert: removing the refused post-walk sentinel loop makes the
+// TCP/22 assertion RED through the zone-0 `None => true` host-inbound arm.
+#[test]
+fn refused_addressed_base_denies_host_bound_but_preserves_controls_10556() {
+    use crate::ZoneSnapshot;
+    use crate::afxdp::forwarding::{host_inbound_admits, host_inbound_admits_iface};
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    const SHARED_IFINDEX: i32 = 611;
+    const TAGGED_IFINDEX: i32 = 612;
+    const WAN_ZONE: u16 = 7;
+    const LAN_ZONE: u16 = 8;
+    const PROTO_TCP: u8 = 6;
+    const PROTO_ICMP: u8 = 1;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            any_service_zone_10503("wan", WAN_ZONE),
+            any_service_zone_10503("lan", LAN_ZONE),
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st0".into(),
+                zone: "wan".into(),
+                ifindex: SHARED_IFINDEX,
+                is_unit: Some(false),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.99.0.1/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st0.0".into(),
+                zone: String::new(),
+                ifindex: SHARED_IFINDEX,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            // Positive control: a zoned unit on its own ifindex remains
+            // zone-attributed and keeps the zone's any-service admission.
+            InterfaceSnapshot {
+                name: "st0.1".into(),
+                zone: "wan".into(),
+                ifindex: TAGGED_IFINDEX,
+                is_unit: Some(true),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.99.1.1/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+        default_policy: "permit".into(),
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    assert!(
+        state.local_v4.contains(&Ipv4Addr::new(10, 99, 0, 1)),
+        "the addressed base must remain a local-delivery exposure"
+    );
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&SHARED_IFINDEX),
+        "refused addressed base must remain unzoned"
+    );
+    assert!(
+        state.ifindex_host_inbound.contains_key(&SHARED_IFINDEX),
+        "refused addressed base must receive a per-ifindex deny sentinel"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "refused addressed base must DENY host-bound ssh"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED_IFINDEX, 0, PROTO_TCP, 179, false, 0),
+        "refused addressed base must DENY host-bound bgp"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, SHARED_IFINDEX, 0, PROTO_ICMP, 0, false, 3),
+        "global ICMP destination-unreachable must remain admitted"
+    );
+    assert!(
+        host_inbound_admits(&state, 0, PROTO_TCP, 22, false, 0),
+        "the genuinely-global zone-0 host-inbound default must remain admitted"
+    );
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&TAGGED_IFINDEX).copied(),
+        Some(WAN_ZONE),
+        "tagged positive-control unit must retain its zone"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, TAGGED_IFINDEX, WAN_ZONE, PROTO_TCP, 22, false, 0),
+        "tagged positive-control unit must retain zone host-inbound admission"
+    );
+}
+
+// #10556 Cell 2: the broad lifeline predicate remains an explicit exception.
+// Removing the lifeline guard arms a sentinel for em0 and makes the
+// no-sentinel/admit assertions RED.
+#[test]
+fn refused_lifeline_keeps_unconditional_admit_10556() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    const SHARED_IFINDEX: i32 = 621;
+    const PROTO_TCP: u8 = 6;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", 7)],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "em0".into(),
+                zone: "wan".into(),
+                ifindex: SHARED_IFINDEX,
+                is_unit: Some(false),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "198.51.100.1/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "em0.0".into(),
+                zone: String::new(),
+                ifindex: SHARED_IFINDEX,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&SHARED_IFINDEX),
+        "lifeline refusal must remain unzoned"
+    );
+    assert!(
+        !state.ifindex_host_inbound.contains_key(&SHARED_IFINDEX),
+        "lifeline refusal must not receive a deny sentinel"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, SHARED_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "lifeline host-bound traffic must remain unconditionally admitted"
+    );
+}
+
+// #10556 Cell 3: an explicit per-interface host-inbound override wins over
+// the refused default. Replacing the override guard with a deny insertion
+// makes the ssh-admit assertion RED and would also erase the effective set.
+#[test]
+fn refused_override_preserves_effective_set_10556() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    const SHARED_IFINDEX: i32 = 631;
+    const PROTO_TCP: u8 = 6;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", 7)],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st1".into(),
+                zone: "wan".into(),
+                ifindex: SHARED_IFINDEX,
+                is_unit: Some(false),
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["ssh".into()],
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "203.0.113.63/32".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st1.0".into(),
+                zone: String::new(),
+                ifindex: SHARED_IFINDEX,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        state.local_v4.contains(&Ipv4Addr::new(203, 0, 113, 63)),
+        "override fixture must carry a local-delivery exposure"
+    );
+
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&SHARED_IFINDEX),
+        "override refusal fixture must remain unzoned"
+    );
+    assert!(
+        state.ifindex_host_inbound.contains_key(&SHARED_IFINDEX),
+        "explicit per-interface host-inbound override must remain present"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, SHARED_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "explicit ssh override must survive refused handling"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED_IFINDEX, 0, PROTO_TCP, 443, false, 0),
+        "ssh-only override must not widen to https"
+    );
+}
+
 
 // #3299: `host-inbound-traffic protocols bfd` must admit multi-hop BFD control
 // (UDP 4784, RFC 5883) in addition to single-hop control (3784) + echo (3785).
