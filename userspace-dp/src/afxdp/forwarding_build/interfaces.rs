@@ -901,6 +901,7 @@ pub(super) fn populate_interfaces(
                     }
                     state.connected_v4.push(ConnectedRouteV4 {
                         prefix: PrefixV4::from_net(v4),
+                        host: v4.addr(),
                         ifindex: iface.ifindex,
                         tunnel_endpoint_id,
                         table: connected_table_v4.clone(),
@@ -925,6 +926,7 @@ pub(super) fn populate_interfaces(
                     }
                     state.connected_v6.push(ConnectedRouteV6 {
                         prefix: PrefixV6::from_net(v6),
+                        host: v6.addr(),
                         ifindex: iface.ifindex,
                         tunnel_endpoint_id,
                         table: connected_table_v6.clone(),

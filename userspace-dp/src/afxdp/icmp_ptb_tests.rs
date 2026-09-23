@@ -434,6 +434,7 @@ fn ptb_suppressed_for_v4_directed_broadcast_dst() {
     let mut fwd = forwarding_with_egress(1400);
     fwd.connected_v4.push(ConnectedRouteV4 {
         prefix: crate::prefix::PrefixV4::from_net("10.0.1.0/24".parse().expect("cidr")),
+        host: Ipv4Addr::new(10, 0, 1, 0),
         ifindex: PTB_IFINDEX,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -464,6 +465,7 @@ fn ptb_still_generated_for_unicast_in_connected_subnet() {
     fwd.connected_v4.push(ConnectedRouteV4 {
         prefix: crate::prefix::PrefixV4::from_net("10.0.1.0/24".parse().expect("cidr")),
         ifindex: PTB_IFINDEX,
+        host: Ipv4Addr::new(10, 0, 1, 0),
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });
@@ -490,6 +492,7 @@ fn ptb_suppressed_for_v4_directed_broadcast_src() {
     fwd.connected_v4.push(ConnectedRouteV4 {
         prefix: crate::prefix::PrefixV4::from_net("10.0.1.0/24".parse().expect("cidr")),
         ifindex: PTB_IFINDEX,
+        host: Ipv4Addr::new(10, 0, 1, 0),
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });
@@ -511,6 +514,7 @@ fn ptb_still_generated_for_unicast_src_in_connected_subnet() {
     fwd.connected_v4.push(ConnectedRouteV4 {
         prefix: crate::prefix::PrefixV4::from_net("10.0.1.0/24".parse().expect("cidr")),
         ifindex: PTB_IFINDEX,
+        host: Ipv4Addr::new(10, 0, 1, 0),
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });

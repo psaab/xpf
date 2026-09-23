@@ -412,10 +412,14 @@ fn local_delivery_resolution_v4(
     if !local_v4_owned_by_table(state, ip, table) {
         return None;
     }
+    // #10645: match the row's unmasked HOST address, not the masked
+    // `prefix.addr()` network (equal to the host only for a /32 — every
+    // wider interface address previously fell through to ifindex 0,
+    // collapsing owner-RG attribution and stripping fabric zone stamps).
     let local_ifindex = state
         .connected_v4
         .iter()
-        .find(|entry| entry.table == table && entry.prefix.addr() == ip)
+        .find(|entry| entry.table == table && entry.host == ip)
         .map(|entry| entry.ifindex)
         .unwrap_or(0);
     if local_ifindex == 0 {
@@ -443,10 +447,11 @@ fn local_delivery_resolution_v6(
     if !local_v6_owned_by_table(state, ip, table) {
         return None;
     }
+    // #10645: match the row's unmasked HOST address (see the v4 arm).
     let local_ifindex = state
         .connected_v6
         .iter()
-        .find(|entry| entry.table == table && entry.prefix.addr() == ip)
+        .find(|entry| entry.table == table && entry.host == ip)
         .map(|entry| entry.ifindex)
         .unwrap_or(0);
     if local_ifindex == 0 {
