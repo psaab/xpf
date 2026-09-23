@@ -853,8 +853,8 @@ pub(in crate::afxdp) fn synced_entry_is_stale_replay(
     zone_absent(metadata.ingress_zone) || zone_absent(metadata.egress_zone)
 }
 /// #10612 (R2 observability): process-wide count of stale-zone replay drops
-/// across all fence sites (worker arm, coordinator filter/purge, import,
-/// prewarm, promote). Bumped per fence DECISION (the worker drain evicts
+/// across all 8 fence decision sites (worker arm, coordinator filter, coordinator
+/// purge, import, prewarm, promote, materialize-as-miss, republish BPF skip). Bumped per fence DECISION (the worker drain evicts
 /// already-counted drops; the purge bumps only on actual removal). A row
 /// judged at two sites (filter + purge) counts twice — honest: two distinct
 /// decisions. Mirrors the
