@@ -261,7 +261,6 @@ pub(super) fn dispatch_inbound(
                                 outer_ecn,
                                 config_generation: advisory_config_generation,
                                 fib_generation: advisory_fib_generation,
-                                ingress_ifindex,
                             };
                         match queue.try_enqueue(descriptor) {
                             Ok(()) => {

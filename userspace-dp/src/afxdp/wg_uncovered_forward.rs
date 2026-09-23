@@ -97,7 +97,7 @@ pub(in crate::afxdp) static WG_UNCOVERED_QUEUE_POISON_RECOVERIES: AtomicU64 = At
 /// One control-thread-decapped inner packet awaiting worker adjudication.
 /// Immutable once enqueued.
 #[derive(Debug)]
-pub(in crate::afxdp) struct WgUncoveredDescriptor {
+pub(crate) struct WgUncoveredDescriptor {
     /// Tunnel endpoint id the record decrypted under (engine/counter key).
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
     /// Tunnel logical ifindex the inner adjudicates under (zone derivation).
@@ -113,13 +113,11 @@ pub(in crate::afxdp) struct WgUncoveredDescriptor {
     /// time. Revalidated by the worker; never trusted blindly.
     pub(in crate::afxdp) config_generation: u64,
     pub(in crate::afxdp) fib_generation: u32,
-    /// Kernel receive ifindex (pktinfo), for provenance in exceptions.
-    pub(in crate::afxdp) ingress_ifindex: Option<u32>,
 }
 
 /// Per-worker bounded MPSC ingress queue carrying
 /// [`WgUncoveredDescriptor`]s from WG control threads to one worker.
-pub(in crate::afxdp) struct WgUncoveredIngressQueue {
+pub(crate) struct WgUncoveredIngressQueue {
     pending: Mutex<VecDeque<WgUncoveredDescriptor>>,
     closed: AtomicBool,
 }
@@ -398,6 +396,7 @@ impl WgUncoveredInjectedBatch {
         queue.drain_into(&mut self.items, WG_UNCOVERED_DRAIN_BUDGET)
     }
 
+    #[cfg(test)]
     pub(in crate::afxdp) fn push_drained(&mut self, desc: WgUncoveredDescriptor) {
         self.items.push(desc);
     }
@@ -424,7 +423,6 @@ impl WgUncoveredInjectedBatch {
                     outer_ecn: None,
                     config_generation: 0,
                     fib_generation: 0,
-                    ingress_ifindex: None,
                 },
             )
         });
@@ -438,6 +436,7 @@ impl WgUncoveredInjectedBatch {
         self.cursor >= self.items.len()
     }
 
+    #[cfg(test)]
     pub(in crate::afxdp) fn remaining(&self) -> usize {
         self.items.len().saturating_sub(self.cursor)
     }
@@ -467,7 +466,6 @@ mod tests {
             outer_ecn: Some(0),
             config_generation: 7,
             fib_generation: 9,
-            ingress_ifindex: Some(3),
         }
     }
 
@@ -576,7 +574,6 @@ mod tests {
             outer_ecn,
             config_generation: 7,
             fib_generation: 9,
-            ingress_ifindex: Some(12),
         }
     }
 
@@ -739,7 +736,6 @@ mod tests {
             outer_ecn,
             config_generation: 7,
             fib_generation: 9,
-            ingress_ifindex: Some(12),
         }
     }
 

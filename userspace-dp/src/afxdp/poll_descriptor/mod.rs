@@ -414,40 +414,38 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // return the slice (would be self-referential).
                 // `owned_packet_frame` MUST be `mut` — deferred
                 // stage-12+ code at lines below calls `.take()`.
+                // #10597: injected WG plaintext arrives decapped; the
+                // synthetic frame becomes the owned packet directly.
                 let (mut meta, mut owned_packet_frame) = if is_injected {
-                    // #10597: control-thread WG plaintext arrives decapped;
-                    // the synthetic frame becomes the owned packet directly.
                     (meta, Some(raw_frame.to_vec()))
                 } else {
-                    let (mut meta, mut owned_packet_frame) =
-                        stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding);
-                    // #8274 step 3 — stage 6b: WireGuard transport-data decap.
-                    //
-                    // Runs only when GRE did not already claim the frame: a packet
-                    // is one tunnel's or the other's, never both, and re-entering
-                    // decap on an already-decapsulated inner would adjudicate a
-                    // synthesized frame as if it were an outer datagram.
-                    //
-                    // Everything downstream then sees the INNER packet — flow
-                    // parse, screen, session, policy, NAT, forward build — which is
-                    // the entire point of the issue: an authenticated peer's inner
-                    // plaintext is adjudicated under the tunnel's logical ingress
-                    // zone instead of being written to the wgN TUN for the kernel
-                    // to forward with no zone policy at all.
-                    if owned_packet_frame.is_none() {
-                        let (wg_meta, wg_frame) = stage_wg_decap(
-                            raw_frame,
-                            meta,
-                            worker_ctx.forwarding,
-                            &binding.wg_scratch,
-                        );
-                        if wg_frame.is_some() {
-                            meta = wg_meta;
-                            owned_packet_frame = wg_frame;
-                        }
-                    }
-                    (meta, owned_packet_frame)
+                    stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding)
                 };
+                // #8274 step 3 — stage 6b: WireGuard transport-data decap.
+                //
+                // Runs only when GRE did not already claim the frame: a packet
+                // is one tunnel's or the other's, never both, and re-entering
+                // decap on an already-decapsulated inner would adjudicate a
+                // synthesized frame as if it were an outer datagram.
+                //
+                // Everything downstream then sees the INNER packet — flow
+                // parse, screen, session, policy, NAT, forward build — which is
+                // the entire point of the issue: an authenticated peer's inner
+                // plaintext is adjudicated under the tunnel's logical ingress
+                // zone instead of being written to the wgN TUN for the kernel
+                // to forward with no zone policy at all.
+                if !is_injected && owned_packet_frame.is_none() {
+                    let (wg_meta, wg_frame) = stage_wg_decap(
+                        raw_frame,
+                        meta,
+                        worker_ctx.forwarding,
+                        &binding.wg_scratch,
+                    );
+                    if wg_frame.is_some() {
+                        meta = wg_meta;
+                        owned_packet_frame = wg_frame;
+                    }
+                }
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
                 // #946 Phase 1 stage 7+8: parse session flow and
                 // learn the source-side dynamic neighbor.
