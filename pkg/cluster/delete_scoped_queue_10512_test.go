@@ -334,3 +334,24 @@ func TestScopedJournalRaceDropsWhenIncapable10512(t *testing.T) {
 		t.Fatalf("DeletesSuppressedScopedPolicy = %d, want 1", got)
 	}
 }
+
+// Post-append pin (completed-empty-then-append): a learn-triggered flush
+// that took an empty journal leaves no later trigger (caps arrive once
+// per conn), so an append landing after it must flush synchronously —
+// else the debt strands forever. Sequential: the race is pure ordering.
+func TestScopedJournalPostAppendFlushesAfterEmptyTake10512(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	s.stats.Connected.Store(true)
+	learnScopedCapable10512(t, s)
+	s.flushScopedDeleteJournal() // takes empty, completes: no later trigger
+	// A writer that observed UNLEARNED journals after the empty take.
+	s.journalScopedDelete(encodeDeleteScopedV4(scopedCodecKeyV4(), 9, false, 100007, 0xF10512))
+	select {
+	case <-s.sendCh:
+	default:
+		t.Fatal("post-append flush must send the stranded debt")
+	}
+	if got := scopedJournalLen10512(s); got != 0 {
+		t.Fatalf("journal holds %d after post-append flush, want 0", got)
+	}
+}
