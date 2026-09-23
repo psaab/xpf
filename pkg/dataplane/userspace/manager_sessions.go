@@ -679,7 +679,7 @@ func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val datap
 func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey, forwardOnly bool) (bool, error) {
 	val, valErr := m.bpfShim.GetSessionV4(key)
 	m.mu.Lock()
-	if m.proc == nil || m.proc.Process == nil {
+	if m.proc == nil {
 		m.mu.Unlock()
 		return false, errSessionHelperUnreachable
 	}
