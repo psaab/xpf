@@ -1428,6 +1428,14 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path(
     )
 }
 
+/// #10591: `now_ns`-parameterized descriptor driver. `now_secs` stays frozen
+/// at the historical `123` (matching `txn_ha_state`'s watchdog/lease stamps)
+/// while `now_ns` advances across ticks; production derives
+/// `loop_now_secs = loop_now_ns / 1e9` (`worker/loop_body/mod.rs:1182`).
+/// Benign for the window cells: asserted paths are HitAuthority verdicts and
+/// ns-idle (`last_seen_ns`), never HA-active/lease-expiry, RG-epoch, or
+/// screen-secs decisions. A future HA-gated cell must derive secs from ns
+/// and re-stamp the HA lease instead of reusing this freeze.
 pub(super) fn txn_run_descriptor_at(
     binding: &mut BindingWorker,
     sessions: &mut SessionTable,
@@ -1455,7 +1463,6 @@ pub(super) fn txn_run_descriptor_at(
         123,
     )
 }
-
 
 pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
     binding: &mut BindingWorker,

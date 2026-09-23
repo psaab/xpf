@@ -62,7 +62,6 @@ mod first_policy_purge_rotation_9526_tests;
 #[path = "expiry_shared_retire_10419_tests.rs"]
 mod expiry_shared_retire_10419_tests;
 
-
 /// Decode the trailing #10509 discriminator without ever turning an absent
 /// value into a GRE `None` class. Go captures from the BPF conntrack mirror,
 /// whose ABI omits this sync-only field, so a production GRE row arrives as
@@ -2824,12 +2823,22 @@ fn reap_expired_sessions(
         }
     }
 }
-/// #10591 test seam: execute the exact production GC pair in one call.
+/// #10591 test seam: execute the production expire+reap pair in one call.
 ///
-/// The worker loop calls `expire_stale_entries_ha` at `:1772`, then immediately
-/// calls `reap_expired_sessions` at `:1792`. The window harness must exercise
-/// BOTH arms; an expire-only test leaves cached descriptors alive, while a
-/// reap-only test cannot observe the wheel's expiry classification.
+/// The worker loop calls `expire_stale_entries_ha` at `:1773`, then
+/// `reap_expired_sessions` at `:1793` (with `retire_expired_missing_neighbor_seeds`,
+/// `session_expires` accounting, and `drain_and_flush_all` between them that
+/// this seam does NOT drive). The window harness must exercise BOTH arms; an
+/// expire-only test leaves cached descriptors alive, while a reap-only test
+/// cannot observe the wheel's expiry classification.
+///
+/// Divergences from the loop (documented, not silent): callers in the window
+/// cells pass `ha=None` where production passes `Some(&ha_ctx)` (synced rows
+/// AGE instead of HOLD — benign while rows stay traffic-fresh); the steering
+/// map is `SteeringMap::unshared_for_test(-1)` with dummy conntrack fds
+/// `-1/-1` and `worker_id 0` (BPF/conntrack teardown and per-worker NAT
+/// accounting no-op); row removal plus flow-cache eviction are real and
+/// asserted. Cross-worker propagation is not driven.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn production_sweep_for_test(
@@ -2856,7 +2865,9 @@ pub(in crate::afxdp) fn production_sweep_for_test(
 /// #10591 test seam: execute the production commit-time zone purge at the
 /// snapshot-rotation boundary. This keeps the window sibling out of private
 /// `session_glue` helpers while still driving the same old/new set derivation
-/// and pair-aware purge that `worker_loop` uses at `:1282`/`:1405`.
+/// (`:1283`) and pair-aware purge (`:1406`) that `worker_loop` uses, with the
+/// same dummy-map/fd/worker-id divergences as `production_sweep_for_test`
+/// (fresh shared maps, no peer commands, no HA delete propagation).
 #[cfg(test)]
 pub(in crate::afxdp) fn production_rotation_purge_for_test(
     sessions: &mut crate::session::SessionTable,
@@ -2889,7 +2900,6 @@ pub(in crate::afxdp) fn production_rotation_purge_for_test(
     );
     (removed_zone_ids.len(), purged)
 }
-
 
 /// #6457: invalidate the per-worker flow-cache slot(s) backing every session
 /// a control-plane `WorkerCommand::DeleteSynced` dropped this tick.

@@ -495,11 +495,13 @@ func TestApplyAndSyncCommittedSurfacesInvalidationError(t *testing.T) {
 }
 
 // TestCommitWindowArmApplySweepOrder10591 drives the real commit wrapper far
-// enough to prove the three production phases are one transaction: the plan is
-// armed before the apply body, and the post-apply sweep consumes the old-policy
-// row before the wrapper returns. The AST order guard below catches an arm,
-// apply, or sweep moved behind the wrong boundary even if this seam is later
-// simplified.
+// enough to prove arm-before-apply plus sweep-deletes-row in one transaction:
+// the plan is armed before the apply body, the body takes the pre-publication
+// capture, and the post-apply sweep consumes the old-policy row before the
+// wrapper returns. The capture-at-publish-boundary placement itself is pinned
+// by TestCaptureRunsBeforeTheDataplanePublish6948; the AST order guard below
+// catches an arm, apply, or sweep moved behind the wrong boundary even if this
+// seam is later simplified.
 func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 	oldCfg, newCfg, oldID, _ := inheritedIDFixture6948(t)
 	key := v4Key6948(1, 40001, 80)
@@ -517,10 +519,15 @@ func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 	d := &Daemon{}
 	d.setDataplane(dp)
 	var phases []string
-	d.applyBodyForTest = func(*config.Config) {
+	d.applyBodyForTest = func(cfg *config.Config) {
 		if d.policyInvalidationPlan == nil {
 			t.Fatal("commit apply reached the publish body without an armed invalidation plan")
 		}
+		// R1: take the pre-publication capture the production body takes at
+		// the publish boundary (daemon_apply_dataplane.go:160-171). Without
+		// this call the sweep below falls back to the legacy scan and the
+		// plan/capture-consumption asserts prove nothing — deleting it must RED.
+		d.capturePolicyInvalidationLocked(cfg)
 		phases = append(phases, "apply")
 	}
 	if _, err := d.applyAndSyncCommitted(oldCfg, newCfg, peerSyncNever); err != nil {
@@ -531,6 +538,9 @@ func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 	}
 	if _, ok := dp.v4[key]; ok {
 		t.Fatal("post-apply invalidation sweep left the old-policy row alive")
+	}
+	if d.policyInvalidationPlan != nil {
+		t.Fatal("post-apply sweep left the invalidation plan armed: the apply body never took its capture")
 	}
 	if d.policyInvalidationCapture != nil {
 		t.Fatal("post-apply sweep left the invalidation capture armed")

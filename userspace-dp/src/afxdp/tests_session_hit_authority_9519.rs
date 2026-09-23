@@ -721,7 +721,9 @@ pub(super) fn matrix_packet(arrival: i32, flags: u8) -> (Vec<u8>, UserspaceDpMet
 }
 
 /// The fixed three-packet matrix observation remains mechanism-only. The
-/// production-window sibling drives real GC/sweep timing instead.
+/// production-window sibling drives real GC/sweep timing instead. Drop lane
+/// here proves retention lower bound only; transient upper bound lives in
+/// the 10591 sibling.
 pub(super) const OBSERVATION_PACKETS: usize = 3;
 
 pub(super) fn matrix_forward_observation(sessions: &SessionTable) -> (u64, u32) {
@@ -733,7 +735,6 @@ pub(super) fn matrix_forward_observation(sessions: &SessionTable) -> (u64, u32) 
     });
     observation.expect("matrix must retain a forward row")
 }
-
 
 #[test]
 fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
