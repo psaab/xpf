@@ -1233,6 +1233,28 @@ pub(in crate::afxdp) fn icmp_identifier_bearing(protocol: u8, icmp_type: u8) -> 
     }
 }
 
+/// #10637: is this ICMP/ICMPv6 type a query ANSWER (vs a query itself)?
+///
+/// Echo Reply (0), Timestamp Reply (14), Information Reply (16); ICMPv6
+/// Echo Reply (129). A reverse-direction packet of one of these types is
+/// return traffic for the live query session it hits — Junos permits it
+/// because the session exists, not because a policy admits the reverse
+/// pair — so the owner-hit type gate coasts. Any other type in the
+/// reverse direction originates a NEW query that merely shares the
+/// typeless session key, and must face reverse-direction policy exactly
+/// as the miss path would judge it. Non-identifier types (errors,
+/// ND/MLD, ...) can never hit a session companion (#3290 gates them
+/// flowless), so answering "not a reply" for them is unreachable
+/// fail-closed, never a behavior change.
+#[inline]
+pub(in crate::afxdp) fn icmp_reply_type(protocol: u8, icmp_type: u8) -> bool {
+    match protocol {
+        PROTO_ICMP => matches!(icmp_type, 0 | 14 | 16),
+        PROTO_ICMPV6 => matches!(icmp_type, 129),
+        _ => false,
+    }
+}
+
 /// #3290: report whether the metadata-stamped ICMP/ICMPv6 pseudo-port may be
 /// trusted as a stateful identifier — frame-EQUIVALENT to the
 /// `parse_flow_ports` gate. Two conditions must hold, both bounded by the
