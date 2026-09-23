@@ -38,12 +38,13 @@
 //!     AllowedIPs-gates the inner src) → consult the kernel-path posture
 //!     (Covered/Uncovered/Unknown ingress × firewall-local-vs-transit inner:
 //!     local delivers, transit drops+counts #9594/#10527) → write a delivered
-//!     plaintext inner IP to the `wgN` TUN, where the kernel routes it — ONLY
-//!     on a steered port's thread (#9587: every selected port). Any other
-//!     port's thread
-//!     drops the authenticated record and counts
-//!     `rx_unsteered_transport_drops` (#9521), because the kernel would
-//!     forward that plaintext with no zone policy.
+//!     plaintext inner IP to the `wgN` TUN, where the kernel delivers it to
+//!     the local stack through the input chains — ONLY on a steered port's
+//!     thread (#9587: every selected port). Any other port's thread drops
+//!     the authenticated record and counts `rx_unsteered_transport_drops`
+//!     (#9521): the armed forward fence (#10302) would drop that TUN-written
+//!     plaintext as unallowlisted wgN transit with no tunnel counters, so
+//!     the thread drops and counts it at the source instead.
 //!   - **Egress** (TUN → engine → kernel socket): inner IP packets the
 //!     kernel routes onto `wgN` are read, `try_encap`'d, and sent to the
 //!     peer endpoint. The transit AF_XDP egress is the other encap site

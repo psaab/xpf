@@ -1793,9 +1793,11 @@ fn steered_port_uncovered_host_inbound_still_forwarded_10597() {
 /// #9594: while the dataplane is degraded the shim passes a steered-port
 /// record addressed to the firewall up to the kernel, and the steered port's
 /// thread used to write its plaintext to the wgN TUN whatever it was — so inner
-/// TRANSIT rode the kernel's open forward hook while every other transit packet
-/// was being dropped. The thread applies the shim's local-vs-transit degraded
-/// posture on covered ingresses.
+/// TRANSIT rode the kernel's then-open forward hook while every other transit
+/// packet was being dropped. (#9594 predates the #10302 armed fence, which now
+/// drops wgN-ingress transit as unallowlisted; the posture below is the
+/// attributed, counted layer.) The thread applies the shim's local-vs-transit
+/// degraded posture on covered ingresses.
 ///
 /// Every arm runs in both outer families. Covered transit, covered host-inbound,
 /// and unknown-ingress transit are the #9594 controls. The record's REAL
@@ -1823,9 +1825,8 @@ fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_95
         );
         assert!(
             transit.delivered.is_none(),
-            "{family}: the steered port wrote degraded-window TRANSIT plaintext to the wgN TUN, \
-             where the kernel forwards it with no zone policy (#9594): {:?}",
-            transit.delivered
+            "{family}: the steered port wrote degraded-window TRANSIT plaintext to the wgN TUN \
+             instead of dropping it as degraded transit (#9594): {:?}",
         );
         assert!(
             transit.forwarded.is_empty(),
