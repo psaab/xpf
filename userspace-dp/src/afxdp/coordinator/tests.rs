@@ -4792,13 +4792,86 @@ fn gre1881_attachment_change_restarts_thread() {
 /// #1881 / Codex plan r1 MAJOR 1 companion: a same-id mode flip
 /// gre→wireguard (reachable because ids are name-derived) prunes the
 /// GRE entry; the WG pass owns the id from then on.
+///
+/// #10553: the GRE thread holds a registered TUN stand-in, so the
+/// prune exercises a LIVE thread (unpublish-before-join against a
+/// running poll loop), not an already-exited one. Post-#10409 the
+/// delivery map also publishes live WG entries, so the flip leaves
+/// exactly the WG delivery behind.
 #[test]
 fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
+    use crate::afxdp::coordinator::wg_control::{TEST_WG_TUN_STANDINS, register_tun_standin_9521};
+    use crate::afxdp::tunnel::{TEST_GRE_TUN_STANDINS, register_tun_standin_10553};
+    let _gre_tun = register_tun_standin_10553("gre1881f");
+    // Keep the post-flip WG thread live through publication: its
+    // stand-in holds the fd/port and avoids expected unprivileged
+    // open_tun EPERM noise.
+    let _wg_tun = register_tun_standin_9521("gre1881f");
     let mut coordinator = gre1881_coordinator_with_worker();
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36287, "gre1881f", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
-    assert!(coordinator.tunnel_sources.contains_key(&1));
     coordinator
-        .refresh_runtime_snapshot(&wg1866_snapshot(1, 36287, "gre1881f", crate::test_ports::reserve_ephemeral_udp_port(), WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36287, "gre1881f", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
+    assert!(coordinator.tunnel_sources.contains_key(&1));
+    // The spawned GRE thread must take the stand-in: registry drain
+    // proves it holds a live fd when the flip prunes it below.
+    let deadline = std::time::Instant::now() + Duration::from_millis(5_000);
+    loop {
+        let drained = TEST_GRE_TUN_STANDINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
+        if drained {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "spawned GRE thread took the registered TUN stand-in"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let gre_wake = coordinator
+        .tunnel_sources
+        .get(&1)
+        .expect("GRE entry")
+        .delivery_tx
+        .as_ref()
+        .expect("GRE delivery")
+        .wake
+        .clone();
+    super::tunnel_supervision::arm_test_gre_unpublish_before_join(36287);
+
+    coordinator
+        .refresh_runtime_snapshot(&wg1866_snapshot(
+            1,
+            36287,
+            "gre1881f",
+            crate::test_ports::reserve_ephemeral_udp_port(),
+            WG1866_PRIVKEY_A,
+        ))
+        .expect("refresh_runtime_snapshot must succeed");
+    assert!(
+        super::tunnel_supervision::take_test_gre_unpublish_before_join_observed(),
+        "GRE stale delivery was absent immediately before the live-thread join"
+    );
+    // The WG thread must consume its own stand-in too. It keeps
+    // the WG fd/port live through publication and silences expected
+    // unprivileged open_tun EPERM noise.
+    let wg_deadline = std::time::Instant::now() + Duration::from_millis(5_000);
+    loop {
+        let consumed = !TEST_WG_TUN_STANDINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(name, _)| name == "gre1881f");
+        if consumed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < wg_deadline,
+            "spawned WG thread took the registered TUN stand-in"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         !coordinator.tunnel_sources.contains_key(&1),
         "mode flip prunes the GRE local-origin entry"
@@ -4807,7 +4880,36 @@ fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
         coordinator.wg_control_threads.contains_key(&1),
         "the WG pass owns the id after the flip"
     );
-    assert!(coordinator.local_tunnel_deliveries.load().is_empty());
+    // Post-#10409 contract: live WG entries publish too — the flip
+    // leaves exactly the WG delivery; the GRE sender was unpublished
+    // before the live thread was joined (Store #1 excludes the stale
+    // id; stop_remove_local_tunnel_entry joins synchronously).
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "flip leaves exactly the WG delivery published"
+    );
+    let published = deliveries
+        .get(&36287)
+        .expect("WG delivery published at the flipped ifindex");
+    let wg_wake = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("WG entry")
+        .delivery_tx
+        .as_ref()
+        .expect("WG delivery")
+        .wake
+        .clone();
+    assert!(
+        Arc::ptr_eq(&published.wake, &wg_wake),
+        "published sender is the WG entry's"
+    );
+    assert!(
+        !Arc::ptr_eq(&published.wake, &gre_wake),
+        "GRE sender unpublished before the live thread was joined"
+    );
 }
 
 /// #1881 (mirrors the #1866 disarmed rule): a disarmed same-plan
