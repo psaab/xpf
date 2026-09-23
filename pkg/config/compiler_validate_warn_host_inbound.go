@@ -482,9 +482,9 @@ func junosHostIKEFullAdmissionTokens(cfg *Config, zones []string) []string {
 // (junos_host_local_policy), which a direct host-bound packet never reaches.
 // So a configured deny (or source-scoped permit) to junos-host is silently
 // unenforced on the primary host-bound path — a false sense of security this
-// warning surfaces at commit. DNAT/static-NAT-to-self and GRE-inner IKE
-// delegated by Stage 11 still follows the coarse admission pending the
-// Stage-11 junos-host enforcement follow-up (#10585).
+// warning surfaces at commit. Secondary DNAT/static-NAT-to-self and GRE-inner
+// IKE is fine-gated in userspace pre-delegation (#10525); the fine DENY
+// governs there as on the direct path.
 //
 // It is never an error: the config is legal Junos, and the actual enforcement
 // fix (withhold the IP from the local set / mirror the policy into nft) is a
@@ -598,11 +598,12 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 				"junos-host overlapping coarse IKE admission on netdev(s) %s "+
 				"(zone(s) %s). The fine junos-host rule governs denied IKE on the "+
 				"direct host-bound path; secondary DNAT/static-NAT-to-self and "+
-				"GRE-inner IKE still follows the Stage-11 coarse admission pending "+
-				"follow-up #%d. For the direct-path overlap, %s (#10524; see "+
+				"GRE-inner IKE is fine-gated in userspace pre-delegation (#10525); "+
+				"the fine DENY governs there as on the direct path. For the "+
+				"direct-path overlap, %s (#10524; see "+
 				"docs/host-inbound-service-matrix.md)",
 			label, strings.Join(netdevs, ", "), strings.Join(zones, ", "),
-			10585, serviceRemedy))
+			serviceRemedy))
 	}
 	// #4146: the representable ordered DENY class is now ENFORCED on the direct
 	// host-bound path by the kernel nft `xpf_hostinbound` chain
