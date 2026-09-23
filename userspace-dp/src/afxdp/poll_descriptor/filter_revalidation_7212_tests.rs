@@ -1863,21 +1863,276 @@ fn a_pbr_term_that_rejects_keeps_its_reject_action_8114() {
     assert_eq!(hit.revoked_key.as_ref(), Some(&flow.forward_key));
 }
 
-/// #10605: a TUNNELED decision is endpoint-pinned and table-free — the miss
-/// path stamps it (0,0) by rule (`install_table_stamp_for_miss`), not by
-/// absence of a PBR term. Hit revalidation must want (0,0) too: re-deriving
-/// the PBR term's nonzero identity mismatches the installed (0,0) on every
-/// first hit (install stamps UNVALIDATED) and revokes every PBR-steered
-/// tunnel flow on its second packet. Direct pin for the exemption predicate
-/// (6075 covers it end-to-end).
+/// #10630: GRE underlay on the shared LAN/WAN topology: endpoint id 824 on
+/// gr-0/0/0.0 (logical ifindex 77), v4 outer 172.16.80.8 -> 203.0.113.9
+/// resolving via reth0.80 in inet.0 (mirrors
+/// `tests_support::gre_to_self_snapshot`, which composes onto `nat_snapshot`
+/// instead of `policy_deny_snapshot`).
+fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnapshot) {
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "gr-0/0/0.0".into(),
+        zone: "wan".into(),
+        linux_name: "gr-0-0-0".into(),
+        ifindex: 77,
+        tunnel: true,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.255.0.1/30".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot
+        .tunnel_endpoints
+        .push(crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: 824,
+            interface: "gr-0/0/0.0".into(),
+            linux_name: "gr-0-0-0".into(),
+            ifindex: 77,
+            zone: "wan".into(),
+            mode: "gre".into(),
+            outer_family: "inet".into(),
+            source: "172.16.80.8".into(),
+            destination: "203.0.113.9".into(),
+            transport_table: "inet.0".into(),
+            ttl: 64,
+            ..Default::default()
+        });
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "203.0.113.0/24".into(),
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: 12,
+        family: "inet".into(),
+        ip: "172.16.80.1".into(),
+        mac: "00:11:22:33:44:55".into(),
+        state: "reachable".into(),
+        router: true,
+        link_local: false,
+    });
+}
+
+/// #10630: a SECOND GRE endpoint (id 825) on gr-0/0/0.1 (logical ifindex
+/// 78) sharing endpoint 824's outer transport, so a retarget can move a
+/// flow from one tunnel to another without touching the underlay.
+fn push_second_gre_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnapshot) {
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "gr-0/0/0.1".into(),
+        zone: "wan".into(),
+        linux_name: "gr-0-0-1".into(),
+        ifindex: 78,
+        tunnel: true,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.255.0.5/30".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot
+        .tunnel_endpoints
+        .push(crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: 825,
+            interface: "gr-0/0/0.1".into(),
+            linux_name: "gr-0-0-1".into(),
+            ifindex: 78,
+            zone: "wan".into(),
+            mode: "gre".into(),
+            outer_family: "inet".into(),
+            source: "172.16.80.8".into(),
+            destination: "203.0.113.9".into(),
+            key: 1,
+            transport_table: "inet.0".into(),
+            ttl: 64,
+            ..Default::default()
+        });
+}
+
+/// #10630 steady state: live PBR steers tcp/5201 into blue, and blue.inet.0
+/// routes the flow destination via tunnel 824 — a state the miss path could
+/// have installed (unlike the empty-blue fixture, whose table cannot
+/// reproduce its tunneled decision).
+fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![pbr_term("pbr-route", "5201", "accept")],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "blue0".into(),
+        zone: "lan".into(),
+        routing_instance: "blue".into(),
+        linux_name: "blue0".into(),
+        ifindex: 101,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.250.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    push_gre_underlay_10630(&mut snapshot);
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "blue.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hops: vec!["@gr-0/0/0.0".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+/// #10630 retarget target: live PBR steers tcp/5201 into green, and
+/// green.inet.0 routes the flow destination NATIVELY via the WAN gateway —
+/// the Accept->Accept move a stale tunneled blue decision must follow.
+fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
+    let mut term = pbr_term("pbr-route", "5201", "accept");
+    term.routing_instance = "green".into();
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![term],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "green0".into(),
+        zone: "lan".into(),
+        routing_instance: "green".into(),
+        linux_name: "green0".into(),
+        ifindex: 102,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.251.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: 12,
+        family: "inet".into(),
+        ip: "172.16.80.1".into(),
+        mac: "00:11:22:33:44:55".into(),
+        state: "reachable".into(),
+        router: true,
+        link_local: false,
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+/// #10630 tunnel-to-tunnel retarget target: live PBR steers tcp/5201 into
+/// green, and green.inet.0 routes the flow destination via tunnel 825.
+fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
+    let mut term = pbr_term("pbr-route", "5201", "accept");
+    term.routing_instance = "green".into();
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![term],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "green0".into(),
+        zone: "lan".into(),
+        routing_instance: "green".into(),
+        linux_name: "green0".into(),
+        ifindex: 102,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.251.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    push_gre_underlay_10630(&mut snapshot);
+    push_second_gre_10630(&mut snapshot);
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hops: vec!["@gr-0/0/0.1".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+/// #10630 (migrated #10605 pin): a STEADY-STATE tunneled PBR steer stays
+/// pinned — the live table still resolves the destination via the stored
+/// tunnel endpoint, so the hit produces no route-transition result.
+///
+/// Migration note: the #10605 pin used the empty-blue fixture, whose table
+/// CANNOT reproduce its tunneled decision — under #10630 semantics that
+/// state is a route deletion and MUST revoke (pinned by
+/// `a_tunneled_pbr_steer_whose_table_lost_its_route_revokes_10630`), so the
+/// pin moved to this truthful steady-state fixture. Green on both sides of
+/// the fix by design: it guards the #10605 second-packet blackhole, not the
+/// #10630 retarget.
 #[test]
-fn a_tunneled_pbr_steer_wants_zero_identity_on_hit_10605() {
-    let forwarding = forwarding_with_empty_blue_pbr();
+fn a_steady_state_tunneled_pbr_steer_stays_pinned_10630() {
+    let forwarding = forwarding_with_blue_pbr_tunnel_10630();
     let flow = v4_flow(5201);
     let sessions = table_with_session(&flow, 7, None);
     let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    // Fixture liveness: the blue table really resolves this destination via
+    // tunnel 824 as a ForwardCandidate — without this the None below could
+    // pass on a dead-underlay NoRoute that merely carries the same id.
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        &forwarding,
+        &neighbors,
+        flow.dst_ip,
+        Some("blue.inet.0"),
+    );
+    assert_eq!(
+        fresh.tunnel_endpoint_id, 824,
+        "fixture liveness: blue.inet.0 must resolve the flow via tunnel 824"
+    );
+    assert_eq!(
+        fresh.disposition,
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        "fixture liveness: the steady-state tunnel resolution must be live"
+    );
     let mut tunneled = decision();
-    tunneled.resolution.tunnel_endpoint_id = 1;
+    tunneled.resolution.tunnel_endpoint_id = 824;
 
     assert!(
         revalidate_static_pbr_route_on_session_hit(
@@ -1892,8 +2147,8 @@ fn a_tunneled_pbr_steer_wants_zero_identity_on_hit_10605() {
             tunneled,
         )
         .is_none(),
-        "a tunneled decision must produce NO route-transition result: the PBR \
-         term's identity is not its table identity (the miss stamped (0,0))"
+        "a tunneled decision whose live table still resolves the same tunnel \
+         endpoint must produce NO route-transition result"
     );
 }
 
