@@ -178,11 +178,11 @@ fn evaluate_filter_ref_tx_selection_cached_v6(
 /// mixes routing-affecting and count terms).
 ///
 /// This only COLLECTS `Arc<FilterTermCounter>` handles; it never calls
-/// `record_filter_counter`. The seed packet is counted by the cold path, so the
-/// capture must not re-count. Cache-declined DSCP / per-packet-L4 input filters
-/// never reach a cached flow, so the matched set is stable for the flow's
-/// lifetime and `TermMatchExtra::default()` suffices (matching
-/// `evaluate_filter_ref_tx_selection_cached`).
+/// `record_filter_counter`. The seed path charges the handles exactly once —
+/// the cold evaluator for a miss, or the insert arm for an uncounted
+/// established-hit ACCEPT. Cache-declined DSCP / per-packet-L4 input filters
+/// never reach a cached flow, so their matched set is irrelevant to seeding;
+/// `TermMatchExtra::default()` remains the capture convention.
 pub(crate) fn evaluate_interface_input_filter_counters_cached(
     state: &FilterState,
     ifindex: i32,

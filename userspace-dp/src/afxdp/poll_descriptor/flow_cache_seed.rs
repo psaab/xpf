@@ -43,6 +43,10 @@ pub(super) fn stage_flow_cache_seed(
     flow_cache_owner_rg_id: i32,
     session_ingress_zone: Option<u16>,
     flow_cache_install_failed: bool,
+    // #10566: true when a counted evaluator already charged this seed
+    // packet. Hit-path static ACCEPTs return false; miss-path evaluation
+    // charges before reaching this common seed.
+    seed_packet_already_counted: bool,
     flow_cache_policy_counter_idx: u32,
     flow_cache_policy_counter: &Option<std::sync::Arc<crate::policy::PolicyRuleCounter>>,
     filter_match_extra: TermMatchExtra<'static>,
@@ -93,7 +97,13 @@ pub(super) fn stage_flow_cache_seed(
     };
     if !flow_cache_install_failed
         && let Some(flow) = flow.as_ref()
-        && let Some(mut entry) = FlowCacheEntry::from_forward_decision(
+    {
+        let input_filter_counters = evaluate_non_pbr_input_filter_counters_cached(
+            worker_ctx.forwarding,
+            Some(flow),
+            meta,
+        );
+        if let Some(mut entry) = FlowCacheEntry::from_forward_decision(
             flow,
             meta,
             validation,
@@ -108,15 +118,13 @@ pub(super) fn stage_flow_cache_seed(
                 meta,
                 ingress_zone_override,
             ),
-            // #3777: capture the input `then count` handles
-            // so cache hits replay them (mirrors the output
-            // counter replay). The seed packet was counted on
-            // the cold path above; this only collects handles.
-            evaluate_non_pbr_input_filter_counters_cached(
-                worker_ctx.forwarding,
-                Some(flow),
-                meta,
-            ),
+            // #3777/#10566: capture the input `then count` handles so cache
+            // hits replay them. A miss-path seed was already counted by the
+            // cold evaluator; a hit-path static ACCEPT was not. Charge the
+            // latter only after the cache entry exists, so refused installs,
+            // foreign/non-cacheable packets, and failed descriptor builds
+            // cannot charge a packet that was not seeded.
+            input_filter_counters.clone(),
             worker_ctx.forwarding,
             worker_ctx.ha_state,
             apply_nat_on_fabric,
@@ -139,6 +147,15 @@ pub(super) fn stage_flow_cache_seed(
             neighbor_mac_epoch_at_resolve,
         )
     {
+        if !seed_packet_already_counted {
+            // Charge the original capture, not the entry's post-dedup set:
+            // `from_forward_decision` removes handles duplicated in TX
+            // selection so cache hits replay them only once, but the seed
+            // packet still owes each matching INPUT term once.
+            input_filter_counters.for_each(|counter| {
+                crate::filter::record_filter_counter(counter, meta.pkt_len as u64);
+            });
+        }
         // #3073: stamp the admitting rule's hit-counter handle
         // onto the cached entry (the seed constructor leaves
         // it 0). The flow-cache hit path
@@ -151,6 +168,7 @@ pub(super) fn stage_flow_cache_seed(
         // rule even after a live policy reorder.
         entry.metadata.policy_counter = flow_cache_policy_counter.clone();
         flow_cache.insert(entry);
+    }
     }
     // ── End flow cache population ────────────────
 }

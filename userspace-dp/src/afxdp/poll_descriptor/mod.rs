@@ -1105,6 +1105,10 @@ pub(super) fn poll_binding_process_descriptor(
                     std::sync::Arc<crate::policy::PolicyRuleCounter>,
                 > = None;
                 let mut apply_nat_on_fabric = false;
+                // #10566: miss-path evaluators count before the common seed;
+                // the established-hit arm below overwrites this with the
+                // explicit result of `evaluate_input_filter_on_session_hit`.
+                let mut seed_packet_already_counted = true;
                 // #1861 §5.4: true when a session install was attempted
                 // for this packet's decision and refused (max_sessions).
                 // Gates the flow-cache population below — caching a
@@ -1404,7 +1408,7 @@ pub(super) fn poll_binding_process_descriptor(
                         // discard/reject keeps its counted/logged semantics.
                         // A route transition overrides only an ordinary
                         // Accept, including the per-packet route-filter arm.
-                        let ordinary_input_filter_hit =
+                        let (ordinary_input_filter_hit, ordinary_input_already_counted) =
                             evaluate_input_filter_on_session_hit(
                                 worker_ctx.forwarding,
                                 sessions,
@@ -1414,43 +1418,55 @@ pub(super) fn poll_binding_process_descriptor(
                                 meta,
                                 Some(authority_zone),
                             );
-                        let input_filter_hit = match ordinary_input_filter_hit {
-                            Some(hit)
-                                if hit.eval.action == crate::filter::FilterAction::Accept =>
-                            {
-                                if let Some(route) = stale_pbr_route {
-                                    // The ordinary evaluator may have stamped
-                                    // this entry fresh on its Accept path.
-                                    if let Some(revoked_key) = route.revoked_key.as_ref() {
-                                        sessions.clear_filter_revalidation(revoked_key);
+                        let (input_filter_hit, input_already_counted) =
+                            match ordinary_input_filter_hit {
+                                Some(hit)
+                                    if hit.eval.action == crate::filter::FilterAction::Accept =>
+                                {
+                                    if let Some(route) = stale_pbr_route {
+                                        // The ordinary evaluator may have stamped
+                                        // this entry fresh on its Accept path.
+                                        if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                            sessions.clear_filter_revalidation(revoked_key);
+                                        }
+                                        (
+                                            Some(SessionHitInputFilterEval {
+                                                eval: NonPbrInputFilterEval {
+                                                    action: crate::filter::FilterAction::Discard,
+                                                    cached_log: None,
+                                                },
+                                                revoked_key: route.revoked_key,
+                                                log_source: FilterLogSource::Pbr,
+                                            }),
+                                            // #10566: route override is synthesized
+                                            // without a counted evaluator.
+                                            false,
+                                        )
+                                    } else {
+                                        (Some(hit), ordinary_input_already_counted)
                                     }
-                                    Some(SessionHitInputFilterEval {
-                                        eval: NonPbrInputFilterEval {
-                                            action: crate::filter::FilterAction::Discard,
-                                            cached_log: None,
-                                        },
-                                        revoked_key: route.revoked_key,
-                                        log_source: FilterLogSource::Pbr,
-                                    })
-                                } else {
-                                    Some(hit)
                                 }
-                            }
-                            Some(hit) => Some(hit),
-                            None => stale_pbr_route.map(|route| {
-                                if let Some(revoked_key) = route.revoked_key.as_ref() {
-                                    sessions.clear_filter_revalidation(revoked_key);
-                                }
-                                SessionHitInputFilterEval {
-                                    eval: NonPbrInputFilterEval {
-                                        action: crate::filter::FilterAction::Discard,
-                                        cached_log: None,
-                                    },
-                                    revoked_key: route.revoked_key,
-                                    log_source: FilterLogSource::Pbr,
-                                }
-                            }),
-                        };
+                                Some(hit) => (Some(hit), ordinary_input_already_counted),
+                                None => (
+                                    stale_pbr_route.map(|route| {
+                                        if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                            sessions.clear_filter_revalidation(revoked_key);
+                                        }
+                                        SessionHitInputFilterEval {
+                                            eval: NonPbrInputFilterEval {
+                                                action: crate::filter::FilterAction::Discard,
+                                                cached_log: None,
+                                            },
+                                            revoked_key: route.revoked_key,
+                                            log_source: FilterLogSource::Pbr,
+                                        }
+                                    }),
+                                    // #10566: neither a static ACCEPT nor a
+                                    // synthesized PBR discard was counted.
+                                    false,
+                                ),
+                            };
+                        seed_packet_already_counted = input_already_counted;
                         if let Some(input_filter_hit) = input_filter_hit {
                             let input_filter_eval = input_filter_hit.eval;
                             let input_filter_revoked_key = input_filter_hit.revoked_key;
@@ -6162,6 +6178,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 flow_cache_owner_rg_id,
                                 session_ingress_zone,
                                 flow_cache_install_failed,
+                                seed_packet_already_counted,
                                 flow_cache_policy_counter_idx,
                                 &flow_cache_policy_counter,
                                 filter_match_extra,
