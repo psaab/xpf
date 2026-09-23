@@ -124,8 +124,13 @@ type policyInvalidationCapture struct {
 	modified capturedSessions
 	deflt    capturedSessions
 
-	v4Err error
-	v6Err error
+	// readErr is the userspace helper READ failure, if any (P9): ONE
+	// error for the one scan — never aliased into both v4Err/v6Err
+	// (that double-counted a single failure in the commit result).
+	// v4Err/v6Err belong to the store ForEach path only.
+	readErr error
+	v4Err   error
+	v6Err   error
 }
 
 // armPolicyInvalidationPlan records the config pair the next applyConfigLocked
@@ -222,9 +227,15 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			Families:  []uint8{4, 6},
 			Classes:   []string{"forward"},
 		})
+		// P7 terminal (shared with the legacy producer): a transport
+		// error gathers nothing → empty buckets + error. An INCOMPLETE
+		// read still matches what was gathered (delete-partial:
+		// revoking some stale sessions beats revoking none) while the
+		// joined readErr surfaces the gap once via the aggregate.
+		// HA-sync covers the partial (per attempted match), so the peer
+		// observes the same revocation.
 		if err != nil {
-			capture.v4Err = fmt.Errorf("policy session READ: %w", err)
-			capture.v6Err = capture.v4Err
+			capture.readErr = fmt.Errorf("policy session READ: %w", err)
 			capture.deleted.enumFailed = true
 			capture.modified.enumFailed = true
 			capture.deflt.enumFailed = true
@@ -232,23 +243,23 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			return
 		}
 		if !resp.SessionPolicyComplete {
-			readErr := fmt.Errorf(
+			capture.readErr = fmt.Errorf(
 				"policy session READ incomplete: %s",
 				strings.Join(resp.SessionPolicyPerWorkerErrors, ", "),
 			)
-			capture.v4Err = readErr
-			capture.v6Err = readErr
-			capture.deleted.enumFailed = true
-			capture.modified.enumFailed = true
-			capture.deflt.enumFailed = true
-			d.policyInvalidationCapture = capture
-			return
 		}
 		for _, match := range resp.SessionPolicyMatches {
+			// P6: the helper must not over-return into unchanged
+			// policies — an extraneous match would over-clear. Skip +
+			// loud (the scan is suspect, so the end check below marks
+			// the whole capture partial).
+			if !idInSet(deleted, match.PolicyID) && !idInSet(modified, match.PolicyID) && !idInSet(deflt, match.PolicyID) {
+				capture.readErr = errors.Join(capture.readErr, fmt.Errorf("policy session READ: extraneous policy %d", match.PolicyID))
+				continue
+			}
 			entry4, entry6, err := policyMatchEntries(match)
 			if err != nil {
-				capture.v4Err = errors.Join(capture.v4Err, err)
-				capture.v6Err = capture.v4Err
+				capture.readErr = errors.Join(capture.readErr, err)
 				continue
 			}
 			target := &capture.deleted
@@ -265,7 +276,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 				target.v6 = append(target.v6, *entry6)
 			}
 		}
-		if capture.v4Err != nil || capture.v6Err != nil {
+		if capture.readErr != nil {
 			capture.deleted.enumFailed = true
 			capture.modified.enumFailed = true
 			capture.deflt.enumFailed = true
@@ -440,21 +451,25 @@ func policyTupleV6(tuple dpuserspace.SessionPolicyTuple) (dataplane.SessionKeyV6
 
 // enumerateErr reports the capture's enumerate failure ONCE for all three
 // classes (the scan is shared, so reporting it per class would triple-count one
-// failure). A failed ForEachV4/V6 leaves UNVISITED sessions out of every
-// bucket, so the invalidation that follows is PARTIAL in exactly the #5578
-// sense — traffic the new policy should now DENY may keep forwarding under the
-// old session's stale authorization — and the error must reach the commit
-// result rather than a log line.
+// failure). A failed scan leaves UNVISITED sessions out of every bucket, so
+// the invalidation that follows is PARTIAL in exactly the #5578 sense —
+// traffic the new policy should now DENY may keep forwarding under the old
+// session's stale authorization — and the error must reach the commit result
+// rather than a log line. The userspace READ contributes at most ONE entry
+// (readErr); v4/v6 legs belong to the store path only (P9).
 func (c *policyInvalidationCapture) enumerateErr() error {
-	if c.v4Err == nil && c.v6Err == nil {
+	if c.readErr == nil && c.v4Err == nil && c.v6Err == nil {
 		return nil
 	}
-	slog.Error("policy session invalidation: pre-publication session-table enumerate failed; clear is PARTIAL — some sessions of changed policies may keep forwarding",
-		"v4_err", c.v4Err, "v6_err", c.v6Err,
+	slog.Error("policy session invalidation: pre-publication enumerate failed; clear is PARTIAL — some sessions of changed policies may keep forwarding",
+		"read_err", c.readErr, "v4_err", c.v4Err, "v6_err", c.v6Err,
 		"deleted_matched", len(c.deleted.v4)+len(c.deleted.v6),
 		"modified_matched", len(c.modified.v4)+len(c.modified.v6),
 		"default_matched", len(c.deflt.v4)+len(c.deflt.v6))
 	var errs []error
+	if c.readErr != nil {
+		errs = append(errs, fmt.Errorf("policy session invalidation: %w", c.readErr))
+	}
 	if c.v4Err != nil {
 		errs = append(errs, fmt.Errorf("policy session invalidation: v4 enumerate: %w", c.v4Err))
 	}

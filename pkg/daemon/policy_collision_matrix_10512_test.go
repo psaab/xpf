@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -32,6 +33,9 @@ type collisionDP10512 struct {
 
 	matches []dpuserspace.SessionPolicyMatch
 	revRows []dpuserspace.SessionPolicyMatch
+	// over, when set, is appended to every READ unfiltered (faithless
+	// helper modeling for the P6 over-return cells).
+	over []dpuserspace.SessionPolicyMatch
 	deleted []dpuserspace.SessionPolicyMatch
 	modes   []string
 	reqs    []dpuserspace.SessionPolicyListRequest
@@ -123,6 +127,10 @@ func (f *collisionDP10512) ListSessionsByPolicy(req dpuserspace.SessionPolicyLis
 		}
 		out = append(out, m)
 	}
+
+	// Faithless mode (P6 cells): over-returned rows bypass all filters,
+	// modeling a helper that ignores the requested set.
+	out = append(out, f.over...)
 	resp := dpuserspace.ControlResponse{
 		SessionPolicyMatches:  out,
 		SessionPolicyComplete: f.complete && !f.incomple && !legacyNoFence,
@@ -471,6 +479,8 @@ func TestProtocolContrastEmptyIncompleteMissing10512(t *testing.T) {
 	d2.capturePolicyInvalidationLocked(newCfg)
 	if err := d2.clearSessionsForPolicyChanges(oldCfg, newCfg); err == nil {
 		t.Fatal("incomplete capture must surface clearErr via the aggregate, got nil")
+	} else if got := strings.Count(err.Error(), "worker-3:queue-full"); got != 1 {
+		t.Fatalf("aggregate error mentions the READ failure %d times, want exactly once (P9 single path): %v", got, err)
 	}
 
 	// Nil capture selects the legacy producer (mode pin).
@@ -710,5 +720,137 @@ func TestT8FailoverPromotionBeforeDelete10512(t *testing.T) {
 	}
 	if !standby.liveHas(100009, revID10512) {
 		t.Error("reverse control reaped in stale delivery — only captured forwards travel")
+	}
+}
+
+// P6 capture: an over-returned match (policy outside the requested
+// set) is skipped loudly — never routed to a bucket — while the
+// legitimate rows still clear. Driven via the aggregate (production
+// path: the readErr joins there).
+func TestCaptureOverReturnSkippedLoudly10512(t *testing.T) {
+	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
+	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
+	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
+	webID := ids["trust->untrust/p-web"]
+	fwd, rev := collisionMatches10512(webID, ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
+	fake.over = []dpuserspace.SessionPolicyMatch{{
+		AddrFamily: 4, RoutingDomain: 100007, PolicyID: 999,
+		ExpectedRTFlowSessionID: 0xE11CE,
+		Tuple: dpuserspace.SessionPolicyTuple{
+			AddrFamily: 4, Protocol: 6,
+			SrcIP: "10.9.9.9", DstIP: "10.9.9.10",
+			SrcPort: 50009, DstPort: 80,
+		},
+	}}
+	d := &Daemon{}
+	d.setDataplane(fake)
+	d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: newCfg}
+	d.capturePolicyInvalidationLocked(newCfg)
+	err := d.clearSessionsForPolicyChanges(oldCfg, newCfg)
+	if err == nil {
+		t.Fatal("over-returned match must surface an error")
+	}
+	for _, m := range fake.deleted {
+		if m.PolicyID == 999 {
+			t.Fatal("extraneous policy 999 was deleted (over-clear)")
+		}
+	}
+	if fake.liveHas(100007, 0xA11CE) {
+		t.Error("A's v4 row survives despite a valid capture (over-return must not block it)")
+	}
+}
+
+// P6 legacy twin: same skip+loud through the legacy producer.
+func TestLegacyOverReturnSkippedLoudly10512(t *testing.T) {
+	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
+	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
+	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
+	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
+	fake.over = []dpuserspace.SessionPolicyMatch{{
+		AddrFamily: 4, RoutingDomain: 100007, PolicyID: 999,
+		ExpectedRTFlowSessionID: 0xE11CE,
+		Tuple: dpuserspace.SessionPolicyTuple{
+			AddrFamily: 4, Protocol: 6,
+			SrcIP: "10.9.9.9", DstIP: "10.9.9.10",
+			SrcPort: 50009, DstPort: 80,
+		},
+	}}
+	d := &Daemon{}
+	d.setDataplane(fake)
+	d.policyInvalidationCapture = nil
+	if err := d.clearSessionsForDeletedPolicies(oldCfg, newCfg); err == nil {
+		t.Fatal("legacy over-return must surface an error")
+	}
+	for _, m := range fake.deleted {
+		if m.PolicyID == 999 {
+			t.Fatal("extraneous policy 999 was deleted (over-clear)")
+		}
+	}
+	if fake.liveHas(100007, 0xA11CE) {
+		t.Error("A's v4 row survives despite a valid legacy READ")
+	}
+}
+
+// P7 capture-partial: an incomplete READ still revokes what was
+// gathered (delete-partial beats zero-delete) while the joined error
+// surfaces the gap — and the HA peer observes the same partial
+// revocation (scoped deletes queued per attempted match).
+func TestCapturePartialDeletesAndSyncsPeer10512(t *testing.T) {
+	d, ss := primaryForRG1Daemon9752()
+	d.cluster = clusterManagerPrimaryForRGs(1)
+	ss.SetScopedPolicyDeleteCapableForTesting(true)
+	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
+	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
+	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
+	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
+	fake.incomple = true
+	fake.workerErr = "worker-1:queue-full"
+	d.setDataplane(fake)
+	d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: newCfg}
+	d.capturePolicyInvalidationLocked(newCfg)
+	if err := d.clearSessionsForPolicyChanges(oldCfg, newCfg); err == nil {
+		t.Fatal("incomplete capture must surface clearErr")
+	}
+	if fake.liveHas(100007, 0xA11CE) {
+		t.Fatal("partial capture deleted nothing — incomplete must still revoke gathered rows")
+	}
+	key4, _, err := policyTupleV4(fwd[0].Tuple)
+	if err != nil {
+		t.Fatalf("FIXTURE: %v", err)
+	}
+	if domain, id, ok := ss.ScopedDeleteJournalEntryForTesting(key4); !ok || domain != 100007 || id != 0xA11CE {
+		t.Fatalf("peer observed (%d, %#x, %v), want the partial row (100007, 0xA11CE, true)", domain, id, ok)
+	}
+}
+
+// P7 legacy-partial twin (delete + error + peer-observed).
+func TestLegacyPartialDeletesAndSyncsPeer10512(t *testing.T) {
+	d, ss := primaryForRG1Daemon9752()
+	d.cluster = clusterManagerPrimaryForRGs(1)
+	ss.SetScopedPolicyDeleteCapableForTesting(true)
+	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
+	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
+	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
+	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
+	fake.incomple = true
+	fake.workerErr = "worker-2:dead"
+	d.setDataplane(fake)
+	d.policyInvalidationCapture = nil
+	if err := d.clearSessionsForDeletedPolicies(oldCfg, newCfg); err == nil {
+		t.Fatal("incomplete legacy READ must surface clearErr")
+	}
+	if fake.liveHas(100007, 0xA11CE) {
+		t.Fatal("partial legacy READ deleted nothing — incomplete must still revoke gathered rows")
+	}
+	key4, _, err := policyTupleV4(fwd[0].Tuple)
+	if err != nil {
+		t.Fatalf("FIXTURE: %v", err)
+	}
+	if domain, id, ok := ss.ScopedDeleteJournalEntryForTesting(key4); !ok || domain != 100007 || id != 0xA11CE {
+		t.Fatalf("peer observed (%d, %#x, %v), want the partial row (100007, 0xA11CE, true)", domain, id, ok)
 	}
 }

@@ -433,14 +433,14 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 		if err != nil {
 			return fmt.Errorf("policy session READ (%s): %w", what, err)
 		}
-		if !resp.SessionPolicyComplete {
-			return fmt.Errorf(
-				"policy session READ (%s) incomplete: %v",
-				what, resp.SessionPolicyPerWorkerErrors)
-		}
 		capture := capturedSessions{targets: len(ids)}
 		var errs []error
 		for _, match := range resp.SessionPolicyMatches {
+			// P6: skip + loud on extraneous policies (capture twin).
+			if _, ok := ids[match.PolicyID]; !ok {
+				errs = append(errs, fmt.Errorf("policy session READ (%s): extraneous policy %d", what, match.PolicyID))
+				continue
+			}
 			entry4, entry6, entryErr := policyMatchEntries(match)
 			if entryErr != nil {
 				errs = append(errs, entryErr)
@@ -454,8 +454,17 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 				capture.v6 = append(capture.v6, *entry6)
 			}
 		}
-		capture.enumFailed = len(errs) != 0
+		// P7 delete-partial terminal (capture twin): revoke what was
+		// gathered even when the READ was incomplete — partial beats
+		// zero — while the joined READ error surfaces the gap (#5578).
+		// HA-sync covers the partial, so the peer observes the same.
+		capture.enumFailed = !resp.SessionPolicyComplete || len(errs) != 0
 		errs = append(errs, d.deleteInvalidatedSessions(capture, reason, what))
+		if !resp.SessionPolicyComplete {
+			errs = append(errs, fmt.Errorf(
+				"policy session READ (%s) incomplete: %v",
+				what, resp.SessionPolicyPerWorkerErrors))
+		}
 		return errors.Join(errs...)
 	}
 
@@ -584,6 +593,12 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 	if rt == nil {
 		return nil
 	}
+	// Whether to propagate the local deletes to the HA peer. Mirrors the GC
+	// delete callback (daemon_run.go): only a node that is primary for some RG
+	// owns the authoritative session and syncs its deletes; the peer ignores
+	// deletes for sessions it does not hold.
+	ss := d.getSessionSync()
+	syncPeer := d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil
 	if invalidator, ok := rt.(interface {
 		DeletePolicySessions([]dpuserspace.SessionPolicyMatch) (dpuserspace.PolicyDeleteResult, error)
 	}); ok && len(c.policy) > 0 {
@@ -592,6 +607,38 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 		if err != nil {
 			errs = append(errs, fmt.Errorf(
 				"policy session invalidation (%s): helper delete: %w", what, err))
+		}
+		// HA-sync what we attempted (legacy parity: the store path below
+		// queues per attempted entry, not per deleted one). Queued even
+		// on helper error — revoke wins: a peer that keeps a row this
+		// node dropped resurrects it on failover, while a queued delete
+		// for a locally-surviving row converges via re-admission. Stale
+		// matches' scoped deletes are refused no-ops (conditional).
+		if syncPeer {
+			for _, m := range c.policy {
+				family := m.AddrFamily
+				if family == 0 {
+					family = m.Tuple.AddrFamily
+				}
+				switch family {
+				case 4:
+					key, _, err := policyTupleV4(m.Tuple)
+					if err != nil {
+						errs = append(errs, fmt.Errorf("policy session invalidation (%s): v4 HA key: %w", what, err))
+						continue
+					}
+					ss.QueueDeleteScopedV4(m.RoutingDomain, key, m.ExpectedRTFlowSessionID)
+				case 6:
+					key, _, err := policyTupleV6(m.Tuple)
+					if err != nil {
+						errs = append(errs, fmt.Errorf("policy session invalidation (%s): v6 HA key: %w", what, err))
+						continue
+					}
+					ss.QueueDeleteScopedV6(m.RoutingDomain, key, m.ExpectedRTFlowSessionID)
+				default:
+					errs = append(errs, fmt.Errorf("policy session invalidation (%s): unknown family %d", what, family))
+				}
+			}
 		}
 		if !c.enumFailed && len(errs) == 0 {
 			slog.Info("cleared sessions of changed policies at commit",
@@ -609,13 +656,6 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 	if store == nil {
 		return nil
 	}
-	// Whether to propagate the local deletes to the HA peer. Mirrors the GC
-	// delete callback (daemon_run.go): only a node that is primary for some RG
-	// owns the authoritative session and syncs its deletes; the peer ignores
-	// deletes for sessions it does not hold.
-	ss := d.getSessionSync()
-	syncPeer := d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil
-
 	var errs []error
 	v4Cleared := 0
 	if len(c.v4) > 0 {
