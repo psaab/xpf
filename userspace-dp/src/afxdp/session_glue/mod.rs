@@ -962,6 +962,7 @@ fn delete_terminal_half(
         conntrack_v4_fd,
         conntrack_v6_fd,
     );
+    let closed_id = sessions.session_id_for(key);
     sessions.delete(key);
     remove_shared_session(
         shared_sessions,
@@ -984,7 +985,7 @@ fn delete_terminal_half(
         metadata.is_reverse,
         now_ns,
     );
-    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false);
+    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false, closed_id);
 }
 
 /// #9856: slice size for the collecting export-candidate walk below. The
@@ -2043,6 +2044,70 @@ pub(super) fn replicate_session_delete_repairing(
         // Byte-for-byte the two releases `handle_delete_synced` would have run,
         // with that worker's id as the holder, so the mask empties on the same
         // last-release rule and the port is returned exactly once.
+        release_source_nat_allocation_for_worker(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            worker_id,
+        );
+        crate::nat64::release_nat64_allocation_for_worker(
+            &forwarding.nat64,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            worker_id,
+        );
+    }
+    outcome
+}
+
+/// Stale-ordinary-close twin of [`replicate_session_delete_repairing`]:
+/// siblings delete only when the forward's live identity still matches
+/// the captured one, and the carried companion goes with it (same
+/// forward-match gate as the scoped HA path — no companion identity is
+/// capturable from a close delta). Drop repair mirrors the unconditional
+/// twin keystroke for keystroke (exact-keyed releases + epoch signal).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn replicate_session_delete_conditional(
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    forwarding: &ForwardingState,
+    key: &SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+    expected_id: u64,
+    companion: Option<SessionKey>,
+) -> DeleteReplicationOutcome {
+    let mut outcome = DeleteReplicationOutcome::default();
+    for commands in peer_worker_commands {
+        let mut pending = worker_queue::lock_recover(commands);
+        let queued = worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::DeleteSyncedConditional {
+                key: key.clone(),
+                expected_id,
+                companion: companion.clone(),
+            },
+        );
+        drop(pending);
+        if queued {
+            continue;
+        }
+        SESSION_DELETE_REPLICA_DROPPED.fetch_add(1, Ordering::Relaxed);
+        outcome.dropped += 1;
+        let Some(worker_id) = worker_id_for_command_queue(worker_commands_by_id, commands) else {
+            continue;
+        };
+        SESSION_DELETE_REPLICA_DROP_REPAIRED.fetch_add(1, Ordering::Relaxed);
+        outcome.repaired += 1;
+        if let Some(epoch) = SESSION_DELETE_DROP_EPOCH.get(worker_id as usize) {
+            epoch.fetch_add(1, Ordering::Relaxed);
+        }
         release_source_nat_allocation_for_worker(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,

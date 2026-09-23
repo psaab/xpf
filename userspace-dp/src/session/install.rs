@@ -761,6 +761,7 @@ impl SessionTable {
         metadata: SessionMetadata,
         origin: SessionOrigin,
         purge_retirement: bool,
+        session_id: u64,
     ) {
         if metadata.is_reverse {
             return;
@@ -789,11 +790,13 @@ impl SessionTable {
         // values off the expiring entry).
         observed_tos: 0,
         observed_tcp_flags: 0,
-        // #4915: the entry was already removed by the explicit-close caller,
-        // so its stable id is no longer in hand — 0 keeps the "unknown"
-        // sentinel. The dominant idle/age close path (session/expire.rs)
-        // carries the real id off the expiring entry.
-        session_id: 0,
+        // #4915: the caller captures the removed entry's stable id BEFORE
+        // deleting (it is no longer in hand here). The flush scopes stale
+        // ordinary teardown on this id; 0 (uncaptured — entry already
+        // gone at capture time) forces the fail-closed drop+resync floor.
+        // Never infer it from current rows at drain time: a same-key
+        // reincarnation would hand back the SURVIVOR's id.
+        session_id,
         bulk_resync: false,
         tcp_close_class: 0,
         purge_retirement, });

@@ -125,7 +125,13 @@ pub(super) fn purge_close_table_leg_is_stale(
 ///
 /// Close deltas carry the identity that produced them when available. If the
 /// worker has already installed a different live identity for the same
-/// canonical tuple, the close is stale and must not mutate or emit teardown.
+/// canonical tuple (or the shared row proves a same-tuple replacement), the
+/// close is stale. Stale does NOT mean droppable: purge and fully-stale
+/// (identity-less) closes skip, but ordinary stale closes still owe scoped
+/// teardown (exact-key shared removal + conditional replication + scoped
+/// emit) while skipping only bare-keyed BPF/conntrack deletes — see the
+/// flush loop. Wholesale-skip would strand the dead row and poison every
+/// future close for the tuple via this same check (M1).
 pub(super) fn close_delta_is_stale_incarnation(
     delta: &SessionDelta,
     current_sessions: Option<&crate::session::SessionTable>,
@@ -629,16 +635,51 @@ pub(super) fn flush_session_deltas(
                 continue;
             }
         }
-        if close_delta_is_stale_incarnation(
+        let stale = close_delta_is_stale_incarnation(
             delta,
             current_sessions.as_deref(),
             shared_sessions,
-        ) {
+        );
+        if stale && delta.purge_retirement {
             drop(_close_install_permits);
             event_stream_out_of_sync = true;
             continue;
         }
+        // Stale ordinary closes still owe scoped teardown (M1), authorized
+        // ONLY by delta-carried identity. Never infer it from current
+        // rows: a same-scoped-key reincarnation would hand back the
+        // SURVIVOR's id and this close would delete it. Explicit closes
+        // capture the removed entry's id at delete time; 0 = fully
+        // stale: legacy drop; the resync heals the peer.
+        let scoped_id = delta.session_id;
+        if stale && scoped_id == 0 {
+            drop(_close_install_permits);
+            event_stream_out_of_sync = true;
+            continue;
+        }
+        // From here on, `stale` == stale-ordinary-with-identity (purge
+        // continued above; non-Close deltas are never stale).
         if delta.kind == SessionDeltaKind::Close {
+        // Stale-ordinary forward FIRST (under permits): exact-key +
+        // identity-conditional. ONLY Removed authorizes the destructive
+        // local ops below (Absent proves nothing about the derived rows;
+        // Declined means a live reincarnation). Conditional replicate +
+        // scoped emit run regardless — they no-op on mismatch.
+        let teardown_ok = if stale {
+            matches!(
+                super::shared_ops::remove_shared_session_if(
+                    shared_sessions,
+                    shared_nat_sessions,
+                    shared_forward_wire_sessions,
+                    shared_owner_rg_indexes,
+                    &delta.key,
+                    |current| current.session_id == scoped_id,
+                ),
+                super::shared_ops::SharedRemoval::Removed(_)
+            )
+        } else {
+            true
+        };
             if cfg!(feature = "debug-log") {
                 debug_log!(
                     "SESS_DELETE: proto={} {}:{} -> {}:{} nat_src={:?} nat_dst={:?} bpf_entries_before={}",
@@ -652,17 +693,19 @@ pub(super) fn flush_session_deltas(
                     count_bpf_session_entries(session_map.fd),
                 );
             }
-            delete_live_session_entry(
-                session_map,
-                &delta.key,
-                delta.decision.nat,
-                delta.metadata.is_reverse,
-            );
-            crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
-                conntrack_v4_fd,
-                conntrack_v6_fd,
-                &delta.key,
-            );
+            if !stale {
+                delete_live_session_entry(
+                    session_map,
+                    &delta.key,
+                    delta.decision.nat,
+                    delta.metadata.is_reverse,
+                );
+                crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
+                    &delta.key,
+                );
+            }
             // #2979: delete the dynamic reverse-NAT dnat_table entry this
             // SNAT'd session published at install. Keyed on the SAME forward
             // key + nat decision used by publish_dnat_table_entry (the Close
@@ -671,7 +714,9 @@ pub(super) fn flush_session_deltas(
             // non-SNAT session is a no-op (no rewrite_src -> no key). Only the
             // forward key publishes a dnat_table entry, so it is NOT repeated
             // for the reverse key below.
-            super::checksum::delete_dnat_table_entry(dnat_fds, &delta.key, delta.decision.nat);
+            if teardown_ok {
+                super::checksum::delete_dnat_table_entry(dnat_fds, &delta.key, delta.decision.nat);
+            }
             // #9752 round 4 item 3: purge-retirement closes skip BOTH shared
             // teardowns here. The atomic presence leg above already decided
             // this key under one lock hold (decline-and-drop on republish,
@@ -681,19 +726,24 @@ pub(super) fn flush_session_deltas(
             // step removed shared authority AND released the coordinator
             // rows on accept, so nothing here is owed.
             if !delta.purge_retirement {
-                remove_shared_session(
-                    shared_sessions,
-                    shared_nat_sessions,
-                    shared_forward_wire_sessions,
-                    &shared_owner_rg_indexes,
-                    &delta.key,
-                );
-                // #9560 round 3: the coordinator claimed this key's rows when it published
-                // them for shared authority (HA import, bringup replay, activation
-                // prewarm). That authority is gone as of the line above, so the claim goes
-                // with it — otherwise it outlives every worker's teardown and suppresses
-                // the row's delete for good.
-                release_coordinator_session_rows(session_map, &delta.key);
+                if !stale {
+                    remove_shared_session(
+                        shared_sessions,
+                        shared_nat_sessions,
+                        shared_forward_wire_sessions,
+                        &shared_owner_rg_indexes,
+                        &delta.key,
+                    );
+                }
+                // (stale: forward already resolved above.)
+                if teardown_ok {
+                    // #9560 round 3: the coordinator claimed this key's rows when it published
+                    // them for shared authority (HA import, bringup replay, activation
+                    // prewarm). That authority is gone as of the line above, so the claim goes
+                    // with it — otherwise it outlives every worker's teardown and suppresses
+                    // the row's delete for good.
+                    release_coordinator_session_rows(session_map, &delta.key);
+                }
             }
             // #9752: a purge-retirement close covers exactly `delta.key`. The
             // purge already decided the pair (fenced forward removal, linked or
@@ -706,46 +756,71 @@ pub(super) fn flush_session_deltas(
             // still run — only the shared teardowns (authorized up front) and
             if !delta.purge_retirement {
                 let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
-                delete_live_session_entry(session_map, &reverse_key, delta.decision.nat, true);
-                crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
-                    conntrack_v4_fd,
-                    conntrack_v6_fd,
-                    &reverse_key,
-                );
-                remove_shared_session(
-                    shared_sessions,
-                    shared_nat_sessions,
-                    shared_forward_wire_sessions,
-                    &shared_owner_rg_indexes,
-                    &reverse_key,
-                );
-                // #9560 round 3: same for the reverse half's own shared entry.
-                release_coordinator_session_rows(session_map, &reverse_key);
-                // #8114 item 4: repair the sibling NAT holder bit a refused
-                // `DeleteSynced` would otherwise strand. The forward key carries
-                // the reservation; the reverse call self-gates on `is_reverse` and
-                // is a no-op for it, exactly as `handle_delete_synced` is.
-                replicate_session_delete_repairing(
-                    peer_worker_commands,
-                    worker_commands_by_id,
-                    forwarding,
-                    &delta.key,
-                    delta.decision.nat,
-                    delta.metadata.is_reverse,
-                    crate::afxdp::wg::counters::monotonic_now_ns(),
-                );
-                // #1069: reuse the reverse_key already computed above instead of
-                // recomputing it. reverse_session_key is pure on its inputs and
-                // delta + nat are not modified between the two replicate calls.
-                replicate_session_delete_repairing(
-                    peer_worker_commands,
-                    worker_commands_by_id,
-                    forwarding,
-                    &reverse_key,
-                    delta.decision.nat,
-                    true,
-                    crate::afxdp::wg::counters::monotonic_now_ns(),
-                );
+                if !stale {
+                    delete_live_session_entry(session_map, &reverse_key, delta.decision.nat, true);
+                    crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
+                        &reverse_key,
+                    );
+                }
+                if teardown_ok {
+                    remove_shared_session(
+                        shared_sessions,
+                        shared_nat_sessions,
+                        shared_forward_wire_sessions,
+                        &shared_owner_rg_indexes,
+                        &reverse_key,
+                    );
+                    // #9560 round 3: same for the reverse half's own shared entry.
+                    release_coordinator_session_rows(session_map, &reverse_key);
+                }
+                // Replicate + emit below are mismatch-safe (conditional on
+                // scoped_id), so they run on Absent too — only the
+                // destructive-unconditional local ops above need Removed.
+                if stale {
+                    // One conditional forward command carrying the derived
+                    // reverse key: siblings delete the companion only
+                    // after the forward's expected id matches (no
+                    // companion identity is capturable from a close).
+                    super::session_glue::replicate_session_delete_conditional(
+                        peer_worker_commands,
+                        worker_commands_by_id,
+                        forwarding,
+                        &delta.key,
+                        delta.decision.nat,
+                        delta.metadata.is_reverse,
+                        crate::afxdp::wg::counters::monotonic_now_ns(),
+                        scoped_id,
+                        Some(reverse_key),
+                    );
+                } else {
+                    // #8114 item 4: repair the sibling NAT holder bit a refused
+                    // `DeleteSynced` would otherwise strand. The forward key carries
+                    // the reservation; the reverse call self-gates on `is_reverse` and
+                    // is a no-op for it, exactly as `handle_delete_synced` is.
+                    replicate_session_delete_repairing(
+                        peer_worker_commands,
+                        worker_commands_by_id,
+                        forwarding,
+                        &delta.key,
+                        delta.decision.nat,
+                        delta.metadata.is_reverse,
+                        crate::afxdp::wg::counters::monotonic_now_ns(),
+                    );
+                    // #1069: reuse the reverse_key already computed above instead of
+                    // recomputing it. reverse_session_key is pure on its inputs and
+                    // delta + nat are not modified between the two replicate calls.
+                    replicate_session_delete_repairing(
+                        peer_worker_commands,
+                        worker_commands_by_id,
+                        forwarding,
+                        &reverse_key,
+                        delta.decision.nat,
+                        true,
+                        crate::afxdp::wg::counters::monotonic_now_ns(),
+                    );
+                }
             }
             if cfg!(feature = "debug-log") {
                 debug_log!(
@@ -754,6 +829,21 @@ pub(super) fn flush_session_deltas(
                 );
             }
         }
+        // Stale-ordinary resolved above always carries a usable identity
+        // into the emit legs: patch it in when the delta itself has none
+        // (explicit closes emit 0). The Go walk routes identity-carrying
+        // closes to conditional deletes; emitting bare would kill the
+        // survivor's peer row.
+        let emit_owned: SessionDelta;
+        let delta: &SessionDelta = if stale && scoped_id != delta.session_id {
+            emit_owned = SessionDelta {
+                session_id: scoped_id,
+                ..delta.clone()
+            };
+            &emit_owned
+        } else {
+            delta
+        };
         let info = session_delta_info(ident, delta, zone_id_to_name);
         drop(_close_install_permits);
         // #2669: per-binding RPC fallback push is the ONLY binding-dependent
