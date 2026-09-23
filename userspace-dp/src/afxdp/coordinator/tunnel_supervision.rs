@@ -1010,6 +1010,7 @@ impl super::Coordinator {
             wake: delivery_wake.clone(),
         };
         let thread_delivery_wake = delivery_wake.clone();
+        let thread_wg_uncovered_queues = self.wg_uncovered_queues.clone();
         eprintln!(
             "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} device={outer_bind_device:?} kernel_transport={kernel_transport:?}"
         );
@@ -1039,6 +1040,7 @@ impl super::Coordinator {
                     thread_shared_owner_rg_indexes,
                     delivery_rx,
                     thread_delivery_wake,
+                    thread_wg_uncovered_queues,
                 );
             },
         );

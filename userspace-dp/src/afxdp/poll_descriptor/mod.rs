@@ -237,11 +237,12 @@ pub(super) fn dns_reply_fastpath_admit(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn poll_binding_process_descriptor(
+pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
     area: *const MmapArea,
     available: u32,
+    injected_packet: Option<(Vec<u8>, UserspaceDpMeta)>,
     sessions: &mut SessionTable,
     screen: &mut ScreenState,
     validation: ValidationState,
@@ -279,16 +280,68 @@ pub(super) fn poll_binding_process_descriptor(
     // Load the immutable SA payload once for this RX batch. Stage 11 performs
     // only plain map lookups against this guard, never another ArcSwap load.
     let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
+    let mut injected_desc = injected_packet.and_then(|(frame, meta)| {
+        if frame.len() > crate::afxdp::UMEM_FRAME_SIZE as usize {
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let Some(addr) = binding.tx_pipeline.free_tx_frames.pop_front() else {
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        // SAFETY: `addr` came from this binding's free-TX frame pool, so the
+        // offset belongs to this binding's UMEM and no other owner can access
+        // it until the injected packet reaches the origin-aware recycle arm.
+        let Some(dst) = (unsafe { (&*area).slice_mut_unchecked(addr as usize, frame.len()) }) else {
+            binding.tx_pipeline.free_tx_frames.push_back(addr);
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        dst.copy_from_slice(&frame);
+        Some((
+            XdpDesc {
+                addr,
+                len: frame.len() as u32,
+                options: 0,
+            },
+            meta,
+        ))
+    });
     let mut received = binding.xsk.rx.receive(available);
     binding.scratch.scratch_recycle.clear();
     binding.scratch.scratch_forwards.clear();
     binding.scratch.scratch_rst_teardowns.clear();
-    while let Some(desc) = received.read() {
-        record_rx_descriptor_telemetry(desc, area, telemetry, worker_ctx);
+    let injected_addr = injected_desc.as_ref().map(|(desc, _)| desc.addr);
+    macro_rules! recycle_desc {
+        ($addr:expr) => {
+            if injected_addr == Some($addr) {
+                binding.tx_pipeline.free_tx_frames.push_back($addr);
+            } else {
+                binding.scratch.scratch_recycle.push($addr);
+            }
+        };
+    }
+    loop {
+        let (desc, injected_meta) = if let Some((desc, meta)) = injected_desc.take() {
+            (desc, Some(meta))
+        } else if let Some(desc) = received.read() {
+            (desc, None)
+        } else {
+            break;
+        };
+        let is_injected = injected_meta.is_some();
+        if !is_injected {
+            record_rx_descriptor_telemetry(desc, area, telemetry, worker_ctx);
+        }
         let mut recycle_now = true;
         // SAFETY: per the `area` contract in this function's header
         // comment — pointee outlives the call, never aliased mutably.
-        if let Some(meta) = try_parse_metadata(unsafe { &*area }, desc) {
+        if let Some(meta) =
+            injected_meta.or_else(|| try_parse_metadata(unsafe { &*area }, desc))
+        {
             telemetry.counters.metadata_packets += 1;
             let disposition = classify_metadata(meta, validation);
             if disposition == PacketDisposition::Valid {
@@ -301,21 +354,18 @@ pub(super) fn poll_binding_process_descriptor(
                 else {
                     telemetry.counters.touched = true;
                     telemetry.counters.umem_slice_dropped += 1;
-                    binding.scratch.scratch_recycle.push(desc.addr);
+                    recycle_desc!(desc.addr);
                     continue;
                 };
-                // #10313: reject an unknown tagged VID at the common ingress
-                // boundary. This must run before destination classification,
-                // ARP/NDP learning, tunnel decapsulation, flow-cache lookup,
-                // session lookup, screen evaluation, and policy/NAT consumers:
-                // none of those stages may observe the parent's inherited
-                // sibling zone for an identity the snapshot does not own.
-                //
-                // The pre-routing scope helper independently preserves the
-                // parent config name for from-interface diagnostics and scope
-                // matching, while forcing its zone empty. The packet itself
-                // never reaches that downstream path for an unknown VID.
-                if meta.ingress_vlan_present != 0
+                // Native AF_XDP records traverse the link-layer and tunnel
+                // decap stages here. A control-thread WG descriptor is
+                // already logical Ethernet + rebased metadata; injecting it
+                // again would subject its synthetic MAC to ingress acceptance
+                // and call WG decap a second time.
+                let fabric_link_ingress =
+                    !is_injected && ingress_is_fabric(worker_ctx.forwarding, meta.ingress_ifindex as i32);
+                if !is_injected
+                    && meta.ingress_vlan_present != 0
                     && crate::afxdp::forwarding::unknown_ingress_vlan(
                         worker_ctx.forwarding,
                         meta.ingress_ifindex as i32,
@@ -324,107 +374,104 @@ pub(super) fn poll_binding_process_descriptor(
                 {
                     telemetry.counters.touched = true;
                     telemetry.counters.unknown_vlan_dropped += 1;
-                    binding.scratch.scratch_recycle.push(desc.addr);
+                    recycle_desc!(desc.addr);
                     continue;
                 }
-                // #10314: perform destination acceptance before ARP/NDP
-                // classification as well as before decap, source-neighbor
-                // learning, and all L3 resolution.
-                let fabric_link_ingress =
-                    ingress_is_fabric(worker_ctx.forwarding, meta.ingress_ifindex as i32);
-                if !ingress_destination_mac_accepted(
-                    worker_ctx.forwarding,
-                    meta.ingress_ifindex as i32,
-                    meta.ingress_vlan_id,
-                    raw_frame,
-                ) {
+                if !is_injected
+                    && !ingress_destination_mac_accepted(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                        raw_frame,
+                    )
+                {
                     telemetry.counters.touched = true;
                     telemetry.counters.dst_mac_dropped += 1;
-                    binding.scratch.scratch_recycle.push(desc.addr);
+                    recycle_desc!(desc.addr);
                     continue;
                 }
-                // #946 Phase 1 stage 5: ARP / NDP link-layer
-                // classification. ARP frames recycle without
-                // transiting; NDP NA learns and falls through.
-                if let StageOutcome::RecycleAndContinue = stage_link_layer_classify(
-                    raw_frame,
-                    meta,
-                    now_ns,
-                    &mut binding.neigh_program_limiter,
-                    worker_ctx,
-                ) {
-                    binding.scratch.scratch_recycle.push(desc.addr);
+                if !is_injected
+                    && matches!(
+                        stage_link_layer_classify(
+                            raw_frame,
+                            meta,
+                            now_ns,
+                            &mut binding.neigh_program_limiter,
+                            worker_ctx,
+                        ),
+                        StageOutcome::RecycleAndContinue
+                    )
+                {
+                    recycle_desc!(desc.addr);
                     continue;
                 }
-                // #946 Phase 1 stage 6: native GRE decap. Caller
-                // binds the active slice locally; helper does NOT
-                // return the slice (would be self-referential).
-                // `owned_packet_frame` MUST be `mut` — deferred
-                // stage-12+ code at lines below calls `.take()`.
-                let (mut meta, mut owned_packet_frame) =
-                    stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding);
-                // #8274 step 3 — stage 6b: WireGuard transport-data decap.
-                //
-                // Runs only when GRE did not already claim the frame: a packet
-                // is one tunnel's or the other's, never both, and re-entering
-                // decap on an already-decapsulated inner would adjudicate a
-                // synthesized frame as if it were an outer datagram.
-                //
-                // Everything downstream then sees the INNER packet — flow
-                // parse, screen, session, policy, NAT, forward build — which is
-                // the entire point of the issue: an authenticated peer's inner
-                // plaintext is adjudicated under the tunnel's logical ingress
-                // zone instead of being written to the wgN TUN for the kernel
-                // to forward with no zone policy at all.
-                if owned_packet_frame.is_none() {
-                    let (wg_meta, wg_frame) = stage_wg_decap(
-                        raw_frame,
-                        meta,
-                        worker_ctx.forwarding,
-                        &binding.wg_scratch,
-                    );
-                    if wg_frame.is_some() {
-                        meta = wg_meta;
-                        owned_packet_frame = wg_frame;
+                let (mut meta, mut owned_packet_frame) = if is_injected {
+                    (meta, Some(raw_frame.to_vec()))
+                } else {
+                    let (mut meta, mut owned_packet_frame) =
+                        stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding);
+                    if owned_packet_frame.is_none() {
+                        let (wg_meta, wg_frame) = stage_wg_decap(
+                            raw_frame,
+                            meta,
+                            worker_ctx.forwarding,
+                            &binding.wg_scratch,
+                        );
+                        if wg_frame.is_some() {
+                            meta = wg_meta;
+                            owned_packet_frame = wg_frame;
+                        }
                     }
-                }
+                    (meta, owned_packet_frame)
+                };
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
+                // #10597 G5: the shim's Local classification is advisory.
+                // Re-resolve the injected destination on the worker before
+                // flow-cache/session lookup so an underlay view skew can never
+                // retain or transmit this frame as transit. The two local
+                // helpers cover ordinary interface ownership and NAT-owned
+                // local targets; all other injected records are terminal.
+                // Native AF_XDP records retain the existing full resolver.
                 // #946 Phase 1 stage 7+8: parse session flow and
                 // learn the source-side dynamic neighbor.
-                // `learn_from_live_frame` MUST be
-                // `owned_packet_frame.is_none()` — preserves the
-                // GRE guard at the original line 113 (neighbor
-                // learning uses the live UMEM Ethernet frame so
-                // the source MAC is the outer host's, not the
-                // GRE tunnel egress).
                 let mut flow = stage_parse_flow_and_learn(
-                    // SAFETY: per the `area` contract in this
-                    // function's header comment.
                     unsafe { &*area },
                     desc,
                     packet_frame,
                     meta,
-                    owned_packet_frame.is_none(),
+                    !is_injected && owned_packet_frame.is_none(),
                     &mut binding.last_learned_neighbor,
                     worker_ctx,
                 );
-                // #7699 stage 7b: THE PPTP DATA-CHANNEL RESOLVE.
-                //
-                // It cannot live inside the stage above, which takes
-                // `&WorkerContext`: the association table is per-worker state on
-                // `SessionTable`, broadcast to every worker at install so the
-                // packet path reads it without a lock. This is the one point in
-                // the loop where the frame and `&mut sessions` are both in
-                // scope, which is why the join is here rather than beside its
-                // sibling.
-                //
-                // Gated on `flow.is_none()` so it is purely ADDITIVE: a packet
-                // that already has an identity is untouched, and a version-1
-                // GRE packet is flowless today, so the only reachable change is
-                // flowless -> identified. Gated on `gre_acceleration` for the
-                // same reason the sibling is — with the knob off this expression
-                // does nothing and the path is bit-identical.
-                if flow.is_none() && worker_ctx.forwarding.gre_acceleration {
+                if is_injected {
+                    let Some(injected_flow) = flow.as_ref() else {
+                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                            .fetch_add(1, Ordering::Relaxed);
+                        recycle_desc!(desc.addr);
+                        continue;
+                    };
+                    let local = ingress_interface_local_resolution_on_session_miss(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                        injected_flow.dst_ip,
+                        meta.protocol,
+                    )
+                    .is_some()
+                        || interface_nat_local_resolution_on_session_miss(
+                            worker_ctx.forwarding,
+                            injected_flow.dst_ip,
+                            meta.protocol,
+                        )
+                        .is_some();
+                    if !local {
+                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                            .fetch_add(1, Ordering::Relaxed);
+                        recycle_desc!(desc.addr);
+                        continue;
+                    }
+                }
+                if flow.is_none() {
                     flow = crate::afxdp::gre_discriminator::pptp_data_session_flow(
                         packet_frame,
                         meta,
@@ -448,7 +495,7 @@ pub(super) fn poll_binding_process_descriptor(
                         &mut *telemetry.counters,
                     )
                 {
-                    binding.scratch.scratch_recycle.push(desc.addr);
+                    recycle_desc!(desc.addr);
                     continue;
                 }
                 // #946 Phase 1 stage 9: fabric-ingress
@@ -510,7 +557,7 @@ pub(super) fn poll_binding_process_descriptor(
                     worker_ctx,
                 ) {
                     StageOutcome::RecycleAndContinue => {
-                        binding.scratch.scratch_recycle.push(desc.addr);
+                        recycle_desc!(desc.addr);
                         continue;
                     }
                     StageOutcome::Continue(ScreenCheckOutcome::Pass) => {}
@@ -525,7 +572,7 @@ pub(super) fn poll_binding_process_descriptor(
                             SynCookieReply::SynAck(challenge),
                             telemetry.counters,
                         );
-                        binding.scratch.scratch_recycle.push(desc.addr);
+                        recycle_desc!(desc.addr);
                         continue;
                     }
                 }
@@ -592,7 +639,7 @@ pub(super) fn poll_binding_process_descriptor(
                         let overlap_dropped = overlap.dropped;
                         telemetry.counters.record_frag_overlap_result(overlap, false);
                         if overlap_dropped {
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         (Some((okey, start, end, is_last)), true)
@@ -654,7 +701,7 @@ pub(super) fn poll_binding_process_descriptor(
                             let overlap_dropped = overlap.dropped;
                             telemetry.counters.record_frag_overlap_result(overlap, false);
                             if overlap_dropped {
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             admission_to_commit = admission;
@@ -678,7 +725,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     .frag_overlap
                                     .fail_admission(admission);
                             }
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         let outlet = {
@@ -700,7 +747,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         .frag_overlap
                                         .fail_admission(admission);
                                 }
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             };
                             let flow_dst_port = flow.forward_key.dst_port;
@@ -740,7 +787,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         .frag_overlap
                                         .fail_admission(admission);
                                 }
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             } else {
                                 let Some(spi) = crate::afxdp::forwarding::esp_in_udp_spi(
@@ -769,7 +816,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             .frag_overlap
                                             .fail_admission(admission);
                                     }
-                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    recycle_desc!(desc.addr);
                                     continue;
                                 };
                                 let Some(key) = crate::afxdp::forwarding::ipsec_sa_key(
@@ -796,7 +843,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             .frag_overlap
                                             .fail_admission(admission);
                                     }
-                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    recycle_desc!(desc.addr);
                                     continue;
                                 };
                                 match worker_ctx
@@ -827,7 +874,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 .frag_overlap
                                                 .fail_admission(admission);
                                         }
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                     crate::afxdp::forwarding::IpsecSaLookup::Stale => {
@@ -850,7 +897,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 .frag_overlap
                                                 .fail_admission(admission);
                                         }
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                 }
@@ -947,7 +994,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         .frag_overlap
                                         .fail_admission(admission);
                                 }
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             if matches!(
@@ -977,7 +1024,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         .frag_overlap
                                         .fail_admission(admission);
                                 }
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                         }
@@ -1005,7 +1052,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 tracker.fail_admission(admission);
                             }
                         }
-                        binding.scratch.scratch_recycle.push(desc.addr);
+                        recycle_desc!(desc.addr);
                         continue;
                     }
                     IpsecPassthroughOutcome::Denied { from_zone_id } => {
@@ -1026,7 +1073,7 @@ pub(super) fn poll_binding_process_descriptor(
                             );
                         }
                         telemetry.counters.host_inbound_denied_packets += 1;
-                        binding.scratch.scratch_recycle.push(desc.addr);
+                        recycle_desc!(desc.addr);
                         continue;
                     }
                 }
@@ -1615,7 +1662,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     );
                                     telemetry.dbg.filter_revoked_sessions += 1;
                                 }
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                         }
@@ -1665,7 +1712,7 @@ pub(super) fn poll_binding_process_descriptor(
                             )
                         {
                             telemetry.dbg.policy_deny += 1;
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         let zone_policy_revocation = match foreign_arrival_zone {
@@ -1706,7 +1753,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 ForeignHitVerdict::Forward => None,
                                 ForeignHitVerdict::Drop => {
                                     telemetry.dbg.foreign_authority_drops += 1;
-                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    recycle_desc!(desc.addr);
                                     continue;
                                 }
                                 ForeignHitVerdict::Revoke(revocation) => Some(revocation),
@@ -1774,7 +1821,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 .live
                                 .policy_revoked_sessions
                                 .fetch_add(1, Ordering::Relaxed);
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         // #10038: solicited-reply exemption. A reverse
@@ -1951,7 +1998,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         authority_zone,
                                         now_ns,
                                     );
-                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    recycle_desc!(desc.addr);
                                     continue;
                                 }
                                 // #2521/#3615: a lo0 `then reject` synthesizes a
@@ -2006,7 +2053,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         }
                                         telemetry.dbg.local += 1;
                                         telemetry.dbg.policy_deny += 1;
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                 }
@@ -2077,7 +2124,7 @@ pub(super) fn poll_binding_process_descriptor(
                             }
                             telemetry.dbg.local += 1;
                             telemetry.dbg.policy_deny += 1;
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         // TTL/hop-limit check on session-hit path: generate
@@ -2180,7 +2227,7 @@ pub(super) fn poll_binding_process_descriptor(
                             worker_ctx,
                         ) {
                             StageOutcome::RecycleAndContinue => {
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             StageOutcome::Continue(SynCookieAckOutcome::Pass) => {}
@@ -2195,7 +2242,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     SynCookieReply::AckRst,
                                     telemetry.counters,
                                 );
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                         }
@@ -2350,7 +2397,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // the unmapped internal subnet. The
                                         // all-ones edge is the scoped review
                                         // rule. Never route or NAT unchanged.
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                 }
@@ -2418,7 +2465,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // policy, or `allocate_source` — no session,
                                         // BIB, or allocation state is minted.
                                         telemetry.counters.record_nat64_ineligible_source();
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                     crate::nat64::Nat64Match::IneligibleDestination => {
@@ -2436,7 +2483,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // `allocate_source` — no session, BIB, or
                                         // allocation state is minted.
                                         telemetry.counters.record_nat64_ineligible_dest();
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                     crate::nat64::Nat64Match::MatchUnavailable => {
@@ -2445,7 +2492,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // Drop rather than route the synthetic
                                         // IPv6 destination as ordinary IPv6.
                                         telemetry.counters.nat64_no_source_pool += 1;
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                 }
@@ -2594,7 +2641,7 @@ pub(super) fn poll_binding_process_descriptor(
                             );
                         }
                         if input_filter_eval.action != crate::filter::FilterAction::Accept {
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         // #4392: a PBR `then { routing-instance X; reject |
@@ -2619,7 +2666,7 @@ pub(super) fn poll_binding_process_descriptor(
                         );
                         let (route_table_override, pbr_install_table) = match route_override {
                             RouteOverride::Drop => {
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             RouteOverride::Table { table, domain, check } => {
@@ -2922,7 +2969,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     from_zone_id,
                                     &worker_ctx.forwarding.flood_counter_slot_map,
                                 );
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                         }
@@ -2977,7 +3024,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 from_zone_id,
                                 &worker_ctx.forwarding.flood_counter_slot_map,
                             );
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         // Debug: log session miss with flow details (throttled)
@@ -3139,7 +3186,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         from_zone_id,
                                         now_ns,
                                     );
-                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    recycle_desc!(desc.addr);
                                     continue;
                                 }
                                 // #2521/#3615: `filter_terminal` enqueues the lo0
@@ -3168,7 +3215,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     ) {
                                         telemetry.dbg.local += 1;
                                         telemetry.dbg.policy_deny += 1;
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                 }
@@ -3215,7 +3262,7 @@ pub(super) fn poll_binding_process_descriptor(
                             telemetry.dbg.local += 1;
                             telemetry.dbg.policy_deny += 1;
                             telemetry.counters.touched = true;
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         if resolution.disposition == ForwardingDisposition::LocalDelivery
@@ -3576,7 +3623,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             telemetry
                                                 .counters
                                                 .record_nat64_source_failure(reason);
-                                            binding.scratch.scratch_recycle.push(desc.addr);
+                                            recycle_desc!(desc.addr);
                                             continue;
                                         }
                                     }
@@ -3635,7 +3682,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                     // the scoped review edge.
                                                     // Do not fall through to
                                                     // static/interface SNAT.
-                                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                                    recycle_desc!(desc.addr);
                                                     continue;
                                                 }
                                             }
@@ -3691,7 +3738,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                     desc.len,
                                                     &failure,
                                                 );
-                                                binding.scratch.scratch_recycle.push(desc.addr);
+                                                recycle_desc!(desc.addr);
                                                 continue;
                                             }
                                         }
@@ -3806,7 +3853,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             now_ns,
                                             worker_id,
                                         );
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                     // SessionTable mutation and its conntrack
@@ -4089,7 +4136,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             now_ns,
                                             worker_id,
                                         );
-                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        recycle_desc!(desc.addr);
                                         continue;
                                     }
                                     if forward_installed {
@@ -4880,7 +4927,7 @@ pub(super) fn poll_binding_process_descriptor(
                             );
                         }
                         if input_eval.action != crate::filter::FilterAction::Accept {
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         // #6835: and the PBR half of the same filter. A matching
@@ -4912,7 +4959,7 @@ pub(super) fn poll_binding_process_descriptor(
                             None,
                         ) {
                             RouteOverride::Drop => {
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             // A non-drop PBR steer is DELIBERATELY not applied
@@ -5015,7 +5062,7 @@ pub(super) fn poll_binding_process_descriptor(
                             // A flowless deny is SILENT: a non-first fragment has
                             // no L4 header to synthesize a TCP RST / reject from,
                             // so both `discard` and `reject` drop quietly.
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                     }
@@ -5059,7 +5106,7 @@ pub(super) fn poll_binding_process_descriptor(
                         .unwrap_or(RouteOverride::None)
                     {
                         RouteOverride::Drop => {
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         RouteOverride::Table { table, domain, check } => {
@@ -5132,7 +5179,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     binding.scratch.scratch_forwards.pop();
                                     telemetry.counters.touched = true;
                                     telemetry.dbg.policy_deny += 1;
-                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    recycle_desc!(desc.addr);
                                     continue;
                                 }
                                 telemetry.counters.touched = true;
@@ -5140,7 +5187,7 @@ pub(super) fn poll_binding_process_descriptor(
                             }
                             EmbeddedIcmpReversal::Dropped => {
                                 telemetry.counters.touched = true;
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             EmbeddedIcmpReversal::NotHandled => {}
@@ -5216,7 +5263,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     binding.scratch.scratch_forwards.pop();
                                     telemetry.counters.touched = true;
                                     telemetry.dbg.policy_deny += 1;
-                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    recycle_desc!(desc.addr);
                                     continue;
                                 }
                                 telemetry.counters.touched = true;
@@ -5227,7 +5274,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the reversed error — fail-closed silent drop
                                 // (never answer an ICMP error with an ICMP error).
                                 telemetry.counters.touched = true;
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             // No NAT match / no source rewrite / unbuildable frame:
@@ -5406,7 +5453,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 now_ns,
                             );
                             telemetry.dbg.policy_deny += 1;
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         // #6122: fail-closed NAT'd non-first-fragment MISS. The
@@ -5445,7 +5492,7 @@ pub(super) fn poll_binding_process_descriptor(
                             // + bumps `nat_frag_untranslated_dropped`); NOT a
                             // policy deny, so `dbg.policy_deny` is left untouched.
                             telemetry.counters.record_nat_frag_untranslated_dropped();
-                            binding.scratch.scratch_recycle.push(desc.addr);
+                            recycle_desc!(desc.addr);
                             continue;
                         }
                         // #10130: session-gated reverse discriminator for the
@@ -5565,7 +5612,7 @@ pub(super) fn poll_binding_process_descriptor(
                         } else {
                             telemetry.counters.record_nat64_ineligible_protocol();
                         }
-                        binding.scratch.scratch_recycle.push(desc.addr);
+                        recycle_desc!(desc.addr);
                         continue;
                     }
 
@@ -5628,14 +5675,14 @@ pub(super) fn poll_binding_process_descriptor(
                                 // #3326: account the host-inbound deny so
                                 // `GlobalCtrHostInboundDeny` reflects the drop.
                                 telemetry.counters.host_inbound_denied_packets += 1;
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                             FlowlessLocalVerdict::Filtered => {
                                 telemetry.dbg.local += 1;
                                 telemetry.dbg.policy_deny += 1;
                                 telemetry.counters.touched = true;
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                         }
@@ -5656,7 +5703,7 @@ pub(super) fn poll_binding_process_descriptor(
                         )
                     {
                         telemetry.counters.record_nat_frag_untranslated_dropped();
-                        binding.scratch.scratch_recycle.push(desc.addr);
+                        recycle_desc!(desc.addr);
                         continue;
                     }
                     // The flowless base resolver checks ingress-local and
@@ -5764,7 +5811,7 @@ pub(super) fn poll_binding_process_descriptor(
                     let pre_overlap_dropped = pre_overlap.dropped;
                     telemetry.counters.record_frag_overlap_result(pre_overlap, false);
                     if pre_overlap_dropped {
-                        binding.scratch.scratch_recycle.push(desc.addr);
+                        recycle_desc!(desc.addr);
                         continue;
                     }
                     let egress_domain = if worker_ctx.forwarding.has_routing_domains {
@@ -5809,7 +5856,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 true,
                             );
                             if post_overlap_dropped {
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                         }
@@ -7708,7 +7755,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // consumed by the SINGLE scratch_recycle push +
                                 // continue here; the continue skips the recycle_now
                                 // epilogue below.
-                                binding.scratch.scratch_recycle.push(desc.addr);
+                                recycle_desc!(desc.addr);
                                 continue;
                             }
                         }
@@ -7809,11 +7856,48 @@ pub(super) fn poll_binding_process_descriptor(
             );
         }
         if recycle_now {
-            binding.scratch.scratch_recycle.push(desc.addr);
+            recycle_desc!(desc.addr);
         }
     }
     received.release();
     drop(received);
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poll_binding_process_descriptor(
+    binding: &mut BindingWorker,
+    binding_index: usize,
+    area: *const MmapArea,
+    available: u32,
+    sessions: &mut SessionTable,
+    screen: &mut ScreenState,
+    validation: ValidationState,
+    now_ns: u64,
+    now_secs: u64,
+    ha_startup_grace_until_secs: u64,
+    worker_id: u32,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    worker_ctx: &WorkerContext,
+    telemetry: &mut TelemetryContext,
+) {
+    poll_binding_process_descriptor_with_injection(
+        binding,
+        binding_index,
+        area,
+        available,
+        None,
+        sessions,
+        screen,
+        validation,
+        now_ns,
+        now_secs,
+        ha_startup_grace_until_secs,
+        worker_id,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        worker_ctx,
+        telemetry,
+    );
 }
 #[cfg(test)]
 #[path = "named_pre_l3_10498_tests.rs"]

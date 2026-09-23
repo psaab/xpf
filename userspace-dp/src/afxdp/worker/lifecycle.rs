@@ -9,6 +9,7 @@
 // no production logic touched.
 
 use super::*;
+use crate::afxdp::poll_descriptor::poll_binding_process_descriptor_with_injection;
 
 // Pins the invariant that `poll_binding` relies on: the RX batch loop
 // must run at least once. Cheap compile-time guard.
@@ -51,6 +52,7 @@ pub(super) fn poll_binding(
     dbg: &mut DebugPollCounters,
     rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
     cold_path_sample_mask: u64,
+    injected_packet: Option<(Vec<u8>, UserspaceDpMeta)>,
 ) -> bool {
     let (left, rest) = bindings.split_at_mut(binding_index);
     let Some((binding, right)) = rest.split_first_mut() else {
@@ -89,13 +91,14 @@ pub(super) fn poll_binding(
     let mut did_work = tx_work || fill_work;
     binding.telemetry.dbg_poll_cycles += 1;
     let mut counters = BatchCounters::default();
+    let mut injected_packet = injected_packet;
     let mut ident: Option<BindingIdentity> = None;
     for _ in 0..MAX_RX_BATCHES_PER_POLL {
         // Backpressure: skip RX when TX queues are heavily loaded to prevent
         // fill ring exhaustion. The NIC holds packets until we refill (#201).
         let tx_backlog = binding.tx_pipeline.pending_tx_local.len()
             + binding.tx_pipeline.pending_tx_prepared.len();
-        if tx_backlog >= binding.tx_pipeline.max_pending_tx {
+        if tx_backlog >= binding.tx_pipeline.max_pending_tx && injected_packet.is_none() {
             binding.telemetry.dbg_backpressure += 1;
             // Try to drain TX first — completions free frames for both TX and fill.
             let _ = drain_pending_tx(
@@ -141,7 +144,7 @@ pub(super) fn poll_binding(
             binding.telemetry.dbg_fill_pending = binding.xsk.device.pending();
             binding.telemetry.dbg_device_avail = binding.xsk.device.available();
         }
-        if available == 0 {
+        if available == 0 && injected_packet.is_none() {
             binding.telemetry.dbg_rx_empty += 1;
             maybe_wake_rx(binding, false, now_ns);
             // Check pending neighbor buffer even when RX is empty.
@@ -215,11 +218,12 @@ pub(super) fn poll_binding(
             dbg,
             counters: &mut counters,
         };
-        poll_binding_process_descriptor(
+        poll_binding_process_descriptor_with_injection(
             binding,
             binding_index,
             area,
             available,
+            injected_packet.take(),
             sessions,
             screen,
             validation,

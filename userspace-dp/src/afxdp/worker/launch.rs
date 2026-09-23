@@ -112,6 +112,9 @@ pub(crate) struct WorkerSharedDataplane {
     pub(in crate::afxdp) runtime: RuntimeViewReader,
     pub(in crate::afxdp) ha_state: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
     pub(in crate::afxdp) local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    /// #10597: live control→worker WG uncovered forward queues.
+    pub(in crate::afxdp) wg_uncovered_queues:
+        Arc<ArcSwap<BTreeMap<u32, Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>>>>,
     pub(in crate::afxdp) fabrics: Arc<ArcSwap<Vec<FabricLink>>>,
     pub(in crate::afxdp) mirror_targets: Arc<ArcSwap<MirrorTargetMap>>,
     pub(in crate::afxdp) rg_epochs: Arc<[AtomicU32; MAX_RG_EPOCHS]>,
@@ -145,6 +148,7 @@ impl WorkerSharedDataplane {
             runtime: coord.ha.runtime_reader(),
             ha_state: coord.ha.rg_runtime.clone(),
             local_tunnel_deliveries: coord.local_tunnel_deliveries.clone(),
+            wg_uncovered_queues: coord.wg_uncovered_queues.clone(),
             fabrics: coord.ha.fabrics.clone(),
             mirror_targets: coord.mirror_targets.clone(),
             rg_epochs: coord.rg_epochs.clone(),

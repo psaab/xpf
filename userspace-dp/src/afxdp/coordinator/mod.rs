@@ -343,6 +343,12 @@ pub struct Coordinator {
     pub(crate) bpf_maps: Arc<ArcSwap<BpfMaps>>,
     pub(crate) slow_path: Option<Arc<SlowPathReinjector>>,
     pub(crate) local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    /// #10597: control-thread-decapped uncovered WG records are routed to
+    /// these bounded per-worker queues. The ArcSwap is shared by the WG
+    /// control threads and workers; reconcile publishes a fresh live set,
+    /// while stop_inner stores an empty set before old workers are joined.
+    pub(crate) wg_uncovered_queues:
+        Arc<ArcSwap<BTreeMap<u32, Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>>>>,
     /// #1881: GRE local-origin thread lifecycle entries keyed by
     /// tunnel_endpoint_id. Reconciled by the same three-pass shape as
     /// `wg_control_threads` (finished sweep → attachment-stale prune →
@@ -632,6 +638,7 @@ impl Coordinator {
             bpf_maps,
             slow_path: None,
             local_tunnel_deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+            wg_uncovered_queues: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
             tunnel_sources: BTreeMap::new(),
             wg_control_threads: BTreeMap::new(),
             last_slow_path_status: SlowPathStatus::default(),
@@ -955,6 +962,19 @@ impl Coordinator {
         self.tunnel_sources.clear();
         self.local_tunnel_deliveries
             .store(Arc::new(BTreeMap::new()));
+        // #10597: fence the control→worker WG forward leg before joining
+        // either side of the tunnel. Closing after publishing an empty map
+        // makes stale table loads fail at enqueue; close_and_drain holds the
+        // queue lock while flipping the producer gate, so no descriptor is
+        // stranded between the two operations.
+        let old_wg_queues = self.wg_uncovered_queues.load_full();
+        self.wg_uncovered_queues
+            .store(Arc::new(BTreeMap::new()));
+        for queue in old_wg_queues.values() {
+            let orphaned = queue.close_and_drain();
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL
+                .fetch_add(orphaned.len() as u64, Ordering::Relaxed);
+        }
         // #1432 S2a: stop + join WG control threads. The persistent wgN
         // TUN is owned by the Go control plane and intentionally NOT
         // torn down here (it must survive a reload — AGY r3 Hazard B).

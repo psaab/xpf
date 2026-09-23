@@ -93,6 +93,7 @@ mod gre;
 mod logical_ingress;
 pub(crate) mod ipsec_inner;
 pub(crate) mod ipsec_inner_queue;
+pub(crate) mod wg_uncovered_forward;
 mod gre_discriminator;
 mod ha;
 // #6785: the control handler needs the synced-import outcome type and its

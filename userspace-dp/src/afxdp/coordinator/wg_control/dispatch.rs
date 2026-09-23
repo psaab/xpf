@@ -73,6 +73,25 @@ pub(super) fn dispatch_inbound(
     // that places it relative to the XDP shim's adjudicated ingress set.
     ingress_ifindex: Option<u32>,
     kernel_path_view: &dyn super::kernel_path::WgKernelPathView,
+    // #10597: live control-to-worker queue table. Production always passes
+    // this handle; an empty table selects the explicit G6a fallback.
+    forward_queues: Option<
+        &Arc<
+            ArcSwap<
+                BTreeMap<
+                    u32,
+                    Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>,
+                >,
+            >,
+        >,
+    >,
+    tunnel_endpoint_id: u16,
+    spawned_logical_ifindex: i32,
+    // Attachment state computed from the same forwarding Arc that supplies
+    // the advisory generations below. A stale attachment never enqueues.
+    tun_origin_attached: bool,
+    advisory_config_generation: u64,
+    advisory_fib_generation: u32,
 ) -> InboundOutcome {
     let Some(&wg_type) = datagram.first() else {
         return InboundOutcome::Unauthenticated;
@@ -203,67 +222,94 @@ pub(super) fn dispatch_inbound(
                         WgCounters::bump(&engine.counters().rx_degraded_transit_drops);
                         return InboundOutcome::Authenticated(outcome.peer_pubkey);
                     }
-                    // #2317: RFC 6040 §4.2 decap-side ECN combine. The
-                    // outer ECN was captured out-of-band via recvmsg's
-                    // IP_RECVTOS / IPV6_RECVTCLASS cmsg (the kernel UDP
-                    // stack stripped the outer IP header before this WG
-                    // record reached userspace). Fold it into the
-                    // freshly-decrypted inner IP packet: an outer CE
-                    // upgrades an ECN-capable inner to CE (recomputing the
-                    // inner IPv4 header checksum), and the illegal
-                    // outer-CE / inner-Not-ECT combination is dropped
-                    // (counter bumped in apply_decap_ecn_combine). Reuses
-                    // the GRE decap combine body, with the WG-specific
-                    // illegal-drop counter. Skipped when no TOS cmsg
-                    // arrived (`outer_ecn` is None) or the inner family is
-                    // unrecognizable — never mutate on a malformed inner.
-                    if let Some(outer_ecn) = outer_ecn {
-                        let inner = &mut decap_buf[..outcome.len];
-                        let inner_family = match inner.first().map(|b| b >> 4) {
-                            Some(4) => Some(libc::AF_INET as u8),
-                            Some(6) => Some(libc::AF_INET6 as u8),
-                            _ => None,
-                        };
-                        if let Some(fam) = inner_family
-                            && !crate::afxdp::gre::apply_decap_ecn_combine(
-                                inner,
-                                fam,
-                                outer_ecn,
-                                &crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS,
-                            )
-                        {
-                            // Illegal RFC 6040 §4.2 combination — drop the
-                            // inner without writing it to the TUN. The
-                            // datagram still authenticated (the peer holds
-                            // the keys), so endpoint-learning proceeds.
+                    // #10597: every authenticated Deliver disposition now
+                    // enters the worker pipeline, including Covered and
+                    // Unknown degraded-path host-inbound records. Transit
+                    // returned above and is never forwarded. The worker owns
+                    // the RFC 6040 combine for this leg, exactly once.
+                    if inner_is_local {
+                        if !tun_origin_attached {
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_STALE_TOTAL
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return InboundOutcome::Authenticated(outcome.peer_pubkey);
                         }
+                        let queue_table = forward_queues.map(|queues| queues.load());
+                        if queue_table
+                            .as_ref()
+                            .map_or(true, |table| table.is_empty())
+                        {
+                            // #10597 G6a: keep management reachability during
+                            // the explicit zero-worker/startup window. This
+                            // is the sole remaining control-thread inbound
+                            // TUN write and is counted loudly; a live queue
+                            // set never reaches this arm.
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_FALLBACK_WRITES_TOTAL
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if let Err(e) = crate::slowpath::write_packet_nonblocking(
+                                tun.as_raw_fd(),
+                                &decap_buf[..outcome.len],
+                            ) {
+                                WgCounters::bump(&engine.counters().tun_write_errors);
+                                record_local_tunnel_exception(
+                                    recent_exceptions,
+                                    tunnel_name,
+                                    format!("wg_tun_write_fallback:{e}"),
+                                );
+                            }
+                            return InboundOutcome::Authenticated(outcome.peer_pubkey);
+                        }
+                        let queue_table = queue_table.expect("non-empty queue table");
+                        let Some((_worker_id, queue)) =
+                            crate::afxdp::wg_uncovered_forward::steer_uncovered_queue(
+                                &queue_table,
+                                crate::afxdp::wg_uncovered_forward::wg_uncovered_flow_hash(
+                                    &decap_buf[..outcome.len],
+                                ),
+                            )
+                        else {
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return InboundOutcome::Authenticated(outcome.peer_pubkey);
+                        };
+                        let descriptor =
+                            crate::afxdp::wg_uncovered_forward::WgUncoveredDescriptor {
+                                tunnel_endpoint_id,
+                                logical_ifindex: spawned_logical_ifindex,
+                                tunnel_name: tunnel_name.to_string(),
+                                inner: decap_buf[..outcome.len].to_vec(),
+                                outer_ecn,
+                                config_generation: advisory_config_generation,
+                                fib_generation: advisory_fib_generation,
+                                ingress_ifindex,
+                            };
+                        match queue.try_enqueue(descriptor) {
+                            Ok(()) => {
+                                crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_ENQUEUED_TOTAL
+                                    .fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                            }
+                            Err(_descriptor) if queue.is_closed() => {
+                                crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                                    .fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                            }
+                            Err(_descriptor) => {
+                                crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_FULL_TOTAL
+                                    .fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                            }
+                        }
+                        return InboundOutcome::Authenticated(outcome.peer_pubkey);
                     }
-                    // Write the plaintext inner IP to the wgN TUN; the
-                    // kernel routes/firewalls it (NOT the AF_XDP policy
-                    // engine — the AllowedIPs gate inside try_decap is
-                    // S2a's inner-src control).
-                    //
-                    // #2438: the wgN TUN fd is O_NONBLOCK, so this uses
-                    // the single-write whole-packet seam
-                    // (`write_packet_nonblocking`) — never std
-                    // `Write::write_all`, whose short-count stream-resume
-                    // would re-write `buf[n..]` and inject the remainder
-                    // as a SECOND, malformed inner packet (the #2407
-                    // corruption class). The seam retries the WHOLE
-                    // packet on WouldBlock/EINTR and drops (counted) on a
-                    // genuine partial.
-                    if let Err(e) = crate::slowpath::write_packet_nonblocking(
-                        tun.as_raw_fd(),
-                        &decap_buf[..outcome.len],
-                    ) {
-                        WgCounters::bump(&engine.counters().tun_write_errors);
-                        record_local_tunnel_exception(
-                            recent_exceptions,
-                            tunnel_name,
-                            format!("wg_tun_write:{e}"),
-                        );
-                    }
+                    // #10527 Half-A transit posture: no route to the worker
+                    // leg and no control-thread TUN fallback. This is the
+                    // authenticated transit drop counted above.
                     InboundOutcome::Authenticated(outcome.peer_pubkey)
                 }
                 Err(crate::afxdp::wg::DecapError::Keepalive(pk)) => {
