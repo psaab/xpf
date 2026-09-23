@@ -275,18 +275,33 @@ impl Drop for HelperMutationLease {
 impl SessionDomain {
     /// Session mutations from a previous helper generation must not be applied
     /// after a restart. Zero preserves compatibility with pre-epoch peers.
+    /// Monotonic re-adopt (P12, permit_epoch precedent): stale in-flight
+    /// epochs from a superseded boot may still land first and are accepted
+    /// (they execute once, idempotently); anything older than the adopted
+    /// epoch is rejected; anything newer re-adopts. The old latch-on-first
+    /// wedged double restarts (stale N+1 latching forever against N+2).
     pub(crate) fn accepts_helper_epoch(&self, epoch: u64) -> bool {
         if epoch == 0 {
             return true;
         }
         use std::sync::atomic::Ordering;
-        let current = self.helper_epoch.load(Ordering::Acquire);
-        if current == 0 {
-            self.helper_epoch
-                .compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire)
-                .map_or_else(|actual| actual == epoch, |_| true)
-        } else {
-            current == epoch
+        let mut current = self.helper_epoch.load(Ordering::Acquire);
+        loop {
+            if epoch == current {
+                return true;
+            }
+            if epoch < current {
+                return false;
+            }
+            match self.helper_epoch.compare_exchange(
+                current,
+                epoch,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
         }
     }
     /// Begin one epoch-scoped mutation. Returns the recorded outcome when the
@@ -1807,6 +1822,65 @@ mod session_domain_tests_7209 {
              Reading 0 here means the handle copied the override instead of \
              sharing it, and the six cells that set it are silently measuring \
              the production formula"
+        );
+    }
+
+    /// P12-A (double-restart wedge): a stale in-flight epoch that lands
+    /// first must not wedge the latch against the current generation —
+    /// N+1 then N+2 both accepted (pre-fix N+2 was rejected forever).
+    #[test]
+    fn helper_epoch_double_restart_readopts_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(8), "stale-first N+1 lands");
+        assert!(
+            domain.accepts_helper_epoch(9),
+            "current N+2 must re-adopt, not wedge"
+        );
+        assert!(domain.accepts_helper_epoch(9), "adopted epoch is stable");
+    }
+
+    /// P12-B (single-restart control): first latch + idempotent re-accept.
+    #[test]
+    fn helper_epoch_single_restart_latches_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(8), "first latch accepts");
+        assert!(domain.accepts_helper_epoch(8), "same epoch re-accepts");
+    }
+
+    /// P12-C (stale-rejected control): anything older than adopted fails.
+    #[test]
+    fn helper_epoch_older_rejected_after_adopt_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(9));
+        assert!(
+            !domain.accepts_helper_epoch(8),
+            "older-than-adopted must be rejected"
+        );
+        assert!(
+            !domain.accepts_helper_epoch(1),
+            "much older must be rejected"
+        );
+    }
+
+    /// P12-F (epoch-0 bypass): legacy/unstamped requests always pass
+    /// and never disturb the latch.
+    #[test]
+    fn helper_epoch_zero_bypasses_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(0), "zero bypasses on fresh latch");
+        assert!(domain.accepts_helper_epoch(9));
+        assert!(domain.accepts_helper_epoch(0), "zero bypasses after adopt");
+        assert!(
+            domain.accepts_helper_epoch(9),
+            "adopted epoch survives zero bypasses"
+        );
+        assert!(
+            !domain.accepts_helper_epoch(8),
+            "zero bypass must not reset the latch"
         );
     }
 }
