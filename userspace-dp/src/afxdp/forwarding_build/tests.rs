@@ -10244,3 +10244,202 @@ fn quarantine_row_never_overwrites_survivor_ifindex_claim_9956() {
         "#9956 GPT-2: the sentinel claim must set has_routing_domains"
     );
 }
+
+// #10644 shape (a): native unit 0 refused-not-contested on a RETH trunk parent
+// bound through a zoned sibling. The parent carries the collapsed unzoned
+// `reth0.0` row, so the sibling's fan-UP zone is REFUSED (not contested) and
+// the parent stays unzoned; address-less + non-tunnel means the #10556
+// exposure guard skips the sentinel and zone-0 `None => true` admits every
+// host-bound service. Fail-on-revert: removing the #10644 unzoned-unit
+// sentinel makes the ssh/bgp assertions RED.
+// Refused-posture note (no exposed refused set exists to assert): the
+// collapsed same-ifindex fixture rows refuse the sibling's fan-UP by the
+// #10520 refused mechanics (collapsed family at tests.rs:2351+); were
+// fixture drift to make this shape contested instead, #10503 would arm the
+// same asserts green while #10644's loop went untested — keep this cell's
+// fixture refused by construction.
+#[test]
+fn refused_native_unit_zero_trunk_parent_denies_host_inbound_10644() {
+    use crate::ZoneSnapshot;
+    use crate::afxdp::forwarding::{host_inbound_admits, host_inbound_admits_iface};
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    const PARENT_IFINDEX: i32 = 11;
+    const SIBLING_IFINDEX: i32 = 12;
+    const WAN_ZONE: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+    const PROTO_ICMP: u8 = 1;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", WAN_ZONE)],
+        interfaces: vec![
+            // Collapsed native unit 0: unzoned, address-less. Its presence is
+            // what refuses the sibling's fan-UP zone on the shared parent.
+            InterfaceSnapshot {
+                name: "reth0.0".into(),
+                zone: String::new(),
+                linux_name: "ge-0-0-0".into(),
+                ifindex: PARENT_IFINDEX,
+                is_unit: Some(true),
+                hardware_addr: "02:bf:72:00:00:0b".into(),
+                ..Default::default()
+            },
+            // Zoned sibling on its own netdev: binds the parent netdev and
+            // attempts the fan-UP that unit 0 refuses.
+            InterfaceSnapshot {
+                name: "reth0.80".into(),
+                zone: "wan".into(),
+                linux_name: "ge-0-0-0.80".into(),
+                ifindex: SIBLING_IFINDEX,
+                parent_ifindex: PARENT_IFINDEX,
+                vlan_id: 80,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "172.16.80.8/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+        default_policy: "permit".into(),
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&PARENT_IFINDEX),
+        "refused native-unit-0 parent must remain unzoned (fan-UP refused, not inherited)"
+    );
+    assert!(
+        state.ifindex_host_inbound.contains_key(&PARENT_IFINDEX),
+        "#10644 must install a per-ifindex deny sentinel on the refused address-less parent"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "refused parent must DENY host-bound ssh (tcp/22) — #10644 shape (a)"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_TCP, 179, false, 0),
+        "refused parent must DENY host-bound bgp (tcp/179)"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_ICMP, 0, false, 3),
+        "global ICMP destination-unreachable must remain admitted on the parent"
+    );
+    assert!(
+        host_inbound_admits(&state, 0, PROTO_TCP, 22, false, 0),
+        "the genuinely-global zone-0 host-inbound default must remain admitted"
+    );
+    // Positive control: the zoned sibling keeps its zone and admission set.
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&SIBLING_IFINDEX).copied(),
+        Some(WAN_ZONE)
+    );
+    assert!(host_inbound_admits_iface(
+        &state, SIBLING_IFINDEX, WAN_ZONE, PROTO_TCP, 22, false, 0
+    ));
+}
+
+// #10644 shape (b): configured-but-unzoned tagged VLAN unit on a RETH trunk.
+// The unit has its own ifindex and a logical-map hit, no refusal (its row is
+// empty-zoned), no contest, no address/tunnel exposure — and no advisory — so
+// it resolves to zone 0 and `None => true` admits every host-bound service
+// while the parent stays bound (and zoned) through its sibling. Always
+// reachable on RETH trunks; on non-RETH trunks after the ordinary "remove a
+// VLAN from its zone" workflow. Fail-on-revert: removing the #10644
+// unzoned-unit sentinel makes the ssh/netconf assertions RED.
+#[test]
+fn unzoned_tagged_vlan_unit_denies_host_inbound_10644() {
+    use crate::ZoneSnapshot;
+    use crate::afxdp::forwarding::{host_inbound_admits, host_inbound_admits_iface};
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    const PARENT_IFINDEX: i32 = 11;
+    const ZONED_IFINDEX: i32 = 12;
+    const UNZONED_IFINDEX: i32 = 13;
+    const WAN_ZONE: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+    const PROTO_ICMP: u8 = 1;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", WAN_ZONE)],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.80".into(),
+                zone: "wan".into(),
+                linux_name: "ge-0-0-0.80".into(),
+                ifindex: ZONED_IFINDEX,
+                parent_ifindex: PARENT_IFINDEX,
+                vlan_id: 80,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "172.16.80.8/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            // The unzoned unit: removed from its zone (or never zoned),
+            // address-less, on its own netdev.
+            InterfaceSnapshot {
+                name: "reth0.50".into(),
+                zone: String::new(),
+                linux_name: "ge-0-0-0.50".into(),
+                ifindex: UNZONED_IFINDEX,
+                parent_ifindex: PARENT_IFINDEX,
+                vlan_id: 50,
+                hardware_addr: "02:bf:72:00:50:08".into(),
+                ..Default::default()
+            },
+        ],
+        default_policy: "permit".into(),
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    // The tagged unit is a live logical identity: (parent, vlan) resolves to it.
+    assert_eq!(
+        state.ingress_logical_ifindex.get(&(PARENT_IFINDEX, 50)).copied(),
+        Some(UNZONED_IFINDEX),
+        "the unzoned unit must remain a logical-map hit"
+    );
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&UNZONED_IFINDEX),
+        "the unzoned unit must not inherit its sibling's zone"
+    );
+    assert!(
+        state.ifindex_host_inbound.contains_key(&UNZONED_IFINDEX),
+        "#10644 must install a per-ifindex deny sentinel on the unzoned unit"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, UNZONED_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "unzoned unit must DENY host-bound ssh (tcp/22) — #10644 shape (b)"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, UNZONED_IFINDEX, 0, PROTO_TCP, 830, false, 0),
+        "unzoned unit must DENY host-bound netconf (tcp/830)"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, UNZONED_IFINDEX, 0, PROTO_ICMP, 0, false, 3),
+        "global ICMP destination-unreachable must remain admitted on the unit"
+    );
+    assert!(
+        host_inbound_admits(&state, 0, PROTO_TCP, 22, false, 0),
+        "the genuinely-global zone-0 host-inbound default must remain admitted"
+    );
+    // Positive controls: the zoned sibling keeps its zone and admission, and
+    // the untagged parent still inherits the single sibling zone (#921/#3618).
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&ZONED_IFINDEX).copied(),
+        Some(WAN_ZONE)
+    );
+    assert!(host_inbound_admits_iface(
+        &state, ZONED_IFINDEX, WAN_ZONE, PROTO_TCP, 22, false, 0
+    ));
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&PARENT_IFINDEX).copied(),
+        Some(WAN_ZONE),
+        "single-sibling parent must still inherit the sibling zone"
+    );
+}

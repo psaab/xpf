@@ -463,6 +463,13 @@ pub(super) fn populate_interfaces(
     // makes #5659 meaningful may receive the refused-ifindex sentinel.
     let mut host_inbound_exposure_ifindexes: std::collections::BTreeSet<i32> =
         std::collections::BTreeSet::new();
+    // #10644: trunk-parent ifindexes (a unit row names them as its parent) and
+    // unzoned child-unit ifindexes (an empty-zone unit row with a parent).
+    // Both feed the post-walk unzoned-unit sentinel below.
+    let mut trunk_parent_ifindexes: std::collections::BTreeSet<i32> =
+        std::collections::BTreeSet::new();
+    let mut unzoned_child_unit_ifindexes: std::collections::BTreeSet<i32> =
+        std::collections::BTreeSet::new();
     // #5659/#10556: distinguish the per-ifindex empty host-inbound sentinel
     // from an explicit per-interface host-inbound override. Both occupy
     // `ifindex_host_inbound`, but only this set may select the sentinel warning
@@ -484,6 +491,16 @@ pub(super) fn populate_interfaces(
         // keep their byte-identical physical fallback.
         if iface.parent_ifindex > 0 && is_logical_unit_row(&iface.name, iface.is_unit) {
             state.ingress_vlan_parents.insert(iface.parent_ifindex);
+            // #10644: remember the trunk parent and, for an empty-zone unit
+            // row, the child unit itself, for the post-walk unzoned-unit
+            // sentinel. The parent half keys on ANY unit row naming a parent
+            // (zoned or not): a quarantined trunk keeps its netdevs bound
+            // while every zone is blanked, so requiring a zoned child would
+            // miss exactly the fail-closed case.
+            trunk_parent_ifindexes.insert(iface.parent_ifindex);
+            if iface.zone.is_empty() {
+                unzoned_child_unit_ifindexes.insert(iface.ifindex);
+            }
         }
         let label = if iface.linux_name.is_empty() {
             iface.name.clone()
@@ -1062,6 +1079,90 @@ pub(super) fn populate_interfaces(
         state.ifindex_host_inbound.entry(*ifindex).or_default();
     }
 
+    // #10644: unzoned trunk-unit host-inbound fail-closed backstop — SYMMETRY
+    // with #10556. Two unzoned address-less unit shapes survive every earlier
+    // arm and resolve to zone 0 with no per-ifindex entry, so
+    // `host_inbound_admits_iface` falls back to `host_inbound_admits(0)` and
+    // the `None => true` global admit arm admits every host-bound service:
+    //
+    //   (a) a refused-not-contested trunk parent: native unit 0 collapsed on
+    //   the parent netdev refuses the fan-UP zone of a sibling on its own
+    //   netdev (`unit_refused_zones`, #7509 arm), the parent stays unzoned,
+    //   and the #10556 exposure guard skips the sentinel for lack of
+    //   address/tunnel. Reachable because the sibling keeps the parent netdev
+    //   bound (always on RETH trunks).
+    //   (b) a configured-but-unzoned tagged child unit: its own ifindex, a
+    //   logical-map hit, no refusal (its row is empty-zoned), no contest, no
+    //   address/tunnel exposure, no advisory. Reachable on RETH trunks, and
+    //   on non-RETH trunks after the ordinary "remove a VLAN from its zone"
+    //   workflow, via tagged frames on the still-bound parent.
+    //
+    // Fix: the same per-ifindex EMPTY `ZoneHostInbound` sentinel #5659/#10503/
+    // #10556 install, with the same guards — final-unzoned only (a retained
+    // zone stays zone-gated), never clobber an existing entry (an explicit
+    // per-interface override or an earlier sentinel), never arm a lifeline,
+    // contested ifindexes stay with #10503. Shape (a) additionally requires
+    // the refused ifindex to be a trunk parent (a unit row names it as its
+    // parent): a collapsed same-ifindex refusal with no sibling (the #10520
+    // address-less pin) shares no netdev with a live unit, is bind-gated
+    // dark, and keeps the global admit default. Keying by ifindex leaves the
+    // genuinely-global zone-0 path untouched, exactly as #5659 does; transit
+    // stays UNZONED_INGRESS_DENIED (#6682). Shape (a) is reported through the
+    // shared `empty_zone_host_inbound_sentinels` set, so the refused warning
+    // below flips its host-bound sentence from global-admit to sentinel-deny.
+    for ifindex in unit_refused_zones.keys() {
+        if state.ifindex_to_zone_id.contains_key(ifindex) {
+            // The final ifindex retained a valid zone; host-bound traffic must
+            // remain governed by that zone's admission set.
+            continue;
+        }
+        if !trunk_parent_ifindexes.contains(ifindex) {
+            // Not a trunk parent: a collapsed same-ifindex refusal with no
+            // sibling unit (the #10520 address-less shape) is bind-gated
+            // dark, so the global admit default stays inert there.
+            continue;
+        }
+        if contested_parent_ifindexes.contains(ifindex) {
+            // Already armed by #10503 above.
+            continue;
+        }
+        if state.ifindex_host_inbound.contains_key(ifindex) {
+            // Already armed by #5659/#10556 above, or carries an explicit
+            // per-interface override — never clobber.
+            continue;
+        }
+        if let Some(name) = state.ifindex_to_config_name.get(ifindex) {
+            if is_host_inbound_lifeline(name) {
+                continue;
+            }
+        }
+        empty_zone_host_inbound_sentinels.insert(*ifindex);
+        state.ifindex_host_inbound.entry(*ifindex).or_default();
+    }
+    for ifindex in &unzoned_child_unit_ifindexes {
+        if state.ifindex_to_zone_id.contains_key(ifindex) {
+            // Zonally attributed after all; host-bound traffic must remain
+            // governed by that zone's admission set.
+            continue;
+        }
+        if contested_parent_ifindexes.contains(ifindex) {
+            // Already armed by #10503 above.
+            continue;
+        }
+        if state.ifindex_host_inbound.contains_key(ifindex) {
+            // Already armed by #5659 above, or carries an explicit
+            // per-interface override — never clobber.
+            continue;
+        }
+        if let Some(name) = state.ifindex_to_config_name.get(ifindex) {
+            if is_host_inbound_lifeline(name) {
+                continue;
+            }
+        }
+        empty_zone_host_inbound_sentinels.insert(*ifindex);
+        state.ifindex_host_inbound.entry(*ifindex).or_default();
+    }
+
     // #6722: flush the Go builder's egress answer, admitting an ifindex only
     // when a row on it CORROBORATES the claim by literally naming that zone.
     //
@@ -1131,9 +1232,10 @@ pub(super) fn populate_interfaces(
     // unit rows refused. A FULL refusal leaves no ingress-zone entry and takes
     // the #6682 unattributed deny; a retained zone is policy-evaluated instead.
     // Host-bound selection follows built state: a retained zone is zone-gated,
-    // an installed #5659/#10556 sentinel denies addressed/tunnel traffic with
-    // control carve-outs, and a full refusal without that sentinel remains on
-    // global admit path unless the config name identifies a narrow lifeline;
+    // an installed #5659/#10556/#10644 sentinel denies host-bound services
+    // with control carve-outs, and a full refusal without that sentinel
+    // remains on the global admit path unless the config name identifies a
+    // narrow lifeline;
     // broad prefix-only/lo0 names remain zone-gated in the warning text.
     // The commit-time advisory
     // (`pkg/config/contested_trunk_zone_advisory_7509.go`) is the one that can
