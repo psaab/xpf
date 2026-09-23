@@ -261,9 +261,10 @@ func TestPermittedRenameResultRejectsDefaultPermit10592(t *testing.T) {
 
 // N3d: port byte-order through the rematch path. networkPort converts
 // between wire (network) and host order; the rematch query AND the recorded
-// row must both carry host-order ports. Scoped: v4+v6 exactness + v4 DNAT
-// translated-port query (v6-DNAT-port is textually identical modulo address
-// width, and v6-DNAT address handling is pinned by the 10511 DNAT test).
+// row must both carry host-order ports. Cells: unit + v4/v6 record-exactness
+// + v4/v6 port-scoped query + v4 DNAT translated-port query (v6-DNAT-port is
+// textually identical modulo address width, and v6-DNAT address handling is
+// pinned by the 10511 DNAT test).
 func TestNetworkPortByteOrder10592(t *testing.T) {
 	if got := networkPort(0x1234); got != 0x3412 {
 		t.Fatalf("networkPort(0x1234) = %#x, want 0x3412", got)
@@ -298,7 +299,9 @@ func TestRematchRenamedV4PreservesPortsExactly10592(t *testing.T) {
 	if !permitted {
 		t.Fatal("matching renamed session was not retained")
 	}
-	// Distinctive non-palindromic ports: any dropped/swapped conversion reds.
+	// Distinctive non-palindromic ports: dropping the record conversion reds.
+	// Query-side reverts stay green under match-any (pinned instead by the
+	// port-scoped cell below, which fails when the query consult breaks).
 	if record.SrcPort != 0x1234 || record.DstPort != 0x1500 {
 		t.Fatalf("record ports not exact host order: got %d/%d", record.SrcPort, record.DstPort)
 	}
@@ -359,7 +362,8 @@ func TestRematchRenamedV4DNATPortQueriesTranslatedRecordsWire10592(t *testing.T)
 		t.Fatalf("DNAT row not rematched through renamed permit: %+v permitted=%v", record, permitted)
 	}
 	// The QUERY consults the translated port, but the RECORD carries the
-	// wire ports: dropping either conversion reds exactly one direction.
+	// wire ports. Dropping the record conversion reds this assert; dropping
+	// the translated-port consult is pinned by the scoped DNAT cell below.
 	if record.SrcPort != 0x1234 || record.DstPort != 0x1500 {
 		t.Fatalf("DNAT record carries translated ports instead of wire: got %d/%d", record.SrcPort, record.DstPort)
 	}
@@ -696,6 +700,55 @@ func TestZoneNamesByIDRejectsCollisions10592(t *testing.T) {
 // admits only junos-https (TCP/443): 443 retains, 444 falls to default-deny.
 // Dropping networkPort at the rematch query sites (:356/:389) breaks the
 // app match (ports arrive network-order) and flips both directions.
+// N3d-DNAT: the rematch query consults the TRANSLATED port for DNAT rows
+// (daemon_policy_rename.go:360/:392), while the record keeps wire ports. The
+// renamed rule admits only junos-https (TCP/443): a row translated to 443
+// retains even though its wire port is 444; translated 444 denies. Dropping
+// the translated-port consult queries wire 444 for both and flips retained→denied.
+func TestRematchDNATTranslatedPortScoped10592(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.DestinationAddresses = []string{"10.0.0.1/32"}
+		cfg.Security.Policies[1].Policies[0].Match.Applications = []string{"junos-https"}
+		cfg.Security.Policies[1].Policies = cfg.Security.Policies[1].Policies[:1]
+	}
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")},
+	)
+	if !ok {
+		t.Fatal("valid policy ancestry rejected")
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	binding := bindings[oldID]
+	dnatRow := func(wirePort, xlatedPort uint16) (dataplane.SessionKey, dataplane.SessionValue) {
+		key := dataplane.SessionKey{
+			SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+			SrcPort: 40000, DstPort: wirePort, Protocol: 6,
+		}
+		value := dataplane.SessionValue{
+			PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+			Flags: dataplane.SessFlagDNAT, NATDstIP: 0x0100000a, NATDstPort: xlatedPort,
+		}
+		return key, value
+	}
+	// Wire 444 (0xBC01), translated 443 (network order): query consults the
+	// translation and matches junos-https.
+	key, value := dnatRow(0xBC01, userspaceHostToNetwork16(443))
+	record, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value)
+	if !permitted || record.RuleID != "lan->wan/p-new" {
+		t.Fatalf("translated-443 DNAT row not retained: %+v permitted=%v", record, permitted)
+	}
+	if record.DstPort != 444 {
+		t.Fatalf("DNAT record must carry the host-order wire port (444 from 0xBC01), got %d", record.DstPort)
+	}
+	// Translated 444: no covering rule (alternate removed) → denied.
+	key444, value444 := dnatRow(0xBC01, userspaceHostToNetwork16(444))
+	if _, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key444, value444); permitted {
+		t.Fatal("translated-444 DNAT row retained despite no covering rule")
+	}
+}
+
 func TestRematchPortScopedV4V610592(t *testing.T) {
 	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
 	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)

@@ -245,6 +245,11 @@ func permittedRenameResult(cfg *config.Config, binding policyRenameBinding, q po
 	if !result.Matched || result.Action != config.PolicyPermit || result.RuleID == "" {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
+	// Defensive and currently unreachable via Match: no configured rule carries
+	// the sentinel (excluded by #9584's validator), and default-path results
+	// carry PolicyID 0 with RuleID "" (rejected above; probed in #10592 N3b).
+	// Kept as belt-and-suspenders against a corrupt result ever retaining
+	// under the default identity.
 	if result.PolicyID == dataplane.DefaultPolicySentinelID {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
