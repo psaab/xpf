@@ -1,0 +1,40 @@
+# close-keyword-lint.yml (#9551): refuse a NEGATED GitHub close keyword on every
+# pull request, at a point nobody can forget.
+#
+# GitHub's close-keyword parser does not read negation: a PR body or commit
+# message saying an issue stays open closes it at merge when a close verb
+# stands in front of the number. It wrongly closed #9016 (via a PR-body scope
+# heading) and #9412 (via a commit message) on one day.
+#
+# Both legs live in scripts/close_keyword_lint_ci.sh -- the PR body and every
+# commit message in the PR's base..head range -- which this job calls with the
+# body passed through `env`, never interpolated into a command line, so a PR
+# body cannot inject shell. The selftest and the campaign landing pipeline
+# call the same script, so there is exactly one grammar, not three.
+#
+# `edited` is load-bearing in the trigger list: without it a PR body edited
+# after opening -- the #9016 shape -- would never re-run this check.
+# `fetch-depth: 0` is load-bearing too: the commit-message leg needs the full
+# base..head range.
+name: close-keyword-lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a negated close keyword
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/close_keyword_lint_ci.sh
