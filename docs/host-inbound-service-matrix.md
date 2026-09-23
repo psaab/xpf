@@ -2235,9 +2235,9 @@ helper never sees it, so a helper crash cannot lock management out).
     IKE-admission netdevs even though the DENY is rendered and the ordinary
     #4168 warning is suppressed. Other sources remain admitted by the coarse
     IKE service after the fine subchain returns. DNAT/static-NAT-to-self and
-    GRE-inner IKE on the Stage-11 secondary path still follows the coarse
-    admission and can remain admitted pending the Stage-11 junos-host
-    enforcement follow-up (#10585). To refuse IKE broadly, remove
+    GRE-inner IKE on the Stage-11 secondary path is fine-gated in userspace
+    pre-delegation (#10525 R1/R2/R3); the fine DENY governs there just as on
+    the direct path. To refuse IKE broadly, remove
     `ike`/`ipsec` or narrow/remove the authored `all`/`any-service` admission
     named by the warning; to refuse only selected sources, retain/review the
     app-any DENY and its #10524 advisory. An IKE-tuple-scoped deny remains

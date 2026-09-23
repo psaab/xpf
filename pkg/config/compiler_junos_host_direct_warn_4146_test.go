@@ -254,10 +254,15 @@ func TestJunosHostIKEOverlapWarning10524(t *testing.T) {
 	for _, want := range []string{
 		`"block-bad"`, "to-zone junos-host", "application-any", "IKE",
 		"ge-0-0-1", "remove `ike`/`ipsec`", "direct host-bound path",
-		"follow-up #10585", "#10524",
+		"fine-gated in userspace pre-delegation", "#10525", "#10524",
 	} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("overlap warning missing %q:\n%s", want, got[0])
+		}
+	}
+	for _, gone := range []string{"10585", "pending", "follow-up"} {
+		if strings.Contains(got[0], gone) {
+			t.Errorf("overlap warning must not cite stale %q:\n%s", gone, got[0])
 		}
 	}
 	if strings.Contains(got[0], `"block-ssh"`) {
