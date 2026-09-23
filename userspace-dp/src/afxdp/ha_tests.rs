@@ -9631,3 +9631,37 @@ fn upsert_synced_session_refuses_stale_zone_replay_10612() {
         "the admitted forward's companion must still be fanned out with it"
     );
 }
+
+/// #10612 (N3 mechanism): `remove_shared_session_if` reports Declined — and
+/// mutates nothing — when the predicate rejects the live entry. The purge's
+/// removal-only counting keys on this return: Declined rows must not bump
+/// the fence-drop counter.
+#[test]
+fn remove_shared_session_if_declined_preserves_live_entry_10612() {
+    let fixture = fixture_9714(false);
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &fixture.forward.key,
+        |_| false,
+    );
+    assert!(
+        matches!(
+            outcome,
+            crate::afxdp::shared_ops::SharedRemoval::Declined
+        ),
+        "a predicate-false removal must report Declined"
+    );
+    assert!(
+        fixture
+            .coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("shared sessions")
+            .contains_key(&fixture.forward.key),
+        "a Declined removal must not mutate the shared maps"
+    );
+}

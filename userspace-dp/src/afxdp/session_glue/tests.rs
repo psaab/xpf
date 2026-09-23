@@ -14939,3 +14939,112 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
     );
     let _ = promoted;
 }
+
+/// #10612 (N1): activation BPF republish must skip stale-zone rows (no BPF
+/// publish for purged rows) while counting the fence decision.
+#[test]
+fn republish_bpf_skips_stale_zone_rows_10612() {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    let mut stale_key = test_key();
+    stale_key.src_port = 46_011;
+    let mut stale_metadata = test_metadata();
+    stale_metadata.ingress_zone = 9;
+    stale_metadata.egress_zone = 10;
+    stale_metadata.owner_rg_id = 1;
+    let stale = SyncedSessionEntry {
+        key: stale_key.clone(),
+        decision: test_decision(),
+        metadata: stale_metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &stale,
+    );
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let count = republish_bpf_session_entries_for_owner_rgs(
+        &shared_sessions,
+        &shared_owner_rg_indexes,
+        SteeringMap::unshared_for_test(-1),
+        &[1],
+        &forwarding,
+    );
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(count, 0, "a stale row must not republish (fd -1 publishes nothing either way; the counter below proves the skip)");
+    assert!(
+        drops_after > drops_before,
+        "republish of a stale-zone row must bump the fence-drop counter"
+    );
+}
+
+/// #10612 (N2): materializing a stale-zone shared hit returns the MISS shape
+/// (lookup clone + false) without installing into the worker table.
+#[test]
+fn materialize_stale_zone_shared_hit_returns_miss_10612() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    let key = test_key();
+    let mut stale_metadata = test_metadata();
+    stale_metadata.ingress_zone = 9;
+    stale_metadata.egress_zone = 10;
+    let mut sessions = SessionTable::new();
+    let mut resolved = ResolvedSessionLookup {
+        key: ResolvedSessionKey::Canonical(key.clone()),
+        lookup: SessionLookup {
+            decision: test_decision(),
+            metadata: test_metadata(),
+        },
+        shared_entry: Some(SyncedSessionEntry {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: stale_metadata,
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        }),
+        origin: SessionOrigin::SyncImport,
+    };
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let (lookup, install_failed) =
+        super::materialize_shared_session_hit(&mut sessions, &mut resolved, &forwarding, 2_000_000, TCP_FLAG_ACK);
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        !install_failed,
+        "a stale-zone shared hit must materialize as a miss (no failure, just no install)"
+    );
+    assert!(
+        sessions.entry_with_origin(&key).is_none(),
+        "a stale-zone shared hit must not install into the worker table"
+    );
+    assert!(
+        drops_after > drops_before,
+        "materialize of a stale-zone hit must bump the fence-drop counter"
+    );
+    let _ = lookup;
+}
