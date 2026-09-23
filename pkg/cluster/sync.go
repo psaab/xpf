@@ -1251,7 +1251,7 @@ type SessionSync struct {
 	// discipline, and overflow resync-arming as the bare journal.
 	scopedDeleteJournal    [][]byte
 	scopedDeleteJournalCap int
-	lastPeerRxMono   atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
+	lastPeerRxMono         atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
 	// peerHeartbeatAckEver latches when the CURRENTLY connected peer proves it
 	// understands syncMsgHeartbeat by replying syncMsgHeartbeatAck. It gates
 	// the two enforcement paths that would otherwise punish a legacy peer that

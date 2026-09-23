@@ -270,3 +270,83 @@ func TestScopedStampTakeDefaultDomain10512(t *testing.T) {
 		t.Fatalf("default-domain take %d must out-rank its install %d", g, val.Generation)
 	}
 }
+
+// Sender-side lifecycle: scoped stamps are bounded by sentCap like the
+// bare maps (ordinary bare-path closes do not remove them; the cap +
+// overflow latch is the reclamation discipline, #9719-shaped). Past the
+// cap, installs skip stamping, the overflow latches, and takes for
+// unstamped keys draw fresh (safe: fresh out-ranks every install).
+func TestScopedSenderStampsBoundedAtCap10512(t *testing.T) {
+	s := &SessionSync{}
+	const wantCap = 8
+	s.sentGenGuardCap = wantCap
+	s.genGuardMapCeilingOverride = wantCap
+	for i := uint16(0); i < 2*uint16(wantCap); i++ {
+		key := scopedGenKeyV4(6000 + i)
+		val := dataplane.SessionValue{RoutingDomain: 7}
+		s.stampInstallGenV4(key, &val)
+	}
+	s.genSentMu.Lock()
+	n := len(s.genSentScopedV4)
+	latched := s.genSentOverflowScopedV4
+	s.genSentMu.Unlock()
+	if n > wantCap {
+		t.Fatalf("scoped sender stamps = %d, want <= cap %d", n, wantCap)
+	}
+	if !latched {
+		t.Fatal("scoped sender overflow must latch past the cap")
+	}
+	// Unstamped key (skipped past the cap) draws fresh, never 0.
+	fresh := scopedGenKeyV4(7000)
+	fval := dataplane.SessionValue{RoutingDomain: 7}
+	s.stampInstallGenV4(fresh, &fval) // skipped: at cap
+	if g := s.takeDeleteGenScopedV4(7, fresh); g == 0 {
+		t.Fatal("overflow-latched take must draw fresh, got 0")
+	}
+}
+
+// Receive-path normalization: a logical-0 scoped tombstone refuses a
+// wire-marker-1 install with an older generation — no store write.
+// Pins the normalization at BOTH the guard and record call sites.
+func TestScopedInstallDefaultDomainRefusedAtReceive10512(t *testing.T) {
+	s := &SessionSync{}
+	fake := &scopedRecorderStore10512{}
+	s.sessions = fake
+	key := scopedGenKeyV4(5030)
+	if !s.deleteGenGuardScopedV4(0, key, 100) {
+		t.Fatal("FIXTURE: logical-0 scoped delete must apply")
+	}
+	val := dataplane.SessionValue{RoutingDomain: 1, Generation: 50}
+	if s.installClusterSyncedV4(key, val) {
+		t.Fatal("pre-delete wire-default install must be refused at receive")
+	}
+	if got := fake.putsV4; got != 0 {
+		t.Fatalf("refused install wrote the store %d times, want 0", got)
+	}
+	// Newer wire-default install lands (normalization is not a block).
+	val.Generation = 150
+	if !s.installClusterSyncedV4(key, val) {
+		t.Fatal("newer wire-default install must land")
+	}
+	if got := fake.putsV4; got != 1 {
+		t.Fatalf("landed install wrote the store %d times, want 1", got)
+	}
+}
+
+// V6 twin of the receive-path normalization cell.
+func TestScopedInstallDefaultDomainRefusedAtReceiveV610512(t *testing.T) {
+	s := &SessionSync{}
+	fake := &scopedRecorderStore10512{}
+	s.sessions = fake
+	key := scopedGenKeyV6(5030)
+	if !s.deleteGenGuardScopedV6(0, key, 100) {
+		t.Fatal("FIXTURE: logical-0 scoped v6 delete must apply")
+	}
+	val := dataplane.SessionValueV6{RoutingDomain: 1, Generation: 50}
+	if s.installClusterSyncedV6(key, val) {
+		t.Fatal("pre-delete wire-default v6 install must be refused at receive")
+	}
+	if got := fake.putsV6; got != 0 {
+		t.Fatalf("refused v6 install wrote the store %d times, want 0", got)
+	}
+}

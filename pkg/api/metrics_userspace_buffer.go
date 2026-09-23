@@ -360,7 +360,7 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	)
 	ch <- prometheus.MustNewConstMetric(
 		c.userspacePolicyBatchHoldMaxNs,
-		prometheus.CounterValue,
+		prometheus.GaugeValue,
 		float64(status.PolicyBatchHoldMaxNs),
 	)
 

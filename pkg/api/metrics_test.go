@@ -1690,7 +1690,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// #10512: assert the VALUES, not merely that three more series appeared.
 	assertCounterClose(t, got, c.userspacePolicyBatchCount, nil, 61)
 	assertCounterClose(t, got, c.userspacePolicyBatchHoldNs, nil, 62)
-	assertCounterClose(t, got, c.userspacePolicyBatchHoldMaxNs, nil, 63)
+	assertGaugeClose(t, got, c.userspacePolicyBatchHoldMaxNs, nil, 63)
 	// #7209: synced imports that skipped the #6211 zone narrowing. Emitted
 	// unconditionally like its neighbours, so a 0 is a real "every synced
 	// import resolved its zones" signal rather than an absent series. The

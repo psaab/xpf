@@ -14,11 +14,11 @@ import (
 // one per request, in order. A nil entry hangs (never responds); a
 // fail entry responds OK:false. It records every request for shape pins.
 type scriptedClearFake10512 struct {
-	mu    sync.Mutex
-	ln    net.Listener
+	mu     sync.Mutex
+	ln     net.Listener
 	script []ControlResponse
 	failAt map[int]bool
-	reqs  []SessionSyncRequest
+	reqs   []SessionSyncRequest
 }
 
 func startScriptedClearFake10512(t *testing.T, sockPath string, script []ControlResponse, failAt map[int]bool) *scriptedClearFake10512 {
@@ -73,7 +73,14 @@ func (f *scriptedClearFake10512) requests() []SessionSyncRequest {
 // and a live child cannot exist in unprivileged CI.
 func newClearOnlyManager10512(t *testing.T) (*Manager, string) {
 	t.Helper()
-	dir := t.TempDir()
+	// Short prefix: sun_path is 108 bytes and these test names are
+	// long — t.TempDir() + userspace-dp-sessions.sock would exceed it
+	// (the #5881 fixture's explicit lesson).
+	dir, err := os.MkdirTemp("", "x10512")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	sessionSock := filepath.Join(dir, "userspace-dp-sessions.sock")
 	m := New()
 	m.proc = &exec.Cmd{Process: &os.Process{}}
@@ -167,5 +174,37 @@ func TestClearAllUnprivilegedStaysBareWithHelperCounts10512(t *testing.T) {
 	}
 	if v4 != 7 || v6 != 5 {
 		t.Errorf("counts = (%d, %d), want (7, 5) (helper-native enumeration)", v4, v6)
+	}
+}
+
+// Fail-closed terminal: incomplete with NO continuation is a stranded
+// remainder with no way forward — a gap error, never success.
+func TestClearAllUnprivilegedIncompleteWithoutTokenErrors10512(t *testing.T) {
+	m, sessionSock := newClearOnlyManager10512(t)
+	startScriptedClearFake10512(t, sessionSock, []ControlResponse{
+		{OK: true, SessionMirrorV4Count: 2},
+	}, nil)
+
+	_, _, err := m.ClearAllSessions()
+	if err == nil {
+		t.Fatal("ClearAllSessions returned nil for incomplete-without-continuation")
+	}
+}
+
+// A repeated continuation token is a wedged helper, not progress —
+// fail fast instead of looping forever.
+func TestClearAllUnprivilegedRepeatedTokenErrors10512(t *testing.T) {
+	m, sessionSock := newClearOnlyManager10512(t)
+	fake := startScriptedClearFake10512(t, sessionSock, []ControlResponse{
+		{OK: true, SessionMirrorContinuation: "stuck", SessionMirrorFenceID: 7},
+		{OK: true, SessionMirrorContinuation: "stuck", SessionMirrorFenceID: 7},
+	}, nil)
+
+	_, _, err := m.ClearAllSessions()
+	if err == nil {
+		t.Fatal("ClearAllSessions returned nil for a repeated continuation token")
+	}
+	if got := len(fake.requests()); got != 2 {
+		t.Fatalf("helper got %d requests, want 2 (detect on first repeat)", got)
 	}
 }

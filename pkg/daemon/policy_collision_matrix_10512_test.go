@@ -10,20 +10,31 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
+// Control-row identities (domain 100009): the post-activation forward
+// pins the legacy before_secs fence (deleted prepublish, fenced legacy);
+// the reverse row pins the producers' Classes:["forward"] contract
+// (never discovered, always survives).
+const (
+	postID10512 = 0xCAFE01
+	revID10512  = 0x9E9E01
+)
+
 // collisionDP10512 is the #10512 T-matrix fake: a per-domain session table
 // where both tenants of a colliding bare tuple coexist (A under 100007, B
-// under 100008), a scripted helper READ (ListSessionsByPolicy filters by
-// the requested policy ids + families, records the mode that drove it),
-// and a recording helper delete (DeletePolicySessions removes + records).
-// It models the helper authority, not the bare-keyed BPF mirror — a
-// mirror scan could hold only ONE row per tuple and could never express
-// the collision these cells pin.
+// under 100008, controls under 100009), a verb-coherent helper READ
+// (ListSessionsByPolicy mirrors the helper's policy/family/class/cutoff
+// filtering and records every request), and a recording helper delete
+// (DeletePolicySessions removes + records). It models the helper
+// authority, not the bare-keyed BPF mirror — a mirror scan could hold
+// only ONE row per tuple and could never express the collision.
 type collisionDP10512 struct {
 	dataplane.DataPlane // embedded nil — only the overridden methods are called
 
 	matches []dpuserspace.SessionPolicyMatch
+	revRows []dpuserspace.SessionPolicyMatch
 	deleted []dpuserspace.SessionPolicyMatch
 	modes   []string
+	reqs    []dpuserspace.SessionPolicyListRequest
 
 	complete  bool
 	readErr   error
@@ -32,8 +43,8 @@ type collisionDP10512 struct {
 	workerErr string
 }
 
-func newCollisionDP10512(matches []dpuserspace.SessionPolicyMatch) *collisionDP10512 {
-	return &collisionDP10512{matches: matches, complete: true}
+func newCollisionDP10512(fwd, rev []dpuserspace.SessionPolicyMatch) *collisionDP10512 {
+	return &collisionDP10512{matches: fwd, revRows: rev, complete: true}
 }
 
 func (f *collisionDP10512) Start(context.Context) error { return nil }
@@ -56,15 +67,19 @@ func (f *collisionDP10512) GetPersistentNAT() *dataplane.PersistentNATTable {
 	return nil
 }
 
-// ListSessionsByPolicy serves the helper READ from the per-domain table:
-// only matches whose policy is requested AND whose family is allowed are
-// returned. The driving mode (prepublish vs legacy) is recorded so cells
-// can pin which producer ran.
+// ListSessionsByPolicy serves the helper READ from the per-domain table,
+// mirroring the helper's filter chain exactly: requested policy, allowed
+// family, allowed class (forward rows vs reverse rows), and — legacy
+// mode only — the before_secs fence (Some(0) unbounded, None rejected).
 func (f *collisionDP10512) ListSessionsByPolicy(req dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error) {
 	f.modes = append(f.modes, req.Mode)
+	f.reqs = append(f.reqs, req)
 	if f.readErr != nil {
 		return dpuserspace.ControlResponse{}, f.readErr
 	}
+	// Legacy without a boundary is a caller bug (helper:
+	// legacy-before-secs-missing), never silently unbounded.
+	legacyNoFence := req.Mode == "legacy" && req.BeforeSecs == nil
 	want := make(map[uint32]bool, len(req.PolicyIDs))
 	for _, id := range req.PolicyIDs {
 		want[id] = true
@@ -80,19 +95,43 @@ func (f *collisionDP10512) ListSessionsByPolicy(req dpuserspace.SessionPolicyLis
 		}
 		return false
 	}
+	classOK := func(reverse bool) bool {
+		if len(req.Classes) == 0 {
+			return true
+		}
+		for _, c := range req.Classes {
+			if reverse && c == "reverse" || !reverse && c == "forward" {
+				return true
+			}
+		}
+		return false
+	}
+	fenced := func(created uint64) bool {
+		return req.Mode == "legacy" && req.BeforeSecs != nil &&
+			*req.BeforeSecs != 0 && created > *req.BeforeSecs
+	}
 	var out []dpuserspace.SessionPolicyMatch
 	for _, m := range f.matches {
-		if !want[m.PolicyID] || !famOK(m.AddrFamily) {
+		if !want[m.PolicyID] || !famOK(m.AddrFamily) || !classOK(false) || fenced(m.CreatedSecs) {
+			continue
+		}
+		out = append(out, m)
+	}
+	for _, m := range f.revRows {
+		if !want[m.PolicyID] || !famOK(m.AddrFamily) || !classOK(true) || fenced(m.CreatedSecs) {
 			continue
 		}
 		out = append(out, m)
 	}
 	resp := dpuserspace.ControlResponse{
 		SessionPolicyMatches:  out,
-		SessionPolicyComplete: f.complete && !f.incomple,
+		SessionPolicyComplete: f.complete && !f.incomple && !legacyNoFence,
 	}
 	if f.incomple {
 		resp.SessionPolicyPerWorkerErrors = []string{f.workerErr}
+	}
+	if legacyNoFence {
+		resp.SessionPolicyPerWorkerErrors = append(resp.SessionPolicyPerWorkerErrors, "legacy-before-secs-missing")
 	}
 	return resp, nil
 }
@@ -104,16 +143,23 @@ func (f *collisionDP10512) DeletePolicySessions(matches []dpuserspace.SessionPol
 	if f.delErr != nil {
 		return dpuserspace.PolicyDeleteResult{}, f.delErr
 	}
-	applied := 0
-	for _, m := range matches {
-		for i, live := range f.matches {
+	remove := func(list []dpuserspace.SessionPolicyMatch, m dpuserspace.SessionPolicyMatch) []dpuserspace.SessionPolicyMatch {
+		for i, live := range list {
 			if live.RoutingDomain == m.RoutingDomain &&
 				live.Tuple == m.Tuple &&
 				live.ExpectedRTFlowSessionID == m.ExpectedRTFlowSessionID {
-				f.matches = append(f.matches[:i], f.matches[i+1:]...)
-				applied++
-				break
+				return append(list[:i], list[i+1:]...)
 			}
+		}
+		return list
+	}
+	applied := 0
+	for _, m := range matches {
+		before := len(f.matches) + len(f.revRows)
+		f.matches = remove(f.matches, m)
+		f.revRows = remove(f.revRows, m)
+		if len(f.matches)+len(f.revRows) < before {
+			applied++
 		}
 		f.deleted = append(f.deleted, m)
 	}
@@ -127,13 +173,34 @@ func (f *collisionDP10512) liveIn(domain uint32) int {
 			n++
 		}
 	}
+	for _, m := range f.revRows {
+		if m.RoutingDomain == domain {
+			n++
+		}
+	}
 	return n
+}
+
+func (f *collisionDP10512) liveHas(domain uint32, id uint64) bool {
+	for _, m := range f.matches {
+		if m.RoutingDomain == domain && m.ExpectedRTFlowSessionID == id {
+			return true
+		}
+	}
+	for _, m := range f.revRows {
+		if m.RoutingDomain == domain && m.ExpectedRTFlowSessionID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // collisionMatches10512 builds the colliding tenants: A (the deleted
 // policy's session) + B (a surviving policy's session) on the SAME bare
-// tuple, v4 + v6, distinguished only by domain + identity.
-func collisionMatches10512(webID, sshID uint32) []dpuserspace.SessionPolicyMatch {
+// tuple, v4 + v6, distinguished only by domain + identity — plus the
+// domain-100009 controls (post-activation forward + reverse row) carrying
+// A's policy. Main rows are CreatedSecs=100 (inside any test fence).
+func collisionMatches10512(aPolicy, bPolicy uint32) (fwd, rev []dpuserspace.SessionPolicyMatch) {
 	v4tuple := dpuserspace.SessionPolicyTuple{
 		AddrFamily: 4, Protocol: 6,
 		SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
@@ -144,18 +211,31 @@ func collisionMatches10512(webID, sshID uint32) []dpuserspace.SessionPolicyMatch
 		SrcIP: "2001:db8::1", DstIP: "2001:db8::2",
 		SrcPort: 40003, DstPort: 80,
 	}
-	mk := func(fam uint8, tuple dpuserspace.SessionPolicyTuple, domain uint32, policy uint32, id uint64) dpuserspace.SessionPolicyMatch {
+	mk := func(fam uint8, tuple dpuserspace.SessionPolicyTuple, domain uint32, policy uint32, id uint64, created uint64) dpuserspace.SessionPolicyMatch {
 		return dpuserspace.SessionPolicyMatch{
 			AddrFamily: fam, RoutingDomain: domain, Tuple: tuple,
-			PolicyID: policy, ExpectedRTFlowSessionID: id,
+			PolicyID: policy, ExpectedRTFlowSessionID: id, CreatedSecs: created,
 		}
 	}
-	return []dpuserspace.SessionPolicyMatch{
-		mk(4, v4tuple, 100007, webID, 0xA11CE),
-		mk(4, v4tuple, 100008, sshID, 0xB10512),
-		mk(6, v6tuple, 100007, webID, 0xA11CE6),
-		mk(6, v6tuple, 100008, sshID, 0xB105126),
+	fwd = []dpuserspace.SessionPolicyMatch{
+		mk(4, v4tuple, 100007, aPolicy, 0xA11CE, 100),
+		mk(4, v4tuple, 100008, bPolicy, 0xB10512, 100),
+		mk(6, v6tuple, 100007, aPolicy, 0xA11CE6, 100),
+		mk(6, v6tuple, 100008, bPolicy, 0xB105126, 100),
+		mk(4, dpuserspace.SessionPolicyTuple{
+			AddrFamily: 4, Protocol: 6,
+			SrcIP: "10.9.9.1", DstIP: "10.9.9.2",
+			SrcPort: 50001, DstPort: 80,
+		}, 100009, aPolicy, postID10512, 0xFFFFFFFF),
 	}
+	rev = []dpuserspace.SessionPolicyMatch{
+		mk(4, dpuserspace.SessionPolicyTuple{
+			AddrFamily: 4, Protocol: 6,
+			SrcIP: "10.0.0.2", DstIP: "10.0.0.1",
+			SrcPort: 80, DstPort: 40001,
+		}, 100009, aPolicy, revID10512, 100),
+	}
+	return fwd, rev
 }
 
 // driveCapture10512 runs the CAPTURE producer: arm the plan, take the
@@ -167,13 +247,16 @@ func driveCapture10512(d *Daemon, oldCfg, newCfg *config.Config) error {
 }
 
 // T1 deleted/v4/capture: deleting A's policy reaps A's v4 row; B's v4 row
-// on the same tuple survives. On base (PolicyID-only mirror scan) A
-// survives behind B's row and the commit reports nil.
+// on the same tuple survives. Prepublish has NO cutoff, so the
+// post-activation control is reaped too; the reverse control is never
+// discovered (Classes:["forward"]) and survives.
 func TestT1DeletedV4CaptureReapsOnlyA10512(t *testing.T) {
 	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
 	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
-	fake := newCollisionDP10512(collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"]))
+	webID := ids["trust->untrust/p-web"]
+	fwd, rev := collisionMatches10512(webID, ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
 	d := &Daemon{}
 	d.setDataplane(fake)
 
@@ -184,11 +267,11 @@ func TestT1DeletedV4CaptureReapsOnlyA10512(t *testing.T) {
 		t.Fatalf("modes = %v, want [prepublish] (the capture producer)", fake.modes)
 	}
 	for _, m := range fake.deleted {
-		if m.RoutingDomain != 100007 {
-			t.Errorf("deleted a domain-%d row; only A's (100007) may go", m.RoutingDomain)
+		if m.RoutingDomain != 100007 && m.RoutingDomain != 100009 {
+			t.Errorf("deleted a domain-%d row; only A (100007) + controls (100009) may go", m.RoutingDomain)
 		}
-		if m.PolicyID != ids["trust->untrust/p-web"] {
-			t.Errorf("deleted policy %d; only p-web (%d) may go", m.PolicyID, ids["trust->untrust/p-web"])
+		if m.PolicyID != webID {
+			t.Errorf("deleted policy %d; only p-web (%d) may go", m.PolicyID, webID)
 		}
 	}
 	if got := fake.liveIn(100008); got != 2 {
@@ -203,6 +286,12 @@ func TestT1DeletedV4CaptureReapsOnlyA10512(t *testing.T) {
 	if !v4gone {
 		t.Error("A's v4 row survives the capture clear — the #10512 miss")
 	}
+	if fake.liveHas(100009, postID10512) {
+		t.Error("post-activation control survives prepublish — prepublish has no cutoff")
+	}
+	if !fake.liveHas(100009, revID10512) {
+		t.Error("reverse control reaped — Classes:[forward] must exclude it from discovery")
+	}
 }
 
 // T2 deleted/v6/capture: the v6 twin of T1.
@@ -210,7 +299,8 @@ func TestT2DeletedV6CaptureReapsOnlyA10512(t *testing.T) {
 	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
 	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
-	fake := newCollisionDP10512(collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"]))
+	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
 	d := &Daemon{}
 	d.setDataplane(fake)
 
@@ -229,25 +319,37 @@ func TestT2DeletedV6CaptureReapsOnlyA10512(t *testing.T) {
 	if got := fake.liveIn(100008); got != 2 {
 		t.Errorf("B holds %d live rows, want 2 (v4+v6 untouched)", got)
 	}
+	if fake.liveHas(100009, postID10512) {
+		t.Error("post-activation control survives prepublish — prepublish has no cutoff")
+	}
+	if !fake.liveHas(100009, revID10512) {
+		t.Error("reverse control reaped — Classes:[forward] must exclude it from discovery")
+	}
 }
 
 // T3 deleted/v4/legacy: the legacy producer reaps A's v4 row through the
-// legacy-mode READ; B survives. The legacy READ carries before_secs and
-// the same identity-conditional delete.
+// legacy-mode READ with a nonzero before_secs fence; B survives, the
+// post-activation control is FENCED (survives), the reverse control is
+// undiscovered (survives).
 func TestT3DeletedV4LegacyReapsOnlyA10512(t *testing.T) {
 	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
 	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
-	fake := newCollisionDP10512(collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"]))
+	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
 	d := &Daemon{}
 	d.setDataplane(fake)
 	d.policyInvalidationCapture = nil // force the legacy producer
+	d.policyActivationSecs = 1000
 
 	if err := d.clearSessionsForDeletedPolicies(oldCfg, newCfg); err != nil {
 		t.Fatalf("legacy clear: %v", err)
 	}
 	if len(fake.modes) != 1 || fake.modes[0] != "legacy" {
 		t.Fatalf("modes = %v, want [legacy] (the legacy producer)", fake.modes)
+	}
+	if len(fake.reqs) != 1 || fake.reqs[0].BeforeSecs == nil || *fake.reqs[0].BeforeSecs != 1000 {
+		t.Fatal("legacy READ must carry a non-nil before_secs fence (1000)")
 	}
 	v4gone := true
 	for _, m := range fake.matches {
@@ -261,6 +363,12 @@ func TestT3DeletedV4LegacyReapsOnlyA10512(t *testing.T) {
 	if got := fake.liveIn(100008); got != 2 {
 		t.Errorf("B holds %d live rows, want 2 (v4+v6 untouched)", got)
 	}
+	if !fake.liveHas(100009, postID10512) {
+		t.Error("post-activation control reaped under a nonzero fence — the fence is not bound")
+	}
+	if !fake.liveHas(100009, revID10512) {
+		t.Error("reverse control reaped — Classes:[forward] must exclude it from discovery")
+	}
 }
 
 // T4 deleted/v6/legacy: the v6 twin of T3.
@@ -268,10 +376,12 @@ func TestT4DeletedV6LegacyReapsOnlyA10512(t *testing.T) {
 	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
 	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
-	fake := newCollisionDP10512(collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"]))
+	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
 	d := &Daemon{}
 	d.setDataplane(fake)
 	d.policyInvalidationCapture = nil
+	d.policyActivationSecs = 1000
 
 	if err := d.clearSessionsForDeletedPolicies(oldCfg, newCfg); err != nil {
 		t.Fatalf("legacy clear: %v", err)
@@ -288,6 +398,43 @@ func TestT4DeletedV6LegacyReapsOnlyA10512(t *testing.T) {
 	if got := fake.liveIn(100008); got != 2 {
 		t.Errorf("B holds %d live rows, want 2 (v4+v6 untouched)", got)
 	}
+	if !fake.liveHas(100009, postID10512) {
+		t.Error("post-activation control reaped under a nonzero fence — the fence is not bound")
+	}
+	if !fake.liveHas(100009, revID10512) {
+		t.Error("reverse control reaped — Classes:[forward] must exclude it from discovery")
+	}
+}
+
+// Legacy with a zero activation stamp ("boundary unknown") is UNBOUNDED:
+// the post-activation control is returned and reaped, exactly like the
+// #6948 activationSecs==0 contract this branch replaces.
+func TestLegacyZeroActivationIsUnbounded10512(t *testing.T) {
+	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
+	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
+	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
+	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake := newCollisionDP10512(fwd, rev)
+	d := &Daemon{}
+	d.setDataplane(fake)
+	d.policyInvalidationCapture = nil
+	// policyActivationSecs left 0: boundary unknown.
+
+	if err := d.clearSessionsForDeletedPolicies(oldCfg, newCfg); err != nil {
+		t.Fatalf("legacy unbounded clear: %v", err)
+	}
+	if len(fake.reqs) != 1 || fake.reqs[0].BeforeSecs == nil || *fake.reqs[0].BeforeSecs != 0 {
+		t.Fatal("legacy READ must carry Some(0) (never nil) when the boundary is unknown")
+	}
+	if fake.liveHas(100009, postID10512) {
+		t.Error("post-activation control survives a zero-stamp legacy clear — zero must be unbounded")
+	}
+	if !fake.liveHas(100009, revID10512) {
+		t.Error("reverse control reaped — Classes:[forward] must exclude it from discovery")
+	}
+	if got := fake.liveIn(100008); got != 2 {
+		t.Errorf("B holds %d live rows, want 2 (v4+v6 untouched)", got)
+	}
 }
 
 // Protocol-state contrast: complete+empty is an authoritative empty (nil),
@@ -300,7 +447,7 @@ func TestProtocolContrastEmptyIncompleteMissing10512(t *testing.T) {
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
 
 	// Complete + zero matches: nil, no delete attempted.
-	fake := newCollisionDP10512(nil)
+	fake := newCollisionDP10512(nil, nil)
 	d := &Daemon{}
 	d.setDataplane(fake)
 	if err := driveCapture10512(d, oldCfg, newCfg); err != nil {
@@ -310,18 +457,24 @@ func TestProtocolContrastEmptyIncompleteMissing10512(t *testing.T) {
 		t.Fatalf("authoritative empty deleted %d rows, want 0", len(fake.deleted))
 	}
 
-	// Incomplete: clearErr surfaces, no success.
-	fake2 := newCollisionDP10512(collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"]))
+	// Incomplete: the aggregate reports the shared enumerate error ONCE
+	// for all three classes (they share one scan — the per-class joins
+	// must not duplicate it). Production reaches the capture only
+	// through clearSessionsForPolicyChanges, so the cell drives that.
+	fwd2, rev2 := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
+	fake2 := newCollisionDP10512(fwd2, rev2)
 	fake2.incomple = true
 	fake2.workerErr = "worker-3:queue-full"
 	d2 := &Daemon{}
 	d2.setDataplane(fake2)
-	if err := driveCapture10512(d2, oldCfg, newCfg); err == nil {
-		t.Fatal("incomplete capture must surface clearErr, got nil")
+	d2.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: newCfg}
+	d2.capturePolicyInvalidationLocked(newCfg)
+	if err := d2.clearSessionsForPolicyChanges(oldCfg, newCfg); err == nil {
+		t.Fatal("incomplete capture must surface clearErr via the aggregate, got nil")
 	}
 
 	// Nil capture selects the legacy producer (mode pin).
-	fake3 := newCollisionDP10512(nil)
+	fake3 := newCollisionDP10512(nil, nil)
 	d3 := &Daemon{}
 	d3.setDataplane(fake3)
 	d3.policyInvalidationCapture = nil
@@ -348,14 +501,15 @@ func TestT5ModifiedActionChangeReapsOnlyChanged10512(t *testing.T) {
 			webID := ids["trust->untrust/p-web"]
 			sshID := ids["trust->untrust/p-ssh"]
 			// A = ssh session (changed policy, reaped); B = web session
-			// (unchanged policy, survives) on the same tuples.
-			fake := newCollisionDP10512(collisionMatches10512(sshID, webID))
-			// collisionMatches puts webID first; swap roles: domain 100007
-			// holds the ssh (changed) rows, 100008 the web (unchanged).
+			// (unchanged policy, survives) on the same tuples. Controls
+			// already carry the changed (first-arg) policy; the swap
+			// leaves domain 100009 alone.
+			fwd, rev := collisionMatches10512(sshID, webID)
+			fake := newCollisionDP10512(fwd, rev)
 			for i := range fake.matches {
 				if fake.matches[i].RoutingDomain == 100007 {
 					fake.matches[i].PolicyID = sshID
-				} else {
+				} else if fake.matches[i].RoutingDomain == 100008 {
 					fake.matches[i].PolicyID = webID
 				}
 			}
@@ -386,6 +540,8 @@ func TestT5ModifiedActionChangeReapsOnlyChanged10512(t *testing.T) {
 // T6 scheduler-flip (#4343)/v4+v6/capture+legacy: p-ssh's scheduler flips
 // active→inactive → same assertions as T5 (an inactive-scheduled policy
 // is fail-closed skipped, so its sessions must re-enter evaluation).
+// Deterministic: AllDay is always-active; a windowless scheduler is
+// fail-closed inactive (no wall-clock window involved).
 func TestT6SchedulerFlipReapsOnlyFlipped10512(t *testing.T) {
 	for _, producer := range []string{"capture", "legacy"} {
 		t.Run(producer, func(t *testing.T) {
@@ -397,17 +553,18 @@ func TestT6SchedulerFlipReapsOnlyFlipped10512(t *testing.T) {
 				"sched": {Name: "sched", AllDay: true},
 			}
 			newCfg.Schedulers = map[string]*config.SchedulerConfig{
-				"sched": {Name: "sched", StartTime: "23:59", StopTime: "00:01"},
+				"sched": {Name: "sched"},
 			}
 			newCfg.Security.PolicyRematch = true
 			ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
 			webID := ids["trust->untrust/p-web"]
 			sshID := ids["trust->untrust/p-ssh"]
-			fake := newCollisionDP10512(collisionMatches10512(sshID, webID))
+			fwd, rev := collisionMatches10512(sshID, webID)
+			fake := newCollisionDP10512(fwd, rev)
 			for i := range fake.matches {
 				if fake.matches[i].RoutingDomain == 100007 {
 					fake.matches[i].PolicyID = sshID
-				} else {
+				} else if fake.matches[i].RoutingDomain == 100008 {
 					fake.matches[i].PolicyID = webID
 				}
 			}
@@ -447,11 +604,12 @@ func TestT7DefaultFlipReapsOnlyDefault10512(t *testing.T) {
 			newCfg.Security.DefaultPolicy = config.PolicyDeny
 			ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
 			webID := ids["trust->untrust/p-web"]
-			fake := newCollisionDP10512(collisionMatches10512(dataplane.DefaultPolicySentinelID, webID))
+			fwd, rev := collisionMatches10512(dataplane.DefaultPolicySentinelID, webID)
+			fake := newCollisionDP10512(fwd, rev)
 			for i := range fake.matches {
 				if fake.matches[i].RoutingDomain == 100007 {
 					fake.matches[i].PolicyID = dataplane.DefaultPolicySentinelID
-				} else {
+				} else if fake.matches[i].RoutingDomain == 100008 {
 					fake.matches[i].PolicyID = webID
 				}
 			}
@@ -491,8 +649,10 @@ func TestT8FailoverDeleteBeforePromotion10512(t *testing.T) {
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
 	webID := ids["trust->untrust/p-web"]
 	sshID := ids["trust->untrust/p-ssh"]
-	primary := newCollisionDP10512(collisionMatches10512(webID, sshID))
-	standby := newCollisionDP10512(collisionMatches10512(webID, sshID))
+	fwdP, revP := collisionMatches10512(webID, sshID)
+	primary := newCollisionDP10512(fwdP, revP)
+	fwdS, revS := collisionMatches10512(webID, sshID)
+	standby := newCollisionDP10512(fwdS, revS)
 	d := &Daemon{}
 	d.setDataplane(primary)
 	if err := driveCapture10512(d, oldCfg, newCfg); err != nil {
@@ -511,29 +671,44 @@ func TestT8FailoverDeleteBeforePromotion10512(t *testing.T) {
 	}
 }
 
-// T8 failover, promotion-before-delete: the standby promotes first (both
-// rows live), then the delete lands post-promotion; same end state — no
-// A resurrection, no B loss. The delete applies to the promoted table
-// exactly as to the primary's.
+// T8 failover, promotion-before-delete: the old primary captures and
+// deletes while the standby is still standby; promotion lands while
+// both rows are live there; then the old primary's already-captured
+// scoped deletes arrive as stale post-promotion HA delivery and must
+// still apply exactly (A gone, B live) — the captured identities,
+// not the promotion, decide.
 func TestT8FailoverPromotionBeforeDelete10512(t *testing.T) {
 	oldCfg := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
 	newCfg := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
 	webID := ids["trust->untrust/p-web"]
 	sshID := ids["trust->untrust/p-ssh"]
-	primary := newCollisionDP10512(collisionMatches10512(webID, sshID))
-	standby := newCollisionDP10512(collisionMatches10512(webID, sshID))
-	// Promote first: both rows live on the new primary.
+	fwdP, revP := collisionMatches10512(webID, sshID)
+	primary := newCollisionDP10512(fwdP, revP)
+	fwdS, revS := collisionMatches10512(webID, sshID)
+	standby := newCollisionDP10512(fwdS, revS)
+	// Capture + delete on the old primary (pre-promotion identities).
 	d := &Daemon{}
-	d.setDataplane(standby)
+	d.setDataplane(primary)
 	if err := driveCapture10512(d, oldCfg, newCfg); err != nil {
-		t.Fatalf("post-promotion clear: %v", err)
+		t.Fatalf("primary clear: %v", err)
 	}
-	_ = primary // the old primary's table is fenced after promotion
+	// Promote while both rows are still live on the standby (no sync yet).
+	if got := standby.liveIn(100007); got != 2 {
+		t.Fatalf("pre-delivery standby holds %d A rows, want 2 (both live)", got)
+	}
+	// Stale post-promotion HA delivery: the old primary's captured
+	// deletes land after promotion and must apply exactly.
+	if _, err := standby.DeletePolicySessions(primary.deleted); err != nil {
+		t.Fatalf("stale post-promotion delivery: %v", err)
+	}
 	if got := standby.liveIn(100007); got != 0 {
 		t.Errorf("promoted table holds %d A rows (resurrection), want 0", got)
 	}
 	if got := standby.liveIn(100008); got != 2 {
 		t.Errorf("promoted table holds %d B rows (loss), want 2", got)
+	}
+	if !standby.liveHas(100009, revID10512) {
+		t.Error("reverse control reaped in stale delivery — only captured forwards travel")
 	}
 }

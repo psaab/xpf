@@ -130,7 +130,7 @@ func newSyncOnlyManager9146(t *testing.T) (*Manager, *syncRec9146) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	rec := startSyncRec9146(t, filepath.Join(dir, "userspace-dp-sessions.sock"))
 	return m, rec
@@ -200,9 +200,9 @@ func TestTenantSwapEmitsNoRetractionSoTheStandbyAccumulates9146(t *testing.T) {
 	deletes := 0
 	for _, r := range got {
 		switch r.Operation {
-		case "upsert", "mirror_upsert":
+		case "mirror_upsert":
 			upserts = append(upserts, r.RoutingDomain)
-		case "delete", "mirror_delete":
+		case "mirror_delete":
 			deletes++
 		}
 	}

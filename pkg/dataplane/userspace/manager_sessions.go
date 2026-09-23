@@ -29,6 +29,12 @@ const (
 	policyReadByteCap      = 48 * 1024 * 1024
 	policyReadDeadline     = 30 * time.Second
 	policyDeleteDeadline   = 30 * time.Second
+	// Clear-all paging bounds (#10512): one absolute deadline plus a
+	// finite page cap, so a wedged helper cannot stack per-request
+	// deadlines or spin the driver on repeated tokens. 65536 pages ×
+	// 4096 helper rows/page = 268M rows, beyond any live table.
+	clearAllDeadline = 30 * time.Second
+	clearAllMaxPages = 65536
 	// Plan §2.4 micro-batch caps: the helper acquires all of one batch's
 	// gate keys together, so Go packs forward matches and their captured
 	// companions under both ceilings.
@@ -679,7 +685,7 @@ func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val datap
 func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey, forwardOnly bool) (bool, error) {
 	val, valErr := m.bpfShim.GetSessionV4(key)
 	m.mu.Lock()
-	if m.proc == nil {
+	if m.proc == nil || m.proc.Process == nil {
 		m.mu.Unlock()
 		return false, errSessionHelperUnreachable
 	}
@@ -998,7 +1004,15 @@ func (m *Manager) ClearAllSessions() (int, int, error) {
 		return v4, v6, errSessionHelperUnreachable
 	}
 	req := SessionSyncRequest{Operation: "mirror_clear_chunk"}
-	for {
+	deadline := time.Now().Add(clearAllDeadline)
+	seen := make(map[string]struct{})
+	for pages := 0; ; pages++ {
+		if time.Now().After(deadline) {
+			return v4, v6, fmt.Errorf("clear-all: paging deadline exceeded after %s (%d pages)", clearAllDeadline, pages)
+		}
+		if pages >= clearAllMaxPages {
+			return v4, v6, fmt.Errorf("clear-all: page cap exceeded (%d pages)", pages)
+		}
 		resp, err := m.syncSessionRequestResponseLocked(req)
 		if err != nil {
 			return v4, v6, fmt.Errorf("clear-all: authoritative helper session revocation failed: %w", err)
@@ -1006,9 +1020,19 @@ func (m *Manager) ClearAllSessions() (int, int, error) {
 		if resp.SessionMirrorV4Count != 0 || resp.SessionMirrorV6Count != 0 {
 			v4, v6 = int(resp.SessionMirrorV4Count), int(resp.SessionMirrorV6Count)
 		}
-		if resp.SessionMirrorComplete || resp.SessionMirrorContinuation == "" {
+		// Fail-closed terminal: ONLY complete-with-empty ends clean.
+		// Incomplete with no continuation strands the remainder with
+		// no way forward — that is a gap, not a success.
+		if resp.SessionMirrorComplete && resp.SessionMirrorContinuation == "" {
 			return v4, v6, nil
 		}
+		if resp.SessionMirrorContinuation == "" {
+			return v4, v6, fmt.Errorf("clear-all: incomplete with no continuation (counts v4=%d v6=%d)", v4, v6)
+		}
+		if _, dup := seen[resp.SessionMirrorContinuation]; dup {
+			return v4, v6, fmt.Errorf("clear-all: repeated continuation %q (counts v4=%d v6=%d)", resp.SessionMirrorContinuation, v4, v6)
+		}
+		seen[resp.SessionMirrorContinuation] = struct{}{}
 		req.ClearFenceID = resp.SessionMirrorFenceID
 		req.ClearContinuation = resp.SessionMirrorContinuation
 	}

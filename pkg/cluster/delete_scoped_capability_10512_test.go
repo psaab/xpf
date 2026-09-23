@@ -213,6 +213,7 @@ func TestStaleCapabilitiesIgnoredAfterSupersession10512(t *testing.T) {
 		t.Fatal("the current conn's frame must land")
 	}
 }
+
 // Pending-retirement promotion (#9818 interplay): a superseded conn that
 // proves a NEWER process identity is re-stamped current by noteConn, and
 // its capabilities then land (the gate runs AFTER noteConn precisely so
@@ -253,4 +254,3 @@ func TestPendingRetirementCapabilitiesPromoteAndLand10512(t *testing.T) {
 		t.Fatalf("promotion must adopt the proven identity, got epoch %d", ss.peerIdentity.epoch)
 	}
 }
-

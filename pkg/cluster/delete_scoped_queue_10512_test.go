@@ -181,6 +181,8 @@ type scopedRecorderStore10512 struct {
 	mu sync.Mutex
 	v4 []scopedCallV410512
 	v6 []scopedCallV610512
+	putsV4 int
+	putsV6 int
 }
 
 func (f *scopedRecorderStore10512) DeleteClusterScopedV4(key dataplane.SessionKey, domain uint32, id uint64) error {
@@ -194,6 +196,20 @@ func (f *scopedRecorderStore10512) DeleteClusterScopedV6(key dataplane.SessionKe
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.v6 = append(f.v6, scopedCallV610512{key, domain, id})
+	return nil
+}
+
+func (f *scopedRecorderStore10512) PutClusterSyncedV4(dataplane.SessionKey, dataplane.SessionValue) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.putsV4++
+	return nil
+}
+
+func (f *scopedRecorderStore10512) PutClusterSyncedV6(dataplane.SessionKeyV6, dataplane.SessionValueV6) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.putsV6++
 	return nil
 }
 
