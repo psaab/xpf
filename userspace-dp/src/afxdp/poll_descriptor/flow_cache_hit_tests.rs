@@ -1201,6 +1201,92 @@ fn run_stage_seeded(
     }
 }
 
+/// The resolve-level refused-repair bit is the flow-cache seed gate. Keep the
+/// call real enough to construct a cache candidate, then prove `true` leaves
+/// no entry behind.
+#[test]
+fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let key = test_key();
+    let flow = Some(SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    });
+    let mut flow_cache = FlowCache::new();
+    let mut worker_ctx = fixture.worker_ctx();
+    let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
+
+    stage_flow_cache_seed(
+        &mut flow_cache,
+        &flow,
+        meta,
+        ValidationState::default(),
+        cached_entry().decision,
+        None,
+        0,
+        Some(TEST_TRUST_ZONE_ID),
+        true,
+        false,
+        0,
+        &policy_counter,
+        crate::filter::TermMatchExtra::default(),
+        None,
+        false,
+        &neighbor_epoch_snapshot,
+        &worker_ctx,
+    );
+
+    assert!(
+        flow_cache
+            .lookup(
+                &key,
+                FlowCacheLookup::for_packet(meta, ValidationState::default(), &fixture.forwarding),
+                1,
+                &fixture.rg_epochs,
+            )
+            .is_none(),
+        "install_failed=true must block flow-cache seeding"
+    );
+
+    // Positive control: the same candidate seeds when the resolve did not
+    // report a refused install.
+    let mut allowed_flow_cache = FlowCache::new();
+    stage_flow_cache_seed(
+        &mut allowed_flow_cache,
+        &flow,
+        meta,
+        ValidationState::default(),
+        cached_entry().decision,
+        None,
+        0,
+        Some(TEST_TRUST_ZONE_ID),
+        false,
+        false,
+        0,
+        &policy_counter,
+        crate::filter::TermMatchExtra::default(),
+        None,
+        false,
+        &neighbor_epoch_snapshot,
+        &worker_ctx,
+    );
+    assert!(
+        allowed_flow_cache
+            .lookup(
+                &key,
+                FlowCacheLookup::for_packet(meta, ValidationState::default(), &fixture.forwarding),
+                1,
+                &fixture.rg_epochs,
+            )
+            .is_some(),
+        "install_failed=false must allow the ordinary flow-cache seed"
+    );
+}
+
 /// #6304 FAIL-ON-REVERT (live call site): a NON-sampled packet on the
 /// established-flow HOT path must not produce, reserve for, or account a
 /// mirror clone.

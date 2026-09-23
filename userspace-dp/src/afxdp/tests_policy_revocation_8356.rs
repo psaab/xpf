@@ -114,6 +114,24 @@ fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
+fn forwarding_reverse_provenance_10582() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "wan-to-wan-permit".into(),
+        from_zone: "wan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
 fn flow_key_to(dst: Ipv4Addr) -> crate::session::SessionKey {
     crate::session::SessionKey {
         addr_family: libc::AF_INET as u8,
@@ -171,9 +189,14 @@ fn metadata(is_reverse: bool) -> SessionMetadata {
     }
 }
 
+struct PollObservables {
+    fresh: bool,
+}
+
 struct Outcome {
     sessions: SessionTable,
     revoked: u64,
+    observables: Option<PollObservables>,
 }
 
 /// Pre-install ONE established session — stamped UNVALIDATED, exactly what an
@@ -239,9 +262,14 @@ fn drive_one_packet_with_action(
         batch.validated_packets, 1,
         "the descriptor must pass validation before policy re-derivation"
     );
+    let fresh = matches!(
+        sessions.policy_revalidation_target(&flow_key_to(dst)),
+        PolicyRevalidationTarget::Fresh
+    );
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: Some(PollObservables { fresh }),
     }
 }
 
@@ -297,6 +325,7 @@ fn drive_one_packet_no_route_9513() -> Outcome {
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: None,
     }
 }
 
@@ -432,6 +461,109 @@ fn a_permit_rule_still_survives_the_widened_revoke_predicate_9381() {
         "the permitted session and its NAT translation must be untouched"
     );
 }
+
+/// T3 control: widening the sessionless deny path must not affect an ordinary
+/// owner TCP hit that still has a local row and an agreeing permit policy.
+#[test]
+fn owner_tcp_permit_hit_remains_admitted_10582_t3() {
+    let out = drive_one_packet_with_action(Some("permit"), false, WAN_IFINDEX, DST);
+    assert_eq!(out.revoked, 0, "an owner permit hit must not be revoked");
+    assert_eq!(
+        out.sessions.len(),
+        1,
+        "the ordinary owner hit must retain its local session"
+    );
+    let observables = out.observables.expect("T3 poll observables");
+    assert!(observables.fresh, "permit hit must re-stamp the local row Fresh");
+}
+/// Drive a shared-only hit through the real descriptor body. The shared-family
+/// upsert is allowed past the local cap, but the live default deny must drop the
+/// packet before `stage_flow_cache_seed`; the target row must stay absent.
+fn drive_shared_hit_10582_t1_t2(policy_generation: u64) -> (SessionTable, BindingWorker, DebugPollCounters) {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(1);
+    sessions.set_policy_revalidation_gen(policy_generation);
+    let filler = SessionKey {
+        src_port: 40_000,
+        ..flow_key_to(DST)
+    };
+    assert!(sessions.install_with_protocol_with_origin(
+        filler,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let key = flow_key_to(DST);
+    let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    shared_sessions.lock().expect("shared sessions").insert(
+        key.clone(),
+        SyncedSessionEntry {
+            key: key.clone(),
+            decision: decision(WAN_IFINDEX),
+            metadata: metadata(false),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+    );
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor_with_shared_sessions(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &shared_sessions,
+    );
+    (sessions, binding, dbg)
+}
+
+#[test]
+fn at_cap_shared_hit_poll_handler_drops_without_seed_10582_t1() {
+    let (sessions, binding, dbg) = drive_shared_hit_10582_t1_t2(7);
+    assert_eq!(dbg.session_hit, 1, "the real poll body must reach shared-hit handling");
+    assert_eq!(dbg.policy_revoked_sessions, 1, "live deny must drop the shared hit");
+    assert!(binding.scratch.scratch_forwards.is_empty(), "denied hit must not forward");
+    assert_eq!(txn_flow_cache_entries(&binding), 0, "denied hit must not seed flow cache");
+    assert!(
+        sessions.entry_with_origin(&flow_key_to(DST)).is_none(),
+        "the denied shared-hit target must remain absent; the filler explains the cap row"
+    );
+}
+
+#[test]
+fn scheduler_generation_shared_hit_poll_handler_drops_without_seed_10582_t2() {
+    let (sessions, binding, dbg) = drive_shared_hit_10582_t1_t2(8);
+    assert_eq!(dbg.session_hit, 1, "the generation-bumped hit must reach handler revalidation");
+    assert_eq!(dbg.policy_revoked_sessions, 1, "generation-bumped live deny must drop");
+    assert!(binding.scratch.scratch_forwards.is_empty(), "denied hit must not forward");
+    assert_eq!(txn_flow_cache_entries(&binding), 0, "denied hit must not seed flow cache");
+    assert!(
+        sessions.entry_with_origin(&flow_key_to(DST)).is_none(),
+        "the denied generation-bumped target must remain absent; the filler explains the cap row"
+    );
+}
+
 
 /// The `deny` point of the same three-way axis, driven through the action-taking
 /// path rather than the bool one.
@@ -669,6 +801,7 @@ fn drive_one_icmp_packet(permit_lan: bool, with_type_constrained_permit: bool) -
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: None,
     }
 }
 
@@ -1975,6 +2108,7 @@ fn drive_moved_interface_9384(
     Outcome {
         sessions,
         revoked: dbg.policy_revoked_sessions,
+        observables: None,
     }
 }
 
@@ -2194,6 +2328,160 @@ fn an_arrival_with_no_interface_identity_still_declines_9513() {
          unzoned interface, and must DECLINE (#9513)"
     );
     assert_eq!(session_count(&sessions), 1, "the session must survive");
+}
+
+/// A sessionless established-hit verdict must still enforce a deny. This is
+/// the #10582 keep-transient shape: the shared row was purged, so the policy
+/// stage has no local stamp or teardown target, but the flow and arrival
+/// identity are sufficient to derive the packet verdict.
+#[test]
+fn sessionless_no_local_entry_denies_without_teardown_10582() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let key = flow_key_to(DST);
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(SRC),
+        dst_ip: IpAddr::V4(DST),
+        forward_key: key.clone(),
+    };
+    let metadata = metadata(false);
+    let decision = decision(WAN_IFINDEX);
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, 0);
+    assert!(
+        super::poll_descriptor::revalidate_zone_policy_sessionless_denies_for_test(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            Some(&flow),
+            meta,
+            false,
+        ),
+        "NoLocalEntry must derive the live deny instead of forwarding"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "sessionless denial must not fabricate or tear down a local row"
+    );
+}
+
+/// #10582 reverse NoLocalEntry pin: the reply arrives on WAN, but the
+/// authoritative forward companion is LAN→WAN. A WAN→WAN permit must not save
+/// the pair from the forward policy's deny; revalidation returns the forward
+/// canonical key for pair teardown.
+#[test]
+fn reverse_sessionless_companion_uses_forward_provenance_10582() {
+    let forwarding = forwarding_reverse_provenance_10582();
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let fwd_key = flow_key_to(DST);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    assert!(sessions.install_with_protocol_with_origin(
+        fwd_key.clone(),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        PolicyRevalidationTarget::NoLocalEntry,
+        "the reverse test must exercise the sessionless companion arm"
+    );
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &rev_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: rev_key.src_ip,
+            dst_ip: rev_key.dst_ip,
+            forward_key: rev_key.clone(),
+        }),
+        txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 80),
+        false,
+    );
+    assert_eq!(
+        canonical,
+        Some(fwd_key.clone()),
+        "reverse deny must identify the forward companion, not the reply tuple"
+    );
+    assert!(
+        sessions.entry_with_origin(&fwd_key).is_some(),
+        "the seam reports the pair revocation; the owner tears down afterward"
+    );
+    assert!(sessions.install_with_protocol_with_origin(
+        rev_key.clone(),
+        decision(LAN_IFINDEX),
+        metadata(true),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    let shared_nat_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions =
+        std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands = Vec::new();
+    super::session_glue::delete_terminal_filtered_session(
+        &mut sessions,
+        super::SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &forwarding,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        &metadata(false),
+        SessionOrigin::ForwardFlow,
+        2_000_000,
+        0,
+    );
+    assert!(sessions.entry_with_origin(&fwd_key).is_none());
+    assert!(sessions.entry_with_origin(&rev_key).is_none());
+}
+
+/// A reverse NoLocalEntry with no LOCAL forward companion survives. Shared-only
+/// companions are intentionally treated the same way: this helper cannot
+/// recover their authoritative local egress/NAT/zone context, so it declines
+/// rather than fabricating a verdict. The existing stale-row #9604 pin covers
+/// the materialized lone-reverse variant.
+#[test]
+fn reverse_sessionless_lone_survives_10582() {
+    let forwarding = forwarding_reverse_provenance_10582();
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let fwd_key = flow_key_to(DST);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &rev_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: rev_key.src_ip,
+            dst_ip: rev_key.dst_ip,
+            forward_key: rev_key.clone(),
+        }),
+        txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 0),
+        false,
+    );
+    assert_eq!(canonical, None);
+    assert_eq!(sessions.len(), 0);
 }
 
 /// The descriptor path must recycle an identity-less arrival at the ingress

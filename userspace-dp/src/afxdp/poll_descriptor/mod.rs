@@ -49,9 +49,11 @@ mod prerouting_scope;
 
 mod policy_revalidation;
 #[cfg(test)]
-pub(crate) use policy_revalidation::revalidate_zone_policy_declines_for_test;
-#[cfg(test)]
-pub(crate) use policy_revalidation::revalidate_zone_policy_revocation_for_test;
+pub(crate) use policy_revalidation::{
+    revalidate_zone_policy_canonical_key_for_test, revalidate_zone_policy_declines_for_test,
+    revalidate_zone_policy_revocation_for_test, revalidate_zone_policy_revokes_for_test,
+    revalidate_zone_policy_sessionless_denies_for_test,
+};
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;
@@ -1687,6 +1689,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 now_secs,
                                 meta.ingress_ifindex as i32,
                                 ha_startup_grace_until_secs,
+                                resolved.origin,
                             ),
                             Some(arrival_zone) => match foreign_hit_verdict(
                                 worker_ctx.forwarding,
@@ -1721,6 +1724,10 @@ pub(super) fn poll_binding_process_descriptor(
                             // (#6457) and the revoked 5-tuple keeps forwarding
                             // off a cached RewriteDescriptor with no session row.
                             //
+                            // A canonical-less, sessionless revocation
+                            // intentionally skips teardown and flow-cache
+                            // eviction: there is no local owner/cache slot to
+                            // evict.
                             // `canonical_key` is the key the revalidation
                             // resolved — NOT `resolved.key`, which is the WIRE
                             // tuple and, on the NAT reverse-translated alias
@@ -1735,31 +1742,33 @@ pub(super) fn poll_binding_process_descriptor(
                             // SAME direction entry or the companion is missed
                             // (a degenerate third key under pure SNAT/DNAT, a
                             // self-identical elision under combined SNAT+DNAT).
-                            delete_terminal_filtered_session(
-                                sessions,
-                                binding.bpf_maps.session_map.handle(),
-                                conntrack_v4_fd,
-                                conntrack_v6_fd,
-                                worker_ctx.shared_sessions,
-                                worker_ctx.shared_nat_sessions,
-                                worker_ctx.shared_forward_wire_sessions,
-                                &worker_ctx.shared_owner_rg_indexes,
-                                worker_ctx.peer_worker_commands,
-                                worker_ctx.worker_commands_by_id,
-                                worker_ctx.forwarding,
-                                &revocation.canonical_key,
-                                revocation.decision,
-                                &revocation.metadata,
-                                revocation.origin,
-                                now_ns,
-                                worker_id,
-                            );
-                            collect_revoked_flow_cache_keys(
-                                &resolved.key,
-                                &revocation.canonical_key,
-                                revocation.decision.nat,
-                                &mut binding.scratch.scratch_filter_revoked_keys,
-                            );
+                            if let Some(canonical_key) = revocation.canonical_key.as_ref() {
+                                delete_terminal_filtered_session(
+                                    sessions,
+                                    binding.bpf_maps.session_map.handle(),
+                                    conntrack_v4_fd,
+                                    conntrack_v6_fd,
+                                    worker_ctx.shared_sessions,
+                                    worker_ctx.shared_nat_sessions,
+                                    worker_ctx.shared_forward_wire_sessions,
+                                    &worker_ctx.shared_owner_rg_indexes,
+                                    worker_ctx.peer_worker_commands,
+                                    worker_ctx.worker_commands_by_id,
+                                    worker_ctx.forwarding,
+                                    canonical_key,
+                                    revocation.decision,
+                                    &revocation.metadata,
+                                    revocation.origin,
+                                    now_ns,
+                                    worker_id,
+                                );
+                                collect_revoked_flow_cache_keys(
+                                    &resolved.key,
+                                    canonical_key,
+                                    revocation.decision.nat,
+                                    &mut binding.scratch.scratch_filter_revoked_keys,
+                                );
+                            }
                             telemetry.dbg.policy_revoked_sessions += 1;
                             binding
                                 .live

@@ -1288,6 +1288,32 @@ pub(super) fn txn_run_descriptor_with_deliveries(
         None,
     )
 }
+/// Test-only descriptor driver with a caller-seeded shared-session map. This
+/// keeps the real poll body in the loop while allowing transient-hit cells to
+/// observe handler drop/no-seed behavior after shared materialization.
+pub(super) fn txn_run_descriptor_with_shared_sessions(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) -> (BatchCounters, DebugPollCounters) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    txn_run_descriptor_inner(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        shared_sessions,
+        None,
+    )
+}
+
 
 /// Descriptor driver variant that overrides the frame length while leaving
 /// metadata and frame bytes in a valid UMEM location.

@@ -712,10 +712,13 @@ func changedPolicyRuntimeIDs(oldCfg, newCfg *config.Config, oldSched, newSched m
 // active-scheduler->inactive-scheduler) and a same-binding scheduler whose active
 // WINDOW the commit redefined out from under the current instant.
 //
-// The inactive->active direction is intentionally NOT a clear trigger: while the
-// policy was inactive it admitted no sessions, so none carry its policy_id — a
-// sweep would be a pure no-op. Only the tightening direction (active->inactive)
-// has live sessions to re-evaluate.
+// The inactive->active direction is intentionally NOT a per-ID clear trigger:
+// the policy's own ID had no sessions while inactive, but sessions admitted by
+// a later permit can be shadowed when this earlier policy becomes active. A
+// per-ID sweep cannot express that dependency because those sessions carry the
+// later permit's ID; the generation-bump Stale path revalidates them instead
+// (ZPS-03/#8356). Only the tightening direction (active->inactive) has live
+// sessions carrying this policy's ID to re-evaluate.
 func policySchedulerBecameInactive(oldPol, newPol *config.Policy, oldSched, newSched map[string]bool) bool {
 	wasActive := !dpuserspace.PolicyInactive(oldPol.SchedulerName, oldSched)
 	nowInactive := dpuserspace.PolicyInactive(newPol.SchedulerName, newSched)
