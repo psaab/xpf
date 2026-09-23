@@ -7260,7 +7260,7 @@ fn forward_noegress_m2_revokes_despite_fresh_live_10507() {
 /// RED-on-revert: with the provenance keying reverted, the reply revokes
 /// (revoked 1, count 0).
 #[test]
-fn typed_permit_local_icmp_first_reply_forwards_10635() {
+fn typed_permit_local_icmp_first_reply_coasts_10635() {
     // nat_snapshot base (inbound_dnat shape): LAN interface address yields the
     // connected route to the reply's destination, so the reverse current is
     // LocalForwarding — the prod shape where the companion fence engages.
@@ -7294,6 +7294,10 @@ fn typed_permit_local_icmp_first_reply_forwards_10635() {
         link_local: false,
     });
     let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "the type-constrained arming must be visible box-wide or GATE 1b stamps and this cell moots itself (b03-F1)"
+    );
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     // Local-admit shape, installed directly (miss-path admit needs HA/lease
@@ -7341,6 +7345,11 @@ fn typed_permit_local_icmp_first_reply_forwards_10635() {
         "a never-validated forward has no recorded Permit to fence — revoking it manufactures a DENY (b03-F1)"
     );
     assert_eq!(session_count(&sessions), 2, "the pair must survive");
+    assert_eq!(
+        sessions.policy_revalidation_loud_declines(),
+        0,
+        "a coasted first reply must not take a loud-decline arm (b03-F1)"
+    );
     // No tx assert (9604 precedent): the fence verdict (revoke vs coast)
     // is this cell's subject, not egress transmission.
 }
@@ -7353,7 +7362,7 @@ fn typed_permit_local_icmp_first_reply_forwards_10635() {
 /// RED-on-revert: with the provenance gate reverted, the reply revokes
 /// (revoked 1, count 0).
 #[test]
-fn lone_reverse_unvalidated_forwards_without_revoke_10635() {
+fn lone_reverse_unvalidated_coasts_without_revoke_10635() {
     // nat_snapshot base (same intent shape as the b03-F1 cell): connected
     // LAN route + reachable neighbor make the reply a ForwardCandidate, so
     // the reverse current is LocalForwarding. allow-all admits the flow.
@@ -7392,6 +7401,18 @@ fn lone_reverse_unvalidated_forwards_without_revoke_10635() {
         ),
         "fixture must install the lone reverse half"
     );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&rev_key),
+        crate::session::PolicyRevalidationKind::Unvalidated,
+        "the lone reverse carries no recorded authorization (r02-F3)"
+    );
+    assert!(
+        matches!(
+            sessions.policy_revalidation_target(&rev_key),
+            crate::session::PolicyRevalidationTarget::Stale(_)
+        ),
+        "gen-0 install at table gen 7 reads Stale (r02-F3)"
+    );
     let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let frame = build_icmp_echo_reply_frame_v4_9604(
         DST,
@@ -7409,4 +7430,99 @@ fn lone_reverse_unvalidated_forwards_without_revoke_10635() {
         "a never-validated reverse has no recorded Permit to fence (r02-F3)"
     );
     assert_eq!(session_count(&sessions), 1, "the lone reverse must survive");
+    assert_eq!(
+        sessions.policy_revalidation_loud_declines(),
+        0,
+        "a coasted lone reverse must not take a loud-decline arm (r02-F3)"
+    );
+}
+
+/// #10635 (recorded lone reverse): a RECORDED (Stale RecordedEgress)
+/// lone-reverse reply that would locally forward, with no forward companion,
+/// must revoke — not coast. The 10635 relaxation coasts only never-validated
+/// rows (r02-F3); a recorded row retains a recorded Permit, so the 1127 gate
+/// fails it closed via `policy_revalidation_fenced`.
+///
+/// RED-on-revert: with the fenced term dropped from the 1127 gate, the reply
+/// coasts (revoked 0, count 1).
+#[test]
+fn lone_reverse_recorded_revokes_without_companion_10635() {
+    // nat_snapshot base (same intent shape as the r02-F3 cell): connected
+    // LAN route + reachable neighbor make the reply a ForwardCandidate, so
+    // the reverse current is LocalForwarding. allow-all admits the flow.
+    let mut snapshot = nat_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    // Reachable neighbor for the reply's LAN destination (inbound_dnat
+    // shape): with the connected route this makes the reply a
+    // ForwardCandidate out reth1.0.
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "reth1.0".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: "10.0.61.102".to_string(),
+        mac: "02:aa:bb:cc:dd:01".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    // Lone reverse only (Cell 6 shape, companion deleted): no forward row.
+    let fwd_key = icmp_flow_key();
+    let rev_key =
+        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            rev_key.clone(),
+            decision(WAN_IFINDEX),
+            metadata(true),
+            SessionOrigin::ReverseFlow,
+            122_000_000_000,
+            PROTO_ICMP,
+            0,
+        ),
+        "fixture must install the lone reverse half"
+    );
+    // Recorded Permit, then aged Stale (a commit moved the generation): the
+    // recorded authorization survives for the fence to act on.
+    sessions.mark_policy_revalidated(
+        &rev_key,
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+    );
+    sessions.set_policy_revalidation_gen(8);
+    assert_eq!(
+        sessions.policy_revalidation_kind(&rev_key),
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        "the lone reverse must retain its recorded provenance"
+    );
+    assert!(
+        matches!(
+            sessions.policy_revalidation_target(&rev_key),
+            crate::session::PolicyRevalidationTarget::Stale(_)
+        ),
+        "gen-7 stamp at table gen 8 reads Stale"
+    );
+    assert!(
+        sessions.policy_revalidation_fenced(&rev_key),
+        "a Stale Recorded row is fenced — the operative 1127 operand"
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let frame = build_icmp_echo_reply_frame_v4_9604(
+        DST,
+        SRC,
+        ICMP_ID,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the lone reverse entry");
+    assert_eq!(
+        out.revoked, 1,
+        "a recorded lone reverse retains a recorded Permit — coasting it is fail-open"
+    );
+    assert_eq!(session_count(&sessions), 0, "the revoked reverse must be gone");
 }
