@@ -257,7 +257,7 @@ pub(super) fn local_tunnel_source_loop(
     recent_exceptions: Arc<Mutex<ExceptionEventRing>>,
     stop: Arc<AtomicBool>,
 ) {
-    let mut tun = match open_tun(&tunnel_name) {
+    let mut tun = match open_gre_tun(&tunnel_name) {
         Ok((file, _actual_name)) => file,
         Err(err) => {
             record_local_tunnel_exception(&recent_exceptions, &tunnel_name, err);
@@ -955,6 +955,76 @@ pub(super) fn set_fd_nonblocking(fd: c_int) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// #10553 test seam (mirrors the #9521 WG seam in
+/// `coordinator/wg_control/mod.rs`): stand-in TUN files keyed by
+/// tunnel name for GRE local-origin threads the coordinator spawns
+/// under test.
+///
+/// Without privilege every spawned GRE thread exits at `open_tun` —
+/// which left the live-thread prune path (unpublish-before-join
+/// against a running poll loop) unobservable. A test that registers
+/// a stand-in here (a datagram socketpair keeps TUN packet
+/// boundaries) drives the whole path, spawn included. Compiled out
+/// of production builds.
+#[cfg(test)]
+pub(super) static TEST_GRE_TUN_STANDINS: Mutex<Vec<(String, std::fs::File)>> =
+    Mutex::new(Vec::new());
+
+fn open_gre_tun(tunnel_name: &str) -> Result<(std::fs::File, String), String> {
+    #[cfg(test)]
+    {
+        let mut standins = TEST_GRE_TUN_STANDINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = standins.iter().position(|(name, _)| name == tunnel_name) {
+            let (name, file) = standins.remove(pos);
+            return Ok((file, name));
+        }
+    }
+    open_tun(tunnel_name)
+}
+
+/// #10553 test helper: a datagram socketpair standing in for the GRE
+/// TUN, as (thread end, test end). SOCK_DGRAM keeps packet boundaries
+/// the way a TUN does. Both ends are non-blocking: the production
+/// caller makes the real TUN non-blocking before the loop runs, and
+/// a blocking stand-in hangs the loop in its TUN read.
+#[cfg(test)]
+pub(super) fn tun_standin_pair_10553() -> (std::fs::File, std::fs::File) {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0i32; 2];
+    let rc = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc, 0, "socketpair");
+    set_fd_nonblocking(fds[0]).expect("thread end non-blocking");
+    set_fd_nonblocking(fds[1]).expect("test end non-blocking");
+    unsafe {
+        (
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        )
+    }
+}
+
+/// #10553 test helper: register a stand-in for `tunnel_name` so a
+/// thread the coordinator spawns gets it instead of a real TUN;
+/// returns the test end.
+#[cfg(test)]
+pub(super) fn register_tun_standin_10553(tunnel_name: &str) -> std::fs::File {
+    let (thread_end, test_end) = tun_standin_pair_10553();
+    TEST_GRE_TUN_STANDINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((tunnel_name.to_string(), thread_end));
+    test_end
 }
 
 #[cfg(test)]

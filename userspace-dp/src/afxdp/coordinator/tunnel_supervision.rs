@@ -18,6 +18,29 @@ use super::*;
 /// (e.g. EADDRINUSE against a host kernel wgX) without ever giving up.
 pub(crate) const WG_SPAWN_BACKOFF_NS: u64 = 3_000_000_000;
 
+/// #10553 test-only oracle for the unpublish-before-join ordering:
+/// when armed with a GRE ifindex, `stop_remove_local_tunnel_entry`
+/// checks the published delivery map immediately before joining the
+/// live thread and records that the stale sender is already absent.
+#[cfg(test)]
+static TEST_GRE_UNPUBLISH_BEFORE_JOIN_IFINDEX: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+#[cfg(test)]
+static TEST_GRE_UNPUBLISH_BEFORE_JOIN_OBSERVED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn arm_test_gre_unpublish_before_join(ifindex: i32) {
+    TEST_GRE_UNPUBLISH_BEFORE_JOIN_OBSERVED.store(false, std::sync::atomic::Ordering::Relaxed);
+    TEST_GRE_UNPUBLISH_BEFORE_JOIN_IFINDEX.store(ifindex, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(test)]
+pub(super) fn take_test_gre_unpublish_before_join_observed() -> bool {
+    TEST_GRE_UNPUBLISH_BEFORE_JOIN_IFINDEX.store(0, std::sync::atomic::Ordering::Release);
+    TEST_GRE_UNPUBLISH_BEFORE_JOIN_OBSERVED.swap(false, std::sync::atomic::Ordering::Acquire)
+}
+
 impl super::Coordinator {
     /// #9549: how many WireGuard engines the current forwarding state holds. A
     /// server-level cell asserts this before trusting a "no WG thread was spawned"
@@ -171,6 +194,22 @@ impl super::Coordinator {
             if let Some(mut handle) = entry.handle.take() {
                 handle.request_stop();
                 if let Some(join) = handle.join.take() {
+                    #[cfg(test)]
+                    {
+                        let probe_ifindex = TEST_GRE_UNPUBLISH_BEFORE_JOIN_IFINDEX
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        if probe_ifindex == entry.spawned_ifindex {
+                            assert!(
+                                !self
+                                    .local_tunnel_deliveries
+                                    .load()
+                                    .contains_key(&probe_ifindex),
+                                "GRE delivery must be unpublished before joining the stale thread"
+                            );
+                            TEST_GRE_UNPUBLISH_BEFORE_JOIN_OBSERVED
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    }
                     let _ = join.join();
                 }
             }
