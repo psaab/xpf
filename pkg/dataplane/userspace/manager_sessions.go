@@ -29,12 +29,6 @@ const (
 	policyReadByteCap      = 48 * 1024 * 1024
 	policyReadDeadline     = 30 * time.Second
 	policyDeleteDeadline   = 30 * time.Second
-	// Clear-all paging bounds (#10512): one absolute deadline plus a
-	// finite page cap, so a wedged helper cannot stack per-request
-	// deadlines or spin the driver on repeated tokens. 65536 pages ×
-	// 4096 helper rows/page = 268M rows, beyond any live table.
-	clearAllDeadline = 30 * time.Second
-	clearAllMaxPages = 65536
 	// Plan §2.4 micro-batch caps: the helper acquires all of one batch's
 	// gate keys together, so Go packs forward matches and their captured
 	// companions under both ceilings.
@@ -46,6 +40,12 @@ const (
 	// failures (one corrupt batch among clean ones) continue past.
 	policyDeleteSemanticBreaker = 3
 )
+// Clear-all single-shot bound (#10512 P4/P8): the one clear RPC is
+// already bounded by the transport round-trip deadline; this absolute
+// deadline (checked before AND after the call) bounds a transport that
+// outlives its own deadlines. A var (not const) so the overrun cell can
+// shrink it like the 5380 deadline vars.
+var clearAllDeadline = 30 * time.Second
 // ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
 // session authority. It deliberately uses the control socket: this request is
 // the commit-time discovery boundary and must not be accepted on the dedicated
@@ -154,11 +154,12 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 		}
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
 		return result, errSessionHelperUnreachable
 	}
 	startProcGen := m.procGen
+	m.mu.Unlock()
 	deadline := time.Now().Add(policyDeleteDeadline)
 	var firstErr error
 	confirmed := 0
@@ -169,14 +170,20 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 				fmt.Errorf("deadline exceeded after %s", policyDeleteDeadline),
 				result, confirmed, len(matches))
 		}
+		// P5: m.mu covers one batch's prep+send only — response
+		// accounting below runs unlocked (locals only), so a 4096-batch
+		// invalidation never stalls workers/commits/HA across its 30s.
+		m.mu.Lock()
 		if m.proc == nil || m.procGen != startProcGen {
 			// Helper churned mid-invalidation (crash/restart/upgrade): the
 			// capture predates the new incarnation, whose rebuilt tables may
 			// carry reminted identities. Never evaluate a stale capture
 			// against fresh tables — gap loud and let a touching recommit
 			// re-capture (precedent: owner_rg_export_paging_9344 procGen fence).
+			cur := m.procGen
+			m.mu.Unlock()
 			return result, policyDeleteGapError(
-				fmt.Errorf("helper churned mid-invalidation (procGen %d -> %d)", startProcGen, m.procGen),
+				fmt.Errorf("helper churned mid-invalidation (procGen %d -> %d)", startProcGen, cur),
 				result, confirmed, len(matches))
 		}
 		end := start + policyDeleteBatchMatches
@@ -209,8 +216,10 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 			// all-stale-count a live revocation), and never hand a fresh
 			// helper generation a pre-churn request at all.
 			if m.proc == nil || m.procGen != startProcGen {
+				cur := m.procGen
+				m.mu.Unlock()
 				return result, policyDeleteGapError(
-					fmt.Errorf("helper churned during batch send (procGen %d -> %d)", startProcGen, m.procGen),
+					fmt.Errorf("helper churned during batch send (procGen %d -> %d)", startProcGen, cur),
 					result, confirmed, len(matches))
 			}
 			// Transport-unknown outcome (lost request/response, slow
@@ -220,6 +229,8 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 			// attempt pair).
 			resp, err = m.syncSessionRequestResponseLocked(req)
 		}
+		// Released before response accounting (P5).
+		m.mu.Unlock()
 		if err != nil {
 			if errors.Is(err, errSessionHelperUnreachable) {
 				// Helper down/hung (both attempts failed transport): #5380
@@ -962,80 +973,69 @@ func (m *Manager) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, err
 	return len(applied), nil
 }
 
-// ClearAllSessions clears the BPF mirror AND issues an authoritative "delete" to
-// the Rust helper for every session so an operator `clear security flow session
-// all` actually stops forwarding under revoked decisions (#5096). The helper
-// exposes no bulk-clear verb (only the per-session "delete" the singular path
-// uses), so every mirror key — forward AND reverse conntrack entries — must be
-// deleted on the helper too.
+// ClearAllSessions revokes every session authoritatively via ONE helper
+// round trip (single-shot mirror_clear_chunk) so an operator
+// `clear security flow session all` stops forwarding under revoked
+// decisions (#5096). The helper natively enumerates all routing
+// domains under its clear fence, deletes helper authority + BPF rows,
+// and reports deleted counts; Go holds no key snapshot at all.
 //
-// The keys are NOT snapshotted here. Enumerating the full v4+v6 mirror into
-// wrapper-owned slices while the shim's own clear snapshots them AGAIN (plus the
-// dynamic-DNAT key lists) stacked ~1 GB of duplicate key slices in RSS on a
-// max-loaded 10M/family table — enough for the recovery command to stall or
-// OOM-kill the daemon (#5304). Instead the shim's ClearAllSessionsChunked drives
-// a per-chunk callback: it collects a bounded chunk, deletes it from the mirror,
-// and hands that same bounded chunk here for deletion on the helper, so neither
-// side ever holds more than one chunk of keys. deleteHelperSessions{V4,V6} keeps
-// the #5096 chunked-transmission behaviour (sessionHelperDeleteChunk).
+// Bounds (P4): the helper snapshot is hard-capped at 262144 keys
+// (take(cap+1) bounds the transient Vec ≈18MB max even against a
+// hostile table; over-cap fails closed touching nothing and surfaces
+// here as an error). Go sends one request and retains one response
+// (counts only) — no paging state, no continuation loop, no fence
+// tracking. Memory: Go O(1) keys; helper O(min(table, cap)) one-shot.
 //
-// The Rust helper is AUTHORITATIVE in userspace mode — it owns packet
-// lookup/forwarding while the BPF mirror is a read model. A helper-delete IPC
-// failure therefore means a session the operator asked to revoke may still be
-// forwarding, even though the mirror was emptied. Losing that error (as the
-// pre-#5881 void callbacks did) let `clear security flow session all` report
-// success while sessions lived on — a security bug. So the first helper-delete
-// error is captured across chunks and, when the mirror clear itself succeeded,
-// surfaced as ClearAllSessions's returned error. The bpf mirror's partial
-// (v4, v6) counts are still returned alongside the error, matching the #5882
-// non-atomic clear-all reporting contract, so a caller learns what the mirror
-// side revoked while also learning the authoritative revocation is unconfirmed.
-// A mirror-side error still takes precedence and is returned as before.
+// Fail-closed atomic (P11, revises #5882): counts are
+// helper-confirmed DELETED sessions — (0,0) on ANY failure,
+// including pre-response transport errors. Nothing is partially
+// reported as cleared: the BPF mirror is the helper's read model
+// (its per-key deletes empty it on success), so Go never sweeps BPF
+// here — a Go sweep would race the helper's own deletes and
+// reintroduce the #5304 full-table enumeration this design deleted.
+// The old #5882 "mirror cleared + partial counts alongside error"
+// contract belonged to the Go-driven chunked design and does not
+// apply: under single-shot there is no Go-cleared portion to report.
+// The #5881 security property (helper failure surfaced, never
+// reported as success) is preserved — strictly: failure now means
+// nothing was revoked anywhere, not "mirror revoked, authority
+// unconfirmed".
 //
-// #5380 residual: the per-chunk callbacks skip the helper delete once a
-// transport failure is recorded, so a full clear-all under a hung helper pays
-// ~one round-trip deadline total rather than one per 4096-key mirror chunk.
-// See the helperDown guard below.
+// Terminal: complete-with-empty is the only success. Incomplete,
+// complete-with-continuation (contradictory), or any continuation
+// (the helper never pages) is a contract-breach error. #5380's
+// multi-dial fast-fail is structural now: one dial exists, so a hung
+// helper costs exactly one round-trip deadline by construction.
 func (m *Manager) ClearAllSessions() (int, int, error) {
-	v4, v6 := m.bpfShim.SessionCount()
+	deadline := time.Now().Add(clearAllDeadline)
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.proc == nil || m.proc.Process == nil {
-		return v4, v6, errSessionHelperUnreachable
+		m.mu.Unlock()
+		return 0, 0, errSessionHelperUnreachable
 	}
 	req := SessionSyncRequest{Operation: "mirror_clear_chunk"}
-	deadline := time.Now().Add(clearAllDeadline)
-	seen := make(map[string]struct{})
-	for pages := 0; ; pages++ {
-		if time.Now().After(deadline) {
-			return v4, v6, fmt.Errorf("clear-all: paging deadline exceeded after %s (%d pages)", clearAllDeadline, pages)
-		}
-		if pages >= clearAllMaxPages {
-			return v4, v6, fmt.Errorf("clear-all: page cap exceeded (%d pages)", pages)
-		}
-		resp, err := m.syncSessionRequestResponseLocked(req)
-		if err != nil {
-			return v4, v6, fmt.Errorf("clear-all: authoritative helper session revocation failed: %w", err)
-		}
-		if resp.SessionMirrorV4Count != 0 || resp.SessionMirrorV6Count != 0 {
-			v4, v6 = int(resp.SessionMirrorV4Count), int(resp.SessionMirrorV6Count)
-		}
-		// Fail-closed terminal: ONLY complete-with-empty ends clean.
-		// Incomplete with no continuation strands the remainder with
-		// no way forward — that is a gap, not a success.
-		if resp.SessionMirrorComplete && resp.SessionMirrorContinuation == "" {
-			return v4, v6, nil
-		}
-		if resp.SessionMirrorContinuation == "" {
-			return v4, v6, fmt.Errorf("clear-all: incomplete with no continuation (counts v4=%d v6=%d)", v4, v6)
-		}
-		if _, dup := seen[resp.SessionMirrorContinuation]; dup {
-			return v4, v6, fmt.Errorf("clear-all: repeated continuation %q (counts v4=%d v6=%d)", resp.SessionMirrorContinuation, v4, v6)
-		}
-		seen[resp.SessionMirrorContinuation] = struct{}{}
-		req.ClearFenceID = resp.SessionMirrorFenceID
-		req.ClearContinuation = resp.SessionMirrorContinuation
+	resp, err := m.syncSessionRequestResponseLocked(req)
+	m.mu.Unlock()
+	if err != nil {
+		return 0, 0, fmt.Errorf("clear-all: authoritative helper session revocation failed: %w", err)
 	}
+	// P8: re-check post-RPC before accepting terminal (a terminal
+	// arriving past the deadline is still authoritative, so this is
+	// latency accounting against a transport that outlived its own
+	// bounds — it fails the call, never the revocation).
+	if time.Now().After(deadline) {
+		return 0, 0, fmt.Errorf("clear-all: response arrived after %s", clearAllDeadline)
+	}
+	// P10: single-shot never pages — any continuation is a breach,
+	// as is incomplete-with-empty (stranded remainder, no way on).
+	if resp.SessionMirrorContinuation != "" {
+		return 0, 0, fmt.Errorf("clear-all: unexpected continuation %q (single-shot helper never pages)", resp.SessionMirrorContinuation)
+	}
+	if !resp.SessionMirrorComplete {
+		return 0, 0, fmt.Errorf("clear-all: incomplete without continuation")
+	}
+	return int(resp.SessionMirrorV4Count), int(resp.SessionMirrorV6Count), nil
 }
 
 // deleteHelperSessionsV4 tells the Rust helper to delete every key so the batch
