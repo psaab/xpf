@@ -13754,3 +13754,32 @@ fn collector_includes_unknown_owner_with_fabric_10507() {
         "an RG-0/fabric row must be refresh-eligible (control)"
     );
 }
+
+/// #10512 (c's 9-tuple dedup, refactored): the shared READ collector keys
+/// the full `(SessionKey, session_id)` identity — two same-tuple rows from
+/// different routing domains with colliding worker-local ids both admit;
+/// only a true replica (same key AND id) refuses. Without the domain in
+/// the key the second reserve would refuse and a live tenant session
+/// would escape revocation (under-clear).
+#[test]
+fn policy_read_collector_cross_domain_rows_do_not_merge_10512() {
+    use std::sync::atomic::AtomicBool;
+    let overflow = AtomicBool::new(false);
+    let mut collector = crate::afxdp::PolicyReadCollector::default();
+    let mut key_a = test_key();
+    key_a.routing_domain = 1;
+    let mut key_b = test_key();
+    key_b.routing_domain = 2;
+    // Same worker-local id in both (ids are per-table counters): the
+    // domain is what distinguishes these rows.
+    assert!(collector.reserve(&overflow, key_a.clone(), 7));
+    assert!(
+        collector.reserve(&overflow, key_b, 7),
+        "cross-domain rows with colliding ids must both admit"
+    );
+    assert!(
+        !collector.reserve(&overflow, key_a, 7),
+        "a true replica (same key and id) must refuse"
+    );
+    assert!(!overflow.load(std::sync::atomic::Ordering::Acquire));
+}
