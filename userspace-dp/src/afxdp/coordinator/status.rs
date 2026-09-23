@@ -345,6 +345,29 @@ impl super::Coordinator {
         self.sessions.delete_stale_ignored.load(Ordering::Relaxed)
     }
 
+    /// #10512 scoped HA deletes refused on identity mismatch.
+    pub fn session_delete_refused_identity_total(&self) -> u64 {
+        self.sessions.delete_refused_identity.load(Ordering::Relaxed)
+    }
+
+    /// #10512: micro-batches that reached a Finalizing gate lease (holds
+    /// recorded). Average hold = `policy_batch_hold_ns_total / count`.
+    pub fn policy_batch_count_total(&self) -> u64 {
+        self.sessions.policy_batch_count.load(Ordering::Relaxed)
+    }
+
+    /// #10512: total gate-lease hold nanoseconds across counted batches.
+    pub fn policy_batch_hold_ns_total(&self) -> u64 {
+        self.sessions.policy_batch_hold_ns.load(Ordering::Relaxed)
+    }
+
+    /// #10512: max single gate-lease hold in nanoseconds (lifetime max).
+    pub fn policy_batch_hold_max_ns(&self) -> u64 {
+        self.sessions
+            .policy_batch_hold_max_ns
+            .load(Ordering::Relaxed)
+    }
+
     /// #6979 F4: `DeleteSynced` commands dropped by a full worker command queue
     /// whose NAT reservation the coordinator released on the worker's behalf.
     pub fn session_delete_dropped_released_total(&self) -> u64 {

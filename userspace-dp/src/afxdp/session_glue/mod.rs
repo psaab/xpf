@@ -1102,6 +1102,7 @@ fn delete_terminal_half(
         conntrack_v4_fd,
         conntrack_v6_fd,
     );
+    let closed_id = sessions.session_id_for(key);
     sessions.delete(key);
     remove_shared_session(
         shared_sessions,
@@ -1124,7 +1125,7 @@ fn delete_terminal_half(
         metadata.is_reverse,
         now_ns,
     );
-    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false);
+    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false, closed_id);
 }
 
 /// #9856: slice size for the collecting export-candidate walk below. The
@@ -1367,6 +1368,130 @@ pub(super) fn apply_worker_commands(
                 };
                 session_counter_answers.push(answer);
             }
+            WorkerCommand::ListSessionsByPolicy {
+                request,
+                collected,
+                overflow,
+                errors,
+                pending,
+            } => {
+                let wanted = |policy_id: u32| {
+                    policy_id != 0 && request.policy_ids.iter().any(|candidate| *candidate == policy_id)
+                };
+                let family_allowed = |family: u8| {
+                    request.families.is_empty()
+                        || request.families.iter().any(|candidate| *candidate == family)
+                };
+                let class_allowed = |is_reverse: bool| {
+                    request.classes.is_empty()
+                        || request.classes.iter().any(|class| {
+                            (is_reverse && class == "reverse")
+                                || (!is_reverse && class == "forward")
+                        })
+                };
+                if request.mode == "legacy" && request.before_secs.is_none() {
+                    errors
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push("legacy-before-secs-missing".to_string());
+                } else {
+                    sessions.iter_with_identity(
+                        |key, decision, metadata, _origin, created_ns, session_id| {
+                            let family = crate::afxdp::ha::policy_wire_family(key.addr_family);
+                            if !family_allowed(family)
+                                || !class_allowed(metadata.is_reverse)
+                                || !wanted(metadata.policy_id)
+                            {
+                                return;
+                            }
+                            // Legacy time fence (#6948): keep sessions admitted
+                            // at or before the activation stamp (old numbering).
+                            // `Some(0)` is explicitly UNBOUNDED — Go sends the
+                            // raw activation stamp, and 0 means "boundary
+                            // unknown" (clear every matching id), never a real
+                            // timestamp. `None` in legacy mode is a caller bug
+                            // and is rejected above, not silently unbounded.
+                            if request.mode == "legacy"
+                                && request
+                                    .before_secs
+                                    .map(|before| {
+                                        before != 0 && created_ns / 1_000_000_000 > before
+                                    })
+                                    .unwrap_or(true)
+                            {
+                                return;
+                            }
+                            if session_id == 0 {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(format!(
+                                        "identity-missing:{}:{}",
+                                        key.src_ip, key.dst_ip
+                                    ));
+                                return;
+                            }
+                            // Shared admission: skip fast past the cap (no
+                            // lock), else reserve (dedups cross-worker
+                            // replicas) BEFORE building the row. The build
+                            // below runs unlocked; only reserve and push take
+                            // the collector lock.
+                            if overflow.load(std::sync::atomic::Ordering::Acquire) {
+                                return;
+                            }
+                            let admitted = collected
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .reserve(overflow.as_ref(), key.clone(), session_id);
+                            if !admitted {
+                                return;
+                            }
+                            let Some(mut row) = crate::afxdp::ha::policy_match_from_parts(
+                                key,
+                                metadata,
+                                session_id,
+                                created_ns,
+                            ) else {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push("unsupported-address-family".to_string());
+                                return;
+                            };
+                            if let Some((companion_key, companion_metadata, companion_id)) =
+                                sessions.policy_companion(key, decision.nat)
+                            {
+                                if companion_id == 0 {
+                                    errors
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .push(format!(
+                                            "companion-identity-missing:{}:{}",
+                                            key.src_ip, key.dst_ip
+                                        ));
+                                    return;
+                                }
+                                row.reverse_key =
+                                    crate::afxdp::ha::policy_tuple_from_key(&companion_key);
+                                if row.reverse_key.is_none() {
+                                    errors
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .push("unsupported-companion-family".to_string());
+                                    return;
+                                }
+                                row.companion_policy_id = companion_metadata.policy_id;
+                                row.expected_companion_rt_flow_session_id = companion_id;
+                            }
+                            collected
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(row);
+                        },
+                    );
+                }
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
             WorkerCommand::UpsertSynced(entry) => {
                 commands::handle_upsert_synced(
                     sessions,
@@ -1439,6 +1564,85 @@ pub(super) fn apply_worker_commands(
                     &mut deleted_synced_keys,
                     worker_id,
                 );
+            }
+            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion } => {
+                commands::handle_delete_synced_conditional(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    key,
+                    expected_id,
+                    now_ns,
+                    now_secs,
+                    &mut deleted_synced_keys,
+                    worker_id,
+                    companion,
+                );
+            }
+            WorkerCommand::DeletePolicyBatch {
+                items,
+                applied,
+                pending,
+                report,
+                intents,
+            } => {
+                // Abort fence, phase 1 (table work ONLY): hold the report
+                // mutex across cancel-check and the per-item teardown loop, so
+                // cancel validation is atomic with the table mutations (see
+                // PolicyDeleteBatchReport). Microsecond, syscall-free, and
+                // tree-standard to hold — BPF redirect deletes are collected
+                // as intents and stashed into the shared handoff INSIDE this
+                // scope (table-side metadata only): holding syscalls would let
+                // a slow worker wedge the coordinator's abort indefinitely,
+                // and post-fence worker BPF would break abort-quiescence.
+                // The coordinator drains + executes after phase-1 acks, under
+                // the batch lease. Lock order fence -> applied slot / intents,
+                // never reversed: the coordinator reads slots and drains
+                // intents without the fence (after all acks) and takes the
+                // fence touching neither (on abort).
+                {
+                    let mut guard = report
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if !guard.cancelled {
+                        let mut applied_slot = applied
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let mut deferred = Vec::new();
+                        for (index, item) in items.iter().enumerate() {
+                            if commands::handle_remove_policy_item(
+                                sessions,
+                                session_map,
+                                forwarding,
+                                ha_state,
+                                item,
+                                &mut *guard,
+                                index,
+                                now_ns,
+                                now_secs,
+                                &mut deleted_synced_keys,
+                                worker_id,
+                                &mut deferred,
+                            ) {
+                                applied_slot[index] = true;
+                            }
+                        }
+                        intents
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .extend(deferred);
+                    }
+                }
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            WorkerCommand::ProbePolicyBatch {
+                bares,
+                found,
+                pending,
+            } => {
+                commands::handle_probe_policy_tuples(sessions, &bares, found.as_ref());
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
             WorkerCommand::DeleteSyncedIfTableUnknown { key, domain, check } => {
                 // #9752: conditional purge delete — decline (no-op, not even
@@ -1985,6 +2189,70 @@ pub(super) fn replicate_session_delete_repairing(
         // Byte-for-byte the two releases `handle_delete_synced` would have run,
         // with that worker's id as the holder, so the mask empties on the same
         // last-release rule and the port is returned exactly once.
+        release_source_nat_allocation_for_worker(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            worker_id,
+        );
+        crate::nat64::release_nat64_allocation_for_worker(
+            &forwarding.nat64,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            worker_id,
+        );
+    }
+    outcome
+}
+
+/// Stale-ordinary-close twin of [`replicate_session_delete_repairing`]:
+/// siblings delete only when the forward's live identity still matches
+/// the captured one, and the carried companion goes with it (same
+/// forward-match gate as the scoped HA path — no companion identity is
+/// capturable from a close delta). Drop repair mirrors the unconditional
+/// twin keystroke for keystroke (exact-keyed releases + epoch signal).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn replicate_session_delete_conditional(
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    forwarding: &ForwardingState,
+    key: &SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+    expected_id: u64,
+    companion: Option<SessionKey>,
+) -> DeleteReplicationOutcome {
+    let mut outcome = DeleteReplicationOutcome::default();
+    for commands in peer_worker_commands {
+        let mut pending = worker_queue::lock_recover(commands);
+        let queued = worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::DeleteSyncedConditional {
+                key: key.clone(),
+                expected_id,
+                companion: companion.clone(),
+            },
+        );
+        drop(pending);
+        if queued {
+            continue;
+        }
+        SESSION_DELETE_REPLICA_DROPPED.fetch_add(1, Ordering::Relaxed);
+        outcome.dropped += 1;
+        let Some(worker_id) = worker_id_for_command_queue(worker_commands_by_id, commands) else {
+            continue;
+        };
+        SESSION_DELETE_REPLICA_DROP_REPAIRED.fetch_add(1, Ordering::Relaxed);
+        outcome.repaired += 1;
+        if let Some(epoch) = SESSION_DELETE_DROP_EPOCH.get(worker_id as usize) {
+            epoch.fetch_add(1, Ordering::Relaxed);
+        }
         release_source_nat_allocation_for_worker(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,

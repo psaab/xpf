@@ -1447,6 +1447,7 @@ fn flush_deltas_for_test(
     forwarding: &ForwardingState,
     shared_runtime: &RuntimeViewReader,
     event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
+    current_sessions: Option<&mut SessionTable>,
 ) {
     use crate::afxdp::checksum::DnatTableFds;
     let ident = BindingIdentity {
@@ -1479,6 +1480,7 @@ fn flush_deltas_for_test(
         forwarding,
         shared_runtime,
         &mut worker_lossless_wedged,
+        current_sessions,
     );
 }
 
@@ -1541,7 +1543,15 @@ fn purge_table_readd_skips_all_through_flush() {
     assert!(evicted.is_empty());
     let deltas = sessions.drain_deltas(64);
     assert!(deltas.is_empty(), "no close may be emitted on re-add skip");
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &reader, &None);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &None,
+        None,
+    );
     assert!(shared.sessions.lock().expect("lock").contains_key(&key));
     assert!(peer_queue.lock().expect("lock").is_empty());
 }
@@ -1611,7 +1621,15 @@ fn purge_fence_decline_emits_no_close_through_flush() {
     assert_eq!(evicted, vec![key.clone()]);
     let deltas = sessions.drain_deltas(64);
     assert!(deltas.is_empty(), "decline must emit no close");
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &reader, &None);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &None,
+        None,
+    );
     assert!(
         shared.sessions.lock().expect("lock").contains_key(&key),
         "fenced shared entry must survive the flush"
@@ -1726,7 +1744,15 @@ fn purge_rejected_companion_survives_close_flush() {
             q[0]
         );
     }
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &reader, &None);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &None,
+        None,
+    );
     assert!(
         !shared.sessions.lock().expect("lock").contains_key(&key),
         "removed forward stays removed"
@@ -1834,7 +1860,15 @@ fn purge_close_after_table_readd_preserves_new_authority_through_flush() {
     // snapshot (blue still gone, as refreshed before the re-add) and must
     // re-read CURRENT truth through the reader (blue back). Handing flush
     // the fresh view directly would bypass the ordering being pinned.
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &reader, &handle);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &handle,
+        None,
+    );
     assert!(
         shared.sessions.lock().expect("lock").contains_key(&key),
         "reinstalled shared authority must survive a stale purge close"
@@ -2009,7 +2043,15 @@ fn purge_close_after_reinstall_without_readd_drops_through_flush() {
         },
     );
     let handle = Some(handle);
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &reader, &handle);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &handle,
+        None,
+    );
     assert!(
         shared.sessions.lock().expect("lock").contains_key(&key),
         "republished shared authority must survive a close that predates it"
@@ -2020,9 +2062,141 @@ fn purge_close_after_reinstall_without_readd_drops_through_flush() {
     );
 }
 
-/// Round 3 item 3, negative control: no reinstall, table still gone — the
-/// purge close is live and the drain PROCEEDS: the HA close is queued (the
-/// fence must not swallow due retirements).
+/// Round 3 item 3, incarnation interleave: queue A's close, install B on the
+/// same bare tuple under a different routing domain, then flush the delayed
+/// close. The stale A close must preserve B in both the local table and shared
+/// authority, and must cancel no queued B traffic.
+#[test]
+fn purge_close_reinstall_scoped_survivor_skips_flush_10512() {
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let decision = stamped_decision(unusable_resolution());
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::SyncImport,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    sessions.drain_deltas(64);
+    let shared = shared_maps();
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, decision, pbr_metadata()),
+    );
+    let rotated = Arc::new(rotated_blue_gone_state());
+    publish_pbr_view(&channel, 8, rotated.clone());
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_cmds = vec![peer_queue.clone()];
+    let mut purge = super::install_table_purge::InstallTablePurge::default();
+    purge.arm(8);
+    let mut evicted = Vec::new();
+    assert_eq!(
+        purge.step(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &peer_cmds,
+            &rotated,
+            &reader,
+            8,
+            NOW_NS,
+            0,
+            &mut evicted,
+        ),
+        1
+    );
+    let deltas = sessions.drain_deltas(64);
+    assert_eq!(deltas.len(), 1);
+    let mut replacement_key = key.clone();
+    replacement_key.routing_domain = 9;
+    let replacement_decision = stamped_decision(unusable_resolution());
+    assert!(sessions.install_with_protocol_with_origin(
+        replacement_key.clone(),
+        replacement_decision,
+        pbr_metadata(),
+        SessionOrigin::SyncImport,
+        NOW_NS + 1,
+        PROTO_TCP,
+        0x18,
+    ));
+    let replacement_id = sessions.session_id_for(&replacement_key);
+    assert_ne!(replacement_id, 0);
+    sessions.drain_deltas(64);
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&replacement_key, replacement_decision, pbr_metadata()),
+    );
+    assert!(
+        super::super::session_delta::close_delta_is_stale_incarnation(
+            &deltas[0],
+            Some(&sessions),
+            &shared.sessions,
+        ),
+        "delayed A close must be stale after scoped B reinstall"
+    );
+    assert_eq!(
+        super::super::session_delta::purge_close_cancel_keys(&deltas[0], true),
+        None,
+        "stale A close must not cancel B queued traffic"
+    );
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let handle = Some(handle);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &handle,
+        Some(&mut sessions),
+    );
+    // A stale close is dropped by the flush: no HA or RT_FLOW teardown for B.
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok()).count(),
+        0,
+        "stale A close must queue no teardown for B"
+    );
+    assert!(
+        sessions.session_id_for(&replacement_key) == replacement_id,
+        "scoped replacement remains live after delayed close"
+    );
+    assert!(
+        shared
+            .sessions
+            .lock()
+            .expect("lock")
+            .contains_key(&replacement_key),
+        "shared scoped replacement remains live after delayed close"
+    );
+}
+
+/// Negative control for the scoped-reinstall interleave: with no replacement,
+/// the purge close remains live and emits the HA + RT_FLOW pair.
 #[test]
 fn purge_close_without_reinstall_flushes_through_flush() {
     let channel = RuntimeViewChannel::default();
@@ -2088,10 +2262,18 @@ fn purge_close_without_reinstall_flushes_through_flush() {
         },
     );
     let handle = Some(handle);
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &reader, &handle);
-    // The live close emits the 1:1 HA + RT_FLOW pair; both must arrive.
-    assert!(
-        std::iter::from_fn(|| rx.try_recv().ok()).count() == 2,
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &handle,
+        None,
+    );
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok()).count(),
+        2,
         "a live purge close must queue the HA + RT_FLOW frame pair"
     );
     assert!(
@@ -2099,7 +2281,6 @@ fn purge_close_without_reinstall_flushes_through_flush() {
         "a live purge close retires the shared entry"
     );
 }
-
 fn cancel_keys_test_delta(purge_retirement: bool) -> SessionDelta {
     SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
     key: pbr_key(),
@@ -2224,7 +2405,15 @@ fn purge_close_after_readd_without_reinstall_drops_through_flush() {
         },
     );
     let handle = Some(handle);
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &reader, &handle);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &rotated,
+        &reader,
+        &handle,
+        None,
+    );
     assert!(
         std::iter::from_fn(|| rx.try_recv().ok()).count() == 0,
         "a close for a re-added table must queue no HA/event frame"
@@ -2265,6 +2454,7 @@ fn ordinary_close_bypasses_the_stale_check_through_flush() {
         &synced_entry_for(&key, decision, pbr_metadata()),
     );
     // Explicit-close production ordering: remove, then emit an ORDINARY close.
+    let closed_id = sessions.session_id_for(&key);
     sessions.delete(&key);
     sessions.emit_close_delta_with_origin(
         key.clone(),
@@ -2272,6 +2462,7 @@ fn ordinary_close_bypasses_the_stale_check_through_flush() {
         pbr_metadata(),
         SessionOrigin::ForwardFlow,
         false,
+        closed_id,
     );
     let deltas = sessions.drain_deltas(64);
     assert_eq!(deltas.len(), 1);
@@ -2294,7 +2485,15 @@ fn ordinary_close_bypasses_the_stale_check_through_flush() {
     let handle = Some(handle);
     let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
         Arc::new(Mutex::new(VecDeque::new()));
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &forwarding, &reader, &handle);
+    flush_deltas_for_test(
+        &deltas,
+        &shared,
+        &peer_queue,
+        &forwarding,
+        &reader,
+        &handle,
+        None,
+    );
     assert!(
         std::iter::from_fn(|| rx.try_recv().ok()).count() == 2,
         "an ordinary close must queue the HA + RT_FLOW frame pair"
@@ -2371,4 +2570,239 @@ fn reimport_zero_stamp_omitted_id_preserves() {
     let (domain, check) = blue_stamp();
     assert_eq!(decision.install_table_domain, domain);
     assert_eq!(decision.install_table_check, check);
+}
+
+/// Colliding-ordinary-close fixture: worker holds live B while shared
+/// holds dead A + live B on the same bare tuple (domains 7/8).
+struct CollidingClose10512 {
+    sessions: SessionTable,
+    shared: SharedMaps,
+    key_a: SessionKey,
+    key_b: SessionKey,
+    id_a: u64,
+    id_b: u64,
+    decision: SessionDecision,
+}
+
+fn colliding_close_fixture10512(octet: u8) -> CollidingClose10512 {
+    let mut sessions = SessionTable::new();
+    // TEST-NET tuples unique per cell: the tuple gate is process-global
+    // and tests run in parallel — sharing pbr_key() flakes on permits.
+    let mut base = pbr_key();
+    base.src_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet));
+    base.dst_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, octet));
+    base.src_port = 45000 + octet as u16;
+    let mut key_a = base.clone();
+    key_a.routing_domain = 7;
+    let mut key_b = base;
+    key_b.routing_domain = 8;
+    let decision = stamped_decision(unusable_resolution());
+    assert!(sessions.install_with_protocol_with_origin(
+        key_a.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    sessions.drain_deltas(64);
+    let id_a = sessions.session_id_for(&key_a);
+    assert_ne!(id_a, 0, "A must mint a live identity");
+    sessions.delete(&key_a);
+    assert!(sessions.install_with_protocol_with_origin(
+        key_b.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    // Drain B's install delta: cells emit exactly one close each.
+    sessions.drain_deltas(64);
+    let id_b = sessions.session_id_for(&key_b);
+    assert_ne!(id_b, 0, "B must mint a live identity");
+    let shared = shared_maps();
+    let mut entry_a = synced_entry_for(&key_a, decision, pbr_metadata());
+    entry_a.session_id = id_a;
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &entry_a,
+    );
+    let mut entry_b = synced_entry_for(&key_b, decision, pbr_metadata());
+    entry_b.session_id = id_b;
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &entry_b,
+    );
+    CollidingClose10512 {
+        sessions,
+        shared,
+        key_a,
+        key_b,
+        id_a,
+        id_b,
+        decision,
+    }
+}
+
+fn flush_handle10512() -> (
+    Arc<ForwardingState>,
+    RuntimeViewReader,
+    Option<crate::event_stream::EventStreamWorkerHandle>,
+    std::sync::mpsc::Receiver<crate::event_stream::EventFrame>,
+) {
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    (forwarding, channel.reader(), Some(handle), rx)
+}
+
+/// M1: a stale ordinary close (A closed, B live on the same bare tuple)
+/// still retires shared-A exactly, replicates conditionally, and emits
+/// its scoped close — while B stays live and B's later close flushes
+/// normally. The explicit close carries the id captured at delete time.
+#[test]
+fn colliding_ordinary_close_retires_a_keeps_b10512() {
+    let mut fx = colliding_close_fixture10512(201);
+    let (forwarding, reader, handle, rx) = flush_handle10512();
+    // Explicit-close production ordering with the M1 producer fix: the
+    // id is captured BEFORE the (already done) delete and rides along.
+    fx.sessions.emit_close_delta_with_origin(
+        fx.key_a.clone(),
+        fx.decision,
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        false,
+        fx.id_a,
+    );
+    let deltas = fx.sessions.drain_deltas(64);
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].session_id, fx.id_a, "explicit close must carry the captured id");
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    flush_deltas_for_test(
+        &deltas,
+        &fx.shared,
+        &peer_queue,
+        &forwarding,
+        &reader,
+        &handle,
+        Some(&mut fx.sessions),
+    );
+    assert!(
+        !fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_a),
+        "stale ordinary close must retire shared-A"
+    );
+    assert!(
+        fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_b),
+        "shared-B must survive A's close"
+    );
+    assert_ne!(
+        fx.sessions.session_id_for(&fx.key_b),
+        0,
+        "worker-B must stay live"
+    );
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).count() == 2,
+        "a handled stale close must emit its scoped HA + RT_FLOW pair"
+    );
+    let expected_rev = reverse_session_key(&fx.key_a, fx.decision.nat);
+    let q = peer_queue.lock().expect("lock");
+    assert!(
+        q.iter().any(|c| matches!(c,
+            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion }
+            if key == &fx.key_a && *expected_id == fx.id_a && companion.as_ref() == Some(&expected_rev))),
+        "stale close must replicate conditionally with the derived companion, got {q:?}"
+    );
+    drop(q);
+    // B's later close is live and flushes normally (no poisoning: the
+    // shared fallback no longer sees a stranded A for this tuple).
+    let id_b = fx.sessions.session_id_for(&fx.key_b);
+    fx.sessions.delete(&fx.key_b);
+    fx.sessions.emit_close_delta_with_origin(
+        fx.key_b.clone(),
+        fx.decision,
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        false,
+        id_b,
+    );
+    let deltas_b = fx.sessions.drain_deltas(64);
+    assert_eq!(deltas_b.len(), 1, "B's close must drain exactly one delta");
+    // Fresh event handle: the test handle is rate-limited and already
+    // carried A's pair; B's emit gets a clean channel.
+    let (_, _, handle_b, rx_b) = flush_handle10512();
+    flush_deltas_for_test(
+        &deltas_b,
+        &fx.shared,
+        &peer_queue,
+        &forwarding,
+        &reader,
+        &handle_b,
+        Some(&mut fx.sessions),
+    );
+    assert!(
+        !fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_b),
+        "B's later close must flush normally (no M1 poison)"
+    );
+    assert!(
+        std::iter::from_fn(|| rx_b.try_recv().ok()).count() == 2,
+        "B's close must emit its own pair"
+    );
+}
+
+/// M1 fail-closed floor: an identity-less stale close (0, uncaptured)
+/// cannot scope anything — it drops with the loss latch (resync heals
+/// the peer) rather than touching exact-keyed rows it cannot verify.
+#[test]
+fn colliding_ordinary_close_without_identity_drops10512() {
+    let mut fx = colliding_close_fixture10512(202);
+    let (forwarding, reader, handle, rx) = flush_handle10512();
+    fx.sessions.emit_close_delta_with_origin(
+        fx.key_a.clone(),
+        fx.decision,
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        false,
+        0,
+    );
+    let deltas = fx.sessions.drain_deltas(64);
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    flush_deltas_for_test(
+        &deltas,
+        &fx.shared,
+        &peer_queue,
+        &forwarding,
+        &reader,
+        &handle,
+        Some(&mut fx.sessions),
+    );
+    assert!(
+        fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_a),
+        "identity-less stale close must not retire unverifiable rows"
+    );
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).count() == 0,
+        "identity-less stale close must emit nothing"
+    );
+    assert!(
+        peer_queue.lock().expect("lock").is_empty(),
+        "identity-less stale close must replicate nothing"
+    );
 }

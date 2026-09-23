@@ -86,6 +86,12 @@ type SessionStore interface {
 	// already decided). False keeps the historical derive-and-retract.
 	DeleteWithCompanionsV4(SessionKey, DeleteReason, bool) error
 	DeleteWithCompanionsV6(SessionKeyV6, DeleteReason, bool) error
+	// DeleteClusterScopedV4/V6 applies a scoped HA policy delete (#10512):
+	// helper FIRST with the explicit domain + expected RT_FLOW identity,
+	// no bare mirror probe. Compile-enforced on every store (no
+	// optional-assertion fallback — the downgrade ban has none).
+	DeleteClusterScopedV4(SessionKey, uint32, uint64) error
+	DeleteClusterScopedV6(SessionKeyV6, uint32, uint64) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
 	SessionDeltas() dpruntime.SessionDeltaSource
 	Count() (v4, v6 int)
@@ -211,6 +217,13 @@ type peerSyncedSessionDeleter interface {
 	// DeletePeerSyncedSession reports whether the helper refused the delete.
 	DeletePeerSyncedSession(SessionKey, bool) (bool, error)
 	DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error)
+	// DeletePeerSyncedSessionScoped asks the helper FIRST with an explicit
+	// routing domain + expected RT_FLOW identity (#10512): the helper
+	// deletes only the row carrying that identity (conditional), refusing
+	// otherwise. Domain comes from the HA wire (authoritative), never
+	// from a local mirror read (which may hold another tenant's row).
+	DeletePeerSyncedSessionScoped(SessionKey, uint32, uint64) (bool, error)
+	DeletePeerSyncedSessionScopedV6(SessionKeyV6, uint32, uint64) (bool, error)
 }
 
 type clusterSyncedSessionInstaller interface {
@@ -1027,6 +1040,36 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, reason D
 		return err
 	}
 	return s.DeleteKnownV6(key, val, reason, forwardOnly)
+}
+
+// DeleteClusterScopedV4 applies a scoped HA policy delete (#10512):
+// helper FIRST with the explicit domain + expected identity, no bare
+// mirror probe (a probe could misattribute a colliding tuple to another
+// tenant). Dataplanes without the peer-delete capability error loudly;
+// there is no unconditional fallback (the downgrade ban has none).
+func (s dataPlaneSessionStore) DeleteClusterScopedV4(key SessionKey, domain uint32, expectedID uint64) error {
+	if s.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	peerDeleter, ok := s.dp.(peerSyncedSessionDeleter)
+	if !ok {
+		return errors.New("dataplane cannot apply scoped deletes")
+	}
+	_, err := peerDeleter.DeletePeerSyncedSessionScoped(key, domain, expectedID)
+	return err
+}
+
+// DeleteClusterScopedV6 is the IPv6 analogue of DeleteClusterScopedV4 (#10512).
+func (s dataPlaneSessionStore) DeleteClusterScopedV6(key SessionKeyV6, domain uint32, expectedID uint64) error {
+	if s.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	peerDeleter, ok := s.dp.(peerSyncedSessionDeleter)
+	if !ok {
+		return errors.New("dataplane cannot apply scoped deletes")
+	}
+	_, err := peerDeleter.DeletePeerSyncedSessionScopedV6(key, domain, expectedID)
+	return err
 }
 
 func (s dataPlaneSessionStore) preservePersistentNATV4(key SessionKey, val SessionValue) {

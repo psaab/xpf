@@ -1,4 +1,201 @@
 use super::super::*;
+use crate::afxdp::DeferredRedirectDelete;
+
+/// Apply one identity-conditional delete from a micro-batch envelope. The
+/// session id is checked immediately before dispatching the ordinary teardown
+/// so a queued policy delete cannot remove a tuple reincarnation that
+/// replaced the captured row.
+///
+/// The check-then-teardown is atomic with respect to the table: this worker
+/// is the table's sole mutator (single-threaded ownership — no other thread
+/// can name these entries), and OS preemption mid-handler freezes the table
+/// rather than interleaving foreign mutations, so the teardown removes
+/// exactly what the check validated. Cross-worker / cross-attempt fencing is
+/// the CALLER's job: the batch arm holds the report mutex (the abort fence)
+/// across the cancel check and the whole per-item loop, so a coordinator
+/// abort either lands before an item's check (the item then skips) or after
+/// its teardown completed (its effects are final before the coordinator
+/// returns).
+///
+/// The companion is removed ONLY on full key equality between the live
+/// derivation (from the MATCHED forward's NAT — the coordinator cannot derive
+/// it) and the captured companion: a mismatch preserves it (partial) rather
+/// than deleting by an uncertain key, and an unexpected live companion
+/// (capture expects none) refuses BEFORE any removal. Mirror (conntrack)
+/// repair is deliberately NOT done here: only the coordinator, holding the
+/// batch's Finalizing gate lease after every worker reports, can distinguish
+/// "no survivor anywhere" (delete the bare row) from "a survivor on another
+/// worker" (republish its value).
+pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    item: &crate::afxdp::PolicyDeleteItem,
+    report: &mut crate::afxdp::PolicyDeleteBatchReport,
+    index: usize,
+    now_ns: u64,
+    now_secs: u64,
+    deleted_keys: &mut Vec<SessionKey>,
+    worker_id: u32,
+    deferred_redirects: &mut Vec<DeferredRedirectDelete>,
+) -> bool {
+    if item.session_id == 0 || sessions.session_id_for(&item.key) != item.session_id {
+        return false;
+    }
+    // Validate the companion half BEFORE removing anything.
+    let mut remove_companion: Option<SessionKey> = None;
+    if !item.forward_only {
+        let derived = sessions
+            .probe_with_origin(&item.key)
+            .map(|(lookup, _)| reverse_session_key(&item.key, lookup.decision.nat));
+        match (&item.captured_companion, item.companion_session_id) {
+            (None, 0) => {
+                if let Some(companion) = derived.as_ref() {
+                    if sessions.session_id_for(companion) != 0 {
+                        report.refused[index] = true;
+                        return false;
+                    }
+                }
+            }
+            (Some(captured), expected) if expected != 0 => match derived {
+                Some(derived) if derived == *captured => {
+                    // 0 is the unknown sentinel (never allocated to a live
+                    // entry): an absent expected companion is already
+                    // converged — the idle race won between READ and delete —
+                    // not partial. Only a LIVE different incarnation preserves
+                    // and reports.
+                    match sessions.session_id_for(&derived) {
+                        0 => {}
+                        actual if actual == expected => {
+                            remove_companion = Some(derived);
+                        }
+                        _ => {
+                            report.partial[index] = true;
+                        }
+                    }
+                }
+                // Live derivation disagrees with the capture: preserve the
+                // companion, remove the id-exact forward below, report
+                // partial. Never delete by a key the capture did not name.
+                _ => {
+                    report.partial[index] = true;
+                }
+            },
+            _ => {
+                report.refused[index] = true;
+                return false;
+            }
+        }
+    }
+    // Self-reversing tuple (forward and companion are the SAME key): the
+    // forward call below removes it and collects its intent, so a second
+    // call would find nothing and fall into the absent branch — which
+    // issues BPF under the abort fence. Drop it: the forward intent's
+    // execution releases a SUPERSET of that branch (derived rows plus every
+    // row the holder holds for the owner, `release_entry`'s held arm), so
+    // nothing — table or alias claims — is stranded.
+    if remove_companion.as_ref().is_some_and(|companion| companion == &item.key) {
+        remove_companion = None;
+    }
+    handle_delete_synced_with_guard(
+        sessions,
+        session_map,
+        forwarding,
+        ha_state,
+        item.key.clone(),
+        now_ns,
+        now_secs,
+        deleted_keys,
+        worker_id,
+        false,
+        false,
+        &mut *deferred_redirects,
+        0,
+        None,
+    );
+    if let Some(companion) = remove_companion {
+        handle_delete_synced_with_guard(
+            sessions,
+            session_map,
+            forwarding,
+            ha_state,
+            companion,
+            now_ns,
+            now_secs,
+            deleted_keys,
+            worker_id,
+        false,
+        false,
+        &mut *deferred_redirects,
+        0,
+        None,
+    );
+    }
+    true
+}
+
+/// Apply `WorkerCommand::ProbePolicyBatch`: one table walk serving every
+/// unfilled bare-tuple slot with its first same-bare-tuple entry as a
+/// republish candidate. Read-only: no table, steering, or BPF mutation, so no
+/// fence is needed. First reporter wins per slot; every survivor describes
+/// the same live tuple, so any one republishes correctly (the same
+/// arbitrariness as the shared path's `.find()` survivor pick).
+pub(in crate::afxdp::session_glue) fn handle_probe_policy_tuples(
+    sessions: &SessionTable,
+    bares: &[SessionKey],
+    found: &std::sync::Mutex<Vec<Option<SyncedSessionEntry>>>,
+) {
+    {
+        let slots = found
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slots.iter().all(Option::is_some) {
+            return;
+        }
+    }
+    let wanted: std::collections::HashSet<&SessionKey> = bares.iter().collect();
+    let mut hits: Vec<(usize, SyncedSessionEntry)> = Vec::new();
+    sessions.iter_with_origin(|key, decision, metadata, origin| {
+        let mut key_bare = key.clone();
+        key_bare.routing_domain = 0;
+        key_bare.discriminator = Default::default();
+        if !wanted.contains(&key_bare) {
+            return;
+        }
+        let Some(index) = bares.iter().position(|bare| *bare == key_bare) else {
+            return;
+        };
+        if hits.iter().any(|(filled, _)| *filled == index) {
+            return;
+        }
+        hits.push((
+            index,
+            SyncedSessionEntry {
+                key: key.clone(),
+                decision,
+                metadata: metadata.clone(),
+                leak_incarnation: 0,
+                origin,
+                protocol: key.protocol,
+                tcp_flags: 0,
+                generation: 0,
+                session_id: sessions.session_id_for(key),
+                tcp_close_class: 0,
+            },
+        ));
+    });
+    if !hits.is_empty() {
+        let mut slots = found
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (index, entry) in hits {
+            if slots[index].is_none() {
+                slots[index] = Some(entry);
+            }
+        }
+    }
+}
 
 /// Apply `WorkerCommand::DeleteSynced`: drop the session and either
 /// republish the kernel session-map alias (if the session table had
@@ -21,23 +218,102 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
-    // #9048: the local HA view, so a peer delete cannot tear down a session
-    // this node is actively forwarding for. Same two inputs the sibling
-    // `handle_upsert_synced` arm already takes.
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     key: SessionKey,
     now_ns: u64,
     now_secs: u64,
     deleted_keys: &mut Vec<SessionKey>,
-    // #6211 F2: THIS worker's id. `DeleteSynced` is replicated to EVERY worker
-    // queue (`replicate_session_delete`), so each worker drops its own holder
-    // bit and the port is freed by whichever worker happens to be last.
     worker_id: u32,
 ) {
+    handle_delete_synced_with_guard(
+        sessions,
+        session_map,
+        forwarding,
+        ha_state,
+        key,
+        now_ns,
+        now_secs,
+        deleted_keys,
+        worker_id,
+        true,
+        true,
+        &mut Vec::new(),
+        0,
+        None,
+    );
+}
+
+/// #10512 scoped HA worker teardown: identity-conditional twin of
+/// [`handle_delete_synced`] — the entry goes only when its live session
+/// id still matches the captured one.
+pub(in crate::afxdp::session_glue) fn handle_delete_synced_conditional(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    key: SessionKey,
+    expected_id: u64,
+    now_ns: u64,
+    now_secs: u64,
+    deleted_keys: &mut Vec<SessionKey>,
+    worker_id: u32,
+    companion: Option<SessionKey>,
+) {
+    handle_delete_synced_with_guard(
+        sessions,
+        session_map,
+        forwarding,
+        ha_state,
+        key,
+        now_ns,
+        now_secs,
+        deleted_keys,
+        worker_id,
+        true,
+        true,
+        &mut Vec::new(),
+        expected_id,
+        companion,
+    );
+}
+pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    key: SessionKey,
+    now_ns: u64,
+    now_secs: u64,
+    deleted_keys: &mut Vec<SessionKey>,
+    worker_id: u32,
+    enforce_peer_owner: bool,
+    remove_mirror: bool,
+    deferred_redirects: &mut Vec<DeferredRedirectDelete>,
+    expected_id: u64,
+    // #10512 scoped companion: torn down in this same handler after the
+    // forward (never a standalone command — a declined forward must leave
+    // it untouched). Unconditional once the forward matched (plan-literal;
+    // same-thread atomic on the worker).
+    companion: Option<SessionKey>,
+) {
+    // #10512 scoped HA delete: only the captured incarnation may go — a
+    // replacement installed after the shared remove (queue delay) keeps
+    // its row. Zero disables (legacy unconditional path). First: a
+    // mismatched entry belongs to a different incarnation entirely, so no
+    // other guard may even read it.
+    if expected_id != 0 && sessions.session_id_for(&key) != expected_id {
+        return;
+    }
     let (delete_alias, existing_origin) = match sessions.probe_with_origin(&key) {
         Some((lookup, origin)) => (Some(lookup), Some(origin)),
         None => (None, None),
     };
+    // `deferred_redirects` intentionally accumulates across calls: the batch
+    // arm owns ONE vec for the whole batch (forward + companion items),
+    // stashes it into the shared handoff INSIDE the fence scope, and the
+    // COORDINATOR drains + executes after phase-1 acks. No per-call
+    // emptiness invariant holds here — a second removal queuing behind the
+    // first is the design, not a bug.
     // #9048: REFUSE a peer delete that would tear down a LIVE LOCAL session.
     //
     // This is the delete-side mirror of the install-side clobber guard in
@@ -83,7 +359,8 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
     // forward session through the ingress-zone fallback, so this was not a
     // corner. The coordinator's #9714 guard carried the identical fail-open and
     // moved in the same change: install and delete now ask one question.
-    let refuse = matches!(existing_origin, Some(origin) if !origin.is_peer_synced())
+    let refuse = enforce_peer_owner
+        && matches!(existing_origin, Some(origin) if !origin.is_peer_synced())
         && delete_alias.as_ref().is_some_and(|lookup| {
             !synced_entry_allows_local_replace(ha_state, lookup.metadata.owner_rg_id, now_secs)
         });
@@ -124,17 +401,59 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
             now_ns,
             worker_id,
         );
-        delete_session_map_entry_for_removed_session(
-            session_map,
-            &key,
-            lookup.decision,
-            &lookup.metadata,
-        );
-    } else {
+        if remove_mirror {
+            delete_session_map_entry_for_removed_session(
+                session_map,
+                &key,
+                lookup.decision,
+                &lookup.metadata,
+            );
+        } else {
+            // Batched policy path (deferred mode): collect the redirect
+            // delete for phase 2 instead of issuing the BPF syscall here.
+            // The abort fence is held across this whole call, and BPF
+            // syscalls can stall (reclaim) — holding them would let a slow
+            // worker wedge the coordinator's abort indefinitely. Table work
+            // above is microsecond, syscall-free, and tree-standard to hold.
+            deferred_redirects.push(DeferredRedirectDelete {
+                key: key.clone(),
+                decision: lookup.decision,
+                metadata: lookup.metadata.clone(),
+                origin: existing_origin.expect("lookup origin"),
+                worker_id,
+            });
+        }
+    } else if remove_mirror {
         // #9560 round 3: the local entry is already gone, so there is no decision to
         // derive this session's rows from — and the bare key is only ONE of them. Its
         // NAT and forward-wire aliases were claimed by this worker too, and releasing
         // just the key left them claimed by a holder that will never name them again.
         release_all_session_rows(session_map, &key);
+    }
+    // Deferred mode (remove_mirror == false): the already-gone branch
+    // issues NO BPF here — phase 2 executes the covering forward intent
+    // instead ("NO BPF under this fence, ever").
+    // Scoped companion (see param doc): same-handler teardown after the
+    // forward, unconditional (legacy parity — the standalone reverse
+    // command it replaces never checked either). Reached only when the
+    // forward matched (mismatch returned at the top), so a declined
+    // forward leaves both halves untouched.
+    if let Some(companion_key) = companion {
+        handle_delete_synced_with_guard(
+            sessions,
+            session_map,
+            forwarding,
+            ha_state,
+            companion_key,
+            now_ns,
+            now_secs,
+            deleted_keys,
+            worker_id,
+            enforce_peer_owner,
+            remove_mirror,
+            deferred_redirects,
+            0,
+            None,
+        );
     }
 }

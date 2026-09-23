@@ -29,17 +29,31 @@ pub(crate) enum SyncedDeleteOutcome {
     /// delete's, so this is a stale delete arriving after a same-key replacement
     /// the helper has already mirrored (#2170).
     RefusedStaleGeneration,
+    /// Refused because tuple admission could not be acquired before timeout.
+    RefusedGateBusy,
+    RefusedMirrorDelete,
+    /// Refused because the captured session incarnation or its companion changed.
+    RefusedIdentity,
+    /// Refused because the captured forward incarnation is absent or changed.
+    StaleForward,
+    /// The forward was removed, but a changed companion was preserved. A
+    /// missing expected companion is NOT this — idempotent absent converges
+    /// silently (Applied); only a LIVE different incarnation reports partial.
+    PartialCompanion,
 }
 
 impl SyncedDeleteOutcome {
     /// Whether the helper refused a PEER delete while the caller must keep its
     /// mirror and DNAT rows. A stale-generation refusal is NOT this: it means
     /// the helper already holds something newer, so the Go side has nothing to
-    /// preserve.
     pub(crate) fn keeps_caller_rows(self) -> bool {
         matches!(
             self,
-            Self::RefusedLocalOwned | Self::RefusedConcurrentLocalOwned
+            Self::RefusedLocalOwned
+                | Self::RefusedConcurrentLocalOwned
+                | Self::RefusedGateBusy
+                | Self::RefusedMirrorDelete
+                | Self::RefusedIdentity
         )
     }
 
@@ -48,6 +62,10 @@ impl SyncedDeleteOutcome {
     /// under-lock concurrent ownership decline from #9960.
     pub(crate) fn is_refused_local_owned(self) -> bool {
         matches!(self, Self::RefusedLocalOwned)
+    }
+
+    pub(crate) fn mirror_delete_failed(self) -> bool {
+        matches!(self, Self::RefusedMirrorDelete)
     }
 }
 
@@ -121,6 +139,9 @@ pub enum SyncedImportOutcome {
     /// nothing, and the typed outcome already reaches the caller as
     /// `synced-import-refused:standalone-reverse`.
     RejectedStandaloneReverse,
+    /// #10512: the tuple admission fence was busy or clear was in progress.
+    RejectedGateBusy,
+    RejectedMirrorPublish,
     /// #7160 (#2387): this node runs routing instances, and the request named
     /// no ingress identity to resolve the session's routing DOMAIN from.
     ///
@@ -164,6 +185,8 @@ impl SyncedImportOutcome {
             SyncedImportOutcome::RejectedCapacity => Some("capacity"),
             SyncedImportOutcome::RejectedReserve => Some("reserve"),
             SyncedImportOutcome::RejectedStandaloneReverse => Some("standalone-reverse"),
+            SyncedImportOutcome::RejectedGateBusy => Some("gate-busy"),
+            SyncedImportOutcome::RejectedMirrorPublish => Some("mirror-write-failed"),
             SyncedImportOutcome::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
         }
     }
@@ -410,6 +433,74 @@ impl crate::afxdp::ha::SessionDomain {
     /// The counter remains worth having because the absent-fd publish skip is
     /// still reachable on its own (a standby taking bulk sync before its first
     /// apply), and it makes those benign occurrences visible rather than
+    pub(crate) fn publish_mirror_only(
+        &self,
+        forwarding: &ForwardingState,
+        entry: &SyncedSessionEntry,
+    ) -> crate::afxdp::bpf_map::ConntrackPublishResult {
+        let maps = self.bpf_maps.load();
+        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry_under_gate(
+            v4_fd,
+            v6_fd,
+            &entry.key,
+            entry.decision,
+            &entry.metadata,
+            &forwarding.zone_name_to_id,
+            0,
+            0,
+            entry.session_id,
+            0,
+            entry.origin,
+        )
+    }
+
+
+    /// Hard cap on one clear snapshot (P4): take(cap+1) bounds the
+    /// transient key Vec even against a hostile table (262144 × ~72B ≈
+    /// 18MB max); over-cap fails closed touching nothing.
+    pub(crate) const CLEAR_MIRROR_KEY_CAP: usize = 262_144;
+
+    pub(crate) fn clear_mirror(&self) -> Result<(usize, usize), &'static str> {
+        self.clear_mirror_with_cap(Self::CLEAR_MIRROR_KEY_CAP)
+    }
+
+    pub(crate) fn clear_mirror_with_cap(&self, cap: usize) -> Result<(usize, usize), &'static str> {
+        let fence = crate::afxdp::bpf_map::global_tuple_gate().begin_clear()?;
+        let keys: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
+            .keys()
+            .take(cap.saturating_add(1))
+            .cloned()
+            .collect();
+        if keys.len() > cap {
+            return Err("clear-cap-exceeded");
+        }
+        // BPF sweep FIRST (P3): on failure nothing is touched
+        // (fail-closed, retryable) — authority clears only after the
+        // kernel sweep lands.
+        let maps = self.bpf_maps.load();
+        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let counts = crate::afxdp::bpf_map::clear_bpf_conntrack_maps(v4_fd, v6_fd)?;
+        for key in keys {
+            let _ = self.delete_synced_session_gen_marked(
+                key,
+                0,
+                false,
+                false,
+                Some(&fence),
+                false,
+                0,
+            );
+        }
+        lock_shared_recover(&self.sessions.synced).clear();
+        lock_shared_recover(&self.sessions.nat).clear();
+        lock_shared_recover(&self.sessions.forward_wire).clear();
+        drop(fence);
+        Ok(counts)
+    }
+
     /// asserted from a reading of the lock graph.
     fn publish_synced_entry_or_note_unpublished(
         &self,
@@ -447,7 +538,22 @@ impl crate::afxdp::ha::SessionDomain {
         }
     }
 
-    pub fn upsert_synced_session(&self, mut entry: SyncedSessionEntry) -> SyncedImportOutcome {
+    pub fn upsert_synced_session(&self, entry: SyncedSessionEntry) -> SyncedImportOutcome {
+        self.upsert_synced_session_with_policy(entry, false)
+    }
+
+    pub(crate) fn upsert_synced_session_mirror(
+        &self,
+        entry: SyncedSessionEntry,
+    ) -> SyncedImportOutcome {
+        self.upsert_synced_session_with_policy(entry, true)
+    }
+
+    fn upsert_synced_session_with_policy(
+        &self,
+        mut entry: SyncedSessionEntry,
+        strict_mirror: bool,
+    ) -> SyncedImportOutcome {
         // #8015: refuse a STANDALONE reverse. This runs before every other
         // decision below because none of them apply to an entry that must not
         // be imported at all — and because the cap gate deliberately skips
@@ -603,6 +709,16 @@ impl crate::afxdp::ha::SessionDomain {
             )
         } else {
             None
+        };
+        let mut gate_keys = vec![entry.key.clone()];
+        if let Some(reverse) = reverse_entry.as_ref() {
+            gate_keys.push(reverse.key.clone());
+        }
+        let _tuple_lease = match crate::afxdp::bpf_map::global_tuple_gate()
+            .acquire_lease(gate_keys)
+        {
+            Ok(lease) => lease,
+            Err(_) => return SyncedImportOutcome::RejectedGateBusy,
         };
         // #6600: RESERVE THE TRANSLATED NAT PORT BEFORE PUBLISHING.
         //
@@ -790,6 +906,17 @@ impl crate::afxdp::ha::SessionDomain {
                 entry.metadata.is_reverse,
             );
         }
+        let mirror_result = self.publish_mirror_only(forwarding, &entry);
+        if strict_mirror
+            && matches!(
+                mirror_result,
+                crate::afxdp::bpf_map::ConntrackPublishResult::KernelError
+                    | crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy
+                    | crate::afxdp::bpf_map::ConntrackPublishResult::NoMap
+            )
+        {
+            return SyncedImportOutcome::RejectedMirrorPublish;
+        }
         refresh_reverse_prewarm_owner_rg_indexes(
             &self.sessions.owner_rg_indexes.reverse_prewarm_sessions,
             forwarding,
@@ -817,6 +944,17 @@ impl crate::afxdp::ha::SessionDomain {
                     reverse.decision.nat,
                     true,
                 );
+            }
+            let mirror_result = self.publish_mirror_only(forwarding, reverse);
+            if strict_mirror
+                && matches!(
+                    mirror_result,
+                    crate::afxdp::bpf_map::ConntrackPublishResult::KernelError
+                        | crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy
+                        | crate::afxdp::bpf_map::ConntrackPublishResult::NoMap
+                )
+            {
+                return SyncedImportOutcome::RejectedMirrorPublish;
             }
         }
         // #6242: fan out to each worker's command queue via its runtime record.
@@ -915,10 +1053,142 @@ impl crate::afxdp::ha::SessionDomain {
         outcome
     }
 
-    pub fn delete_synced_session(&self, key: SessionKey, forward_only: bool) {
+    pub fn delete_synced_session(
+        &self,
+        key: SessionKey,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
         // Helper-local deletes (tunnel-remap purge, GC) are authoritative and
         // carry no peer install generation — apply unconditionally.
-        self.delete_synced_session_gen(key, 0, forward_only);
+        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, false, 0)
+    }
+
+    pub(crate) fn delete_synced_session_mirror(
+        &self,
+        key: SessionKey,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, true, 0)
+    }
+
+    /// #10512: one micro-batch match's SHARED-store conditional remove. The
+    /// batch lease (held by the caller across the whole batch) covers every
+    /// BPF touch, so this takes no gate permits and performs no mirror or
+    /// worker fan-out of its own: it validates the captured identities
+    /// against the shared entries and removes them under the removal lock.
+    /// Returns only Applied / StaleForward / PartialCompanion /
+    /// RefusedIdentity — never a gate or mirror outcome.
+    ///
+    /// The companion derives from the REMOVED forward's NAT (authoritative
+    /// for shared entries) and is validated against the captured companion
+    /// key: a mismatch preserves it (partial) rather than removing by an
+    /// uncertain key, exactly like the worker path.
+    pub(crate) fn remove_shared_policy_item(
+        &self,
+        key: &SessionKey,
+        expected_forward: u64,
+        expected_companion: u64,
+        captured_companion: Option<&SessionKey>,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
+        if expected_forward == 0 {
+            return SyncedDeleteOutcome::RefusedIdentity;
+        }
+        let candidate = lock_shared_recover(&self.sessions.synced)
+            .get(key)
+            .cloned();
+        let Some(entry) = candidate.as_ref() else {
+            return SyncedDeleteOutcome::StaleForward;
+        };
+        if entry.session_id != expected_forward {
+            return SyncedDeleteOutcome::StaleForward;
+        }
+        // Validate the companion half BEFORE removing anything.
+        // `companion_key` is Some exactly when the shared companion must be
+        // removed under the lock below; `partial` when it must be preserved
+        // despite an expectation.
+        let mut companion_key: Option<SessionKey> = None;
+        let mut partial = false;
+        if !forward_only && !entry.metadata.is_reverse {
+            let derived = reverse_session_key(key, entry.decision.nat);
+            match (captured_companion, expected_companion) {
+                (None, 0) => {
+                    if lock_shared_recover(&self.sessions.synced)
+                        .get(&derived)
+                        .is_some()
+                    {
+                        return SyncedDeleteOutcome::RefusedIdentity;
+                    }
+                }
+                (Some(captured), expected) if expected != 0 => {
+                    if derived != *captured {
+                        // Live derivation disagrees with the capture: preserve
+                        // (partial), never remove by an uncertain key.
+                        partial = true;
+                    } else {
+                        match lock_shared_recover(&self.sessions.synced).get(&derived) {
+                            // Idempotent absent (idle race won between READ and
+                            // delete): converged, not partial. Only a LIVE
+                            // different incarnation preserves and reports.
+                            None => {}
+                            Some(reverse) => {
+                                if reverse.session_id != expected {
+                                    partial = true;
+                                } else {
+                                    // Self-reversing (derived == forward key): the
+                                    // forward removal below subsumes it — recording
+                                    // a same-key companion would find Absent and
+                                    // misreport partial.
+                                    if derived != *key {
+                                        companion_key = Some(derived);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return SyncedDeleteOutcome::RefusedIdentity;
+                }
+            }
+        }
+        // Under-lock forward removal with the #9960 identity recheck: the
+        // candidate above and this removal straddle the lock, so a concurrent
+        // replacement must decline here rather than delete the new incarnation.
+        let removal = remove_shared_session_if(
+            &self.sessions.synced,
+            &self.sessions.nat,
+            &self.sessions.forward_wire,
+            &self.sessions.owner_rg_indexes,
+            key,
+            |current| current.session_id == expected_forward,
+        );
+        match removal {
+            SharedRemoval::Declined | SharedRemoval::Absent => {
+                // Declined: the incarnation changed under the lock. Absent: a
+                // concurrent remover won. Either way nothing was removed here.
+                return SyncedDeleteOutcome::StaleForward;
+            }
+            SharedRemoval::Removed(_) => {}
+        }
+        if let Some(companion) = companion_key {
+            let companion_removal = remove_shared_session_if(
+                &self.sessions.synced,
+                &self.sessions.nat,
+                &self.sessions.forward_wire,
+                &self.sessions.owner_rg_indexes,
+                &companion,
+                |current| expected_companion != 0 && current.session_id == expected_companion,
+            );
+            if !matches!(companion_removal, SharedRemoval::Removed(_)) {
+                partial = true;
+            }
+        }
+        if partial {
+            SyncedDeleteOutcome::PartialCompanion
+        } else {
+            SyncedDeleteOutcome::Applied
+        }
     }
 
     /// #9714: a delete sent on behalf of the PEER (`SessionSyncRequest.peer_delete`:
@@ -939,7 +1209,35 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, true, forward_only)
+        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, false, 0)
+    }
+
+    pub(crate) fn delete_peer_synced_session_mirror(
+        &self,
+        key: SessionKey,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true, 0)
+    }
+
+    /// #10512 scoped HA peer delete: like
+    /// [`Self::delete_peer_synced_session_mirror`], but the shared removal
+    /// only proceeds when the under-lock entry still carries the expected
+    /// RT_FLOW identity (a replacement installed after capture is
+    /// refused, never torn down).
+    pub(crate) fn delete_peer_synced_session_mirror_scoped(
+        &self,
+        key: SessionKey,
+        forward_only: bool,
+        expected_id: u64,
+    ) -> SyncedDeleteOutcome {
+        // Fail closed: zero is identity-missing (plan §2.1), never an
+        // unconditional delete. The callee treats 0 as "no check" for
+        // legacy callers; this scoped entry point must not inherit that.
+        if expected_id == 0 {
+            return SyncedDeleteOutcome::RefusedIdentity;
+        }
+        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true, expected_id)
     }
 
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
@@ -950,10 +1248,22 @@ impl crate::afxdp::ha::SessionDomain {
     /// (deleteClusterSynced*) — that short-circuits both the BPF map delete and
     /// this helper path, so the cluster-delete path never reaches here with a
     /// non-zero delete_gen today; the seam exists for future helper-originated
-    /// generation-aware deletes. A delete_gen of 0, or a stored generation of
     /// 0, falls back to unconditional delete (rolling-upgrade safe).
-    pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64, forward_only: bool) {
-        let _ = self.delete_synced_session_gen_marked(key, delete_gen, false, forward_only);
+    pub fn delete_synced_session_gen(
+        &self,
+        key: SessionKey,
+        delete_gen: u64,
+        forward_only: bool,
+    ) {
+        let _ = self.delete_synced_session_gen_marked(
+            key,
+            delete_gen,
+            false,
+            forward_only,
+            None,
+            false,
+            0,
+        );
     }
 
     fn delete_synced_session_gen_marked(
@@ -965,6 +1275,11 @@ impl crate::afxdp::ha::SessionDomain {
         // derivation (which also skips the reverse shared removal and the
         // reverse `DeleteSynced` fan-out below: both key off `reverse_key`).
         forward_only: bool,
+        clear_fence: Option<&crate::afxdp::bpf_map::ClearFence>,
+        strict_mirror: bool,
+        // #10512 scoped HA delete: only the captured incarnation may go.
+        // Zero disables (legacy unconditional path).
+        expected_id: u64,
     ) -> SyncedDeleteOutcome {
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
@@ -984,6 +1299,7 @@ impl crate::afxdp::ha::SessionDomain {
         let candidate_entry = lock_shared_recover(&self.sessions.synced)
             .get(&key)
             .cloned();
+        let delete_reverse = !forward_only;
         if let Some(entry) = candidate_entry.as_ref()
             && entry.generation != 0
             && delete_gen != 0
@@ -993,6 +1309,45 @@ impl crate::afxdp::ha::SessionDomain {
                 .delete_stale_ignored
                 .fetch_add(1, Ordering::Relaxed);
             return SyncedDeleteOutcome::RefusedStaleGeneration;
+        }
+        // #10512 scoped HA delete, early (fail fast before gate/BPF; the
+        // under-lock recheck below stays authoritative): without a matching
+        // shared authority, idempotent cleanup must not run — BPF publishes
+        // before shared maps, so "no shared entry" can mean a live session
+        // mid-install whose rows cleanup would erase. Absent converges
+        // silently (StaleForward, uncounted); a LIVE different incarnation
+        // refuses loudly (RefusedIdentity + counter).
+        if expected_id != 0 {
+            match candidate_entry.as_ref() {
+                None => return SyncedDeleteOutcome::StaleForward,
+                Some(entry) if entry.session_id != expected_id => {
+                    self.sessions
+                        .delete_refused_identity
+                        .fetch_add(1, Ordering::Relaxed);
+                    return SyncedDeleteOutcome::RefusedIdentity;
+                }
+                Some(_) => {}
+            }
+        }
+        let mut gate_keys = vec![key.clone()];
+        if !forward_only {
+            let reverse_nat = candidate_entry
+                .as_ref()
+                .map_or_else(NatDecision::default, |entry| entry.decision.nat);
+            gate_keys.push(reverse_session_key(&key, reverse_nat));
+        }
+        let tuple_lease = if clear_fence.is_some() {
+            None
+        } else {
+            match crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(gate_keys) {
+                Ok(lease) => Some(lease),
+                Err(_) => return SyncedDeleteOutcome::RefusedGateBusy,
+            }
+        };
+        if let Some(lease) = tuple_lease.as_ref()
+            && lease.begin_finalizing().is_err()
+        {
+            return SyncedDeleteOutcome::RefusedGateBusy;
         }
         // #9714: refuse a PEER delete of a live local session whose owner RG is
         // locally active, before any kernel, DNAT or shared delete and before the
@@ -1038,6 +1393,15 @@ impl crate::afxdp::ha::SessionDomain {
             &self.sessions.owner_rg_indexes,
             &key,
             |current| {
+                // #10512 scoped HA delete: only the captured incarnation may
+                // go — a replacement installed after capture (same key, new
+                // id) is refused, never torn down. Evaluated first: identity
+                // is the stronger claim, and a mismatched entry belongs to a
+                // different tenant incarnation entirely. Zero disables.
+                if expected_id != 0 && current.session_id != expected_id {
+                    under_lock_outcome = Some(SyncedDeleteOutcome::RefusedIdentity);
+                    return false;
+                }
                 // #2170: a stale delete must not remove a NEWER same-key entry.
                 if current.generation != 0 && delete_gen != 0 && delete_gen < current.generation {
                     under_lock_outcome = Some(SyncedDeleteOutcome::RefusedStaleGeneration);
@@ -1078,7 +1442,17 @@ impl crate::afxdp::ha::SessionDomain {
                             .delete_stale_ignored
                             .fetch_add(1, Ordering::Relaxed);
                     }
-                    SyncedDeleteOutcome::Applied | SyncedDeleteOutcome::RefusedLocalOwned => {
+                    SyncedDeleteOutcome::RefusedIdentity => {
+                        self.sessions
+                            .delete_refused_identity
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    SyncedDeleteOutcome::Applied
+                    | SyncedDeleteOutcome::RefusedLocalOwned
+                    | SyncedDeleteOutcome::RefusedGateBusy
+                    | SyncedDeleteOutcome::RefusedMirrorDelete
+                    | SyncedDeleteOutcome::StaleForward
+                    | SyncedDeleteOutcome::PartialCompanion => {
                         debug_assert!(false, "an applied/early refusal cannot be under-lock");
                     }
                 }
@@ -1091,12 +1465,77 @@ impl crate::afxdp::ha::SessionDomain {
             SharedRemoval::Absent => candidate_entry,
         };
 
+        let mut mirror_delete_ok = true;
+        let mut reverse_key = if !forward_only {
+            removed_entry.as_ref().and_then(|entry| {
+                (!entry.metadata.is_reverse).then(|| {
+                    reverse_session_key(&entry.key, entry.decision.nat)
+                })
+            })
+        } else {
+            None
+        };
+        let reverse_teardown = if let Some(reverse) = reverse_key.as_ref() {
+            let removal = remove_shared_session_if(
+                &self.sessions.synced,
+                &self.sessions.nat,
+                &self.sessions.forward_wire,
+                &self.sessions.owner_rg_indexes,
+                reverse,
+                |_| true,
+            );
+            match removal {
+                SharedRemoval::Removed(_) | SharedRemoval::Absent => true,
+                SharedRemoval::Declined => false,
+            }
+        } else {
+            false
+        };
         // The six teardown operations below all pivot on `removed_entry`, which
         // is the exact incarnation returned by the under-lock removal. A declined
         // removal returned above, before any of them, and therefore changes
         // nothing.
         if let Some(entry) = removed_entry.as_ref() {
             let maps = self.bpf_maps.load();
+            let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+            let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+            let repair_or_delete = |target: &SessionKey| {
+                let mut target_bare = target.clone();
+                target_bare.routing_domain = 0;
+                target_bare.discriminator = Default::default();
+                let survivor = lock_shared_recover(&self.sessions.synced)
+                    .values()
+                    .find(|candidate| {
+                        candidate.key != entry.key
+                            && {
+                                let mut candidate_bare = candidate.key.clone();
+                                candidate_bare.routing_domain = 0;
+                                candidate_bare.discriminator = Default::default();
+                                candidate_bare == target_bare
+                            }
+                    })
+                    .cloned();
+                if let Some(survivor) = survivor {
+                    !matches!(
+                        self.publish_mirror_only(forwarding, &survivor),
+                        crate::afxdp::bpf_map::ConntrackPublishResult::KernelError
+                            | crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy
+                            | crate::afxdp::bpf_map::ConntrackPublishResult::NoMap
+                    )
+                } else {
+                    crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                        v4_fd,
+                        v6_fd,
+                        target,
+                    )
+                }
+            };
+            mirror_delete_ok &= repair_or_delete(&entry.key);
+            if reverse_teardown
+                && let Some(reverse) = reverse_key.as_ref()
+            {
+                mirror_delete_ok &= repair_or_delete(reverse);
+            }
             if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
                 delete_session_map_entry_for_removed_session(
                     SteeringMap {
@@ -1127,17 +1566,17 @@ impl crate::afxdp::ha::SessionDomain {
                 delete_dnat_table_entry(&dnat_fds, &entry.key, entry.decision.nat);
             }
         }
-        let reverse_key = if forward_only {
-            None
-        } else {
-            removed_entry.as_ref().and_then(|entry| {
-                if entry.metadata.is_reverse {
-                    None
-                } else {
-                    Some(reverse_session_key(&entry.key, entry.decision.nat))
-                }
-            })
-        };
+        else {
+            let maps = self.bpf_maps.load();
+            let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+            let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+            mirror_delete_ok =
+                crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                    v4_fd,
+                    v6_fd,
+                    &key,
+                );
+        }
         refresh_reverse_prewarm_owner_rg_indexes(
             &self.sessions.owner_rg_indexes.reverse_prewarm_sessions,
             forwarding,
@@ -1145,22 +1584,6 @@ impl crate::afxdp::ha::SessionDomain {
             removed_entry.as_ref(),
             None,
         );
-        // The reverse companion is derived from this exact removed incarnation.
-        // A DECLINED removal returned above before this point, so no live reverse
-        // half can be torn down by a refused delete.
-        if let Some(reverse_key) = &reverse_key {
-            remove_shared_session(
-                &self.sessions.synced,
-                &self.sessions.nat,
-                &self.sessions.forward_wire,
-                &self.sessions.owner_rg_indexes,
-                reverse_key,
-            );
-        }
-        // #6242: fan out to each worker's command queue via its runtime record.
-        //
-        // #6979 F4: a DROPPED `DeleteSynced` is a permanently stranded NAT
-        // reservation, so the drop is repaired here instead of discarded.
         //
         // `push_bounded` returns false when the queue is at
         // `MAX_PENDING_WORKER_COMMANDS`, and that return was ignored. Shared
@@ -1203,19 +1626,37 @@ impl crate::afxdp::ha::SessionDomain {
             // #1790/#1807: recover-and-push instead of silently skipping a
             // poisoned queue (same policy as update_ha_state).
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);
-            let queued =
-                worker_queue::push_bounded(&mut pending, WorkerCommand::DeleteSynced(key.clone()));
+            // #10512: the identity travels to the worker so a replacement
+            // installed during queue delay survives the drain. Legacy paths
+            // (expected_id 0) keep emitting plain DeleteSynced — same bytes,
+            // same existing match sites, zero behavior delta.
+            let forward_command = if expected_id != 0 {
+                // #10512: the identity + coordinator-derived companion travel
+                // to the worker so a replacement installed during queue delay
+                // survives the drain (forward mismatch skips both).
+                WorkerCommand::DeleteSyncedConditional {
+                    key: key.clone(),
+                    expected_id,
+                    companion: reverse_key.clone(),
+                }
+            } else {
+                WorkerCommand::DeleteSynced(key.clone())
+            };
+            let queued = worker_queue::push_bounded(&mut pending, forward_command);
             // #9560 round 3: the REVERSE half's result was discarded. Both halves carry
             // the same consequence for the worker that misses one — its local session
             // entry, its flow-cache slots and its steering claims for that key all stay
             // — so both are checked, and either drop raises that worker's out-of-band
             // delete epoch below.
+            // Scoped deletes carry their companion INSIDE the conditional
+            // command (torn down only after a forward match) — no
+            // standalone reverse, which would fire even when the forward
+            // declines and kill a replacement's reverse.
             let reverse_queued = match &reverse_key {
-                Some(reverse_key) => worker_queue::push_bounded(
-                    &mut pending,
-                    WorkerCommand::DeleteSynced(reverse_key.clone()),
-                ),
-                None => true,
+                Some(reverse_key) if expected_id == 0 => {
+                    worker_queue::push_bounded(&mut pending, WorkerCommand::DeleteSynced(reverse_key.clone()))
+                }
+                _ => true,
             };
             // Release the command queue before touching allocator mutexes: the
             // two are unrelated locks and holding both would invent an ordering.
@@ -1247,12 +1688,12 @@ impl crate::afxdp::ha::SessionDomain {
                 }
             }
         }
-        SyncedDeleteOutcome::Applied
+        if strict_mirror && !mirror_delete_ok {
+            SyncedDeleteOutcome::RefusedMirrorDelete
+        } else {
+            SyncedDeleteOutcome::Applied
+        }
     }
-
-    /// #6979 F4: run the NAT teardown a worker will never run itself, because
-    /// its `DeleteSynced` was dropped by a full command queue.
-    ///
     /// Byte-for-byte the call the worker makes when it processes the command,
     /// with that worker's id as the holder — so the holder mask empties on the
     /// same last-release rule and the port is returned exactly once.

@@ -60,8 +60,8 @@ func TestAMarkedSingleDeleteMarksBothHalves9714(t *testing.T) {
 	m.syncDeleteV4LockedMarked(k, val, true, true, false)
 	m.mu.Unlock()
 	marked := rec.all()
-	if len(marked) != 2 {
-		t.Fatalf("FIXTURE: recorded %d requests for a marked delete, want 2 (key + reverse)", len(marked))
+	if len(marked) != 1 {
+		t.Fatalf("FIXTURE: recorded %d requests for a marked delete, want 1 (single-req: the helper derives the reverse inside)", len(marked))
 	}
 	for i, req := range marked {
 		if !req.PeerDelete {
@@ -73,10 +73,10 @@ func TestAMarkedSingleDeleteMarksBothHalves9714(t *testing.T) {
 	m.syncDeleteV4Locked(k, val, true)
 	m.mu.Unlock()
 	all := rec.all()
-	if len(all) != 4 {
-		t.Fatalf("FIXTURE: recorded %d requests after the unmarked delete, want 4", len(all))
+	if len(all) != 2 {
+		t.Fatalf("FIXTURE: recorded %d requests after the unmarked delete, want 2", len(all))
 	}
-	for i, req := range all[2:] {
+	for i, req := range all[1:] {
 		if req.PeerDelete {
 			t.Errorf("half %d of an ordinary single-key delete is marked PeerDelete", i)
 		}
@@ -138,7 +138,7 @@ func TestARefusedPeerSingleDeleteKeepsTheReverse9714(t *testing.T) {
 }
 
 // #9714: an UNMARKED delete never reads an in-band answer as a peer refusal, even the
-// same text, so an operator clear always goes on to the reverse half.
+// same text. Single-req fan-out: the helper derives the reverse half inside.
 func TestAnUnmarkedDeleteNeverReadsAPeerRefusal9714(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
 	rec.refuseFirst(peerDeleteRefusedLocalOwned)
@@ -152,8 +152,8 @@ func TestAnUnmarkedDeleteNeverReadsAPeerRefusal9714(t *testing.T) {
 	if refused {
 		t.Errorf("an unmarked delete reported a peer refusal")
 	}
-	if got := len(rec.all()); got != 2 {
-		t.Errorf("recorded %d helper requests, want 2: an unmarked delete must still send the reverse half", got)
+	if got := len(rec.all()); got != 1 {
+		t.Errorf("recorded %d helper requests, want 1 (single-req: the helper derives the reverse inside)", got)
 	}
 }
 

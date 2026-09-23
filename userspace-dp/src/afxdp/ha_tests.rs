@@ -8049,3 +8049,1496 @@ fn single_threaded_peer_delete_never_spuriously_declines_9960() {
         assert!(matches!(outcome, SyncedDeleteOutcome::Applied));
     }
 }
+
+// #10512 lease pin (preflight-deletion ruling): the micro-batch leases ALL of
+// its keys — every forward plus every captured companion — together before
+// ANY SessionTable mutation. Pre-holding any one of them must refuse the
+// batch with shared authority fully intact (lease-before-mutation); holding
+// an unrelated tuple must not disturb it (exact coverage, no over-fencing).
+// Zero workers throughout: fan-outs go vacuous and the shared-only batch
+// exercises lease + shared remove + probe + repair deterministically. Mirror
+// writes fail closed in unit tests (no BPF fds), so post-lease progress
+// asserts shared removal plus the mirror-failed verdict — never success.
+struct Fixture10512Lease {
+    coordinator: Coordinator,
+    forward: SyncedSessionEntry,
+    reverse: SyncedSessionEntry,
+}
+
+fn fixture_10512_lease(
+    octet: u8,
+    src_port: u16,
+    dst_port: u16,
+    forward_id: u64,
+    companion_id: u64,
+) -> Fixture10512Lease {
+    // Distinct TEST-NET tuples per cell: the tuple gate is process-global and
+    // tests run in parallel, so lease coverage cells must not share tuples
+    // with each other (or with other suites' gate users).
+    let coordinator = Coordinator::new();
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, octet)),
+        src_port,
+        dst_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let mut forward = SyncedSessionEntry {
+        key: key.clone(),
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: forward_id,
+        tcp_close_class: 0,
+    };
+    forward.metadata.is_reverse = false;
+    let reverse_key = reverse_session_key(&key, NatDecision::default());
+    let mut reverse = forward.clone();
+    reverse.key = reverse_key;
+    reverse.origin = SessionOrigin::ReverseFlow;
+    reverse.metadata.is_reverse = true;
+    reverse.session_id = companion_id;
+    for entry in [&forward, &reverse] {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            entry,
+        );
+    }
+    Fixture10512Lease {
+        coordinator,
+        forward,
+        reverse,
+    }
+}
+
+impl Fixture10512Lease {
+    fn shared_has(&self, key: &SessionKey) -> bool {
+        self.coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced map")
+            .contains_key(key)
+    }
+
+    fn capture(&self) -> Vec<crate::protocol::SessionPolicyMatch> {
+        vec![crate::protocol::SessionPolicyMatch {
+            addr_family: 4,
+            routing_domain: 0,
+            tuple: crate::afxdp::ha::policy_tuple_from_key(&self.forward.key)
+                .expect("forward tuple encodes"),
+            reverse_key: Some(
+                crate::afxdp::ha::policy_tuple_from_key(&self.reverse.key)
+                    .expect("reverse tuple encodes"),
+            ),
+            policy_id: 7,
+            created_secs: 0,
+            created_ns: 0,
+            expected_rt_flow_session_id: self.forward.session_id,
+            companion_policy_id: 7,
+            expected_companion_rt_flow_session_id: self.reverse.session_id,
+        }]
+    }
+}
+
+#[test]
+fn policy_batch_lease_covers_forward_key_10512() {
+    let fixture = fixture_10512_lease(211, 41193, 51193, 0xF10512, 0xC10512);
+    let domain = fixture.coordinator.session_domain();
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([fixture.forward.key.clone()])
+        .expect("test lease on the forward tuple");
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "a fenced forward key must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e.starts_with("policy-batch-lease-refused")),
+        "failure must name the lease refusal, got {errors:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "lease-before-mutation: a refused lease must leave shared authority intact"
+    );
+    drop(held);
+    // Control: released, the same batch proceeds — shared rows removed, and
+    // the only failure left is the mirror write wanting BPF fds unit tests
+    // cannot create. That error proves post-lease progress, not a second
+    // refusal.
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(!complete && outcomes.is_empty());
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "released, the batch must reach the mirror stage, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "released, both shared rows must be conditionally removed"
+    );
+}
+
+#[test]
+fn policy_batch_lease_covers_companion_key_10512() {
+    let fixture = fixture_10512_lease(212, 41293, 51293, 0xF20512, 0xC20512);
+    let domain = fixture.coordinator.session_domain();
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([fixture.reverse.key.clone()])
+        .expect("test lease on the companion tuple");
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "a fenced companion key must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e.starts_with("policy-batch-lease-refused")),
+        "failure must name the lease refusal, got {errors:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "lease-before-mutation: a refused lease must leave shared authority intact"
+    );
+    drop(held);
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(!complete && outcomes.is_empty());
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "released, the batch must reach the mirror stage, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "released, both shared rows must be conditionally removed"
+    );
+}
+
+#[test]
+fn policy_batch_lease_ignores_unrelated_tuple_10512() {
+    let fixture = fixture_10512_lease(213, 41393, 51393, 0xF30512, 0xC30512);
+    let domain = fixture.coordinator.session_domain();
+    let unrelated = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99)),
+        src_port: 41099,
+        dst_port: 51099,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let _held = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([unrelated])
+        .expect("test lease on an unrelated tuple");
+    // A held UNRELATED tuple must not disturb the batch: it proceeds past
+    // acquisition (shared rows removed) and stops only at the mirror write
+    // unit tests cannot perform.
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(!complete && outcomes.is_empty());
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "an unrelated hold must not refuse acquisition, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "an unrelated hold must not prevent the conditional removes"
+    );
+    // Hold observer: exactly one hold recorded for the leased batch, with a
+    // sane average (sub-second bound — generous enough to never flake, tight
+    // enough to catch seconds-scale wedging) and max >= average (invariant).
+    let count = fixture.coordinator.policy_batch_count_total();
+    let total_ns = fixture.coordinator.policy_batch_hold_ns_total();
+    let max_ns = fixture.coordinator.policy_batch_hold_max_ns();
+    assert_eq!(count, 1, "one leased batch must record exactly one hold");
+    assert!(
+        total_ns / count < 1_000_000_000,
+        "average hold must read ms-typical, got {total_ns}ns over {count}"
+    );
+    assert!(
+        max_ns >= total_ns / count,
+        "max hold must bound the average"
+    );
+}
+
+/// #10512: an absent expected companion is converged (Applied), not partial —
+/// only a LIVE different incarnation preserves and reports. Shared half (the
+/// worker half is pinned in session_glue tests). Covers the trichotomy
+/// directly against `remove_shared_policy_item` (no lease, workers, or BPF):
+/// absent → Applied + forward gone; same → Applied + both gone;
+/// different-live → PartialCompanion + forward gone + companion kept.
+#[test]
+fn policy_shared_absent_companion_is_applied_not_partial_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    // (A) Companion absent: forward installed alone; expected companion id +
+    // captured key given but no live row. Applied, forward gone.
+    {
+        let coordinator = Coordinator::new();
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 221)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 221)),
+            src_port: 42193,
+            dst_port: 52193,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let forward = SyncedSessionEntry {
+            key: key.clone(),
+            decision: SessionDecision {
+                resolution: test_resolution(),
+                nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xF40512,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &forward,
+        );
+        let captured = reverse_session_key(&key, NatDecision::default());
+        let outcome = coordinator
+            .session_domain()
+            .remove_shared_policy_item(&key, 0xF40512, 0xC40512, Some(&captured), false);
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::Applied),
+            "absent companion is converged, not partial; got {outcome:?}"
+        );
+        assert!(
+            !coordinator
+                .sessions
+                .synced
+                .lock()
+                .expect("synced map")
+                .contains_key(&key),
+            "forward row must be gone"
+        );
+    }
+    // (B) Companion present with a different live incarnation: forward
+    // removed, companion preserved, PartialCompanion.
+    {
+        let fixture = fixture_10512_lease(222, 42293, 52293, 0xF50512, 0xC50512);
+        let captured =
+            reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
+        let outcome = fixture
+            .coordinator
+            .session_domain()
+            .remove_shared_policy_item(
+                &fixture.forward.key,
+                fixture.forward.session_id,
+                0xDEADBEEF,
+                Some(&captured),
+                false,
+            );
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::PartialCompanion),
+            "a LIVE different companion incarnation must report partial; got {outcome:?}"
+        );
+        assert!(
+            !fixture.shared_has(&fixture.forward.key)
+                && fixture.shared_has(&fixture.reverse.key),
+            "forward gone, live companion preserved"
+        );
+    }
+    // (C) Companion present with the expected incarnation: both removed, Applied.
+    {
+        let fixture = fixture_10512_lease(223, 42393, 52393, 0xF60512, 0xC60512);
+        let captured =
+            reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
+        let outcome = fixture
+            .coordinator
+            .session_domain()
+            .remove_shared_policy_item(
+                &fixture.forward.key,
+                fixture.forward.session_id,
+                fixture.reverse.session_id,
+                Some(&captured),
+                false,
+            );
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::Applied),
+            "matched companion must remove cleanly; got {outcome:?}"
+        );
+        assert!(
+            !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+            "both shared rows must be gone"
+        );
+    }
+    // (D) Self-reversing tuple (forward and companion are the SAME key):
+    // removed once, Applied (not PartialCompanion) — the companion
+    // removal is subsumed by the forward removal, not a second removal
+    // that finds Absent.
+    {
+        let coordinator = Coordinator::new();
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 224)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 224)),
+            src_port: 42493,
+            dst_port: 42493,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        assert_eq!(
+            reverse_session_key(&key, NatDecision::default()),
+            key,
+            "fixture must be self-reversing"
+        );
+        let mut metadata = test_metadata();
+        metadata.is_reverse = false;
+        let forward = SyncedSessionEntry {
+            key: key.clone(),
+            decision: SessionDecision {
+                resolution: test_resolution(),
+                nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata,
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xF70512,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &forward,
+        );
+        let outcome = coordinator
+            .session_domain()
+            .remove_shared_policy_item(&key, 0xF70512, 0xF70512, Some(&key), false);
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::Applied),
+            "self-reversing removal must be Applied, not partial; got {outcome:?}"
+        );
+        assert!(
+            !coordinator
+                .sessions
+                .synced
+                .lock()
+                .expect("synced map")
+                .contains_key(&key),
+            "self-reversing row must be gone"
+        );
+    }
+}
+
+/// #10512 abort-ordering pin (bounded-abort ruling): when the remove fan-out
+/// cannot queue (worker command queue pre-filled to cap here — deterministic,
+/// no sleeps), the abort cancels fences, COMPLETES the shared half (quiesce —
+/// infallible, still fenced), attempts fenced repair, then fails loud.
+/// Asserts quiesce-happened (shared rows gone) plus the loud error with no
+/// usable outcomes — never silent, never half-fenced. The probe attempt also
+/// meets the full queue and is skipped the same deterministic way (no waits).
+#[test]
+fn policy_batch_remove_abort_quiesces_shared_then_fails_loud_10512() {
+    let mut fixture = fixture_10512_lease(225, 42593, 52593, 0xF80512, 0xC80512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut queue = commands.lock().expect("queue");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            queue.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands)),
+        None,
+    );
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "an aborted batch must carry no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-remove-aborted"),
+        "abort must name itself loudly, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on abort"
+    );
+}
+
+/// #10512 abort-ordering pin (bounded-abort ruling), dead-worker half: a
+/// worker already dead at fan-out fails the remove (a panic during commit
+/// fails loud — revocation must not silently succeed alongside one), and the
+/// abort still quiesces shared before failing. Dead tables died with their
+/// threads (no Arc<SessionTable> exists), so no worker evidence is missing —
+/// but the batch fails regardless, by policy, not by uncertainty.
+#[test]
+fn policy_batch_dead_abort_quiesces_shared_then_fails_loud_10512() {
+    let mut fixture = fixture_10512_lease(226, 42693, 52693, 0xF90512, 0xC90512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands);
+    handle
+        .runtime_atomics
+        .dead
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(handle),
+        None,
+    );
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "a pre-dead worker must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-remove-aborted"),
+        "abort must name itself loudly, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on abort"
+    );
+}
+
+/// #10512: the abort-path probe retries once — a first probe that never acks
+/// (scripted stall: command dropped) is followed by a second that succeeds —
+/// and the batch still fails loud (revocation was already incomplete; the
+/// retry only maximizes repair coverage). Deterministic: drops guarantee
+/// both 250ms timeouts with no timing races (nothing ever acks a dropped
+/// command), and the scripted ack lands in ~milliseconds against a 250ms
+/// budget. A mock worker thread drains the queue per the script below.
+#[test]
+fn policy_batch_abort_probe_retries_once_then_fails_loud_10512() {
+    let mut fixture = fixture_10512_lease(227, 42793, 52793, 0xFA0512, 0xCA0512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Script: drop the remove (forces abort via timeout) and the first probe
+    // (forces the retry), ack everything after. Counters prove exact shape.
+    let removes_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probes_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let removes_seen = Arc::clone(&removes_seen);
+        let probes_seen = Arc::clone(&probes_seen);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut probes_acked = 0usize;
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands
+                        .lock()
+                        .expect("commands")
+                        .drain(..)
+                        .collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch { .. } => {
+                            removes_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            // Drop: never ack (forces the remove timeout).
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            let n = probes_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            // Drop the first probe, ack the retry.
+                            if n > 0 {
+                                probes_acked += 1;
+                                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            probes_acked
+        })
+    };
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    let probes_acked = worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "an aborted batch must carry no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-remove-aborted"),
+        "abort must name itself loudly, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on abort"
+    );
+    assert_eq!(
+        removes_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the remove envelope must arrive exactly once (no remove retry)"
+    );
+    assert_eq!(
+        probes_seen.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the abort probe must retry exactly once after the first stalls"
+    );
+    assert_eq!(
+        probes_acked, 1,
+        "exactly the retried probe must be acked"
+    );
+}
+
+/// #10512 advisory-25/2: coordinator-owned phase 2 executes each intent
+/// under ITS collecting worker's holder bit, against a caller-held
+/// Finalizing lease. Covered intent: BPF deletes recorded, worker claim
+/// retired, returns true. Uncovered intent: fails loud BEFORE any write
+/// (registry untouched), returns false. The retirement assert is the
+/// holder pin — execute under `Coordinator` and the worker's claim bit
+/// survives (`remove_claim` returns Remaining without running delete).
+#[test]
+fn policy_deferred_redirects_execute_under_collecting_worker_holder_10512() {
+    let fixture = fixture_10512_lease(230, 42093, 52093, 0xF80512, 0xC80512);
+    let key = fixture.forward.key.clone();
+    // Production-fidelity lease: acquired + Finalizing, exactly as the batch holds it.
+    let lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([key.clone()])
+        .expect("test lease on the forward tuple");
+    lease.begin_finalizing().expect("test lease finalizes");
+    // Pre-claim the session row for Worker(1): the collector's holder.
+    let owners = crate::afxdp::bpf_map::SteeringRowOwners::default();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+    owners
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(1),
+            || Ok(()),
+        )
+        .expect("pre-claim publishes");
+    assert_eq!(owners.held_row_count(&key, 1), 1, "fixture must pre-claim one row");
+    // Base holder is Coordinator: the helper must override per-intent.
+    let map = crate::afxdp::bpf_map::SteeringMap {
+        fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+        owners: &owners,
+        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+    };
+    let intent = crate::afxdp::DeferredRedirectDelete {
+        key: key.clone(),
+        decision: fixture.forward.decision.clone(),
+        metadata: fixture.forward.metadata.clone(),
+        origin: fixture.forward.origin,
+        worker_id: 1,
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let ok =
+        crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[intent]);
+    assert!(ok, "covered intent must execute cleanly");
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .any(|record| record.value.is_none() && record.key == key),
+        "covered intent must record BPF deletes for its key"
+    );
+    assert_eq!(
+        owners.held_row_count(&key, 1),
+        0,
+        "execution must retire the collecting worker's claim (holder pin)"
+    );
+    assert_eq!(
+        owners.owner_count(&row),
+        0,
+        "the claimed row must be fully released"
+    );
+    // Uncovered intent: loud failure BEFORE any write — registry untouched.
+    let mut outside_key = key.clone();
+    outside_key.src_port = outside_key.src_port.wrapping_add(1);
+    let outside_row = crate::afxdp::bpf_map::session_map_row(&outside_key);
+    owners
+        .publish_row(
+            &outside_row,
+            &outside_key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(1),
+            || Ok(()),
+        )
+        .expect("pre-claim publishes");
+    let outside = crate::afxdp::DeferredRedirectDelete {
+        key: outside_key.clone(),
+        decision: fixture.forward.decision.clone(),
+        metadata: fixture.forward.metadata.clone(),
+        origin: fixture.forward.origin,
+        worker_id: 1,
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let ok =
+        crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[outside]);
+    assert!(!ok, "uncovered intent must fail loud");
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes().is_empty(),
+        "cover failure must precede any BPF write"
+    );
+    assert_eq!(
+        owners.held_row_count(&outside_key, 1),
+        1,
+        "failed intent must leave the registry untouched"
+    );
+}
+
+/// #10512 advisory-25/2: end-to-end wiring — a mock worker that stashes a
+/// covered intent and acks drives the coordinator through execution: BPF
+/// deletes for the intent key are RECORDED (execution ran), and the batch
+/// continues past execution to the mirror verdict (repair fails closed on
+/// absent conntrack fds — never success in unit tests). Delete the
+/// coordinator's execute call and the recorder stays empty.
+#[test]
+fn policy_batch_covered_intent_executes_then_reports_mirror_10512() {
+    let mut fixture = fixture_10512_lease(228, 42893, 52893, 0xFC0512, 0xCC0512);
+    fixture
+        .coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Mock worker: stash ONE covered intent (built from the leased item key,
+    // so coverage is structural, not hardcoded), mark applied, ack; ack
+    // probes immediately (absence — repair then fails closed on fd -1).
+    let decision = fixture.forward.decision.clone();
+    let metadata = fixture.forward.metadata.clone();
+    let origin = fixture.forward.origin;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands.lock().expect("commands").drain(..).collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch {
+                            items,
+                            intents,
+                            applied,
+                            pending,
+                            ..
+                        } => {
+                            intents
+                                .lock()
+                                .expect("intents")
+                                .push(crate::afxdp::DeferredRedirectDelete {
+                                    key: items[0].key.clone(),
+                                    decision: decision.clone(),
+                                    metadata: metadata.clone(),
+                                    origin,
+                                    worker_id: 0,
+                                });
+                            applied.lock().expect("applied")[0] = true;
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "no conntrack fds: repair fails closed, got complete={complete} outcomes={outcomes:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "covered intent must execute cleanly and continue to the mirror verdict, got {errors:?}"
+    );
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .any(|record| record.value.is_none() && record.key == fixture.forward.key),
+        "coordinator must execute the stashed intent (BPF deletes recorded)"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "normal path must run the shared loop past execution"
+    );
+}
+
+/// #10512 advisory-25/3: an uncovered intent fails the execution with the
+/// phase-2 verdict — routed THROUGH the abort-convergence sequence (shared
+/// quiesce + best-effort repair), never a direct return. Recorder stays
+/// empty (cover failed before any write); shared converges (no zombie
+/// authority behind the failed batch); the abort probe ran exactly once.
+#[test]
+fn policy_batch_uncovered_intent_fails_loud_then_quiesces_shared_10512() {
+    let mut fixture = fixture_10512_lease(229, 42993, 52993, 0xFD0512, 0xCD0512);
+    fixture
+        .coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Mock worker: stash ONE intent for a key OUTSIDE the batch lease,
+    // mark applied (the worker did remove), ack; ack probes immediately.
+    let decision = fixture.forward.decision.clone();
+    let metadata = fixture.forward.metadata.clone();
+    let origin = fixture.forward.origin;
+    let probes_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let probes_seen = Arc::clone(&probes_seen);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands.lock().expect("commands").drain(..).collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch {
+                            items,
+                            intents,
+                            applied,
+                            pending,
+                            ..
+                        } => {
+                            let mut outside = items[0].key.clone();
+                            outside.src_port = outside.src_port.wrapping_add(1);
+                            intents
+                                .lock()
+                                .expect("intents")
+                                .push(crate::afxdp::DeferredRedirectDelete {
+                                    key: outside,
+                                    decision: decision.clone(),
+                                    metadata: metadata.clone(),
+                                    origin,
+                                    worker_id: 0,
+                                });
+                            applied.lock().expect("applied")[0] = true;
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            probes_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "an uncovered intent must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-deferred-failed"),
+        "execution failure must carry the phase-2 verdict, got {errors:?}"
+    );
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes().is_empty(),
+        "cover failure must precede any BPF write"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on phase-2 failure"
+    );
+    assert_eq!(
+        probes_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the abort probe must run exactly once (best-effort repair attempted)"
+    );
+}
+
+/// #10512 advisory-25/4: registry retirement must run even with NO kernel
+/// map bound. Mapless batch (no `bpf_maps.store`), pre-claimed Worker(0)
+/// row, mock stashes a covered intent: execution still records the delete
+/// attempt (the recorder intercepts pre-fd-gate) AND retires the claim.
+/// Restore the skip and both asserts fail.
+#[test]
+fn policy_batch_mapless_intent_still_retires_registry_10512() {
+    let mut fixture = fixture_10512_lease(231, 43193, 53193, 0xFF0512, 0xCF0512);
+    // NOTE: no bpf_maps.store — the session map is unbound (fd -1 path).
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Pre-claim the forward row for Worker(0) in the COORDINATOR's registry.
+    let key = fixture.forward.key.clone();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+    fixture
+        .coordinator
+        .steering_owners
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(0),
+            || Ok(()),
+        )
+        .expect("pre-claim publishes");
+    assert_eq!(
+        fixture.coordinator.steering_owners.held_row_count(&key, 0),
+        1,
+        "fixture must pre-claim one row"
+    );
+    let decision = fixture.forward.decision.clone();
+    let metadata = fixture.forward.metadata.clone();
+    let origin = fixture.forward.origin;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands.lock().expect("commands").drain(..).collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch {
+                            items,
+                            intents,
+                            applied,
+                            pending,
+                            ..
+                        } => {
+                            intents
+                                .lock()
+                                .expect("intents")
+                                .push(crate::afxdp::DeferredRedirectDelete {
+                                    key: items[0].key.clone(),
+                                    decision: decision.clone(),
+                                    metadata: metadata.clone(),
+                                    origin,
+                                    worker_id: 0,
+                                });
+                            applied.lock().expect("applied")[0] = true;
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "no conntrack fds: repair fails closed, got complete={complete} outcomes={outcomes:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "mapless execution must succeed and continue to the mirror verdict, got {errors:?}"
+    );
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .any(|record| record.value.is_none() && record.key == key),
+        "mapless execution must still attempt the delete"
+    );
+    assert_eq!(
+        fixture.coordinator.steering_owners.held_row_count(&key, 0),
+        0,
+        "mapless execution must retire the collecting worker's claim"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "normal path must run the shared loop past execution"
+    );
+}
+
+/// #10512 scoped HA delete, matched: the entry carrying the captured
+/// identity is removed (Applied), and the worker fan-out carries the
+/// conditional command with the coordinator-derived companion (no
+/// standalone reverse).
+#[test]
+fn scoped_peer_delete_matched_removes_and_fans_out_conditional_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(232, 43293, 53293, 0xF10512, 0xC10512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(
+            fixture.forward.key.clone(),
+            false,
+            fixture.forward.session_id,
+        );
+    // Applied in production; RefusedMirrorDelete here (no BPF fds in unit
+    // tests, and scoped deletes are mirror-strict). Either way the
+    // identity matched and the shared removal + fan-out below ran.
+    assert!(
+        matches!(
+            outcome,
+            SyncedDeleteOutcome::Applied | SyncedDeleteOutcome::RefusedMirrorDelete
+        ),
+        "matched scoped delete must apply (modulo test-env mirror), got {outcome:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "matched forward row must be gone"
+    );
+    let queued: Vec<WorkerCommand> = commands.lock().expect("commands").drain(..).collect();
+    assert_eq!(queued.len(), 1, "exactly the conditional fan-out, got {queued:?}");
+    match &queued[0] {
+        WorkerCommand::DeleteSyncedConditional {
+            key,
+            expected_id,
+            companion,
+        } => {
+            assert_eq!(key, &fixture.forward.key, "command must name the forward");
+            assert_eq!(
+                *expected_id, fixture.forward.session_id,
+                "command must carry the captured identity"
+            );
+            assert_eq!(
+                companion.as_ref(),
+                Some(&fixture.reverse.key),
+                "command must carry the derived companion (no standalone reverse)"
+            );
+        }
+        other => panic!("expected DeleteSyncedConditional, got {other:?}"),
+    }
+}
+
+/// #10512 scoped HA delete, mismatched: a live different incarnation
+/// survives (RefusedIdentity + counter), shared and worker state untouched.
+#[test]
+fn scoped_peer_delete_mismatched_survives_and_counts_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(233, 43393, 53393, 0xF20512, 0xC20512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let before = fixture
+        .coordinator
+        .session_delete_refused_identity_total();
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(
+            fixture.forward.key.clone(),
+            false,
+            0xDEADBEEF,
+        );
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
+        "mismatched scoped delete must refuse identity, got {outcome:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "live entry must survive a mismatched delete"
+    );
+    assert_eq!(
+        fixture
+            .coordinator
+            .session_delete_refused_identity_total(),
+        before + 1,
+        "identity refusal must count"
+    );
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "a refused delete must fan out nothing"
+    );
+}
+
+/// #10512 scoped HA delete, absent forward: StaleForward with NO side
+/// effects — no worker fan-out (BPF cleanup would erase a live row in a
+/// publish-before-shared window, so the short-circuit precedes it).
+#[test]
+fn scoped_peer_delete_absent_is_stale_without_side_effects_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(234, 43493, 53493, 0xF30512, 0xC30512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let mut missing = fixture.forward.key.clone();
+    missing.src_port = missing.src_port.wrapping_add(1);
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(missing, false, 0xF30512);
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::StaleForward),
+        "absent scoped delete must be StaleForward, got {outcome:?}"
+    );
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "an absent scoped delete must fan out nothing"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "an absent scoped delete must touch nothing"
+    );
+}
+
+/// #10512 scoped entry with zero identity refuses WITHOUT touching the
+/// table: 0 is identity-missing (plan §2.1), and the callee's legacy
+/// "0 disables the check" must not leak through this API.
+#[test]
+fn scoped_peer_delete_zero_identity_refuses_without_side_effects_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(235, 43593, 53593, 0xF40512, 0xC40512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(fixture.forward.key.clone(), false, 0);
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
+        "zero-identity scoped delete must refuse, got {outcome:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "a zero-identity scoped delete must touch nothing"
+    );
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "a zero-identity scoped delete must fan out nothing"
+    );
+}
+
+/// Pump every listed worker queue once through the real dispatch loop.
+fn pump_list_queues10512(
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+) {
+    for (q, t) in queues.iter().zip(tables.iter_mut()) {
+        if q.lock().expect("queue").is_empty() {
+            continue;
+        }
+        let forwarding = ForwardingState::default();
+        let ha_state = BTreeMap::new();
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        crate::afxdp::session_glue::apply_worker_commands(
+            q,
+            t,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &neighbors,
+            0,
+            &mut VecDeque::new(),
+        );
+    }
+}
+
+/// Run list_sessions_by_policy on a thread while the main thread pumps
+/// the worker queues until it returns. Deterministic: the pump runs
+/// until the call finishes, so acks always land before the 250ms
+/// worker-ack deadline (duration varies, outcome does not).
+fn call_list_with_pump10512(
+    domain: &super::ha::SessionDomain,
+    req: &crate::protocol::SessionPolicyListRequest,
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+) -> (
+    Vec<crate::protocol::SessionPolicyMatch>,
+    bool,
+    Vec<String>,
+    String,
+) {
+    let d = domain.clone();
+    let r = req.clone();
+    let handle = std::thread::spawn(move || d.list_sessions_by_policy(&r));
+    while !handle.is_finished() {
+        pump_list_queues10512(queues, tables);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    handle.join().expect("list thread")
+}
+
+fn install_list_row10512(
+    sessions: &mut SessionTable,
+    key: &SessionKey,
+    policy_id: u32,
+    now_ns: u64,
+) {
+    let mut meta = test_metadata();
+    meta.policy_id = policy_id;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        meta,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+}
+
+fn list_req_ha10512(policy_ids: Vec<u32>) -> crate::protocol::SessionPolicyListRequest {
+    crate::protocol::SessionPolicyListRequest {
+        policy_ids,
+        mode: "prepublish".to_string(),
+        before_secs: None,
+        families: Vec::new(),
+        classes: Vec::new(),
+        continuation: String::new(),
+        ..Default::default()
+    }
+}
+
+/// Coordinator fan-out merges rows across workers and dedups the same
+/// (key, identity) replica found in two tables.
+#[test]
+fn coord_list_fans_out_merges_and_dedups_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut coordinator = Coordinator::new();
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    let q1 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+    coordinator.workers.register(
+        1,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q1.clone())),
+        None,
+    );
+    let mut t0 = SessionTable::new();
+    let mut t1 = SessionTable::new();
+    let shared = test_key();
+    install_list_row10512(&mut t0, &shared, 5, now_ns);
+    // Same key first-installed in the second table: both fresh tables
+    // mint id 1, so this is a true (key, id) replica.
+    install_list_row10512(&mut t1, &shared, 5, now_ns);
+    let mut other = test_key();
+    other.src_port = other.src_port.wrapping_add(7);
+    install_list_row10512(&mut t1, &other, 6, now_ns);
+
+    let domain = coordinator.session_domain();
+    let (rows, complete, errs, cont) = call_list_with_pump10512(
+        &domain,
+        &list_req_ha10512(vec![5, 6]),
+        &[q0, q1],
+        &mut [t0, t1],
+    );
+    assert!(errs.is_empty(), "clean fan-out must error nothing, got {errs:?}");
+    assert!(complete, "pumped fan-out must complete");
+    assert!(cont.is_empty(), "two rows need no continuation");
+    assert_eq!(rows.len(), 2, "merged rows with the replica deduped");
+    let mut policies: Vec<u32> = rows.iter().map(|r| r.policy_id).collect();
+    policies.sort_unstable();
+    assert_eq!(policies, vec![5, 6]);
+}
+
+/// Coordinator pages beyond 4096 rows: first page + continuation, then
+/// the terminal page (complete, no continuation).
+#[test]
+fn coord_list_pages_beyond_4096_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut coordinator = Coordinator::new();
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+    let mut table = SessionTable::new();
+    for i in 0..4100u32 {
+        let mut key = test_key();
+        key.src_port = 10000u16.wrapping_add(i as u16);
+        install_list_row10512(&mut table, &key, 5, now_ns);
+    }
+    let domain = coordinator.session_domain();
+    let (page1, complete1, errs1, cont1) = call_list_with_pump10512(
+        &domain,
+        &list_req_ha10512(vec![5]),
+        std::slice::from_ref(&q0),
+        std::slice::from_mut(&mut table),
+    );
+    assert!(errs1.is_empty(), "page 1 must error nothing, got {errs1:?}");
+    assert_eq!(page1.len(), 4096, "first page holds PAGE_ROWS");
+    assert!(!complete1, "partial page must not report complete");
+    assert!(!cont1.is_empty(), "partial page must continue");
+    // Terminal page needs no pump (continuation resumes the capture).
+    let mut req2 = list_req_ha10512(vec![5]);
+    req2.continuation = cont1;
+    let (page2, complete2, errs2, cont2) = domain.list_sessions_by_policy(&req2);
+    assert!(errs2.is_empty(), "page 2 must error nothing, got {errs2:?}");
+    assert_eq!(page2.len(), 4, "terminal page holds the rest");
+    assert!(complete2, "terminal page must complete");
+    assert!(cont2.is_empty(), "terminal page continues nothing");
+    let mut ids: std::collections::HashSet<u64> = page1
+        .iter()
+        .chain(page2.iter())
+        .map(|r| r.expected_rt_flow_session_id)
+        .collect();
+    assert_eq!(ids.len(), 4100, "all rows distinct across pages");
+}
+
+/// An unpumped (stalled) worker trips the 250ms ack deadline: the READ
+/// is incomplete with a worker-ack-timeout error, never a hang.
+#[test]
+fn coord_list_unacked_worker_times_out_incomplete_10512() {
+    let mut coordinator = Coordinator::new();
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+    let domain = coordinator.session_domain();
+    let (rows, complete, errs, _) = domain.list_sessions_by_policy(&list_req_ha10512(vec![5]));
+    assert!(rows.is_empty(), "unacked scan must return no rows");
+    assert!(!complete, "unacked scan must not complete");
+    assert!(
+        errs.iter().any(|e| e.starts_with("worker-ack-timeout")),
+        "unacked scan must name the timeout, got {errs:?}"
+    );
+}
+
+/// Empty policy ids return the authoritative empty without fanning out
+/// (no workers needed, no errors).
+#[test]
+fn coord_list_empty_ids_returns_authoritative_empty_10512() {
+    let coordinator = Coordinator::new();
+    let domain = coordinator.session_domain();
+    let (rows, complete, errs, cont) = domain.list_sessions_by_policy(&list_req_ha10512(Vec::new()));
+    assert!(rows.is_empty());
+    assert!(complete, "empty ids must complete");
+    assert!(errs.is_empty(), "empty ids must error nothing, got {errs:?}");
+    assert!(cont.is_empty());
+}
+
+/// clear_mirror enumerates helper-owned rows natively: the same bare
+/// tuple in two routing domains are distinct keys and one clear
+/// removes every row, leaving all shared maps empty (#5304).
+#[test]
+fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
+    let coordinator = Coordinator::new();
+    let base = test_key();
+    for domain in [7u32, 8u32] {
+        let mut key = base.clone();
+        key.routing_domain = domain;
+        let entry = SyncedSessionEntry {
+            key,
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xC1EA9000 + domain as u64,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &entry,
+        );
+    }
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("synced").len(),
+        2,
+        "fixture must hold both domain rows"
+    );
+    let domain = coordinator.session_domain();
+    let counts = domain.clear_mirror().expect("clear must succeed");
+    assert_eq!(counts, (0, 0), "no BPF maps bound in unit tests");
+    assert!(
+        coordinator.sessions.synced.lock().expect("synced").is_empty(),
+        "clear must empty the shared synced map"
+    );
+    assert!(
+        coordinator.sessions.nat.lock().expect("nat").is_empty(),
+        "clear must empty the shared nat map"
+    );
+    assert!(
+        coordinator.sessions.forward_wire.lock().expect("wire").is_empty(),
+        "clear must empty the shared forward-wire map"
+    );
+}
+
+/// P3: a failing BPF sweep fails the clear WITHOUT touching
+/// authority — shared rows are retained for retry, and the verb
+/// reports ok=false (never a masked complete).
+#[test]
+fn clear_mirror_bpf_failure_retains_authority_10512() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0xC1EA9,
+        tcp_close_class: 0,
+    };
+    crate::afxdp::shared_ops::publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    // i32::MAX: a bound-but-bogus fd (EBADF on first syscall, #10590
+    // precedent) — exercises the production error leg unprivileged.
+    coordinator.bpf_maps.store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+        conntrack_v4_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
+        conntrack_v6_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
+        ..Default::default()
+    }));
+    let domain = coordinator.session_domain();
+    let err = domain.clear_mirror().expect_err("BPF failure must fail the clear");
+    assert!(
+        err.contains("conntrack"),
+        "error must name the failing sweep, got {err}"
+    );
+    assert!(
+        coordinator.sessions.synced.lock().expect("synced").contains_key(&key),
+        "failed clear must retain shared authority"
+    );
+}
+
+/// P4: over-cap single-shot fails closed touching nothing (the
+/// take(cap+1) snapshot bounds the transient Vec, proven here with a
+/// 1-row cap against 2 rows).
+#[test]
+fn clear_mirror_over_cap_fails_closed_untouched_10512() {
+    let coordinator = Coordinator::new();
+    for domain in [7u32, 8u32] {
+        let mut key = test_key();
+        key.routing_domain = domain;
+        let entry = SyncedSessionEntry {
+            key,
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xC1EA9000 + domain as u64,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &entry,
+        );
+    }
+    let domain = coordinator.session_domain();
+    let err = domain
+        .clear_mirror_with_cap(1)
+        .expect_err("2 rows over a 1-row cap must fail");
+    assert_eq!(err, "clear-cap-exceeded");
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("synced").len(),
+        2,
+        "over-cap clear must touch nothing"
+    );
+}

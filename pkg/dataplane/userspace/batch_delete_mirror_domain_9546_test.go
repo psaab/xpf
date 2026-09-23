@@ -88,7 +88,7 @@ func TestBatchDeleteNamesTheMirroredDomainOnTheWire9546(t *testing.T) {
 
 	var deletes []SessionSyncRequest
 	for _, r := range rec.all() {
-		if r.Operation == "delete" {
+		if r.Operation == "mirror_delete_batch" {
 			deletes = append(deletes, r)
 		}
 	}

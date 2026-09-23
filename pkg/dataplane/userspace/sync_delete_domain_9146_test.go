@@ -130,7 +130,7 @@ func newSyncOnlyManager9146(t *testing.T) (*Manager, *syncRec9146) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	rec := startSyncRec9146(t, filepath.Join(dir, "userspace-dp-sessions.sock"))
 	return m, rec
@@ -200,9 +200,9 @@ func TestTenantSwapEmitsNoRetractionSoTheStandbyAccumulates9146(t *testing.T) {
 	deletes := 0
 	for _, r := range got {
 		switch r.Operation {
-		case "upsert":
+		case "mirror_upsert":
 			upserts = append(upserts, r.RoutingDomain)
-		case "delete":
+		case "mirror_delete":
 			deletes++
 		}
 	}
@@ -240,12 +240,12 @@ func TestDeleteSessionWireCarriesDomainForBothHalves9146(t *testing.T) {
 	m.mu.Unlock()
 
 	got := rec.all()
-	if len(got) != 2 {
-		t.Fatalf("got %d sync requests, want 2 (forward + reverse companion)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("got %d sync requests, want 1 (single-req: the helper derives the reverse companion inside)", len(got))
 	}
 	for i, r := range got {
-		if r.Operation != "delete" {
-			t.Fatalf("request %d op = %q, want delete", i, r.Operation)
+		if r.Operation != "mirror_delete" {
+			t.Fatalf("request %d op = %q, want mirror_delete", i, r.Operation)
 		}
 		if r.RoutingDomain != tenant {
 			t.Fatalf("delete half %d carried routing_domain=%d, want %d — the reverse companion is "+
@@ -297,8 +297,8 @@ func TestDeleteV6WireCarriesDomainForBothHalves9146(t *testing.T) {
 	m.mu.Unlock()
 
 	got := rec.all()
-	if len(got) != 2 {
-		t.Fatalf("got %d v6 sync requests, want 2", len(got))
+	if len(got) != 1 {
+		t.Fatalf("got %d v6 sync requests, want 1 (single-req: the helper derives the reverse inside)", len(got))
 	}
 	for i, r := range got {
 		if r.RoutingDomain != tenant {
@@ -307,10 +307,9 @@ func TestDeleteV6WireCarriesDomainForBothHalves9146(t *testing.T) {
 	}
 }
 
-// A reverse-companion refusal must be returned to the caller, not swallowed
-// after the forward delete succeeded. This sync-only cell drives the exact
-// second helper request without requiring CAP_BPF and proves a retry emits
-// both halves again.
+// A helper refusal must be returned to the caller, not swallowed.
+// Single-req fan-out: the helper derives the reverse half inside, so
+// this cell refuses the single request and proves a retry re-emits it.
 func TestSyncDeleteReverseCompanionRefusalIsRetryable9146(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
 	k := key9146()
@@ -319,16 +318,16 @@ func TestSyncDeleteReverseCompanionRefusalIsRetryable9146(t *testing.T) {
 		SrcPort: k.DstPort, DstPort: k.SrcPort, Protocol: k.Protocol,
 	}
 	val := dataplane.SessionValue{RoutingDomain: 100007, ReverseKey: rev}
-	rec.refuseNth(2, "injected reverse helper delete failure")
+	rec.refuseNth(1, "injected helper delete failure")
 
 	m.mu.Lock()
 	err := m.syncDeleteV4Locked(k, val, true)
 	m.mu.Unlock()
 	if err == nil {
-		t.Fatal("reverse helper refusal was swallowed")
+		t.Fatal("helper refusal was swallowed")
 	}
-	if got := rec.all(); len(got) != 2 {
-		t.Fatalf("first attempt emitted %d requests, want forward + reverse", len(got))
+	if got := rec.all(); len(got) != 1 {
+		t.Fatalf("first attempt emitted %d requests, want 1", len(got))
 	}
 
 	rec.mu.Lock()
@@ -341,8 +340,8 @@ func TestSyncDeleteReverseCompanionRefusalIsRetryable9146(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry after reverse refusal: %v", err)
 	}
-	if got := rec.all(); len(got) != 4 {
-		t.Fatalf("retry emitted %d total requests, want two complete delete pairs", len(got))
+	if got := rec.all(); len(got) != 2 {
+		t.Fatalf("retry emitted %d total requests, want 2 (first + retry)", len(got))
 	}
 }
 
@@ -395,7 +394,7 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 		t.Fatal("DeleteSession emitted no helper sync at all — the delete never reaches the standby")
 	}
 	for i, r := range got {
-		if r.Operation != "delete" {
+		if r.Operation != "mirror_delete_batch" {
 			continue
 		}
 		if r.RoutingDomain != tenant {

@@ -31,10 +31,14 @@ import "time"
 // shutdown census is likewise unaffected: armControlIO is still the single site
 // and controlShutdownCeiling still clamps a stop in progress.
 var controlVerbDeadlineFloors9344 = map[string]time.Duration{
+	// 30 s is the absolute budget for the helper-owned policy READ and all
+	// continuation pages in one capture. Individual pages remain bounded by
+	// this floor; the manager enforces the same deadline across the sequence.
+	"list_sessions_by_policy": 30 * time.Second,
 	// 15 s of worker ack-wait, plus the drain, JSON serialization and write of
 	// a page. The margin is 3 s — the same base a small request gets — rather
-	// than a round number, so the floor is the helper's own bound plus one
-	// ordinary round trip and nothing else.
+	// than a round number, so the helper's own bound and one ordinary round trip
+	// fit without changing the global control deadline.
 	"export_owner_rg_sessions": ownerRGExportAckWait + controlBaseDeadline,
 }
 

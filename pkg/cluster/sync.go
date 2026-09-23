@@ -458,6 +458,14 @@ type SyncStats struct {
 	// as DeletesSuppressedPeerIncapable: counted, visible leak over
 	// invisible teardown.
 	DeletesSuppressedPurgeRetirement atomic.Uint64
+	// DeletesSuppressedScopedPolicy counts outgoing SCOPED session deletes
+	// WITHHELD because the peer advertised its capabilities and did NOT
+	// claim #10512 scoped policy deletes (capFlagScopedPolicyDelete).
+	// Such a peer applies deletes by bare tuple, so our scoped delete
+	// would destroy a surviving colliding tenant's session. Same
+	// operational meaning as the other delete suppressors: counted,
+	// visible leak over invisible teardown.
+	DeletesSuppressedScopedPolicy atomic.Uint64
 	// InstallsSuppressedNoPeerInstallTable counts outgoing STAMPED session
 	// installs WITHHELD because the peer advertised its capabilities and
 	// did NOT claim #9752 install-table identity
@@ -1111,6 +1119,10 @@ type SessionSync struct {
 	// suppression warning, same incarnation scoping as deleteSuppressionWarned
 	// (reset alongside it on full disconnect).
 	purgeRetirementSuppressionWarned atomic.Bool
+	// scopedPolicySuppressionWarned latches the #10512 scoped-delete
+	// suppression warning, same incarnation scoping as
+	// deleteSuppressionWarned (reset alongside it on full disconnect).
+	scopedPolicySuppressionWarned atomic.Bool
 	// installTableSuppressionWarned latches the #9752 round 3 stamped-install
 	// suppression warning, same incarnation scoping (reset alongside on
 	// full disconnect).
@@ -1239,7 +1251,15 @@ type SessionSync struct {
 	deleteJournalMu  sync.Mutex
 	deleteJournal    [][]byte
 	deleteJournalCap int
-	lastPeerRxMono   atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
+	// scopedDeleteJournal is the #10512 deferred scoped-delete debt: scoped
+	// frames that could not be queued (disconnected/full) wait here — never
+	// in the bare journal — and flush only after the current peer
+	// positively advertises the scoped bit (learn-triggered), so no
+	// cross-incarnation raw replay can downgrade them. Same mutex, cap
+	// discipline, and overflow resync-arming as the bare journal.
+	scopedDeleteJournal    [][]byte
+	scopedDeleteJournalCap int
+	lastPeerRxMono         atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
 	// peerHeartbeatAckEver latches when the CURRENTLY connected peer proves it
 	// understands syncMsgHeartbeat by replying syncMsgHeartbeatAck. It gates
 	// the two enforcement paths that would otherwise punish a legacy peer that
@@ -1390,6 +1410,13 @@ type SessionSync struct {
 	genSentMu  sync.Mutex
 	genSentV4  map[dataplane.SessionKey]uint64
 	genSentV6  map[dataplane.SessionKeyV6]uint64
+	// genSentScopedV4/V6 stamp per-(domain, tuple) install generations for
+	// scoped policy deletes (#10512, plan §1.2 keyed sender state):
+	// takeDeleteGenScoped draws fresh strictly greater than the last
+	// install it cancels. Guarded by genSentMu; same cap/overflow
+	// discipline as the bare stamp maps.
+	genSentScopedV4 map[scopedDeleteKeyV4]uint64
+	genSentScopedV6 map[scopedDeleteKeyV6]uint64
 	// genSentOverflowV4/V6 latch, per family and for the life of the process, that
 	// the stamp map has ever been at its effective cap and skipped a key (#9719).
 	// After that, a delete for an unstamped key may be for a live session whose
@@ -1397,6 +1424,10 @@ type SessionSync struct {
 	// Guarded by genSentMu.
 	genSentOverflowV4 bool
 	genSentOverflowV6 bool
+	// genSentOverflowScopedV4/V6 are the #9719 overflow latches for the
+	// scoped stamp maps (see genSentOverflowV4). Guarded by genSentMu.
+	genSentOverflowScopedV4 bool
+	genSentOverflowScopedV6 bool
 	// sentGenGuardCap/recvGenGuardCap are the effective sender/receiver-side
 	// generation-guard caps (#9915 F-044): genGuardMapDefaultCap until demand
 	// growth doubles them toward genGuardMapCap. Zero means never grown.
@@ -1444,12 +1475,22 @@ type SessionSync struct {
 	installTableRecvV6 map[dataplane.SessionKeyV6]recvInstallTable
 	recvGenV4          map[dataplane.SessionKey]uint64
 	recvGenV6          map[dataplane.SessionKeyV6]uint64
+	// recvGenScopedV4/V6 + recvTombScopedV4/V6 are the #10512 scoped
+	// policy-delete receiver spaces, keyed by (domain, tuple) and fully
+	// separate from the bare spaces in both directions (see
+	// deleteGenGuardScopedV4). Guarded by recvGenMu; reclaimed/reset
+	// alongside the bare maps.
+	recvGenScopedV4 map[scopedDeleteKeyV4]uint64
+	recvGenScopedV6 map[scopedDeleteKeyV6]uint64
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
 	// map at its effective cap evicts the oldest tombstone to record a new key instead
 	// of skip-recording it (#9719). Guarded by recvGenMu; retained across same-namespace
 	// resets and cleared by a namespace reset.
 	recvTombV4 genTombstoneOrder[dataplane.SessionKey]
 	recvTombV6 genTombstoneOrder[dataplane.SessionKeyV6]
+	// Scoped tombstone orders (see the recvGenScoped comment above).
+	recvTombScopedV4 genTombstoneOrder[scopedDeleteKeyV4]
+	recvTombScopedV6 genTombstoneOrder[scopedDeleteKeyV6]
 	// applyMu serializes the receive-side session APPLY across receive loops
 	// (#9715).
 	//   - Every installClusterSynced* holds it from the guard, through the
@@ -1712,6 +1753,11 @@ type SessionSync struct {
 	// would be written, exercising the watermark failure path without
 	// disconnecting the active connection in production.
 	testBeforeQueuedWrite func()
+	// testBeforeScopedJournalTake runs in flushScopedDeleteJournal after
+	// the capability re-check and before the journal take, then nils
+	// itself (testBeforeQueuedWrite shape). Test-only; pins the
+	// caps-store-vs-append race deterministically.
+	testBeforeScopedJournalTake func()
 	// testDHCPPreCommit, when non-nil, runs after DHCP decode+filter and
 	// before the commit, with NO locks held (so the test may drive reset
 	// + replacement paths from the hook rendezvous). Test-only hook for
@@ -1898,6 +1944,8 @@ func (s *SessionSync) initGenState() {
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
 	s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
+	s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+	s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the
 	// sender's config-gen never regresses below a value the peer may hold
 	// across this node's restarts within a boot, and create the ordered

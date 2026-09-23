@@ -790,6 +790,53 @@ impl SessionTable {
         }
     }
 
+    /// Iterate over table rows with the identity and monotonic creation stamp
+    /// needed by the policy invalidation READ. Unlike `iter_with_origin`, this
+    /// deliberately exposes no mutable state and still walks the authoritative
+    /// primary-key index.
+    pub fn iter_with_identity(
+        &self,
+        mut f: impl FnMut(
+            &SessionKey,
+            SessionDecision,
+            &SessionMetadata,
+            SessionOrigin,
+            u64,
+            u64,
+        ),
+    ) {
+        for (key, handle) in &self.key_to_handle {
+            if let Some(record) = self.entries.get(*handle as usize) {
+                let entry = &record.entry;
+                f(
+                    key,
+                    entry.decision,
+                    &entry.metadata,
+                    entry.origin,
+                    entry.created_ns,
+                    entry.session_id,
+                );
+            }
+        }
+    }
+
+    /// Return the exact reverse companion for a policy READ row. The helper
+    /// owns the NAT-aware transform; callers must not reconstruct a bare
+    /// five-tuple or assume a companion exists.
+    pub fn policy_companion(
+        &self,
+        key: &SessionKey,
+        nat: NatDecision,
+    ) -> Option<(SessionKey, SessionMetadata, u64)> {
+        let companion_key = reverse_session_key(key, nat);
+        let record = self.entry_by_key(&companion_key)?;
+        Some((
+            companion_key,
+            record.metadata.clone(),
+            record.session_id,
+        ))
+    }
+
     /// Iterate over ALL session entries in one pass with idle time (in
     /// nanoseconds) and, since #2501, the per-direction byte/packet counters.
     ///

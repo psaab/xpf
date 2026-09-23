@@ -37,6 +37,16 @@ impl Coordinator {
         crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced).len()
     }
 
+    /// Test seam: the shared synced-session id for one key (0 when absent).
+    /// Reads one entry where the count reads the map; same recover
+    /// discipline as its neighbor.
+    #[cfg(test)]
+    pub(crate) fn synced_session_id_for_test(&self, key: &crate::session::SessionKey) -> u64 {
+        crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced)
+            .get(key)
+            .map_or(0, |entry| entry.session_id)
+    }
+
     /// Test seam: the routing domains of every entry in the shared synced map.
     /// A count cannot tell "imported under the domain the sender stated" from
     /// "imported under the one this node derived", and that distinction is the

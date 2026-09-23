@@ -492,6 +492,7 @@ type ControlRequest struct {
 	Binding        *BindingControlRequest    `json:"binding,omitempty"`
 	Packet         *InjectPacketRequest      `json:"packet,omitempty"`
 	SessionSync    *SessionSyncRequest       `json:"session_sync,omitempty"`
+	SessionPolicyList *SessionPolicyListRequest `json:"session_policy_list,omitempty"`
 	SessionDeltas  *SessionDeltaDrainRequest `json:"session_deltas,omitempty"`
 	SessionExport  *SessionExportRequest     `json:"session_export,omitempty"`
 	// #7919: the 5-tuple for the read-only `session_counters` verb. An ADDED
@@ -526,6 +527,10 @@ type ControlResponse struct {
 	OK            bool               `json:"ok"`
 	Error         string             `json:"error,omitempty"`
 	Status        *ProcessStatus     `json:"status,omitempty"`
+	SessionPolicyMatches []SessionPolicyMatch `json:"session_policy_matches,omitempty"`
+	SessionPolicyComplete bool `json:"session_policy_complete,omitempty"`
+	SessionPolicyContinuation string `json:"session_policy_continuation,omitempty"`
+	SessionPolicyPerWorkerErrors []string `json:"session_policy_per_worker_errors,omitempty"`
 	SessionDeltas []SessionDeltaInfo `json:"session_deltas,omitempty"`
 	// SessionExportMore reports that an export_owner_rg_sessions answer was
 	// CAPPED by the request's Max and the helper still holds deltas from the
@@ -561,6 +566,21 @@ type ControlResponse struct {
 	// helper's `unknown request type` error and surfaces as
 	// ErrSessionCountersUnsupported, never as an empty answer.
 	SessionCounters []SessionCounterRow `json:"session_counters,omitempty"`
+	// #10512: helper-owned clear transaction metadata.
+	SessionMirrorV4Count          uint64 `json:"session_mirror_v4_count,omitempty"`
+	SessionMirrorV6Count          uint64 `json:"session_mirror_v6_count,omitempty"`
+	SessionMirrorComplete         bool   `json:"session_mirror_complete,omitempty"`
+	SessionMirrorFenceID          uint64 `json:"session_mirror_fence_id,omitempty"`
+	SessionMirrorContinuation     string `json:"session_mirror_continuation,omitempty"`
+	// PolicyDeleteOutcomes is the per-match outcome vector for one
+	// mirror_delete_policy_batch micro-batch (#10512, plan §2.4), positional
+	// against the request's PolicyMatches: applied | stale_forward |
+	// partial_companion | refused_identity. Valid only when
+	// PolicyDeleteComplete is true; any other shape is a batch failure the
+	// caller surfaces as a persistent gap, never partial success.
+	PolicyDeleteOutcomes []string `json:"policy_delete_outcomes,omitempty"`
+	PolicyDeleteComplete bool     `json:"policy_delete_complete,omitempty"`
+	PolicyDeleteErrors   []string `json:"policy_delete_errors,omitempty"`
 }
 
 // QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than

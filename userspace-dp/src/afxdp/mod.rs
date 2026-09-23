@@ -96,8 +96,12 @@ pub(crate) mod ipsec_inner_queue;
 mod gre_discriminator;
 mod ha;
 // #6785: the control handler needs the synced-import outcome type and its
-// refusal-token prefix.
-pub use ha::{SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX};
+// #10512: expose the typed conditional-delete result and mutation replay
+// outcome to the protocol handler and coordinator wrapper.
+pub(crate) use ha::{
+    HelperMutationBegin, HelperMutationOutcome, SyncedDeleteOutcome, SyncedImportOutcome,
+    SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
+};
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 // #7919: the per-session counter query's wait handle + reply row, used by the
 // control-socket handler's two-phase dispatch.
@@ -612,6 +616,10 @@ mod coordinator;
 /// re-exported so every spawner across both test modules takes the SAME lock.
 #[cfg(test)]
 pub(crate) use coordinator::neigh_monitor_test_serial;
+/// #10512 T2: test-only worker bundle for server-level policy-list
+/// cells (lets server tests drive a populated coordinator).
+#[cfg(test)]
+pub(crate) use coordinator::{register_list_test_worker, ListTestWorker};
 // #8121 part 2: idle persistent-NAT lease sync records.
 pub(crate) use coordinator::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
 // afxdp/tests.rs (14k-LOC catch-all) was split into cohesive per-subsystem

@@ -224,20 +224,23 @@ fn worker_loop_orders_expiry_teardown_before_poll_10419() {
     let overflow = executable_lines
         .iter()
         .position(|line| {
-            line.starts_with("let expiry_overflow_deltas: Vec<SessionDelta> = expired_entries")
+            line.starts_with("expiry_overflow_deltas.extend(")
         })
         .expect("worker loop must retain expiry overflow records");
     let drain = executable_lines
         .iter()
         .enumerate()
         .skip(reap)
-        .find(|(_, line)| **line == "drain_and_flush_all!();")
+        .find(|(_, line)| **line == "let _ = drain_and_flush_all!();")
         .map(|(index, _)| index)
         .expect("worker loop must drain expiry teardown");
     let poll = executable_lines
         .iter()
         .position(|line| line.starts_with("if poll_binding("))
         .expect("worker loop must poll bindings");
+    // The 1278 drain (first match past reap) flushes the expiry walk's
+    // ring-accepted Closes before overflow collection; d2425efb5's extra
+    // pre-chunk drain does not disturb this order.
     assert!(
         expiry < retire && retire < reap && reap < drain && drain < overflow && overflow < poll,
         "expiry must retire seeds, reap resources, drain Close deltas, then poll"

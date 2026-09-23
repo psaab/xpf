@@ -3687,6 +3687,7 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
                 &forwarding,
                 &__r3_reader,
                 &mut worker_lossless_wedged,
+                None,
             );
         }
         // Per-pass control drain (mirrors the control thread collecting
@@ -3973,6 +3974,7 @@ fn owner_rg_export_echo_still_emits_every_visit_9856() {
                 &forwarding,
                 &__r3_reader,
                 &mut worker_lossless_wedged,
+                None,
             );
         }
         delivered += export_buffer
@@ -8601,6 +8603,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
 
     // Binding-independent consumer 1: shared session table cleared.
@@ -8771,6 +8774,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             &forwarding,
             &runtime_reader,
             &mut worker_lossless_wedged,
+            None,
         );
     };
     let mut delete_count = 0usize;
@@ -8851,15 +8855,18 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
         .collect();
     let extraction = executable_lines
         .iter()
-        .position(|line| line.starts_with("let expiry_overflow_deltas: Vec<SessionDelta> = expired_entries"))
+        .position(|line| line.starts_with("expiry_overflow_deltas.extend("))
         .expect("worker loop must extract returned expiry Close records");
     let chunk_loop = executable_lines
         .iter()
-        .position(|line| line.starts_with("for deltas in expiry_overflow_deltas.chunks(256)"))
+        .position(|line| line.starts_with("let mut overflow_chunks = expiry_overflow_deltas.chunks(256)"))
         .expect("worker loop must flush expiry overflow in bounded chunks");
     let flush = executable_lines
         .iter()
-        .position(|line| *line == "flush_drained_session_deltas!(deltas);")
+        .enumerate()
+        .skip(chunk_loop)
+        .find(|(_, line)| **line == "flush_drained_session_deltas!(&deltas[..handled]);")
+        .map(|(index, _)| index)
         .expect("worker loop must route each expiry overflow chunk to global consumers");
     assert!(
         extraction < chunk_loop && chunk_loop < flush,
@@ -8988,6 +8995,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
         let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         let payload = frames
@@ -9127,6 +9135,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
     let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let payload = frames
@@ -9224,6 +9233,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
 
     assert!(
@@ -9325,6 +9335,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         ),
         "CommandExport echo must not arm loss-of-sync",
     );
@@ -9364,6 +9375,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         ),
         "LossResync event-stream delivery must remain lossless",
     );
@@ -9489,6 +9501,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
     let elapsed = start.elapsed();
 
@@ -9621,6 +9634,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
         all_latched &= out_of_sync;
     }
@@ -9748,6 +9762,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
     };
 
@@ -12177,6 +12192,7 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
 
     assert_eq!(
@@ -13367,6 +13383,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
         std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>()
     };
@@ -13561,6 +13578,857 @@ fn reverse_companion_stamps_zero_install_table_9752() {
     );
 }
 
+/// #10512: an absent expected companion is converged (forward removed, no
+/// partial flag) — only a LIVE different incarnation preserves and reports.
+/// Worker half (the shared half is pinned in ha_tests). Covers the full
+/// trichotomy: absent → clean remove; same → both removed clean; different →
+/// forward removed, companion preserved, partial set.
+#[test]
+fn policy_remove_absent_companion_is_applied_not_partial_10512() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let run_item = |sessions: &mut SessionTable,
+                    key: &SessionKey,
+                    forward_id: u64,
+                    companion_id: u64,
+                    captured: Option<SessionKey>| {
+        let item = crate::afxdp::PolicyDeleteItem {
+            key: key.clone(),
+            session_id: forward_id,
+            forward_only: false,
+            companion_session_id: companion_id,
+            captured_companion: captured,
+        };
+        let mut report = crate::afxdp::PolicyDeleteBatchReport {
+            cancelled: false,
+            partial: vec![false],
+            refused: vec![false],
+        };
+        let map = SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        clear_session_map_writes();
+        let removed = super::commands::handle_remove_policy_item(
+            sessions,
+            map,
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            &item,
+            &mut report,
+            0,
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+            &mut deferred,
+        );
+        // Phase-1 pin (THE advisory-25 property): table work under the abort
+        // fence issues NO BPF — every redirect delete is deferred.
+        assert!(
+            session_map_writes().is_empty(),
+            "phase 1 must issue no BPF under the abort fence"
+        );
+        // No phase 2 here: execution is coordinator-owned (ha_tests pins it).
+        // The handoff vector below is what the arm stashes fence-scoped.
+        (removed, report, deferred)
+    };
+    // (A) Companion absent: forward removed, NO partial flag.
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        assert_ne!(forward_id, 0, "fixture must mint a live identity");
+        let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+        let (removed, report, deferred) =
+            run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion));
+        assert_eq!(deferred.len(), 1, "absent companion: only the forward intent");
+        assert_eq!(deferred[0].key, key, "intent must name the removed forward");
+        assert!(removed, "forward with an absent expected companion must be removed");
+        assert!(
+            !report.partial[0],
+            "absent companion is converged, not partial"
+        );
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "forward row must be gone"
+        );
+    }
+    // (B) Companion present with a different live incarnation: forward
+    // removed, companion preserved, partial set.
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+        let mut companion_metadata = test_metadata();
+        companion_metadata.is_reverse = true;
+        assert!(sessions.install_with_protocol_with_origin(
+            companion.clone(),
+            test_decision(),
+            companion_metadata,
+            SessionOrigin::ReverseFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let live_companion_id = sessions.session_id_for(&companion);
+        assert_ne!(live_companion_id, 0, "fixture must mint a live companion");
+        let (removed, report, deferred) =
+            run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion.clone()));
+        assert_eq!(deferred.len(), 1, "refused companion: only the forward intent");
+        assert_eq!(deferred[0].key, key, "intent must name the removed forward");
+        assert!(removed, "forward must be removed");
+        assert!(
+            report.partial[0],
+            "a LIVE different companion incarnation must report partial"
+        );
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "forward row must be gone"
+        );
+        assert_eq!(
+            sessions.session_id_for(&companion),
+            live_companion_id,
+            "live companion must be preserved, not removed"
+        );
+    }
+    // (C) Companion present with the expected incarnation: both removed, clean.
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+        let mut companion_metadata = test_metadata();
+        companion_metadata.is_reverse = true;
+        assert!(sessions.install_with_protocol_with_origin(
+            companion.clone(),
+            test_decision(),
+            companion_metadata,
+            SessionOrigin::ReverseFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let live_companion_id = sessions.session_id_for(&companion);
+        let (removed, report, deferred) = run_item(
+            &mut sessions,
+            &key,
+            forward_id,
+            live_companion_id,
+            Some(companion.clone()),
+        );
+        assert_eq!(deferred.len(), 2, "matched companion: forward + companion intents");
+        assert!(
+            deferred.iter().any(|intent| intent.key == key),
+            "forward intent present"
+        );
+        assert!(
+            deferred.iter().any(|intent| intent.key == companion),
+            "companion intent present"
+        );
+        assert!(removed, "forward must be removed");
+        assert!(
+            !report.partial[0],
+            "matched companion must remove cleanly"
+        );
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "forward row must be gone"
+        );
+        assert_eq!(
+            sessions.session_id_for(&companion),
+            0,
+            "matched companion row must be gone"
+        );
+    }
+    // (D') Intent fidelity: the handoff carries owned copies of everything
+    // phase 2 needs (no table re-derivation on the coordinator) plus the
+    // collecting worker's id (phase 2 executes under its holder bit).
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        let decision = test_decision();
+        let mut metadata = test_metadata();
+        // Distinctive zones: proves the intent CLONED the entry's metadata
+        // rather than carrying defaults.
+        metadata.ingress_zone = 0xA11C;
+        metadata.egress_zone = 0xE61E;
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision.clone(),
+            metadata.clone(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        let item = crate::afxdp::PolicyDeleteItem {
+            key: key.clone(),
+            session_id: forward_id,
+            forward_only: true,
+            companion_session_id: 0,
+            captured_companion: None,
+        };
+        let mut report = crate::afxdp::PolicyDeleteBatchReport {
+            cancelled: false,
+            partial: vec![false],
+            refused: vec![false],
+        };
+        let map = SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        clear_session_map_writes();
+        assert!(super::commands::handle_remove_policy_item(
+            &mut sessions,
+            map,
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            &item,
+            &mut report,
+            0,
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            7,
+            &mut deferred,
+        ));
+        assert!(
+            session_map_writes().is_empty(),
+            "phase 1 must issue no BPF under the abort fence"
+        );
+        assert_eq!(deferred.len(), 1, "one removal produces one intent");
+        let intent = &deferred[0];
+        assert_eq!(intent.key, key, "intent names the removed entry");
+        assert_eq!(intent.decision, decision, "intent carries the removed decision");
+        assert_eq!(
+            intent.metadata.ingress_zone, 0xA11C,
+            "intent clones the entry metadata (ingress)"
+        );
+        assert_eq!(
+            intent.metadata.egress_zone, 0xE61E,
+            "intent clones the entry metadata (egress)"
+        );
+        assert_eq!(intent.origin, SessionOrigin::ForwardFlow, "intent carries the origin");
+        assert_eq!(intent.worker_id, 7, "intent names the collecting worker");
+    }
+    // (E) Self-reversing tuple (forward and companion are the SAME key):
+    // removed once, clean, exactly ONE intent — and NO BPF under the fence
+    // (run_item asserts the recorder is empty: without the dedupe the
+    // second call falls into the absent branch and issues BPF there).
+    {
+        let mut sessions = SessionTable::new();
+        let mut key = test_key();
+        key.dst_ip = key.src_ip;
+        key.dst_port = key.src_port;
+        assert_eq!(
+            crate::session::reverse_session_key(&key, NatDecision::default()),
+            key,
+            "fixture must be self-reversing"
+        );
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        assert_ne!(forward_id, 0, "fixture must mint a live identity");
+        let (removed, report, deferred) =
+            run_item(&mut sessions, &key, forward_id, forward_id, Some(key.clone()));
+        assert!(removed, "self-reversing entry must be removed");
+        assert!(
+            !report.partial[0] && !report.refused[0],
+            "self-reversing removal must be clean"
+        );
+        assert_eq!(deferred.len(), 1, "companion deduped: exactly the forward intent");
+        assert_eq!(deferred[0].key, key, "intent must name the removed entry");
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "self-reversing row must be gone"
+        );
+    }
+}
+
+/// #10512 advisory-25: the batch arm stashes redirect-delete intents into
+/// the shared handoff INSIDE the abort fence and issues NO BPF itself —
+/// phase 2 is coordinator-owned. What this pins through the real
+/// dispatcher: end-to-end wiring (applied/pending/table/report), the stash
+/// landing in the shared vec (fence-scoped handoff), and the recorder
+/// staying EMPTY (worker issues nothing — abort-quiescence).
+/// Coordinator-side execution is pinned in `ha_tests` (helper-unit +
+/// wiring cells).
+#[test]
+fn policy_delete_batch_arm_stashes_intents_without_bpf_10512() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let forward_id = sessions.session_id_for(&key);
+    assert_ne!(forward_id, 0, "fixture must mint a live identity");
+    let applied = Arc::new(Mutex::new(vec![false]));
+    let pending = Arc::new(AtomicUsize::new(1));
+    let report = Arc::new(Mutex::new(crate::afxdp::PolicyDeleteBatchReport {
+        cancelled: false,
+        partial: vec![false],
+        refused: vec![false],
+    }));
+    let intents = Arc::new(Mutex::new(Vec::new()));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .expect("commands lock")
+        .push_back(crate::afxdp::WorkerCommand::DeletePolicyBatch {
+            items: vec![crate::afxdp::PolicyDeleteItem {
+                key: key.clone(),
+                session_id: forward_id,
+                forward_only: true,
+                companion_session_id: 0,
+                captured_companion: None,
+            }],
+            applied: Arc::clone(&applied),
+            pending: Arc::clone(&pending),
+            report: Arc::clone(&report),
+            intents: Arc::clone(&intents),
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    clear_session_map_writes();
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    // Wiring: applied, acked, table row gone, report clean.
+    assert!(applied.lock().expect("applied lock")[0], "arm must mark applied");
+    assert_eq!(pending.load(Ordering::SeqCst), 0, "arm must ack");
+    assert_eq!(sessions.session_id_for(&key), 0, "forward row must be gone");
+    {
+        let guard = report.lock().expect("report lock");
+        assert!(!guard.partial[0] && !guard.refused[0], "report must be clean");
+    }
+    // Handoff: the intent landed in the SHARED vec (fence-scoped stash).
+    {
+        let stashed = intents.lock().expect("intents lock");
+        assert_eq!(stashed.len(), 1, "arm must stash exactly one intent");
+        assert_eq!(stashed[0].key, key, "stashed intent must name the removed forward");
+        assert_eq!(stashed[0].worker_id, 0, "stashed intent must name the collecting worker");
+    }
+    // Abort-quiescence: the worker issued NO BPF — the recorder is empty.
+    // (Execution belongs to the coordinator; ha_tests pins it there.)
+    assert!(
+        session_map_writes().is_empty(),
+        "arm must issue no BPF under or after the fence"
+    );
+}
+
+/// #10512 scoped HA worker race: a queued conditional delete arriving after
+/// a same-key replacement must decline — BOTH the forward replacement and
+/// its reverse survive (no standalone reverse fires for scoped deletes).
+#[test]
+fn scoped_worker_delete_mismatched_keeps_both_halves_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut companion_metadata = test_metadata();
+    companion_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        companion_metadata.clone(),
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let stale_forward_id = sessions.session_id_for(&key);
+    // Replacement installs before the queued delete drains: same keys, new
+    // incarnations.
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        companion_metadata,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let live_forward_id = sessions.session_id_for(&key);
+    let live_companion_id = sessions.session_id_for(&companion);
+    assert_ne!(live_forward_id, stale_forward_id, "reinstall must re-identify");
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .expect("commands lock")
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: stale_forward_id,
+            companion: Some(companion.clone()),
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        live_forward_id,
+        "replacement forward must survive a stale conditional delete"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        live_companion_id,
+        "replacement reverse must survive: no standalone reverse fires when the forward declines"
+    );
+}
+
+/// #10512 scoped HA worker apply: a matched conditional delete removes
+/// both the forward and its carried companion in the one handler.
+#[test]
+fn scoped_worker_delete_matched_removes_both_halves_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut companion_metadata = test_metadata();
+    companion_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        companion_metadata,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let forward_id = sessions.session_id_for(&key);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .expect("commands lock")
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: forward_id,
+            companion: Some(companion.clone()),
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        0,
+        "matched forward must be gone"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        0,
+        "carried companion must be gone with its matched forward"
+    );
+}
+
+/// Deferred-absent issues no BPF: with remove_mirror == false the
+/// already-gone branch must not touch the kernel map — phase 2 executes
+/// the covering forward intent instead ("NO BPF under this fence, ever").
+#[test]
+fn deferred_absent_branch_issues_no_bpf_10512() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key(); // never installed: absent
+    let map = SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD);
+    let mut deleted_keys = Vec::new();
+    let mut deferred = Vec::new();
+    clear_session_map_writes();
+    super::commands::handle_delete_synced_with_guard(
+        &mut sessions,
+        map,
+        &ForwardingState::default(),
+        &BTreeMap::new(),
+        key,
+        now_ns,
+        now_ns / 1_000_000_000,
+        &mut deleted_keys,
+        0,
+        false,
+        false,
+        &mut deferred,
+        0,
+        None,
+    );
+    assert!(
+        session_map_writes().is_empty(),
+        "deferred absent branch must issue no BPF"
+    );
+    assert!(
+        deferred.is_empty(),
+        "absent branch queues no phase-2 intent"
+    );
+}
+
+/// Drive one ListSessionsByPolicy worker command through the real
+/// dispatch loop; returns (rows, errors, pending-left).
+fn run_list_scan10512(
+    sessions: &mut SessionTable,
+    req: crate::protocol::SessionPolicyListRequest,
+) -> (
+    Vec<crate::protocol::SessionPolicyMatch>,
+    Vec<String>,
+    usize,
+) {
+    let collected = Arc::new(Mutex::new(crate::afxdp::PolicyReadCollector::default()));
+    let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let pending = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let commands = Arc::new(Mutex::new(VecDeque::from([
+        crate::afxdp::WorkerCommand::ListSessionsByPolicy {
+            request: req,
+            collected: Arc::clone(&collected),
+            overflow: Arc::clone(&overflow),
+            errors: Arc::clone(&errors),
+            pending: Arc::clone(&pending),
+        },
+    ])));
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    let rows = collected
+        .lock()
+        .expect("collector")
+        .take_rows();
+    let errs = errors.lock().expect("errors").clone();
+    let left = pending.load(Ordering::Acquire);
+    (rows, errs, left)
+}
+
+fn list_req10512(
+    policy_ids: Vec<u32>,
+    mode: &str,
+    before_secs: Option<u64>,
+    families: Vec<u8>,
+    classes: Vec<String>,
+) -> crate::protocol::SessionPolicyListRequest {
+    crate::protocol::SessionPolicyListRequest {
+        policy_ids,
+        mode: mode.to_string(),
+        before_secs,
+        families,
+        classes,
+        continuation: String::new(),
+        ..Default::default()
+    }
+}
+
+/// Worker scan returns only the requested policy, carrying the live
+/// RT_FLOW identity the conditional delete needs. Zero policy ids are
+/// never wanted (no wildcard row).
+#[test]
+fn worker_list_returns_matching_policy_with_identity_10512() {
+    let now_ns = monotonic_nanos();
+    let mut sessions = SessionTable::new();
+    let key5 = test_key();
+    let mut key6 = test_key();
+    key6.src_port = key6.src_port.wrapping_add(1);
+    let mut meta5 = test_metadata();
+    meta5.policy_id = 5;
+    let mut meta6 = test_metadata();
+    meta6.policy_id = 6;
+    assert!(sessions.install_with_protocol_with_origin(
+        key5.clone(),
+        test_decision(),
+        meta5,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        key6.clone(),
+        test_decision(),
+        meta6,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let live5 = sessions.session_id_for(&key5);
+    assert_ne!(live5, 0, "fixture must mint a live identity");
+    let (rows, errs, left) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, Vec::new(), Vec::new()),
+    );
+    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert_eq!(left, 0, "worker must ack the scan");
+    assert_eq!(rows.len(), 1, "only the requested policy is returned");
+    assert_eq!(rows[0].policy_id, 5);
+    assert_eq!(
+        rows[0].expected_rt_flow_session_id, live5,
+        "row must carry the live identity"
+    );
+}
+
+/// Legacy cutoff: created after before_secs is fenced; zero is
+/// unbounded; None in legacy mode errors without scanning.
+#[test]
+fn worker_list_legacy_cutoff_zero_unbounded_nil_rejected_10512() {
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let mut meta = test_metadata();
+    meta.policy_id = 5;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        meta,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    // Created "now" >> 1: fenced out.
+    let (rows, _, left) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", Some(1), Vec::new(), Vec::new()),
+    );
+    assert!(rows.is_empty(), "row created after the fence must be cut");
+    assert_eq!(left, 0, "fenced scan still acks");
+    // Zero: unbounded, returned.
+    let (rows, _, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", Some(0), Vec::new(), Vec::new()),
+    );
+    assert_eq!(rows.len(), 1, "zero before_secs must be unbounded");
+    // Far future: returned.
+    let (rows, _, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", Some(now_secs + 3600), Vec::new(), Vec::new()),
+    );
+    assert_eq!(rows.len(), 1, "row created before the fence must return");
+    // None in legacy mode: caller bug, error, no scan.
+    let (rows, errs, left) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "legacy", None, Vec::new(), Vec::new()),
+    );
+    assert!(rows.is_empty(), "nil-fence scan must return nothing");
+    assert!(
+        errs.iter().any(|e| e == "legacy-before-secs-missing"),
+        "nil fence must error, got {errs:?}"
+    );
+    assert_eq!(left, 0, "rejected scan still acks");
+}
+
+/// Classes:["forward"] excludes reverse rows from discovery (the
+/// producers' contract — the delete expands companions itself).
+#[test]
+fn worker_list_forward_class_excludes_reverse_10512() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let mut fwd_meta = test_metadata();
+    fwd_meta.policy_id = 5;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        fwd_meta,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let rev = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut rev_meta = test_metadata();
+    rev_meta.policy_id = 5;
+    rev_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        rev,
+        test_decision(),
+        rev_meta,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let live = sessions.session_id_for(&key);
+    let (rows, errs, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, Vec::new(), vec!["forward".to_string()]),
+    );
+    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert_eq!(rows.len(), 1, "only the forward row is discovered");
+    assert_eq!(
+        rows[0].expected_rt_flow_session_id, live,
+        "the discovered row must be the forward"
+    );
+}
+
+/// Families filter by wire family (T1): real IPv4 + IPv6 rows, [4]
+/// selects only v4, [6] only v6, empty selects both. Identity-pinned
+/// (the row's live id), so a bypassing filter fails on count AND id.
+#[test]
+fn worker_list_family_filter_selects_v4_v6_10512() {
+    let now_ns = monotonic_nanos();
+    let mut sessions = SessionTable::new();
+    let key4 = test_key();
+    let mut key6 = test_key();
+    key6.addr_family = libc::AF_INET6 as u8;
+    key6.src_ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    key6.dst_ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
+    for key in [&key4, &key6] {
+        let mut meta = test_metadata();
+        meta.policy_id = 5;
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            meta,
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+    }
+    let live4 = sessions.session_id_for(&key4);
+    let live6 = sessions.session_id_for(&key6);
+    assert_ne!(live4, 0);
+    assert_ne!(live6, 0);
+    let (rows, errs, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, vec![4], Vec::new()),
+    );
+    assert!(errs.is_empty(), "got {errs:?}");
+    assert_eq!(rows.len(), 1, "[4] must select only v4");
+    assert_eq!(rows[0].expected_rt_flow_session_id, live4);
+    let (rows, errs, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, vec![6], Vec::new()),
+    );
+    assert!(errs.is_empty(), "got {errs:?}");
+    assert_eq!(rows.len(), 1, "[6] must select only v6");
+    assert_eq!(rows[0].expected_rt_flow_session_id, live6);
+    let (rows, _, _) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, Vec::new(), Vec::new()),
+    );
+    assert_eq!(rows.len(), 2, "empty families must select both");
+}
 #[test]
 fn removed_zone_ids_require_validated_sets_and_detect_cross_generation_reuse_10510() {
     let mut old = ForwardingState::default();
@@ -13715,4 +14583,33 @@ fn collector_includes_unknown_owner_with_fabric_10507() {
         items.iter().any(|(item_key, ..)| *item_key == key),
         "an RG-0/fabric row must be refresh-eligible (control)"
     );
+}
+
+/// #10512 (c's 9-tuple dedup, refactored): the shared READ collector keys
+/// the full `(SessionKey, session_id)` identity — two same-tuple rows from
+/// different routing domains with colliding worker-local ids both admit;
+/// only a true replica (same key AND id) refuses. Without the domain in
+/// the key the second reserve would refuse and a live tenant session
+/// would escape revocation (under-clear).
+#[test]
+fn policy_read_collector_cross_domain_rows_do_not_merge_10512() {
+    use std::sync::atomic::AtomicBool;
+    let overflow = AtomicBool::new(false);
+    let mut collector = crate::afxdp::PolicyReadCollector::default();
+    let mut key_a = test_key();
+    key_a.routing_domain = 1;
+    let mut key_b = test_key();
+    key_b.routing_domain = 2;
+    // Same worker-local id in both (ids are per-table counters): the
+    // domain is what distinguishes these rows.
+    assert!(collector.reserve(&overflow, key_a.clone(), 7));
+    assert!(
+        collector.reserve(&overflow, key_b, 7),
+        "cross-domain rows with colliding ids must both admit"
+    );
+    assert!(
+        !collector.reserve(&overflow, key_a, 7),
+        "a true replica (same key and id) must refuse"
+    );
+    assert!(!overflow.load(std::sync::atomic::Ordering::Acquire));
 }

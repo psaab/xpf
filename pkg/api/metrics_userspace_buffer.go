@@ -345,6 +345,24 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.SyncedImportUnknownRoutingDomain),
 	)
+	// #10512: emitted unconditionally like their neighbours. All three are
+	// lifetime-monotonic (count, summed holds, max hold), so CounterValue is
+	// exact, not approximate.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspacePolicyBatchCount,
+		prometheus.CounterValue,
+		float64(status.PolicyBatchCount),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspacePolicyBatchHoldNs,
+		prometheus.CounterValue,
+		float64(status.PolicyBatchHoldNs),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspacePolicyBatchHoldMaxNs,
+		prometheus.GaugeValue,
+		float64(status.PolicyBatchHoldMaxNs),
+	)
 
 	// #7209: peer-synced imports that skipped #6211's zone narrowing.
 	// Emitted unconditionally, for the same reason as its neighbours: a 0
