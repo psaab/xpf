@@ -69,19 +69,20 @@ Differences that matter (#1881):
   kernel's forwarding path with no zone policy. The decision is
   `WgKernelTransport`, computed once per spawn
   (`wg_kernel_transport_for_endpoint`) and fail-closed: a snapshot with an
-  empty steered set delivers for no endpoint. A steered port's thread keeps
-  delivering, per #8274's stated residual. Tests reach a
-  spawned thread's packet path through the `#[cfg(test)]` TUN stand-in
-  registry in `wg_control/mod.rs` (a real TUN needs CAP_NET_ADMIN).
-- The steered port's WG thread applies the XDP shim's degraded posture to a
-  kernel-path transport record that entered on an ingress the shim
-  adjudicates (#9594, `wg_control/kernel_path.rs`) — a healthy shim claims
-  those records for the worker, so arriving there means degraded. It learns
-  the ingress from `IP_PKTINFO`, reads the shim's pinned ingress and
-  local-address maps, delivers traffic addressed to the firewall and drops
-  transit (`rx_degraded_transit_drops`). Uncovered ingress (#8274's residual)
-  is delivered as before. The thread receives `ha.runtime_reader()` to tell an
-  unadjudicated configured interface from an unplaceable ifindex.
+  empty steered set delivers for no endpoint. A steered port's thread delivers
+  only host-inbound plaintext and refuses transit on covered and uncovered
+  ingresses (#9594/#10527), while retaining the TUN handoff for the input
+  chains. Tests reach a spawned thread's packet path through the `#[cfg(test)]`
+  TUN stand-in registry in `wg_control/mod.rs` (a real TUN needs CAP_NET_ADMIN).
+- The steered port's WG thread applies the XDP shim's local-vs-transit
+  degraded posture to a kernel-path transport record on every ingress
+  (#9594/#10527, `wg_control/kernel_path.rs`). A healthy shim claims covered
+  records for the worker, so arriving there means degraded; an uncovered ingress
+  is #8274's residual. The thread learns the ingress from `IP_PKTINFO`, reads
+  the shim's pinned ingress and local-address maps, delivers traffic addressed
+  to the firewall and drops transit (`rx_degraded_transit_drops`) on either
+  ingress class. It receives `ha.runtime_reader()` to tell an unadjudicated
+  configured interface from an unplaceable ifindex.
 - The GRE loop carries a rotation gate (`endpoint_attachment_valid`,
   `tunnel.rs`): on every forwarding-Arc rotation it re-validates that
   the loaded state still describes its TUN attachment (id present,

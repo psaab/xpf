@@ -704,7 +704,8 @@ pub(crate) struct WgTunnelStatus {
     /// #9521: see `WgCounters::rx_unsteered_transport_drops`.
     #[serde(rename = "rx_unsteered_transport_drops", default)]
     pub rx_unsteered_transport_drops: u64,
-    /// #9594: see `WgCounters::rx_degraded_transit_drops`.
+    /// #9594/#10527: see `WgCounters::rx_degraded_transit_drops`; this includes
+    /// transit refused on covered degraded and uncovered shim ingresses.
     #[serde(rename = "rx_degraded_transit_drops", default)]
     pub rx_degraded_transit_drops: u64,
     // --- transport encap ---

@@ -577,8 +577,9 @@ pub(super) fn set_recv_tos_options(fd: i32, socket_is_v6: bool) {
 /// control loop itself, so every path that runs the loop receives it.
 ///
 /// A kernel that rejects the option delivers no pktinfo cmsg; the record's
-/// ingress is then unknown, which the posture treats as covered — fail closed
-/// for transit, host-inbound still delivered. Logged once per socket.
+/// ingress is then unknown, which the posture fail-closes for transit
+/// (Unknown is its own classification, not Covered) while host-inbound is
+/// still delivered. Logged once per socket.
 pub(super) fn set_recv_pktinfo_options(fd: i32, socket_is_v6: bool) {
     let on: libc::c_int = 1;
     let rc = unsafe {
