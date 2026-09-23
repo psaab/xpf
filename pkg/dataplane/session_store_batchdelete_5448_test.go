@@ -351,6 +351,79 @@ func TestDeleteBatchKnownV4SurfacesRecoveryLoopFailure(t *testing.T) {
 	}
 }
 
+// TestDeleteBatchKnownExactV4ProjectsTheNonPrefixDeletedSet pins the public
+// exact projection for the canonical missing@1/boom@3 hole (#10598).
+func TestDeleteBatchKnownExactV4ProjectsTheNonPrefixDeletedSet(t *testing.T) {
+	keys := batchDeleteV4Keys10528()
+	errBoom := errors.New("exact projection boom")
+	dp := &batchDeleteTailDP{
+		missingV4:  keys[1],
+		presentV4:  map[SessionKey]bool{},
+		retryErrV4: map[SessionKey]error{keys[1]: ebpf.ErrKeyNotExist, keys[3]: errBoom},
+	}
+	for i, key := range keys {
+		dp.presentV4[key] = i != 1
+	}
+	entries := make([]SessionEntryV4, len(keys))
+	for i, key := range keys {
+		entries[i] = SessionEntryV4{Key: key}
+	}
+
+	store := dataPlaneSessionStore{dp: dp}
+	exact, err := store.DeleteBatchKnownExactV4(entries, DeleteReasonGCExpired, true)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("DeleteBatchKnownExactV4 error = %v, want %v", err, errBoom)
+	}
+	want := []SessionKey{keys[0], keys[2], keys[4]}
+	if len(exact) != len(want) {
+		t.Fatalf("exact deleted keys = %+v, want %+v", exact, want)
+	}
+	for i := range want {
+		if exact[i] != want[i] {
+			t.Fatalf("exact deleted keys = %+v, want %+v", exact, want)
+		}
+	}
+	if dp.presentV4[keys[3]] == false {
+		t.Fatalf("boom key survived? present=%v, want retained", dp.presentV4[keys[3]])
+	}
+}
+
+// TestDeleteBatchKnownExactV6ProjectsTheNonPrefixDeletedSet is the IPv6 twin.
+func TestDeleteBatchKnownExactV6ProjectsTheNonPrefixDeletedSet(t *testing.T) {
+	keys := batchDeleteV6Keys10528()
+	errBoom := errors.New("exact v6 projection boom")
+	dp := &batchDeleteTailDP{
+		missingV6:  keys[1],
+		presentV6:  map[SessionKeyV6]bool{},
+		retryErrV6: map[SessionKeyV6]error{keys[1]: ebpf.ErrKeyNotExist, keys[3]: errBoom},
+	}
+	for i, key := range keys {
+		dp.presentV6[key] = i != 1
+	}
+	entries := make([]SessionEntryV6, len(keys))
+	for i, key := range keys {
+		entries[i] = SessionEntryV6{Key: key}
+	}
+
+	store := dataPlaneSessionStore{dp: dp}
+	exact, err := store.DeleteBatchKnownExactV6(entries, DeleteReasonGCExpired, true)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("DeleteBatchKnownExactV6 error = %v, want %v", err, errBoom)
+	}
+	want := []SessionKeyV6{keys[0], keys[2], keys[4]}
+	if len(exact) != len(want) {
+		t.Fatalf("exact deleted v6 keys = %+v, want %+v", exact, want)
+	}
+	for i := range want {
+		if exact[i] != want[i] {
+			t.Fatalf("exact deleted v6 keys = %+v, want %+v", exact, want)
+		}
+	}
+	if dp.presentV6[keys[3]] == false {
+		t.Fatalf("v6 boom key survived? present=%v, want retained", dp.presentV6[keys[3]])
+	}
+}
+
 // TestBatchDeleteV4PropagatesRealError confirms a non-not-found batch error is
 // still surfaced (the #5448 fix must not swallow genuine failures).
 func TestBatchDeleteV4PropagatesRealError(t *testing.T) {

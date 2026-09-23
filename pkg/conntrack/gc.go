@@ -359,19 +359,19 @@ func (gc *GC) sweep() time.Duration {
 		return gc.interval
 	}
 
-	if deleted, err := gc.sessions.DeleteBatchKnownV4(toDelete, dataplane.DeleteReasonGCExpired, false); err != nil {
+	if exact, err := gc.sessions.DeleteBatchKnownExactV4(toDelete, dataplane.DeleteReasonGCExpired, false); err != nil {
 		slog.Debug("conntrack GC v4 delete failed", "err", err)
-		expired += deleted
+		expired += len(exact)
 		if gc.OnDeleteV4 != nil {
-			for i := 0; i < deleted && i < len(toDelete); i++ {
-				gc.OnDeleteV4(toDelete[i].Key)
+			for _, key := range exact {
+				gc.OnDeleteV4(key)
 			}
 		}
 	} else {
-		expired += deleted
+		expired += len(exact)
 		if gc.OnDeleteV4 != nil {
-			for _, entry := range toDelete {
-				gc.OnDeleteV4(entry.Key)
+			for _, key := range exact {
+				gc.OnDeleteV4(key)
 			}
 		}
 	}
@@ -444,19 +444,19 @@ func (gc *GC) sweep() time.Duration {
 		gc.lastV6Count = v6Count
 	}
 
-	if deleted, err := gc.sessions.DeleteBatchKnownV6(toDeleteV6, dataplane.DeleteReasonGCExpired, false); err != nil {
+	if exact, err := gc.sessions.DeleteBatchKnownExactV6(toDeleteV6, dataplane.DeleteReasonGCExpired, false); err != nil {
 		slog.Debug("conntrack GC v6 delete failed", "err", err)
-		expired += deleted
+		expired += len(exact)
 		if gc.OnDeleteV6 != nil {
-			for i := 0; i < deleted && i < len(toDeleteV6); i++ {
-				gc.OnDeleteV6(toDeleteV6[i].Key)
+			for _, key := range exact {
+				gc.OnDeleteV6(key)
 			}
 		}
 	} else {
-		expired += deleted
+		expired += len(exact)
 		if gc.OnDeleteV6 != nil {
-			for _, entry := range toDeleteV6 {
-				gc.OnDeleteV6(entry.Key)
+			for _, key := range exact {
+				gc.OnDeleteV6(key)
 			}
 		}
 	}

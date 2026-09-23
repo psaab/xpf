@@ -548,7 +548,8 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 	var errs []error
 	v4Cleared := 0
 	if len(c.v4) > 0 {
-		n, err := store.DeleteBatchKnownV4(c.v4, reason, false)
+		exact, err := store.DeleteBatchKnownExactV4(c.v4, reason, false)
+		n := len(exact)
 		if err != nil {
 			slog.Warn("policy session invalidation: v4 clear failed",
 				"reason", reason, "policies", c.targets,
@@ -560,19 +561,20 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 				slog.Warn("policy session invalidation: v4 delete count mismatch",
 					"reason", reason, "policies", c.targets,
 					"matched", len(c.v4), "deleted", n,
-					"hint", "concurrent expiry may explain the gap; hard delete failures are reported separately")
+					"hint", "concurrent expiry or an already-absent row may explain the gap; hard delete failures are reported separately")
 			}
 		}
 		if syncPeer {
-			for _, e := range c.v4 {
-				ss.QueueDeleteV4(e.Key, false)
+			for _, key := range exact {
+				ss.QueueDeleteV4(key, false)
 			}
 		}
 	}
 
 	v6Cleared := 0
 	if len(c.v6) > 0 {
-		n, err := store.DeleteBatchKnownV6(c.v6, reason, false)
+		exact, err := store.DeleteBatchKnownExactV6(c.v6, reason, false)
+		n := len(exact)
 		if err != nil {
 			slog.Warn("policy session invalidation: v6 clear failed",
 				"reason", reason, "policies", c.targets,
@@ -584,12 +586,12 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 				slog.Warn("policy session invalidation: v6 delete count mismatch",
 					"reason", reason, "policies", c.targets,
 					"matched", len(c.v6), "deleted", n,
-					"hint", "concurrent expiry may explain the gap; hard delete failures are reported separately")
+					"hint", "concurrent expiry or an already-absent row may explain the gap; hard delete failures are reported separately")
 			}
 		}
 		if syncPeer {
-			for _, e := range c.v6 {
-				ss.QueueDeleteV6(e.Key, false)
+			for _, key := range exact {
+				ss.QueueDeleteV6(key, false)
 			}
 		}
 	}

@@ -665,6 +665,29 @@ func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.Scope
 	return deleted, refused, err
 }
 
+// BatchDeletePeerSyncedSessionsExactScoped is the exact peer-delete projection
+// used by SessionStore's DeleteBatchKnownExactV4/V6 path (#10598). It returns
+// mirror keys whose delete call actually succeeded and the helper-applied set;
+// already-absent mirror rows are excluded from the first set.
+func (m *Manager) BatchDeletePeerSyncedSessionsExactScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) ([]dataplane.ScopedSessionKey, []dataplane.ScopedSessionKey, error) {
+	var refused, applied []dataplane.ScopedSessionKey
+	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
+	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKey) error {
+		return m.bpfShim.DeleteSession(sk.Key)
+	})
+	return deleted, applied, err
+}
+
+// BatchDeletePeerSyncedSessionsExactScopedV6 is the IPv6 analogue.
+func (m *Manager) BatchDeletePeerSyncedSessionsExactScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) ([]dataplane.ScopedSessionKeyV6, []dataplane.ScopedSessionKeyV6, error) {
+	var refused, applied []dataplane.ScopedSessionKeyV6
+	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, forwardOnly, &refused, &applied)
+	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKeyV6) error {
+		return m.bpfShim.DeleteSessionV6(sk.Key)
+	})
+	return deleted, applied, err
+}
+
 // deleteAppliedMirrorRows deletes the BPF mirror row of every key the helper
 // EXPLICITLY APPLIED (#9714 review round 2, finding 1).
 //
@@ -679,12 +702,19 @@ func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.Scope
 // Rows go one at a time, and a row that is already gone is not an error, so one
 // missing row does not strand the rest.
 func deleteAppliedMirrorRows[K comparable](applied []K, del func(K) error) (int, error) {
-	deleted := 0
+	deleted, err := deleteAppliedMirrorRowsExact(applied, del)
+	return len(deleted), err
+}
+
+// deleteAppliedMirrorRowsExact returns the keys whose mirror delete actually
+// succeeded, excluding benign already-absent rows. It preserves input order.
+func deleteAppliedMirrorRowsExact[K comparable](applied []K, del func(K) error) ([]K, error) {
+	deleted := make([]K, 0, len(applied))
 	var firstErr error
 	for _, key := range applied {
 		switch err := del(key); {
 		case err == nil:
-			deleted++
+			deleted = append(deleted, key)
 		case errors.Is(err, ebpf.ErrKeyNotExist):
 		case firstErr == nil:
 			firstErr = err
