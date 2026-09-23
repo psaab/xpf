@@ -1102,7 +1102,7 @@ fn reverse_hit_zone_policy(
             // Unvalidated) has no recorded Permit to protect — revoking it
             // kills legitimate lone-reverse replies (r02-F3). Recorded and
             // Live reverses (Cell 6 shape) still fail closed below: a Live
-            // row retains a recorded Permit and must never coast stale.
+            // row retains a recorded Permit and must never coast (stale or fresh: the forward ledger is orphaned).
             None => {
                 sessions.policy_revalidation_fenced(&rev_canonical)
                     || matches!(rev_kind, PolicyRevalidationKind::LiveEgress)
@@ -1130,7 +1130,7 @@ fn reverse_hit_zone_policy(
         // never-validated (stale `Unvalidated`) reverse carries no recorded
         // authorization to fence — revoking it kills legitimate
         // lone-reverse replies (materialized/shared shapes, r02-F3). Coast;
-        // recorded reverses (Cell 6 shape) still fail closed.
+        // Recorded and Live reverses (Cell 6 shape) still fail closed.
         let reverse_fenced = sessions.policy_revalidation_fenced(&rev_canonical)
             || matches!(rev_kind, PolicyRevalidationKind::LiveEgress);
         return if reverse_fenced && reverse_inconsistent_fail_closed {

@@ -7526,3 +7526,164 @@ fn lone_reverse_recorded_revokes_without_companion_10635() {
     );
     assert_eq!(session_count(&sessions), 0, "the revoked reverse must be gone");
 }
+
+/// #10635 (stale-Live lone reverse): a STALE LiveEgress lone reverse with no
+/// forward companion must revoke — a Live row retains a recorded Permit, and
+/// a stale one is un-revalidatable, so coasting it is fail-open (round-2
+/// Opus-1/Codex-M1: the `|| LiveEgress` term at the 1127 gate exists for
+/// exactly this population).
+///
+/// RED-on-revert: with the LiveEgress term dropped from the 1127 gate, the
+/// reply coasts (revoked 0, count 1).
+#[test]
+fn lone_reverse_stale_live_revokes_without_companion_10635() {
+    // Same intent shape as the recorded control cell: connected LAN route +
+    // reachable neighbor make the reply a ForwardCandidate (LocalForwarding).
+    let mut snapshot = nat_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "reth1.0".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: "10.0.61.102".to_string(),
+        mac: "02:aa:bb:cc:dd:01".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let fwd_key = icmp_flow_key();
+    let rev_key =
+        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            rev_key.clone(),
+            decision(WAN_IFINDEX),
+            metadata(true),
+            SessionOrigin::ReverseFlow,
+            122_000_000_000,
+            PROTO_ICMP,
+            0,
+        ),
+        "fixture must install the lone reverse half"
+    );
+    // Live verdict, then aged Stale (a commit moved the generation).
+    sessions.mark_policy_revalidated(
+        &rev_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    sessions.set_policy_revalidation_gen(8);
+    assert_eq!(
+        sessions.policy_revalidation_kind(&rev_key),
+        crate::session::PolicyRevalidationKind::LiveEgress,
+        "the lone reverse must retain its Live provenance"
+    );
+    assert!(
+        matches!(
+            sessions.policy_revalidation_target(&rev_key),
+            crate::session::PolicyRevalidationTarget::Stale(_)
+        ),
+        "gen-7 stamp at table gen 8 reads Stale"
+    );
+    assert!(
+        !sessions.policy_revalidation_fenced(&rev_key),
+        "a Stale Live row is NOT fenced — the LiveEgress term is the operative 1127 operand"
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let frame = build_icmp_echo_reply_frame_v4_9604(
+        DST,
+        SRC,
+        ICMP_ID,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the lone reverse entry");
+    assert_eq!(
+        out.revoked, 1,
+        "a stale-Live lone reverse retains a recorded Permit — coasting it is fail-open"
+    );
+    assert_eq!(session_count(&sessions), 0, "the revoked reverse must be gone");
+}
+
+/// #10635 (fresh-Live lone reverse): a FRESH LiveEgress lone reverse with no
+/// forward companion must revoke (pre-fix behavior). Here the None-arm Live
+/// term is load-bearing: without it the hit coasts at the Fresh early-return
+/// before ever reaching the 1127 gate (round-2 Codex-G1).
+///
+/// RED-on-revert: with the LiveEgress term dropped from the None arm, the
+/// reply coasts (revoked 0, count 1).
+#[test]
+fn lone_reverse_fresh_live_revokes_without_companion_10635() {
+    // Same intent shape as the sibling control cells.
+    let mut snapshot = nat_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "reth1.0".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: "10.0.61.102".to_string(),
+        mac: "02:aa:bb:cc:dd:01".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let fwd_key = icmp_flow_key();
+    let rev_key =
+        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            rev_key.clone(),
+            decision(WAN_IFINDEX),
+            metadata(true),
+            SessionOrigin::ReverseFlow,
+            122_000_000_000,
+            PROTO_ICMP,
+            0,
+        ),
+        "fixture must install the lone reverse half"
+    );
+    // Live verdict at the CURRENT generation: Fresh.
+    sessions.mark_policy_revalidated(
+        &rev_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&rev_key),
+        crate::session::PolicyRevalidationKind::LiveEgress,
+        "the lone reverse must carry a Live verdict"
+    );
+    assert!(
+        matches!(
+            sessions.policy_revalidation_target(&rev_key),
+            crate::session::PolicyRevalidationTarget::Fresh
+        ),
+        "gen-7 stamp at table gen 7 reads Fresh"
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let frame = build_icmp_echo_reply_frame_v4_9604(
+        DST,
+        SRC,
+        ICMP_ID,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the lone reverse entry");
+    assert_eq!(
+        out.revoked, 1,
+        "a fresh-Live lone reverse with intent revokes (pre-fix behavior; the None-arm Live term is load-bearing here)"
+    );
+    assert_eq!(session_count(&sessions), 0, "the revoked reverse must be gone");
+}
