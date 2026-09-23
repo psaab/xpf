@@ -110,6 +110,9 @@ pub enum SyncedImportOutcome {
     Applied,
     /// #2170: a strictly-older generation than the stored entry.
     RejectedStaleGeneration,
+    /// #10612: the entry names a zone absent from the current validated
+    /// forwarding snapshot and is refused before shared publication.
+    RejectedStaleZone,
     /// #5674: the aggregate synced-import entry ceiling is full.
     RejectedCapacity,
     /// #6600: the translated NAT tuple could not be reserved for this import.
@@ -182,6 +185,7 @@ impl SyncedImportOutcome {
         match self {
             SyncedImportOutcome::Applied => None,
             SyncedImportOutcome::RejectedStaleGeneration => Some("stale-generation"),
+            SyncedImportOutcome::RejectedStaleZone => Some("stale-zone"),
             SyncedImportOutcome::RejectedCapacity => Some("capacity"),
             SyncedImportOutcome::RejectedReserve => Some("reserve"),
             SyncedImportOutcome::RejectedStandaloneReverse => Some("standalone-reverse"),
@@ -575,6 +579,19 @@ impl crate::afxdp::ha::SessionDomain {
         // the pairing defect #6592 closed, reintroduced at a different layer.
         let view = self.runtime_view();
         let forwarding = view.forwarding();
+        // #10612: refuse a stale post-purge replay before it can publish into
+        // shared authority or fan out to worker queues. This is the import
+        // ingress counterpart to the bring-up replay filter and worker
+        // `UpsertSynced` fence. Fail-open for unvalidated/empty snapshots is
+        // intentional and matches the rotation purge's legacy behavior.
+        if crate::afxdp::session_glue::synced_entry_is_stale_replay(
+            entry.origin,
+            &entry.metadata,
+            forwarding,
+        ) {
+            crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            return SyncedImportOutcome::RejectedStaleZone;
+        }
 
         // #7209: ONE initial snapshot of the worker set for admission.
         //

@@ -9542,3 +9542,193 @@ fn clear_mirror_over_cap_fails_closed_untouched_10512() {
         "over-cap clear must touch nothing"
     );
 }
+
+/// #10612: the HA import ingress refuses a stale post-purge replay before
+/// shared publication or worker fan-out, while a current-zone import applies.
+///
+/// The rotation purge retains no tombstone, so a pre-purge snapshot row
+/// re-imported after the purge must be dropped at this ingress — the import
+/// counterpart to the bring-up replay filter and the worker `UpsertSynced`
+/// fence. Fail-open for unvalidated/empty snapshots is pinned at the
+/// predicate level (`stale_replay_fence_admits_live_and_exempt_rows_10612`).
+///
+/// PARENT-RED recipe: delete the `synced_entry_is_stale_replay` early return
+/// in `upsert_synced_session` (session_import.rs). Leg (b)'s outcome
+/// assertion fails (`Applied`, not `RejectedStaleZone`), the stale key is
+/// published, and it is fanned out.
+#[test]
+fn upsert_synced_session_refuses_stale_zone_replay_10612() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.zone_id_to_name.insert(TEST_LAN_ZONE_ID, "lan".to_string());
+    forwarding.zone_id_to_name.insert(TEST_WAN_ZONE_ID, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    coordinator.set_forwarding_for_test(forwarding);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+
+    // (a) CONTROL — a current-zone import applies: published + fanned out.
+    let live = synced_entry_port(1000, 0);
+    let live_key = live.key.clone();
+    let live_companion = reverse_session_key(&live.key, live.decision.nat);
+    assert_eq!(
+        coordinator.upsert_synced_session(live),
+        SyncedImportOutcome::Applied,
+        "a current-zone import must apply"
+    );
+    {
+        let synced = coordinator.sessions.synced.lock().expect("shared sessions");
+        assert!(
+            synced.contains_key(&live_key),
+            "the admitted forward must be published"
+        );
+    }
+
+    // (b) SUBJECT — the same shape with a removed zone is refused: not
+    // published, not fanned out, and reported with its own reason token.
+    let mut stale = synced_entry_port(2000, 0);
+    stale.metadata.ingress_zone = 9;
+    let stale_key = stale.key.clone();
+    assert_eq!(
+        coordinator.upsert_synced_session(stale),
+        SyncedImportOutcome::RejectedStaleZone,
+        "a removed-zone replay must be refused before shared publication (#10612)"
+    );
+    assert_eq!(
+        SyncedImportOutcome::RejectedStaleZone.refusal_reason(),
+        Some("stale-zone"),
+        "the refusal must carry a stable reason token"
+    );
+    {
+        let synced = coordinator.sessions.synced.lock().expect("shared sessions");
+        assert!(
+            !synced.contains_key(&stale_key),
+            "a refused stale replay must not be published"
+        );
+    }
+    let pending = commands.lock().expect("commands");
+    assert!(
+        !pending.iter().any(
+            |cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == stale_key),
+        ),
+        "a refused stale replay must not be fanned out to any worker queue"
+    );
+    assert!(
+        pending.iter().any(
+            |cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == live_key),
+        ),
+        "the admitted forward must still reach the worker queue — without this the \
+         cell would pass for a helper that stopped fanning out entirely"
+    );
+    assert!(
+        pending.iter().any(
+            |cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == live_companion),
+        ),
+        "the admitted forward's companion must still be fanned out with it"
+    );
+}
+
+/// #10612 (N3 mechanism): `remove_shared_session_if` reports Declined — and
+/// mutates nothing — when the predicate rejects the live entry. The purge's
+/// removal-only counting keys on this return: Declined rows must not bump
+/// the fence-drop counter.
+#[test]
+fn remove_shared_session_if_declined_preserves_live_entry_10612() {
+    let fixture = fixture_9714(false);
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &fixture.forward.key,
+        |_| false,
+    );
+    assert!(
+        matches!(
+            outcome,
+            crate::afxdp::shared_ops::SharedRemoval::Declined
+        ),
+        "a predicate-false removal must report Declined"
+    );
+    assert!(
+        fixture
+            .coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("shared sessions")
+            .contains_key(&fixture.forward.key),
+        "a Declined removal must not mutate the shared maps"
+    );
+}
+
+/// #10612 (D2-remainder): the coordinator purge bumps the fence-drop counter
+/// exactly on actual removals: a present stale entry is removed + counted;
+/// a live replacement (Declined) is preserved. (The Declined leg pins
+/// preservation, not a zero counter-delta — the global counter is shared
+/// with parallel tests; exact Declined-emits-zero was verified firsthand by
+/// a serial run. The matches!(Removed) gate itself is read-verified.)
+#[test]
+fn purge_stale_replay_counts_removals_not_declines_10612() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.zone_id_to_name.insert(TEST_LAN_ZONE_ID, "lan".to_string());
+    forwarding.zone_id_to_name.insert(TEST_WAN_ZONE_ID, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    coordinator.set_forwarding_for_test(forwarding);
+
+    // (a) STALE present -> removed + counted.
+    let stale = synced_entry_port(3000, 0);
+    let mut stale = stale;
+    stale.metadata.ingress_zone = 9;
+    stale.metadata.egress_zone = 10;
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &stale,
+    );
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(
+        &coordinator,
+        std::slice::from_ref(&stale),
+    );
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        drops_after > drops_before,
+        "purge of a present stale entry must bump the fence-drop counter"
+    );
+    assert!(
+        !coordinator.sessions.synced.lock().expect("shared").contains_key(&stale.key),
+        "a present stale entry must be removed by the purge"
+    );
+
+    // (b) LIVE replacement under a stale snapshot entry -> Declined: preserved.
+    let live = synced_entry_port(4000, 0);
+    let live_key = live.key.clone();
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &live,
+    );
+    let mut stale_snapshot = live.clone();
+    stale_snapshot.metadata.ingress_zone = 9;
+    stale_snapshot.metadata.egress_zone = 10;
+    crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(
+        &coordinator,
+        std::slice::from_ref(&stale_snapshot),
+    );
+    assert!(
+        coordinator.sessions.synced.lock().expect("shared").contains_key(&live_key),
+        "a Declined live replacement must survive the purge"
+    );
+}

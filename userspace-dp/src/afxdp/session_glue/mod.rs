@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(in crate::afxdp) mod commands;
 mod delete_drop_sweep;
@@ -499,6 +500,14 @@ pub(super) struct WorkerCommandResults {
     /// operator `clear security flow session`, cluster-stale sweep, and HA
     /// DeleteSynced paths all funnel through this command).
     pub deleted_synced_keys: Vec<SessionKey>,
+    /// #10612: every session key refused by the stale-replay fence this tick
+    /// (an `UpsertSynced` whose recorded zones are absent from the current
+    /// validated set — see `synced_entry_is_stale_replay`). `apply_worker_commands`
+    /// has no shared-map access; the worker loop drains this list and evicts
+    /// each key from shared authority, so the purge-deleted row stays deleted
+    /// on both sides. Same record-here/apply-where-the-handles-are split as
+    /// `deleted_synced_keys` above.
+    pub stale_replay_dropped_keys: Vec<SessionKey>,
     pub exported_sequences: Vec<u64>,
     /// #7919: answers to `QuerySessionCounters` processed this tick. The
     /// command handler reads the table (it has `sessions` in scope); the WORKER
@@ -563,6 +572,7 @@ impl WorkerCommandResults {
         WorkerCommandResults {
             cancelled_keys: Vec::new(),
             deleted_synced_keys: Vec::new(),
+            stale_replay_dropped_keys: Vec::new(),
             exported_sequences: Vec::new(),
             session_counter_answers: Vec::new(),
             export_owner_rgs: Vec::new(),
@@ -785,6 +795,75 @@ pub(super) fn purge_sessions_with_removed_zone_ids(
         );
     }
     purged
+}
+
+/// #10612: stale-replay fence — is this synced entry's recorded zone identity
+/// absent from the CURRENT validated zone set?
+///
+/// The #10510 rotation purge is a one-shot delete: it removes the unbound
+/// sync-derived id-0 rows whose zones vanished and retains nothing. Every
+/// replay/install ingress must therefore re-validate zone membership against
+/// the current view at install time, or a pre-purge snapshot re-published
+/// post-purge reinstalls the exact row the purge deleted (shared map and
+/// worker table alike).
+///
+/// Mirrors the purge predicate it fences (`purge_sessions_with_removed_zone_ids`):
+/// unbound (`policy_counter.is_none()`), `policy_id == 0`, sync-family
+/// (`is_peer_synced()` or `SharedPromote`), either recorded zone absent from
+/// the current set. Same fail-opens: an unvalidated or empty current set
+/// admits (legacy/empty-snapshot safe), and zone id 0 never matches
+/// (`populate_zones` never admits it; 0 is unknown/unset on the wire).
+///
+/// Deliberately does NOT mirror the purge's `is_reverse` exemption (review
+/// finding 10619/M2): the purge deletes the pair via the forward (companion
+/// expansion), but the fence drops only the fenced entry — exempting reverses
+/// would install stale reverse halves standalone after their forward was
+/// dropped. Zone-membership is pair-symmetric (the check ORs both legs), so
+/// live reverses (zones present) still admit while stale-zone reverses drop,
+/// exactly like forwards. Legitimate rotation survivors, including reverse
+/// halves, remain replayable via zone presence, not via exemption.
+///
+/// Never-member zones (an id absent from the current set that was never a
+/// member, e.g. legacy/foreign rows): the fence drops these on REPLAY paths
+/// (fail-closed on unvalidatable input). Local installs are unaffected (the
+/// fence guards sync/replay ingress only, never the local path).
+///
+/// Known gap (#10620): cross-generation id reuse (same id, new name) is
+/// ADMITTED here (`contains_key` sees the reused id) while the purge DELETES
+/// it. No stateless predicate can distinguish the two (identical observables);
+/// the vintage-stamped fix is tracked separately. Window: id-reuse + racing
+/// stale replay.
+pub(in crate::afxdp) fn synced_entry_is_stale_replay(
+    origin: SessionOrigin,
+    metadata: &SessionMetadata,
+    forwarding: &ForwardingState,
+) -> bool {
+    // NOTE: no is_reverse exemption (see doc above). Reverses are judged by
+    // zone membership exactly like forwards.
+    if !forwarding.zone_set_validated || forwarding.zone_id_to_name.is_empty() {
+        return false;
+    }
+    if metadata.policy_counter.is_some() || metadata.policy_id != 0 {
+        return false;
+    }
+    if !(origin.is_peer_synced() || origin == SessionOrigin::SharedPromote) {
+        return false;
+    }
+    let zone_absent = |zone: u16| zone != 0 && !forwarding.zone_id_to_name.contains_key(&zone);
+    zone_absent(metadata.ingress_zone) || zone_absent(metadata.egress_zone)
+}
+/// #10612 (R2 observability): process-wide count of stale-zone replay drops
+/// across all 8 fence decision sites (worker arm, coordinator filter, coordinator
+/// purge, import, prewarm, promote, materialize-as-miss, republish BPF skip). Bumped per fence DECISION (the worker drain evicts
+/// already-counted drops; the purge bumps only on actual removal). A row
+/// judged at two sites (filter + purge) counts twice — honest: two distinct
+/// decisions. Mirrors the
+/// `SESSION_PUBLISH_ERRORS_SHARED` static pattern (no stats-handle threading).
+pub(in crate::afxdp) static STALE_REPLAY_FENCE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// Bump [`STALE_REPLAY_FENCE_DROPS`] for one refused stale replay.
+pub(in crate::afxdp) fn note_stale_replay_fence_drop() {
+    STALE_REPLAY_FENCE_DROPS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// #9526: the stable rule id of the OLD snapshot's literal first policy (the
@@ -1235,6 +1314,11 @@ pub(super) fn apply_worker_commands(
     // bursts are control-plane paced and the common no-delete tick pays
     // no allocation (same policy as `cancelled_keys`).
     let mut deleted_synced_keys: Vec<SessionKey> = Vec::new();
+    // #10612: keys refused by the stale-replay fence this tick (see the
+    // `UpsertSynced` arm); drained by the worker loop into shared-map
+    // evictions. Not pre-sized — drops are control-plane paced and the
+    // common no-drop tick pays no allocation (same policy as its neighbors).
+    let mut stale_replay_dropped_keys: Vec<SessionKey> = Vec::new();
     // #5155: companion dedup set for `handle_demote_owner_rgs`. Kept
     // beside `cancelled_keys` (not pre-sized) so the O(1) membership
     // test persists across the multiple DemoteOwnerRGS arms in one
@@ -1493,17 +1577,29 @@ pub(super) fn apply_worker_commands(
                 pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
             WorkerCommand::UpsertSynced(entry) => {
-                commands::handle_upsert_synced(
-                    sessions,
-                    session_map,
-                    forwarding,
-                    ha_state,
-                    dynamic_neighbors,
-                    entry,
-                    now_ns,
-                    now_secs,
-                    worker_id,
-                );
+                // #10612: fence a stale replay behind the rotation purge. A
+                // pre-purge snapshot re-published post-purge (backlog, late
+                // fan-out, re-import) must not reinstall the removed-zone row
+                // the purge deleted. Dropped here — before re-resolve, install,
+                // reserve, publish — and the key recorded so the worker loop
+                // evicts the stale row from shared authority (same
+                // record-here/evict-where-the-handles-are split as #6457).
+                if synced_entry_is_stale_replay(entry.origin, &entry.metadata, forwarding) {
+                    note_stale_replay_fence_drop();
+                    stale_replay_dropped_keys.push(entry.key);
+                } else {
+                    commands::handle_upsert_synced(
+                        sessions,
+                        session_map,
+                        forwarding,
+                        ha_state,
+                        dynamic_neighbors,
+                        entry,
+                        now_ns,
+                        now_secs,
+                        worker_id,
+                    );
+                }
             }
             WorkerCommand::UpsertLocal(entry) => {
                 // Kept inline (#1346 plan v2 §4.1): lifting a short
@@ -1748,6 +1844,7 @@ pub(super) fn apply_worker_commands(
     WorkerCommandResults {
         cancelled_keys,
         deleted_synced_keys,
+        stale_replay_dropped_keys,
         exported_sequences,
         session_counter_answers,
         export_owner_rgs,
@@ -2602,6 +2699,14 @@ fn materialize_shared_session_hit(
     tcp_flags: u8,
 ) -> (SessionLookup, bool) {
     if let Some(shared) = resolved.shared_entry.take() {
+        // #10612 (N2): fence stale-zone shared hits at materialize ingress.
+        // A shared-transient stale row (import fail-open linger racing
+        // validation) must materialize as a MISS, not install into the
+        // worker table (the later arm-drop would not remove it).
+        if synced_entry_is_stale_replay(shared.origin, &shared.metadata, forwarding) {
+            note_stale_replay_fence_drop();
+            return (resolved.lookup.clone(), false);
+        }
         let mut replica = synced_replica_entry(&shared);
         // A zero token carries no leak provenance and is recomputed locally
         // for peer-synced rows. A nonzero token was computed before this

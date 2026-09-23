@@ -6428,7 +6428,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         &shared_owner_rg_indexes,
         SteeringMap::unshared_for_test(-1),
         &[1],
-        false,
+        &ForwardingState::default(),
     );
     assert_eq!(count, 0, "fd=-1 should produce 0 successful publishes");
 
@@ -6438,7 +6438,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         &shared_owner_rg_indexes,
         SteeringMap::unshared_for_test(-1),
         &[2],
-        false,
+        &ForwardingState::default(),
     );
     assert_eq!(count, 0, "should find 0 sessions for RG2");
 }
@@ -14612,4 +14612,439 @@ fn policy_read_collector_cross_domain_rows_do_not_merge_10512() {
         "a true replica (same key and id) must refuse"
     );
     assert!(!overflow.load(std::sync::atomic::Ordering::Acquire));
+}
+
+/// #10612 T1: the stale-replay fence drops a forward, unbound, id-0,
+/// sync-family entry when either recorded zone is absent from the CURRENT
+/// validated set — the exact row the #10510 rotation purge deletes.
+///
+/// RED-on-revert: deleting any conjunct of `synced_entry_is_stale_replay`
+/// (or the whole predicate) flips one of these asserts.
+#[test]
+fn stale_replay_fence_drops_removed_zone_unbound_id0_10612() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+
+    // Both legs gone.
+    let mut md = test_metadata();
+    md.ingress_zone = 9;
+    md.egress_zone = 10;
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SyncImport, &md, &forwarding),
+        "a removed-zone unbound id-0 SyncImport must be fenced"
+    );
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SharedPromote, &md, &forwarding),
+        "SharedPromote is sync-family and must be fenced identically"
+    );
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SharedMaterialize, &md, &forwarding),
+        "SharedMaterialize is sync-family and must be fenced identically"
+    );
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::WorkerLocalImport, &md, &forwarding),
+        "WorkerLocalImport is sync-family and must be fenced identically"
+    );
+
+    // Either leg absent suffices (matches the purge's OR-of-legs).
+    md.egress_zone = 2;
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SyncImport, &md, &forwarding),
+        "one removed leg must fence even when the other leg survives"
+    );
+    md.ingress_zone = 1;
+    md.egress_zone = 10;
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SyncImport, &md, &forwarding),
+        "the egress leg alone must fence"
+    );
+}
+
+/// #10612 T2/T3/T4: the fence admits everything that is not the purged
+/// shape — live zones, bound rows, reverses, non-sync origins, non-zero
+/// policy ids, unvalidated/empty sets (fail-open), and zone id 0
+/// (never matches, mirroring `removed_zone_ids_for_rotation`).
+///
+/// RED-on-revert (inverted): widening the predicate (e.g. dropping the
+/// bound exemption or failing closed) flips one of these asserts.
+#[test]
+fn stale_replay_fence_admits_live_and_exempt_rows_10612() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+
+    // Live: both recorded zones still validated.
+    let live = test_metadata();
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &live, &forwarding),
+        "a current-zone replay must install (live replay unaffected)"
+    );
+
+    // Bound rows belong to rebind, not the purge.
+    let mut bound = test_metadata();
+    bound.ingress_zone = 9;
+    bound.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::default()));
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &bound, &forwarding),
+        "a bound row must install even when its zone vanished"
+    );
+
+    // Reverses are judged by zone membership exactly like forwards
+    // (10619/M2: no is_reverse exemption — exempting them installed stale
+    // reverse halves standalone after their forward was dropped).
+    let mut stale_reverse = test_metadata();
+    stale_reverse.ingress_zone = 9;
+    stale_reverse.is_reverse = true;
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SyncImport, &stale_reverse, &forwarding),
+        "a stale-zone reverse must fence exactly like its forward"
+    );
+    let mut live_reverse = test_metadata();
+    live_reverse.is_reverse = true;
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &live_reverse, &forwarding),
+        "a live-zone reverse half must stay replayable"
+    );
+
+    // Non-sync origins are never purge victims.
+    let mut local = test_metadata();
+    local.ingress_zone = 9;
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::ForwardFlow, &local, &forwarding),
+        "a locally-created row must install regardless of zones"
+    );
+
+    // Non-zero policy ids are not the overloaded id-0 shape.
+    let mut ruled = test_metadata();
+    ruled.ingress_zone = 9;
+    ruled.policy_id = 7;
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &ruled, &forwarding),
+        "a non-zero policy id must install regardless of zones"
+    );
+
+    // Fail-open: unvalidated or empty current sets admit (legacy safe).
+    let mut stale = test_metadata();
+    stale.ingress_zone = 9;
+    let mut unvalidated = forwarding.clone();
+    unvalidated.zone_set_validated = false;
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &stale, &unvalidated),
+        "an unvalidated zone set must admit, never fail closed"
+    );
+    let empty_validated = ForwardingState {
+        zone_set_validated: true,
+        ..ForwardingState::default()
+    };
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &stale, &empty_validated),
+        "an empty-but-validated map is not evidence of removal"
+    );
+
+    // Zone id 0 never matches on either leg.
+    let mut zero = test_metadata();
+    zero.ingress_zone = 0;
+    zero.egress_zone = 0;
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &zero, &forwarding),
+        "zone id 0 is unknown/unset and must never fence"
+    );
+    zero.egress_zone = 9;
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SyncImport, &zero, &forwarding),
+        "id 0 on one leg must not save a genuinely removed other leg"
+    );
+}
+
+/// #10612 (M4): activation prewarm must skip stale-zone entries — no worker
+/// fan-out for purged rows — while prewarming live entries normally. Also
+/// pins the R2 drop counter wiring (delta >= 1).
+#[test]
+fn prewarm_skips_stale_zone_entries_10612() {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+
+    let mut stale_key = test_key();
+    stale_key.src_port = 46_001;
+    let mut stale_metadata = test_metadata();
+    stale_metadata.ingress_zone = 9;
+    stale_metadata.egress_zone = 10;
+    stale_metadata.owner_rg_id = 1;
+    let stale = SyncedSessionEntry {
+        key: stale_key.clone(),
+        decision: test_decision(),
+        metadata: stale_metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let mut live_key = test_key();
+    live_key.src_port = 46_002;
+    let mut live_metadata = test_metadata();
+    live_metadata.ingress_zone = 1;
+    live_metadata.egress_zone = 2;
+    live_metadata.owner_rg_id = 1;
+    let live = SyncedSessionEntry {
+        key: live_key.clone(),
+        decision: test_decision(),
+        metadata: live_metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    for entry in [&stale, &live] {
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            entry,
+        );
+    }
+
+    let worker_commands = vec![Arc::new(Mutex::new(VecDeque::new()))];
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    prewarm_reverse_synced_sessions_for_owner_rgs(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &worker_commands,
+        SteeringMap::unshared_for_test(-1),
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &[1],
+        1,
+    );
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        drops_after > drops_before,
+        "prewarm of a stale entry must bump the fence-drop counter"
+    );
+    let fanned: Vec<SessionKey> = worker_commands[0]
+        .lock()
+        .expect("worker commands")
+        .iter()
+        .filter_map(|cmd| match cmd {
+            WorkerCommand::UpsertSynced(entry) => Some(entry.key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !fanned.contains(&stale_key),
+        "stale-zone entry must not fan out at prewarm"
+    );
+    assert!(
+        fanned.contains(&live_key),
+        "live-zone entry must prewarm normally"
+    );
+}
+
+/// #10612 (M4): failover promote must skip authoritative republish for
+/// stale-zone rows (no shared publish, no peer replicate) while the local
+/// flip still stands. Also pins the R2 drop counter wiring.
+#[test]
+fn promote_skips_republish_for_stale_zone_rows_10612() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let mut metadata = test_metadata();
+    metadata.ingress_zone = 9;
+    metadata.egress_zone = 10;
+    assert!(sessions.upsert_synced_with_origin(
+        crate::session::SessionInstall {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: metadata.clone(),
+            origin: SessionOrigin::SyncImport,
+            now_ns: 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+        false,
+    ));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let shared = crate::afxdp::session_glue::SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+    };
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let promoted = crate::afxdp::session_glue::maybe_promote_synced_session(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        shared,
+        &peer_worker_commands,
+        &forwarding,
+        &key,
+        test_decision(),
+        metadata,
+        SessionOrigin::SyncImport,
+        false,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    );
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        drops_after > drops_before,
+        "promote of a stale-zone row must bump the fence-drop counter"
+    );
+    assert!(
+        !shared_sessions.lock().expect("shared").contains_key(&key),
+        "stale-zone row must not publish to shared on promote"
+    );
+    let (_, _, origin) = sessions
+        .entry_with_origin(&key)
+        .expect("local row must exist");
+    assert_eq!(
+        origin,
+        SessionOrigin::SharedPromote,
+        "the local flip stands; only the authoritative republish is fenced"
+    );
+    let _ = promoted;
+}
+
+/// #10612 (N1): activation BPF republish must skip stale-zone rows (no BPF
+/// publish for purged rows) while counting the fence decision.
+#[test]
+fn republish_bpf_skips_stale_zone_rows_10612() {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    let mut stale_key = test_key();
+    stale_key.src_port = 46_011;
+    let mut stale_metadata = test_metadata();
+    stale_metadata.ingress_zone = 9;
+    stale_metadata.egress_zone = 10;
+    stale_metadata.owner_rg_id = 1;
+    let stale = SyncedSessionEntry {
+        key: stale_key.clone(),
+        decision: test_decision(),
+        metadata: stale_metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &stale,
+    );
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let count = republish_bpf_session_entries_for_owner_rgs(
+        &shared_sessions,
+        &shared_owner_rg_indexes,
+        SteeringMap::unshared_for_test(-1),
+        &[1],
+        &forwarding,
+    );
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(count, 0, "a stale row must not republish (fd -1 publishes nothing either way; the counter below proves the skip)");
+    assert!(
+        drops_after > drops_before,
+        "republish of a stale-zone row must bump the fence-drop counter"
+    );
+}
+
+/// #10612 (N2): materializing a stale-zone shared hit returns the MISS shape
+/// (lookup clone + false) without installing into the worker table.
+#[test]
+fn materialize_stale_zone_shared_hit_returns_miss_10612() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    let key = test_key();
+    let mut stale_metadata = test_metadata();
+    stale_metadata.ingress_zone = 9;
+    stale_metadata.egress_zone = 10;
+    let mut sessions = SessionTable::new();
+    let mut resolved = ResolvedSessionLookup {
+        key: ResolvedSessionKey::Canonical(key.clone()),
+        lookup: SessionLookup {
+            decision: test_decision(),
+            metadata: test_metadata(),
+        },
+        shared_entry: Some(SyncedSessionEntry {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: stale_metadata,
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        }),
+        origin: SessionOrigin::SyncImport,
+    };
+    let drops_before =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let (lookup, install_failed) =
+        super::materialize_shared_session_hit(&mut sessions, &mut resolved, &forwarding, 2_000_000, TCP_FLAG_ACK);
+    let drops_after =
+        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        !install_failed,
+        "a stale-zone shared hit must materialize as a miss (no failure, just no install)"
+    );
+    assert!(
+        sessions.entry_with_origin(&key).is_none(),
+        "a stale-zone shared hit must not install into the worker table"
+    );
+    assert!(
+        drops_after > drops_before,
+        "materialize of a stale-zone hit must bump the fence-drop counter"
+    );
+    let _ = lookup;
 }

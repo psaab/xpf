@@ -159,29 +159,51 @@ pub(in crate::afxdp) fn tunnel_remap_purge_ids_from_owners(
 /// replay. A reverse-marked entry drops standalone (its unmarked
 /// forward keeps forwarding without the tunnel), matching the live
 /// purge's delete_synced_session(is_reverse) behavior.
+///
+/// #10612: the same replay boundary also re-checks the recorded zone pair
+/// against the CURRENT validated zone set. The rotation purge intentionally
+/// retains no tombstone; a stale snapshot can therefore be present in the
+/// shared map after the purge and must be dropped before fan-out. The
+/// worker-side fence is the second leg for commands already queued before
+/// this filter runs.
 pub(in crate::afxdp) fn filter_replayed_synced_sessions(
     entries: &mut Vec<SyncedSessionEntry>,
     purge_ids: &[u16],
+    forwarding: &ForwardingState,
 ) {
-    if purge_ids.is_empty() || entries.is_empty() {
+    if entries.is_empty() {
         return;
     }
-    // #4975: index the drop set in a HashSet rather than a Vec. The
-    // retain phase tests membership once per surviving entry, so a
-    // `Vec::contains` scan made the dominant phase O(entries × drop_keys)
-    // — quadratic when an HA-recovery tunnel remap coincides with a large
-    // synced-session set (entries bounded by the 131,072 worker ceiling).
-    // A HashSet makes the retain step O(entries) amortized. Membership
-    // testing is the only thing that changes: `entries.retain` still
-    // walks the vector in place, so survivor order is preserved. Pre-size
-    // to entries.len() (each purged entry contributes at most 2 keys —
-    // itself plus its derived reverse companion — so this covers the
-    // common case without reallocation).
+    let zone_fence_enabled =
+        forwarding.zone_set_validated && !forwarding.zone_id_to_name.is_empty();
+    if purge_ids.is_empty() && !zone_fence_enabled {
+        return;
+    }
+    // #4975: index the drop set in a HashSet rather than a Vec. The retain
+    // phase tests membership once per surviving entry, so a Vec::contains
+    // scan made the dominant phase O(entries × drop_keys) — quadratic when
+    // an HA-recovery tunnel remap coincides with a large synced-session set.
+    // A HashSet makes the retain step O(entries) amortized. Membership testing
+    // is the only thing that changes: `entries.retain` still walks the vector
+    // in place, so survivor order is preserved.
+    // Pre-size to entries.len() (each purged entry contributes at most 2 keys —
+    // itself plus its derived reverse companion — so this covers the common
+    // case without reallocation).
     let mut drop_keys: std::collections::HashSet<crate::session::SessionKey> =
         std::collections::HashSet::with_capacity(entries.len());
     for entry in entries.iter() {
-        let id = entry.decision.resolution.tunnel_endpoint_id;
-        if id != 0 && purge_ids.contains(&id) {
+        let tunnel_purged = entry.decision.resolution.tunnel_endpoint_id != 0
+            && purge_ids.contains(&entry.decision.resolution.tunnel_endpoint_id);
+        let zone_stale = zone_fence_enabled
+            && crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                entry.origin,
+                &entry.metadata,
+                forwarding,
+            );
+        if tunnel_purged || zone_stale {
+            if zone_stale {
+                crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            }
             drop_keys.insert(entry.key.clone());
             if !entry.metadata.is_reverse {
                 drop_keys.insert(crate::session::reverse_session_key(
@@ -193,6 +215,67 @@ pub(in crate::afxdp) fn filter_replayed_synced_sessions(
     }
     if !drop_keys.is_empty() {
         entries.retain(|entry| !drop_keys.contains(&entry.key));
+    }
+}
+/// #10612: remove stale zone rows that were already present in the shared
+/// snapshot when bring-up starts. Filtering the replay vector alone would
+/// prevent fan-out but leave the authoritative shared row available to a
+/// later reader. Each removal is conditional on the CURRENT shared value
+/// still being stale, so a legitimate live replacement under the same key
+/// wins over a delayed snapshot.
+pub(in crate::afxdp) fn purge_stale_replayed_synced_sessions(
+    coord: &Coordinator,
+    entries: &[SyncedSessionEntry],
+) {
+    for entry in entries {
+        if !crate::afxdp::session_glue::synced_entry_is_stale_replay(
+            entry.origin,
+            &entry.metadata,
+            &coord.forwarding,
+        ) {
+            continue;
+        }
+        let remove_if_stale = |candidate: &SyncedSessionEntry| {
+            crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                candidate.origin,
+                &candidate.metadata,
+                &coord.forwarding,
+            )
+        };
+        // #10612 (N3): count actual removals, not decisions — a Declined
+        // live-replacement (nothing dropped) must not count. (Filter+purge may
+        // still count one row twice — once per site — which is honest: two
+        // distinct fence decisions. See the counter doc.)
+        if matches!(
+            crate::afxdp::shared_ops::remove_shared_session_if(
+                &coord.sessions.synced,
+                &coord.sessions.nat,
+                &coord.sessions.forward_wire,
+                &coord.sessions.owner_rg_indexes,
+                &entry.key,
+                remove_if_stale,
+            ),
+            crate::afxdp::shared_ops::SharedRemoval::Removed(_)
+        ) {
+            crate::afxdp::session_glue::note_stale_replay_fence_drop();
+        }
+        if !entry.metadata.is_reverse {
+            let reverse_key =
+                crate::session::reverse_session_key(&entry.key, entry.decision.nat);
+            if matches!(
+                crate::afxdp::shared_ops::remove_shared_session_if(
+                    &coord.sessions.synced,
+                    &coord.sessions.nat,
+                    &coord.sessions.forward_wire,
+                    &coord.sessions.owner_rg_indexes,
+                    &reverse_key,
+                    remove_if_stale,
+                ),
+                crate::afxdp::shared_ops::SharedRemoval::Removed(_)
+            ) {
+                crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            }
+        }
     }
 }
 

@@ -538,7 +538,12 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
             .collect(),
     );
     let mut replay_entries = coord.snapshot_shared_session_entries();
-    crate::afxdp::coordinator::filter_replayed_synced_sessions(&mut replay_entries, tunnel_purge_ids);
+    crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(coord, &replay_entries);
+    crate::afxdp::coordinator::filter_replayed_synced_sessions(
+        &mut replay_entries,
+        tunnel_purge_ids,
+        &coord.forwarding,
+    );
     let replayed_synced_sessions = coord.replay_synced_sessions(
         &replay_entries,
         worker_command_queues.as_ref(),
@@ -578,7 +583,12 @@ pub(in crate::afxdp) fn replay_late_synced_sessions(
     // resurrecting a row deleted between an unlocked snapshot and enqueue.
     let mut pending = crate::afxdp::worker_queue::lock_recover(commands);
     let mut entries = coord.snapshot_shared_session_entries();
-    crate::afxdp::coordinator::filter_replayed_synced_sessions(&mut entries, tunnel_purge_ids);
+    crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(coord, &entries);
+    crate::afxdp::coordinator::filter_replayed_synced_sessions(
+        &mut entries,
+        tunnel_purge_ids,
+        &coord.forwarding,
+    );
     // The initial replay queue may contain an entry removed or replaced while
     // workers were still spawning. Keep non-upsert commands in order, then
     // append the authoritative current snapshot below.

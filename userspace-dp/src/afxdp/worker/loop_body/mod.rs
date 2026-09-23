@@ -1644,6 +1644,7 @@ pub(crate) fn worker_loop(
         let WorkerCommandResults {
             cancelled_keys,
             deleted_synced_keys,
+            stale_replay_dropped_keys,
             exported_sequences,
             session_counter_answers,
             export_owner_rgs,
@@ -1674,6 +1675,61 @@ pub(crate) fn worker_loop(
         // here where `&mut bindings` is held.
         if !deleted_synced_keys.is_empty() {
             invalidate_flow_cache_slots_for_deleted_sessions(&mut bindings, &deleted_synced_keys);
+        }
+        // #10612: a stale replay can be queued after the rotation purge and
+        // must be refused before worker installation. Remove the same stale
+        // row from shared authority as well, but only while it still has the
+        // stale zone identity: a legitimate live replacement under the same
+        // key must not be deleted by a delayed stale command. Single pass per
+        // key (R-N2C: snapshot the forward NAT BEFORE evicting, so the derived
+        // reverse companion is always available — a separate second loop would
+        // read-after-delete and never fire).
+        for key in &stale_replay_dropped_keys {
+            // Snapshot the forward's NAT first (None if the key is already
+            // gone or reversed — both safe to skip). #2402: recover the lock
+            // (never skip on poison).
+            let companion_key = {
+                let map =
+                    crate::afxdp::shared_ops::lock_shared_recover(&shared_sessions);
+                map.get(key)
+                    .filter(|entry| !entry.metadata.is_reverse)
+                    .map(|entry| {
+                        crate::session::reverse_session_key(&entry.key, entry.decision.nat)
+                    })
+            };
+            let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                key,
+                |entry| {
+                    crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                        entry.origin,
+                        &entry.metadata,
+                        forwarding.as_ref(),
+                    )
+                },
+            );
+            // #10612 (N2 companion): evict the derived reverse companion too
+            // (mirrors the coordinator purge) so an unqueued stale reverse half
+            // does not linger shared-side until next bringup.
+            if let Some(reverse_key) = companion_key {
+                let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+                    &shared_sessions,
+                    &shared_nat_sessions,
+                    &shared_forward_wire_sessions,
+                    &shared_owner_rg_indexes,
+                    &reverse_key,
+                    |entry| {
+                        crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                            entry.origin,
+                            &entry.metadata,
+                            forwarding.as_ref(),
+                        )
+                    },
+                );
+            }
         }
         if !shaped_tx_requests.is_empty() {
             apply_worker_shaped_tx_requests(
