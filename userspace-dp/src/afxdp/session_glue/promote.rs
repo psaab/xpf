@@ -107,6 +107,19 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
         protocol,
         tcp_flags,
     }) {
+        // #10612 (M4): fence stale replays at promote-publish ingress. A row
+        // that lingered through an unvalidated purge (purge no-op) must not be
+        // published to shared/BPF/peer after its zones vanished. The local
+        // flip above stands (the row is live locally); only the authoritative
+        // republish is fenced.
+        if crate::afxdp::session_glue::synced_entry_is_stale_replay(
+            SessionOrigin::SharedPromote,
+            &promoted,
+            forwarding,
+        ) {
+            crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            return promoted;
+        }
         // The helper's promotion flips a peer-synced row to local ownership.
         // Clear only the origin bit in the conntrack mirror; counters,
         // timestamps, NAT state, and creation time remain untouched.

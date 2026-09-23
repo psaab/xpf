@@ -1644,6 +1644,7 @@ pub(crate) fn worker_loop(
         let WorkerCommandResults {
             cancelled_keys,
             deleted_synced_keys,
+            stale_replay_dropped_keys,
             exported_sequences,
             session_counter_answers,
             export_owner_rgs,
@@ -1674,6 +1675,27 @@ pub(crate) fn worker_loop(
         // here where `&mut bindings` is held.
         if !deleted_synced_keys.is_empty() {
             invalidate_flow_cache_slots_for_deleted_sessions(&mut bindings, &deleted_synced_keys);
+        }
+        // #10612: a stale replay can be queued after the rotation purge and
+        // must be refused before worker installation. Remove the same stale
+        // row from shared authority as well, but only while it still has the
+        // stale zone identity: a legitimate live replacement under the same
+        // key must not be deleted by a delayed stale command.
+        for key in &stale_replay_dropped_keys {
+            let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                key,
+                |entry| {
+                    crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                        entry.origin,
+                        &entry.metadata,
+                        forwarding.as_ref(),
+                    )
+                },
+            );
         }
         if !shaped_tx_requests.is_empty() {
             apply_worker_shaped_tx_requests(

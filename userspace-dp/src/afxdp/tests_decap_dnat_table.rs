@@ -240,7 +240,7 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         make(&reverse_key, plain_resolution, true),
         make(&unrelated_key, plain_resolution, false),
     ];
-    filter_replayed_synced_sessions(&mut entries, &[824]);
+    filter_replayed_synced_sessions(&mut entries, &[824], &ForwardingState::default());
     assert_eq!(entries.len(), 1, "forward + derived reverse both dropped");
     assert_eq!(entries[0].key, unrelated_key);
 
@@ -252,13 +252,13 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         make(&forward_key, plain_resolution, false),
         make(&reverse_key, tunnel_resolution, true),
     ];
-    filter_replayed_synced_sessions(&mut entries, &[824]);
+    filter_replayed_synced_sessions(&mut entries, &[824], &ForwardingState::default());
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].key, forward_key);
 
     // Case 3: no purged ids — untouched.
     let mut entries = vec![make(&forward_key, tunnel_resolution, false)];
-    filter_replayed_synced_sessions(&mut entries, &[7]);
+    filter_replayed_synced_sessions(&mut entries, &[7], &ForwardingState::default());
     assert_eq!(entries.len(), 1);
 }
 
@@ -410,7 +410,7 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
     entries.push(make(&survivor_tail, tunnel_resolution(0), false));
     expected_survivors.push(survivor_tail.clone());
 
-    filter_replayed_synced_sessions(&mut entries, &purge_ids);
+    filter_replayed_synced_sessions(&mut entries, &purge_ids, &ForwardingState::default());
 
     let got: Vec<SessionKey> = entries.iter().map(|e| e.key.clone()).collect();
     assert_eq!(
@@ -1015,4 +1015,138 @@ fn a_non_snat_session_holds_nothing_6745() {
     publish_dnat_table_entry(&DnatTableFds::default(), &key, no_nat);
     assert_eq!(dnat_steering_holder_count(&key, no_nat), 0);
     assert!(release_dnat_steering_holder(&key, no_nat));
+}
+
+/// #10612 T5: the coordinator replay filter drops stale-zone forwards
+/// (plus their derived reverse companions by key) while tunnel-purge
+/// semantics stay byte-identical and live-zone entries survive — with
+/// the fence ENABLED (validated set), which the pre-existing cells do
+/// not cover (they pass an unvalidated default).
+///
+/// RED-on-revert: removing the zone clause from
+/// `filter_replayed_synced_sessions` leaves the stale pair in the replay vec.
+#[test]
+fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
+    use crate::afxdp::coordinator::filter_replayed_synced_sessions;
+
+    let nat = NatDecision::default();
+    let mut seq = 0u16;
+    let mut fresh_key = || {
+        seq += 1;
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            src_port: 30000 + seq,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        }
+    };
+    let resolution = |tunnel_endpoint_id| ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 41,
+        tx_ifindex: 3,
+        tunnel_endpoint_id,
+        next_hop: None,
+        neighbor_mac: Some([2, 0, 0, 0, 0, 9]),
+        src_mac: Some([2, 0, 0, 0, 0, 1]),
+        tx_vlan_id: 0,
+    };
+    let make = |key: &SessionKey,
+                tunnel_endpoint_id: u16,
+                ingress_zone: u16,
+                egress_zone: u16,
+                is_reverse: bool| SyncedSessionEntry {
+        key: key.clone(),
+        decision: SessionDecision {
+            resolution: resolution(tunnel_endpoint_id),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata {
+            ingress_zone,
+            egress_zone,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+
+    // Stale forward + derived reverse companion drop; live pair survives.
+    let stale_forward = fresh_key();
+    let stale_reverse = crate::session::reverse_session_key(&stale_forward, nat);
+    let live_forward = fresh_key();
+    let live_reverse = crate::session::reverse_session_key(&live_forward, nat);
+    let mut entries = vec![
+        make(&stale_forward, 0, 9, 10, false),
+        make(&stale_reverse, 0, 9, 10, true),
+        make(&live_forward, 0, 1, 2, false),
+        make(&live_reverse, 0, 1, 2, true),
+    ];
+    filter_replayed_synced_sessions(&mut entries, &[], &forwarding);
+    let got: Vec<SessionKey> = entries.iter().map(|e| e.key.clone()).collect();
+    assert_eq!(
+        got,
+        vec![live_forward.clone(), live_reverse.clone()],
+        "stale-zone pair drops, live-zone pair survives, order preserved"
+    );
+
+    // Tunnel-purge semantics unchanged with the fence enabled: a
+    // tunnel-marked live-zone entry still drops by tunnel id.
+    let mut entries = vec![
+        make(&live_forward, 824, 1, 2, false),
+        make(&live_reverse, 0, 1, 2, true),
+    ];
+    filter_replayed_synced_sessions(&mut entries, &[824], &forwarding);
+    assert!(
+        entries.is_empty(),
+        "tunnel purge must still drop the forward and its derived companion"
+    );
+
+    // Fail-open: an unvalidated set admits the stale pair.
+    let mut entries = vec![
+        make(&stale_forward, 0, 9, 10, false),
+        make(&stale_reverse, 0, 9, 10, true),
+    ];
+    filter_replayed_synced_sessions(&mut entries, &[], &ForwardingState::default());
+    assert_eq!(
+        entries.len(),
+        2,
+        "unvalidated forwarding must admit (fail-open)"
+    );
+
+    // Reverse-alone (10619/m3): a lone stale reverse (no forward in the vec
+    // for companion-key derivation) drops by its own zone membership now
+    // that the predicate judges reverses (no is_reverse exemption).
+    let mut entries = vec![make(&stale_reverse, 0, 9, 10, true)];
+    filter_replayed_synced_sessions(&mut entries, &[], &forwarding);
+    assert!(
+        entries.is_empty(),
+        "a lone stale reverse must drop by zone membership, not linger"
+    );
 }

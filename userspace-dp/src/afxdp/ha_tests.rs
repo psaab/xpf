@@ -9542,3 +9542,92 @@ fn clear_mirror_over_cap_fails_closed_untouched_10512() {
         "over-cap clear must touch nothing"
     );
 }
+
+/// #10612: the HA import ingress refuses a stale post-purge replay before
+/// shared publication or worker fan-out, while a current-zone import applies.
+///
+/// The rotation purge retains no tombstone, so a pre-purge snapshot row
+/// re-imported after the purge must be dropped at this ingress — the import
+/// counterpart to the bring-up replay filter and the worker `UpsertSynced`
+/// fence. Fail-open for unvalidated/empty snapshots is pinned at the
+/// predicate level (`stale_replay_fence_admits_live_and_exempt_rows_10612`).
+///
+/// PARENT-RED recipe: delete the `synced_entry_is_stale_replay` early return
+/// in `upsert_synced_session` (session_import.rs). Leg (b)'s outcome
+/// assertion fails (`Applied`, not `RejectedStaleZone`), the stale key is
+/// published, and it is fanned out.
+#[test]
+fn upsert_synced_session_refuses_stale_zone_replay_10612() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.zone_id_to_name.insert(TEST_LAN_ZONE_ID, "lan".to_string());
+    forwarding.zone_id_to_name.insert(TEST_WAN_ZONE_ID, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    coordinator.set_forwarding_for_test(forwarding);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+
+    // (a) CONTROL — a current-zone import applies: published + fanned out.
+    let live = synced_entry_port(1000, 0);
+    let live_key = live.key.clone();
+    let live_companion = reverse_session_key(&live.key, live.decision.nat);
+    assert_eq!(
+        coordinator.upsert_synced_session(live),
+        SyncedImportOutcome::Applied,
+        "a current-zone import must apply"
+    );
+    {
+        let synced = coordinator.sessions.synced.lock().expect("shared sessions");
+        assert!(
+            synced.contains_key(&live_key),
+            "the admitted forward must be published"
+        );
+    }
+
+    // (b) SUBJECT — the same shape with a removed zone is refused: not
+    // published, not fanned out, and reported with its own reason token.
+    let mut stale = synced_entry_port(2000, 0);
+    stale.metadata.ingress_zone = 9;
+    let stale_key = stale.key.clone();
+    assert_eq!(
+        coordinator.upsert_synced_session(stale),
+        SyncedImportOutcome::RejectedStaleZone,
+        "a removed-zone replay must be refused before shared publication (#10612)"
+    );
+    assert_eq!(
+        SyncedImportOutcome::RejectedStaleZone.refusal_reason(),
+        Some("stale-zone"),
+        "the refusal must carry a stable reason token"
+    );
+    {
+        let synced = coordinator.sessions.synced.lock().expect("shared sessions");
+        assert!(
+            !synced.contains_key(&stale_key),
+            "a refused stale replay must not be published"
+        );
+    }
+    let pending = commands.lock().expect("commands");
+    assert!(
+        !pending.iter().any(
+            |cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == stale_key),
+        ),
+        "a refused stale replay must not be fanned out to any worker queue"
+    );
+    assert!(
+        pending.iter().any(
+            |cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == live_key),
+        ),
+        "the admitted forward must still reach the worker queue — without this the \
+         cell would pass for a helper that stopped fanning out entirely"
+    );
+    assert!(
+        pending.iter().any(
+            |cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == live_companion),
+        ),
+        "the admitted forward's companion must still be fanned out with it"
+    );
+}

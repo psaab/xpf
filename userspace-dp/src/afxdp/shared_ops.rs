@@ -451,6 +451,18 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             if entry.metadata.is_reverse {
                 continue;
             }
+            // #10612 (M4): fence stale replays at prewarm ingress. A pre-purge
+            // snapshot lingering in shared must not be BPF-published or fanned
+            // out after the purge deleted it. Checked here (before reverse
+            // synthesis) so a stale forward suppresses both halves.
+            if crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                entry.origin,
+                &entry.metadata,
+                forwarding,
+            ) {
+                crate::afxdp::session_glue::note_stale_replay_fence_drop();
+                continue;
+            }
             let allow_reverse_prewarm = entry.origin.is_peer_synced()
                 || matches!(entry.origin, SessionOrigin::SharedPromote);
             let Some(reverse) = synthesized_synced_reverse_entry(
