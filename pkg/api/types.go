@@ -176,6 +176,11 @@ type ZoneInfo struct {
 	// "genuinely zero traffic"; without it the endpoint reported a misleading 0
 	// (or, for a stable-hash zone id >= MaxZones, 500'd the whole response).
 	PerZoneCountersAvailable bool `json:"per_zone_counters_available"`
+	// Quarantine is a presence-safe structured verdict (#10531). A nil
+	// pointer/omitted key means UNKNOWN, which is how a client represents an
+	// old server that predates this field. New servers always populate it for
+	// emitted zones; SurvivorZone is set only for a quarantined row.
+	Quarantine *ZoneQuarantineInfo `json:"quarantine,omitempty"`
 
 	// HostInboundApplied (#7181) reports the APPLIED state of the host-inbound
 	// nftables surface enforcing this zone's host-inbound-traffic stanza, as
@@ -184,6 +189,20 @@ type ZoneInfo struct {
 	// a false one would claim "not enforced".
 	HostInboundApplied *HostInboundAppliedInfo `json:"host_inbound_applied,omitempty"`
 }
+
+// ZoneQuarantineInfo is the REST projection of the structured zone
+// quarantine verdict (#10531). The parent ZoneInfo.Quarantine pointer is the
+// presence gate: an omitted `quarantine` key means UNKNOWN from an older
+// server. New servers emit one of the two explicit states below.
+type ZoneQuarantineInfo struct {
+	State        string `json:"state"`
+	SurvivorZone string `json:"survivor_zone,omitempty"`
+}
+
+const (
+	ZoneQuarantineStateNotQuarantined = "not_quarantined"
+	ZoneQuarantineStateQuarantined    = "quarantined"
+)
 
 // ZoneInterfaceHostInbound is a per-interface host-inbound-traffic override
 // (#3328, #3362): a zone may expose a service (e.g. ssh) on one interface
