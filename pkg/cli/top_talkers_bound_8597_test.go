@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -295,4 +296,22 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+func TestTopTalkerZoneLabelQuarantine10530(t *testing.T) {
+	id := config.StableZoneID("z174")
+	cfg := &config.Config{Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
+		"z174": {Name: "z174"},
+		"z214": {Name: "z214"},
+	}}}
+	filter := sessionFilter{cfg: cfg, zoneName: "z214", zoneID: id}
+	zoneNames := map[uint16]string{id: "z174"}
+	if got := zoneLabel(filter, zoneNames, id, id); got !=
+		"z174 "+config.ZoneQuarantineReferenceQualifier+"->z174 "+config.ZoneQuarantineReferenceQualifier {
+		t.Fatalf("quarantined top-talker zone label = %q, want qualified survivor pair", got)
+	}
+	ordinary := sessionFilter{cfg: cfg, zoneName: "z174", zoneID: id}
+	if got := zoneLabel(ordinary, zoneNames, id, id); got != "z174->z174" {
+		t.Fatalf("ordinary top-talker zone label = %q, want unqualified pair", got)
+	}
 }

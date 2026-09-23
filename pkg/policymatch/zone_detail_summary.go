@@ -93,6 +93,11 @@ func zoneDetailModifiers(id uint32, schedulerName string, inactive bool, log *co
 // (Manager.PolicySchedulerActiveState). When haveSched is false the runtime
 // scheduler state is unknown and no rule is claimed inactive, matching the
 // #3062 policy-detail renderer. A nil cfg returns nil.
+// Quarantine annotation is deliberately a caller concern: the CLI and gRPC
+// zones-detail renderers prefix ZoneQuarantinePoliciesQualifier immediately
+// before this shared block when the requested zone is quarantined. Keeping
+// this SSOT unqualified prevents direct consumers and those two established
+// callers from double-marking the same policy summary (#10530).
 func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[string]bool, haveSched bool) []string {
 	if cfg == nil {
 		return nil
