@@ -1,0 +1,94 @@
+{
+  "config_set_lines": [
+    "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+    "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+    "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+    "set security zones security-zone trust interfaces ge-0/0/0.0",
+    "set security zones security-zone untrust interfaces ge-0/0/1.0",
+    "set security zones security-zone dmz interfaces ge-0/0/2.0",
+    "set security policies default-policy permit-all",
+    "set security policies global policy g-deny match from-zone trust",
+    "set security policies global policy g-deny match source-address any",
+    "set security policies global policy g-deny match destination-address any",
+    "set security policies global policy g-deny match application any",
+    "set security policies global policy g-deny then deny"
+  ],
+  "go_verdict": {
+    "action": "deny",
+    "default_used": false,
+    "matched": true,
+    "policy_id": 0,
+    "policy_name": "g-deny"
+  },
+  "id": "scoped-global-applies-only-in-scope-01",
+  "query": {
+    "dst_ip": "10.0.2.5",
+    "dst_port": 80,
+    "frag": false,
+    "from_zone": "trust",
+    "icmp_code": null,
+    "icmp_type": null,
+    "l4_present": true,
+    "protocol": "tcp",
+    "src_ip": "10.0.1.5",
+    "src_port": 1234,
+    "to_zone": "untrust"
+  },
+  "rust_verdict": {
+    "action": "deny",
+    "default_used": false,
+    "matched": true,
+    "policy_id": 0,
+    "policy_name": "g-deny"
+  },
+  "schema_version": 1,
+  "snapshot": {
+    "default_policy": "permit",
+    "rules": [
+      {
+        "action": "deny",
+        "applications": [
+          "any"
+        ],
+        "destination_addresses": [
+          "any"
+        ],
+        "destination_literals": [
+          "any"
+        ],
+        "from_zone": "junos-global",
+        "match_from_zone": "trust",
+        "match_from_zones": [
+          "trust"
+        ],
+        "name": "g-deny",
+        "rule_id": "junos-global->junos-global/g-deny",
+        "source_addresses": [
+          "any"
+        ],
+        "source_literals": [
+          "any"
+        ],
+        "to_zone": "junos-global"
+      }
+    ],
+    "zones": [
+      {
+        "host_inbound_configured": true,
+        "id": 56918,
+        "name": "dmz"
+      },
+      {
+        "host_inbound_configured": true,
+        "id": 50675,
+        "name": "trust"
+      },
+      {
+        "host_inbound_configured": true,
+        "id": 20665,
+        "name": "untrust"
+      }
+    ]
+  },
+  "source_case": "scoped-global-applies-only-in-scope"
+}

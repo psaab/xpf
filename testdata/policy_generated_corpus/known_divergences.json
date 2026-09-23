@@ -1,0 +1,1 @@
+{"_note": "#10587: explicit record of Go-vs-Rust generated-row disagreements. EMPTY at land: every committed row must agree. An entry records a tracking issue and must never be used as a waiver to make a differential soak green.", "divergences": []}
