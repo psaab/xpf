@@ -10,14 +10,20 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"golang.org/x/sync/semaphore"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 // twoPolicyConfig builds a config with a single trust->untrust zone pair
@@ -1117,5 +1123,103 @@ func TestRenameStagingRunsBeforeDataplanePublish10511(t *testing.T) {
 	if !publishPos.IsValid() || publishPos <= stagingPos {
 		t.Fatalf("%s: the rename staging call (%s) must precede the ApplyConfig publish in %s",
 			src, fset.Position(stagingPos), stagingFunc)
+	}
+}
+
+// TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623 closes the one
+// unwired atom the #10592 review deferred: a feed-BACKED renamed row retained
+// through arm + CapturePolicyInvalidationLocked with a POPULATED feed
+// overlay. Adjacent atoms are pinned elsewhere (stamp loop, hand-injected
+// overlay honoring, nil-overlay drop, SnapshotForBindings itself); this cell
+// wires SnapshotForBindings output → binding.feedOverlay → Match end to end.
+//
+// The feed Manager is populated through its production path (Apply over an
+// httptest feed server + poll-until-installed), not through the feeds
+// package's private installPrefixes seam. No timing is asserted — the poll
+// waits for installation, so the cell cannot flake on scheduling.
+//
+// RED: neutering the feedOverlay stamp (nil at the capture binding loop)
+// drops the row (renamed == 0): without the overlay the feed-backed name
+// cannot resolve, exactly the feed-unresolved shape.
+func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
+	const feedBody = "203.0.113.0/24\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, feedBody)
+	}))
+	defer server.Close()
+
+	const feedName = "bad-actors-feed"
+	daCfg := &config.DynamicAddressConfig{
+		FeedServers: map[string]*config.FeedServer{
+			"srv": {Name: "srv", URL: server.URL, FeedName: feedName, UpdateInterval: 3600},
+		},
+		AddressBindings: map[string]*config.AddressBinding{
+			"bad-actors": {Name: "bad-actors", FeedNames: []string{feedName}},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := feeds.New(func() error { return nil })
+	// Feed fetch SSRF policy blocks loopback by default; allowlist the
+	// httptest server exactly as the feeds package's own tests do.
+	mgr.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	mgr.Apply(ctx, daCfg)
+	defer mgr.StopAll()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if got := mgr.SnapshotForBindings(daCfg)["bad-actors"]; len(got) == 1 && got[0] == "203.0.113.0/24" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("feed overlay never installed: %v", mgr.SnapshotForBindings(daCfg))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.SourceAddresses = []string{"bad-actors"}
+		cfg.Security.Policies[1].Policies = cfg.Security.Policies[1].Policies[:1]
+		cfg.Security.DynamicAddress = *daCfg
+	}
+	// Session source inside the feed prefixes (203.0.113.0/24): with the
+	// overlay the renamed rule's match permits and the row retains; without
+	// it the name cannot resolve and the row drops.
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{203, 0, 113, 7}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 1234, DstPort: 443, Protocol: 6,
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	dp := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {
+				State:       dataplane.SessStateEstablished,
+				PolicyID:    oldID,
+				IngressZone: config.StableZoneID("lan"),
+				EgressZone:  config.StableZoneID("wan"),
+			},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	d.feeds = mgr
+	d.armPolicyInvalidationPlanWithRename(oldCfg, newCfg, &pendingRenameApply{
+		descriptors: []configstore.RenameDescriptor{
+			policyRenameDescriptor("p-old", "p-new"),
+		},
+	})
+	d.capturePolicyInvalidationLocked(newCfg)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("rename apply did not produce a pre-publication capture")
+	}
+	if len(capture.renamed) != 1 {
+		t.Fatalf("populated-feed renamed rows = %d, want 1: %+v", len(capture.renamed), capture.renamed)
+	}
+	if capture.renamed[0].RuleID != "lan->wan/p-new" {
+		t.Fatalf("renamed row rule = %q, want lan->wan/p-new", capture.renamed[0].RuleID)
 	}
 }
