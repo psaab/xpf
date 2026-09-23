@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -101,6 +103,9 @@ type capturedSessions struct {
 	targets int
 	v4      []dataplane.SessionEntryV4
 	v6      []dataplane.SessionEntryV6
+	// policy retains the helper READ rows, including their incarnation and
+	// companion identities, for the userspace identity-conditional delete.
+	policy []dpuserspace.SessionPolicyMatch
 	// enumFailed marks a candidate set gathered from an INCOMPLETE scan. It
 	// suppresses the delete site's success line only — the counts describe what
 	// was gathered, not what existed, so reporting them as a complete clear
@@ -108,7 +113,10 @@ type capturedSessions struct {
 	enumFailed bool
 }
 
-func (c capturedSessions) empty() bool { return len(c.v4) == 0 && len(c.v6) == 0 }
+func (c capturedSessions) empty() bool {
+	return len(c.v4) == 0 && len(c.v6) == 0 && len(c.policy) == 0
+}
+
 
 // policyInvalidationCapture is the whole pre-publication snapshot: one bucket
 // per change class, plus the enumerate errors.
@@ -129,8 +137,13 @@ type policyInvalidationCapture struct {
 	renamed        []dpuserspace.PolicySessionRebind
 	renameAncestry []dpuserspace.PolicyRenameAncestry
 
-	v4Err error
-	v6Err error
+	// readErr is the userspace helper READ failure, if any (P9): ONE
+	// error for the one scan — never aliased into both v4Err/v6Err
+	// (that double-counted a single failure in the commit result).
+	// v4Err/v6Err belong to the store ForEach path only.
+	readErr error
+	v4Err   error
+	v6Err   error
 }
 
 // armPolicyInvalidationPlan records the config pair the next applyConfigLocked
@@ -232,6 +245,86 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		return
 	}
 	store := rt.Sessions()
+	// #10512: userspace policy invalidation reads the helper authority, not
+	// the BPF mirror. A missing/incomplete READ is a partial invalidation and
+	// must never be converted into an authoritative empty capture.
+	if lister, ok := rt.(interface {
+		ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error)
+	}); ok {
+		ids := make([]uint32, 0, len(deleted)+len(modified)+len(deflt))
+		for id := range deleted {
+			ids = append(ids, id)
+		}
+		for id := range modified {
+			ids = append(ids, id)
+		}
+		for id := range deflt {
+			ids = append(ids, id)
+		}
+		resp, err := lister.ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest{
+			PolicyIDs: ids,
+			Mode:      "prepublish",
+			Families:  []uint8{4, 6},
+			Classes:   []string{"forward"},
+		})
+		// P7 terminal (shared with the legacy producer): a transport
+		// error gathers nothing → empty buckets + error. An INCOMPLETE
+		// read still matches what was gathered (delete-partial:
+		// revoking some stale sessions beats revoking none) while the
+		// joined readErr surfaces the gap once via the aggregate.
+		// HA-sync covers the partial (per attempted match), so the peer
+		// observes the same revocation.
+		if err != nil {
+			capture.readErr = fmt.Errorf("policy session READ: %w", err)
+			capture.deleted.enumFailed = true
+			capture.modified.enumFailed = true
+			capture.deflt.enumFailed = true
+			d.policyInvalidationCapture = capture
+			return
+		}
+		if !resp.SessionPolicyComplete {
+			capture.readErr = fmt.Errorf(
+				"policy session READ incomplete: %s",
+				strings.Join(resp.SessionPolicyPerWorkerErrors, ", "),
+			)
+		}
+		for _, match := range resp.SessionPolicyMatches {
+			// P6: the helper must not over-return into unchanged
+			// policies — an extraneous match would over-clear. Skip +
+			// loud (the scan is suspect, so the end check below marks
+			// the whole capture partial).
+			if !idInSet(deleted, match.PolicyID) && !idInSet(modified, match.PolicyID) && !idInSet(deflt, match.PolicyID) {
+				capture.readErr = errors.Join(capture.readErr, fmt.Errorf("policy session READ: extraneous policy %d", match.PolicyID))
+				continue
+			}
+			entry4, entry6, err := policyMatchEntries(match)
+			if err != nil {
+				capture.readErr = errors.Join(capture.readErr, err)
+				continue
+			}
+			target := &capture.deleted
+			if idInSet(modified, match.PolicyID) {
+				target = &capture.modified
+			} else if idInSet(deflt, match.PolicyID) {
+				target = &capture.deflt
+			}
+			target.policy = append(target.policy, match)
+			if entry4 != nil {
+				target.v4 = append(target.v4, *entry4)
+			}
+			if entry6 != nil {
+				target.v6 = append(target.v6, *entry6)
+			}
+		}
+		if capture.readErr != nil {
+			capture.deleted.enumFailed = true
+			capture.modified.enumFailed = true
+			capture.deflt.enumFailed = true
+		}
+		d.policyInvalidationCapture = capture
+		return
+	}
+
 	if store == nil {
 		return
 	}
@@ -346,24 +439,130 @@ func idInSet(ids map[uint32]struct{}, id uint32) bool {
 	_, ok := ids[id]
 	return ok
 }
+// policyMatchEntries converts one helper READ match into the existing
+// dataplane entry shape consumed by the companion-aware delete path. The
+// helper is authoritative for the routing domain and RT_FLOW identity; the
+// mirror value is only a transport container for that identity.
+func policyMatchEntries(match dpuserspace.SessionPolicyMatch) (*dataplane.SessionEntryV4, *dataplane.SessionEntryV6, error) {
+	family := match.AddrFamily
+	if family == 0 {
+		family = match.Tuple.AddrFamily
+	}
+	if match.ExpectedRTFlowSessionID == 0 {
+		return nil, nil, fmt.Errorf(
+			"policy session READ: identity-missing for policy %d (%s -> %s)",
+			match.PolicyID, match.Tuple.SrcIP, match.Tuple.DstIP,
+		)
+	}
+	if match.ExpectedCompanionRTFlowSessionID != 0 && match.ReverseKey == nil {
+		return nil, nil, fmt.Errorf(
+			"policy session READ: companion identity without reverse key for policy %d",
+			match.PolicyID,
+		)
+	}
+	switch family {
+	case 4:
+		key, discriminator, err := policyTupleV4(match.Tuple)
+		if err != nil {
+			return nil, nil, err
+		}
+		val := dataplane.SessionValue{
+			PolicyID:            match.PolicyID,
+			Created:             match.CreatedSecs,
+			RoutingDomain:       match.RoutingDomain,
+			RTFlowSessionID:     match.ExpectedRTFlowSessionID,
+			TunnelDiscriminator: discriminator,
+		}
+		if val.RoutingDomain == 0 {
+			val.RoutingDomain = match.Tuple.RoutingDomain
+		}
+		if match.ReverseKey != nil {
+			reverse, _, err := policyTupleV4(*match.ReverseKey)
+			if err != nil {
+				return nil, nil, err
+			}
+			val.ReverseKey = reverse
+		}
+		return &dataplane.SessionEntryV4{Key: key, Value: val}, nil, nil
+	case 6:
+		key, discriminator, err := policyTupleV6(match.Tuple)
+		if err != nil {
+			return nil, nil, err
+		}
+		val := dataplane.SessionValueV6{
+			PolicyID:            match.PolicyID,
+			Created:             match.CreatedSecs,
+			RoutingDomain:       match.RoutingDomain,
+			RTFlowSessionID:     match.ExpectedRTFlowSessionID,
+			TunnelDiscriminator: discriminator,
+		}
+		if val.RoutingDomain == 0 {
+			val.RoutingDomain = match.Tuple.RoutingDomain
+		}
+		if match.ReverseKey != nil {
+			reverse, _, err := policyTupleV6(*match.ReverseKey)
+			if err != nil {
+				return nil, nil, err
+			}
+			val.ReverseKey = reverse
+		}
+		return nil, &dataplane.SessionEntryV6{Key: key, Value: val}, nil
+	default:
+		return nil, nil, fmt.Errorf("policy session READ: unsupported address family %d", family)
+	}
+}
+
+func policyTupleV4(tuple dpuserspace.SessionPolicyTuple) (dataplane.SessionKey, uint64, error) {
+	src := net.ParseIP(tuple.SrcIP).To4()
+	dst := net.ParseIP(tuple.DstIP).To4()
+	if src == nil || dst == nil {
+		return dataplane.SessionKey{}, 0, fmt.Errorf("policy session READ: invalid IPv4 tuple %q -> %q", tuple.SrcIP, tuple.DstIP)
+	}
+	var key dataplane.SessionKey
+	copy(key.SrcIP[:], src)
+	copy(key.DstIP[:], dst)
+	key.SrcPort = tuple.SrcPort
+	key.DstPort = tuple.DstPort
+	key.Protocol = tuple.Protocol
+	return key, tuple.TunnelDiscriminator, nil
+}
+
+func policyTupleV6(tuple dpuserspace.SessionPolicyTuple) (dataplane.SessionKeyV6, uint64, error) {
+	src := net.ParseIP(tuple.SrcIP).To16()
+	dst := net.ParseIP(tuple.DstIP).To16()
+	if src == nil || dst == nil || net.ParseIP(tuple.SrcIP).To4() != nil || net.ParseIP(tuple.DstIP).To4() != nil {
+		return dataplane.SessionKeyV6{}, 0, fmt.Errorf("policy session READ: invalid IPv6 tuple %q -> %q", tuple.SrcIP, tuple.DstIP)
+	}
+	var key dataplane.SessionKeyV6
+	copy(key.SrcIP[:], src)
+	copy(key.DstIP[:], dst)
+	key.SrcPort = tuple.SrcPort
+	key.DstPort = tuple.DstPort
+	key.Protocol = tuple.Protocol
+	return key, tuple.TunnelDiscriminator, nil
+}
 
 // enumerateErr reports the capture's enumerate failure ONCE for all three
 // classes (the scan is shared, so reporting it per class would triple-count one
-// failure). A failed ForEachV4/V6 leaves UNVISITED sessions out of every
-// bucket, so the invalidation that follows is PARTIAL in exactly the #5578
-// sense — traffic the new policy should now DENY may keep forwarding under the
-// old session's stale authorization — and the error must reach the commit
-// result rather than a log line.
+// failure). A failed scan leaves UNVISITED sessions out of every bucket, so
+// the invalidation that follows is PARTIAL in exactly the #5578 sense —
+// traffic the new policy should now DENY may keep forwarding under the old
+// session's stale authorization — and the error must reach the commit result
+// rather than a log line. The userspace READ contributes at most ONE entry
+// (readErr); v4/v6 legs belong to the store path only (P9).
 func (c *policyInvalidationCapture) enumerateErr() error {
-	if c.v4Err == nil && c.v6Err == nil {
+	if c.readErr == nil && c.v4Err == nil && c.v6Err == nil {
 		return nil
 	}
-	slog.Error("policy session invalidation: pre-publication session-table enumerate failed; clear is PARTIAL — some sessions of changed policies may keep forwarding",
-		"v4_err", c.v4Err, "v6_err", c.v6Err,
+	slog.Error("policy session invalidation: pre-publication enumerate failed; clear is PARTIAL — some sessions of changed policies may keep forwarding",
+		"read_err", c.readErr, "v4_err", c.v4Err, "v6_err", c.v6Err,
 		"deleted_matched", len(c.deleted.v4)+len(c.deleted.v6),
 		"modified_matched", len(c.modified.v4)+len(c.modified.v6),
 		"default_matched", len(c.deflt.v4)+len(c.deflt.v6))
 	var errs []error
+	if c.readErr != nil {
+		errs = append(errs, fmt.Errorf("policy session invalidation: %w", c.readErr))
+	}
 	if c.v4Err != nil {
 		errs = append(errs, fmt.Errorf("policy session invalidation: v4 enumerate: %w", c.v4Err))
 	}

@@ -196,10 +196,32 @@ fn install_table_identity_matches_go_vectors_9752() {
 /// alias). Callers skip defaults before extraction (registry) or never
 /// override on empty (PBR terms); the `debug_assert!` fails loud in tests.
 /// The registry test pins that no row is ever keyed by it.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "must be skipped before name extraction")]
 fn empty_name_hash_panics_9752() {
     let _ = install_table_identity("");
+}
+
+/// #10552 (release leg of `empty_name_hash_panics_9752`): the `debug_assert!`
+/// compiles out under `--release`, so the empty name does NOT panic there —
+/// the function stays total and pure. Pin the exact documented release
+/// behavior instead: `""` hashes to domain 106945 (IN-BAND, per
+/// `install_table_identity` docs — which is why callers must skip defaults
+/// before extraction), deterministically.
+#[cfg(not(debug_assertions))]
+#[test]
+fn empty_name_hash_release_total_10552() {
+    let (domain, check) = install_table_identity("");
+    assert_eq!(
+        domain, 106945,
+        "empty name must hash to the documented in-band domain"
+    );
+    assert_eq!(
+        install_table_identity(""),
+        (domain, check),
+        "install_table_identity must stay total and deterministic in release"
+    );
 }
 
 /// #9752: the known Go collision pair collides here too (same function), so

@@ -467,22 +467,31 @@ func PurgeRetirementOnly(logFlags uint8) bool {
 	return logFlags&dataplane.LogFlagPurgeRetirementOnly != 0
 }
 
-// encodeDeleteV4 emits a delete message for a v4 session key. The 16-byte
-// 5-tuple payload grows to 24 bytes with a length-gated trailing #2170
-// install Generation: an old decoder reads only the first 16 bytes (its
-// `len(payload) >= 16` check tolerates the longer payload) and ignores the
-// generation; a new decoder reads the trailing uint64 when present. A
-// generation of 0 means "unknown / legacy" and the receiver falls back to
-// today's unconditional delete.
-//
-// forwardOnly (#9752) appends one more length-gated byte (1/0): a
-// purge-retirement delete the peer must apply to exactly the named key,
-// skipping companion deletes. Old decoders stop after the generation.
+// encodeDeleteV4 emits a bare delete message for a v4 session key (25-byte
+// payload: 16-byte 5-tuple + #2170 generation + #9752 forward-only marker).
+// Bare layout is frozen: scoped deletes use encodeDeleteScopedV4, which
+// appends the #10512 tail only when scoped, so these bytes never change.
 func encodeDeleteV4(key dataplane.SessionKey, gen uint64, forwardOnly bool) []byte {
-	hdr := make([]byte, syncHeaderSize+25)
+	return encodeDeleteScopedV4(key, gen, forwardOnly, 0, 0)
+}
+
+// encodeDeleteScopedV4 emits a delete with the #10512 scoped tail:
+// routing_domain u32 + expected_rt_flow_session_id u64 after the forwardOnly
+// byte (v4 payload 37 bytes). Appended ONLY when scoped (domain or id
+// nonzero); bare deletes stay 25 bytes so legacy bytes are untouched. Old
+// decoders stop after forwardOnly (length-tolerant, same discipline as the
+// #2170 generation and #9752 marker); new decoders read the tail only at
+// full length. A scoped delete is never sent to a peer that did not
+// advertise the capability — see suppressScopedDeleteForIncapablePeer.
+func encodeDeleteScopedV4(key dataplane.SessionKey, gen uint64, forwardOnly bool, domain uint32, expectedID uint64) []byte {
+	size := 25
+	if domain != 0 || expectedID != 0 {
+		size = 37
+	}
+	hdr := make([]byte, syncHeaderSize+size)
 	copy(hdr[:4], syncMagic[:])
 	hdr[4] = syncMsgDeleteV4
-	binary.LittleEndian.PutUint32(hdr[8:12], 25)
+	binary.LittleEndian.PutUint32(hdr[8:12], uint32(size))
 	off := syncHeaderSize
 	copy(hdr[off:], key.SrcIP[:])
 	off += 4
@@ -499,13 +508,32 @@ func encodeDeleteV4(key dataplane.SessionKey, gen uint64, forwardOnly bool) []by
 	if forwardOnly {
 		hdr[off] = 1
 	}
+	off++
+	if size == 37 {
+		binary.LittleEndian.PutUint32(hdr[off:], domain)
+		binary.LittleEndian.PutUint64(hdr[off+4:], expectedID)
+	}
 	return hdr
 }
+
+// encodeDeleteV6 is the bare v6 twin of encodeDeleteV4 (49-byte payload,
+// frozen); scoped deletes use encodeDeleteScopedV6.
 func encodeDeleteV6(key dataplane.SessionKeyV6, gen uint64, forwardOnly bool) []byte {
-	hdr := make([]byte, syncHeaderSize+49)
+	return encodeDeleteScopedV6(key, gen, forwardOnly, 0, 0)
+}
+
+// encodeDeleteScopedV6 is the v6 twin of encodeDeleteScopedV4: scoped tail
+// after the forwardOnly byte (v6 payload 61 bytes), appended only when
+// scoped; bare deletes stay 49 bytes.
+func encodeDeleteScopedV6(key dataplane.SessionKeyV6, gen uint64, forwardOnly bool, domain uint32, expectedID uint64) []byte {
+	size := 49
+	if domain != 0 || expectedID != 0 {
+		size = 61
+	}
+	hdr := make([]byte, syncHeaderSize+size)
 	copy(hdr[:4], syncMagic[:])
 	hdr[4] = syncMsgDeleteV6
-	binary.LittleEndian.PutUint32(hdr[8:12], 49)
+	binary.LittleEndian.PutUint32(hdr[8:12], uint32(size))
 	off := syncHeaderSize
 	copy(hdr[off:], key.SrcIP[:])
 	off += 16
@@ -522,6 +550,11 @@ func encodeDeleteV6(key dataplane.SessionKeyV6, gen uint64, forwardOnly bool) []
 	if forwardOnly {
 		hdr[off] = 1
 	}
+	off++
+	if size == 61 {
+		binary.LittleEndian.PutUint32(hdr[off:], domain)
+		binary.LittleEndian.PutUint64(hdr[off+4:], expectedID)
+	}
 	return hdr
 }
 
@@ -531,10 +564,14 @@ func encodeDeleteV6(key dataplane.SessionKeyV6, gen uint64, forwardOnly bool) []
 // mirror the encoder: 16-byte 5-tuple required, #2170 generation at [16:24]
 // when present (absent on a legacy peer → 0 → unconditional delete in the
 // apply guard), #9752 forward-only marker at [24] when present (absent keeps
-// the historical derive-and-retract behavior).
-func parseDeleteV4Wire(payload []byte) (key dataplane.SessionKey, gen uint64, forwardOnly bool, ok bool) {
+// the historical derive-and-retract behavior), #10512 scoped tail at full
+// 37-byte length (domain [25:29], expected id [29:37]). The scoped bit
+// derives from LENGTH, never content; gap lengths (26-36) and a full tail
+// with zero expected id (no incarnation to match — corrupt or hostile)
+// fail closed (ok=false), never reclassify as bare.
+func parseDeleteV4Wire(payload []byte) (key dataplane.SessionKey, gen uint64, forwardOnly bool, domain uint32, expectedID uint64, scoped bool, ok bool) {
 	if len(payload) < 16 {
-		return key, 0, false, false
+		return key, 0, false, 0, 0, false, false
 	}
 	copy(key.SrcIP[:], payload[0:4])
 	copy(key.DstIP[:], payload[4:8])
@@ -545,14 +582,31 @@ func parseDeleteV4Wire(payload []byte) (key dataplane.SessionKey, gen uint64, fo
 		gen = binary.LittleEndian.Uint64(payload[16:24])
 	}
 	forwardOnly = len(payload) >= 25 && payload[24] != 0
-	return key, gen, forwardOnly, true
+	if len(payload) >= 26 && len(payload) < 37 {
+		// Gap lengths are neither bare nor scoped: a truncated scoped
+		// tail must fail closed, never decode as an unconditional bare
+		// delete (the §1 downgrade ban). The encoder never emits them.
+		return key, 0, false, 0, 0, false, false
+	}
+	if len(payload) >= 37 {
+		scoped = true
+		domain = binary.LittleEndian.Uint32(payload[25:29])
+		expectedID = binary.LittleEndian.Uint64(payload[29:37])
+		if expectedID == 0 {
+			return key, 0, false, 0, 0, false, false
+		}
+	}
+	return key, gen, forwardOnly, domain, expectedID, scoped, true
 }
 
 // parseDeleteV6Wire is the v6 twin of parseDeleteV4Wire: 40-byte 5-tuple
-// required, generation at [40:48] when present, forward-only marker at [48].
-func parseDeleteV6Wire(payload []byte) (key dataplane.SessionKeyV6, gen uint64, forwardOnly bool, ok bool) {
+// required, generation at [40:48] when present, forward-only marker at [48],
+// #10512 scoped tail at full 61-byte length (domain [49:53], expected id
+// [53:61]). Scoped bit from length; gaps (50-60) and zero-id full tails
+// fail closed, never reclassify as bare.
+func parseDeleteV6Wire(payload []byte) (key dataplane.SessionKeyV6, gen uint64, forwardOnly bool, domain uint32, expectedID uint64, scoped bool, ok bool) {
 	if len(payload) < 40 {
-		return key, 0, false, false
+		return key, 0, false, 0, 0, false, false
 	}
 	copy(key.SrcIP[:], payload[0:16])
 	copy(key.DstIP[:], payload[16:32])
@@ -563,7 +617,19 @@ func parseDeleteV6Wire(payload []byte) (key dataplane.SessionKeyV6, gen uint64, 
 		gen = binary.LittleEndian.Uint64(payload[40:48])
 	}
 	forwardOnly = len(payload) >= 49 && payload[48] != 0
-	return key, gen, forwardOnly, true
+	if len(payload) >= 50 && len(payload) < 61 {
+		// v6 twin of the gap fail-closed above.
+		return key, 0, false, 0, 0, false, false
+	}
+	if len(payload) >= 61 {
+		scoped = true
+		domain = binary.LittleEndian.Uint32(payload[49:53])
+		expectedID = binary.LittleEndian.Uint64(payload[53:61])
+		if expectedID == 0 {
+			return key, 0, false, 0, 0, false, false
+		}
+	}
+	return key, gen, forwardOnly, domain, expectedID, scoped, true
 }
 
 // decodeSessionV4Payload decodes a v4 session from wire format. It returns the

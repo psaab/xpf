@@ -315,7 +315,7 @@ pub(super) fn foreign_hit_verdict(
     match sessions.entry_with_origin(&canonical_key) {
         Some((decision, metadata, origin)) => {
             ForeignHitVerdict::Revoke(PolicyRevocation {
-                canonical_key,
+                canonical_key: Some(canonical_key),
                 decision,
                 metadata,
                 origin,

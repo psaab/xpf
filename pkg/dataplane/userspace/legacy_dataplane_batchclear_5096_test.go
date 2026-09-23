@@ -3,6 +3,7 @@ package userspace
 import (
 	"encoding/json"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -19,6 +20,9 @@ type fakeHelperDeleteRecorder struct {
 	ln   net.Listener
 	mu   sync.Mutex
 	reqs []SessionSyncRequest
+	// clearV4/clearV6 are the authoritative counts the fake reports
+	// for a mirror_clear_chunk (single-shot success shape).
+	clearV4, clearV6 int
 }
 
 func startFakeHelperDeleteRecorder(t *testing.T, sockPath string) *fakeHelperDeleteRecorder {
@@ -38,8 +42,10 @@ func startFakeHelperDeleteRecorder(t *testing.T, sockPath string) *fakeHelperDel
 			go func() {
 				defer conn.Close()
 				var req ControlRequest
+				op := ""
 				if err := json.NewDecoder(conn).Decode(&req); err == nil {
 					if req.SessionSync != nil {
+						op = req.SessionSync.Operation
 						r.mu.Lock()
 						r.reqs = append(r.reqs, *req.SessionSync)
 						r.mu.Unlock()
@@ -47,7 +53,16 @@ func startFakeHelperDeleteRecorder(t *testing.T, sockPath string) *fakeHelperDel
 				}
 				// The client blocks on this response, so by the time the
 				// adapter call returns the request above is already recorded.
-				_ = json.NewEncoder(conn).Encode(ControlResponse{OK: true})
+				resp := ControlResponse{OK: true}
+				if op == "mirror_clear_chunk" {
+					r.mu.Lock()
+					v4, v6 := r.clearV4, r.clearV6
+					r.mu.Unlock()
+					resp = ControlResponse{OK: true,
+						SessionMirrorV4Count: uint64(v4), SessionMirrorV6Count: uint64(v6),
+						SessionMirrorComplete: true}
+				}
+				_ = json.NewEncoder(conn).Encode(resp)
 			}()
 		}
 	}()
@@ -73,6 +88,18 @@ func (r *fakeHelperDeleteRecorder) count() int {
 	return len(r.reqs)
 }
 
+func (r *fakeHelperDeleteRecorder) opCount(op string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, req := range r.reqs {
+		if req.Operation == op {
+			n++
+		}
+	}
+	return n
+}
+
 // TestBatchAndClearRouteToHelper5096 is the fail-on-revert guard for #5096.
 //
 // The batch/clear session mutations must reach the authoritative Rust helper,
@@ -91,7 +118,7 @@ func TestBatchAndClearRouteToHelper5096(t *testing.T) {
 	rec := startFakeHelperDeleteRecorder(t, sessionSock)
 
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.cfg.ControlSocket = controlSock
 	injectSessionMaps(t, m)
 
@@ -163,13 +190,16 @@ func TestBatchAndClearRouteToHelper5096(t *testing.T) {
 	if err := m.bpfShim.SetSessionV6(clearV6, dataplane.SessionValueV6{}); err != nil {
 		t.Fatalf("seed clear v6 session: %v", err)
 	}
-	if _, _, err := adapter.ClearAllSessions(); err != nil {
+	rec.clearV4, rec.clearV6 = 1, 1
+	if v4, v6, err := adapter.ClearAllSessions(); err != nil {
 		t.Fatalf("ClearAllSessions: %v", err)
+	} else if v4 != 1 || v6 != 1 {
+		t.Fatalf("ClearAllSessions counts = (%d, %d), want (1, 1) helper-confirmed", v4, v6)
 	}
-	if !rec.deletedIP("delete", "10.0.61.50", "172.16.80.201") {
-		t.Fatalf("ClearAllSessions did not send helper delete for v4 key; recorded=%d", rec.count())
-	}
-	if !rec.deletedIP("delete", "2001:559:8585:ef00::200", "2001:559:8585:80::201") {
-		t.Fatalf("ClearAllSessions did not send helper delete for v6 key; recorded=%d", rec.count())
+	// Single-shot: one clear op reaches the authoritative helper (no
+	// per-key fan-out — the helper enumerates natively). Reverting to a
+	// mirror-only clear leaves zero ops and fails RED (#5096 bypass).
+	if got := rec.opCount("mirror_clear_chunk"); got != 1 {
+		t.Fatalf("ClearAllSessions sent %d helper clear ops, want exactly 1; recorded=%d", got, rec.count())
 	}
 }

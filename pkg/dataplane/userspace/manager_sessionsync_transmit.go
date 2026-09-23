@@ -14,6 +14,7 @@ package userspace
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -24,7 +25,17 @@ func (m *Manager) syncSessionV4Locked(op string, key dataplane.SessionKey, val *
 		return nil
 	}
 	req := m.buildSessionSyncRequestV4(op, key, val)
-	return m.syncSessionRequestLocked(req)
+	m.stampSessionMutationLocked(&req)
+	startGen := m.procGen
+	err := m.syncSessionRequestLocked(req)
+	// P12-E: churn self-heal — restamp to the live generation and retry
+	// once (single-key idempotent verbs only; capture-based policy
+	// batches gap instead and never call this).
+	if m.churnedSinceLocked(startGen) && req.HelperEpoch != 0 {
+		req.HelperEpoch = m.procGen
+		err = m.syncSessionRequestLocked(req)
+	}
+	return err
 }
 
 func (m *Manager) syncSessionV6Locked(op string, key dataplane.SessionKeyV6, val *dataplane.SessionValueV6) error {
@@ -32,10 +43,66 @@ func (m *Manager) syncSessionV6Locked(op string, key dataplane.SessionKeyV6, val
 		return nil
 	}
 	req := m.buildSessionSyncRequestV6(op, key, val)
-	return m.syncSessionRequestLocked(req)
+	m.stampSessionMutationLocked(&req)
+	startGen := m.procGen
+	err := m.syncSessionRequestLocked(req)
+	// P12-E: churn self-heal (V4 twin).
+	if m.churnedSinceLocked(startGen) && req.HelperEpoch != 0 {
+		req.HelperEpoch = m.procGen
+		err = m.syncSessionRequestLocked(req)
+	}
+	return err
+}
+func (m *Manager) stampSessionMutationLocked(req *SessionSyncRequest) {
+	req.HelperEpoch = m.procGen
+	if req.OperationID == "" {
+		m.sessionOperationID++
+		req.OperationID = fmt.Sprintf("%d-%d", req.HelperEpoch, m.sessionOperationID)
+	}
+	if req.MutationID == "" {
+		if req.RTFlowSessionID == 0 && req.Generation == 0 {
+			// A bare tuple is not an incarnation. Keep ordinary deletes and
+			// legacy rows from suppressing a later session that reuses it.
+			req.MutationID = "op:" + req.OperationID
+			return
+		}
+		req.MutationID = fmt.Sprintf(
+			"%s|%d|%d|%s|%s|%d|%d|%d|%d|%d|%s|%s|%d|%d",
+			req.Operation,
+			req.AddrFamily,
+			req.Protocol,
+			req.SrcIP,
+			req.DstIP,
+			req.SrcPort,
+			req.DstPort,
+			req.RoutingDomain,
+			req.Generation,
+			req.RTFlowSessionID,
+			req.NATSrcIP,
+			req.NATDstIP,
+			req.NATSrcPort,
+			req.NATDstPort,
+		)
+	}
+}
+
+// churnedSinceLocked reports whether the helper turned over since
+// startGen (call with m.mu held, after relock). A nil proc (helper
+// gone, none yet) is not churn to heal — there is nothing to resend
+// to — so it reports false and the original result stands.
+func (m *Manager) churnedSinceLocked(startGen uint64) bool {
+	return m.proc != nil && m.procGen != startGen
 }
 
 func (m *Manager) syncSessionRequestLocked(req SessionSyncRequest) error {
+	_, err := m.syncSessionRequestResponseLocked(req)
+	return err
+}
+
+func (m *Manager) syncSessionRequestResponseLocked(
+	req SessionSyncRequest,
+) (ControlResponse, error) {
+	m.stampSessionMutationLocked(&req)
 	// Build the control request under mu (for data access), then release mu
 	// before the socket I/O so snapshot publishes aren't blocked.
 	ctrlReq := ControlRequest{
@@ -44,12 +111,12 @@ func (m *Manager) syncSessionRequestLocked(req SessionSyncRequest) error {
 		SessionSync:    &req,
 	}
 	m.mu.Unlock()
-	err := m.requestSessionSync(ctrlReq)
+	resp, err := m.requestSessionSyncResponse(ctrlReq)
 	m.mu.Lock()
 	if err != nil {
 		slog.Debug("userspace session sync mirror failed", "operation", req.Operation, "err", err)
 	}
-	return err
+	return resp, err
 }
 
 // sendSessionSyncBatch transmits reqs through send, which performs one
@@ -143,9 +210,29 @@ func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) [
 	if len(reqs) == 0 {
 		return nil
 	}
+	for i := range reqs {
+		m.stampSessionMutationLocked(&reqs[i])
+	}
+	startGen := m.procGen
 	m.mu.Unlock()
 	outcomes := sendSessionSyncBatchOutcomes(reqs, m.requestSessionSync)
 	m.mu.Lock()
+	// P12-E: churn self-heal — restamp the batch to the live generation
+	// and resend once (idempotent verbs only; zero epochs bypass).
+	if m.churnedSinceLocked(startGen) {
+		restamped := false
+		for i := range reqs {
+			if reqs[i].HelperEpoch != 0 {
+				reqs[i].HelperEpoch = m.procGen
+				restamped = true
+			}
+		}
+		if restamped {
+			m.mu.Unlock()
+			outcomes = sendSessionSyncBatchOutcomes(reqs, m.requestSessionSync)
+			m.mu.Lock()
+		}
+	}
 	return outcomes
 }
 
@@ -176,15 +263,31 @@ func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) [
 //
 // It returns the FIRST helper IPC error encountered, or nil if all succeeded.
 // The bare batch callers discard the result (#5096 best-effort); the scoped
-// batch (#10513) and the authoritative clear-all path (#5881) propagate it
-// so a failed helper revocation is reported instead of masquerading as
-// success.
 func (m *Manager) syncSessionRequestsLocked(reqs ...SessionSyncRequest) error {
 	if len(reqs) == 0 {
 		return nil
 	}
+	for i := range reqs {
+		m.stampSessionMutationLocked(&reqs[i])
+	}
+	startGen := m.procGen
 	m.mu.Unlock()
 	err := sendSessionSyncBatch(reqs, m.requestSessionSync)
 	m.mu.Lock()
+	// P12-E: churn self-heal (Outcomes twin).
+	if m.churnedSinceLocked(startGen) {
+		restamped := false
+		for i := range reqs {
+			if reqs[i].HelperEpoch != 0 {
+				reqs[i].HelperEpoch = m.procGen
+				restamped = true
+			}
+		}
+		if restamped {
+			m.mu.Unlock()
+			err = sendSessionSyncBatch(reqs, m.requestSessionSync)
+			m.mu.Lock()
+		}
+	}
 	return err
 }

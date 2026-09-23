@@ -292,7 +292,7 @@ impl crate::afxdp::Coordinator {
                 &self.sessions.owner_rg_indexes,
                 session_map,
                 activated_rgs,
-                self.forwarding.has_routing_domains,
+                &self.forwarding,
             );
             if republished > 0 {
                 eprintln!(

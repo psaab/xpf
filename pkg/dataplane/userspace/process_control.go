@@ -376,15 +376,25 @@ func (m *Manager) sessionSocketPath() string {
 func (m *Manager) requestSessionSync(req ControlRequest) error {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
-	return m.requestSessionSyncLocked(req)
+	_, err := m.requestSessionSyncResponseLocked(req)
+	return err
 }
 
-// requestSessionSyncLocked performs ONE session-socket round trip. The caller
-// MUST already hold m.sessionMu; it is not reentrant.
+func (m *Manager) requestSessionSyncResponse(req ControlRequest) (ControlResponse, error) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.requestSessionSyncResponseLocked(req)
+}
+
 func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
+	_, err := m.requestSessionSyncResponseLocked(req)
+	return err
+}
+
+func (m *Manager) requestSessionSyncResponseLocked(req ControlRequest) (ControlResponse, error) {
 	sockPath := m.sessionSocketPath()
 	if sockPath == "" {
-		return errors.New("session socket not configured")
+		return ControlResponse{}, errors.New("session socket not configured")
 	}
 	// A bounded dial + round-trip deadline so a hung helper (accepts the
 	// connection but never reads/replies) fails THIS request in a few seconds
@@ -397,12 +407,12 @@ func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 	// handler dispatch — a squatter on it installs and reads sessions.
 	conn, err := dialTrustedHelperSocket("session socket", sockPath, sessionSyncDialTimeout)
 	if err != nil {
-		return fmt.Errorf("%w: dial session socket: %w", errSessionHelperUnreachable, err)
+		return ControlResponse{}, fmt.Errorf("%w: dial session socket: %w", errSessionHelperUnreachable, err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(sessionSyncRoundtripDeadline))
 	if err := json.NewEncoder(conn).Encode(&req); err != nil {
-		return fmt.Errorf("%w: write session request: %w", errSessionHelperUnreachable, err)
+		return ControlResponse{}, fmt.Errorf("%w: write session request: %w", errSessionHelperUnreachable, err)
 	}
 	var resp ControlResponse
 	// #9003: byte-bounded as well as deadline-bounded — see requestDetailedLocked.
@@ -416,10 +426,10 @@ func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 		// be a #6785-shaped decision with HA blast radius, and it is not this
 		// change's to make.
 		if bounded.truncated {
-			return fmt.Errorf("%w: read session response: %w",
+			return ControlResponse{}, fmt.Errorf("%w: read session response: %w",
 				errSessionHelperUnreachable, responseCapError(req.Type, err))
 		}
-		return fmt.Errorf("%w: read session response: %w", errSessionHelperUnreachable, err)
+		return ControlResponse{}, fmt.Errorf("%w: read session response: %w", errSessionHelperUnreachable, err)
 	}
 	if !resp.OK {
 		if resp.Error == "" {
@@ -439,12 +449,12 @@ func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 		// human-readable remainder, so the sentence can be reworded without
 		// silently reclassifying a refusal as a transport failure.
 		if strings.HasPrefix(resp.Error, syncedImportRefusedPrefix) {
-			return fmt.Errorf("%w: %s", dataplane.ErrSyncedImportRefused,
+			return ControlResponse{}, fmt.Errorf("%w: %s", dataplane.ErrSyncedImportRefused,
 				strings.TrimPrefix(resp.Error, syncedImportRefusedPrefix))
 		}
-		return errors.New(resp.Error)
+		return ControlResponse{}, errors.New(resp.Error)
 	}
-	return nil
+	return resp, nil
 }
 
 // requestHAWatchdogSessionAtPath publishes a lease-only HA refresh via the

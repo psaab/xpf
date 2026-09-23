@@ -33,8 +33,8 @@ func TestBatchDeleteCarriesTunnelVariantFlag10511(t *testing.T) {
 			"must not widen into a wildcard")
 	}
 	for i, req := range got {
-		if req.Operation != "delete" {
-			t.Errorf("request %d operation = %q, want delete", i, req.Operation)
+		if req.Operation != "mirror_delete_batch" {
+			t.Errorf("request %d operation = %q, want mirror_delete_batch", i, req.Operation)
 		}
 	}
 }

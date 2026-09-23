@@ -39,6 +39,7 @@ type fakeHelperSessionSocket struct {
 	mu   sync.Mutex
 	fail bool
 	reqs int
+	ops  []string
 }
 
 func startFakeHelperSessionSocket(t *testing.T, sockPath string, fail bool) *fakeHelperSessionSocket {
@@ -63,11 +64,19 @@ func startFakeHelperSessionSocket(t *testing.T, sockPath string, fail bool) *fak
 				}
 				f.mu.Lock()
 				f.reqs++
+				if req.SessionSync != nil {
+					f.ops = append(f.ops, req.SessionSync.Operation)
+				}
 				fail := f.fail
 				f.mu.Unlock()
 				resp := ControlResponse{OK: true}
 				if req.SessionSync != nil && fail {
 					resp = ControlResponse{OK: false, Error: "injected helper delete failure"}
+				} else if req.SessionSync != nil {
+					// Single-shot success: the helper cleared and
+					// reports its authoritative counts.
+					resp = ControlResponse{OK: true, SessionMirrorV4Count: 1,
+						SessionMirrorV6Count: 1, SessionMirrorComplete: true}
 				}
 				// The client blocks on this response, so by the time the
 				// adapter call returns the request above is fully handled.
@@ -82,6 +91,18 @@ func (f *fakeHelperSessionSocket) requestCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.reqs
+}
+
+func (f *fakeHelperSessionSocket) sawOp(op string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, got := range f.ops {
+		if got == op {
+			n++
+		}
+	}
+	return n
 }
 
 // seedOneSessionPerFamily installs one v4 and one v6 forward session in the
@@ -126,7 +147,7 @@ func newClearManager5881(t *testing.T) (*Manager, *LegacyDataPlaneAdapter, strin
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	controlSock := filepath.Join(dir, "control.sock")
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.cfg.ControlSocket = controlSock
 	injectSessionMaps(t, m)
 	seedOneSessionPerFamily5881(t, m)
@@ -152,13 +173,19 @@ func TestClearAllSessionsSurfacesHelperDeleteError5881(t *testing.T) {
 		if fake.requestCount() == 0 {
 			t.Fatal("helper never received a delete request; the test did not exercise the propagation path")
 		}
-		// Mirror-clear behaviour is preserved: the read model is emptied and
-		// the partial counts are still returned alongside the error (#5882).
-		if v4 != 1 || v6 != 1 {
-			t.Errorf("counts = (%d, %d), want (1, 1) surfaced alongside the error", v4, v6)
+		if got := fake.sawOp("mirror_clear_chunk"); got != 1 {
+			t.Fatalf("helper saw %d clear ops, want exactly 1 single-shot", got)
 		}
-		if mv4, mv6 := m.bpfShim.SessionCount(); mv4 != 0 || mv6 != 0 {
-			t.Errorf("mirror not cleared: count = (%d, %d), want (0, 0)", mv4, mv6)
+		// Fail-closed atomic (P11, revises #5882): nothing confirmed,
+		// so (0,0) — the old "mirror cleared + partial counts" belonged
+		// to the Go-driven chunked design, where Go swept the mirror
+		// itself. Under single-shot Go sweeps nothing (the mirror is
+		// the helper's read model); a failed clear leaves it intact.
+		if v4 != 0 || v6 != 0 {
+			t.Errorf("counts = (%d, %d), want (0, 0) (nothing confirmed)", v4, v6)
+		}
+		if mv4, mv6 := m.bpfShim.SessionCount(); mv4 != 1 || mv6 != 1 {
+			t.Errorf("mirror count = (%d, %d), want (1, 1) intact — Go must not sweep on helper failure", mv4, mv6)
 		}
 	})
 
@@ -166,17 +193,24 @@ func TestClearAllSessionsSurfacesHelperDeleteError5881(t *testing.T) {
 	// clean success — the fix must not turn healthy clears into errors.
 	t.Run("all_deletes_succeed_is_success", func(t *testing.T) {
 		m, adapter, sessionSock := newClearManager5881(t)
-		startFakeHelperSessionSocket(t, sessionSock, false)
+		fake := startFakeHelperSessionSocket(t, sessionSock, false)
 
 		v4, v6, err := adapter.ClearAllSessions()
 		if err != nil {
 			t.Fatalf("ClearAllSessions returned error on the all-succeed path: %v", err)
 		}
 		if v4 != 1 || v6 != 1 {
-			t.Errorf("counts = (%d, %d), want (1, 1)", v4, v6)
+			t.Errorf("counts = (%d, %d), want (1, 1) (helper-confirmed)", v4, v6)
 		}
-		if mv4, mv6 := m.bpfShim.SessionCount(); mv4 != 0 || mv6 != 0 {
-			t.Errorf("mirror not cleared: count = (%d, %d), want (0, 0)", mv4, mv6)
+		if got := fake.sawOp("mirror_clear_chunk"); got != 1 {
+			t.Errorf("helper saw %d clear ops, want exactly 1", got)
+		}
+		// The fake cannot clear BPF (no maps behind it); in production
+		// the real helper's per-key deletes empty the mirror. What this
+		// pins is the Go side: Go itself sweeps nothing (single-shot —
+		// a reintroduced Go sweep would empty the mirror and fail here).
+		if mv4, mv6 := m.bpfShim.SessionCount(); mv4 != 1 || mv6 != 1 {
+			t.Errorf("mirror count = (%d, %d), want (1, 1) (Go sweeps nothing; only a real helper clears BPF)", mv4, mv6)
 		}
 	})
 }

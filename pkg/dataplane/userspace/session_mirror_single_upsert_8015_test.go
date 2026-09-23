@@ -140,8 +140,8 @@ func assertSingleForwardUpsert(t *testing.T, reqs []SessionSyncRequest, wantSrcI
 			"behind (#8015). Requests: %v", len(reqs), got)
 	}
 	req := reqs[0]
-	if req.Operation != "upsert" {
-		t.Errorf("mirror request operation = %q, want %q", req.Operation, "upsert")
+	if req.Operation != "mirror_upsert" {
+		t.Errorf("mirror request operation = %q, want %q", req.Operation, "mirror_upsert")
 	}
 	if req.IsReverse {
 		t.Errorf("the mirror's single request carries is_reverse=true; the only request " +

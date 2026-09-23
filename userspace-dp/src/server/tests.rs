@@ -6923,6 +6923,373 @@ mod routing_domain_delete_7160 {
         );
     }
 
+    /// #10512 scoped HA delete through the session-sync verb: stale identity
+    /// survives end-to-end (shared row intact, refusal loud).
+    #[test]
+    fn scoped_verb_stale_identity_survives_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        // Install with an explicit identity (adopted by the helper).
+        let mut install = req("sync_session");
+        let mut install_sync = upsert_request();
+        install_sync.session_id = 0xA11CE;
+        install.session_sync = Some(install_sync);
+        let installed = run_request(state.clone(), install);
+        assert!(installed.ok, "fixture upsert must land: {:?}", installed.error);
+        let live_id = shared_session_id_for(&state, 0);
+        assert_eq!(
+            live_id, 0xA11CE,
+            "fixture upsert must adopt the explicit identity"
+        );
+        // Stale scoped delete: different identity, stated default domain.
+        let mut delete = req("sync_session");
+        let mut sync_req = upsert_request();
+        sync_req.operation = "mirror_delete_scoped".to_string();
+        sync_req.routing_domain = 1; // WIRE_DEFAULT_INSTANCE: stated default.
+        sync_req.session_id = live_id ^ 0xFF;
+        sync_req.peer_delete = true;
+        delete.session_sync = Some(sync_req);
+        let response = run_request(state.clone(), delete);
+        assert!(
+            !response.ok,
+            "a stale scoped delete must be refused, not applied"
+        );
+        assert_eq!(
+            shared_session_id_for(&state, 0),
+            live_id,
+            "live entry must survive a stale scoped delete"
+        );
+    }
+
+    /// Matched scoped delete removes end-to-end (verdict modulo test-env
+    /// mirror, as in the unit cell).
+    #[test]
+    fn scoped_verb_matched_identity_removes_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut install = req("sync_session");
+        let mut install_sync = upsert_request();
+        install_sync.session_id = 0xA11CE;
+        install.session_sync = Some(install_sync);
+        let installed = run_request(state.clone(), install);
+        assert!(installed.ok, "fixture upsert must land: {:?}", installed.error);
+        let live_id = shared_session_id_for(&state, 0);
+        assert_eq!(
+            live_id, 0xA11CE,
+            "fixture upsert must adopt the explicit identity"
+        );
+        let mut delete = req("sync_session");
+        let mut sync_req = upsert_request();
+        sync_req.operation = "mirror_delete_scoped".to_string();
+        sync_req.routing_domain = 1;
+        sync_req.session_id = live_id;
+        sync_req.peer_delete = true;
+        delete.session_sync = Some(sync_req);
+        run_request(state.clone(), delete);
+        assert_eq!(
+            shared_session_id_for(&state, 0),
+            0,
+            "matched scoped delete must remove end-to-end"
+        );
+    }
+
+    /// Zero identity is identity-missing (plan §2.1), never an
+    /// unconditional delete — and touches nothing.
+    #[test]
+    fn scoped_verb_zero_identity_is_missing_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut install = req("sync_session");
+        let mut install_sync = upsert_request();
+        install_sync.session_id = 0xA11CE;
+        install.session_sync = Some(install_sync);
+        let installed = run_request(state.clone(), install);
+        assert!(installed.ok, "fixture upsert must land: {:?}", installed.error);
+        let live_id = shared_session_id_for(&state, 0);
+        assert_eq!(
+            live_id, 0xA11CE,
+            "fixture upsert must adopt the explicit identity"
+        );
+        let mut delete = req("sync_session");
+        let mut sync_req = upsert_request();
+        sync_req.operation = "mirror_delete_scoped".to_string();
+        sync_req.routing_domain = 1;
+        sync_req.session_id = 0;
+        sync_req.peer_delete = true;
+        delete.session_sync = Some(sync_req);
+        let response = run_request(state.clone(), delete);
+        assert!(
+            !response.ok && response.error.contains("identity-missing"),
+            "zero identity must fail closed as identity-missing, got ok={} err={:?}",
+            response.ok,
+            response.error
+        );
+        assert_eq!(
+            shared_session_id_for(&state, 0),
+            live_id,
+            "identity-missing must touch nothing"
+        );
+    }
+
+    /// Policy-list with no request body fails closed (missing, never an
+    /// unbounded scan).
+    #[test]
+    fn policy_list_missing_request_fails_closed_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let list = req("list_sessions_by_policy");
+        let response = run_request(state.clone(), list);
+        assert!(
+            !response.ok && response.error.contains("missing session policy list request"),
+            "missing body must fail closed, got ok={} err={:?}",
+            response.ok,
+            response.error
+        );
+    }
+
+    /// Empty policy ids through the full server path return the
+    /// authoritative empty (complete, no matches, no continuation) —
+    /// pins socket → handler → coordinator → response delegation.
+    #[test]
+    fn policy_list_empty_ids_authoritative_empty_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut list = req("list_sessions_by_policy");
+        list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
+            policy_ids: Vec::new(),
+            mode: "prepublish".to_string(),
+            ..Default::default()
+        });
+        let response = run_request(state.clone(), list);
+        assert!(response.ok, "authoritative empty must be ok: {:?}", response.error);
+        assert!(
+            response.session_policy_complete,
+            "empty ids must complete"
+        );
+        assert!(
+            response.session_policy_matches.is_empty(),
+            "empty ids must match nothing"
+        );
+        assert!(
+            response.session_policy_continuation.is_empty(),
+            "empty ids continue nothing"
+        );
+    }
+
+    /// Zero workers with requested ids: the scan is unavailable, not
+    /// empty — complete=false with worker-local-scan-unavailable
+    /// (never an authoritative empty, never unknown-verb).
+    #[test]
+    fn policy_list_zero_workers_with_ids_incomplete_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut list = req("list_sessions_by_policy");
+        list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
+            policy_ids: vec![5],
+            mode: "prepublish".to_string(),
+            ..Default::default()
+        });
+        let response = run_request(state.clone(), list);
+        assert!(
+            !response.session_policy_complete,
+            "zero workers must not complete"
+        );
+        assert!(
+            response
+                .session_policy_per_worker_errors
+                .iter()
+                .any(|e| e == "worker-local-scan-unavailable"),
+            "zero workers must name the unavailable scan, got {:?}",
+            response.session_policy_per_worker_errors
+        );
+        assert!(
+            response.session_policy_matches.is_empty(),
+            "zero workers must match nothing"
+        );
+    }
+
+    /// Populated delegation end-to-end: socket request → dispatch →
+    /// handler → coordinator fan-out → worker scan → response fields.
+    /// A pumped test worker holds one policy-5 row; the response must
+    /// carry it (matches/errors/continuation mapping, not just empty).
+    #[test]
+    fn policy_list_populated_delegation_e2e_10512() {
+        let mut coordinator = afxdp::Coordinator::new();
+        let mut worker =
+            crate::afxdp::register_list_test_worker(&mut coordinator, 0);
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 40001,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let live = worker.install_policy_row(key, 5, 1_000_000_000);
+        assert_ne!(live, 0, "fixture must mint a live identity");
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: coordinator,
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        let mut list = req("list_sessions_by_policy");
+        list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
+            policy_ids: vec![5],
+            mode: "prepublish".to_string(),
+            ..Default::default()
+        });
+        let st = state.clone();
+        let handle = std::thread::spawn(move || run_request(st, list));
+        while !handle.is_finished() {
+            worker.pump();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let response = handle.join().expect("request thread");
+        assert!(response.ok, "populated scan must be ok: {:?}", response.error);
+        assert!(
+            response.session_policy_complete,
+            "pumped scan must complete"
+        );
+        assert_eq!(
+            response.session_policy_matches.len(),
+            1,
+            "exactly the installed row must delegate"
+        );
+        assert_eq!(response.session_policy_matches[0].policy_id, 5);
+        assert_eq!(
+            response.session_policy_matches[0].expected_rt_flow_session_id,
+            live,
+            "delegated row must carry the live identity"
+        );
+        assert!(
+            response.session_policy_per_worker_errors.is_empty(),
+            "clean scan must error nothing, got {:?}",
+            response.session_policy_per_worker_errors
+        );
+        assert!(
+            response.session_policy_continuation.is_empty(),
+            "one row continues nothing"
+        );
+    }
+
+    /// Default-domain scoped delete amid a tenant collision: only the
+    /// default row goes (stated domain 1 selects it exactly).
+    #[test]
+    fn scoped_verb_default_domain_collision_exact_e2e_10512() {
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus::default(),
+            snapshot: None,
+            afxdp: afxdp::Coordinator::new(),
+            state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
+        }));
+        // Same tuple in two domains: default (stated 1) + tenant 100007,
+        // each with an explicit adopted identity.
+        let mut install_default = req("sync_session");
+        let mut default_upsert = upsert_request();
+        default_upsert.routing_domain = 1;
+        default_upsert.session_id = 0xD1F1;
+        install_default.session_sync = Some(default_upsert);
+        assert!(
+            run_request(state.clone(), install_default).ok,
+            "default-domain fixture upsert must land"
+        );
+        let mut install_tenant = req("sync_session");
+        let mut tenant_upsert = upsert_request();
+        tenant_upsert.routing_domain = 100007;
+        tenant_upsert.session_id = 0x7E97;
+        install_tenant.session_sync = Some(tenant_upsert);
+        assert!(
+            run_request(state.clone(), install_tenant).ok,
+            "tenant fixture upsert must land"
+        );
+        assert_eq!(
+            shared_session_id_for(&state, 0),
+            0xD1F1,
+            "default upsert must adopt its identity"
+        );
+        assert_eq!(
+            shared_session_id_for(&state, 100007),
+            0x7E97,
+            "tenant upsert must adopt its identity"
+        );
+        let default_id = 0xD1F1u64;
+        let tenant_id = 0x7E97u64;
+        // Scoped delete names the default incarnation exactly.
+        let mut delete = req("sync_session");
+        let mut sync_req = upsert_request();
+        sync_req.operation = "mirror_delete_scoped".to_string();
+        sync_req.routing_domain = 1;
+        sync_req.session_id = default_id;
+        sync_req.peer_delete = true;
+        delete.session_sync = Some(sync_req);
+        run_request(state.clone(), delete);
+        assert_eq!(
+            shared_session_id_for(&state, 0),
+            0,
+            "default row must be gone"
+        );
+        assert_eq!(
+            shared_session_id_for(&state, 100007),
+            tenant_id,
+            "colliding tenant row must survive a default-scoped delete"
+        );
+    }
+
+    /// Read the shared session id for the e2e tuple in one domain (0 when
+    /// no row exists). The tuple mirrors `upsert_request`.
+    fn shared_session_id_for(state: &Arc<Mutex<ServerState>>, domain: u32) -> u64 {
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 1234,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: domain,
+        };
+        state
+            .lock()
+            .expect("server state")
+            .afxdp
+            .synced_session_id_for_test(&key)
+    }
+
     /// The same request on a node with NO routing instances must still import.
     /// This is the half that keeps the fix from being a fail-closed regression
     /// for every single-instance cluster — which is all of them today.

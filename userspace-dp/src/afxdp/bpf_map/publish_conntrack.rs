@@ -19,9 +19,9 @@
 // See #1356.
 
 use super::{
-    BpfSessionKeyV4, BpfSessionKeyV6, BpfSessionValueV4, BpfSessionValueV6, SESS_STATE_ESTABLISHED,
-    SessionDecision, SessionKey, SessionMetadata, bpf_session_key_v4, bpf_session_key_v6,
-    reverse_session_key,
+    BpfSessionKeyV4, BpfSessionKeyV6, BpfSessionValueV4, BpfSessionValueV6,
+    ConntrackPublishResult, SESS_STATE_ESTABLISHED, SessionDecision, SessionKey,
+    SessionMetadata, bpf_session_key_v4, bpf_session_key_v6, reverse_session_key,
 };
 use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
 use core::ffi::{c_int, c_void};
@@ -114,7 +114,7 @@ pub(super) fn publish_v4_session(
     session_id: u64,
     // #8125: see build_conntrack_value_v4.
     timeout_secs: u32,
-) {
+) -> ConntrackPublishResult {
     let bpf_key = bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
 
     // A cross-family reverse key means the session cannot be mirrored to the v4
@@ -132,7 +132,7 @@ pub(super) fn publish_v4_session(
         session_id,
         timeout_secs,
     ) else {
-        return;
+        return ConntrackPublishResult::IntentionallySkipped;
     };
 
     let rc = unsafe {
@@ -148,6 +148,11 @@ pub(super) fn publish_v4_session(
             "xpf-ha: conntrack v4 map update failed: {}",
             io::Error::last_os_error()
         );
+    }
+    if rc >= 0 {
+        ConntrackPublishResult::Written
+    } else {
+        ConntrackPublishResult::KernelError
     }
 }
 
@@ -325,7 +330,7 @@ pub(super) fn publish_v6_session(
     session_id: u64,
     // #8125: see build_conntrack_value_v4.
     timeout_secs: u32,
-) {
+) -> ConntrackPublishResult {
     // #6923: THE CHOKEPOINT. Refuse to make a key the shim would probe visible
     // when its protocol is an IPv6 extension-header type rather than an L4.
     //
@@ -361,7 +366,7 @@ pub(super) fn publish_v6_session(
     // state for a backstop and not the "ships and does nothing" shape: the
     // guard IS the deliverable, and it is directly testable at its own entry.
     if !v6_session_key_is_publishable(key.protocol) {
-        return;
+        return ConntrackPublishResult::IntentionallySkipped;
     }
     let bpf_key = bpf_session_key_v6(
         src.octets(),
@@ -384,7 +389,7 @@ pub(super) fn publish_v6_session(
         session_id,
         timeout_secs,
     ) else {
-        return;
+        return ConntrackPublishResult::IntentionallySkipped;
     };
 
     let rc = unsafe {
@@ -400,6 +405,11 @@ pub(super) fn publish_v6_session(
             "xpf-ha: conntrack v6 map update failed: {}",
             io::Error::last_os_error()
         );
+    }
+    if rc >= 0 {
+        ConntrackPublishResult::Written
+    } else {
+        ConntrackPublishResult::KernelError
     }
 }
 

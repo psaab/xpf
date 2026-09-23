@@ -364,6 +364,7 @@ fn teardown_purge_forward(
         conntrack_v4_fd,
         conntrack_v6_fd,
     );
+    let closed_id = sessions.session_id_for(key);
     sessions.delete(key);
     let removed = remove_shared_session_if(
         shared_sessions,
@@ -387,7 +388,7 @@ fn teardown_purge_forward(
     // and an ordinary Close would destroy the preserved entry downstream.
     if !matches!(removed, SharedRemoval::Declined) {
         release_coordinator_session_rows(session_map, key);
-        sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin, true);
+        sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin, true, closed_id);
         true
     } else {
         false
@@ -443,6 +444,7 @@ fn teardown_purge_companion(
         conntrack_v4_fd,
         conntrack_v6_fd,
     );
+    let closed_companion_id = sessions.session_id_for(companion_key);
     sessions.delete(companion_key);
     let removed = remove_shared_session_if(
         shared_sessions,
@@ -471,6 +473,7 @@ fn teardown_purge_companion(
             companion_metadata.clone(),
             companion_origin,
             true,
+            closed_companion_id,
         );
     }
 }

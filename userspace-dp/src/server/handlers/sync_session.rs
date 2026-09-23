@@ -6,7 +6,10 @@ use super::super::helpers::{
     SyncedKeyIntent, build_synced_session_entry, build_synced_session_key,
 };
 use crate::afxdp::SessionDomain;
-use crate::afxdp::{SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX};
+use crate::afxdp::{
+    SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
+    SYNCED_IMPORT_REFUSED_PREFIX,
+};
 use crate::{ControlResponse, SessionSyncRequest};
 
 /// #7209: served from the SESSION-DOMAIN HANDLE, not from `&mut ServerState`.
@@ -94,7 +97,10 @@ pub(super) fn handle(
             // identity for every Unrecognized value — only 0 maps to the
             // marker 1 — and no other raw domain maps onto one), so resolving
             // it is exact, not a guess.
-            if sync_req.operation.as_str() != "delete" {
+            if !matches!(
+                sync_req.operation.as_str(),
+                "delete" | "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
+            ) {
                 domain.note_unknown_routing_domain_import();
                 response.ok = false;
                 response.error =
@@ -104,8 +110,61 @@ pub(super) fn handle(
             Some(sync_req.routing_domain)
         }
     };
+    let epoch_scoped = matches!(
+        sync_req.operation.as_str(),
+        "mirror_upsert"
+            | "mirror_publish_only"
+            | "mirror_delete"
+            | "mirror_delete_batch"
+            | "mirror_clear_chunk"
+            | "mirror_delete_policy_batch"
+            | "mirror_delete_scoped"
+    );
+    if epoch_scoped && !domain.accepts_helper_epoch(sync_req.helper_epoch) {
+        response.ok = false;
+        response.error = "helper-epoch-stale".to_string();
+        return;
+    }
+    // Exact `(epoch, operation_id, mutation_id)` replays return the recorded
+    // response summary. A new operation id carrying a known mutation id is a
+    // repair/retry-after-unknown-outcome and deliberately proceeds.
+    let mut mutation_lease = if epoch_scoped
+        && !sync_req.operation_id.is_empty()
+        && !sync_req.mutation_id.is_empty()
+    {
+        match domain.helper_mutation_begin(
+            sync_req.helper_epoch,
+            &sync_req.operation_id,
+            &sync_req.mutation_id,
+        ) {
+            Ok(crate::afxdp::HelperMutationBegin::Replay(outcome)) => {
+                outcome.apply_to_response(response);
+                return;
+            }
+            Ok(crate::afxdp::HelperMutationBegin::Proceed(lease)) => Some(lease),
+            Err(reason) => {
+                response.ok = false;
+                response.error = reason.to_string();
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    // #10512 scoped verb requires its identity (plan §2.1: zero forward id
+    // is identity-missing, never an unconditional delete). Fail fast before
+    // key building; the mutation lease completes here (taken, so the tail
+    // below no-ops) exactly as on the success path.
+    if sync_req.operation.as_str() == "mirror_delete_scoped" && sync_req.session_id == 0 {
+        response.ok = false;
+        response.error = "identity-missing".to_string();
+        if let Some(lease) = mutation_lease.take() {
+            lease.complete(crate::afxdp::HelperMutationOutcome::from_response(response));
+        }
+        return;
+    }
     match sync_req.operation.as_str() {
-        "upsert" if resolved_domain.is_none() => {
+        "upsert" | "mirror_upsert" | "mirror_publish_only" if resolved_domain.is_none() => {
             domain.note_unknown_routing_domain_import();
             response.ok = false;
             response.error = format!(
@@ -115,7 +174,7 @@ pub(super) fn handle(
                     .expect("a rejection always carries a reason token")
             );
         }
-        "upsert" => match build_synced_session_entry(
+        "upsert" | "mirror_upsert" => match build_synced_session_entry(
             &sync_req,
             view.zone_name_to_id(),
             resolved_domain.expect("the None arm above already returned"),
@@ -135,15 +194,94 @@ pub(super) fn handle(
                 // and gates takeover-readiness (#5247), whereas a refusal is the
                 // correct answer from a HEALTHY helper and must not block
                 // failover on a node that is working.
-                let outcome = domain.upsert_synced_session(entry);
+                let outcome = if sync_req.operation == "mirror_upsert" {
+                    domain.upsert_synced_session_mirror(entry)
+                } else {
+                    domain.upsert_synced_session(entry)
+                };
                 if let Some(reason) = outcome.refusal_reason() {
                     response.ok = false;
-                    response.error = format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}");
+                    response.error = if reason == "mirror-write-failed" {
+                        reason.to_string()
+                    } else {
+                        format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}")
+                    };
                 }
             }
             Err(err) => {
                 response.ok = false;
                 response.error = err;
+            }
+        },
+        "mirror_publish_only" => match build_synced_session_entry(
+            &sync_req,
+            view.zone_name_to_id(),
+            resolved_domain.expect("the None arm above already returned"),
+        ) {
+            Ok(entry) => {
+                if let Err(err) = view.publish_mirror_only(&entry) {
+                    response.ok = false;
+                    response.error = format!("mirror-publish:{err}");
+                }
+            }
+            Err(err) => {
+                response.ok = false;
+                response.error = err;
+            }
+        },
+        "mirror_clear_chunk" => match domain.clear_mirror() {
+            Ok((v4, v6)) => {
+                response.session_mirror_v4_count = v4 as u64;
+                response.session_mirror_v6_count = v6 as u64;
+                response.session_mirror_complete = true;
+            }
+            Err(err) => {
+                response.ok = false;
+                response.error = format!("mirror-clear:{err}");
+            }
+        },
+        // #10512: one identity-conditional policy-delete micro-batch (plan
+        // §2.4). Validates every match's capture (keys must decode, identities
+        // must be present, companion expectations must carry a reverse tuple),
+        // then runs the all-keys-leased batch. ANY malformed match fails the
+        // WHOLE batch closed: the capture is the delete's authorization, and
+        // a batch that cannot name every companion exactly must not run.
+        "mirror_delete_policy_batch" => {
+            // Decoding + validation live behind the domain (the worker item
+            // type never crosses to this layer): ANY malformed match fails
+            // the WHOLE batch closed with complete=false below.
+            let matches = sync_req.policy_matches.clone().unwrap_or_default();
+            let (outcomes, complete, errors) =
+                domain.delete_policy_batch_matches(&matches, sync_req.forward_only);
+            {
+                response.policy_delete_outcomes = outcomes
+                    .iter()
+                    .map(|outcome| match outcome {
+                        crate::afxdp::SyncedDeleteOutcome::Applied => "applied",
+                        crate::afxdp::SyncedDeleteOutcome::StaleForward => "stale_forward",
+                        crate::afxdp::SyncedDeleteOutcome::PartialCompanion => "partial_companion",
+                        crate::afxdp::SyncedDeleteOutcome::RefusedIdentity => "refused_identity",
+                        // Gate/mirror failures never surface per-match: the
+                        // batch fails (complete=false) and Go surfaces the gap.
+                        // Any other token is a bug Go loudly rejects.
+                        _ => "batch_failed",
+                    })
+                    .map(str::to_string)
+                    .collect();
+                response.policy_delete_complete = complete;
+                response.policy_delete_errors = errors;
+                if !complete {
+                    // The batch is authoritative about its own incompleteness:
+                    // fail the IPC closed so Go surfaces the persistent gap
+                    // (#5578) instead of counting partial outcomes.
+                    response.ok = false;
+                    if response.error.is_empty() {
+                        response.error = format!(
+                            "policy-batch-incomplete:{}",
+                            response.policy_delete_errors.join(",")
+                        );
+                    }
+                }
             }
         },
         // #7188: a delete reconstructs the key with `Delete` intent, so a peer
@@ -159,33 +297,43 @@ pub(super) fn handle(
         // the 5-tuple did not already name. Two different fields, one rule —
         // fail closed where an identity is PUBLISHED, fail open where one is
         // only RETRACTED.
-        "delete" => match build_synced_session_key(
+        "delete" | "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped" => match build_synced_session_key(
             &sync_req,
             resolved_domain.unwrap_or(0),
             SyncedKeyIntent::Delete,
         ) {
             Ok(key) => {
-                // #9714: a delete the Go side marked as made on behalf of the PEER
-                // is refused for a live local session whose owner RG is locally
-                // active; every other delete stays authoritative. `delete` reports a
-                // refusal, answered in-band below so the Go side keeps its own mirror
-                // and DNAT rows for the flow the helper kept.
-                // #9714 r2 F7 / #9960: the helper reports an OUTCOME, not a bool in
-                // which a stale-generation rejection and a successful apply were
-                // the same value. Only an ownership refusal — whether the early
-                // #9714 check or the under-lock #9960 concurrent check — is
-                // answered in-band with the peer-delete token. A stale-generation
-                // refusal means the helper already holds something newer, so there
-                // is nothing for the Go side to preserve and nothing to tell it
-                // about.
                 let forward_only = sync_req.forward_only;
-                let delete = |key| {
-                    if sync_req.peer_delete {
-                        domain
-                            .delete_peer_synced_session(key, forward_only)
-                            .keeps_caller_rows()
+                let scoped = sync_req.operation.as_str() == "mirror_delete_scoped";
+                let strict_mirror = matches!(
+                    sync_req.operation.as_str(),
+                    "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
+                );
+                let mut mirror_delete_error = false;
+                let mut delete = |key| {
+                    let outcome = if sync_req.peer_delete {
+                        if strict_mirror {
+                            if scoped {
+                                domain.delete_peer_synced_session_mirror_scoped(
+                                    key,
+                                    forward_only,
+                                    sync_req.session_id,
+                                )
+                            } else {
+                                domain.delete_peer_synced_session_mirror(key, forward_only)
+                            }
+                        } else {
+                            domain.delete_peer_synced_session(key, forward_only)
+                        }
+                    } else if strict_mirror {
+                        domain.delete_synced_session_mirror(key, forward_only)
                     } else {
-                        domain.delete_synced_session(key, forward_only);
+                        domain.delete_synced_session(key, forward_only)
+                    };
+                    mirror_delete_error |= outcome.mirror_delete_failed();
+                    if sync_req.peer_delete {
+                        outcome.keeps_caller_rows()
+                    } else {
                         false
                     }
                 };
@@ -348,7 +496,10 @@ pub(super) fn handle(
                         }
                     }
                 }
-                if refused && response.ok {
+                if mirror_delete_error && response.ok {
+                    response.ok = false;
+                    response.error = "mirror-write-failed".to_string();
+                } else if refused && response.ok {
                     response.ok = false;
                     response.error =
                         format!("{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned");
@@ -363,6 +514,9 @@ pub(super) fn handle(
             response.ok = false;
             response.error = format!("unknown session sync operation {other}");
         }
+    }
+    if let Some(lease) = mutation_lease {
+        lease.complete(crate::afxdp::HelperMutationOutcome::from_response(response));
     }
 }
 

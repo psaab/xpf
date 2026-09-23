@@ -159,29 +159,51 @@ pub(in crate::afxdp) fn tunnel_remap_purge_ids_from_owners(
 /// replay. A reverse-marked entry drops standalone (its unmarked
 /// forward keeps forwarding without the tunnel), matching the live
 /// purge's delete_synced_session(is_reverse) behavior.
+///
+/// #10612: the same replay boundary also re-checks the recorded zone pair
+/// against the CURRENT validated zone set. The rotation purge intentionally
+/// retains no tombstone; a stale snapshot can therefore be present in the
+/// shared map after the purge and must be dropped before fan-out. The
+/// worker-side fence is the second leg for commands already queued before
+/// this filter runs.
 pub(in crate::afxdp) fn filter_replayed_synced_sessions(
     entries: &mut Vec<SyncedSessionEntry>,
     purge_ids: &[u16],
+    forwarding: &ForwardingState,
 ) {
-    if purge_ids.is_empty() || entries.is_empty() {
+    if entries.is_empty() {
         return;
     }
-    // #4975: index the drop set in a HashSet rather than a Vec. The
-    // retain phase tests membership once per surviving entry, so a
-    // `Vec::contains` scan made the dominant phase O(entries × drop_keys)
-    // — quadratic when an HA-recovery tunnel remap coincides with a large
-    // synced-session set (entries bounded by the 131,072 worker ceiling).
-    // A HashSet makes the retain step O(entries) amortized. Membership
-    // testing is the only thing that changes: `entries.retain` still
-    // walks the vector in place, so survivor order is preserved. Pre-size
-    // to entries.len() (each purged entry contributes at most 2 keys —
-    // itself plus its derived reverse companion — so this covers the
-    // common case without reallocation).
+    let zone_fence_enabled =
+        forwarding.zone_set_validated && !forwarding.zone_id_to_name.is_empty();
+    if purge_ids.is_empty() && !zone_fence_enabled {
+        return;
+    }
+    // #4975: index the drop set in a HashSet rather than a Vec. The retain
+    // phase tests membership once per surviving entry, so a Vec::contains
+    // scan made the dominant phase O(entries × drop_keys) — quadratic when
+    // an HA-recovery tunnel remap coincides with a large synced-session set.
+    // A HashSet makes the retain step O(entries) amortized. Membership testing
+    // is the only thing that changes: `entries.retain` still walks the vector
+    // in place, so survivor order is preserved.
+    // Pre-size to entries.len() (each purged entry contributes at most 2 keys —
+    // itself plus its derived reverse companion — so this covers the common
+    // case without reallocation).
     let mut drop_keys: std::collections::HashSet<crate::session::SessionKey> =
         std::collections::HashSet::with_capacity(entries.len());
     for entry in entries.iter() {
-        let id = entry.decision.resolution.tunnel_endpoint_id;
-        if id != 0 && purge_ids.contains(&id) {
+        let tunnel_purged = entry.decision.resolution.tunnel_endpoint_id != 0
+            && purge_ids.contains(&entry.decision.resolution.tunnel_endpoint_id);
+        let zone_stale = zone_fence_enabled
+            && crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                entry.origin,
+                &entry.metadata,
+                forwarding,
+            );
+        if tunnel_purged || zone_stale {
+            if zone_stale {
+                crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            }
             drop_keys.insert(entry.key.clone());
             if !entry.metadata.is_reverse {
                 drop_keys.insert(crate::session::reverse_session_key(
@@ -193,6 +215,67 @@ pub(in crate::afxdp) fn filter_replayed_synced_sessions(
     }
     if !drop_keys.is_empty() {
         entries.retain(|entry| !drop_keys.contains(&entry.key));
+    }
+}
+/// #10612: remove stale zone rows that were already present in the shared
+/// snapshot when bring-up starts. Filtering the replay vector alone would
+/// prevent fan-out but leave the authoritative shared row available to a
+/// later reader. Each removal is conditional on the CURRENT shared value
+/// still being stale, so a legitimate live replacement under the same key
+/// wins over a delayed snapshot.
+pub(in crate::afxdp) fn purge_stale_replayed_synced_sessions(
+    coord: &Coordinator,
+    entries: &[SyncedSessionEntry],
+) {
+    for entry in entries {
+        if !crate::afxdp::session_glue::synced_entry_is_stale_replay(
+            entry.origin,
+            &entry.metadata,
+            &coord.forwarding,
+        ) {
+            continue;
+        }
+        let remove_if_stale = |candidate: &SyncedSessionEntry| {
+            crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                candidate.origin,
+                &candidate.metadata,
+                &coord.forwarding,
+            )
+        };
+        // #10612 (N3): count actual removals, not decisions — a Declined
+        // live-replacement (nothing dropped) must not count. (Filter+purge may
+        // still count one row twice — once per site — which is honest: two
+        // distinct fence decisions. See the counter doc.)
+        if matches!(
+            crate::afxdp::shared_ops::remove_shared_session_if(
+                &coord.sessions.synced,
+                &coord.sessions.nat,
+                &coord.sessions.forward_wire,
+                &coord.sessions.owner_rg_indexes,
+                &entry.key,
+                remove_if_stale,
+            ),
+            crate::afxdp::shared_ops::SharedRemoval::Removed(_)
+        ) {
+            crate::afxdp::session_glue::note_stale_replay_fence_drop();
+        }
+        if !entry.metadata.is_reverse {
+            let reverse_key =
+                crate::session::reverse_session_key(&entry.key, entry.decision.nat);
+            if matches!(
+                crate::afxdp::shared_ops::remove_shared_session_if(
+                    &coord.sessions.synced,
+                    &coord.sessions.nat,
+                    &coord.sessions.forward_wire,
+                    &coord.sessions.owner_rg_indexes,
+                    &reverse_key,
+                    remove_if_stale,
+                ),
+                crate::afxdp::shared_ops::SharedRemoval::Removed(_)
+            ) {
+                crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            }
+        }
     }
 }
 
@@ -693,7 +776,7 @@ impl Coordinator {
 
     /// See [`Coordinator::upsert_synced_session`].
     pub fn delete_synced_session(&self, key: crate::session::SessionKey, forward_only: bool) {
-        self.session_domain.delete_synced_session(key, forward_only)
+        self.session_domain.delete_synced_session(key, forward_only);
     }
 
     /// See [`Coordinator::upsert_synced_session`].
@@ -1914,3 +1997,113 @@ mod routing_domain;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+/// Test-only worker bundle for server-level policy-list cells: owns the
+/// registered queue and the worker table the pump scans. Zero production
+/// surface (cfg(test)); the only bridge letting server tests drive a
+/// populated coordinator without widening afxdp worker plumbing.
+#[cfg(test)]
+pub(crate) struct ListTestWorker {
+    queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<crate::afxdp::WorkerCommand>>>,
+    table: crate::session::SessionTable,
+}
+
+/// Registers worker `id` with an empty command queue; returns its bundle.
+#[cfg(test)]
+pub(crate) fn register_list_test_worker(coordinator: &mut Coordinator, id: u32) -> ListTestWorker {
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let handle = super::types::WorkerHandle {
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        heartbeat: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        commands: queue.clone(),
+        session_export_ack: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cos_status: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        runtime_atomics: std::sync::Arc::new(super::worker_runtime::WorkerRuntimeAtomics::new()),
+        cold_path_atomics: std::sync::Arc::new(super::cold_path_hist::WorkerColdPathAtomics::new()),
+    };
+    coordinator.workers.register(
+        id,
+        worker_manager::WorkerRuntimeRecord::for_test(handle),
+        None,
+    );
+    ListTestWorker {
+        queue,
+        table: crate::session::SessionTable::new(),
+    }
+}
+
+#[cfg(test)]
+impl ListTestWorker {
+    /// Installs one forward row; returns its live identity.
+    #[cfg(test)]
+    pub(crate) fn install_policy_row(
+        &mut self,
+        key: crate::session::SessionKey,
+        policy_id: u32,
+        now_ns: u64,
+    ) -> u64 {
+        let decision = crate::session::SessionDecision {
+            resolution: super::types::ForwardingResolution {
+                disposition: super::types::ForwardingDisposition::NoRoute,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: crate::nat::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let metadata = crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: true,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        };
+        assert!(self.table.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            metadata,
+            crate::session::SessionOrigin::ForwardFlow,
+            now_ns,
+            crate::afxdp::PROTO_TCP,
+            0x10,
+        ));
+        self.table.session_id_for(&key)
+    }
+
+    /// Single-pass pump (the dispatch the worker loop runs).
+    #[cfg(test)]
+    pub(crate) fn pump(&mut self) {
+        let forwarding = ForwardingState::default();
+        let ha_state = std::collections::BTreeMap::new();
+        let neighbors =
+            std::sync::Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+        super::session_glue::apply_worker_commands(
+            &self.queue,
+            &mut self.table,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &neighbors,
+            0,
+            &mut std::collections::VecDeque::new(),
+        );
+    }
+}

@@ -883,6 +883,7 @@ pub(crate) fn worker_loop(
                         forwarding.as_ref(),
                         &shared_runtime,
                         &mut worker_lossless_wedged,
+                        Some(&mut sessions),
                     )
                 }
                 None => {
@@ -912,6 +913,7 @@ pub(crate) fn worker_loop(
                         forwarding.as_ref(),
                         &shared_runtime,
                         &mut worker_lossless_wedged,
+                        Some(&mut sessions),
                     )
                 }
             };
@@ -1025,6 +1027,10 @@ pub(crate) fn worker_loop(
     let mut wr_prev_nat_collisions: u64 = 0;
     let mut wr_prev_shared_displacements: u64 = 0;
     const WR_PUBLISH_INTERVAL_NS: u64 = 1_000_000_000;
+    // Expiry closes that could not obtain the tuple gate remain outside the
+    // session delta ring. This preserves the all-close guarantee for overflow
+    // entries without competing with the ring's bounded capacity.
+    let mut deferred_expiry_overflow_deltas: Vec<SessionDelta> = Vec::new();
     while !stop.load(Ordering::Relaxed) {
         let loop_now_ns = monotonic_nanos();
         // #5468: reset the per-drain-cycle aggregate lossless-wedge latch. It is
@@ -1638,6 +1644,7 @@ pub(crate) fn worker_loop(
         let WorkerCommandResults {
             cancelled_keys,
             deleted_synced_keys,
+            stale_replay_dropped_keys,
             exported_sequences,
             session_counter_answers,
             export_owner_rgs,
@@ -1668,6 +1675,61 @@ pub(crate) fn worker_loop(
         // here where `&mut bindings` is held.
         if !deleted_synced_keys.is_empty() {
             invalidate_flow_cache_slots_for_deleted_sessions(&mut bindings, &deleted_synced_keys);
+        }
+        // #10612: a stale replay can be queued after the rotation purge and
+        // must be refused before worker installation. Remove the same stale
+        // row from shared authority as well, but only while it still has the
+        // stale zone identity: a legitimate live replacement under the same
+        // key must not be deleted by a delayed stale command. Single pass per
+        // key (R-N2C: snapshot the forward NAT BEFORE evicting, so the derived
+        // reverse companion is always available — a separate second loop would
+        // read-after-delete and never fire).
+        for key in &stale_replay_dropped_keys {
+            // Snapshot the forward's NAT first (None if the key is already
+            // gone or reversed — both safe to skip). #2402: recover the lock
+            // (never skip on poison).
+            let companion_key = {
+                let map =
+                    crate::afxdp::shared_ops::lock_shared_recover(&shared_sessions);
+                map.get(key)
+                    .filter(|entry| !entry.metadata.is_reverse)
+                    .map(|entry| {
+                        crate::session::reverse_session_key(&entry.key, entry.decision.nat)
+                    })
+            };
+            let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                key,
+                |entry| {
+                    crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                        entry.origin,
+                        &entry.metadata,
+                        forwarding.as_ref(),
+                    )
+                },
+            );
+            // #10612 (N2 companion): evict the derived reverse companion too
+            // (mirrors the coordinator purge) so an unqueued stale reverse half
+            // does not linger shared-side until next bringup.
+            if let Some(reverse_key) = companion_key {
+                let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+                    &shared_sessions,
+                    &shared_nat_sessions,
+                    &shared_forward_wire_sessions,
+                    &shared_owner_rg_indexes,
+                    &reverse_key,
+                    |entry| {
+                        crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                            entry.origin,
+                            &entry.metadata,
+                            forwarding.as_ref(),
+                        )
+                    },
+                );
+            }
         }
         if !shaped_tx_requests.is_empty() {
             apply_worker_shaped_tx_requests(
@@ -1750,18 +1812,26 @@ pub(crate) fn worker_loop(
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
         };
+        let mut deferred_delta_cleanup = false;
         macro_rules! drain_and_flush_all {
-            () => {
+            () => {{
                 while sessions.has_pending_deltas() {
                     let deltas = sessions.drain_deltas(256);
-                    purge_queued_flows_for_closed_deltas(
+                    let handled = purge_queued_flows_for_closed_deltas(
                         &mut bindings,
                         &binding_lookup,
                         &mut shared_recycles,
                         &shared_runtime,
                         &shared_sessions,
                         &deltas,
+                        Some(&mut sessions),
                     );
+                    if handled < deltas.len() {
+                        flush_drained_session_deltas!(&deltas[..handled]);
+                        sessions.requeue_deltas_front(&deltas[handled..]);
+                        deferred_delta_cleanup = true;
+                        break;
+                    }
                     // #2669: flush UNCONDITIONALLY. The binding-independent
                     // consumers (shared session/conntrack tables, HA peer,
                     // peer-worker commands, recent-deltas RPC buffer, event
@@ -1771,7 +1841,8 @@ pub(crate) fn worker_loop(
                     // drain-then-discard, silently desyncing HA/conntrack.
                     flush_drained_session_deltas!(&deltas);
                 }
-            };
+                !deferred_delta_cleanup
+            }};
         }
         let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns, Some(&ha_ctx));
         // #2428: the "Current sessions" gauge Go derives as
@@ -1816,7 +1887,7 @@ pub(crate) fn worker_loop(
         // removed local row, rematerialize the still-published shared copy,
         // and forward one more packet on an expired session.
         if !expired_entries.is_empty() {
-            drain_and_flush_all!();
+            let _ = drain_and_flush_all!();
         }
         // #10309: the expiry walk must remain all-in-one-call. A full ring
         // may have accepted the first Close deltas and returned the suffix
@@ -1825,22 +1896,55 @@ pub(crate) fn worker_loop(
         // flush the returned suffix in fixed-size chunks before processing
         // another packet or control event. No shared entry can remain
         // honoured merely because its Close missed the 4096-slot ring.
-        let expiry_overflow_deltas: Vec<SessionDelta> = expired_entries
-            .into_iter()
-            .filter_map(|entry| entry.overflow_close)
-            .collect();
+        let mut expiry_overflow_deltas = std::mem::take(&mut deferred_expiry_overflow_deltas);
+        expiry_overflow_deltas.extend(
+            expired_entries
+                .into_iter()
+                .filter_map(|entry| entry.overflow_close),
+        );
+        if deferred_delta_cleanup {
+            deferred_expiry_overflow_deltas.extend(expiry_overflow_deltas);
+            continue;
+        }
         if !expiry_overflow_deltas.is_empty() {
-            drain_and_flush_all!();
-            for deltas in expiry_overflow_deltas.chunks(256) {
-                purge_queued_flows_for_closed_deltas(
+            let _ = drain_and_flush_all!();
+            if deferred_delta_cleanup {
+                deferred_expiry_overflow_deltas.extend(expiry_overflow_deltas);
+                continue;
+            }
+            let mut overflow_chunks = expiry_overflow_deltas.chunks(256);
+            while let Some(deltas) = overflow_chunks.next() {
+                let handled = purge_queued_flows_for_closed_deltas(
                     &mut bindings,
                     &binding_lookup,
                     &mut shared_recycles,
                     &shared_runtime,
                     &shared_sessions,
                     deltas,
+                    Some(&mut sessions),
                 );
-                flush_drained_session_deltas!(deltas);
+                flush_drained_session_deltas!(&deltas[..handled]);
+                if handled < deltas.len() {
+                    deferred_expiry_overflow_deltas.extend_from_slice(&deltas[handled..]);
+                    for suffix in overflow_chunks {
+                        deferred_expiry_overflow_deltas.extend_from_slice(suffix);
+                    }
+                    deferred_delta_cleanup = true;
+                    break;
+                }
+            }
+            if deferred_delta_cleanup {
+                continue;
+            }
+        }
+        // A requeued close from an earlier drain is a teardown barrier: retry
+        // it before command/control work or the next AF_XDP poll. This keeps
+        // queued packets from forwarding while their close cleanup waits for
+        // the tuple permit.
+        if sessions.has_pending_deltas() {
+            let _ = drain_and_flush_all!();
+            if deferred_delta_cleanup {
+                continue;
             }
         }
         // #7699: drain the PPTP control inbox — parse the TCP/1723 segments the
@@ -2075,9 +2179,9 @@ pub(crate) fn worker_loop(
                             sessions
                                 .emit_open_delta_with_origin(key, decision, metadata, origin, true);
                         }
-                        // Ship this chunk and empty the ring before the next
-                        // chunk, so the next batch of emits cannot overflow.
-                        drain_and_flush_all!();
+                        if !drain_and_flush_all!() {
+                            break;
+                        }
                     }
                 }
             }};
@@ -2200,8 +2304,15 @@ pub(crate) fn worker_loop(
             // owned forward session so the peer re-derives a complete snapshot.
             //
             // Drain the existing backlog so the ring starts empty.
-            drain_and_flush_all!();
+            if !drain_and_flush_all!() {
+                sessions.set_delta_loss();
+                continue;
+            }
             chunked_drain_as_you_export!(sessions.all_owner_rg_ids());
+            if deferred_delta_cleanup {
+                sessions.set_delta_loss();
+                continue;
+            }
             // #8593: that claim was TRUE OF ONE RING AND FALSE OF THE OTHER,
             // and #5290 widened its scope without re-checking it. An earlier
             // revision read: "The export drained to empty without overflowing,
@@ -2291,7 +2402,9 @@ pub(crate) fn worker_loop(
                 }
             }
             // Drain-first ALWAYS: the ring starts empty before echo emits.
-            drain_and_flush_all!();
+            if !drain_and_flush_all!() {
+                continue;
+            }
             let mut export_done = false;
             if let Some(state) = worker_export.as_mut() {
                 use crate::session::ExportWalkOutcome::{Complete, ResumeAt};
@@ -2392,7 +2505,9 @@ pub(crate) fn worker_loop(
                         crate::session::ExportProvenance::CommandExport(token),
                     );
                 }
-                drain_and_flush_all!();
+                if !drain_and_flush_all!() {
+                    continue;
+                }
                 match outcome {
                     Complete => {
                         // Ack only after the complete export has shipped.
@@ -2415,14 +2530,19 @@ pub(crate) fn worker_loop(
             }
         } else if sessions.has_pending_deltas() {
             let deltas = sessions.drain_deltas(256);
-            purge_queued_flows_for_closed_deltas(
+            let handled = purge_queued_flows_for_closed_deltas(
                 &mut bindings,
                 &binding_lookup,
                 &mut shared_recycles,
                 &shared_runtime,
                 &shared_sessions,
                 &deltas,
+                Some(&mut sessions),
             );
+            if handled < deltas.len() {
+                sessions.requeue_deltas_front(&deltas[handled..]);
+                continue;
+            }
             // #2669: flush unconditionally — see flush_drained_session_deltas!.
             flush_drained_session_deltas!(&deltas);
         }

@@ -2028,3 +2028,65 @@ func TestProcessStatusUnsurfacedCounterTrioRoundTrip7398(t *testing.T) {
 			legacy.SyncedImportReserveRefused)
 	}
 }
+
+// TestProcessStatusPolicyBatchTrioRoundTrip10512 covers the three #10512
+// lease-hold counters with the same distinct-value discipline as the #7398
+// trio: each field carries a value no neighbour carries, so a field wired
+// to the wrong wire key cannot pass by reading its neighbour.
+func TestProcessStatusPolicyBatchTrioRoundTrip10512(t *testing.T) {
+	in := ProcessStatus{
+		PolicyBatchCount:     41,
+		PolicyBatchHoldNs:    42,
+		PolicyBatchHoldMaxNs: 43,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range []string{
+		"policy_batch_count",
+		"policy_batch_hold_ns",
+		"policy_batch_hold_max_ns",
+	} {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from ProcessStatus JSON: %s", key, string(raw))
+		}
+	}
+
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if back.PolicyBatchCount != 41 {
+		t.Errorf("PolicyBatchCount: got %d, want 41 — a value of 42 or 43 means "+
+			"this field decodes another counter's wire key", back.PolicyBatchCount)
+	}
+	if back.PolicyBatchHoldNs != 42 {
+		t.Errorf("PolicyBatchHoldNs: got %d, want 42 — a value of 41 or 43 means "+
+			"this field decodes another counter's wire key", back.PolicyBatchHoldNs)
+	}
+	if back.PolicyBatchHoldMaxNs != 43 {
+		t.Errorf("PolicyBatchHoldMaxNs: got %d, want 43 — a value of 41 or 42 means "+
+			"this field decodes another counter's wire key", back.PolicyBatchHoldMaxNs)
+	}
+
+	// A helper that predates #10512 omits all three keys; they must decode
+	// to 0 rather than failing the parse, which keeps a mixed-version
+	// cluster readable.
+	var legacy ProcessStatus
+	if err := json.Unmarshal([]byte(`{}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	if legacy.PolicyBatchCount != 0 ||
+		legacy.PolicyBatchHoldNs != 0 ||
+		legacy.PolicyBatchHoldMaxNs != 0 {
+		t.Fatalf("pre-#10512 payload must decode the trio to 0, got %d/%d/%d",
+			legacy.PolicyBatchCount,
+			legacy.PolicyBatchHoldNs,
+			legacy.PolicyBatchHoldMaxNs)
+	}
+}
