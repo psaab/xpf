@@ -121,6 +121,44 @@ func TestDeletedPolicyRuntimeIDs(t *testing.T) {
 	})
 }
 
+// TestPolicySchedulerTransitionInvalidationDirection4343 pins the asymmetric
+// scheduler transition contract: active->inactive clears sessions carrying
+// the surviving policy's id, while inactive->active does not sweep that id.
+// The latter is revalidated by the userspace generation fence because sessions
+// admitted by a later permit carry that later policy's id.
+func TestPolicySchedulerTransitionInvalidationDirection4343(t *testing.T) {
+	oldCfg := twoPolicyConfig([]string{"p-first", "p-window"}, nil)
+	oldCfg.Security.PolicyRematch = true
+	oldCfg.Security.Policies[0].Policies[1].SchedulerName = "window"
+	newCfg := twoPolicyConfig([]string{"p-first", "p-window"}, nil)
+	newCfg.Security.PolicyRematch = true
+	newCfg.Security.Policies[0].Policies[1].SchedulerName = "window"
+	policyID := dpuserspace.PolicyIDsByStableKey(oldCfg)["trust->untrust/p-window"]
+	if policyID == 0 {
+		t.Fatalf("test policy must use a non-overloaded runtime id, got %d", policyID)
+	}
+
+	tightened := changedPolicyRuntimeIDs(
+		oldCfg,
+		newCfg,
+		map[string]bool{"window": true},
+		map[string]bool{"window": false},
+	)
+	if _, ok := tightened[policyID]; !ok {
+		t.Fatalf("active->inactive scheduler transition omitted policy id %d: %v", policyID, tightened)
+	}
+
+	reopened := changedPolicyRuntimeIDs(
+		oldCfg,
+		newCfg,
+		map[string]bool{"window": false},
+		map[string]bool{"window": true},
+	)
+	if len(reopened) != 0 {
+		t.Fatalf("inactive->active scheduler transition swept ids %v; generation revalidation owns this edge", reopened)
+	}
+}
+
 // TestClearSessionsForDeletedPolicies is the RED-on-revert test: a session
 // admitted under a policy that the commit DELETES (id >= 1) is invalidated,
 // while a session under a surviving (or merely modified) policy keeps

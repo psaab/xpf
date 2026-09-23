@@ -2484,47 +2484,29 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     )
     .expect("translated shared hit should resolve");
 
-
-    // T4: keep_transient deliberately skips local materialization. The result
-    // must remain an explicit HA outcome (or fabric redirect), never a local
-    // ForwardCandidate that silently seeds an unadjudicated cache row.
+    // T4 branch A: a packet arriving on the fabric link is held HAInactive.
+    // This branch is intentionally non-cacheable, so it cannot seed even
+    // before policy revalidation; keep the assertion deterministic.
     assert!(!resolved.install_failed);
-    assert!(matches!(
+    assert_eq!(
         resolved.decision.resolution.disposition,
-        ForwardingDisposition::HAInactive | ForwardingDisposition::FabricRedirect
-    ));
-
-    // Exercise the same post-purge revalidation shape with the live default
-    // deny. There is no local entry to tear down, so the sessionless verdict
-    // must return a canonical-less revocation and leave the table empty.
-    let deny_forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
-        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+        ForwardingDisposition::HAInactive
     );
-    let mut purged_sessions = SessionTable::new();
-    let sessionless_denied =
-        crate::afxdp::poll_descriptor::revalidate_zone_policy_sessionless_denies_for_test(
-            &deny_forwarding,
-            &mut purged_sessions,
-            &translated_key,
-            &test_metadata(),
-            test_decision(),
-            Some(&flow),
-            UserspaceDpMeta {
-                ingress_ifindex: 24,
-                protocol: PROTO_TCP,
-                tcp_flags: 0x18,
-                ..UserspaceDpMeta::default()
-            },
-            false,
-        );
-    assert!(sessionless_denied, "purged keep-transient hit must be denied");
-    assert_eq!(purged_sessions.len(), 0);
+    let fabric_meta = UserspaceDpMeta {
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        ..UserspaceDpMeta::default()
+    };
+    assert!(
+        !crate::afxdp::flow_cache::FlowCacheEntry::should_cache(fabric_meta, resolved.decision),
+        "HAInactive is never cacheable"
+    );
     assert!(sessions.lookup(&translated_key, 1_000_000, 0x18).is_none());
 }
 
 #[test]
-fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inactive_non_fabric_ingress()
- {
+fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inactive_non_fabric_ingress_10582_t4()
+{
     let mut sessions = SessionTable::new();
     let key = test_key();
     let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
@@ -2548,6 +2530,10 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         tcp_close_class: 0,
     };
     let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.policy = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    )
+    .policy;
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
         ifindex: 12,
@@ -2581,7 +2567,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let _resolved = resolve_flow_session_decision(
+    let resolved = resolve_flow_session_decision(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         &shared_sessions,
@@ -2605,7 +2591,54 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     )
     .expect("translated shared hit should resolve");
 
+    // T4 branch B is the actual cacheable residual: non-fabric owner ingress
+    // resolves the purged translated hit to FabricRedirect.
+    assert!(!resolved.install_failed);
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect
+    );
     assert!(sessions.lookup(&translated_key, 1_000_000, 0x18).is_none());
+    assert!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&translated_key)
+            .is_none(),
+        "keep_transient must purge the shared row before revalidation"
+    );
+    let actual_meta = UserspaceDpMeta {
+        ingress_ifindex: 12,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        ..UserspaceDpMeta::default()
+    };
+    assert!(
+        crate::afxdp::flow_cache::FlowCacheEntry::should_cache(
+            actual_meta,
+            resolved.decision
+        ),
+        "the pre-fix FabricRedirect shape is cache-eligible"
+    );
+    assert!(
+        crate::afxdp::poll_descriptor::revalidate_zone_policy_sessionless_denies_for_test(
+            &forwarding,
+            &mut sessions,
+            &resolved.key,
+            &resolved.metadata,
+            resolved.decision,
+            Some(&flow),
+            actual_meta,
+            false,
+        ),
+        "the actual post-purge FabricRedirect must be denied by live policy"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "sessionless deny must not materialize or tear down a local row"
+    );
+
 }
 
 #[test]
@@ -7605,6 +7638,104 @@ fn scheduler_generation_bump_revalidates_at_cap_shared_hit_10582_t2() {
             false,
         ),
         "the post-activation generation bump must re-derive the deny"
+    );
+}
+
+/// A local row at the replica key must not be clobbered by a shared hit.
+/// `install_failed` is the cache-seed safety bit for this refused repair.
+#[test]
+fn shared_hit_local_clobber_sets_install_failed_10582() {
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    );
+    let key = test_key();
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    sessions.stamp_leak_incarnation(&key, 41);
+    let incumbent_incarnation = sessions.leak_incarnation(&key);
+    assert_eq!(incumbent_incarnation, Some(41));
+    let mut resolved = ResolvedSessionLookup {
+        key: ResolvedSessionKey::Canonical(key.clone()),
+        lookup: SessionLookup {
+            decision: test_decision(),
+            metadata: test_metadata(),
+        },
+        shared_entry: Some(SyncedSessionEntry {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 99,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        }),
+        origin: SessionOrigin::SyncImport,
+    };
+    let (_, install_failed) =
+        super::materialize_shared_session_hit(&mut sessions, &mut resolved, &forwarding, 2_000_000, TCP_FLAG_ACK);
+    assert!(
+        install_failed,
+        "a live local row must turn the refused shared repair into install_failed"
+    );
+    assert_eq!(sessions.len(), 1, "the local row must remain authoritative");
+    assert_eq!(
+        sessions.leak_incarnation(&key),
+        incumbent_incarnation,
+        "a refused clobber must not rewrite the incumbent leak provenance"
+    );
+}
+
+/// A shared-hit materialization refreshes the local row before policy
+/// revalidation, so the next policy-generation probe sees a real stale target.
+#[test]
+fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() {
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    );
+    let key = test_key();
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let mut resolved = ResolvedSessionLookup {
+        key: ResolvedSessionKey::Canonical(key.clone()),
+        lookup: SessionLookup {
+            decision: test_decision(),
+            metadata: test_metadata(),
+        },
+        shared_entry: Some(SyncedSessionEntry {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        }),
+        origin: SessionOrigin::SyncImport,
+    };
+    let (_, install_failed) = super::materialize_shared_session_hit(
+        &mut sessions,
+        &mut resolved,
+        &forwarding,
+        2_000_000,
+        TCP_FLAG_ACK,
+    );
+    assert!(!install_failed);
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Stale(key)
     );
 }
 

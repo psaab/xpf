@@ -114,6 +114,24 @@ fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
+fn forwarding_reverse_provenance_10582() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "wan-to-wan-permit".into(),
+        from_zone: "wan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
 fn flow_key_to(dst: Ipv4Addr) -> crate::session::SessionKey {
     crate::session::SessionKey {
         addr_family: libc::AF_INET as u8,
@@ -2245,6 +2263,122 @@ fn sessionless_no_local_entry_denies_without_teardown_10582() {
         0,
         "sessionless denial must not fabricate or tear down a local row"
     );
+}
+
+/// #10582 reverse NoLocalEntry pin: the reply arrives on WAN, but the
+/// authoritative forward companion is LAN→WAN. A WAN→WAN permit must not save
+/// the pair from the forward policy's deny; revalidation returns the forward
+/// canonical key for pair teardown.
+#[test]
+fn reverse_sessionless_companion_uses_forward_provenance_10582() {
+    let forwarding = forwarding_reverse_provenance_10582();
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let fwd_key = flow_key_to(DST);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    assert!(sessions.install_with_protocol_with_origin(
+        fwd_key.clone(),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        PolicyRevalidationTarget::NoLocalEntry,
+        "the reverse test must exercise the sessionless companion arm"
+    );
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &rev_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: rev_key.src_ip,
+            dst_ip: rev_key.dst_ip,
+            forward_key: rev_key.clone(),
+        }),
+        txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 80),
+        false,
+    );
+    assert_eq!(
+        canonical,
+        Some(fwd_key.clone()),
+        "reverse deny must identify the forward companion, not the reply tuple"
+    );
+    assert!(
+        sessions.entry_with_origin(&fwd_key).is_some(),
+        "the seam reports the pair revocation; the owner tears down afterward"
+    );
+    assert!(sessions.install_with_protocol_with_origin(
+        rev_key.clone(),
+        decision(LAN_IFINDEX),
+        metadata(true),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    let shared_nat_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions =
+        std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands = Vec::new();
+    super::session_glue::delete_terminal_filtered_session(
+        &mut sessions,
+        super::SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &forwarding,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        &metadata(false),
+        SessionOrigin::ForwardFlow,
+        2_000_000,
+        0,
+    );
+    assert!(sessions.entry_with_origin(&fwd_key).is_none());
+    assert!(sessions.entry_with_origin(&rev_key).is_none());
+}
+
+/// A reverse NoLocalEntry with no LOCAL forward companion survives. Shared-only
+/// companions are intentionally treated the same way: this helper cannot
+/// recover their authoritative local egress/NAT/zone context, so it declines
+/// rather than fabricating a verdict. The existing stale-row #9604 pin covers
+/// the materialized lone-reverse variant.
+#[test]
+fn reverse_sessionless_lone_survives_10582() {
+    let forwarding = forwarding_reverse_provenance_10582();
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let fwd_key = flow_key_to(DST);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &rev_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: rev_key.src_ip,
+            dst_ip: rev_key.dst_ip,
+            forward_key: rev_key.clone(),
+        }),
+        txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 0),
+        false,
+    );
+    assert_eq!(canonical, None);
+    assert_eq!(sessions.len(), 0);
 }
 
 /// The descriptor path must recycle an identity-less arrival at the ingress

@@ -50,8 +50,8 @@ mod prerouting_scope;
 mod policy_revalidation;
 #[cfg(test)]
 pub(crate) use policy_revalidation::{
-    revalidate_zone_policy_declines_for_test, revalidate_zone_policy_revokes_for_test,
-    revalidate_zone_policy_sessionless_denies_for_test,
+    revalidate_zone_policy_canonical_key_for_test, revalidate_zone_policy_declines_for_test,
+    revalidate_zone_policy_revokes_for_test, revalidate_zone_policy_sessionless_denies_for_test,
 };
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;

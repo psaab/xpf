@@ -2332,11 +2332,12 @@ fn materialize_shared_session_hit(
             },
             false,
         );
-        // Local entries preserve their published stamp; peer entries above
-        // recompute it from this worker's forwarding state before reaching
-        // this point, so no remote numeric token is trusted.
-        if let Some(incarnation) =
-            (replica.leak_incarnation != 0).then_some(replica.leak_incarnation)
+        // A refused shared repair must not mutate the incumbent local row's
+        // leak provenance. The stamp is evidence for the materialized replica
+        // only; failed clobber attempts return install_failed instead.
+        if materialized
+            && let Some(incarnation) =
+                (replica.leak_incarnation != 0).then_some(replica.leak_incarnation)
         {
             sessions.stamp_leak_incarnation(&replica.key, incarnation);
         }
