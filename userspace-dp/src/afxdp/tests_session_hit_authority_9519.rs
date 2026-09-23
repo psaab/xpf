@@ -149,7 +149,7 @@ fn forwarding(p: Posture) -> ForwardingState {
     build_forwarding_state(&s)
 }
 
-fn binding(ifindex: i32) -> BindingWorker {
+pub(super) fn binding(ifindex: i32) -> BindingWorker {
     let mut b = BindingWorker::new_for_mirror_test(0, 0, ifindex, 0);
     b.interface = Arc::<str>::from(match ifindex {
         WAN_IFINDEX => "reth0.80",
@@ -204,7 +204,7 @@ fn drive_on(
 
 /// A fresh binding per packet, so a flow-cache entry one packet seeded cannot
 /// serve the next. The seeding cell is the one place that reuses a binding.
-fn drive(
+pub(super) fn drive(
     fw: &ForwardingState,
     sessions: &mut SessionTable,
     packet: (Vec<u8>, UserspaceDpMeta),
@@ -213,7 +213,7 @@ fn drive(
     drive_on(&mut b, fw, sessions, packet)
 }
 
-fn session_count(sessions: &SessionTable) -> usize {
+pub(super) fn session_count(sessions: &SessionTable) -> usize {
     let mut n = 0;
     sessions.iter_with_origin(|_k, _d, _m, _o| n += 1);
     n
@@ -601,140 +601,144 @@ fn a_foreign_packets_lo0_discard_does_not_tear_down_the_session_9519() {
          terminal lo0 verdict (#9519)"
     );
 }
+/// Shape matrix shared by #10509 mechanism and #10591 production-window
+/// quantification. Keep this at module scope so the sibling window module uses
+/// the exact same forwarding builders and packet tuples rather than growing a
+/// second fixture that can drift.
+#[derive(Clone, Copy)]
+pub(super) struct MatrixShape {
+    pub(super) name: &'static str,
+    pub(super) dmz_permit: bool,
+    pub(super) dead_egress: bool,
+    pub(super) default_permit: bool,
+    pub(super) permit_control: bool,
+}
+
+pub(super) const MATRIX_SHAPES: [MatrixShape; 4] = [
+    MatrixShape {
+        name: "single-zone-equivalent-permit",
+        dmz_permit: true,
+        dead_egress: false,
+        default_permit: false,
+        permit_control: true,
+    },
+    MatrixShape {
+        name: "single-zone-default-deny",
+        dmz_permit: false,
+        dead_egress: false,
+        default_permit: false,
+        permit_control: false,
+    },
+    MatrixShape {
+        name: "multi-zone-dead-egress-default-deny",
+        dmz_permit: false,
+        dead_egress: true,
+        default_permit: false,
+        permit_control: false,
+    },
+    MatrixShape {
+        name: "multi-zone-dead-egress-default-permit",
+        dmz_permit: false,
+        dead_egress: true,
+        default_permit: true,
+        permit_control: true,
+    },
+];
+
+pub(super) fn matrix_forwarding(
+    dmz_permit: bool,
+    dead_egress: bool,
+    default_permit: bool,
+) -> ForwardingState {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules.clear();
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        ..Default::default()
+    });
+    snapshot.zones.push(ZoneSnapshot {
+        name: "dmz".to_string(),
+        id: TEST_DMZ_ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        mtu: 1500,
+        hardware_addr: "02:bf:72:02:00:01".to_string(),
+        ..Default::default()
+    });
+    if dmz_permit {
+        snapshot.policies.push(PolicyRuleSnapshot {
+            name: "dmz-to-wan".to_string(),
+            from_zone: "dmz".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "permit".to_string(),
+            ..Default::default()
+        });
+    }
+    snapshot.default_policy = if default_permit {
+        "permit".to_string()
+    } else {
+        "deny".to_string()
+    };
+    if dead_egress {
+        // Preserve the live WAN interface and route, but change its zone
+        // identity. The old session keeps metadata.egress_zone == 2;
+        // the live policy now has no pair whose egress is 2.
+        snapshot
+            .zones
+            .iter_mut()
+            .find(|zone| zone.name == "wan")
+            .expect("nat fixture must define wan")
+            .id = TEST_MGMT_ZONE_ID;
+    }
+    build_forwarding_state(&snapshot)
+}
+
+pub(super) fn matrix_packet(arrival: i32, flags: u8) -> (Vec<u8>, UserspaceDpMeta) {
+    tcp(
+        REAL,
+        Ipv4Addr::new(172, 16, 80, 200),
+        REAL_PORT,
+        5201,
+        flags,
+        arrival,
+    )
+}
+
+/// The fixed three-packet matrix observation remains mechanism-only. The
+/// production-window sibling drives real GC/sweep timing instead. Drop lane
+/// here proves retention lower bound only; transient upper bound lives in
+/// the 10591 sibling.
+pub(super) const OBSERVATION_PACKETS: usize = 3;
+
+pub(super) fn matrix_forward_observation(sessions: &SessionTable) -> (u64, u32) {
+    let mut observation = None;
+    sessions.iter_with_idle(u64::MAX, |_, _, metadata, idle_ns, _| {
+        if !metadata.is_reverse && observation.is_none() {
+            observation = Some((idle_ns, metadata.policy_id));
+        }
+    });
+    observation.expect("matrix must retain a forward row")
+}
 
 #[test]
 fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
-    struct Shape {
-        name: &'static str,
-        dmz_permit: bool,
-        dead_egress: bool,
-        default_permit: bool,
-        permit_control: bool,
-    }
-    let shapes = [
-        Shape {
-            name: "single-zone-equivalent-permit",
-            dmz_permit: true,
-            dead_egress: false,
-            default_permit: false,
-            permit_control: true,
-        },
-        Shape {
-            name: "single-zone-default-deny",
-            dmz_permit: false,
-            dead_egress: false,
-            default_permit: false,
-            permit_control: false,
-        },
-        Shape {
-            name: "multi-zone-dead-egress-default-deny",
-            dmz_permit: false,
-            dead_egress: true,
-            default_permit: false,
-            permit_control: false,
-        },
-        Shape {
-            name: "multi-zone-dead-egress-default-permit",
-            dmz_permit: false,
-            dead_egress: true,
-            default_permit: true,
-            permit_control: true,
-        },
-    ];
-
-    fn matrix_forwarding(
-        dmz_permit: bool,
-        dead_egress: bool,
-        default_permit: bool,
-    ) -> ForwardingState {
-        let mut snapshot = nat_snapshot();
-        snapshot.source_nat_rules.clear();
-        snapshot.neighbors.push(NeighborSnapshot {
-            interface: "ge-0-0-0.80".to_string(),
-            ifindex: WAN_IFINDEX,
-            family: "inet".to_string(),
-            ip: "172.16.80.200".to_string(),
-            mac: "00:11:22:33:44:66".to_string(),
-            state: "reachable".to_string(),
-            ..Default::default()
-        });
-        snapshot.zones.push(ZoneSnapshot {
-            name: "dmz".to_string(),
-            id: TEST_DMZ_ZONE_ID,
-            host_inbound_configured: true,
-            host_inbound_system_services: vec!["any-service".to_string()],
-            ..Default::default()
-        });
-        snapshot.interfaces.push(InterfaceSnapshot {
-            name: "reth2.0".to_string(),
-            zone: "dmz".to_string(),
-            linux_name: "ge-0-0-2".to_string(),
-            ifindex: DMZ_IFINDEX,
-            mtu: 1500,
-            hardware_addr: "02:bf:72:02:00:01".to_string(),
-            ..Default::default()
-        });
-        if dmz_permit {
-            snapshot.policies.push(PolicyRuleSnapshot {
-                name: "dmz-to-wan".to_string(),
-                from_zone: "dmz".to_string(),
-                to_zone: "wan".to_string(),
-                source_addresses: vec!["any".to_string()],
-                destination_addresses: vec!["any".to_string()],
-                applications: vec!["any".to_string()],
-                application_terms: Vec::new(),
-                action: "permit".to_string(),
-                ..Default::default()
-            });
-        }
-        snapshot.default_policy = if default_permit {
-            "permit".to_string()
-        } else {
-            "deny".to_string()
-        };
-        if dead_egress {
-            // Preserve the live WAN interface and route, but change its zone
-            // identity. The old session keeps metadata.egress_zone == 2;
-            // the live policy now has no pair whose egress is 2.
-            snapshot
-                .zones
-                .iter_mut()
-                .find(|zone| zone.name == "wan")
-                .expect("nat fixture must define wan")
-                .id = TEST_MGMT_ZONE_ID;
-        }
-        build_forwarding_state(&snapshot)
-    }
-
-    fn matrix_packet(arrival: i32, flags: u8) -> (Vec<u8>, UserspaceDpMeta) {
-        tcp(
-            REAL,
-            Ipv4Addr::new(172, 16, 80, 200),
-            REAL_PORT,
-            5201,
-            flags,
-            arrival,
-        )
-    }
-    /// Fixed observation window: three packets per shape/lane. This is NOT a
-    /// sweep emulation — no sweep runs here, no wall clock, no idle/GC — so
-    /// the Drop lane proves retention for AT LEAST three packets (a lower
-    /// bound on the stale-row lifetime), not a transient upper bound or a
-    /// packets-per-rename quantification. Only the Revoke lane pins an upper
-    /// bound (the pair clears within three packets). Production-window
-    /// quantification against real sweep timing is follow-up work, deliberately
-    /// out of this mechanism-regression matrix.
-    const OBSERVATION_PACKETS: usize = 3;
-
-    fn matrix_forward_observation(sessions: &SessionTable) -> (u64, u32) {
-        let mut observation = None;
-        sessions.iter_with_idle(u64::MAX, |_, _, metadata, idle_ns, _| {
-            if !metadata.is_reverse && observation.is_none() {
-                observation = Some((idle_ns, metadata.policy_id));
-            }
-        });
-        observation.expect("matrix must retain a forward row")
-    }
+    let shapes = MATRIX_SHAPES;
 
     for shape in shapes {
         for revoke_lane in [false, true] {
