@@ -1163,7 +1163,7 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 	mgr := feeds.New(func() error { return nil })
 	// Feed fetch SSRF policy blocks loopback by default; allowlist the
 	// httptest server exactly as the feeds package's own tests do.
-	mgr.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	mgr.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")})
 	mgr.Apply(ctx, daCfg)
 	defer mgr.StopAll()
 	deadline := time.Now().Add(10 * time.Second)
@@ -1191,15 +1191,27 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 		SrcIP: [4]byte{203, 0, 113, 7}, DstIP: [4]byte{10, 0, 0, 20},
 		SrcPort: 1234, DstPort: 443, Protocol: 6,
 	}
+	// Out-of-feed source (198.51.100.9 ∉ 203.0.113.0/24): the populated
+	// overlay is present but CIDR membership fails, so this row must NOT
+	// retain — pinning membership (not just overlay presence) load-bearing
+	// at capture level.
+	outKey := dataplane.SessionKey{
+		SrcIP: [4]byte{198, 51, 100, 9}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 1235, DstPort: 443, Protocol: 6,
+	}
 	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	mkValue := func() dataplane.SessionValue {
+		return dataplane.SessionValue{
+			State:       dataplane.SessStateEstablished,
+			PolicyID:    oldID,
+			IngressZone: config.StableZoneID("lan"),
+			EgressZone:  config.StableZoneID("wan"),
+		}
+	}
 	dp := &policyInvalTestDP{
 		v4: map[dataplane.SessionKey]dataplane.SessionValue{
-			key: {
-				State:       dataplane.SessStateEstablished,
-				PolicyID:    oldID,
-				IngressZone: config.StableZoneID("lan"),
-				EgressZone:  config.StableZoneID("wan"),
-			},
+			key:    mkValue(),
+			outKey: mkValue(),
 		},
 		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
 	}
@@ -1221,5 +1233,11 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 	}
 	if capture.renamed[0].RuleID != "lan->wan/p-new" {
 		t.Fatalf("renamed row rule = %q, want lan->wan/p-new", capture.renamed[0].RuleID)
+	}
+	if len(capture.deleted.v4) != 1 {
+		t.Fatalf("out-of-feed row did not land exactly once in the delete bucket: %+v", capture.deleted.v4)
+	}
+	if entry := capture.deleted.v4[0]; entry.Key != outKey {
+		t.Fatalf("delete bucket holds the wrong row: %+v, want %+v", entry.Key, outKey)
 	}
 }
