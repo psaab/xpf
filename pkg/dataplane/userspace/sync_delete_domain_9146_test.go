@@ -394,7 +394,7 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 		t.Fatal("DeleteSession emitted no helper sync at all — the delete never reaches the standby")
 	}
 	for i, r := range got {
-		if r.Operation != "delete" {
+		if r.Operation != "mirror_delete_batch" {
 			continue
 		}
 		if r.RoutingDomain != tenant {
