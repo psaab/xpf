@@ -494,6 +494,89 @@ func TestApplyAndSyncCommittedSurfacesInvalidationError(t *testing.T) {
 	}
 }
 
+// TestCommitWindowArmApplySweepOrder10591 drives the real commit wrapper far
+// enough to prove the three production phases are one transaction: the plan is
+// armed before the apply body, and the post-apply sweep consumes the old-policy
+// row before the wrapper returns. The AST order guard below catches an arm,
+// apply, or sweep moved behind the wrong boundary even if this seam is later
+// simplified.
+func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
+	oldCfg, newCfg, oldID, _ := inheritedIDFixture6948(t)
+	key := v4Key6948(1, 40001, 80)
+	dp := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {
+				State:       dataplane.SessStateEstablished,
+				PolicyID:    oldID,
+				IngressZone: config.StableZoneID("lan"),
+				EgressZone:  config.StableZoneID("wan"),
+			},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	var phases []string
+	d.applyBodyForTest = func(*config.Config) {
+		if d.policyInvalidationPlan == nil {
+			t.Fatal("commit apply reached the publish body without an armed invalidation plan")
+		}
+		phases = append(phases, "apply")
+	}
+	if _, err := d.applyAndSyncCommitted(oldCfg, newCfg, peerSyncNever); err != nil {
+		t.Fatalf("applyAndSyncCommitted: %v", err)
+	}
+	if len(phases) != 1 || phases[0] != "apply" {
+		t.Fatalf("commit apply phases = %v, want one real apply phase", phases)
+	}
+	if _, ok := dp.v4[key]; ok {
+		t.Fatal("post-apply invalidation sweep left the old-policy row alive")
+	}
+	if d.policyInvalidationCapture != nil {
+		t.Fatal("post-apply sweep left the invalidation capture armed")
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "daemon_apply_commit.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse daemon_apply_commit.go: %v", err)
+	}
+	var armAt, applyAt, sweepAt token.Pos
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "applyAndSyncCommitted" || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "armPolicyInvalidationPlanWithRename":
+				armAt = call.Pos()
+			case "applyConfigLockedForCommit":
+				applyAt = call.Pos()
+			case "reportSessionAuthorizationChanges":
+				sweepAt = call.Pos()
+			}
+			return true
+		})
+	}
+	if !armAt.IsValid() || !applyAt.IsValid() || !sweepAt.IsValid() {
+		t.Fatalf("commit path must contain arm, apply, and sweep calls (arm=%v apply=%v sweep=%v)",
+			armAt.IsValid(), applyAt.IsValid(), sweepAt.IsValid())
+	}
+	if !(armAt < applyAt && applyAt < sweepAt) {
+		t.Fatalf("commit phases out of order: arm=%s apply=%s sweep=%s",
+			fset.Position(armAt), fset.Position(applyAt), fset.Position(sweepAt))
+	}
+}
+
 func TestCapturePolicyInvalidationRetainsRenamedAndLeavesFirstPolicy10511(t *testing.T) {
 	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
 	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)

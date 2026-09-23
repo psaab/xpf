@@ -86,6 +86,16 @@ mod wheel;
 use wheel::SessionWheel;
 
 const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
+/// #10591: test-only names for the production cadence constants. The window
+/// harness must derive its MAX values from the same values that gate the real
+/// worker sweep and advance the real timer wheel; a copied literal can make a
+/// cadence drift silently green.
+#[cfg(test)]
+pub(crate) const SESSION_GC_INTERVAL_NS_FOR_TEST: u64 = SESSION_GC_INTERVAL_NS;
+#[cfg(test)]
+pub(crate) const WHEEL_TICK_NS_FOR_TEST: u64 = wheel::WHEEL_TICK_NS;
+#[cfg(test)]
+pub(crate) const WHEEL_BUCKETS_FOR_TEST: usize = wheel::WHEEL_BUCKETS;
 const DEFAULT_MAX_SESSIONS: usize = 131072;
 /// #9856: one page of deferred terminal removals per worker. Overflow is
 /// counted and makes the active export fail closed rather than growing an

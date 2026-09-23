@@ -1423,8 +1423,39 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path(
         desc_len,
         slow_path,
         None,
+        123_000_000_000,
+        123,
     )
 }
+
+pub(super) fn txn_run_descriptor_at(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    now_ns: u64,
+) -> (BatchCounters, DebugPollCounters) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        None,
+        None,
+        now_ns,
+        123,
+    )
+}
+
 
 pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
     binding: &mut BindingWorker,
@@ -1451,6 +1482,8 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
         desc_len,
         slow_path,
         Some(ike_exchanges),
+        123_000_000_000,
+        123,
     )
 }
 
@@ -1466,6 +1499,8 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     desc_len: Option<u32>,
     slow_path: Option<&Arc<crate::slowpath::SlowPathReinjector>>,
     ike_exchanges: Option<&Arc<crate::afxdp::forwarding::IkeExchangeTable>>,
+    now_ns: u64,
+    now_secs: u64,
 ) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -1553,8 +1588,8 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
             config_generation: 7,
             fib_generation: 9,
         },
-        123_000_000_000,
-        123,
+        now_ns,
+        now_secs,
         0,
         0,
         -1,

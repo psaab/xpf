@@ -657,6 +657,10 @@ mod tests_policy_revocation_8356;
 #[cfg(test)]
 #[path = "tests_session_hit_authority_9519.rs"]
 mod tests_session_hit_authority_9519;
+// #10591: production-window sweep quantification for the #10509 rename matrix.
+#[cfg(test)]
+#[path = "tests_session_hit_authority_window_10591.rs"]
+mod tests_session_hit_authority_window_10591;
 // #9529: host-bound gates judge the post-destination-translation tuple.
 #[cfg(test)]
 #[path = "tests_host_bound_post_dnat_9529.rs"]
