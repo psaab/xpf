@@ -514,8 +514,8 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 // indistinguishable to the HA peer, the delete reason, and the operator log —
 // the choice of producer changes WHICH sessions are deleted, never HOW.
 //
-// The delete reuses the companion-aware DeleteBatchKnownV4/V6 (forward entry +
-// reverse companion + any dynamic DNAT/NAT64 companion) and propagates each
+// The delete reuses the companion-aware DeleteBatchKnownExactV4/V6 (forward
+// entry + reverse companion + any dynamic DNAT/NAT64 companion) and propagates
 // deletion to the HA peer through the same #2468 delete-sync channel the GC
 // delete callback uses, so a session dropped on the owner is dropped on the
 // standby too and cannot resurrect on failover.

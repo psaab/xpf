@@ -739,7 +739,12 @@ func TestGCExactDeleteEdgeCases(t *testing.T) {
 			deleteError: errors.New("all failed"),
 		}
 		gc := NewGCWithDomains(store, nil, nil, nil, time.Minute)
+		var callbacks []dataplane.SessionKey
+		gc.OnDeleteV4 = func(key dataplane.SessionKey) { callbacks = append(callbacks, key) }
 		gc.sweep()
+		if len(callbacks) != 0 {
+			t.Fatalf("all-fail callbacks=%+v, want none", callbacks)
+		}
 		if len(store.entries) != len(entries) || gc.Stats().ExpiredDeleted != 0 {
 			t.Fatalf("all-fail entries=%d stats=%+v", len(store.entries), gc.Stats())
 		}
@@ -753,12 +758,21 @@ func TestGCExactDeleteEdgeCases(t *testing.T) {
 		}
 		store := &partialDeleteSessionStore{entries: entries, exact: keys}
 		gc := NewGCWithDomains(store, nil, nil, nil, time.Minute)
+		var callbacks []dataplane.SessionKey
+		gc.OnDeleteV4 = func(key dataplane.SessionKey) { callbacks = append(callbacks, key) }
 		gc.sweep()
 		if len(store.entries) != 0 || gc.Stats().ExpiredDeleted != len(entries) {
 			t.Fatalf("all-ok entries=%d stats=%+v", len(store.entries), gc.Stats())
 		}
+		if len(callbacks) != len(keys) {
+			t.Fatalf("all-ok callbacks=%+v, want %+v", callbacks, keys)
+		}
+		for i := range keys {
+			if callbacks[i] != keys[i] {
+				t.Fatalf("all-ok callbacks=%+v, want %+v", callbacks, keys)
+			}
+		}
 	})
-
 	t.Run("sweep-retry", func(t *testing.T) {
 		entries := gcExactEntriesV4(now)
 		keys := make([]dataplane.SessionKey, 0, len(entries))

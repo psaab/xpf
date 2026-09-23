@@ -424,6 +424,108 @@ func TestDeleteBatchKnownExactV6ProjectsTheNonPrefixDeletedSet(t *testing.T) {
 	}
 }
 
+// TestDeleteBatchKnownExactV4ProjectsMultiChunkSet pins exact-set accumulation
+// across the 64-key boundary: missing@64, hard error@66, and successful tail.
+func TestDeleteBatchKnownExactV4ProjectsMultiChunkSet(t *testing.T) {
+	keys := make([]SessionKey, 70)
+	for i := range keys {
+		keys[i] = SessionKey{
+			SrcIP:    [4]byte{10, 0, 0, byte(i)},
+			DstIP:    [4]byte{10, 0, 1, byte(i)},
+			Protocol: 6,
+			SrcPort:  uint16(1000 + i),
+			DstPort:  80,
+		}
+	}
+	errBoom := errors.New("multi-chunk exact projection boom")
+	dp := &batchDeleteTailDP{
+		missingV4:  keys[64],
+		presentV4:  map[SessionKey]bool{},
+		retryErrV4: map[SessionKey]error{keys[64]: ebpf.ErrKeyNotExist, keys[66]: errBoom},
+	}
+	for i, key := range keys {
+		dp.presentV4[key] = i != 64
+	}
+	entries := make([]SessionEntryV4, len(keys))
+	for i, key := range keys {
+		entries[i] = SessionEntryV4{Key: key}
+	}
+
+	exact, err := (dataPlaneSessionStore{dp: dp}).DeleteBatchKnownExactV4(entries, DeleteReasonGCExpired, true)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("DeleteBatchKnownExactV4 error = %v, want %v", err, errBoom)
+	}
+	want := make([]SessionKey, 0, len(keys)-2)
+	for i, key := range keys {
+		if i != 64 && i != 66 {
+			want = append(want, key)
+		}
+	}
+	if len(exact) != len(want) {
+		t.Fatalf("exact deleted keys length = %d, want %d", len(exact), len(want))
+	}
+	for i := range want {
+		if exact[i] != want[i] {
+			t.Fatalf("exact deleted keys[%d] = %+v, want %+v", i, exact[i], want[i])
+		}
+	}
+	if !dp.presentV4[keys[66]] {
+		t.Fatalf("boom key deleted, want retained: %+v", keys[66])
+	}
+}
+
+// TestDeleteBatchKnownExactV6ProjectsMultiChunkSet is the IPv6 twin.
+func TestDeleteBatchKnownExactV6ProjectsMultiChunkSet(t *testing.T) {
+	keys := make([]SessionKeyV6, 70)
+	for i := range keys {
+		var src, dst [16]byte
+		src[0], src[15] = 0x20, byte(i)
+		dst[0], dst[15] = 0x30, byte(i)
+		keys[i] = SessionKeyV6{
+			SrcIP:    src,
+			DstIP:    dst,
+			Protocol: 6,
+			SrcPort:  uint16(1000 + i),
+			DstPort:  80,
+		}
+	}
+	errBoom := errors.New("multi-chunk v6 exact projection boom")
+	dp := &batchDeleteTailDP{
+		missingV6:  keys[64],
+		presentV6:  map[SessionKeyV6]bool{},
+		retryErrV6: map[SessionKeyV6]error{keys[64]: ebpf.ErrKeyNotExist, keys[66]: errBoom},
+	}
+	for i, key := range keys {
+		dp.presentV6[key] = i != 64
+	}
+	entries := make([]SessionEntryV6, len(keys))
+	for i, key := range keys {
+		entries[i] = SessionEntryV6{Key: key}
+	}
+
+	exact, err := (dataPlaneSessionStore{dp: dp}).DeleteBatchKnownExactV6(entries, DeleteReasonGCExpired, true)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("DeleteBatchKnownExactV6 error = %v, want %v", err, errBoom)
+	}
+	want := make([]SessionKeyV6, 0, len(keys)-2)
+	for i, key := range keys {
+		if i != 64 && i != 66 {
+			want = append(want, key)
+		}
+	}
+	if len(exact) != len(want) {
+		t.Fatalf("exact deleted v6 keys length = %d, want %d", len(exact), len(want))
+	}
+	for i := range want {
+		if exact[i] != want[i] {
+			t.Fatalf("exact deleted v6 keys[%d] = %+v, want %+v", i, exact[i], want[i])
+		}
+	}
+	if !dp.presentV6[keys[66]] {
+		t.Fatalf("v6 boom key deleted, want retained: %+v", keys[66])
+	}
+}
+
 // TestBatchDeleteV4PropagatesRealError confirms a non-not-found batch error is
 // still surfaced (the #5448 fix must not swallow genuine failures).
 func TestBatchDeleteV4PropagatesRealError(t *testing.T) {
