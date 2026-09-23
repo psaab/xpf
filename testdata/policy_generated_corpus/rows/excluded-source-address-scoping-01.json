@@ -1,0 +1,94 @@
+{
+  "config_set_lines": [
+    "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+    "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+    "set security zones security-zone trust interfaces ge-0/0/0.0",
+    "set security zones security-zone untrust interfaces ge-0/0/1.0",
+    "set security policies default-policy deny-all",
+    "set security address-book global address a-lab 10.0.1.100/32",
+    "set security policies from-zone trust to-zone untrust policy p-nonlab match source-address a-lab",
+    "set security policies from-zone trust to-zone untrust policy p-nonlab match source-address-excluded",
+    "set security policies from-zone trust to-zone untrust policy p-nonlab match destination-address any",
+    "set security policies from-zone trust to-zone untrust policy p-nonlab match application any",
+    "set security policies from-zone trust to-zone untrust policy p-nonlab then permit"
+  ],
+  "go_verdict": {
+    "action": "deny",
+    "default_used": true,
+    "matched": false,
+    "policy_id": 0,
+    "policy_name": ""
+  },
+  "id": "excluded-source-address-scoping-01",
+  "query": {
+    "dst_ip": "10.0.2.5",
+    "dst_port": 80,
+    "frag": false,
+    "from_zone": "trust",
+    "icmp_code": null,
+    "icmp_type": null,
+    "l4_present": true,
+    "protocol": "tcp",
+    "src_ip": "10.0.1.100",
+    "src_port": 1234,
+    "to_zone": "untrust"
+  },
+  "rust_verdict": {
+    "action": "deny",
+    "default_used": true,
+    "matched": false,
+    "policy_id": 0,
+    "policy_name": ""
+  },
+  "schema_version": 1,
+  "snapshot": {
+    "default_policy": "deny",
+    "rules": [
+      {
+        "rule_id": "trust-\u003euntrust/p-nonlab",
+        "name": "p-nonlab",
+        "from_zone": "trust",
+        "to_zone": "untrust",
+        "source_addresses": [
+          "10.0.1.100/32"
+        ],
+        "destination_addresses": [
+          "any"
+        ],
+        "source_book_ids": [
+          3495241515
+        ],
+        "destination_literals": [
+          "any"
+        ],
+        "applications": [
+          "any"
+        ],
+        "action": "permit",
+        "source_address_excluded": true
+      }
+    ],
+    "zones": [
+      {
+        "name": "trust",
+        "id": 50675,
+        "host_inbound_configured": true
+      },
+      {
+        "name": "untrust",
+        "id": 20665,
+        "host_inbound_configured": true
+      }
+    ],
+    "address_books": [
+      {
+        "id": 3495241515,
+        "name": "a-lab",
+        "prefixes_v4": [
+          "10.0.1.100/32"
+        ]
+      }
+    ]
+  },
+  "source_case": "excluded-source-address-scoping"
+}

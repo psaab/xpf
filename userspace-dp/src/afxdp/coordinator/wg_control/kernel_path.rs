@@ -4,21 +4,18 @@
 //! Only a STEERED port's thread gets here — #9521 already drops every
 //! other port's kernel-path transport (`WgKernelTransport::DropUnsteered`,
 //! set-valued since #9587). For a steered port the kernel path has two
-//! causes, and they need opposite answers:
+//! causes, and both get the SAME local-vs-transit posture:
 //!
 //!   * the record arrived on an ingress the XDP shim does NOT adjudicate (#8274's
-//!     stated residual, `docs/log/8274.md`). The TUN write is the only path there,
-//!     so it is delivered exactly as before;
+//!     stated residual, `docs/log/8274.md`, tightened for transit by #10527);
 //!   * the record arrived on an ingress the shim DOES adjudicate. A healthy shim
 //!     claims every steered-port transport record addressed to the firewall for
 //!     the worker (`wg_worker_claims_record`), so reaching the kernel there means
 //!     the shim took one of its degraded arms — ctrl disabled at helper start / an
 //!     RG transition / a reth link cycle, binding missing or not ready, heartbeat
-//!     missing or stale — and passed the record up as "local". Writing its
-//!     plaintext to the TUN handed inner TRANSIT to the kernel's open forward hook
-//!     while every other transit packet was being dropped.
+//!     missing or stale — and passed the record up as "local".
 //!
-//! For the second case the thread applies the shim's OWN degraded posture to the
+//! In BOTH cases the thread applies the shim's OWN degraded posture to the
 //! decapsulated packet: an inner packet addressed to the firewall itself is
 //! delivered (it then meets the nftables `hook input` chains, as native
 //! host-inbound does in these windows), and inner transit is dropped and counted
@@ -32,10 +29,10 @@
 //! including the VRRP VIPs it reads from the kernel — addresses the helper's
 //! snapshot-derived `local_v4` does not carry).
 //!
-//! An ingress the thread cannot place — no pktinfo cmsg, or an ifindex that is
-//! neither in the ingress set nor a configured interface (a VRF master, if the
-//! kernel reports one) — is treated as covered: that fails closed for transit
-//! only, and still delivers traffic addressed to the firewall.
+//! A no-pktinfo ingress is treated as unknown and gets the same local-vs-
+//! transit disposition. A configured ingress whose shim map cannot be read is
+//! classified as uncovered; if locality is unreadable too, the destination
+//! lookup returns false and the packet fails closed rather than being written.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -71,8 +68,9 @@ pub(crate) fn kernel_path_disposition(
     inner_is_local: bool,
 ) -> WgKernelPathDisposition {
     match ingress {
-        WgKernelPathIngress::Uncovered => WgKernelPathDisposition::Deliver,
-        WgKernelPathIngress::Covered | WgKernelPathIngress::Unknown => {
+        WgKernelPathIngress::Uncovered
+        | WgKernelPathIngress::Covered
+        | WgKernelPathIngress::Unknown => {
             if inner_is_local {
                 WgKernelPathDisposition::Deliver
             } else {
@@ -249,7 +247,7 @@ impl ShimMapsKernelPathView {
                             eprintln!(
                                 "xpf-wg: tun={} cannot read the XDP shim's ingress/local maps ({err}): \
                                  kernel-path transport is treated as arriving on an UNCOVERED ingress, \
-                                 so the degraded-mode transit refusal (#9594) is INACTIVE until they open",
+                                 transit and unreadable-locality traffic fail closed (#10527)",
                                 self.tunnel_name
                             );
                         }
@@ -328,8 +326,16 @@ mod tests {
     fn disposition_mirrors_the_shims_degraded_posture_9594() {
         use WgKernelPathDisposition::*;
         use WgKernelPathIngress::*;
-        assert_eq!(kernel_path_disposition(Uncovered, false), Deliver, "#8274 residual: delivered");
-        assert_eq!(kernel_path_disposition(Uncovered, true), Deliver);
+        assert_eq!(
+            kernel_path_disposition(Uncovered, false),
+            DropDegradedTransit,
+            "#10527: uncovered transit is refused, not #8274-delivered"
+        );
+        assert_eq!(
+            kernel_path_disposition(Uncovered, true),
+            Deliver,
+            "#10527: uncovered host-inbound still delivered"
+        );
         assert_eq!(kernel_path_disposition(Covered, false), DropDegradedTransit, "degraded transit");
         assert_eq!(kernel_path_disposition(Covered, true), Deliver, "degraded host-inbound");
         assert_eq!(kernel_path_disposition(Unknown, false), DropDegradedTransit, "fail closed");
@@ -345,6 +351,31 @@ mod tests {
         assert_eq!(classify_ingress(Some(3), Some(false), true), Uncovered, "configured, not adjudicated");
         assert_eq!(classify_ingress(Some(99), Some(false), false), Unknown, "unplaceable");
         assert_eq!(classify_ingress(Some(3), None, false), Uncovered, "no shim set: nothing covered");
+    }
+
+    #[test]
+    fn unparseable_inner_fails_closed_for_uncovered_transit_10527() {
+        let truncated = [0x10, 0, 0, 0];
+        assert_eq!(inner_destination(&truncated), None);
+        assert_eq!(
+            kernel_path_disposition(
+                WgKernelPathIngress::Uncovered,
+                inner_destination(&truncated).is_some()
+            ),
+            WgKernelPathDisposition::DropDegradedTransit,
+            "an unreadable inner destination must not be treated as local"
+        );
+    }
+
+    #[test]
+    fn unreadable_ingress_map_fails_closed_for_uncovered_transit_10527() {
+        let ingress = classify_ingress(Some(3), None, false);
+        assert_eq!(ingress, WgKernelPathIngress::Uncovered);
+        assert_eq!(
+            kernel_path_disposition(ingress, false),
+            WgKernelPathDisposition::DropDegradedTransit,
+            "an unreadable shim ingress map must refuse transit"
+        );
     }
 
     #[test]
@@ -383,9 +414,10 @@ mod tests {
     }
 }
 
-/// #9594 test-only view: every ingress is uncovered, nothing is local — the
-/// pre-#9594 behavior, used by `run_wg_control_loop`'s test wrapper so the older
-/// loop cells keep observing what they were written against.
+/// #9594 test-only view: every ingress is uncovered, and no destination is
+/// local. It is used by the legacy transport cell, which now pins the
+/// #10527 uncovered-transit refusal; dedicated local-delivery cells use a
+/// fixed posture view with an explicit local destination.
 #[cfg(test)]
 pub(crate) struct UncoveredKernelPathView;
 

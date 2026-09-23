@@ -90,6 +90,10 @@ func TestWGPlaintextWarningScopesTheZoneToTheDataplanePath(t *testing.T) {
 		// forwarding path, which #9594 made false.
 		"While the dataplane is degraded",
 		"transit is dropped and counted as a degraded-transit receive drop (#9594)",
+		// #10527 closes the uncovered-ingress transit bypass while preserving
+		// the host-inbound TUN/input-chain handoff.
+		"host-inbound path",
+		"transit is dropped and counted as a degraded-transit receive drop (#10527)",
 		// ... and the refused-port case stays addressed, keyed by its stable
 		// issue tag rather than its sentence (the sentence moved to
 		// selected-set wording under #9587).

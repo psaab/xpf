@@ -30,11 +30,30 @@ type peerRecorderDP struct {
 	// #9752 round 3: the forward-only mark each helper batch/single carried.
 	peerBatchMarks  []bool
 	peerSingleMarks []bool
-	// refuseV4 names the keys the "helper" refuses as peer deletes; events records
-	// the order of peer deletes and DNAT deletes; iterV4 is what a bulk sweep sees.
+	// refuseV4 names the keys the "helper" refuses as peer deletes; absentV4/V6
+	// model helper-applied rows whose mirror disappeared concurrently. events
+	// records the order of peer deletes and DNAT deletes; iterV4 is what a bulk
+	// sweep sees.
 	refuseV4 map[ScopedSessionKey]bool
+	absentV4 map[ScopedSessionKey]bool
+	absentV6 map[ScopedSessionKeyV6]bool
 	events   []string
 	iterV4   []SessionEntryV4
+	// #10512: scoped single-key peer deletes received (key + domain + id).
+	peerScopedV4 []scopedPeerCallV4
+	peerScopedV6 []scopedPeerCallV6
+}
+
+type scopedPeerCallV4 struct {
+	key    SessionKey
+	domain uint32
+	id     uint64
+}
+
+type scopedPeerCallV6 struct {
+	key    SessionKeyV6
+	domain uint32
+	id     uint64
 }
 
 func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKey, forwardOnly bool) (int, []ScopedSessionKey, error) {
@@ -54,6 +73,34 @@ func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScopedV6(s []ScopedSession
 	d.peerBatchV6 = append(d.peerBatchV6, s...)
 	return len(s), nil, nil
 }
+func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsExactScoped(s []ScopedSessionKey, forwardOnly bool) ([]ScopedSessionKey, []ScopedSessionKey, error) {
+	d.peerBatchV4 = append(d.peerBatchV4, s...)
+	d.peerBatchMarks = append(d.peerBatchMarks, forwardOnly)
+	var deleted, applied []ScopedSessionKey
+	for _, k := range s {
+		d.events = append(d.events, "peer-delete")
+		if d.refuseV4[k] {
+			continue
+		}
+		applied = append(applied, k)
+		if !d.absentV4[k] {
+			deleted = append(deleted, k)
+		}
+	}
+	return deleted, applied, nil
+}
+
+func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsExactScopedV6(s []ScopedSessionKeyV6, forwardOnly bool) ([]ScopedSessionKeyV6, []ScopedSessionKeyV6, error) {
+	d.peerBatchV6 = append(d.peerBatchV6, s...)
+	applied := append([]ScopedSessionKeyV6(nil), s...)
+	deleted := make([]ScopedSessionKeyV6, 0, len(s))
+	for _, k := range s {
+		if !d.absentV6[k] {
+			deleted = append(deleted, k)
+		}
+	}
+	return deleted, applied, nil
+}
 
 func (d *peerRecorderDP) DeletePeerSyncedSession(k SessionKey, forwardOnly bool) (bool, error) {
 	d.peerSingleV4 = append(d.peerSingleV4, k)
@@ -62,6 +109,16 @@ func (d *peerRecorderDP) DeletePeerSyncedSession(k SessionKey, forwardOnly bool)
 }
 
 func (d *peerRecorderDP) DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error) {
+	return false, nil
+}
+
+func (d *peerRecorderDP) DeletePeerSyncedSessionScoped(k SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	d.peerScopedV4 = append(d.peerScopedV4, scopedPeerCallV4{key: k, domain: domain, id: expectedID})
+	return false, nil
+}
+
+func (d *peerRecorderDP) DeletePeerSyncedSessionScopedV6(k SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	d.peerScopedV6 = append(d.peerScopedV6, scopedPeerCallV6{key: k, domain: domain, id: expectedID})
 	return false, nil
 }
 
@@ -129,6 +186,73 @@ func TestAClusterStaleDeleteIsMarkedAsAPeerDelete9714(t *testing.T) {
 	if len(dp.scopedV4) != 0 {
 		t.Errorf("a cluster-stale delete also took the unmarked scoped path (%d keys); the helper then "+
 			"cannot tell it from an operator clear", len(dp.scopedV4))
+	}
+}
+
+// TestExactPeerDeleteExcludesAbsentMirrorRowsKeepsAppliedCompanions pins the
+// distinction between a helper-applied forward and a mirror row that was
+// already absent (#10598). The absent forward is still helper-applied, so its
+// reverse companion must be retired, but only the actually deleted mirror key
+// belongs in the outward exact set.
+func TestExactPeerDeleteExcludesAbsentMirrorRowsKeepsAppliedCompanions(t *testing.T) {
+	forward0, forward1 := key9364(1234), key9364(1235)
+	reverse0, reverse1 := key9364(4321), key9364(4322)
+	entries := []SessionEntryV4{
+		{Key: forward0, Value: SessionValue{RoutingDomain: 100007, ReverseKey: reverse0}},
+		{Key: forward1, Value: SessionValue{RoutingDomain: 100007, ReverseKey: reverse1}},
+	}
+	dp := &peerRecorderDP{
+		absentV4: map[ScopedSessionKey]bool{{
+			Key:           forward1,
+			RoutingDomain: 100007,
+		}: true},
+	}
+	store := dataPlaneSessionStore{dp: dp}
+	exact, err := store.DeleteBatchKnownExactV4(entries, DeleteReasonClusterStale, false)
+	if err != nil {
+		t.Fatalf("DeleteBatchKnownExactV4: %v", err)
+	}
+	if len(exact) != 1 || exact[0] != forward0 {
+		t.Fatalf("exact keys = %+v, want [%+v]", exact, forward0)
+	}
+	if len(dp.peerBatchV4) != 4 {
+		t.Fatalf("peer batch keys = %+v, want two forwards plus two applied companions", dp.peerBatchV4)
+	}
+	if dp.peerBatchV4[2].Key != reverse0 || dp.peerBatchV4[3].Key != reverse1 {
+		t.Fatalf("companion batch keys = %+v, want [%+v %+v]", dp.peerBatchV4[2:], reverse0, reverse1)
+	}
+}
+
+// TestExactPeerDeleteExcludesAbsentMirrorRowsKeepsAppliedCompanionsV6 is the
+// IPv6 twin of the absent-vs-applied companion regression.
+func TestExactPeerDeleteExcludesAbsentMirrorRowsKeepsAppliedCompanionsV6(t *testing.T) {
+	forward0 := SessionKeyV6{SrcIP: [16]byte{0x20, 1}, DstIP: [16]byte{0x30, 1}, SrcPort: 1234, DstPort: 80, Protocol: 6}
+	forward1 := SessionKeyV6{SrcIP: [16]byte{0x20, 2}, DstIP: [16]byte{0x30, 2}, SrcPort: 1235, DstPort: 80, Protocol: 6}
+	reverse0 := SessionKeyV6{SrcIP: [16]byte{0x30, 1}, DstIP: [16]byte{0x20, 1}, SrcPort: 80, DstPort: 1234, Protocol: 6}
+	reverse1 := SessionKeyV6{SrcIP: [16]byte{0x30, 2}, DstIP: [16]byte{0x20, 2}, SrcPort: 80, DstPort: 1235, Protocol: 6}
+	entries := []SessionEntryV6{
+		{Key: forward0, Value: SessionValueV6{RoutingDomain: 100007, ReverseKey: reverse0}},
+		{Key: forward1, Value: SessionValueV6{RoutingDomain: 100007, ReverseKey: reverse1}},
+	}
+	dp := &peerRecorderDP{
+		absentV6: map[ScopedSessionKeyV6]bool{{
+			Key:           forward1,
+			RoutingDomain: 100007,
+		}: true},
+	}
+	store := dataPlaneSessionStore{dp: dp}
+	exact, err := store.DeleteBatchKnownExactV6(entries, DeleteReasonClusterStale, false)
+	if err != nil {
+		t.Fatalf("DeleteBatchKnownExactV6: %v", err)
+	}
+	if len(exact) != 1 || exact[0] != forward0 {
+		t.Fatalf("exact v6 keys = %+v, want [%+v]", exact, forward0)
+	}
+	if len(dp.peerBatchV6) != 4 {
+		t.Fatalf("v6 peer batch keys = %+v, want two forwards plus two applied companions", dp.peerBatchV6)
+	}
+	if dp.peerBatchV6[2].Key != reverse0 || dp.peerBatchV6[3].Key != reverse1 {
+		t.Fatalf("v6 companion batch keys = %+v, want [%+v %+v]", dp.peerBatchV6[2:], reverse0, reverse1)
 	}
 }
 

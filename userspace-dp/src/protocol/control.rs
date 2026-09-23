@@ -334,6 +334,11 @@ pub(crate) struct ControlRequest {
     pub packet: Option<InjectPacketRequest>,
     #[serde(rename = "session_sync", default)]
     pub session_sync: Option<SessionSyncRequest>,
+    /// #10512: pre-publication policy invalidation discovery. The helper
+    /// enumerates its frozen session authority; Go performs the subsequent
+    /// identity-conditional deletes after the new snapshot is live.
+    #[serde(rename = "session_policy_list", default)]
+    pub session_policy_list: Option<SessionPolicyListRequest>,
     #[serde(rename = "session_deltas", default)]
     pub session_deltas: Option<SessionDeltaDrainRequest>,
     #[serde(rename = "session_export", default)]
@@ -699,7 +704,8 @@ pub(crate) struct WgTunnelStatus {
     /// #9521: see `WgCounters::rx_unsteered_transport_drops`.
     #[serde(rename = "rx_unsteered_transport_drops", default)]
     pub rx_unsteered_transport_drops: u64,
-    /// #9594: see `WgCounters::rx_degraded_transit_drops`.
+    /// #9594/#10527: see `WgCounters::rx_degraded_transit_drops`; this includes
+    /// transit refused on covered degraded and uncovered shim ingresses.
     #[serde(rename = "rx_degraded_transit_drops", default)]
     pub rx_degraded_transit_drops: u64,
     // --- transport encap ---
@@ -789,10 +795,22 @@ pub(crate) struct ControlResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ProcessStatus>,
     #[serde(
-        rename = "session_deltas",
+        rename = "session_policy_matches",
         default,
         skip_serializing_if = "Vec::is_empty"
     )]
+    pub session_policy_matches: Vec<SessionPolicyMatch>,
+    #[serde(rename = "session_policy_complete", default)]
+    pub session_policy_complete: bool,
+    #[serde(rename = "session_policy_continuation", default)]
+    pub session_policy_continuation: String,
+    #[serde(
+        rename = "session_policy_per_worker_errors",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub session_policy_per_worker_errors: Vec<String>,
+    #[serde(rename = "session_deltas", default, skip_serializing_if = "Vec::is_empty")]
     pub session_deltas: Vec<SessionDeltaInfo>,
     /// #9344/#9856: `true` when an export answer is capped by `max` and
     /// the helper still holds entries from the same tokenized window.
@@ -818,6 +836,28 @@ pub(crate) struct ControlResponse {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub display_leases: Vec<DisplayLeaseWire>,
+    /// #10512: mirror-clear transaction metadata. Non-clear verbs carry zero
+    /// values; additive serde defaults preserve rolling compatibility.
+    #[serde(rename = "session_mirror_v4_count", default)]
+    pub session_mirror_v4_count: u64,
+    #[serde(rename = "session_mirror_v6_count", default)]
+    pub session_mirror_v6_count: u64,
+    #[serde(rename = "session_mirror_complete", default)]
+    pub session_mirror_complete: bool,
+    #[serde(rename = "session_mirror_fence_id", default)]
+    pub session_mirror_fence_id: u64,
+    #[serde(rename = "session_mirror_continuation", default)]
+    pub session_mirror_continuation: String,
+    /// #10512: per-match outcome vector for one `mirror_delete_policy_batch`
+    /// micro-batch (plan §2.4), positional against the request's matches:
+    /// `applied` | `stale_forward` | `partial_companion` | `refused_identity`.
+    /// Valid only when `policy_delete_complete` is true.
+    #[serde(rename = "policy_delete_outcomes", default)]
+    pub policy_delete_outcomes: Vec<String>,
+    #[serde(rename = "policy_delete_complete", default)]
+    pub policy_delete_complete: bool,
+    #[serde(rename = "policy_delete_errors", default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_delete_errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -884,6 +924,14 @@ pub(crate) struct InjectPacketRequest {
 pub(crate) struct SessionSyncRequest {
     #[serde(default)]
     pub operation: String,
+    /// #10512: helper process epoch and idempotency identity. Additive for
+    /// rolling upgrades; tuple verbs reject an epoch older than the process.
+    #[serde(rename = "helper_epoch", default)]
+    pub helper_epoch: u64,
+    #[serde(rename = "operation_id", default)]
+    pub operation_id: String,
+    #[serde(rename = "mutation_id", default)]
+    pub mutation_id: String,
     #[serde(rename = "addr_family", default)]
     pub addr_family: u8,
     #[serde(default)]
@@ -990,6 +1038,15 @@ pub(crate) struct SessionSyncRequest {
     /// which falls back to unconditional behavior (rolling-upgrade safe).
     #[serde(default)]
     pub generation: u64,
+    /// #10512: one identity-conditional policy-delete micro-batch (plan §2.4:
+    /// at most 64 matches, 128 gate keys). Each item is a READ match
+    /// verbatim — forward tuple, captured reverse tuple, and both expected
+    /// identities. Tuple routing domains are RAW (0 = default instance,
+    /// stated) and family tags compact 4/6. Set only with operation
+    /// `mirror_delete_policy_batch`; `None` for every other verb. Additive:
+    /// an old helper rejects the unknown verb.
+    #[serde(rename = "policy_matches", default, skip_serializing_if = "Option::is_none")]
+    pub policy_matches: Option<Vec<SessionPolicyMatch>>,
     /// #3301: the admitting policy's ID (#3056 namespace), carried so a
     /// peer-PROMOTED session resolves the admitting policy on its live-session
     /// rows / RT_FLOW records instead of the `0` sentinel (which the Go side
@@ -1121,11 +1178,16 @@ pub(crate) struct SessionSyncRequest {
     /// #9752: the session's installing route-table domain id
     /// (`routingInstanceDomain` semantics: 0 = default table). Carried so a
     /// peer-synced session re-resolves in the table its PBR steer installed
+
     /// instead of `inet.0`. `serde(default)` => 0 on an old peer (default),
     /// the pre-#9752 behavior (rolling-upgrade safe).
     ///
     /// The rename MUST match the Go struct tag
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
+    #[serde(rename = "clear_fence_id", default)]
+    pub clear_fence_id: u64,
+    #[serde(rename = "clear_continuation", default)]
+    pub clear_continuation: String,
     #[serde(rename = "install_table_domain", default)]
     pub install_table_domain: u32,
     /// #9752: owner check for `install_table_domain` (high 32 of the FNV-64).
@@ -1140,6 +1202,68 @@ pub(crate) struct SessionSyncRequest {
     /// variant for the stated tuple/domain rather than under-matching `None`.
     #[serde(rename = "purge_tunnel_variants", default)]
     pub purge_tunnel_variants: bool,
+}
+/// #10512: policy invalidation discovery request. `mode=prepublish` has no
+/// creation-time cutoff; `mode=legacy` applies `before_secs` against the
+/// helper's monotonic creation timestamp.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct SessionPolicyListRequest {
+    #[serde(rename = "policy_ids", default)]
+    pub policy_ids: Vec<u32>,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(rename = "before_secs", default)]
+    pub before_secs: Option<u64>,
+    #[serde(default)]
+    pub families: Vec<u8>,
+    #[serde(default)]
+    pub classes: Vec<String>,
+    #[serde(default)]
+    pub continuation: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct SessionPolicyTuple {
+    #[serde(rename = "addr_family", default)]
+    pub addr_family: u8,
+    #[serde(default)]
+    pub protocol: u8,
+    #[serde(rename = "src_ip", default)]
+    pub src_ip: String,
+    #[serde(rename = "dst_ip", default)]
+    pub dst_ip: String,
+    #[serde(rename = "src_port", default)]
+    pub src_port: u16,
+    #[serde(rename = "dst_port", default)]
+    pub dst_port: u16,
+    #[serde(rename = "tunnel_discriminator", default)]
+    pub tunnel_discriminator: u64,
+    #[serde(rename = "routing_domain", default)]
+    pub routing_domain: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct SessionPolicyMatch {
+    #[serde(rename = "addr_family", default)]
+    pub addr_family: u8,
+    #[serde(rename = "routing_domain", default)]
+    pub routing_domain: u32,
+    #[serde(default)]
+    pub tuple: SessionPolicyTuple,
+    #[serde(rename = "reverse_key", default, skip_serializing_if = "Option::is_none")]
+    pub reverse_key: Option<SessionPolicyTuple>,
+    #[serde(rename = "policy_id", default)]
+    pub policy_id: u32,
+    #[serde(rename = "created_secs", default)]
+    pub created_secs: u64,
+    #[serde(rename = "created_ns", default)]
+    pub created_ns: u64,
+    #[serde(rename = "expected_rt_flow_session_id", default)]
+    pub expected_rt_flow_session_id: u64,
+    #[serde(rename = "companion_policy_id", default)]
+    pub companion_policy_id: u32,
+    #[serde(rename = "expected_companion_rt_flow_session_id", default)]
+    pub expected_companion_rt_flow_session_id: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

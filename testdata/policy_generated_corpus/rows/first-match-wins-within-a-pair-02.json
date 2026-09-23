@@ -1,0 +1,118 @@
+{
+  "config_set_lines": [
+    "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+    "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+    "set security zones security-zone trust interfaces ge-0/0/0.0",
+    "set security zones security-zone untrust interfaces ge-0/0/1.0",
+    "set security policies default-policy deny-all",
+    "set applications application app-ssh protocol tcp",
+    "set applications application app-ssh destination-port 22",
+    "set security policies from-zone trust to-zone untrust policy p-deny-ssh match source-address any",
+    "set security policies from-zone trust to-zone untrust policy p-deny-ssh match destination-address any",
+    "set security policies from-zone trust to-zone untrust policy p-deny-ssh match application app-ssh",
+    "set security policies from-zone trust to-zone untrust policy p-deny-ssh then deny",
+    "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+    "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+    "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+    "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+  ],
+  "go_verdict": {
+    "action": "permit",
+    "default_used": false,
+    "matched": true,
+    "policy_id": 1,
+    "policy_name": "p-allow"
+  },
+  "id": "first-match-wins-within-a-pair-02",
+  "query": {
+    "dst_ip": "10.0.2.5",
+    "dst_port": 80,
+    "frag": false,
+    "from_zone": "trust",
+    "icmp_code": null,
+    "icmp_type": null,
+    "l4_present": true,
+    "protocol": "tcp",
+    "src_ip": "10.0.1.5",
+    "src_port": 1234,
+    "to_zone": "untrust"
+  },
+  "rust_verdict": {
+    "action": "permit",
+    "default_used": false,
+    "matched": true,
+    "policy_id": 1,
+    "policy_name": "p-allow"
+  },
+  "schema_version": 1,
+  "snapshot": {
+    "default_policy": "deny",
+    "rules": [
+      {
+        "action": "deny",
+        "application_terms": [
+          {
+            "destination_port": "22",
+            "name": "app-ssh",
+            "protocol": "tcp"
+          }
+        ],
+        "applications": [
+          "app-ssh"
+        ],
+        "destination_addresses": [
+          "any"
+        ],
+        "destination_literals": [
+          "any"
+        ],
+        "from_zone": "trust",
+        "name": "p-deny-ssh",
+        "rule_id": "trust->untrust/p-deny-ssh",
+        "source_addresses": [
+          "any"
+        ],
+        "source_literals": [
+          "any"
+        ],
+        "to_zone": "untrust"
+      },
+      {
+        "action": "permit",
+        "applications": [
+          "any"
+        ],
+        "destination_addresses": [
+          "any"
+        ],
+        "destination_literals": [
+          "any"
+        ],
+        "from_zone": "trust",
+        "name": "p-allow",
+        "policy_id": 1,
+        "rule_id": "trust->untrust/p-allow",
+        "source_addresses": [
+          "any"
+        ],
+        "source_literals": [
+          "any"
+        ],
+        "to_zone": "untrust"
+      }
+    ],
+    "zones": [
+      {
+        "host_inbound_configured": true,
+        "id": 50675,
+        "name": "trust"
+      },
+      {
+        "host_inbound_configured": true,
+        "id": 20665,
+        "name": "untrust"
+      }
+    ]
+  },
+  "source_case": "first-match-wins-within-a-pair"
+}

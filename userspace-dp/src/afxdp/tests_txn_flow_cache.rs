@@ -202,10 +202,12 @@ fn txn_transit_install_publishes_the_installer_session_id_9582() {
 
 /// #3777 RED-on-revert: an interface INPUT filter `then count` must count EVERY
 /// packet of a cacheable flow, not just the seed. Packet 1 (SYN) counts on the
-/// cold path and seeds the flow cache; packet 2 (same 5-tuple) hits the flow
+/// cold path and installs the session but does NOT seed (#2363); packet 2
+/// (first ACK, same 5-tuple) seeds the flow cache; packet 3 MUST hit the flow
 /// cache and MUST replay the input `then count` — mirroring the output-counter
-/// replay (#2573). Reverting the input replay leaves the counter at 1 for a
-/// 2-packet flow (the under-count this fixes).
+/// replay (#2573). Reverting the input replay leaves the counter at 2 for a
+/// 3-packet flow (the under-count this fixes). SYN-first per the #10270
+/// fail-closed gate (ACK-first on a miss drops; #10605).
 #[test]
 fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
     use std::sync::atomic::Ordering;
@@ -244,9 +246,40 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         .clone();
     assert_eq!(input_counter.packets.load(Ordering::Relaxed), 0);
 
-    // Packet 1 (pure ACK = established TCP, so it is flow-cache-eligible per
-    // #2363 — a SYN is not cached): cold path counts the input filter, installs
-    // the session, and seeds the flow cache.
+    // Packet 1 (SYN): the #10270 fail-closed gate admits only SYN on a session
+    // miss. Cold path counts the input filter and installs the session; the SYN
+    // is not cache-eligible (#2363) so it must NOT seed.
+    let frame0 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame0,
+        meta0,
+        true,
+    );
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        1,
+        "the SYN session-miss must count on the cold path"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the SYN must install the session but NOT seed the flow cache"
+    );
+
+    // Packet 2 (first ACK, same 5-tuple): session hit, counts the input filter
+    // and seeds the flow cache.
     let frame1 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -267,16 +300,16 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
     );
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
-        1,
-        "the seed packet must count on the cold path"
+        2,
+        "the ACK seed must count on the session-hit path"
     );
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
-        "the forwarded SYN must seed the flow cache"
+        "the first ACK must seed the flow cache"
     );
 
-    // Packet 2 (same 5-tuple, ACK): MUST hit the flow cache and replay the
+    // Packet 3 (same 5-tuple, ACK): MUST hit the flow cache and replay the
     // input count.
     let frame2 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
@@ -298,11 +331,11 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
     );
     assert!(
         dbg2.tx >= 1,
-        "packet 2 must be forwarded from the flow-cache fast path"
+        "packet 3 must be forwarded from the flow-cache fast path"
     );
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
-        2,
+        3,
         "the flow-cache hit MUST replay the interface input `then count` (#3777)"
     );
 }
@@ -797,11 +830,13 @@ fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
 }
 /// #3778 RED-on-revert: a CoS behavior-aggregate (DSCP) classifier is
 /// per-packet in vSRX, but the cached TX-selection froze the SEED packet's
-/// queue (the flow-cache key excludes DSCP). Packet 1 (DSCP 0) seeds the cache
-/// on the default queue; packet 2 (same 5-tuple, DSCP 46 = EF) hits the flow
-/// cache and MUST re-classify to the EF queue. Reverting the per-packet
-/// re-classify replays the frozen default queue (queue 0), which this asserts
-/// against (expects queue 1).
+/// queue (the flow-cache key excludes DSCP). Packet 1 (SYN, DSCP 0) installs
+/// the session without seeding (#2363); packet 2 (first ACK, same 5-tuple,
+/// DSCP 0) seeds the cache on the default queue; packet 3 (DSCP 46 = EF) hits
+/// the flow cache and MUST re-classify to the EF queue. Reverting the
+/// per-packet re-classify replays the frozen default queue (queue 0), which
+/// this asserts against (expects queue 1). SYN-first per the #10270
+/// fail-closed gate (#10605).
 #[test]
 fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
     let mut snapshot = nat_snapshot();
@@ -885,7 +920,34 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
 
-    // Packet 1 (pure ACK = established, cache-eligible; DSCP 0): seeds the
+    // Packet 1 (SYN, DSCP 0): admitted on the session miss, installs the
+    // session. It must NOT seed (#2363); DSCP 0 so it cannot pollute CoS state.
+    let frame0 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let mut meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    meta0.dscp = 0;
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame0,
+        meta0,
+        true,
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the SYN must install the session but NOT seed the flow cache"
+    );
+
+    // Packet 2 (first ACK = established, cache-eligible; DSCP 0): seeds the
     // cache on the default queue.
     let frame1 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
@@ -909,7 +971,7 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
-        "the forwarded established ACK must seed the flow cache"
+        "the first ACK must seed the flow cache"
     );
     let seed_q = binding
         .scratch
@@ -922,7 +984,7 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
         "DSCP-0 seed packet must land on the default (best-effort) queue"
     );
 
-    // Packet 2 (same 5-tuple, DSCP 46 = EF): flow-cache HIT. The BA classifier
+    // Packet 3 (same 5-tuple, DSCP 46 = EF): flow-cache HIT. The BA classifier
     // MUST re-classify per packet to the EF queue instead of replaying the
     // frozen default.
     let frame2 = build_txn_tcp_syn_frame_v4(
@@ -961,12 +1023,14 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
 /// #3779 RED-on-revert: on the flow-cache hit path the TTL/hop-limit check (and
 /// its ICMP Time Exceeded) MUST run BEFORE the egress side effects (output
 /// `then count` replay, policy hit counter, policers, filter logs, terminal
-/// drop). Packet 1 (TTL 64) seeds the cache and charges the output filter count
-/// once; packet 2 (same 5-tuple, TTL 1) hits the cache and must be handled as a
-/// TTL-exceeded packet — enqueuing ICMP Time Exceeded — WITHOUT charging the
-/// output filter count a second time. Reverting the hoist replays the output
-/// count for the expired packet (it reaches 2) and, on a dropping flow, would
-/// drop it before the TE is built.
+/// drop). Packet 1 (SYN, TTL 64) installs the session without seeding (#2363)
+/// and charges the output filter count once; packet 2 (first ACK, TTL 64)
+/// seeds the cache and charges the output count again; packet 3 (same 5-tuple,
+/// TTL 1) hits the cache and must be handled as a TTL-exceeded packet —
+/// enqueuing ICMP Time Exceeded — WITHOUT charging the output filter count a
+/// third time. Reverting the hoist replays the output count for the expired
+/// packet (it reaches 3) and, on a dropping flow, would drop it before the TE
+/// is built. SYN-first per the #10270 fail-closed gate (#10605).
 #[test]
 fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
     use std::sync::atomic::Ordering;
@@ -1003,7 +1067,40 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
         .counter
         .clone();
 
-    // Packet 1 (pure ACK, TTL 64): seeds the cache and charges the output count.
+    // Packet 1 (SYN, TTL 64): admitted on the session miss, installs the
+    // session without seeding (#2363). It forwards, so it charges the output
+    // count once — establishing the one-packet base.
+    let frame0 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame0,
+        meta0,
+        true,
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the SYN must install the session but NOT seed the flow cache"
+    );
+    assert_eq!(
+        out_counter.packets.load(Ordering::Relaxed),
+        1,
+        "the forwarded SYN charges the output `then count` once"
+    );
+
+    // Packet 2 (first ACK, TTL 64): seeds the cache and charges the output
+    // count a second time.
     let frame1 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -1025,16 +1122,16 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
-        "the forwarded established ACK must seed the flow cache"
+        "the first ACK must seed the flow cache"
     );
     assert_eq!(
         out_counter.packets.load(Ordering::Relaxed),
-        1,
-        "the seed packet charges the output `then count` once"
+        2,
+        "the ACK seed charges the output `then count` a second time"
     );
     let forwards_after_seed = binding.scratch.scratch_forwards.len();
 
-    // Packet 2 (same 5-tuple, TTL 1): TTL check must precede egress accounting.
+    // Packet 3 (same 5-tuple, TTL 1): TTL check must precede egress accounting.
     let mut frame2 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -1063,13 +1160,13 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
     );
     assert_eq!(
         out_counter.packets.load(Ordering::Relaxed),
-        1,
+        2,
         "a TTL=1 cache-hit packet MUST NOT charge egress counters — the TTL \
          check runs before egress accounting (#3779)"
     );
     // The expired packet is handled on the TTL path (ICMP Time Exceeded when
     // the per-reason token bucket admits it, otherwise a silent drop) — in BOTH
-    // cases BEFORE egress accounting, which the count==1 pin above proves. When
+    // cases BEFORE egress accounting, which the count==2 pin above proves. When
     // a reply IS enqueued it must be a prebuilt Time Exceeded frame, not the
     // transit packet; the global per-reason rate-limiter bucket is shared across
     // the test binary, so gate that stronger check on the reply being produced
@@ -1095,13 +1192,15 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
 /// flow-cache key (`reclassify_cached_ba_queue` reads `meta.ingress_pcp`), so a
 /// mixed-priority flow must not be pinned to the SEED packet's queue.
 ///
-/// A priority-tagged (802.1p, VID 0) packet 1 with PCP 0 seeds the cache on the
-/// default (best-effort) queue; packet 2 (same 5-tuple, PCP 5) hits the flow
+/// A priority-tagged (802.1p, VID 0) packet 1 (SYN, PCP 0) installs the session
+/// without seeding (#2363); packet 2 (first ACK, PCP 0) seeds the cache on the
+/// default (best-effort) queue; packet 3 (same 5-tuple, PCP 5) hits the flow
 /// cache and MUST re-classify to the EF queue via the 802.1p branch of
 /// `reclassify_cached_ba_queue`. The interface carries ONLY an 802.1p classifier
 /// (no DSCP classifier), so the PCP branch is the sole path to the EF queue.
 /// Reverting the per-packet re-classify (or dropping the 802.1p arm) replays the
 /// frozen default queue (0), which this asserts against (expects queue 1).
+/// SYN-first per the #10270 fail-closed gate (#10605).
 #[test]
 fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
     // Splice an 802.1p priority tag (TPID 0x8100, VID 0, PCP in the top 3 TCI
@@ -1119,7 +1218,7 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
     }
     // Meta for a priority-tagged (VID 0) frame: L3 at 18, tag present, PCP set.
     // Everything else mirrors the untagged `txn_meta_v4`.
-    fn pcp_meta(pcp: u8, l3_len: u16) -> UserspaceDpMeta {
+    fn pcp_meta(pcp: u8, flags: u8, l3_len: u16) -> UserspaceDpMeta {
         UserspaceDpMeta {
             l3_offset: 18,
             l4_offset: 38,
@@ -1127,7 +1226,7 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
             ingress_vlan_present: 1,
             ingress_vlan_id: 0,
             ingress_pcp: pcp,
-            ..txn_meta_v4(24, 0x10_u8, l3_len)
+            ..txn_meta_v4(24, flags, l3_len)
         }
     }
 
@@ -1214,7 +1313,35 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
 
-    // Packet 1 (pure ACK = established, cache-eligible; priority tag PCP 0):
+    // Packet 1 (SYN, priority tag PCP 0): admitted on the session miss, installs
+    // the session without seeding (#2363). Tagged like the seed so the SYN takes
+    // the same L3-offset path (untagged would weaken the PCP-only pin).
+    let base0 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let frame0 = priority_tag(&base0, 0);
+    let meta0 = pcp_meta(0, TCP_FLAG_SYN, (frame0.len() - 18) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame0,
+        meta0,
+        true,
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the SYN must install the session but NOT seed the flow cache"
+    );
+
+    // Packet 2 (first ACK = established, cache-eligible; priority tag PCP 0):
     // seeds the cache on the default queue.
     let base1 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
@@ -1225,7 +1352,7 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let frame1 = priority_tag(&base1, 0);
-    let meta1 = pcp_meta(0, (frame1.len() - 18) as u16);
+    let meta1 = pcp_meta(0, 0x10_u8, (frame1.len() - 18) as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1238,7 +1365,7 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
-        "the forwarded established ACK must seed the flow cache"
+        "the first ACK must seed the flow cache"
     );
     let seed_q = binding
         .scratch
@@ -1251,7 +1378,7 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
         "PCP-0 seed packet must land on the default (best-effort) queue"
     );
 
-    // Packet 2 (same 5-tuple, priority tag PCP 5): flow-cache HIT. The 802.1p BA
+    // Packet 3 (same 5-tuple, priority tag PCP 5): flow-cache HIT. The 802.1p BA
     // classifier MUST re-classify per packet to the EF queue instead of
     // replaying the frozen default.
     let base2 = build_txn_tcp_syn_frame_v4(
@@ -1263,7 +1390,7 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let frame2 = priority_tag(&base2, 5);
-    let meta2 = pcp_meta(5, (frame2.len() - 18) as u16);
+    let meta2 = pcp_meta(5, 0x10_u8, (frame2.len() - 18) as u16);
     txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1296,11 +1423,13 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
 ///
 /// #3779 pinned the ordering for an output `then count` counter; this pins the
 /// POLICER interaction — the "TTL-expired-with-policer" item #4422 calls out.
-/// Packet 1 (TTL 64) seeds the cache; packet 2 (TTL 1) hits and must leave the
-/// policer's green count unchanged; packet 3 (TTL 64) hits and DOES meter the
-/// policer once — proving packet 2's non-metering is the TTL guard, not a dead
-/// policer. Reverting the hoist meters the expired packet 2 (green += 1) and
-/// fails the packet-2 assertion.
+/// Packet 1 (SYN, TTL 64) installs the session without seeding (#2363);
+/// packet 2 (first ACK, TTL 64) seeds the cache; packet 3 (TTL 1) hits and must
+/// leave the policer's green count unchanged; packet 4 (TTL 64) hits and DOES
+/// meter the policer once — proving packet 3's non-metering is the TTL guard,
+/// not a dead policer. Reverting the hoist meters the expired packet 3
+/// (green += 1) and fails the packet-3 assertion. SYN-first per the #10270
+/// fail-closed gate (#10605).
 #[test]
 fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
     let mut snapshot = nat_snapshot();
@@ -1345,7 +1474,34 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
             .green_packets
     };
 
-    // Packet 1 (pure ACK, TTL 64): seeds the cache and forwards.
+    // Packet 1 (SYN, TTL 64): admitted on the session miss, installs the
+    // session without seeding (#2363). It forwards and meters the policer once
+    // on the cold path.
+    let frame0 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta0 = txn_meta_v4(24, TCP_FLAG_SYN, (frame0.len() - 14) as u16);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame0,
+        meta0,
+        true,
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the SYN must install the session but NOT seed the flow cache"
+    );
+
+    // Packet 2 (first ACK, TTL 64): seeds the cache and forwards.
     let frame1 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -1367,11 +1523,11 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
-        "the forwarded established ACK must seed the flow cache"
+        "the first ACK must seed the flow cache"
     );
     let green_after_seed = green_packets();
 
-    // Packet 2 (same 5-tuple, TTL 1): flow-cache HIT, TTL expired. The TTL check
+    // Packet 3 (same 5-tuple, TTL 1): flow-cache HIT, TTL expired. The TTL check
     // precedes the policer, so this packet must NOT meter it.
     let mut frame2 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
@@ -1406,9 +1562,9 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
          TTL check runs before apply_cached_three_color_policers (#4422 / #3779)"
     );
 
-    // Packet 3 (same 5-tuple, TTL 64): a LIVE flow-cache hit. This DOES meter the
+    // Packet 4 (same 5-tuple, TTL 64): a LIVE flow-cache hit. This DOES meter the
     // policer once on the cached replay path — proving the policer is live and
-    // that packet 2's non-metering is specifically the TTL guard.
+    // that packet 3's non-metering is specifically the TTL guard.
     let frame3 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -1431,7 +1587,7 @@ fn txn_flow_cache_hit_ttl_expired_does_not_charge_three_color_policer_4422() {
         green_packets(),
         green_after_seed + 1,
         "a live cache-hit packet meters the three-color policer exactly once — \
-         confirms the policer is live, so packet 2's unchanged count is the TTL \
+         confirms the policer is live, so packet 3's unchanged count is the TTL \
          guard, not a dead policer"
     );
 }
@@ -1623,7 +1779,12 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
-            ingress_ifindex: 0,
+            // #10628: stamp the OBSERVED LAN ingress (reth1.0, ifindex 24) like
+            // the miss path does. A ForwardFlow forward with (0,0) is
+            // fixture-only: the healed reply-2 hit resolves its from-zone LIVE
+            // from this identity, and (0,0) Declines fail-closed into a pair
+            // revocation on the Stale arm (len 0 instead of 2).
+            ingress_ifindex: 24,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
             fabric_ingress: false,
@@ -1697,6 +1858,13 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
     );
     assert_eq!(batch2.session_creates, 1);
     assert_eq!(dbg2.tx, 1, "self-healed reply forwards as well");
+    assert_eq!(
+        dbg2.policy_revoked_sessions, 0,
+        "the healed hit must PERMIT via the live from-zone, not Decline \
+         fail-closed into a pair revocation (pre-fix: 1, len 0; #10628)"
+    );
+    assert_eq!(sessions.admission_refused(), 0);
+    assert_eq!(sessions.install_partial(), 0);
 }
 
 
@@ -1786,6 +1954,41 @@ fn poll_descriptor_stamps_neighbor_mac_epoch_from_outer_neighbor_shard_not_logic
     neighbors.insert_if_changed((outer_if, outer_nh), NeighborEntry { mac: [0xaa; 6] });
     neighbors.insert_if_changed((outer_if, outer_nh), NeighborEntry { mac: [0xbb; 6] });
 
+    // Packet 1 (SYN): the #10270 fail-closed gate admits only SYN on a session
+    // miss. PBR steers it into sfmix.inet.0 -> tunnel endpoint 1
+    // (ForwardCandidate — same 5-tuple route/policy as the ACK seed below, so
+    // the disposition is identical), which the poll installs WITHOUT seeding
+    // (#2363). Epochs are read AFTER this SYN (below), so the pins cannot hide
+    // a SYN-side neighbor-map disturbance behind a stale pre-read.
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 100),
+        Ipv4Addr::new(10, 255, 192, 41),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_RETH1_PARENT_MAC,
+    );
+    let syn_meta = txn_meta_v4(5, TCP_FLAG_SYN, syn.len() as u16);
+    let (_syn_batch, syn_dbg) = txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        syn_meta,
+        &neighbors,
+    );
+    assert_eq!(
+        syn_dbg.tx, 1,
+        "the SYN must forward through the GRE-transit path (ForwardCandidate), \
+         proving it takes the same disposition as the ACK seed"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the SYN must install the session but NOT seed the flow cache"
+    );
+
     let outer_epoch = neighbors.mac_change_epoch_for(&(outer_if, outer_nh));
     let logical_epoch = neighbors.mac_change_epoch_for(&(logical_if, outer_nh));
     // Preconditions: the outer bump advanced the outer shard's epoch, and the
@@ -1803,11 +2006,12 @@ fn poll_descriptor_stamps_neighbor_mac_epoch_from_outer_neighbor_shard_not_logic
          DIFFERENT shards for this next-hop"
     );
 
-    // A cache-eligible ESTABLISHED (pure-ACK) TCP flow ingressing the LAN (ifindex
-    // 5), destined into the GRE tunnel's connected /30 (10.255.192.41). PBR steers
-    // it into sfmix.inet.0 -> tunnel endpoint 1 (ForwardCandidate; the outer
-    // neighbor resolves from the static NeighborSnapshot), which the poll installs
-    // and seeds into the flow cache.
+    // Packet 2 (first ACK = ESTABLISHED, cache-eligible), same 5-tuple,
+    // ingressing the LAN (ifindex 5), destined into the GRE tunnel's connected
+    // /30 (10.255.192.41). PBR steers it into sfmix.inet.0 -> tunnel endpoint 1
+    // (ForwardCandidate; the outer neighbor resolves from the static
+    // NeighborSnapshot), which the poll seeds into the flow cache (the SYN
+    // already installed the session).
     let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 100),
         Ipv4Addr::new(10, 255, 192, 41),
@@ -1839,7 +2043,7 @@ fn poll_descriptor_stamps_neighbor_mac_epoch_from_outer_neighbor_shard_not_logic
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
-        "the forwarded established tunnel flow must seed exactly one flow-cache entry"
+        "the first ACK must seed exactly one flow-cache entry"
     );
 
     let entry = binding

@@ -1100,6 +1100,16 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 		s.peerIncarnation++
 		s.peerHeartbeatAckEver.Store(false)
 		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
+		// #10512: learned capability state belongs to the superseded
+		// incarnation — a same-slot replacement that skips full disconnect
+		// would otherwise inherit the old peer's bits (including the
+		// scoped-delete bit) and pass gates before advertising. Clear the
+		// same learned set full disconnect clears, atomically with the
+		// advance (s.mu held throughout installConn).
+		s.peerSnapshotProtocol.Store(0)
+		s.peerCapabilityFlags.Store(0)
+		s.peerSessionSyncWire.Store(0)
+		s.scopedPolicySuppressionWarned.Store(false)
 		s.evictStaleIncarnationConnsLocked(fabricIdx, retiredIdentity)
 		if installed := s.installedPeerIdentityLocked(retiredIdentity); installed.known() {
 			s.peerIdentity = installed
@@ -1512,6 +1522,8 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.deleteSuppressionWarned.Store(false)
 		// #9752: same incarnation scoping for the forward-only-delete latch.
 		s.purgeRetirementSuppressionWarned.Store(false)
+		// #10512: same incarnation scoping for the scoped-delete latch.
+		s.scopedPolicySuppressionWarned.Store(false)
 		// #9752 round 3: same incarnation scoping for the stamped-install latch.
 		s.installTableSuppressionWarned.Store(false)
 		// #9752 round 4: same for the bulk-refusal latch.

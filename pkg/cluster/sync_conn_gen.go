@@ -9,6 +9,34 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
+// scopedDeleteKeyV4 keys receiver generation guards by scoped policy-delete
+// identity (#10512): colliding tenants sharing a bare tuple order
+// independently. Comparable (all fields comparable) for map + tombstone use.
+type scopedDeleteKeyV4 struct {
+	Domain uint32
+	Key    dataplane.SessionKey
+}
+
+// scopedDeleteKeyV6 is the IPv6 twin of scopedDeleteKeyV4.
+type scopedDeleteKeyV6 struct {
+	Domain uint32
+	Key    dataplane.SessionKeyV6
+}
+
+// scopedLogicalDomain normalizes a #7239 wire routing domain to the logical
+// domain the scoped generation spaces are keyed by: marker 1 (DEFAULT,
+// stated) folds to 0; all other values ride unchanged (real domains live
+// in the 100000+ band, so 1 is unambiguous). Unstated (0) shares the
+// default space — fail-closed: an install of unknown domain consults
+// default tombstones rather than bypassing them. Callers holding logical
+// domains already (queue/recv paths) pass them straight through.
+func scopedLogicalDomain(wire uint32) uint32 {
+	if wire == 1 {
+		return 0
+	}
+	return wire
+}
+
 func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err error) {
 	if err == nil {
 		warned.Store(false)
@@ -27,12 +55,14 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
 // directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
 //
-// TEN map families share the two side caps. The sender side bounds SIX maps by
+// FOURTEEN map families share the two side caps. The sender side bounds EIGHT maps by
 // sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
-// installTableSentV4/V6 (#9752) — and the receiver side bounds FOUR by
-// recvCap() — recvGenV4/V6 (with their #9719 tombstone orders, which index the
-// same entries rather than adding new ones) and installTableRecvV4/V6. Every
-// family grows on full-of-live demand and skip-records at the cap.
+// installTableSentV4/V6 (#9752), genSentScopedV4/V6 (#10512) — and the
+// receiver side bounds SIX by recvCap() — recvGenV4/V6 (with their #9719
+// tombstone orders, which index the same entries rather than adding new
+// ones), installTableRecvV4/V6, and recvGenScopedV4/V6 (#10512, with their
+// own tombstone orders). Every family grows on full-of-live demand and
+// skip-records at the cap.
 //
 // The EFFECTIVE cap starts at genGuardMapDefaultCap (the pre-#9915 static
 // value) and grows by doubling, per side, whenever a map is full of LIVE
@@ -40,18 +70,18 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // cap down (growGuardCapSide) and every read clamps to the ceiling in force
 // (sentCap/recvCap); the receiver side is additionally reclaimed at a
 // namespace-reset bulk barrier (resetRecvGen), while sender maps self-drain on
-// delete-echo. All ten families are evicted on delete; the cap is a safety
+// delete-echo. All fourteen families are evicted on delete; the cap is a safety
 // valve for keys whose delete never arrives (e.g. dropped close delta).
 //
 // Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
 // genuinely fills, and per-map=wired is coverage-correct — one family can hold
 // every session (an all-v4 table fills genSentV4 alone), so each map must be
-// able to reach the full session count. The worst case is therefore ~10 maps ×
+// able to reach the full session count. The worst case is therefore ~14 maps ×
 // the effective cap: ~56B/entry measured at 1M representative keys, plus 64B
-// per tombstone order node, i.e. ≈2.8GB of guard heap plus tombstone nodes at
+// per tombstone order node, i.e. ≈3.9GB of guard heap plus tombstone nodes at
 // the 5M-entry absolute ceiling and 100% single-family occupancy of a full
 // 10M-entry table — see docs/log/9915.md for the measurement and budget. The
-// default 200k effective cap bounds the unwired case to ≈112MB plus
+// default 200k effective cap bounds the unwired case to ≈157MB plus
 // tombstones, and demand growth past it requires helper-attested provisioned
 // RAM via SetGenGuardSessionCap, so guard heap stays proportionate to the
 // table it protects.
@@ -394,6 +424,20 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 		// boot"; see takeDeleteGenV4.
 		s.genSentOverflowV4 = true
 	}
+	// #10512: stamp the scoped sender space alongside (same generation,
+	// keyed by installing domain from the value).
+	skey := scopedDeleteKeyV4{Domain: scopedLogicalDomain(val.RoutingDomain), Key: key}
+	if s.genSentScopedV4 == nil {
+		s.genSentScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+	}
+	storedScoped := putGenBounded(s.genSentScopedV4, skey, g, s.sentCap())
+	if !storedScoped && s.growSentCap() {
+		storedScoped = putGenBounded(s.genSentScopedV4, skey, g, s.sentCap())
+	}
+	if !storedScoped {
+		s.stats.GenMapOverflow.Add(1)
+		s.genSentOverflowScopedV4 = true
+	}
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
 	s.stampCloseClassSentV4(key, val.SessionID, &val.TCPCloseClass)
@@ -445,6 +489,19 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	if !stored {
 		s.stats.GenMapOverflow.Add(1)
 		s.genSentOverflowV6 = true // #9719: see stampInstallGenV4.
+	}
+	// #10512: scoped sender stamp alongside (see the v4 twin).
+	skey6 := scopedDeleteKeyV6{Domain: scopedLogicalDomain(val.RoutingDomain), Key: key}
+	if s.genSentScopedV6 == nil {
+		s.genSentScopedV6 = make(map[scopedDeleteKeyV6]uint64)
+	}
+	storedScoped6 := putGenBounded(s.genSentScopedV6, skey6, g, s.sentCap())
+	if !storedScoped6 && s.growSentCap() {
+		storedScoped6 = putGenBounded(s.genSentScopedV6, skey6, g, s.sentCap())
+	}
+	if !storedScoped6 {
+		s.stats.GenMapOverflow.Add(1)
+		s.genSentOverflowScopedV6 = true
 	}
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
@@ -589,6 +646,60 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	return gen
 }
 
+// takeDeleteGenScopedV4 draws the delete generation for a SCOPED
+// (domain, tuple) policy delete (#10512) against the per-scoped-key
+// stamp space (plan §1.2 keyed sender state): fresh strictly greater
+// than the install it cancels, evicting the stamp; unstamped draws 0
+// legacy fallback (fresh on #9719 overflow). Scoped touches
+// scoped-only: bare sender stamps (possibly another tenant's) are
+// never disturbed. Test hooks shared with the bare twin.
+func (s *SessionSync) takeDeleteGenScopedV4(domain uint32, key dataplane.SessionKey) uint64 {
+	if hook := s.testBeforeDeleteGen; hook != nil {
+		hook()
+	}
+	s.bulkSnapshotGenMu.Lock()
+	defer s.bulkSnapshotGenMu.Unlock()
+	s.genSentMu.Lock()
+	defer s.genSentMu.Unlock()
+	skey := scopedDeleteKeyV4{Domain: domain, Key: key}
+	if _, ok := s.genSentScopedV4[skey]; !ok {
+		if s.genSentOverflowScopedV4 {
+			return s.nextInstallGen() // #9719: see takeDeleteGenV4.
+		}
+		return 0
+	}
+	delete(s.genSentScopedV4, skey)
+	gen := s.nextInstallGen()
+	if hook := s.testAfterDeleteGen; hook != nil {
+		hook()
+	}
+	return gen
+}
+
+// takeDeleteGenScopedV6 is the IPv6 twin of takeDeleteGenScopedV4.
+func (s *SessionSync) takeDeleteGenScopedV6(domain uint32, key dataplane.SessionKeyV6) uint64 {
+	if hook := s.testBeforeDeleteGen; hook != nil {
+		hook()
+	}
+	s.bulkSnapshotGenMu.Lock()
+	defer s.bulkSnapshotGenMu.Unlock()
+	s.genSentMu.Lock()
+	defer s.genSentMu.Unlock()
+	skey := scopedDeleteKeyV6{Domain: domain, Key: key}
+	if _, ok := s.genSentScopedV6[skey]; !ok {
+		if s.genSentOverflowScopedV6 {
+			return s.nextInstallGen()
+		}
+		return 0
+	}
+	delete(s.genSentScopedV6, skey)
+	gen := s.nextInstallGen()
+	if hook := s.testAfterDeleteGen; hook != nil {
+		hook()
+	}
+	return gen
+}
+
 // installGenGuardV4 implements the receiver-side install-side guard (#2170 SMR
 // fix #2): refuse to overwrite a stored entry with a strictly-older-generation
 // install so the per-key stored generation never regresses. Returns the
@@ -656,6 +767,94 @@ func (s *SessionSync) installGenGuardV6(key dataplane.SessionKeyV6, incoming uin
 		return stored, true
 	}
 	return incoming, true
+}
+
+// installGenGuardScopedV4 is the scoped-space half of installGenGuardV4
+// (#10512): refuse an install older than the scoped tombstone for
+// (domain, tuple) so a delayed pre-delete install cannot land after the
+// scoped delete that cancelled it. Same record/apply contract as the bare
+// twin; production applies only when BOTH agree (either stale refuses).
+// Domain comes from the installed value (0 = default instance, a real
+// scoped space — every install consults exactly one).
+func (s *SessionSync) installGenGuardScopedV4(domain uint32, key dataplane.SessionKey, incoming uint64) (record uint64, apply bool) {
+	s.recvGenMu.Lock()
+	defer s.recvGenMu.Unlock()
+	stored, ok := s.recvGenScopedV4[scopedDeleteKeyV4{Domain: domain, Key: key}]
+	if ok && stored != 0 && incoming != 0 && incoming < stored {
+		return 0, false
+	}
+	if incoming == 0 {
+		return stored, true
+	}
+	return incoming, true
+}
+
+// installGenGuardScopedV6 is the IPv6 twin of installGenGuardScopedV4.
+func (s *SessionSync) installGenGuardScopedV6(domain uint32, key dataplane.SessionKeyV6, incoming uint64) (record uint64, apply bool) {
+	s.recvGenMu.Lock()
+	defer s.recvGenMu.Unlock()
+	stored, ok := s.recvGenScopedV6[scopedDeleteKeyV6{Domain: domain, Key: key}]
+	if ok && stored != 0 && incoming != 0 && incoming < stored {
+		return 0, false
+	}
+	if incoming == 0 {
+		return stored, true
+	}
+	return incoming, true
+}
+
+// recordInstalledGenScopedV4 records a live install into the scoped space
+// (#10512): a newer replacement is what transitions a scoped entry back
+// to live, advancing the high-water past its delete tombstone (which is
+// forgotten, mirroring the bare twin) so later scoped deletes order
+// against the install instead of the stale tombstone.
+func (s *SessionSync) recordInstalledGenScopedV4(domain uint32, key dataplane.SessionKey, gen uint64) {
+	if gen == 0 {
+		return
+	}
+	s.recvGenMu.Lock()
+	skey := scopedDeleteKeyV4{Domain: domain, Key: key}
+	if s.recvGenScopedV4 == nil {
+		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		s.recvTombScopedV4.forget(skey)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+	s.recvGenMu.Unlock()
+}
+
+// recordInstalledGenScopedV6 is the IPv6 twin of recordInstalledGenScopedV4.
+func (s *SessionSync) recordInstalledGenScopedV6(domain uint32, key dataplane.SessionKeyV6, gen uint64) {
+	if gen == 0 {
+		return
+	}
+	s.recvGenMu.Lock()
+	skey := scopedDeleteKeyV6{Domain: domain, Key: key}
+	if s.recvGenScopedV6 == nil {
+		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		s.recvTombScopedV6.forget(skey)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+	s.recvGenMu.Unlock()
 }
 
 // recordInstalledGenV4 stores the per-key generation after a successful
@@ -800,6 +999,76 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 	return true
 }
 
+// deleteGenGuardScopedV4 is the receiver-side reorder guard for scoped
+// policy deletes (#10512): same refuse-older + tombstone semantics as
+// deleteGenGuardV4, in a dedicated per-(domain, tuple) space. Fully
+// separate from the bare space in both directions — bare records are
+// unknown-generation to scoped deletes and never authoritative for one
+// (plan §1.2 migration note), and scoped tombstones never gate bare
+// deletes (legacy over/under preserved exactly, not reshaped).
+func (s *SessionSync) deleteGenGuardScopedV4(domain uint32, key dataplane.SessionKey, deleteGen uint64) bool {
+	s.recvGenMu.Lock()
+	defer s.recvGenMu.Unlock()
+	skey := scopedDeleteKeyV4{Domain: domain, Key: key}
+	stored := s.recvGenScopedV4[skey]
+	if stored != 0 && deleteGen != 0 && deleteGen < stored {
+		return false
+	}
+	if deleteGen != 0 {
+		if s.recvGenScopedV4 == nil {
+			s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+		}
+		stored, evicted := putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, deleteGen, s.recvCap())
+		if !stored && !evicted && s.growRecvCap() {
+			stored, evicted = putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, deleteGen, s.recvCap())
+		}
+		if evicted {
+			s.stats.GenTombstonesEvicted.Add(1)
+		}
+		if stored {
+			s.recvTombScopedV4.mark(skey) // #9719: see the bare twin.
+		} else {
+			s.stats.GenMapOverflow.Add(1)
+		}
+	} else {
+		delete(s.recvGenScopedV4, skey)
+		s.recvTombScopedV4.forget(skey)
+	}
+	return true
+}
+
+// deleteGenGuardScopedV6 is the IPv6 twin of deleteGenGuardScopedV4.
+func (s *SessionSync) deleteGenGuardScopedV6(domain uint32, key dataplane.SessionKeyV6, deleteGen uint64) bool {
+	s.recvGenMu.Lock()
+	defer s.recvGenMu.Unlock()
+	skey := scopedDeleteKeyV6{Domain: domain, Key: key}
+	stored := s.recvGenScopedV6[skey]
+	if stored != 0 && deleteGen != 0 && deleteGen < stored {
+		return false
+	}
+	if deleteGen != 0 {
+		if s.recvGenScopedV6 == nil {
+			s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
+		}
+		stored, evicted := putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, deleteGen, s.recvCap())
+		if !stored && !evicted && s.growRecvCap() {
+			stored, evicted = putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, deleteGen, s.recvCap())
+		}
+		if evicted {
+			s.stats.GenTombstonesEvicted.Add(1)
+		}
+		if stored {
+			s.recvTombScopedV6.mark(skey)
+		} else {
+			s.stats.GenMapOverflow.Add(1)
+		}
+	} else {
+		delete(s.recvGenScopedV6, skey)
+		s.recvTombScopedV6.forget(skey)
+	}
+	return true
+}
+
 // resetRecvSessionGen resets only receiver-side session generation maps. A
 // same-incarnation bulk uses preserve=true to reclaim live high-waters while
 // retaining delete tombstones and without resetting comparable config/full-set
@@ -826,11 +1095,31 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 				recvGenV6[key] = gen
 			}
 		}
+		recvGenScopedV4 := make(map[scopedDeleteKeyV4]uint64, s.recvTombScopedV4.size())
+		for key := range s.recvTombScopedV4.elems {
+			if gen, ok := s.recvGenScopedV4[key]; ok {
+				recvGenScopedV4[key] = gen
+			}
+		}
+		recvGenScopedV6 := make(map[scopedDeleteKeyV6]uint64, s.recvTombScopedV6.size())
+		for key := range s.recvTombScopedV6.elems {
+			if gen, ok := s.recvGenScopedV6[key]; ok {
+				recvGenScopedV6[key] = gen
+			}
+		}
 		s.recvGenV4 = recvGenV4
 		s.recvGenV6 = recvGenV6
+		s.recvGenScopedV4 = recvGenScopedV4
+		s.recvGenScopedV6 = recvGenScopedV6
 		preserved := len(recvGenV4)
 		if len(recvGenV6) > preserved {
 			preserved = len(recvGenV6)
+		}
+		if len(recvGenScopedV4) > preserved {
+			preserved = len(recvGenScopedV4)
+		}
+		if len(recvGenScopedV6) > preserved {
+			preserved = len(recvGenScopedV6)
 		}
 		// Keep the smallest growth tier that can contain the retained
 		// tombstones. A test ceiling below the historical default is also
@@ -855,8 +1144,12 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 	} else {
 		s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
+		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 		s.recvTombV4.reset()
 		s.recvTombV6.reset()
+		s.recvTombScopedV4.reset()
+		s.recvTombScopedV6.reset()
 		// #9915 F-044: a namespace reset starts the next epoch at the
 		// default cap and clears all session tombstones.
 		s.recvGenGuardCap = 0
@@ -1076,7 +1369,8 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	record, apply := s.installGenGuardV4(key, val.Generation)
-	if !apply {
+	scopedRecord, scopedApply := s.installGenGuardScopedV4(scopedLogicalDomain(val.RoutingDomain), key, val.Generation)
+	if !apply || !scopedApply {
 		s.stats.InstallsStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v4 install",
 			"incoming_gen", val.Generation)
@@ -1111,6 +1405,7 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 			return false
 		}
 		s.recordInstalledGenV4(key, record)
+		s.recordInstalledGenScopedV4(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
 		s.stats.SessionsInstalled.Add(1)
 		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, nil)
 		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
@@ -1144,7 +1439,8 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	record, apply := s.installGenGuardV6(key, val.Generation)
-	if !apply {
+	scopedRecord, scopedApply := s.installGenGuardScopedV6(scopedLogicalDomain(val.RoutingDomain), key, val.Generation)
+	if !apply || !scopedApply {
 		s.stats.InstallsStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v6 install",
 			"incoming_gen", val.Generation)
@@ -1177,6 +1473,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 			return false
 		}
 		s.recordInstalledGenV6(key, record)
+		s.recordInstalledGenScopedV6(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
 		s.stats.SessionsInstalled.Add(1)
 		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, nil)
 		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
@@ -1246,5 +1543,42 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete v6 session", "err", err)
+	}
+}
+
+func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.SessionKey, deleteGen uint64, expectedID uint64) {
+	if s.sessions == nil {
+		return
+	}
+	// #9715: guard + delete are one apply; see the bare twin.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	if !s.deleteGenGuardScopedV4(domain, key, deleteGen) {
+		s.stats.DeletesStaleIgnored.Add(1)
+		slog.Debug("cluster sync: ignored stale-generation scoped v4 delete",
+			"domain", domain, "delete_gen", deleteGen)
+		return
+	}
+	if err := s.sessions.DeleteClusterScopedV4(key, domain, expectedID); err != nil {
+		s.stats.Errors.Add(1)
+		slog.Warn("cluster sync: failed to delete scoped v4 session", "err", err)
+	}
+}
+
+func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.SessionKeyV6, deleteGen uint64, expectedID uint64) {
+	if s.sessions == nil {
+		return
+	}
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	if !s.deleteGenGuardScopedV6(domain, key, deleteGen) {
+		s.stats.DeletesStaleIgnored.Add(1)
+		slog.Debug("cluster sync: ignored stale-generation scoped v6 delete",
+			"domain", domain, "delete_gen", deleteGen)
+		return
+	}
+	if err := s.sessions.DeleteClusterScopedV6(key, domain, expectedID); err != nil {
+		s.stats.Errors.Add(1)
+		slog.Warn("cluster sync: failed to delete scoped v6 session", "err", err)
 	}
 }

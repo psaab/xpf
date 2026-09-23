@@ -31,11 +31,12 @@ import (
 
 // controlCallFacts is what the analyzer extracts per function.
 type controlCallFacts struct {
-	name         string
-	file         string
-	acquiresMu   bool // takes m.mu with no preceding release
-	callsReq     bool // calls requestLocked / requestDetailedLocked / requestApplySnapshotLocked
-	setsDeadline bool
+	name          string
+	file          string
+	acquiresMu    bool // takes m.mu with no preceding release
+	callsReq      bool // calls requestLocked / requestDetailedLocked / requestApplySnapshotLocked
+	setsDeadline  bool
+	deadlineCalls int
 }
 
 func analyzeControlCalls8526(t *testing.T, dir string) []controlCallFacts {
@@ -96,6 +97,7 @@ func analyzeControlCalls8526(t *testing.T, dir string) []controlCallFacts {
 					cf.callsReq = true
 				case "SetDeadline":
 					cf.setsDeadline = true
+					cf.deadlineCalls++
 				}
 				return true
 			})
@@ -192,9 +194,10 @@ func TestControlDeadlineHasExactlyOneSite8526(t *testing.T) {
 	//                            SHORTENS the deadline of a round trip already
 	//                            in flight. It never lengthens one, so it
 	//                            cannot be a bypass.
-	// requestSessionSyncLocked — the dedicated SESSION socket, not this one.
-	//                            Flat sessionSyncRoundtripDeadline (3s), already
-	//                            inside the stop budget by construction.
+	// requestSessionSyncResponseLocked — the dedicated SESSION socket, not this
+	// one. Flat sessionSyncRoundtripDeadline (3s), already inside the stop budget
+	// by construction; this is the response-returning split of the old
+	// requestSessionSyncLocked wrapper.
 	// requestHAWatchdogSessionLockedAtPath — same session socket + flat 3s
 	//                            deadline as its sync sibling, and it never
 	//                            takes m.mu (proven by
@@ -207,7 +210,7 @@ func TestControlDeadlineHasExactlyOneSite8526(t *testing.T) {
 	want := map[string]bool{
 		"armControlIO":                         true,
 		"cutInFlightControlIOLocked":           true,
-		"requestSessionSyncLocked":             true,
+		"requestSessionSyncResponseLocked":      true,
 		"requestHAWatchdogSessionLockedAtPath": true,
 		"ProbeStatus":                          true,
 	}
@@ -217,6 +220,12 @@ func TestControlDeadlineHasExactlyOneSite8526(t *testing.T) {
 	for _, f := range facts {
 		if f.setsDeadline {
 			got[f.name] = f.file
+			if f.name == "requestSessionSyncResponseLocked" && f.deadlineCalls != 1 {
+				t.Errorf(
+					"requestSessionSyncResponseLocked has %d SetDeadline calls; expected exactly one",
+					f.deadlineCalls,
+				)
+			}
 		}
 	}
 	if len(got) == 0 {

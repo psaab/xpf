@@ -22,6 +22,11 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 	}
 
 	cr := s.applyResult()
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for zoneName := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, zoneName)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
 
 	// #3408: a per-zone counter read failure must surface as codes.Internal
 	// rather than a clean-zero field, mirroring GetGlobalStats (#3345).
@@ -36,6 +41,20 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 			Description: zone.Description,
 			Interfaces:  zone.Interfaces,
 			TcpRst:      zone.TCPRst,
+		}
+		_, quarantined := quarantinedZones[zoneName]
+		if quarantined {
+			zi.QuarantineState = pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_QUARANTINED
+			zi.QuarantineSurvivorZone = config.StableZoneIDOwner(
+				zoneNames, config.StableZoneID(zoneName))
+		} else {
+			zi.QuarantineState = pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_NOT_QUARANTINED
+		}
+		if quarantined {
+			// Do not read the survivor's counters under the quarantined name.
+			// The four counter fields remain zero and explicitly unavailable.
+			zi.PerZoneCounterAvailability =
+				pb.ZoneCounterAvailability_ZONE_COUNTER_AVAILABILITY_UNAVAILABLE
 		}
 		if zone.ScreenProfile != "" {
 			zi.ScreenProfile = zone.ScreenProfile
@@ -91,7 +110,7 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 		if cr != nil {
 			if id, ok := cr.ZoneIDs[zoneName]; ok {
 				zi.Id = uint32(id)
-				if s.dp != nil && s.dp.IsLoaded() {
+				if !quarantined && s.dp != nil && s.dp.IsLoaded() {
 					ing, errIn := s.dp.ReadZoneCounters(id, 0)
 					eg, errOut := s.dp.ReadZoneCounters(id, 1)
 					switch {

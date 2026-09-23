@@ -409,6 +409,65 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 		return nil
 	}
 
+	if lister, ok := rt.(interface {
+		ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error)
+	}); ok {
+		// The raw activation stamp, possibly 0 ("boundary unknown"). The
+		// helper honors Some(0) as unbounded in legacy mode — every matching
+		// forward is returned — which is exactly the #6948 contract this
+		// branch replaces (activationSecs==0 clears every matching id).
+		// Never nil here: legacy mode requires the fence precisely so an
+		// omitted boundary errors instead of silently unbounded.
+		beforeSecs := d.policyActivationSecs
+		policyIDs := make([]uint32, 0, len(ids))
+		for id := range ids {
+			policyIDs = append(policyIDs, id)
+		}
+		resp, err := lister.ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest{
+			PolicyIDs:  policyIDs,
+			Mode:       "legacy",
+			BeforeSecs: &beforeSecs,
+			Families:   []uint8{4, 6},
+			Classes:    []string{"forward"},
+		})
+		if err != nil {
+			return fmt.Errorf("policy session READ (%s): %w", what, err)
+		}
+		capture := capturedSessions{targets: len(ids)}
+		var errs []error
+		for _, match := range resp.SessionPolicyMatches {
+			// P6: skip + loud on extraneous policies (capture twin).
+			if _, ok := ids[match.PolicyID]; !ok {
+				errs = append(errs, fmt.Errorf("policy session READ (%s): extraneous policy %d", what, match.PolicyID))
+				continue
+			}
+			entry4, entry6, entryErr := policyMatchEntries(match)
+			if entryErr != nil {
+				errs = append(errs, entryErr)
+				continue
+			}
+			capture.policy = append(capture.policy, match)
+			if entry4 != nil {
+				capture.v4 = append(capture.v4, *entry4)
+			}
+			if entry6 != nil {
+				capture.v6 = append(capture.v6, *entry6)
+			}
+		}
+		// P7 delete-partial terminal (capture twin): revoke what was
+		// gathered even when the READ was incomplete — partial beats
+		// zero — while the joined READ error surfaces the gap (#5578).
+		// HA-sync covers the partial, so the peer observes the same.
+		capture.enumFailed = !resp.SessionPolicyComplete || len(errs) != 0
+		errs = append(errs, d.deleteInvalidatedSessions(capture, reason, what))
+		if !resp.SessionPolicyComplete {
+			errs = append(errs, fmt.Errorf(
+				"policy session READ (%s) incomplete: %v",
+				what, resp.SessionPolicyPerWorkerErrors))
+		}
+		return errors.Join(errs...)
+	}
+
 	store := rt.Sessions()
 	if store == nil {
 		return nil
@@ -514,8 +573,8 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 // indistinguishable to the HA peer, the delete reason, and the operator log —
 // the choice of producer changes WHICH sessions are deleted, never HOW.
 //
-// The delete reuses the companion-aware DeleteBatchKnownV4/V6 (forward entry +
-// reverse companion + any dynamic DNAT/NAT64 companion) and propagates each
+// The delete reuses the companion-aware DeleteBatchKnownExactV4/V6 (forward
+// entry + reverse companion + any dynamic DNAT/NAT64 companion) and propagates
 // deletion to the HA peer through the same #2468 delete-sync channel the GC
 // delete callback uses, so a session dropped on the owner is dropped on the
 // standby too and cannot resurrect on failover.
@@ -534,21 +593,74 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 	if rt == nil {
 		return nil
 	}
-	store := rt.Sessions()
-	if store == nil {
-		return nil
-	}
 	// Whether to propagate the local deletes to the HA peer. Mirrors the GC
 	// delete callback (daemon_run.go): only a node that is primary for some RG
 	// owns the authoritative session and syncs its deletes; the peer ignores
 	// deletes for sessions it does not hold.
 	ss := d.getSessionSync()
 	syncPeer := d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil
+	if invalidator, ok := rt.(interface {
+		DeletePolicySessions([]dpuserspace.SessionPolicyMatch) (dpuserspace.PolicyDeleteResult, error)
+	}); ok && len(c.policy) > 0 {
+		result, err := invalidator.DeletePolicySessions(c.policy)
+		var errs []error
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"policy session invalidation (%s): helper delete: %w", what, err))
+		}
+		// HA-sync what we attempted (legacy parity: the store path below
+		// queues per attempted entry, not per deleted one). Queued even
+		// on helper error — revoke wins: a peer that keeps a row this
+		// node dropped resurrects it on failover, while a queued delete
+		// for a locally-surviving row converges via re-admission. Stale
+		// matches' scoped deletes are refused no-ops (conditional).
+		if syncPeer {
+			for _, m := range c.policy {
+				family := m.AddrFamily
+				if family == 0 {
+					family = m.Tuple.AddrFamily
+				}
+				switch family {
+				case 4:
+					key, _, err := policyTupleV4(m.Tuple)
+					if err != nil {
+						errs = append(errs, fmt.Errorf("policy session invalidation (%s): v4 HA key: %w", what, err))
+						continue
+					}
+					ss.QueueDeleteScopedV4(m.RoutingDomain, key, m.ExpectedRTFlowSessionID)
+				case 6:
+					key, _, err := policyTupleV6(m.Tuple)
+					if err != nil {
+						errs = append(errs, fmt.Errorf("policy session invalidation (%s): v6 HA key: %w", what, err))
+						continue
+					}
+					ss.QueueDeleteScopedV6(m.RoutingDomain, key, m.ExpectedRTFlowSessionID)
+				default:
+					errs = append(errs, fmt.Errorf("policy session invalidation (%s): unknown family %d", what, family))
+				}
+			}
+		}
+		if !c.enumFailed && len(errs) == 0 {
+			slog.Info("cleared sessions of changed policies at commit",
+				"change", what,
+				"policies", c.targets,
+				"matched", len(c.policy),
+				"cleared", result.Applied,
+				"stale", result.Stale,
+				"ha_sync", d.cluster != nil && d.cluster.IsLocalPrimaryAny())
+		}
+		return errors.Join(errs...)
+	}
 
+	store := rt.Sessions()
+	if store == nil {
+		return nil
+	}
 	var errs []error
 	v4Cleared := 0
 	if len(c.v4) > 0 {
-		n, err := store.DeleteBatchKnownV4(c.v4, reason, false)
+		exact, err := store.DeleteBatchKnownExactV4(c.v4, reason, false)
+		n := len(exact)
 		if err != nil {
 			slog.Warn("policy session invalidation: v4 clear failed",
 				"reason", reason, "policies", c.targets,
@@ -560,19 +672,20 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 				slog.Warn("policy session invalidation: v4 delete count mismatch",
 					"reason", reason, "policies", c.targets,
 					"matched", len(c.v4), "deleted", n,
-					"hint", "concurrent expiry may explain the gap; hard delete failures are reported separately")
+					"hint", "concurrent expiry or an already-absent row may explain the gap; hard delete failures are reported separately")
 			}
 		}
 		if syncPeer {
-			for _, e := range c.v4 {
-				ss.QueueDeleteV4(e.Key, false)
+			for _, key := range exact {
+				ss.QueueDeleteV4(key, false)
 			}
 		}
 	}
 
 	v6Cleared := 0
 	if len(c.v6) > 0 {
-		n, err := store.DeleteBatchKnownV6(c.v6, reason, false)
+		exact, err := store.DeleteBatchKnownExactV6(c.v6, reason, false)
+		n := len(exact)
 		if err != nil {
 			slog.Warn("policy session invalidation: v6 clear failed",
 				"reason", reason, "policies", c.targets,
@@ -584,12 +697,12 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 				slog.Warn("policy session invalidation: v6 delete count mismatch",
 					"reason", reason, "policies", c.targets,
 					"matched", len(c.v6), "deleted", n,
-					"hint", "concurrent expiry may explain the gap; hard delete failures are reported separately")
+					"hint", "concurrent expiry or an already-absent row may explain the gap; hard delete failures are reported separately")
 			}
 		}
 		if syncPeer {
-			for _, e := range c.v6 {
-				ss.QueueDeleteV6(e.Key, false)
+			for _, key := range exact {
+				ss.QueueDeleteV6(key, false)
 			}
 		}
 	}
@@ -710,10 +823,13 @@ func changedPolicyRuntimeIDs(oldCfg, newCfg *config.Config, oldSched, newSched m
 // active-scheduler->inactive-scheduler) and a same-binding scheduler whose active
 // WINDOW the commit redefined out from under the current instant.
 //
-// The inactive->active direction is intentionally NOT a clear trigger: while the
-// policy was inactive it admitted no sessions, so none carry its policy_id — a
-// sweep would be a pure no-op. Only the tightening direction (active->inactive)
-// has live sessions to re-evaluate.
+// The inactive->active direction is intentionally NOT a per-ID clear trigger:
+// the policy's own ID had no sessions while inactive, but sessions admitted by
+// a later permit can be shadowed when this earlier policy becomes active. A
+// per-ID sweep cannot express that dependency because those sessions carry the
+// later permit's ID; the generation-bump Stale path revalidates them instead
+// (ZPS-03/#8356). Only the tightening direction (active->inactive) has live
+// sessions carrying this policy's ID to re-evaluate.
 func policySchedulerBecameInactive(oldPol, newPol *config.Policy, oldSched, newSched map[string]bool) bool {
 	wasActive := !dpuserspace.PolicyInactive(oldPol.SchedulerName, oldSched)
 	nowInactive := dpuserspace.PolicyInactive(newPol.SchedulerName, newSched)

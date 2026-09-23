@@ -55,7 +55,7 @@ func (c *xpfCollector) initWireGuardDescriptors() {
 	)
 	c.wgTransportDropsTotal = prometheus.NewDesc(
 		"xpf_userspace_wg_transport_drops_total",
-		"WireGuard transport drops by direction and reason. decap: malformed_header | unknown_session | counter_ceiling | crypto | replay | allowed_ips | malformed_inner | buffer | expired. encap: no_session | unconfirmed | rekey_required | mtu | other | expired. `expired` is the #1888 per-use REJECT_AFTER_TIME refusal (drop-only on decap; arms the rekey edge on encap). `unconfirmed` is the responder key-confirmation window (transient at rekey — distinct from no_session so operators do not tcpdump a blip); `mtu` is the exact pad-aware guard at BOTH egress sites (the #1736 v4-mapped blackhole class) (#1865).",
+		"WireGuard transport drops by direction and reason. decap: malformed_header | unknown_session | counter_ceiling | crypto | replay | allowed_ips | malformed_inner | buffer | unsteered_port | degraded_transit | expired. encap: no_session | unconfirmed | rekey_required | mtu | other | expired. `unsteered_port` is a steered-set miss refused by #9521; `degraded_transit` is authenticated transit refused on covered degraded ingress (#9594) and shim-uncovered ingress (#10527), including the steady-state uncovered case. `expired` is the #1888 per-use REJECT_AFTER_TIME refusal (drop-only on decap; arms the rekey edge on encap). `unconfirmed` is the responder key-confirmation window (transient at rekey — distinct from no_session so operators do not tcpdump a blip); `mtu` is the exact pad-aware guard at BOTH egress sites (the #1736 v4-mapped blackhole class) (#1865).",
 		[]string{"tunnel", "direction", "reason"}, nil,
 	)
 	c.wgSendErrorsTotal = prometheus.NewDesc(

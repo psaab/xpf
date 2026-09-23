@@ -1,4 +1,6 @@
 use super::*;
+mod tuple_gate;
+pub(crate) use tuple_gate::*;
 
 /// #9517: `has_routing_domains` DEMOTES a `PASS_TO_KERNEL` row to `REDIRECT`,
 /// for the same reason the `lo0`-filter gate in `session_glue` already does.
@@ -821,8 +823,49 @@ pub(super) struct ConntrackPublishSampling;
 pub(super) fn conntrack_publishes() -> Vec<ConntrackPublishRecord> {
     CONNTRACK_PUBLISHES.with(|records| records.borrow().clone())
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConntrackPublishResult {
+    Written,
+    IntentionallySkipped,
+    GateBusy,
+    KernelError,
+    NoMap,
+}
 
-pub(super) fn publish_bpf_conntrack_entry(
+pub(crate) fn publish_bpf_conntrack_entry(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    zone_name_to_id: &FastMap<String, u16>,
+    alg_disable_flags: u8,
+    app_id: u16,
+    session_id: u64,
+    timeout_secs: u32,
+    origin: SessionOrigin,
+) -> ConntrackPublishResult {
+    match crate::afxdp::bpf_map::global_tuple_gate().with_publish(key, || {
+        publish_bpf_conntrack_entry_raw(
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            key,
+            decision,
+            metadata,
+            zone_name_to_id,
+            alg_disable_flags,
+            app_id,
+            session_id,
+            timeout_secs,
+            origin,
+        )
+    }) {
+        Ok(result) => result,
+        Err(_) => ConntrackPublishResult::GateBusy,
+    }
+}
+
+fn publish_bpf_conntrack_entry_raw(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
@@ -848,7 +891,7 @@ pub(super) fn publish_bpf_conntrack_entry(
     // (SessionTable::timeout_secs_for); 0 = no live entry.
     timeout_secs: u32,
     origin: SessionOrigin,
-) {
+) -> ConntrackPublishResult {
     // #6965: record the call BEFORE the `fd >= 0` gate below. The gate is what
     // makes this a no-op under a unit test's `-1` fds, and the property the
     // #6965 tests bind is that the call SITE exists on the transit install
@@ -900,7 +943,7 @@ pub(super) fn publish_bpf_conntrack_entry(
                 app_id,
                 session_id,
                 timeout_secs,
-            );
+            )
         }
         (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
             publish_conntrack::publish_v6_session(
@@ -918,18 +961,86 @@ pub(super) fn publish_bpf_conntrack_entry(
                 app_id,
                 session_id,
                 timeout_secs,
-            );
+            )
         }
-        _ => {}
+        (libc::AF_INET, IpAddr::V4(..), IpAddr::V4(..)) => ConntrackPublishResult::NoMap,
+        (libc::AF_INET6, IpAddr::V6(..), IpAddr::V6(..)) => ConntrackPublishResult::NoMap,
+        _ => ConntrackPublishResult::IntentionallySkipped,
+    }
+}
+
+/// Publish while the caller owns the tuple admission lease.
+///
+/// The low-level write intentionally does not acquire a second permit: worker
+/// callers must acquire `try_acquire_install` before mutating their table, and
+/// helper callers hold a `GateLease` across their complete transaction.
+pub(crate) fn publish_bpf_conntrack_entry_under_gate(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    zone_name_to_id: &FastMap<String, u16>,
+    alg_disable_flags: u8,
+    app_id: u16,
+    session_id: u64,
+    timeout_secs: u32,
+    origin: SessionOrigin,
+) -> ConntrackPublishResult {
+    publish_bpf_conntrack_entry_raw(
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        key,
+        decision,
+        metadata,
+        zone_name_to_id,
+        alg_disable_flags,
+        app_id,
+        session_id,
+        timeout_secs,
+        origin,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConntrackDeleteResult {
+    Deleted,
+    GateBusy,
+    KernelError,
+}
+
+/// Delete a session entry from the BPF conntrack map and retain gate refusal.
+pub(crate) fn delete_bpf_conntrack_entry_result(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> ConntrackDeleteResult {
+    match crate::afxdp::bpf_map::global_tuple_gate().with_publish(key, || {
+        delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key)
+    }) {
+        Ok(true) => ConntrackDeleteResult::Deleted,
+        Ok(false) => ConntrackDeleteResult::KernelError,
+        Err(_) => ConntrackDeleteResult::GateBusy,
     }
 }
 
 /// Delete a session entry from the BPF conntrack map.
-pub(super) fn delete_bpf_conntrack_entry(
+pub(crate) fn delete_bpf_conntrack_entry(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
-) {
+) -> bool {
+    matches!(
+        delete_bpf_conntrack_entry_result(conntrack_v4_fd, conntrack_v6_fd, key),
+        ConntrackDeleteResult::Deleted
+    )
+}
+
+fn delete_bpf_conntrack_entry_raw(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> bool {
     match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
         (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
             let bpf_key = bpf_session_key_v4(
@@ -939,12 +1050,13 @@ pub(super) fn delete_bpf_conntrack_entry(
                 key.dst_port,
                 key.protocol,
             );
-            let _ = unsafe {
+            let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
                     conntrack_v4_fd,
                     (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                 )
             };
+            rc >= 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
         }
         (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
             let bpf_key = bpf_session_key_v6(
@@ -954,15 +1066,132 @@ pub(super) fn delete_bpf_conntrack_entry(
                 key.dst_port,
                 key.protocol,
             );
-            let _ = unsafe {
+            let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
                     conntrack_v6_fd,
                     (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                 )
             };
+            rc >= 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
         }
-        _ => {}
+        _ => false,
     }
+}
+
+/// Delete while the caller owns the tuple admission lease.
+pub(crate) fn delete_bpf_conntrack_entry_under_gate(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> bool {
+    delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key)
+}
+
+pub(crate) fn clear_bpf_conntrack_maps(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+) -> Result<(usize, usize), &'static str> {
+    fn clear_one(fd: c_int, key_size: usize, what: &'static str) -> Result<usize, &'static str> {
+        if fd < 0 {
+            return Ok(0);
+        }
+        let mut key = vec![0u8; key_size];
+        let mut next = vec![0u8; key_size];
+        let mut current: *const c_void = std::ptr::null();
+        let mut deleted = 0usize;
+        loop {
+            let rc = unsafe {
+                libbpf_sys::bpf_map_get_next_key(fd, current, next.as_mut_ptr().cast::<c_void>())
+            };
+            if rc != 0 {
+                // libbpf returns -errno: ENOENT is the clean end of
+                // iteration; anything else is a real scan failure (a
+                // half-swept map converges on retry — deletes are
+                // idempotent — but this call reports the failure).
+                if rc == -libc::ENOENT {
+                    break;
+                }
+                return Err(what);
+            }
+            let rc = unsafe {
+                libbpf_sys::bpf_map_delete_elem(fd, next.as_ptr().cast::<c_void>())
+            };
+            if rc != 0 {
+                return Err(what);
+            }
+            deleted += 1;
+            key.copy_from_slice(&next);
+            current = key.as_ptr().cast::<c_void>();
+        }
+        Ok(deleted)
+    }
+    Ok((
+        clear_one(conntrack_v4_fd, std::mem::size_of::<BpfSessionKeyV4>(), "conntrack-v4-clear")?,
+        clear_one(conntrack_v6_fd, std::mem::size_of::<BpfSessionKeyV6>(), "conntrack-v6-clear")?,
+    ))
+}
+
+
+/// #10590 test seam: one policy-restamp attempt, as the dataplane ATTEMPTED
+/// it. Recorded after the family/address validation passes — a mismatched key
+/// fails closed without touching any map (see the MIN-7 doc on the mismatch
+/// cell in `bpf_map_tests.rs`) and is not an attempt — and before the
+/// `fd < 0` early-true, so the `-1` control records its two attempts too.
+///
+/// Thread-local, like `SESSION_MAP_WRITES` above (#8105): a process-global
+/// counter would race every parallel test driving a restamp, and the writer
+/// is production code that cannot take a lock. Each sampler drives its rebind
+/// synchronously on its own test thread, so its attempts and only its
+/// attempts land in its own vector. The fail hook defaults to off; tests arm
+/// it per-test after clearing.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RestampAttemptRecord {
+    pub(super) addr_family: u8,
+    pub(super) fd: c_int,
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESTAMP_ATTEMPTS: std::cell::RefCell<Vec<RestampAttemptRecord>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESTAMP_FAIL_ON_ATTEMPT: std::cell::RefCell<Option<u64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn clear_restamp_attempts() {
+    RESTAMP_ATTEMPTS.with(|records| records.borrow_mut().clear());
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow_mut() = None);
+}
+
+#[cfg(test)]
+pub(super) fn restamp_attempts() -> Vec<RestampAttemptRecord> {
+    RESTAMP_ATTEMPTS.with(|records| records.borrow().clone())
+}
+
+/// #10590 T5: fail exactly the Nth restamp attempt on this thread (1-based),
+/// leaving every other attempt's real semantics untouched. Same-family halves
+/// share one conntrack fd, so a bogus fd fails BOTH halves — only this hook
+/// can express exactly-one-false and kill an `all` -> `any` mutant.
+#[cfg(test)]
+pub(super) fn fail_restamp_attempt_on(n: u64) {
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow_mut() = Some(n));
+}
+
+/// Record one attempt; returns whether the T5 hook fails this attempt.
+#[cfg(test)]
+fn record_restamp_attempt(addr_family: u8, fd: c_int) -> bool {
+    let attempt = RESTAMP_ATTEMPTS.with(|records| {
+        let mut records = records.borrow_mut();
+        records.push(RestampAttemptRecord { addr_family, fd });
+        records.len() as u64
+    });
+    RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow() == Some(attempt))
 }
 
 /// Restamp only policy metadata in an existing conntrack row. This is a
@@ -978,6 +1207,11 @@ pub(super) fn restamp_bpf_conntrack_policy(
         let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
+        // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
+        #[cfg(test)]
+        if record_restamp_attempt(key.addr_family, conntrack_v4_fd) {
+            return false;
+        }
         // Unit tests and builds without a pinned conntrack map deliberately
         // pass -1. There is no map state to restamp, so this is not a failure.
         if conntrack_v4_fd < 0 {
@@ -1016,6 +1250,11 @@ pub(super) fn restamp_bpf_conntrack_policy(
         let (IpAddr::V6(src), IpAddr::V6(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
+        // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
+        #[cfg(test)]
+        if record_restamp_attempt(key.addr_family, conntrack_v6_fd) {
+            return false;
+        }
         if conntrack_v6_fd < 0 {
             return true;
         }
@@ -1050,7 +1289,6 @@ pub(super) fn restamp_bpf_conntrack_policy(
     }
     false
 }
-
 /// Update `last_seen` in BPF conntrack entries for active userspace sessions.
 ///
 /// The userspace helper owns session lifetime in its own SessionTable, but

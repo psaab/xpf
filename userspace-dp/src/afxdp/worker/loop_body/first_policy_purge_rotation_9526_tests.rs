@@ -94,14 +94,21 @@ fn view_with_policy_metadata(
     forwarding.zone_id_to_name.insert(3, "dmz".to_string());
     forwarding.zone_set_validated = true;
     forwarding.ingress_logical_ifindex.insert((11, 0), 11);
+    // Fixture interface 11 is a concrete LAN port in every cell; its zone is
+    // the first KNOWN from-zone, not necessarily rules[0]'s. Prod maps an
+    // interface to its assigned zone regardless of policy shape, so a global
+    // first rule (unscoped, not in the map) must not zero the interface.
+    // Identical for all zone-pair cells (rules[0].from is always known there).
     let ingress_zone = rules
-        .first()
-        .and_then(|rule| forwarding.zone_name_to_id.get(&rule.from_zone))
+        .iter()
+        .filter_map(|rule| forwarding.zone_name_to_id.get(&rule.from_zone))
         .copied()
+        .next()
         .unwrap_or(0);
     forwarding.ifindex_to_zone_id.insert(11, ingress_zone);
     let forwarding = Arc::new(forwarding);
-    let view = Arc::new(RuntimeView::new(  // runtime-view-canary: test-local
+    let view = Arc::new(RuntimeView::new(
+        // runtime-view-canary: test-local
         ValidationState {
             snapshot_installed: true,
             config_generation: generation,
@@ -129,7 +136,7 @@ fn view_with_removed_zone_metadata(
     let mut forwarding = (*base_forwarding).clone();
     forwarding.zone_id_to_name.remove(&removed_zone_id);
     let forwarding = Arc::new(forwarding);
-    let view = Arc::new(RuntimeView::new(base_view.validation(), forwarding.clone()));  // runtime-view-canary: test-local
+    let view = Arc::new(RuntimeView::new(base_view.validation(), forwarding.clone())); // runtime-view-canary: test-local
     (view, forwarding)
 }
 
@@ -256,6 +263,7 @@ struct RotationHarness {
     commands: Arc<Mutex<VecDeque<WorkerCommand>>>,
     stop: Arc<AtomicBool>,
     heartbeat: Arc<AtomicU64>,
+    runtime_atomics: Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>,
     worker: Option<std::thread::JoinHandle<()>>,
     first_forward: SessionKey,
     first_reverse: SessionKey,
@@ -271,19 +279,62 @@ impl RotationHarness {
         Self::start_with_extra(&[])
     }
 
+    /// Starts the same worker fixture with the unbound victim carrying the
+    /// requested origin. The failover-before-rename joint starts it as a
+    /// `SyncImport`, then promotes it through the worker's real
+    /// `UpsertSynced` command path before rotating the forwarding view.
+    fn start_with_unbound_origin(
+        extra: &[SyncedSessionEntry],
+        unbound_origin: SessionOrigin,
+    ) -> Self {
+        Self::start_with_extra_and_origin(extra, unbound_origin)
+    }
+
+    /// Starts the fixture with an initial `SyncImport` victim so the joint can
+    /// exercise the failover retag instead of beginning with the post-failover
+    /// `SharedPromote` fixture used by the single-leg cells.
+    fn start_for_failover(extra: &[SyncedSessionEntry]) -> Self {
+        Self::start_with_unbound_origin(extra, SessionOrigin::SyncImport)
+    }
+
     /// `start` plus additional caller-supplied rows, installed through the
     /// same shared-map + command-queue path (SharedPromote rows via
     /// UpsertSynced, all others via UpsertLocal). Selectivity cells use this
     /// to install rows the rotation must NOT purge.
     fn start_with_extra(extra: &[SyncedSessionEntry]) -> Self {
+        Self::start_with_extra_and_origin(extra, SessionOrigin::SharedPromote)
+    }
+
+    fn start_with_extra_and_origin(
+        extra: &[SyncedSessionEntry],
+        unbound_origin: SessionOrigin,
+    ) -> Self {
+        Self::start_with_extra_origin_old_rules(
+            extra,
+            unbound_origin,
+            &[rule("p-first", 0), rule("p-web", 1)],
+            "lan->wan/p-first",
+        )
+    }
+
+    /// `start_with_extra_and_origin` with caller-supplied generation-1 rules
+    /// (the junos-global cell rotates FROM a global first rule, not
+    /// `lan->wan/p-first`). The expected id pins counter idx 1 to the
+    /// caller's first rule, exactly as the fixed fixture does.
+    fn start_with_extra_origin_old_rules(
+        extra: &[SyncedSessionEntry],
+        unbound_origin: SessionOrigin,
+        old_rules: &[crate::PolicyRuleSnapshot],
+        expected_first_rule_id: &str,
+    ) -> Self {
         let coord = Coordinator::new();
         let channel = RuntimeViewChannel::default();
-        let (old_view, old_forwarding) = view(1, &[rule("p-first", 0), rule("p-web", 1)]);
+        let (old_view, old_forwarding) = view(1, old_rules);
         let first_counter = old_forwarding.policy.hit_counter_by_idx(1).cloned();
         let old_first_counter = first_counter.clone();
         assert_eq!(
             first_counter.as_ref().map(|c| c.rule_id()),
-            Some("lan->wan/p-first"),
+            Some(expected_first_rule_id),
             "fixture: counter idx 1 is the first rule's handle"
         );
         channel.publish(old_view);
@@ -314,12 +365,13 @@ impl RotationHarness {
             DnatTableFds::default(),
         );
         let cos = WorkerCoSState::from_coord(&coord);
+        let runtime_atomics = Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new());
         let telemetry = WorkerPublishedTelemetry::new(
             Arc::new(Mutex::new(ExceptionEventRing::new())),
             Arc::new(Mutex::new(VecDeque::new())),
             Arc::new(Mutex::new(None)),
             Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
+            runtime_atomics.clone(),
             Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new()),
         );
         let worker = std::thread::spawn(move || worker_loop(plan, shared, control, cos, telemetry));
@@ -329,7 +381,7 @@ impl RotationHarness {
         let unbound = key(40003);
         let mut unbound_entry = entry(unbound.clone(), false, None);
         unbound_entry.metadata.ingress_zone = 3;
-        unbound_entry.origin = SessionOrigin::SharedPromote;
+        unbound_entry.origin = unbound_origin;
         let mut entries = vec![
             entry(first_forward.clone(), false, first_counter.clone()),
             entry(first_reverse.clone(), true, first_counter),
@@ -361,7 +413,9 @@ impl RotationHarness {
             std::thread::sleep(Duration::from_millis(1));
         }
         // Queue emptiness only proves the commands moved out of the shared deque;
-        // let the worker finish its local scratch batch before rotating the view.
+        // let the worker finish its local scratch batch before any caller rotates
+        // the view. This synchronization is required by every existing rotation
+        // cell, not just the failover-before-rename joint.
         wait_for_iterations(&heartbeat, 2);
         Self {
             channel,
@@ -369,6 +423,7 @@ impl RotationHarness {
             commands,
             stop,
             heartbeat,
+            runtime_atomics,
             worker: Some(worker),
             first_forward,
             first_reverse,
@@ -403,6 +458,115 @@ impl RotationHarness {
         };
         self.channel.publish(new_view);
         wait_for_iterations(&self.heartbeat, 3);
+    }
+
+    /// Re-publish the victim through the same shared-map + worker-command path
+    /// used by a failover promotion. The real packet-side promoter is not
+    /// reachable from this empty-binding worker fixture; this is its queue
+    /// contract: the authoritative shared row is retagged first, then the
+    /// worker receives the SharedPromote upsert.
+    fn promote_unbound_for_failover(&self) {
+        let mut promoted = self
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .get(&self.unbound)
+            .cloned()
+            .expect("failover victim must be in the shared map");
+        assert_eq!(
+            promoted.origin,
+            SessionOrigin::SyncImport,
+            "joint setup must begin with a peer-synced victim"
+        );
+        promoted.origin = SessionOrigin::SharedPromote;
+        self.synced
+            .lock()
+            .expect("shared synced map")
+            .insert(self.unbound.clone(), promoted.clone());
+        self.commands
+            .lock()
+            .expect("worker command queue")
+            .push_back(WorkerCommand::UpsertSynced(promoted));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self
+            .commands
+            .lock()
+            .expect("worker command queue")
+            .is_empty()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the worker never drained the failover promotion command"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        wait_for_iterations(&self.heartbeat, 2);
+    }
+
+    /// Queue a diagnostic read against the real worker-local SessionTable.
+    /// `counter_query_replica` distinguishes the pre-failover SyncImport from
+    /// the post-failover SharedPromote origin because SharedPromote is
+    /// intentionally excluded from `is_peer_synced`.
+    fn query_worker_presence(&self, key: &SessionKey, sequence: u64) -> (bool, bool) {
+        self.commands
+            .lock()
+            .expect("worker command queue")
+            .push_back(WorkerCommand::QuerySessionCounters {
+                sequence,
+                key: key.clone(),
+            });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self
+            .runtime_atomics
+            .counter_query_seq
+            .load(Ordering::Acquire)
+            != sequence
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the worker never answered the session presence query"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        (
+            self.runtime_atomics
+                .counter_query_found
+                .load(Ordering::Acquire)
+                != 0,
+            self.runtime_atomics
+                .counter_query_replica
+                .load(Ordering::Acquire)
+                != 0,
+        )
+    }
+
+    /// Model a late bulk/incremental replay: reinsert the stale authoritative
+    /// row into the shared map and enqueue its worker import, exactly as the
+    /// fixture setup does. Keeping both sides observable prevents a
+    /// shared-map-only assertion from passing while the worker resurrects it.
+    fn replay_unbound(&self, stale: SyncedSessionEntry) {
+        self.synced
+            .lock()
+            .expect("shared synced map")
+            .insert(stale.key.clone(), stale.clone());
+        self.commands
+            .lock()
+            .expect("worker command queue")
+            .push_back(WorkerCommand::UpsertSynced(stale));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self
+            .commands
+            .lock()
+            .expect("worker command queue")
+            .is_empty()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the worker never drained the stale replay command"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        wait_for_iterations(&self.heartbeat, 2);
     }
 
     fn presence(&self) -> Presence {
@@ -457,6 +621,129 @@ fn rotate_with_metadata(
     let presence = harness.presence();
     harness.shutdown();
     presence
+}
+
+/// `rotate_with_metadata` starting FROM caller-supplied generation-1 rules
+/// (the junos-global cell rotates from a global first rule). Sessions are
+/// installed exactly as in `start` (a lan->wan pair bound to policy id 0):
+/// a global rule admits any flow zones, so the fixed fixture pair is a
+/// faithful global-bound session.
+fn rotate_with_old_rules(
+    old_rules: &[crate::PolicyRuleSnapshot],
+    expected_first_rule_id: &str,
+    new_rules: &[crate::PolicyRuleSnapshot],
+    policy_rematch_extensive: bool,
+    policy_rename_ancestry: &[crate::protocol::PolicyRenameAncestry],
+) -> Presence {
+    let harness = RotationHarness::start_with_extra_origin_old_rules(
+        &[],
+        SessionOrigin::SharedPromote,
+        old_rules,
+        expected_first_rule_id,
+    );
+    harness.publish(
+        2,
+        new_rules,
+        policy_rematch_extensive,
+        policy_rename_ancestry,
+        None,
+    );
+    let presence = harness.presence();
+    harness.shutdown();
+    presence
+}
+
+/// #10625: the extensive id-0 rotation rematch handles a GLOBAL first-rule
+/// rename (g-old -> g-new) through the junos-global ancestry arms — the
+/// zone-pair 10511 cell pins only zone-pair ancestry. The bound pair keeps
+/// its flow zones (the junos-global destination arm returns the fallback),
+/// and the rebind replaces the counter Arc with the new global rule's.
+///
+/// RED-on-revert: breaking either junos-global arm (source match or
+/// destination fallback) fails the retain expects — the pair purges instead
+/// of rebinding, exactly the zone-pair behavior without ancestry.
+#[test]
+fn extensive_rotation_rebinds_global_first_policy_via_junos_global_ancestry_10625() {
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "junos-global->junos-global/g-old".to_string(),
+        destination_rule_id: "junos-global->junos-global/g-new".to_string(),
+        source_from_zone: "junos-global".to_string(),
+        source_to_zone: "junos-global".to_string(),
+        destination_from_zone: "junos-global".to_string(),
+        destination_to_zone: "junos-global".to_string(),
+        source_from_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        source_to_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        destination_from_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        destination_to_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let retained = rotate_with_old_rules(
+        &[
+            rule_with_zones("g-old", 0, "junos-global", "junos-global"),
+            // p-web is lan->dmz: its from-zone keeps fixture interface 11
+            // on lan (the first-known fallback), while its to-zone keeps it
+            // from matching the lan->wan fixture flow — zone-pair rules
+            // evaluate before the global tier, so a lan->wan p-web would
+            // shadow the global in the re-eval and land the rebind on
+            // policy 1 instead of the renamed global.
+            rule_with_zones("p-web", 1, "lan", "dmz"),
+        ],
+        "junos-global->junos-global/g-old",
+        &[
+            rule_with_zones("g-new", 0, "junos-global", "junos-global"),
+            rule_with_zones("p-web", 1, "lan", "dmz"),
+        ],
+        true,
+        &[ancestry],
+    );
+    let forward = retained
+        .first_forward_entry
+        .as_ref()
+        .expect("extensive rematch must retain the forward half");
+    let reverse = retained
+        .first_reverse_entry
+        .as_ref()
+        .expect("extensive rematch must retain the reverse half");
+    assert_eq!(forward.metadata.policy_id, 0);
+    assert_eq!(reverse.metadata.policy_id, 0);
+    assert_eq!(forward.metadata.policy_counter_idx, 1);
+    assert_eq!(reverse.metadata.policy_counter_idx, 1);
+    let forward_counter = forward
+        .metadata
+        .policy_counter
+        .as_ref()
+        .expect("forward half must carry the new counter Arc");
+    let reverse_counter = reverse
+        .metadata
+        .policy_counter
+        .as_ref()
+        .expect("reverse half must carry the new counter Arc");
+    assert_eq!(
+        forward_counter.rule_id(),
+        "junos-global->junos-global/g-new"
+    );
+    assert_eq!(
+        reverse_counter.rule_id(),
+        "junos-global->junos-global/g-new"
+    );
+    assert!(Arc::ptr_eq(forward_counter, reverse_counter));
+    assert!(
+        !Arc::ptr_eq(
+            forward_counter,
+            retained
+                .old_first_counter
+                .as_ref()
+                .expect("fixture must expose the old counter"),
+        ),
+        "the rebind must replace, not reuse, the old policy counter Arc"
+    );
+    assert_eq!(forward.metadata.ingress_zone, 1);
+    assert_eq!(forward.metadata.egress_zone, 2);
+    assert_eq!(reverse.metadata.ingress_zone, 2);
+    assert_eq!(reverse.metadata.egress_zone, 1);
 }
 
 #[test]
@@ -900,5 +1187,312 @@ fn rotation_purge_keeps_bound_when_zone_vanishes_10588() {
         "the surviving bound row must still carry its policy counter"
     );
     drop(map);
+    harness.shutdown();
+}
+/// #10589 joint: bind the demoted-owner CLOSE precondition to a real
+/// failover-before-rename worker rotation. Leg A's paired Go cell proves that
+/// the demoted owner emits no CLOSE delete; this shared helper drives the
+/// receiver's independent leg through failover, rename, and purge. The normal
+/// #10589 test below runs Steps 1-2 green; the #10612 repro runs only
+/// the post-purge stale replay (un-ignored by the #10612 fix).
+struct JointRotationSetup {
+    harness: RotationHarness,
+    stale_victim: SyncedSessionEntry,
+}
+
+fn setup_failover_before_rename_joint_10589() -> JointRotationSetup {
+    let survivor_key = key(40009);
+    let mut survivor = entry(survivor_key.clone(), false, None);
+    survivor.metadata.ingress_zone = 1;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SharedPromote;
+
+    let bound_key = key(40010);
+    let bound_counter = policy(&[rule("p-first", 0), rule("p-web", 1)])
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose the first-rule counter");
+    let mut bound = entry(bound_key.clone(), false, Some(bound_counter));
+    bound.metadata.ingress_zone = 3;
+    bound.metadata.egress_zone = 2;
+    bound.origin = SessionOrigin::SyncImport;
+
+    let harness = RotationHarness::start_for_failover(&[survivor, bound]);
+    let stale_victim = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&harness.unbound)
+        .cloned()
+        .expect("joint victim must be installed");
+    assert_eq!(stale_victim.origin, SessionOrigin::SyncImport);
+    let (found, replica) = harness.query_worker_presence(&harness.unbound, 1);
+    assert!(found, "failover victim must be present before promotion");
+    assert!(replica, "pre-failover victim must remain peer-synced");
+
+    // FAILOVER before the rename: the queue-driven republish is the
+    // harness's fallback for the production packet-side promoter.
+    harness.promote_unbound_for_failover();
+    let (found, replica) = harness.query_worker_presence(&harness.unbound, 2);
+    assert!(found, "failover promotion must retain the victim");
+    assert!(
+        !replica,
+        "promoted victim must be SharedPromote, not peer-synced"
+    );
+    let promoted = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&harness.unbound)
+        .cloned()
+        .expect("promoted victim must remain authoritative");
+    assert_eq!(promoted.origin, SessionOrigin::SharedPromote);
+    assert!(
+        promoted.metadata.policy_counter.is_none(),
+        "failover victim must remain unbound"
+    );
+    assert_eq!(promoted.metadata.policy_id, 0);
+    assert_eq!(promoted.metadata.ingress_zone, 3);
+    assert_eq!(promoted.metadata.egress_zone, 2);
+
+    assert!(
+        harness.channel.load().forwarding().zone_set_validated,
+        "joint setup must begin with a validated old zone set"
+    );
+
+    // RENAME rotation: p-first survives, but zone 3 disappears. Both the old
+    // fixture generation and this new generation are explicitly validated;
+    // the positive removed-set contract must not be silently weakened.
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let current_view = harness.channel.load();
+    assert!(
+        current_view.forwarding().zone_set_validated,
+        "joint rotation must publish a validated new zone set"
+    );
+    assert!(
+        !current_view.forwarding().zone_id_to_name.contains_key(&3),
+        "joint rename must remove zone 3 from the new generation"
+    );
+    let rotated = harness.presence();
+    assert!(
+        !rotated.unbound,
+        "the failover-promoted, owner-absent id-0 victim must purge"
+    );
+    assert!(
+        rotated.first_forward && rotated.first_reverse,
+        "the bound first-policy pair must survive the zone purge"
+    );
+    let map = harness.synced.lock().expect("shared synced map");
+    assert!(
+        map.contains_key(&survivor_key),
+        "the unbound id-0 survivor outside the removed set must remain"
+    );
+    let kept_bound = map
+        .get(&bound_key)
+        .expect("the bound control stamped with zone 3 must survive");
+    assert!(
+        kept_bound.metadata.policy_counter.is_some(),
+        "the bound control must retain its policy counter"
+    );
+    drop(map);
+    let (found, _) = harness.query_worker_presence(&harness.unbound, 3);
+    assert!(
+        !found,
+        "the receiver worker must remove the purged victim, not only its shared row"
+    );
+
+    JointRotationSetup {
+        harness,
+        stale_victim,
+    }
+}
+
+/// #10589 GREEN cell: failover-before-rename purges the promoted, unbound
+/// id-0 row while retaining the outside-set and bound controls.
+#[test]
+fn failover_before_rename_joint_purges_10589() {
+    let setup = setup_failover_before_rename_joint_10589();
+    setup.harness.shutdown();
+}
+
+/// #10612 repro pin (UN-IGNORED by the fix): `replay_unbound` reinserts the
+/// purged victim into the shared map and queues
+/// `WorkerCommand::UpsertSynced` after rotation; the stale-replay fence must
+/// refuse it on both authorities. Fails pre-fix (resurrection), green post-fix.
+#[test]
+fn failover_before_rename_joint_stale_replay_does_not_resurrect_10612() {
+    let setup = setup_failover_before_rename_joint_10589();
+    let harness = setup.harness;
+
+    // NO-RESURRECTION replay: model a late stale import through both
+    // authoritative shared state and the worker command queue. The delete
+    // contract requires the purged key to remain absent after the replay.
+    harness.replay_unbound(setup.stale_victim);
+    let (found, _) = harness.query_worker_presence(&harness.unbound, 4);
+    assert!(
+        !found,
+        "a stale replay must not resurrect the removed-zone victim"
+    );
+    assert!(
+        !harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&harness.unbound),
+        "a stale replay must not restore shared authority for the purged victim"
+    );
+    harness.shutdown();
+}
+
+/// #10612: a pre-rotation shared snapshot replayed after the real zone purge
+/// must not restore either authority. This is intentionally an independent
+/// reproduction complementing the joint repro cell: it drives the real worker
+/// loop but re-publishes the stale row itself through the shared map and queue.
+///
+/// FAIL-ON-REVERT: removing the worker fence leaves `found=true`; removing the
+/// conditional shared eviction leaves the shared-map assertion fail.
+#[test]
+fn stale_removed_zone_replay_does_not_resurrect_10612() {
+    let harness = RotationHarness::start();
+    let stale = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&harness.unbound)
+        .cloned()
+        .expect("the pre-rotation victim must be installed");
+
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    assert!(
+        !harness.presence().unbound,
+        "the rotation purge must remove the old removed-zone victim first"
+    );
+
+    harness.replay_unbound(stale);
+    assert!(
+        !harness.query_worker_presence(&harness.unbound, 10612).0,
+        "a stale post-purge replay must not resurrect the worker row"
+    );
+    assert!(
+        !harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&harness.unbound),
+        "a stale post-purge replay must not restore shared authority"
+    );
+    harness.shutdown();
+}
+
+/// #10612 (N4): a stale REVERSE replay must not resurrect either authority.
+/// The predicate judges reverses by zone membership (no exemption); this cell
+/// pins the worker-level integrated behavior for the reverse half (the
+/// forward half is pinned above; unit + filter levels pin the parts).
+/// Fails pre-M2 (standalone stale reverse installed).
+#[test]
+fn stale_removed_zone_reverse_replay_does_not_resurrect_10612() {
+    let harness = RotationHarness::start();
+    let stale = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&harness.unbound)
+        .cloned()
+        .expect("the pre-rotation victim must be installed");
+
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    assert!(
+        !harness.presence().unbound,
+        "the rotation purge must remove the old removed-zone victim first"
+    );
+
+    let reverse_key =
+        crate::session::reverse_session_key(&harness.unbound, stale.decision.nat);
+    let mut reversed = stale;
+    reversed.key = reverse_key.clone();
+    reversed.metadata.is_reverse = true;
+    harness.replay_unbound(reversed);
+    assert!(
+        !harness.query_worker_presence(&reverse_key, 10614).0,
+        "a stale post-purge reverse replay must not resurrect the worker row"
+    );
+    assert!(
+        !harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&reverse_key),
+        "a stale post-purge reverse replay must not restore shared authority"
+    );
+    harness.shutdown();
+}
+
+/// #10612 live pin: an unbound id-0 replay whose zones are still current
+/// must install through BOTH authorities — the fence drops only the
+/// removed-zone shape, never live rows or rotation survivors.
+///
+/// FAIL-ON-REVERT (inverted): a mis-scoped fence (e.g. dropping every
+/// unbound id-0 replay) evicts this row from shared authority and the
+/// worker table alike.
+#[test]
+fn live_unbound_replay_still_installs_after_rotation_10612() {
+    let live_key = key(40005);
+    let live = entry(live_key.clone(), false, None);
+    let harness = RotationHarness::start_with_extra(std::slice::from_ref(&live));
+
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    assert!(
+        harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&live_key),
+        "the current-zone unbound row must survive the rotation purge"
+    );
+
+    let replay = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&live_key)
+        .cloned()
+        .expect("the surviving row must be replayable");
+    harness.replay_unbound(replay);
+    assert!(
+        harness.query_worker_presence(&live_key, 10613).0,
+        "a current-zone replay must keep the worker row installed"
+    );
+    assert!(
+        harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&live_key),
+        "a current-zone replay must keep shared authority"
+    );
     harness.shutdown();
 }

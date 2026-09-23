@@ -70,7 +70,8 @@ pub(crate) enum HaRefreshOutcome {
 
 /// A cloneable, lock-free handle onto the peer-synced session domain.
 ///
-/// Cheap to clone (eight `Arc` bumps) and valid for the coordinator's whole life:
+/// Cheap to clone (the live references and two mutation-lifecycle cells are
+/// all `Arc`s) and valid for the coordinator's whole life:
 /// none of the fields it mirrors is ever REASSIGNED on the `Coordinator` — only
 /// mutated through its own interior synchronization — which is what makes a
 /// handle taken at startup observe every later change rather than a snapshot.
@@ -86,11 +87,17 @@ pub(crate) struct SessionDomain {
     /// rows in, so an HA delete racing a teardown or bringup sees their claims.
     pub(in crate::afxdp) steering_owners: Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
     pub(in crate::afxdp) rg_runtime: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    pub(in crate::afxdp) dynamic_neighbors: Arc<ShardedNeighborMap>,
     /// #9629: the HA leaf mutex (`HaState::ha_mutex`), shared — not copied —
     /// so the session fast path serializes against the locked path across the
     /// load→decisions→store section. Same `Arc`, same mutex, same µs hold.
     pub(in crate::afxdp) ha_mutex: Arc<Mutex<()>>,
-    pub(in crate::afxdp) dynamic_neighbors: Arc<ShardedNeighborMap>,
+    pub(in crate::afxdp) helper_epoch: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::afxdp) helper_mutations: Arc<Mutex<HelperMutationStore>>,
+    /// #10512: helper-owned READ captures survive page-to-page control
+    /// requests. Tokens are opaque to Go; entries expire when idle.
+    policy_captures: Arc<Mutex<std::collections::HashMap<String, PolicyCapture>>>,
+    policy_capture_seq: Arc<std::sync::atomic::AtomicU64>,
     /// #6819 §7 test seam, SHARED rather than copied. The six tests that set it
     /// do so on the `Coordinator` after construction; a copied `usize` would
     /// leave the handle reading 0 and every cap assertion would pass against
@@ -116,7 +123,229 @@ pub(crate) struct SessionDomain {
     pub(in crate::afxdp) ha_refresh_acquired_proceed:
         Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
+
+/// Buffered helper-owned policy READ page state. The buffer is bounded by
+/// `POLICY_CAPTURE_LIMIT`; the opaque token is only a map key.
+struct PolicyCapture {
+    rows: Vec<crate::protocol::SessionPolicyMatch>,
+    errors: Vec<String>,
+    offset: usize,
+    last_used: std::time::Instant,
+}
+/// #10512: recorded outcome summary of one epoch-scoped helper mutation.
+///
+/// Replayed verbatim when the exact `(epoch, operation_id, mutation_id)`
+/// triple is retried, so the replayed response is indistinguishable from the
+/// first execution's. Every response field a tuple verb can set lives here.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HelperMutationOutcome {
+    pub ok: bool,
+    pub error: String,
+    pub mirror_v4_count: u64,
+    pub mirror_v6_count: u64,
+    pub mirror_complete: bool,
+    pub mirror_fence_id: u64,
+    pub mirror_continuation: String,
+    pub delete_outcomes: Vec<String>,
+    pub delete_complete: bool,
+    pub delete_errors: Vec<String>,
+}
+
+impl HelperMutationOutcome {
+    pub(crate) fn from_response(response: &crate::ControlResponse) -> Self {
+        Self {
+            ok: response.ok,
+            error: response.error.clone(),
+            mirror_v4_count: response.session_mirror_v4_count,
+            mirror_v6_count: response.session_mirror_v6_count,
+            mirror_complete: response.session_mirror_complete,
+            mirror_fence_id: response.session_mirror_fence_id,
+            mirror_continuation: response.session_mirror_continuation.clone(),
+            delete_outcomes: response.policy_delete_outcomes.clone(),
+            delete_complete: response.policy_delete_complete,
+            delete_errors: response.policy_delete_errors.clone(),
+        }
+    }
+
+    pub(crate) fn apply_to_response(&self, response: &mut crate::ControlResponse) {
+        response.ok = self.ok;
+        response.error = self.error.clone();
+        response.session_mirror_v4_count = self.mirror_v4_count;
+        response.session_mirror_v6_count = self.mirror_v6_count;
+        response.session_mirror_complete = self.mirror_complete;
+        response.session_mirror_fence_id = self.mirror_fence_id;
+        response.session_mirror_continuation = self.mirror_continuation.clone();
+        response.policy_delete_outcomes = self.delete_outcomes.clone();
+        response.policy_delete_complete = self.delete_complete;
+        response.policy_delete_errors = self.delete_errors.clone();
+    }
+}
+
+/// One recorded epoch-scoped mutation: the mutation id it ran under (for the
+/// operation-id-reuse check), its outcome summary (for exact-pair replay),
+/// and a recency sequence (for within-epoch LRU).
+struct HelperMutationRecord {
+    mutation_id: String,
+    outcome: HelperMutationOutcome,
+    last_used: u64,
+}
+
+/// #10512 (F-D): epoch-scoped LRU mutation store.
+///
+/// Replaces the random `HashMap::iter().next()` eviction, which could drop a
+/// live in-flight retry's record while retaining stale epochs forever.
+/// Eviction removes the oldest epoch first, then the least-recently-used
+/// record within that epoch — and never an in-flight operation (one that
+/// passed `helper_mutation_begin` but has not recorded its outcome yet).
+#[derive(Default)]
+pub(crate) struct HelperMutationStore {
+    records: std::collections::HashMap<(u64, String), HelperMutationRecord>,
+    in_flight: std::collections::HashSet<(u64, String)>,
+    seq: u64,
+}
+
+/// Outcome of `SessionDomain::helper_mutation_begin`.
+pub(crate) enum HelperMutationBegin {
+    /// The exact triple already ran: replay this outcome without executing.
+    Replay(HelperMutationOutcome),
+    /// Execute the mutation, then `complete` the lease with its outcome.
+    Proceed(HelperMutationLease),
+}
+
+/// In-flight guard for one epoch-scoped mutation. Completing records the
+/// outcome; dropping without completing (any early return) releases the
+/// in-flight mark without recording, so a failed op stays retryable under
+/// the same ids and can never be evicted mid-execution.
+pub(crate) struct HelperMutationLease {
+    mutations: Arc<Mutex<HelperMutationStore>>,
+    key: (u64, String),
+    mutation_id: String,
+    completed: bool,
+}
+
+impl HelperMutationLease {
+    /// Record the terminal outcome. At capacity, evicts oldest-epoch-first /
+    /// LRU-within-epoch; when every record is in-flight the insert runs over
+    /// capacity rather than evicting a live op.
+    pub(crate) fn complete(mut self, outcome: HelperMutationOutcome) {
+        let mut store = self
+            .mutations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        store.in_flight.remove(&self.key);
+        const MAX_MUTATIONS: usize = 16_384;
+        if store.records.len() >= MAX_MUTATIONS {
+            let victim = store
+                .records
+                .iter()
+                .filter(|(key, _)| !store.in_flight.contains(*key))
+                .min_by_key(|((epoch, _), record)| (*epoch, record.last_used))
+                .map(|(key, _)| key.clone());
+            if let Some(victim) = victim {
+                store.records.remove(&victim);
+            }
+        }
+        store.seq = store.seq.wrapping_add(1);
+        let seq = store.seq;
+        let mutation_id = std::mem::take(&mut self.mutation_id);
+        store.records.insert(
+            self.key.clone(),
+            HelperMutationRecord {
+                mutation_id,
+                outcome,
+                last_used: seq,
+            },
+        );
+        self.completed = true;
+    }
+}
+
+impl Drop for HelperMutationLease {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.mutations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .in_flight
+            .remove(&self.key);
+    }
+}
 impl SessionDomain {
+    /// Session mutations from a previous helper generation must not be applied
+    /// after a restart. Zero preserves compatibility with pre-epoch peers.
+    /// Monotonic re-adopt (P12, permit_epoch precedent): stale in-flight
+    /// epochs from a superseded boot may still land first and are accepted
+    /// (they execute once, idempotently); anything older than the adopted
+    /// epoch is rejected; anything newer re-adopts. The old latch-on-first
+    /// wedged double restarts (stale N+1 latching forever against N+2).
+    pub(crate) fn accepts_helper_epoch(&self, epoch: u64) -> bool {
+        if epoch == 0 {
+            return true;
+        }
+        use std::sync::atomic::Ordering;
+        let mut current = self.helper_epoch.load(Ordering::Acquire);
+        loop {
+            if epoch == current {
+                return true;
+            }
+            if epoch < current {
+                return false;
+            }
+            match self.helper_epoch.compare_exchange(
+                current,
+                epoch,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+    /// Begin one epoch-scoped mutation. Returns the recorded outcome when the
+    /// exact `(epoch, operation_id, mutation_id)` triple already ran — the
+    /// caller replays it and returns without executing. Otherwise marks the
+    /// op in-flight and returns a lease the caller completes with the
+    /// terminal outcome (dropping it uncompleted releases the mark, so a
+    /// failed op stays retryable). Reusing an operation id with a DIFFERENT
+    /// mutation id is rejected; a NEW operation id carrying a known mutation
+    /// id (repair/retry-after-unknown-outcome) proceeds and re-executes.
+    pub(crate) fn helper_mutation_begin(
+        &self,
+        epoch: u64,
+        operation_id: &str,
+        mutation_id: &str,
+    ) -> Result<HelperMutationBegin, &'static str> {
+        let mut store = self
+            .helper_mutations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (epoch, operation_id.to_string());
+        let replay = store
+            .records
+            .get(&key)
+            .map(|record| (record.mutation_id.clone(), record.outcome.clone()));
+        if let Some((recorded_mutation, outcome)) = replay {
+            if recorded_mutation != mutation_id {
+                return Err("operation-id-reused");
+            }
+            store.seq = store.seq.wrapping_add(1);
+            let seq = store.seq;
+            if let Some(record) = store.records.get_mut(&key) {
+                record.last_used = seq;
+            }
+            return Ok(HelperMutationBegin::Replay(outcome));
+        }
+        store.in_flight.insert(key.clone());
+        Ok(HelperMutationBegin::Proceed(HelperMutationLease {
+            mutations: Arc::clone(&self.helper_mutations),
+            key,
+            mutation_id: mutation_id.to_string(),
+            completed: false,
+        }))
+    }
     /// #9629 test-only rendezvous: notify immediately before the fast path
     /// attempts its shared HA leaf mutex. The production build has no sender
     /// field or callback, so this cannot alter the lock ordering.
@@ -168,7 +397,8 @@ impl SessionDomain {
     ///
     /// Takes borrows of the live fields rather than an `&Coordinator`, so it
     /// can be called from inside `Coordinator::new`'s struct construction —
-    /// and so the compiler enforces that it reads exactly these eight things.
+    /// and so the compiler enforces that it reads exactly these six live
+    /// sources (plus the test-only cap seam).
     pub(in crate::afxdp) fn new(
         sessions: &Arc<SessionManager>,
         workers: &WorkerManager,
@@ -187,6 +417,10 @@ impl SessionDomain {
             rg_runtime: Arc::clone(&ha.rg_runtime),
             ha_mutex: Arc::clone(&ha.ha_mutex),
             dynamic_neighbors: Arc::clone(&neighbors.dynamic),
+            helper_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            helper_mutations: Arc::new(Mutex::new(HelperMutationStore::default())),
+            policy_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            policy_capture_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
             synced_import_cap_override: Arc::clone(synced_import_cap_override),
             #[cfg(test)]
@@ -225,6 +459,54 @@ pub(crate) struct SessionDomainView<'a> {
     view: arc_swap::Guard<Arc<RuntimeView>>,
 }
 
+
+/// The READ wire deliberately uses compact `4`/`6` family tags rather than
+/// leaking Linux's `AF_INET`/`AF_INET6` values (`2`/`10`) into Go.
+pub(crate) fn policy_wire_family(addr_family: u8) -> u8 {
+    match addr_family as i32 {
+        libc::AF_INET => 4,
+        libc::AF_INET6 => 6,
+        _ => 0,
+    }
+}
+
+pub(crate) fn policy_tuple_from_key(
+    key: &SessionKey,
+) -> Option<crate::protocol::SessionPolicyTuple> {
+    let family = policy_wire_family(key.addr_family);
+    (family != 0).then(|| crate::protocol::SessionPolicyTuple {
+        addr_family: family,
+        protocol: key.protocol,
+        src_ip: key.src_ip.to_string(),
+        dst_ip: key.dst_ip.to_string(),
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        tunnel_discriminator: key.discriminator.to_wire(),
+        routing_domain: key.routing_domain,
+    })
+}
+
+pub(crate) fn policy_match_from_parts(
+    key: &SessionKey,
+    metadata: &SessionMetadata,
+    session_id: u64,
+    created_ns: u64,
+) -> Option<crate::protocol::SessionPolicyMatch> {
+    let family = policy_wire_family(key.addr_family);
+    let tuple = policy_tuple_from_key(key)?;
+    Some(crate::protocol::SessionPolicyMatch {
+        addr_family: family,
+        routing_domain: key.routing_domain,
+        tuple,
+        reverse_key: None,
+        policy_id: metadata.policy_id,
+        created_secs: created_ns / 1_000_000_000,
+        created_ns,
+        expected_rt_flow_session_id: session_id,
+        companion_policy_id: 0,
+        expected_companion_rt_flow_session_id: 0,
+    })
+}
 impl SessionDomain {
     /// Take this request's view. Cheap (one `ArcSwap` load), and the guard is
     /// held for as long as the returned value lives.
@@ -252,6 +534,928 @@ impl SessionDomain {
         // scanner caught this one by CONTENT, from another module — the class of
         // guard a package-scoped test run cannot see.
         crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced).len()
+    }
+    /// Decode one READ tuple to a session key for an identity-conditional
+    /// policy delete (Delete intent: an unstatable discriminator under-matches
+    /// to `None`, and validation against the live derivation refuses rather
+    /// than deleting by it anyway). The tuple's family tag is the compact 4/6
+    /// (`policy_wire_family`), not `AF_INET`/`AF_INET6`, and its routing domain
+    /// is RAW (0 = default instance, stated) — never the #7239 wire codec —
+    /// so no domain decode applies. Inverse of `policy_tuple_from_key` for
+    /// the delete path's exact-key needs.
+    fn policy_key_from_tuple(
+        tuple: &crate::protocol::SessionPolicyTuple,
+    ) -> Result<SessionKey, String> {
+        let discriminator = match crate::session::TunnelDiscriminator::from_wire(
+            tuple.tunnel_discriminator,
+        ) {
+            crate::session::WireDiscriminator::Present(discriminator) => discriminator,
+            crate::session::WireDiscriminator::Absent
+            | crate::session::WireDiscriminator::Unrecognized => {
+                crate::session::TunnelDiscriminator::None
+            }
+        };
+        let addr_family = match tuple.addr_family {
+            4 => libc::AF_INET as u8,
+            6 => libc::AF_INET6 as u8,
+            other => return Err(format!("policy tuple family {other}")),
+        };
+        let src_ip = tuple
+            .src_ip
+            .parse()
+            .map_err(|e| format!("parse policy tuple src_ip {}: {e}", tuple.src_ip))?;
+        let dst_ip = tuple
+            .dst_ip
+            .parse()
+            .map_err(|e| format!("parse policy tuple dst_ip {}: {e}", tuple.dst_ip))?;
+        Ok(SessionKey {
+            addr_family,
+            protocol: tuple.protocol,
+            src_ip,
+            dst_ip,
+            src_port: tuple.src_port,
+            dst_port: tuple.dst_port,
+            discriminator,
+            routing_domain: tuple.routing_domain,
+        })
+    }
+
+    /// #10512: decode + validate one wire micro-batch, then run it. The
+    /// `PolicyDeleteItem` worker type never crosses to the server layer, so
+    /// the sync handler enters here with the wire matches. ANY malformed
+    /// match fails the WHOLE batch closed: the capture is the delete's
+    /// authorization, and a batch that cannot name every companion exactly
+    /// must not run.
+    pub(crate) fn delete_policy_batch_matches(
+        &self,
+        matches: &[crate::protocol::SessionPolicyMatch],
+        forward_only: bool,
+    ) -> (Vec<crate::afxdp::SyncedDeleteOutcome>, bool, Vec<String>) {
+        let mut items = Vec::with_capacity(matches.len());
+        for m in matches {
+            if m.expected_rt_flow_session_id == 0 {
+                return (
+                    Vec::new(),
+                    false,
+                    vec!["policy-batch-identity-missing".to_string()],
+                );
+            }
+            let forward = match Self::policy_key_from_tuple(&m.tuple) {
+                Ok(key) => key,
+                Err(err) => {
+                    return (
+                        Vec::new(),
+                        false,
+                        vec![format!("policy-batch-forward-key:{err}")],
+                    )
+                }
+            };
+            let captured = match (&m.reverse_key, m.expected_companion_rt_flow_session_id) {
+                (None, 0) => None,
+                (Some(tuple), expected) if expected != 0 => {
+                    match Self::policy_key_from_tuple(tuple) {
+                        Ok(key) => Some(key),
+                        Err(err) => {
+                            return (
+                                Vec::new(),
+                                false,
+                                vec![format!("policy-batch-reverse-key:{err}")],
+                            )
+                        }
+                    }
+                }
+                _ => {
+                    return (
+                        Vec::new(),
+                        false,
+                        vec!["policy-batch-companion-mismatch".to_string()],
+                    )
+                }
+            };
+            items.push(crate::afxdp::PolicyDeleteItem {
+                key: forward,
+                session_id: m.expected_rt_flow_session_id,
+                forward_only,
+                companion_session_id: m.expected_companion_rt_flow_session_id,
+                captured_companion: captured,
+            });
+        }
+        self.delete_policy_batch(&items)
+    }
+
+    /// #10512: one identity-conditional policy-delete micro-batch (plan §2.4:
+    /// at most 64 matches, 128 gate keys). Shared HA state does not contain
+    /// ordinary sessions, so the batch covers BOTH stores per match: a
+    /// coordinator-side shared conditional remove plus a fenced worker
+    /// remove envelope, under ONE all-keys gate lease, with one probe
+    /// envelope and token-authorized repair per touched tuple.
+    ///
+    /// Phases, uniform (no short-circuit): acquire ALL keys + Finalizing →
+    /// fenced remove envelope → shared conditional removes → probe envelope
+    /// (+1 retry) → token-authorized repair → release. No SessionTable
+    /// mutation precedes acquisition: a lease failure aborts with zero
+    /// mutations. A remove abort cancels every queued fence, completes the
+    /// shared half (quiesce — infallible, still fenced, so no zombie
+    /// authority survives the failed batch), attempts one best-effort fenced
+    /// repair, then fails loud. Any fan-out, lease, or mirror failure aborts
+    /// the WHOLE batch with `complete=false` (the caller answers `ok=false`):
+    /// outcomes are valid only on `(ok, complete)`.
+    ///
+    /// Dead workers: the remove fan-out fails on them (a panic during commit
+    /// fails loud — revocation must not silently succeed alongside one),
+    /// while the probe skips them (diagnostic only): dead tables die with
+    /// their threads (no Arc<SessionTable> exists anywhere), so live-only
+    /// evidence is complete and repair attempts stay sound.
+    pub(in crate::afxdp) fn delete_policy_batch(
+        &self,
+        items: &[crate::afxdp::PolicyDeleteItem],
+    ) -> (Vec<crate::afxdp::SyncedDeleteOutcome>, bool, Vec<String>) {
+        use crate::afxdp::SyncedDeleteOutcome;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        const FANOUT_TIMEOUT: Duration = Duration::from_millis(250);
+
+        if items.is_empty() {
+            return (Vec::new(), true, Vec::new());
+        }
+        // Plan §2.4 caps, enforced before gate acquisition (Go packs under
+        // them; this is defense against a corrupt or hostile sender).
+        let key_count: usize = items
+            .iter()
+            .map(|item| 1 + usize::from(item.captured_companion.is_some()))
+            .sum();
+        if items.len() > 64 || key_count > 128 {
+            return (
+                Vec::new(),
+                false,
+                vec![format!(
+                    "policy-batch-over-cap:{}:{}",
+                    items.len(),
+                    key_count
+                )],
+            );
+        }
+
+        let shared_removed = |outcome: &SyncedDeleteOutcome| {
+            matches!(
+                outcome,
+                SyncedDeleteOutcome::Applied | SyncedDeleteOutcome::PartialCompanion
+            )
+        };
+
+        // Lease ALL of the batch's keys together (plan §2.4 all-keys lease),
+        // before ANY SessionTable mutation: a lease failure then aborts with
+        // zero mutations (the liveness gate above is read-only). Uniform
+        // phases — no short-circuit — so every ordering stays fenced.
+        let mut lease_keys: Vec<SessionKey> = Vec::new();
+        for item in items {
+            lease_keys.push(item.key.clone());
+            if let Some(companion) = item.captured_companion.as_ref() {
+                lease_keys.push(companion.clone());
+            }
+        }
+        let lease = match crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(lease_keys) {
+            Ok(lease) => lease,
+            Err(err) => {
+                eprintln!("xpf-ha: policy batch lease refused: {err}");
+                return (
+                    Vec::new(),
+                    false,
+                    vec![format!("policy-batch-lease-refused:{err}")],
+                );
+            }
+        };
+        if lease.begin_finalizing().is_err() {
+            eprintln!("xpf-ha: policy batch lease busy at finalizing");
+            drop(lease);
+            return (
+                Vec::new(),
+                false,
+                vec!["policy-batch-lease-busy".to_string()],
+            );
+        }
+        // Hold clock starts at Finalizing: what the observer measures is the
+        // fenced window (remove + shared + probe + repair), not acquisition.
+        let lease_since = Instant::now();
+
+        // Phase 2: fenced remove envelope. Each worker's command carries its
+        // OWN fence mutex: workers tear down in parallel (the plan's parallel
+        // envelopes — never W×64 serialized), while cancel validation stays
+        // atomic with each worker's mutations. On ANY fan-out failure every
+        // queued fence is cancelled in fan-out order — validation atomic with
+        // the mutations — then the lease drops and the batch fails. No drain:
+        // post-return mutation is impossible by construction, not by timing.
+        // Lock order is always fan-out (worker-id) order, and no worker ever
+        // holds more than its own fence: no cycle exists.
+        let mut remove_fences: Vec<std::sync::Arc<std::sync::Mutex<crate::afxdp::PolicyDeleteBatchReport>>> =
+            Vec::new();
+        let mut applied_slots: Vec<std::sync::Arc<std::sync::Mutex<Vec<bool>>>> = Vec::new();
+        // Phase-2 handoff: ONE intent vec per batch, shared across workers
+        // (each arm pushes inside its fence scope — see the variant doc).
+        let remove_intents: std::sync::Arc<
+            std::sync::Mutex<Vec<crate::afxdp::DeferredRedirectDelete>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let remove_pending = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut remove_failed = false;
+        let records = self.workers.load();
+        for (worker_id, record) in records.iter() {
+            if record.is_dead() {
+                remove_failed = true;
+                eprintln!("xpf-ha: policy batch remove worker-{worker_id}: dead");
+                continue;
+            }
+            let fence = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::afxdp::PolicyDeleteBatchReport {
+                    cancelled: false,
+                    partial: vec![false; items.len()],
+                    refused: vec![false; items.len()],
+                },
+            ));
+            remove_fences.push(std::sync::Arc::clone(&fence));
+            let slot = std::sync::Arc::new(std::sync::Mutex::new(vec![false; items.len()]));
+            applied_slots.push(std::sync::Arc::clone(&slot));
+            let command = crate::afxdp::WorkerCommand::DeletePolicyBatch {
+                items: items.to_vec(),
+                applied: slot,
+                pending: std::sync::Arc::clone(&remove_pending),
+                report: fence,
+                intents: std::sync::Arc::clone(&remove_intents),
+            };
+            let mut queue = crate::afxdp::worker_queue::lock_recover(&record.handle.commands);
+            remove_pending.fetch_add(1, Ordering::Release);
+            if !crate::afxdp::worker_queue::push_bounded(&mut queue, command) {
+                remove_pending.fetch_sub(1, Ordering::AcqRel);
+                remove_failed = true;
+                eprintln!("xpf-ha: policy batch remove worker-{worker_id}: queue-full");
+            }
+        }
+        drop(records);
+        if remove_pending.load(Ordering::Acquire) != 0 {
+            let deadline = Instant::now() + FANOUT_TIMEOUT;
+            while remove_pending.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if remove_pending.load(Ordering::Acquire) != 0 {
+            remove_failed = true;
+            eprintln!(
+                "xpf-ha: policy batch remove: worker-ack-timeout:{}",
+                remove_pending.load(Ordering::Acquire)
+            );
+        }
+        // Phase-2 failure verdict (default: fan-out abort): set by the normal
+        // phase-2 attempt below on failure so the abort sequence returns the
+        // precise error. `&str`: all candidates are 'static; allocated once,
+        // on the failure return only.
+        let mut remove_error = "policy-batch-remove-aborted";
+        // True once the normal path attempted phase 2 (success or failure):
+        // the abort sequence skips its best-effort re-execution (deletes are
+        // idempotent, but a second attempt is pure noise).
+        let mut phase2_attempted = false;
+        // Coordinator-owned phase 2, normal path: every worker acked, so
+        // every intent is in hand (acks cover the fence-scoped stash).
+        // Executed under the batch lease (dropped below after repair), which
+        // serializes same-tuple installs — no replacement can land between
+        // any worker's phase 1 and this execution, so no re-probe is needed.
+        // On failure this sets flags and falls THROUGH into the abort
+        // sequence below (shared quiesce + best-effort repair, then the
+        // phase-2 verdict): returning directly would leave shared authority
+        // contradicting already-removed worker state plus ghost mirrors.
+        if !remove_failed {
+            phase2_attempted = true;
+            // Absent map degrades to fd -1 (repair sites do the same): the
+            // registry retirement below MUST run even with no kernel map
+            // bound (skipping would strand Worker claims for removed rows);
+            // only the kernel write no-ops, exactly like the old worker path.
+            let maps = self.bpf_maps.load();
+            let fd = maps.session_map_fd.as_ref().map_or(-1, |fd| fd.fd);
+            let stashed = remove_intents
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let map = crate::afxdp::bpf_map::SteeringMap {
+                fd,
+                owners: &self.steering_owners,
+                holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+            };
+            if !Self::execute_deferred_redirects(map, &lease, &stashed) {
+                remove_error = "policy-batch-deferred-failed";
+                remove_failed = true;
+            }
+        }
+        if remove_failed {
+            // Cancel every queued fence in fan-out order. Each worker's
+            // in-flight section (table work ONLY — workers issue no BPF in
+            // this path) completes before its flag lands, so every mutation
+            // is either final pre-return or never happens. Redirect deletes
+            // run coordinator-side below, from the in-hand intents.
+            for fence in &remove_fences {
+                fence
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .cancelled = true;
+            }
+            // Coordinator-owned phase 2, abort path: execute the in-hand
+            // intents while still fenced/leased (every worker either pushed
+            // before its fence landed or observes `cancelled` and pushes
+            // nothing — the set is complete). Best-effort: the batch fails
+            // regardless, but fewer ghost rows is live+consistent. Intentions
+            // that never arrive belong to dead workers whose tables died
+            // with their threads (stale rows self-heal via overwrite).
+            // Skipped when the normal path already attempted it (success or
+            // failure — re-execution is idempotent but pure noise).
+            if !phase2_attempted {
+                // fd -1 when unbound (see the normal path): retirement runs
+                // regardless; only the kernel write no-ops.
+                let maps = self.bpf_maps.load();
+                let fd = maps.session_map_fd.as_ref().map_or(-1, |fd| fd.fd);
+                let stashed = remove_intents
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let map = crate::afxdp::bpf_map::SteeringMap {
+                    fd,
+                    owners: &self.steering_owners,
+                    holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                };
+                if !Self::execute_deferred_redirects(map, &lease, &stashed) {
+                    eprintln!("xpf-ha: policy batch abort: deferred redirect execution failed");
+                }
+            }
+            let applied_count: usize = applied_slots
+                .iter()
+                .map(|slot| {
+                    slot.lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .iter()
+                        .filter(|applied| **applied)
+                        .count()
+                })
+                .sum();
+            eprintln!("xpf-ha: policy batch remove aborted with {applied_count} worker removals");
+            // Quiesce: complete the deterministic shared half now (infallible,
+            // still fenced) so the abort leaves no zombie authority behind —
+            // shared converges with the partial worker state instead of
+            // contradicting it. Outcomes discarded: the batch fails regardless.
+            let _ = self.run_shared_policy_loop(items);
+            // Best-effort final repair while still fenced: removals may have
+            // landed pre-cancel, and the mirror must not misrepresent live
+            // survivors as ghost rows. Always attempted: dead workers are
+            // skipped inside the probe (their tables died with their threads,
+            // so live-only evidence is complete). Retried once like the
+            // success path — a stall that clears still repairs. The batch
+            // fails regardless — revocation is incomplete — but
+            // live+consistent beats live+ghost.
+            let mut bares: Vec<SessionKey> = Vec::new();
+            for item in items {
+                for key in std::iter::once(&item.key).chain(item.captured_companion.iter()) {
+                    let mut bare = key.clone();
+                    bare.routing_domain = 0;
+                    bare.discriminator = Default::default();
+                    if !bares.contains(&bare) {
+                        bares.push(bare);
+                    }
+                }
+            }
+            if !bares.is_empty() {
+                let found: std::sync::Arc<
+                    std::sync::Mutex<Vec<Option<crate::afxdp::worker::SyncedSessionEntry>>>,
+                > = std::sync::Arc::new(std::sync::Mutex::new(vec![None; bares.len()]));
+                let mut probed = self.probe_policy_bares(&bares, &found).is_ok();
+                if !probed {
+                    probed = self.probe_policy_bares(&bares, &found).is_ok();
+                }
+                if probed {
+                    let view = self.runtime_view();
+                    let forwarding = view.forwarding();
+                    let maps = self.bpf_maps.load();
+                    let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+                    let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+                    let _ = self.repair_policy_bares(
+                        &lease,
+                        forwarding,
+                        v4_fd,
+                        v6_fd,
+                        &bares,
+                        &found,
+                    );
+                }
+            }
+            self.record_policy_hold(lease_since);
+            drop(lease);
+            return (
+                Vec::new(),
+                false,
+                vec![remove_error.to_string()],
+            );
+        }
+        let mut worker_applied = vec![false; items.len()];
+        let mut worker_partial = vec![false; items.len()];
+        let mut worker_refused = vec![false; items.len()];
+        for slot in &applied_slots {
+            let applied = slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (index, did) in applied.iter().enumerate() {
+                worker_applied[index] |= did;
+            }
+        }
+        for fence in &remove_fences {
+            let report = fence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for index in 0..items.len() {
+                worker_partial[index] |= report.partial[index];
+                worker_refused[index] |= report.refused[index];
+            }
+        }
+        // Shared conditional removes, under the lease (same helper the abort
+        // path uses to quiesce): no SessionTable mutation precedes
+        // acquisition. Cannot fail (outcomes only, no transport).
+        let shared_outcome = self.run_shared_policy_loop(items);
+
+        // Probe + repair every tuple anything removed (shared or worker),
+        // deduplicated: the lease above serializes same-tuple installs, so
+        // each probe result is authoritative for its repair.
+        let mut probe_bares: Vec<SessionKey> = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            if !shared_removed(&shared_outcome[index]) && !worker_applied[index] {
+                continue;
+            }
+            for key in std::iter::once(&item.key).chain(item.captured_companion.iter()) {
+                let mut bare = key.clone();
+                bare.routing_domain = 0;
+                bare.discriminator = Default::default();
+                if !probe_bares.contains(&bare) {
+                    probe_bares.push(bare);
+                }
+            }
+        }
+        // Probe + repair every tuple anything removed (shared or worker),
+        // deduplicated: the lease serializes same-tuple installs, so each
+        // probe result is authoritative for its repair. A first probe failure
+        // retries once unconditionally — dead workers are skipped inside the
+        // probe (their tables died with their threads), so only a live stall
+        // can fail, and the probe is read-only, so retry-to-success is sound
+        // (unlike remove, where a retry would only re-fence an
+        // already-incomplete revocation).
+        let probe_found: std::sync::Arc<
+            std::sync::Mutex<Vec<Option<crate::afxdp::worker::SyncedSessionEntry>>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(vec![None; probe_bares.len()]));
+        let mut probed = probe_bares.is_empty()
+            || self.probe_policy_bares(&probe_bares, &probe_found).is_ok();
+        if !probed {
+            probed = self.probe_policy_bares(&probe_bares, &probe_found).is_ok();
+        }
+        let mut mirror_ok = false;
+        if probed {
+            let view = self.runtime_view();
+            let forwarding = view.forwarding();
+            let maps = self.bpf_maps.load();
+            let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+            let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+            mirror_ok = self.repair_policy_bares(
+                &lease,
+                forwarding,
+                v4_fd,
+                v6_fd,
+                &probe_bares,
+                &probe_found,
+            );
+        }
+        self.record_policy_hold(lease_since);
+        drop(lease);
+        if !probed {
+            return (
+                Vec::new(),
+                false,
+                vec!["policy-batch-probe-aborted".to_string()],
+            );
+        }
+        if !mirror_ok {
+            return (
+                Vec::new(),
+                false,
+                vec!["policy-batch-mirror-failed".to_string()],
+            );
+        }
+        let outcomes = items
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let applied =
+                    shared_removed(&shared_outcome[index]) || worker_applied[index];
+                let partial = matches!(
+                    shared_outcome[index],
+                    SyncedDeleteOutcome::PartialCompanion
+                ) || worker_partial[index]
+                    || (worker_refused[index] && applied);
+                if applied {
+                    if partial {
+                        SyncedDeleteOutcome::PartialCompanion
+                    } else {
+                        SyncedDeleteOutcome::Applied
+                    }
+                } else if worker_refused[index]
+                    || matches!(
+                        shared_outcome[index],
+                        SyncedDeleteOutcome::RefusedIdentity
+                    )
+                {
+                    SyncedDeleteOutcome::RefusedIdentity
+                } else {
+                    SyncedDeleteOutcome::StaleForward
+                }
+            })
+            .collect();
+        (outcomes, true, Vec::new())
+    }
+
+    /// Record one Finalizing hold (`since` → now) into the batch observer
+    /// (count, total, max). Called exactly once per leased batch, at every
+    /// release site past finalizing — success and abort paths alike, so the
+    /// average covers pathological holds too, not just clean ones.
+    fn record_policy_hold(&self, since: std::time::Instant) {
+        use std::sync::atomic::Ordering;
+        let held_ns = since.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        self.sessions.policy_batch_count.fetch_add(1, Ordering::Relaxed);
+        self.sessions
+            .policy_batch_hold_ns
+            .fetch_add(held_ns, Ordering::Relaxed);
+        self.sessions
+            .policy_batch_hold_max_ns
+            .fetch_max(held_ns, Ordering::Relaxed);
+    }
+
+    /// Coordinator-owned phase 2: execute worker-collected redirect-delete
+    /// intents. Called after phase-1 acks (normal) or after setting
+    /// cancelled (abort) — always under the caller's Finalizing batch lease
+    /// (the `&GateLease` parameter is the proof, mirroring
+    /// `repair_policy_bares`). No re-probe: the lease serializes
+    /// same-tuple installs, so no replacement can land between any phase 1
+    /// and this execution. Each intent executes under ITS collecting
+    /// worker's holder bit (claims are per-holder — Coordinator-holder
+    /// execution would strand worker claims and skip every delete). Every
+    /// intent is mechanically verified against the lease before its
+    /// execution — an uncovered intent is a caller bug that fails loud,
+    /// never an unfenced delete. Returns false on any cover failure
+    /// (attempts all intents, like the repair); BPF delete errors are
+    /// fire-and-forget (pre-existing: the worker path never observed them
+    /// either).
+    pub(in crate::afxdp) fn execute_deferred_redirects(
+        map: crate::afxdp::bpf_map::SteeringMap<'_>,
+        lease: &crate::afxdp::bpf_map::GateLease,
+        intents: &[crate::afxdp::DeferredRedirectDelete],
+    ) -> bool {
+        let mut ok = true;
+        for intent in intents {
+            if !lease.covers(&intent.key) {
+                eprintln!("xpf-ha: policy batch deferred redirect for unleased tuple");
+                ok = false;
+                continue;
+            }
+            crate::afxdp::bpf_map::delete_session_map_redirect_for_session(
+                crate::afxdp::bpf_map::SteeringMap {
+                    holder: crate::afxdp::bpf_map::SteeringHolder::Worker(intent.worker_id),
+                    ..map
+                },
+                &intent.key,
+                intent.decision,
+                &intent.metadata,
+                intent.origin,
+            );
+        }
+        ok
+    }
+
+    /// Run every match's shared conditional remove (lease-less: the caller
+    /// holds the batch lease across the whole batch). Cannot fail — outcomes
+    /// only, no transport — so both the success path and the abort path
+    /// (quiesce: complete the deterministic shared half before the final
+    /// probe+repair, leaving no zombie authority behind a failed batch) call
+    /// it exactly once per batch.
+    fn run_shared_policy_loop(
+        &self,
+        items: &[crate::afxdp::PolicyDeleteItem],
+    ) -> Vec<crate::afxdp::SyncedDeleteOutcome> {
+        items
+            .iter()
+            .map(|item| {
+                self.remove_shared_policy_item(
+                    &item.key,
+                    item.session_id,
+                    item.companion_session_id,
+                    item.captured_companion.as_ref(),
+                    item.forward_only,
+                )
+            })
+            .collect()
+    }
+
+    /// One probe fan-out over `bares`, filling `found` (first reporter wins
+    /// per slot; slots may already hold earlier-attempt survivors — state is
+    /// stable under the batch lease, so reuse is sound). Dead workers are
+    /// skipped (diagnostic only): their tables died with their threads, so
+    /// live-only evidence is complete. `Ok` iff every live worker acked with
+    /// no full queue.
+    fn probe_policy_bares(
+        &self,
+        bares: &[SessionKey],
+        found: &std::sync::Arc<std::sync::Mutex<Vec<Option<crate::afxdp::worker::SyncedSessionEntry>>>>,
+    ) -> Result<(), String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let pending = std::sync::Arc::new(AtomicUsize::new(0));
+        let records = self.workers.load();
+        for (worker_id, record) in records.iter() {
+            if record.is_dead() {
+                // Dead tables are dropped with their threads (no Arc<SessionTable>
+                // exists anywhere: thread-owned plain field), so a dead worker
+                // holds nothing to probe. Skip (diagnostic only); live-only
+                // evidence is complete by that proof.
+                eprintln!("xpf-ha: policy batch probe worker-{worker_id}: dead, skipped");
+                continue;
+            }
+            let command = crate::afxdp::WorkerCommand::ProbePolicyBatch {
+                bares: bares.to_vec(),
+                found: std::sync::Arc::clone(found),
+                pending: std::sync::Arc::clone(&pending),
+            };
+            let mut queue = crate::afxdp::worker_queue::lock_recover(&record.handle.commands);
+            pending.fetch_add(1, Ordering::Release);
+            if !crate::afxdp::worker_queue::push_bounded(&mut queue, command) {
+                pending.fetch_sub(1, Ordering::AcqRel);
+                eprintln!("xpf-ha: policy batch probe worker-{worker_id}: queue-full");
+                return Err(format!("worker-{worker_id}:queue-full"));
+            }
+        }
+        drop(records);
+        if pending.load(Ordering::Acquire) != 0 {
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while pending.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if pending.load(Ordering::Acquire) != 0 {
+            let outstanding = pending.load(Ordering::Acquire);
+            eprintln!("xpf-ha: policy batch probe: worker-ack-timeout:{outstanding}");
+            return Err(format!("worker-ack-timeout:{outstanding}"));
+        }
+        Ok(())
+    }
+
+    /// Token-authorized repair for probed tuples, under the caller's
+    /// Finalizing batch lease: a survivor anywhere (worker probe or a shared
+    /// entry this batch did not remove) republishes; proven absence deletes
+    /// the bare row. Either live value satisfies the mirror invariant (a
+    /// tuple with any live session carries a LIVE tenant's value); the shared
+    /// scan runs after the worker probe so it observes the freshest shared
+    /// state. Every tuple is mechanically verified against the lease before
+    /// its repair — an uncovered tuple is a caller bug that fails loud, never
+    /// an unfenced repair. Returns false on any mirror-write failure.
+    fn repair_policy_bares(
+        &self,
+        lease: &crate::afxdp::bpf_map::GateLease,
+        forwarding: &super::ForwardingState,
+        conntrack_v4_fd: std::os::unix::io::RawFd,
+        conntrack_v6_fd: std::os::unix::io::RawFd,
+        bares: &[SessionKey],
+        found: &std::sync::Arc<std::sync::Mutex<Vec<Option<crate::afxdp::worker::SyncedSessionEntry>>>>,
+    ) -> bool {
+        let mut mirror_ok = true;
+        for (tuple_index, bare) in bares.iter().enumerate() {
+            if !lease.covers(bare) {
+                eprintln!("xpf-ha: policy batch repair of unleased tuple");
+                mirror_ok = false;
+                continue;
+            }
+            let survivor = found
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(tuple_index)
+                .cloned()
+                .flatten()
+                .or_else(|| {
+                    crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced)
+                        .values()
+                        .find(|candidate| {
+                            let mut candidate_bare = candidate.key.clone();
+                            candidate_bare.routing_domain = 0;
+                            candidate_bare.discriminator = Default::default();
+                            candidate_bare == *bare
+                        })
+                        .cloned()
+                });
+            match survivor {
+                Some(entry) => {
+                    if !matches!(
+                        self.publish_mirror_only(forwarding, &entry),
+                        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+                            | crate::afxdp::bpf_map::ConntrackPublishResult::IntentionallySkipped
+                    ) {
+                        mirror_ok = false;
+                    }
+                }
+                None => {
+                    if !crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
+                        bare,
+                    ) {
+                        mirror_ok = false;
+                    }
+                }
+            }
+        }
+        mirror_ok
+    }
+
+    /// #10512: enumerate policy-tagged sessions from the helper-owned
+    /// authority. The request is fanned out to every live worker because the
+    /// worker table is the only place that retains the creation/identity pair
+    /// needed for an identity-conditional delete. The shared synced map is
+    pub(crate) fn list_sessions_by_policy(
+        &self,
+        request: &crate::protocol::SessionPolicyListRequest,
+    ) -> (
+        Vec<crate::protocol::SessionPolicyMatch>,
+        bool,
+        Vec<String>,
+        String,
+    ) {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        use crate::afxdp::POLICY_READ_CAPTURE_LIMIT as CAPTURE_LIMIT;
+        const PAGE_ROWS: usize = 4096;
+        const CAPTURE_IDLE: Duration = Duration::from_secs(30);
+
+        let now = Instant::now();
+        {
+            let mut captures = self
+                .policy_captures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            captures.retain(|_, capture| now.duration_since(capture.last_used) <= CAPTURE_IDLE);
+            if !request.continuation.is_empty() {
+                let Some(mut capture) = captures.remove(&request.continuation) else {
+                    return (
+                        Vec::new(),
+                        false,
+                        vec!["stale-capture".to_string()],
+                        String::new(),
+                    );
+                };
+                let start = capture.offset.min(capture.rows.len());
+                let end = start.saturating_add(PAGE_ROWS).min(capture.rows.len());
+                let page = capture.rows[start..end].to_vec();
+                capture.offset = end;
+                capture.last_used = now;
+                let complete = end >= capture.rows.len() && capture.errors.is_empty();
+                let errors = capture.errors.clone();
+                let continuation = if end < capture.rows.len() {
+                    captures.insert(request.continuation.clone(), capture);
+                    request.continuation.clone()
+                } else {
+                    String::new()
+                };
+                return (page, complete, errors, continuation);
+            }
+        }
+
+        let wanted: HashSet<u32> =
+            request.policy_ids.iter().copied().filter(|id| *id != 0).collect();
+        if wanted.is_empty() {
+            return (Vec::new(), true, Vec::new(), String::new());
+        }
+        let family_allowed = |family: u8| {
+            request.families.is_empty()
+                || request.families.iter().any(|candidate| *candidate == family)
+        };
+        let class_allowed = |is_reverse: bool| {
+            request.classes.is_empty()
+                || request.classes.iter().any(|class| {
+                    (is_reverse && class == "reverse") || (!is_reverse && class == "forward")
+                })
+        };
+
+        let collected = Arc::new(Mutex::new(crate::afxdp::PolicyReadCollector::default()));
+        let overflow = Arc::new(AtomicBool::new(false));
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let pending = Arc::new(AtomicUsize::new(0));
+        let mut complete = true;
+        let mut queued = 0usize;
+        let records = self.workers.load();
+        for (worker_id, record) in records.iter() {
+            if record.is_dead() {
+                errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!("worker-{worker_id}:dead"));
+                complete = false;
+                continue;
+            }
+            let command = crate::afxdp::WorkerCommand::ListSessionsByPolicy {
+                request: request.clone(),
+                collected: Arc::clone(&collected),
+                overflow: Arc::clone(&overflow),
+                errors: Arc::clone(&errors),
+                pending: Arc::clone(&pending),
+            };
+            let mut queue = crate::afxdp::worker_queue::lock_recover(&record.handle.commands);
+            // Reserve the acknowledgement before enqueueing: a worker can
+            // consume a command immediately after the queue lock is released.
+            pending.fetch_add(1, Ordering::Release);
+            if crate::afxdp::worker_queue::push_bounded(&mut queue, command) {
+                queued += 1;
+            } else {
+                pending.fetch_sub(1, Ordering::AcqRel);
+                errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!("worker-{worker_id}:queue-full"));
+                complete = false;
+            }
+        }
+        drop(records);
+
+        // Worker acknowledgements are bounded: a dead/stalled worker must
+        // produce an incomplete READ rather than hold the control socket.
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while pending.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if pending.load(Ordering::Acquire) != 0 {
+            errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(format!(
+                    "worker-ack-timeout:{}",
+                    pending.load(Ordering::Acquire)
+                ));
+            complete = false;
+        }
+        if queued == 0 {
+            complete = false;
+            errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push("worker-local-scan-unavailable".to_string());
+        }
+
+        // Rows arrive deduplicated and capped: workers admitted through the
+        // shared collector during the scan (no post-clone dedup/truncate, no
+        // O(W×sessions) transient). Move them out (no clone) plus the
+        // overflow verdict.
+        let mut collector = collected
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut rows = collector.take_rows();
+        let overflowed = collector.overflowed();
+        drop(collector);
+        let mut all_errors = errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
+        if request.mode == "legacy" && request.before_secs.is_none() {
+            all_errors.push("legacy-before-secs-missing".to_string());
+            complete = false;
+        }
+        if overflowed || rows.len() > CAPTURE_LIMIT {
+            // overflowed: the admission cap tripped during collection
+            // (authoritative). The length check is defense-in-depth (reserve
+            // accounting can only skew via an arm bug, caught by debug_assert
+            // in tests).
+            rows.truncate(CAPTURE_LIMIT);
+            all_errors.push("capture-limit".to_string());
+            complete = false;
+        }
+        let token = format!(
+            "policy-{:016x}",
+            self.policy_capture_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let row_count = rows.len();
+        let end = row_count.min(PAGE_ROWS);
+        let page = rows[..end].to_vec();
+        let continuation = if end < row_count {
+            self.policy_captures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    token.clone(),
+                    PolicyCapture {
+                        rows,
+                        errors: all_errors.clone(),
+                        offset: end,
+                        last_used: now,
+                    },
+                );
+            token
+        } else {
+            String::new()
+        };
+        let page_complete = end >= row_count && complete && all_errors.is_empty();
+        (page, page_complete, all_errors, continuation)
     }
 
     /// #9629: the operator-facing HA status for one RG, read lock-free.
@@ -516,6 +1720,28 @@ impl SessionDomainView<'_> {
     pub(crate) fn zone_name_to_id(&self) -> &FastMap<String, u16> {
         &self.view.forwarding().zone_name_to_id
     }
+    pub(crate) fn publish_mirror_only(
+        &self,
+        entry: &crate::afxdp::worker::SyncedSessionEntry,
+    ) -> Result<(), &'static str> {
+        let _lease = crate::afxdp::bpf_map::global_tuple_gate()
+            .acquire_lease([entry.key.clone()])
+            .map_err(|_| "gate-busy")?;
+        match self
+            .domain
+            .publish_mirror_only(self.view.forwarding(), entry)
+        {
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written
+            | crate::afxdp::bpf_map::ConntrackPublishResult::IntentionallySkipped => Ok(()),
+            crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy => Err("gate-busy"),
+            crate::afxdp::bpf_map::ConntrackPublishResult::KernelError => {
+                Err("mirror-write-failed")
+            }
+            crate::afxdp::bpf_map::ConntrackPublishResult::NoMap => {
+                Err("mirror-map-unavailable")
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -596,6 +1822,65 @@ mod session_domain_tests_7209 {
              Reading 0 here means the handle copied the override instead of \
              sharing it, and the six cells that set it are silently measuring \
              the production formula"
+        );
+    }
+
+    /// P12-A (double-restart wedge): a stale in-flight epoch that lands
+    /// first must not wedge the latch against the current generation —
+    /// N+1 then N+2 both accepted (pre-fix N+2 was rejected forever).
+    #[test]
+    fn helper_epoch_double_restart_readopts_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(8), "stale-first N+1 lands");
+        assert!(
+            domain.accepts_helper_epoch(9),
+            "current N+2 must re-adopt, not wedge"
+        );
+        assert!(domain.accepts_helper_epoch(9), "adopted epoch is stable");
+    }
+
+    /// P12-B (single-restart control): first latch + idempotent re-accept.
+    #[test]
+    fn helper_epoch_single_restart_latches_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(8), "first latch accepts");
+        assert!(domain.accepts_helper_epoch(8), "same epoch re-accepts");
+    }
+
+    /// P12-C (stale-rejected control): anything older than adopted fails.
+    #[test]
+    fn helper_epoch_older_rejected_after_adopt_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(9));
+        assert!(
+            !domain.accepts_helper_epoch(8),
+            "older-than-adopted must be rejected"
+        );
+        assert!(
+            !domain.accepts_helper_epoch(1),
+            "much older must be rejected"
+        );
+    }
+
+    /// P12-F (epoch-0 bypass): legacy/unstamped requests always pass
+    /// and never disturb the latch.
+    #[test]
+    fn helper_epoch_zero_bypasses_10583() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        assert!(domain.accepts_helper_epoch(0), "zero bypasses on fresh latch");
+        assert!(domain.accepts_helper_epoch(9));
+        assert!(domain.accepts_helper_epoch(0), "zero bypasses after adopt");
+        assert!(
+            domain.accepts_helper_epoch(9),
+            "adopted epoch survives zero bypasses"
+        );
+        assert!(
+            !domain.accepts_helper_epoch(8),
+            "zero bypass must not reset the latch"
         );
     }
 }

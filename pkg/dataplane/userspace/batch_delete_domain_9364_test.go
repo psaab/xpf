@@ -55,8 +55,8 @@ func TestBatchDeleteNamesTheInstalledRoutingDomain9364(t *testing.T) {
 			"observe the domain if the requests never reached the socket", len(got))
 	}
 	for i, req := range got {
-		if req.Operation != "delete" {
-			t.Errorf("request %d operation = %q, want delete", i, req.Operation)
+		if req.Operation != "mirror_delete_batch" {
+			t.Errorf("request %d operation = %q, want mirror_delete_batch", i, req.Operation)
 		}
 		if req.RoutingDomain != tenant {
 			t.Errorf("#9364: batch delete %d carried routing_domain=%d, want %d. A bare "+

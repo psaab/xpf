@@ -70,11 +70,28 @@ type SessionStore interface {
 	DeleteKnownV6(SessionKeyV6, SessionValueV6, DeleteReason, bool) error
 	DeleteBatchKnownV4([]SessionEntryV4, DeleteReason, bool) (int, error)
 	DeleteBatchKnownV6([]SessionEntryV6, DeleteReason, bool) (int, error)
+	// DeleteBatchKnownExactV4/V6 (#10598) delete exactly like their count-only
+	// twins but return the FORWARD keys this call removed, in input order,
+	// instead of a bare count. A count cannot name a non-prefix partial: the
+	// recovery loop keeps deleting the tail after a per-key failure, so the
+	// deleted set has holes and consumers must not treat [:deleted] as the
+	// set. Absent (NotFound) keys are excluded, never listed, never an error;
+	// reverse companions are deleted but never listed (they were never
+	// HA-synced individually). A total failure returns (nil, err); len()==0
+	// means none either way.
+	DeleteBatchKnownExactV4([]SessionEntryV4, DeleteReason, bool) ([]SessionKey, error)
+	DeleteBatchKnownExactV6([]SessionEntryV6, DeleteReason, bool) ([]SessionKeyV6, error)
 	// forwardOnly (#9752): retract exactly the named keys, skipping
 	// companion deletes (a purge-retirement close whose pair the sender
 	// already decided). False keeps the historical derive-and-retract.
 	DeleteWithCompanionsV4(SessionKey, DeleteReason, bool) error
 	DeleteWithCompanionsV6(SessionKeyV6, DeleteReason, bool) error
+	// DeleteClusterScopedV4/V6 applies a scoped HA policy delete (#10512):
+	// helper FIRST with the explicit domain + expected RT_FLOW identity,
+	// no bare mirror probe. Compile-enforced on every store (no
+	// optional-assertion fallback — the downgrade ban has none).
+	DeleteClusterScopedV4(SessionKey, uint32, uint64) error
+	DeleteClusterScopedV6(SessionKeyV6, uint32, uint64) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
 	SessionDeltas() dpruntime.SessionDeltaSource
 	Count() (v4, v6 int)
@@ -192,9 +209,21 @@ type peerSyncedSessionDeleter interface {
 	// so the helper retires exactly the named keys (no reverse fan-out).
 	BatchDeletePeerSyncedSessionsScoped([]ScopedSessionKey, bool) (int, []ScopedSessionKey, error)
 	BatchDeletePeerSyncedSessionsScopedV6([]ScopedSessionKeyV6, bool) (int, []ScopedSessionKeyV6, error)
+	// Exact variants return (deleted mirror keys, helper-applied keys). The
+	// first excludes refused and already-absent rows; the second is used only
+	// to retire companions for helper-applied forwards.
+	BatchDeletePeerSyncedSessionsExactScoped([]ScopedSessionKey, bool) ([]ScopedSessionKey, []ScopedSessionKey, error)
+	BatchDeletePeerSyncedSessionsExactScopedV6([]ScopedSessionKeyV6, bool) ([]ScopedSessionKeyV6, []ScopedSessionKeyV6, error)
 	// DeletePeerSyncedSession reports whether the helper refused the delete.
 	DeletePeerSyncedSession(SessionKey, bool) (bool, error)
 	DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error)
+	// DeletePeerSyncedSessionScoped asks the helper FIRST with an explicit
+	// routing domain + expected RT_FLOW identity (#10512): the helper
+	// deletes only the row carrying that identity (conditional), refusing
+	// otherwise. Domain comes from the HA wire (authoritative), never
+	// from a local mirror read (which may hold another tenant's row).
+	DeletePeerSyncedSessionScoped(SessionKey, uint32, uint64) (bool, error)
+	DeletePeerSyncedSessionScopedV6(SessionKeyV6, uint32, uint64) (bool, error)
 }
 
 type clusterSyncedSessionInstaller interface {
@@ -525,26 +554,39 @@ func (s dataPlaneSessionStore) DeleteV6(key SessionKeyV6) error {
 }
 
 func (s dataPlaneSessionStore) DeleteKnownV4(key SessionKey, val SessionValue, reason DeleteReason, forwardOnly bool) error {
-	_, err := s.DeleteBatchKnownV4([]SessionEntryV4{{Key: key, Value: val}}, reason, forwardOnly)
+	_, err := s.DeleteBatchKnownExactV4([]SessionEntryV4{{Key: key, Value: val}}, reason, forwardOnly)
 	return err
 }
 
 func (s dataPlaneSessionStore) DeleteKnownV6(key SessionKeyV6, val SessionValueV6, reason DeleteReason, forwardOnly bool) error {
-	_, err := s.DeleteBatchKnownV6([]SessionEntryV6{{Key: key, Value: val}}, reason, forwardOnly)
+	_, err := s.DeleteBatchKnownExactV6([]SessionEntryV6{{Key: key, Value: val}}, reason, forwardOnly)
 	return err
 }
 
 func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reason DeleteReason, forwardOnly bool) (int, error) {
+	// Count-only projection of the canonical exact loop (#10598): unmigrated
+	// callers keep their (count, error) behavior while the exact set lives one
+	// call down. New callers that sync or account per-key must use
+	// DeleteBatchKnownExactV4 — [:deleted] is not the deleted set.
+	exact, err := s.DeleteBatchKnownExactV4(entries, reason, forwardOnly)
+	return len(exact), err
+}
+
+// DeleteBatchKnownExactV4 is the canonical (#10598) known-delete path:
+// DeleteBatchKnownV4 counts it and drops the set. The returned keys are
+// exactly the forward rows this call removed, in input order; see the
+// SessionStore interface for the absent/companion contract.
+func (s dataPlaneSessionStore) DeleteBatchKnownExactV4(entries []SessionEntryV4, reason DeleteReason, forwardOnly bool) ([]SessionKey, error) {
 	if s.dp == nil {
-		return 0, errors.New("nil dataplane")
+		return nil, errors.New("nil dataplane")
 	}
 	if len(entries) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 	// #9714: a delete made on behalf of the PEER asks the helper first; see
-	// deletePeerBatchKnownV4.
+	// deletePeerBatchKnownExactV4.
 	if peerDeleter, ok := s.dp.(peerSyncedSessionDeleter); ok && reason == DeleteReasonClusterStale {
-		return s.deletePeerBatchKnownV4(peerDeleter, entries, forwardOnly)
+		return s.deletePeerBatchKnownExactV4(peerDeleter, entries, forwardOnly)
 	}
 
 	reverseKeys := make([]ScopedSessionKey, 0, len(entries))
@@ -553,7 +595,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 		s.preservePersistentNATV4(entry.Key, val)
 		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
 			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntry(dnatKeyForSessionV4(entry.Key, val))); err != nil {
-				return 0, err
+				return nil, err
 			}
 		}
 		// #9752: a forward-only delete retires exactly the named keys; the
@@ -572,9 +614,15 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 		}
 	}
 
-	if _, err := s.batchDeleteV4(reverseKeys); err != nil {
-		return 0, err
+	// One backing array serves both phases: reverseKeys holds at most one key
+	// per entry, so out already fits the reverse exact set, which is dropped
+	// (companions were never HA-synced individually) before the forward phase
+	// reuses the array from [:0]. The returned slice names FORWARD keys only.
+	out := make([]SessionKey, 0, len(entries))
+	if _, err := s.batchDeleteExactV4(reverseKeys, out); err != nil {
+		return nil, err
 	}
+	out = out[:0]
 
 	forwardKeys := make([]ScopedSessionKey, 0, len(entries))
 	for _, entry := range entries {
@@ -584,24 +632,30 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 			PurgeTunnelVariants: entry.PurgeTunnelVariants,
 		})
 	}
-	deleted, err := s.batchDeleteV4(forwardKeys)
-	if err != nil {
-		return deleted, err
-	}
-	return deleted, nil
+	return s.batchDeleteExactV4(forwardKeys, out)
 }
 
 func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reason DeleteReason, forwardOnly bool) (int, error) {
+	// Count-only projection of the canonical exact loop (#10598); see the V4
+	// twin. New callers that sync or account per-key must use
+	// DeleteBatchKnownExactV6.
+	exact, err := s.DeleteBatchKnownExactV6(entries, reason, forwardOnly)
+	return len(exact), err
+}
+
+// DeleteBatchKnownExactV6 is the IPv6 analogue of DeleteBatchKnownExactV4
+// (#10598).
+func (s dataPlaneSessionStore) DeleteBatchKnownExactV6(entries []SessionEntryV6, reason DeleteReason, forwardOnly bool) ([]SessionKeyV6, error) {
 	if s.dp == nil {
-		return 0, errors.New("nil dataplane")
+		return nil, errors.New("nil dataplane")
 	}
 	if len(entries) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 	// #9714: a delete made on behalf of the PEER asks the helper first; see
-	// deletePeerBatchKnownV6.
+	// deletePeerBatchKnownExactV6.
 	if peerDeleter, ok := s.dp.(peerSyncedSessionDeleter); ok && reason == DeleteReasonClusterStale {
-		return s.deletePeerBatchKnownV6(peerDeleter, entries, forwardOnly)
+		return s.deletePeerBatchKnownExactV6(peerDeleter, entries, forwardOnly)
 	}
 
 	reverseKeys := make([]ScopedSessionKeyV6, 0, len(entries))
@@ -610,7 +664,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 		s.preservePersistentNATV6(entry.Key, val)
 		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
 			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntryV6(dnatKeyForSessionV6(entry.Key, val))); err != nil {
-				return 0, err
+				return nil, err
 			}
 		}
 		// #9752: v6 twin of the forward-only gate above.
@@ -624,9 +678,12 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 		}
 	}
 
-	if _, err := s.batchDeleteV6(reverseKeys); err != nil {
-		return 0, err
+	// One backing array serves both phases — see the V4 twin.
+	out := make([]SessionKeyV6, 0, len(entries))
+	if _, err := s.batchDeleteExactV6(reverseKeys, out); err != nil {
+		return nil, err
 	}
+	out = out[:0]
 
 	forwardKeys := make([]ScopedSessionKeyV6, 0, len(entries))
 	for _, entry := range entries {
@@ -636,11 +693,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 			PurgeTunnelVariants: entry.PurgeTunnelVariants,
 		})
 	}
-	deleted, err := s.batchDeleteV6(forwardKeys)
-	if err != nil {
-		return deleted, err
-	}
-	return deleted, nil
+	return s.batchDeleteExactV6(forwardKeys, out)
 }
 
 // batchDeleteV4 removes keys from the v4 session map in
@@ -652,7 +705,15 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 // advancing, so the unattempted tail is not silently dropped (#5448) — a
 // dropped tail leaks stale peer-synced sessions after HA bulk reconcile.
 func (s dataPlaneSessionStore) batchDeleteV4(keys []ScopedSessionKey) (int, error) {
-	deleted := 0
+	deleted, err := s.batchDeleteExactV4(keys, nil)
+	return len(deleted), err
+}
+
+// batchDeleteExactV4 is the canonical V4 delete loop (#10598). It returns
+// exactly the forward keys removed, in input order. BatchDelete can stop at a
+// missing key; the missing key is excluded and the remainder is retried one
+// at a time so a later success cannot be mistaken for a prefix success.
+func (s dataPlaneSessionStore) batchDeleteExactV4(keys []ScopedSessionKey, out []SessionKey) ([]SessionKey, error) {
 	for len(keys) > 0 {
 		n := sessionDeleteBatchSize
 		if len(keys) < n {
@@ -665,39 +726,51 @@ func (s dataPlaneSessionStore) batchDeleteV4(keys []ScopedSessionKey) (int, erro
 		} else if chunkDeleted > len(chunk) {
 			chunkDeleted = len(chunk)
 		}
-		deleted += chunkDeleted
+		for _, sk := range chunk[:chunkDeleted] {
+			out = append(out, sk.Key)
+		}
 		if err != nil {
 			if !sessionNotFound(err) {
-				return deleted, err
+				if len(out) == 0 {
+					out = nil
+				}
+				return out, err
 			}
 			// Batch stopped at the first missing key (index chunkDeleted):
-			// that key is already gone, but chunk[chunkDeleted+1:] were never
-			// attempted. Finish the remainder per-key so nothing is dropped.
-			// #9364: the per-key retry is UNCHANGED and is already
-			// domain-correct. `DeleteSession` on the userspace manager fetches
-			// the row's own value and names its domain (#9146), so re-scoping it
-			// here would be redundant, and passing a scope it did not ask for
-			// would be a second derivation of the same fact.
+			// that key is already gone, but chunk[chunkDeleted+1:] were
+			// never attempted. Finish the remainder per-key so nothing is
+			// dropped (#5448).
+			// #9364: the per-key retry is domain-correct. DeleteSession on
+			// the userspace manager fetches the row's own value and names
+			// its domain (#9146), so no scope is needed here.
 			var firstErr error
 			for _, sk := range chunk[chunkDeleted:] {
 				if delErr := s.dp.DeleteSession(sk.Key); delErr == nil {
-					deleted++
+					out = append(out, sk.Key)
 				} else if firstErr == nil && !sessionNotFound(delErr) {
 					firstErr = delErr
 				}
 			}
 			if firstErr != nil {
-				return deleted, firstErr
+				if len(out) == 0 {
+					out = nil
+				}
+				return out, firstErr
 			}
 		}
 		keys = keys[n:]
 	}
-	return deleted, nil
+	return out, nil
 }
 
-// batchDeleteV6 is the IPv6 variant of batchDeleteV4 (#5448).
+// batchDeleteV6 is the IPv6 count projection of batchDeleteExactV6 (#10598).
 func (s dataPlaneSessionStore) batchDeleteV6(keys []ScopedSessionKeyV6) (int, error) {
-	deleted := 0
+	deleted, err := s.batchDeleteExactV6(keys, nil)
+	return len(deleted), err
+}
+
+// batchDeleteExactV6 is the IPv6 analogue of batchDeleteExactV4.
+func (s dataPlaneSessionStore) batchDeleteExactV6(keys []ScopedSessionKeyV6, out []SessionKeyV6) ([]SessionKeyV6, error) {
 	for len(keys) > 0 {
 		n := sessionDeleteBatchSize
 		if len(keys) < n {
@@ -710,27 +783,37 @@ func (s dataPlaneSessionStore) batchDeleteV6(keys []ScopedSessionKeyV6) (int, er
 		} else if chunkDeleted > len(chunk) {
 			chunkDeleted = len(chunk)
 		}
-		deleted += chunkDeleted
+		for _, sk := range chunk[:chunkDeleted] {
+			out = append(out, sk.Key)
+		}
 		if err != nil {
 			if !sessionNotFound(err) {
-				return deleted, err
+				if len(out) == 0 {
+					out = nil
+				}
+				return out, err
 			}
-			// #9364: unchanged, and already domain-correct — see the V4 twin.
+			// The batch stopped at a missing key; retry the unattempted
+			// remainder one at a time, excluding absent keys and retaining
+			// later successful keys in the exact output.
 			var firstErr error
 			for _, sk := range chunk[chunkDeleted:] {
 				if delErr := s.dp.DeleteSessionV6(sk.Key); delErr == nil {
-					deleted++
+					out = append(out, sk.Key)
 				} else if firstErr == nil && !sessionNotFound(delErr) {
 					firstErr = delErr
 				}
 			}
 			if firstErr != nil {
-				return deleted, firstErr
+				if len(out) == 0 {
+					out = nil
+				}
+				return out, firstErr
 			}
 		}
 		keys = keys[n:]
 	}
-	return deleted, nil
+	return out, nil
 }
 
 // batchDeleteChunkV4 issues ONE chunk of v4 deletes, preferring the #9364 scoped
@@ -756,37 +839,49 @@ func (s dataPlaneSessionStore) batchDeleteChunkV6(chunk []ScopedSessionKeyV6) (i
 	return s.dp.BatchDeleteSessionsV6(bareSessionKeysV6(chunk))
 }
 
-// deletePeerBatchKnownV4 is DeleteBatchKnownV4 for a delete made on behalf of the
-// PEER (#9714). The helper answers FIRST. A forward key it refuses (a live local
-// session whose owner RG is locally active: a dual-primary split) keeps everything
-// this node holds for it: its BPF mirror rows, its reverse companion and its
-// reverse-SNAT DNAT row. The unmarked path deletes the DNAT row before the helper
-// is asked, which let a refused delete still break the flow's replies.
-//
-// Forward keys go first, so a refused forward never loses its reverse half. The
-// helper removes an applied forward's derived reverse itself; the reverse delete
-// that follows retires that half's mirror row.
-func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDeleter, entries []SessionEntryV4, forwardOnly bool) (int, error) {
-	scoped := func(entry SessionEntryV4) ScopedSessionKey {
-		return ScopedSessionKey{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
-	}
+// deletePeerBatchKnownExactV4 is the exact V4 path for a delete made on behalf
+// of the PEER (#9714, #10598). The helper answers FIRST. A forward key it
+// refuses (a live local session whose owner RG is locally active: a dual-primary
+// split) keeps everything this node holds for it. The helper-applied forward
+// keys whose mirror delete succeeded are the exact set returned to the caller;
+// reverse companions are never included.
+func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionDeleter, entries []SessionEntryV4, forwardOnly bool) ([]SessionKey, error) {
 	forwardKeys := make([]ScopedSessionKey, 0, len(entries))
 	for _, entry := range entries {
-		forwardKeys = append(forwardKeys, scoped(entry))
+		forwardKeys = append(forwardKeys, ScopedSessionKey{
+			Key:           entry.Key,
+			RoutingDomain: entry.Value.RoutingDomain,
+		})
 	}
-	deleted, refused, err := peerDeleteChunks(forwardKeys, func(keys []ScopedSessionKey) (int, []ScopedSessionKey, error) {
-		return dp.BatchDeletePeerSyncedSessionsScoped(keys, forwardOnly)
-	})
-	if err != nil {
-		return deleted, err
+	deleted, applied, err := dp.BatchDeletePeerSyncedSessionsExactScoped(forwardKeys, forwardOnly)
+	deletedSet := make(map[ScopedSessionKey]struct{}, len(deleted))
+	for _, scoped := range deleted {
+		deletedSet[scoped] = struct{}{}
 	}
-	applied := make([]SessionEntryV4, 0, len(entries))
-	reverseKeys := make([]ScopedSessionKey, 0, len(entries))
+	appliedSet := make(map[ScopedSessionKey]struct{}, len(applied))
+	for _, scoped := range applied {
+		appliedSet[scoped] = struct{}{}
+	}
+	exact := make([]SessionKey, 0, len(deleted))
+	appliedEntries := make([]SessionEntryV4, 0, len(applied))
 	for _, entry := range entries {
-		if _, kept := refused[scoped(entry)]; kept {
-			continue
+		scoped := ScopedSessionKey{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
+		if _, ok := deletedSet[scoped]; ok {
+			exact = append(exact, scoped.Key)
 		}
-		applied = append(applied, entry)
+		if _, ok := appliedSet[scoped]; ok {
+			appliedEntries = append(appliedEntries, entry)
+		}
+	}
+	if err != nil {
+		if len(exact) == 0 {
+			exact = nil
+		}
+		return exact, err
+	}
+
+	reverseKeys := make([]ScopedSessionKey, 0, len(appliedEntries))
+	for _, entry := range appliedEntries {
 		// #9752: a forward-only delete retires exactly the named keys; the
 		// sender already decided every companion. DNAT + persistent-NAT
 		// handling below still run.
@@ -798,45 +893,62 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDelete
 			})
 		}
 	}
-	if _, _, err := peerDeleteChunks(reverseKeys, func(keys []ScopedSessionKey) (int, []ScopedSessionKey, error) {
-		return dp.BatchDeletePeerSyncedSessionsScoped(keys, false)
-	}); err != nil {
-		return deleted, err
+	if len(reverseKeys) > 0 {
+		if _, _, err := dp.BatchDeletePeerSyncedSessionsExactScoped(reverseKeys, false); err != nil {
+			return exact, err
+		}
 	}
-	for _, entry := range applied {
+	for _, entry := range appliedEntries {
 		val := entry.Value
 		s.preservePersistentNATV4(entry.Key, val)
 		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
 			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntry(dnatKeyForSessionV4(entry.Key, val))); err != nil {
-				return deleted, err
+				return exact, err
 			}
 		}
 	}
-	return deleted, nil
+	return exact, nil
 }
 
-// deletePeerBatchKnownV6 is the IPv6 analogue of deletePeerBatchKnownV4 (#9714).
-func (s dataPlaneSessionStore) deletePeerBatchKnownV6(dp peerSyncedSessionDeleter, entries []SessionEntryV6, forwardOnly bool) (int, error) {
-	scoped := func(entry SessionEntryV6) ScopedSessionKeyV6 {
-		return ScopedSessionKeyV6{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
-	}
+// deletePeerBatchKnownExactV6 is the IPv6 analogue of
+// deletePeerBatchKnownExactV4 (#10598).
+func (s dataPlaneSessionStore) deletePeerBatchKnownExactV6(dp peerSyncedSessionDeleter, entries []SessionEntryV6, forwardOnly bool) ([]SessionKeyV6, error) {
 	forwardKeys := make([]ScopedSessionKeyV6, 0, len(entries))
 	for _, entry := range entries {
-		forwardKeys = append(forwardKeys, scoped(entry))
+		forwardKeys = append(forwardKeys, ScopedSessionKeyV6{
+			Key:           entry.Key,
+			RoutingDomain: entry.Value.RoutingDomain,
+		})
 	}
-	deleted, refused, err := peerDeleteChunks(forwardKeys, func(keys []ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error) {
-		return dp.BatchDeletePeerSyncedSessionsScopedV6(keys, forwardOnly)
-	})
-	if err != nil {
-		return deleted, err
+	deleted, applied, err := dp.BatchDeletePeerSyncedSessionsExactScopedV6(forwardKeys, forwardOnly)
+	deletedSet := make(map[ScopedSessionKeyV6]struct{}, len(deleted))
+	for _, scoped := range deleted {
+		deletedSet[scoped] = struct{}{}
 	}
-	applied := make([]SessionEntryV6, 0, len(entries))
-	reverseKeys := make([]ScopedSessionKeyV6, 0, len(entries))
+	appliedSet := make(map[ScopedSessionKeyV6]struct{}, len(applied))
+	for _, scoped := range applied {
+		appliedSet[scoped] = struct{}{}
+	}
+	exact := make([]SessionKeyV6, 0, len(deleted))
+	appliedEntries := make([]SessionEntryV6, 0, len(applied))
 	for _, entry := range entries {
-		if _, kept := refused[scoped(entry)]; kept {
-			continue
+		scoped := ScopedSessionKeyV6{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
+		if _, ok := deletedSet[scoped]; ok {
+			exact = append(exact, scoped.Key)
 		}
-		applied = append(applied, entry)
+		if _, ok := appliedSet[scoped]; ok {
+			appliedEntries = append(appliedEntries, entry)
+		}
+	}
+	if err != nil {
+		if len(exact) == 0 {
+			exact = nil
+		}
+		return exact, err
+	}
+
+	reverseKeys := make([]ScopedSessionKeyV6, 0, len(appliedEntries))
+	for _, entry := range appliedEntries {
 		// #9752: v6 twin of the forward-only gate above.
 		if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant.
@@ -846,49 +958,21 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV6(dp peerSyncedSessionDelete
 			})
 		}
 	}
-	if _, _, err := peerDeleteChunks(reverseKeys, func(keys []ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error) {
-		return dp.BatchDeletePeerSyncedSessionsScopedV6(keys, false)
-	}); err != nil {
-		return deleted, err
+	if len(reverseKeys) > 0 {
+		if _, _, err := dp.BatchDeletePeerSyncedSessionsExactScopedV6(reverseKeys, false); err != nil {
+			return exact, err
+		}
 	}
-	for _, entry := range applied {
+	for _, entry := range appliedEntries {
 		val := entry.Value
 		s.preservePersistentNATV6(entry.Key, val)
 		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
 			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntryV6(dnatKeyForSessionV6(entry.Key, val))); err != nil {
-				return deleted, err
+				return exact, err
 			}
 		}
 	}
-	return deleted, nil
-}
-
-// peerDeleteChunks drives a #9714 peer batch delete in sessionDeleteBatchSize
-// chunks and gathers the keys the helper refused.
-func peerDeleteChunks[K comparable](keys []K, del func([]K) (int, []K, error)) (int, map[K]struct{}, error) {
-	deleted := 0
-	refused := make(map[K]struct{})
-	for len(keys) > 0 {
-		n := sessionDeleteBatchSize
-		if len(keys) < n {
-			n = len(keys)
-		}
-		chunkDeleted, chunkRefused, err := del(keys[:n])
-		if chunkDeleted < 0 {
-			chunkDeleted = 0
-		} else if chunkDeleted > n {
-			chunkDeleted = n
-		}
-		deleted += chunkDeleted
-		for _, key := range chunkRefused {
-			refused[key] = struct{}{}
-		}
-		if err != nil {
-			return deleted, refused, err
-		}
-		keys = keys[n:]
-	}
-	return deleted, refused, nil
+	return exact, nil
 }
 
 // bareSessionKeys strips the domain for a dataplane that cannot carry one.
@@ -956,6 +1040,36 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, reason D
 		return err
 	}
 	return s.DeleteKnownV6(key, val, reason, forwardOnly)
+}
+
+// DeleteClusterScopedV4 applies a scoped HA policy delete (#10512):
+// helper FIRST with the explicit domain + expected identity, no bare
+// mirror probe (a probe could misattribute a colliding tuple to another
+// tenant). Dataplanes without the peer-delete capability error loudly;
+// there is no unconditional fallback (the downgrade ban has none).
+func (s dataPlaneSessionStore) DeleteClusterScopedV4(key SessionKey, domain uint32, expectedID uint64) error {
+	if s.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	peerDeleter, ok := s.dp.(peerSyncedSessionDeleter)
+	if !ok {
+		return errors.New("dataplane cannot apply scoped deletes")
+	}
+	_, err := peerDeleter.DeletePeerSyncedSessionScoped(key, domain, expectedID)
+	return err
+}
+
+// DeleteClusterScopedV6 is the IPv6 analogue of DeleteClusterScopedV4 (#10512).
+func (s dataPlaneSessionStore) DeleteClusterScopedV6(key SessionKeyV6, domain uint32, expectedID uint64) error {
+	if s.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	peerDeleter, ok := s.dp.(peerSyncedSessionDeleter)
+	if !ok {
+		return errors.New("dataplane cannot apply scoped deletes")
+	}
+	_, err := peerDeleter.DeletePeerSyncedSessionScopedV6(key, domain, expectedID)
+	return err
 }
 
 func (s dataPlaneSessionStore) preservePersistentNATV4(key SessionKey, val SessionValue) {

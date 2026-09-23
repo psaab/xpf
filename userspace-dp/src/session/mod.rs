@@ -2390,7 +2390,39 @@ impl SessionTable {
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
     }
+    /// Return the live session identity for any incarnation of the same
+    /// canonical bare tuple, ignoring routing-domain and tunnel discriminator.
+    /// Used by delayed close drains to reject an old scoped close after a
+    /// collision survivor has been installed.
+    #[inline]
+    pub(crate) fn session_id_for_bare_tuple(&self, key: &SessionKey) -> u64 {
+        let mut canonical = key.clone();
+        canonical.routing_domain = 0;
+        canonical.discriminator = Default::default();
+        self.entries
+            .iter()
+            .find_map(|record| {
+                let mut candidate = record.1.key.clone();
+                candidate.routing_domain = 0;
+                candidate.discriminator = Default::default();
+                (candidate == canonical).then_some(record.1.entry.session_id)
+            })
+            .unwrap_or(0)
+    }
 
+    /// Return whether any live incarnation occupies the canonical bare tuple,
+    /// including rows whose legacy session id is zero.
+    pub(crate) fn contains_bare_tuple(&self, key: &SessionKey) -> bool {
+        let mut canonical = key.clone();
+        canonical.routing_domain = 0;
+        canonical.discriminator = Default::default();
+        self.entries.iter().any(|(_, record)| {
+            let mut candidate = record.key.clone();
+            candidate.routing_domain = 0;
+            candidate.discriminator = Default::default();
+            candidate == canonical
+        })
+    }
     /// #9582: true when `session_id` was minted by ANOTHER worker and carried here.
     ///
     /// `alloc_session_id` puts this table's namespace, `(node_bit << 15 | worker_id)
@@ -3344,6 +3376,20 @@ impl SessionTable {
         }
         self.delta_drained = self.delta_drained.saturating_add(out.len() as u64);
         out
+    }
+
+    /// Requeue drained deltas at the front when a tuple gate could not be
+    /// acquired for their binding-queue cleanup. Reversing preserves the
+    /// original FIFO order when pushing each item to the front.
+    pub(crate) fn requeue_deltas_front(&mut self, deltas: &[SessionDelta]) {
+        for delta in deltas.iter().rev() {
+            if self.deltas.len() >= MAX_SESSION_DELTAS {
+                self.delta_drops = self.delta_drops.saturating_add(1);
+                self.delta_loss_pending = true;
+                continue;
+            }
+            self.deltas.push_front(delta.clone());
+        }
     }
     /// #9856: drain tombstones harvested by terminal removals for an active
     /// owner-RG export. Entries outside this window are discarded because a

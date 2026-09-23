@@ -511,7 +511,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 | NAT64 whose route resolves through a GRE / WireGuard endpoint | **Forwarded and encapsulated (#8896).** The NAT64 builder rebuilds the two `ForwardPacketMeta` fields the encapsulators read and applies the tunnel post-pass, and the PTB clamp composes both budgets. An endpoint id resolving to no row, or to a mode that is neither GRE nor WireGuard, still fails closed (#2327) and is what `nat64_tunnel_encap_unsupported` now counts. See [NAT64 composes with native tunnel egress](#nat64-composes-with-native-tunnel-egress-8896). |
 | GRE / ESP / explicit early filters | Live kernel-owned/tunnel-control cases use cpumap or pass-through; degraded helper/XSK states pass only proven local/control traffic and drop non-local transit |
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed. The DECRYPTED plaintext is not zone-adjudicated — see [Tunnel plaintext adjudication](#tunnel-plaintext-adjudication-5619-ipsec-5618-wireguard) (#5619). |
-| WireGuard (`interfaces <if> tunnel mode wireguard`) | The XDP shim hands inbound transport-data records for the steered listen port to the AF_XDP worker, which decapsulates them and adjudicates the inner packet under the tunnel's zone (#8274); handshake and cookie records go to the helper's WireGuard control thread, which owns the UDP socket and the `wgN` TUN (#5582). A steered-port transport record that reaches the kernel on ingress the shim does not attach to is still written to `wgN` and forwarded by the kernel unadjudicated; one that reaches it on ingress the shim does attach to — which only happens while the dataplane is degraded — has its transit dropped, with only traffic addressed to the firewall delivered (#9594); for any other listen port it is dropped (#9521). See [Tunnel plaintext adjudication](#tunnel-plaintext-adjudication-5619-ipsec-5618-wireguard) (#5618). |
+| WireGuard (`interfaces <if> tunnel mode wireguard`) | The XDP shim hands inbound transport-data records for the steered listen port to the AF_XDP worker, which decapsulates them and adjudicates the inner packet under the tunnel's zone (#8274); handshake and cookie records go to the helper's WireGuard control thread, which owns the UDP socket and the `wgN` TUN (#5582). A steered-port transport record that reaches the kernel on an ingress the shim does not attach to gets the Half-A local-vs-transit posture: traffic addressed to the firewall is written to `wgN` for the kernel's input chains, while transit is dropped and counted (`rx_degraded_transit_drops`, #10527); the same local delivery / transit refusal applies on covered ingress during degraded windows (#9594). For any other listen port it is dropped (#9521). See [Tunnel plaintext adjudication](#tunnel-plaintext-adjudication-5619-ipsec-5618-wireguard) (#5618). |
 | DataPlane control-plane contract | Userspace manager no longer embeds the legacy `dataplane.DataPlane`; a userspace `LegacyDataPlaneAdapter` owns old-interface compatibility. Operator metadata reads in API/gRPC/CLI/daemon now use `LastApplyResult()` instead of `LastCompileResult()`, with a canary preventing those surfaces from regressing to compile-result metadata. GC and HA session sync use `SessionStore`/`Telemetry`. The manager still holds a named userspace shim manager for XDP/map bootstrap state. API/gRPC/CLI session/counter readers plus daemon control paths still name root `pkg/dataplane` session/counter types (e.g. `SessionKey`, `CounterValue`); those imports are tracked as the intentional, documented allowlist in `pkg/dataplane/retirement_boundary_canary_test.go` and move to a domain package as that type-relocation work continues. This is post-retirement interface cleanup, not a retirement blocker |
 | DPDK backend | Retired in #1525. The historical #1475 backend-local exception for its root `DataPlane` dependency applied pre-retirement; #1527 removes the registration import and #1528 deletes the package. |
 | Dataplane event logging | Session open/close/update are emitted by userspace. Policy-deny, screen-drop, logged routing-instance filter hits, non-PBR input filter logs, output filter logs, cached output-filter hits, and lo0 filter logs now enqueue RT_FLOW frames through the non-blocking Rust event-stream producer with existing per-event rate-limit/loss accounting. Go decode/status handling feeds raw userspace RT_FLOW frames through the same `EventReader.ProcessRawEvent` syslog/local-log path as eBPF, with a deterministic UDP syslog fanout harness for policy deny, screen drop, and filter log. Policy-deny events now carry the snapshot's compiled numeric policy ID; filter-log events carry filter/term/action identity from the matched compiled term. #1379 is closed for the feature-gap audit; the final live cluster syslog proof was delivered in the closed #1477 validation set. |
@@ -527,17 +527,17 @@ The two supported VPN modes no longer share one answer.
   inner traffic**. An operator can put the tunnel interface in a security zone,
   the commit is accepted, and nothing in the CLI distinguishes that zone from
   one that is enforced.
-- **WireGuard (#5618)** is adjudicated on the **dataplane path** since #8274,
-  and is not adjudicated on the **kernel path** through an ingress the shim does
-  not attach to — a residual #8274 stated rather than closed. The same path on
-  covered ingress, reachable while the dataplane is degraded, refuses transit
-  since #9594.
+- **WireGuard (#5618)** is adjudicated on the **dataplane path** since #8274.
+  On the **kernel path**, a steered-port record gets the local-vs-transit
+  posture on both shim-covered and shim-uncovered ingress: host-inbound traffic
+  is delivered to the kernel's input chains, while transit is refused and
+  counted (#9594/#10527). Other listen ports are refused by #9521.
 
 | Protocol / path | Where decapsulation happens | Adjudicated? |
 |-----------------|-----------------------------|--------------|
 | Route-based IPsec (#5619) | The kernel XFRM stack; the plaintext is delivered on the `xfrmi` netdev. | **No.** There is no path to hand a plaintext frame back INTO an `xfrmi` for the egress direction, so the dataplane cannot own the interface end-to-end. |
 | WireGuard, dataplane path (#8274) | The AF_XDP worker. The shim's `wg_worker_claims_record` hands a transport-data record for the steered listen port to the worker; the worker itself matches every configured listen port, so a record that reaches it by another route (for example, to an interface-mode SNAT address) is decapsulated there too. `userspace-dp/src/afxdp/wg/decap.rs` decapsulates it and `logical_ingress::build_logical_ingress_packet` rebinds the inner packet to the tunnel's `logical_ifindex`. | **Yes**, under the tunnel's zone: screen, session, policy, NAT. An **unzoned** tunnel resolves to zone id 0 and its transit is **denied** by the #6682 unzoned-ingress guard, even under `default-policy permit-all` with a both-any permit (`poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251`). |
-| WireGuard, kernel path | `userspace-dp/src/afxdp/coordinator/wg_control/dispatch.rs`. A transport record reaches the control thread's UDP socket through the kernel when it arrives on an ingress interface the shim does not attach to (#8274's residual, `docs/log/8274.md`), or while the dataplane is degraded and the shim passes local-destination traffic to the kernel — helper start, redundancy-group transition, reth link cycle, missing or not-ready binding, stale heartbeat (#9594). | **Steered port, uncovered ingress: no.** The thread authenticates the record, enforces the peer's `allowed-ips` against the inner SOURCE address, and writes the plaintext to the `wgN` TUN for the kernel to forward. **Steered port, covered ingress (degraded windows): transit refused.** The thread learns the ingress from `IP_PKTINFO`, applies the shim's own degraded posture to the decapsulated packet (the shim's pinned ingress and local-address maps), delivers traffic addressed to the firewall and drops transit (`rx_degraded_transit_drops`, #9594, `wg_control/kernel_path.rs`). **Every other port: refused** (`rx_unsteered_transport_drops`, #9521). |
+| WireGuard, kernel path | `userspace-dp/src/afxdp/coordinator/wg_control/dispatch.rs`. A transport record reaches the control thread's UDP socket through the kernel when it arrives on an ingress interface the shim does not attach to (#8274's residual, `docs/log/8274.md`), or while the dataplane is degraded and the shim passes local-destination traffic to the kernel — helper start, redundancy-group transition, reth link cycle, missing or not-ready binding, stale heartbeat (#9594). | **Steered port, uncovered or covered ingress: transit refused.** The thread authenticates the record, enforces the peer's `allowed-ips` against the inner SOURCE address, delivers traffic addressed to the firewall through the `wgN` TUN and kernel input chains, and drops transit (`rx_degraded_transit_drops`, #10527/#9594, `wg_control/kernel_path.rs`). **Every other port: refused** (`rx_unsteered_transport_drops`, #9521). |
 
 Both tunnel netdevs are excluded from the ingress-adjudication set:
 `userspaceSkipsIngressInterface` (`pkg/dataplane/userspace/ingress_exclusions.go`)
@@ -545,10 +545,12 @@ matches WireGuard through the `Tunnel` class of `netdevExclusionClasses` and
 IPsec through the `SecureTunnel` class, so the row is left out of
 `buildUserspaceIngressIfindexes` and of the AF_XDP binding plan, and
 `syncInterfaceAttachments` detaches the shim from the netdev. For IPsec that is
-the whole story. For WireGuard it is why the kernel path is unadjudicated: the
-dataplane path decapsulates on the UNDERLAY's binding, while the `wgN` TUN the
-control thread writes to is excluded from adjudication, so what is written there
-is left to the kernel. The exclusion has one known hole, stated next.
+the whole story. For WireGuard it is why the kernel path retains a local
+host-inbound handoff: the dataplane path decapsulates on the UNDERLAY's
+binding, while the `wgN` TUN the control thread writes to is excluded from
+adjudication. Half A now refuses transit before that TUN write; only local
+traffic is left to the kernel's input chains. The exclusion has one known hole,
+stated next.
 
 > **That is not true of the WireGuard BASE row under the canonical spelling
 > (#8279).** The base row's flag is `Tunnel: iface.Tunnel != nil`
@@ -582,18 +584,18 @@ bounded cross-thread packet handoff", and #8274 built it. Outbound WireGuard
 plaintext is adjudicated as it always was: encapsulation is the last step after
 the forwarding decision.
 
-**Operator-visible consequence.** Where tunnel plaintext is not adjudicated —
-every route-based IPsec tunnel, and WireGuard's kernel path — inter-zone
-authority is delegated to the kernel FIB plus nftables, and xpf installs only
-`hook input` chains while keeping `ip_forward` at 1 for as long as the dataplane
-is armed (#5275's arm gate makes the knob conditional on `dataplaneArmed`, and
-its comment names *this* path as the reason it must never be lowered while
-armed) — so that transit is forwarded unfiltered. `allowed-ips` is not a
-substitute: it is a cryptographic peer/source ownership gate on the inner source
-address, with no destination, no zone-pair, no application and no direction.
-Leaving the tunnel out of a zone is not a mitigation either: IPsec plaintext
-never reaches zone policy at all, and for WireGuard it leaves the kernel path
-untouched (on the dataplane path it turns the adjudication into a deny).
+**Operator-visible consequence.** Route-based IPsec plaintext remains
+unadjudicated and can be forwarded by the kernel FIB plus nftables, because xpf
+installs only `hook input` chains while keeping `ip_forward` at 1 when the
+dataplane is armed (#5275). WireGuard's kernel path is narrower: it does not
+run zone policy for host-inbound traffic delivered to the `wgN` TUN, but it
+refuses authenticated transit on both covered and uncovered ingress
+(`#9594`/`#10527`), so it no longer forwards that plaintext unfiltered.
+`allowed-ips` remains a cryptographic peer/source ownership gate on the inner
+source address, not a substitute for destination, zone-pair, application or
+directional policy. Leaving the tunnel out of a zone is not a mitigation:
+IPsec plaintext never reaches zone policy at all, while WireGuard's dataplane
+path resolves an unzoned ingress to zone id 0 and denies its transit (#6682).
 
 (This paragraph used to add that an interface in no zone resolves to zone id 0
 and "a `from-zone any to-zone any permit` rule matches zone-pair (0,0)". That
@@ -614,9 +616,10 @@ headings or unzoned caveat. The IPsec advisory escalates a zoned tunnel
 ("ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as
 zone-adjudicated and is not").
 The WireGuard advisory says the zone is enforced on the dataplane path and NOT
-on the kernel path, names both ways onto the kernel path, says other listen
-ports are dropped there, and says an unzoned tunnel's transit is denied on the
-dataplane path. Until #9251 the WireGuard advisory rendered the IPsec account,
+on the kernel path, names host-inbound delivery plus transit refusal on both
+uncovered and covered ingress, says other listen ports are dropped there, and
+says an unzoned tunnel's transit is denied on the dataplane path. Until #9251
+the WireGuard advisory rendered the IPsec account,
 which described the pre-#8274 dataplane. It still names every WireGuard tunnel
 rather than only the steered ones: the steered set has one derivation
 (`SteeredWireGuardListenPorts` plus
@@ -628,15 +631,15 @@ both HA node views — and NEITHER can reject: they have no error return and no
 `lenient` flag, so a box already running a tunnel can still commit an unrelated
 change (#1960 no-brick).
 
-The advisories make the gap VISIBLE; they do not close it. For IPsec, #9506 now
-owns the kernel-to-userspace capture bridge: an admitted generation diverts
-INPUT+FORWARD captures before policy and fail-closes them with terminal DROP.
-The Rust D11 adjudicated-PERMIT join remains unbuilt; #9506 owns the capture
-bridge and D11 owns the still-unwired permit path. For WireGuard, the
-degraded-dataplane half of the kernel path refuses transit since #9594; the
-uncovered-ingress half
-was kept deliberately, because on such an ingress the TUN write is the only
-path and dropping it black-holes the tunnel (`docs/log/8274.md`).
+The advisories make the remaining boundary VISIBLE; they do not make the
+kernel path zone-adjudicated. For IPsec, #9506 now owns the kernel-to-userspace
+capture bridge: an admitted generation diverts INPUT+FORWARD captures before
+policy and fail-closes them with terminal DROP. The Rust D11 adjudicated-PERMIT
+join remains unbuilt; #9506 owns the capture bridge and D11 owns the still-
+unwired permit path. For WireGuard, the degraded covered-ingress half refuses
+transit since #9594, and Half A (#10527) extends that refusal to the previously
+uncovered ingress while preserving host-inbound delivery. Half B remains a
+separate follow-up for a full WG local-delivery seam; it is not part of #10527.
 **Do not try to enforce by un-excluding the tunnel netdev.** Both
 planners put an ifindex into the shim's ingress-adjudication map before any
 AF_XDP binding exists for it, and the shim's `BINDING_MISSING` arm then takes

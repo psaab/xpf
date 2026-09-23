@@ -38,8 +38,46 @@ type SessionExportRequest struct {
 	ContinuationSequence    uint64 `json:"session_export_seq,omitempty"`
 }
 
+type SessionPolicyListRequest struct {
+	PolicyIDs    []uint32      `json:"policy_ids,omitempty"`
+	Mode         string        `json:"mode,omitempty"`
+	BeforeSecs   *uint64       `json:"before_secs,omitempty"`
+	Families     WireUint8List `json:"families,omitempty"`
+	Classes      []string      `json:"classes,omitempty"`
+	Continuation string        `json:"continuation,omitempty"`
+}
+
+type SessionPolicyTuple struct {
+	AddrFamily    uint8  `json:"addr_family,omitempty"`
+	Protocol      uint8  `json:"protocol,omitempty"`
+	SrcIP         string `json:"src_ip,omitempty"`
+	DstIP         string `json:"dst_ip,omitempty"`
+	SrcPort       uint16 `json:"src_port,omitempty"`
+	DstPort              uint16 `json:"dst_port,omitempty"`
+	TunnelDiscriminator  uint64 `json:"tunnel_discriminator,omitempty"`
+	RoutingDomain        uint32 `json:"routing_domain,omitempty"`
+}
+
+type SessionPolicyMatch struct {
+	AddrFamily                     uint8               `json:"addr_family,omitempty"`
+	RoutingDomain                  uint32              `json:"routing_domain,omitempty"`
+	Tuple                          SessionPolicyTuple  `json:"tuple"`
+	ReverseKey                     *SessionPolicyTuple `json:"reverse_key,omitempty"`
+	PolicyID                       uint32              `json:"policy_id,omitempty"`
+	CreatedSecs                    uint64              `json:"created_secs,omitempty"`
+	CreatedNS                      uint64              `json:"created_ns,omitempty"`
+	ExpectedRTFlowSessionID        uint64              `json:"expected_rt_flow_session_id,omitempty"`
+	CompanionPolicyID              uint32              `json:"companion_policy_id,omitempty"`
+	ExpectedCompanionRTFlowSessionID uint64            `json:"expected_companion_rt_flow_session_id,omitempty"`
+}
 type SessionSyncRequest struct {
 	Operation   string `json:"operation,omitempty"`
+	// #10512: every helper-first tuple mutation carries a process-generation
+	// epoch and a manager-local idempotency identity. Older helpers ignore these
+	// additive fields; the new helper uses them to quarantine stale retries.
+	HelperEpoch uint64 `json:"helper_epoch,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+	MutationID  string `json:"mutation_id,omitempty"`
 	AddrFamily  uint8  `json:"addr_family,omitempty"`
 	Protocol    uint8  `json:"protocol,omitempty"`
 	SrcIP       string `json:"src_ip,omitempty"`
@@ -91,11 +129,17 @@ type SessionSyncRequest struct {
 	// generation guard (belt-and-suspenders for helper-originated deletes
 	// and the delayed-stale-install variant). Plain uint64 with NO
 	// omitempty: a 0 value MUST serialize as 0 (legacy/unknown) so an old
-	// helper without the field still decodes via serde(default), and a new
-	// helper sees an explicit 0 rather than a missing key — the #1961
-	// wire-type discipline (no omitempty ambiguity on a numeric field). The
 	// Rust side declares `#[serde(default)] generation: u64`.
 	Generation uint64 `json:"generation"`
+	// PolicyMatches carries ONE micro-batch of identity-conditional policy
+	// deletes (#10512, plan §2.4: at most 64 matches and 128 gate keys per
+	// batch; Go packs, the helper rejects over-cap before acquisition). Each
+	// item is a READ match verbatim — forward tuple, captured reverse tuple,
+	// and both expected identities. Tuple routing domains are RAW (0 =
+	// default instance, stated), never the #7239 wire codec. Set only with
+	// operation mirror_delete_policy_batch; nil for every other verb.
+	// Additive: an old helper without the verb rejects it as unknown.
+	PolicyMatches []SessionPolicyMatch `json:"policy_matches,omitempty"`
 	// #3301: the admitting policy's firewall metadata, carried so a
 	// peer-PROMOTED session is correctly attributed, counted, and aged after
 	// failover instead of degrading to policy 0 / no counter / the global
@@ -193,6 +237,9 @@ type SessionSyncRequest struct {
 	// InstallTableDomain/InstallTableCheck (#9752): forwarded from
 	// SessionValue{,V6}.InstallTable* so the standby's helper imports a
 	// PBR-steered session with the table its steer installed, re-resolving
+	// #10512: clear continuation echoes the helper-owned exclusive fence.
+	ClearFenceID      uint64 `json:"clear_fence_id,omitempty"`
+	ClearContinuation string `json:"clear_continuation,omitempty"`
 	// there instead of inet.0 after failover. (0,0) = default table, which
 	// imports exactly as before. userspace-dp's SessionSyncRequest
 	// declares the same keys.

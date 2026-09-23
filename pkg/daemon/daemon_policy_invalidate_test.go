@@ -3,15 +3,19 @@ package daemon
 import (
 	"context"
 	"errors"
+	"github.com/cilium/ebpf"
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/policymatch"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"golang.org/x/sync/semaphore"
+	"net"
 	"strings"
 	"testing"
 )
@@ -119,6 +123,44 @@ func TestDeletedPolicyRuntimeIDs(t *testing.T) {
 			t.Fatalf("identical old/new produced clear set %v, want empty", got)
 		}
 	})
+}
+
+// TestPolicySchedulerTransitionInvalidationDirection4343 pins the asymmetric
+// scheduler transition contract: active->inactive clears sessions carrying
+// the surviving policy's id, while inactive->active does not sweep that id.
+// The latter is revalidated by the userspace generation fence because sessions
+// admitted by a later permit carry that later policy's id.
+func TestPolicySchedulerTransitionInvalidationDirection4343(t *testing.T) {
+	oldCfg := twoPolicyConfig([]string{"p-first", "p-window"}, nil)
+	oldCfg.Security.PolicyRematch = true
+	oldCfg.Security.Policies[0].Policies[1].SchedulerName = "window"
+	newCfg := twoPolicyConfig([]string{"p-first", "p-window"}, nil)
+	newCfg.Security.PolicyRematch = true
+	newCfg.Security.Policies[0].Policies[1].SchedulerName = "window"
+	policyID := dpuserspace.PolicyIDsByStableKey(oldCfg)["trust->untrust/p-window"]
+	if policyID == 0 {
+		t.Fatalf("test policy must use a non-overloaded runtime id, got %d", policyID)
+	}
+
+	tightened := changedPolicyRuntimeIDs(
+		oldCfg,
+		newCfg,
+		map[string]bool{"window": true},
+		map[string]bool{"window": false},
+	)
+	if _, ok := tightened[policyID]; !ok {
+		t.Fatalf("active->inactive scheduler transition omitted policy id %d: %v", policyID, tightened)
+	}
+
+	reopened := changedPolicyRuntimeIDs(
+		oldCfg,
+		newCfg,
+		map[string]bool{"window": false},
+		map[string]bool{"window": true},
+	)
+	if len(reopened) != 0 {
+		t.Fatalf("inactive->active scheduler transition swept ids %v; generation revalidation owns this edge", reopened)
+	}
 }
 
 // TestClearSessionsForDeletedPolicies is the RED-on-revert test: a session
@@ -281,11 +323,13 @@ type policyInvalTestDP struct {
 	renameWire   []dpuserspace.PolicyRenameAncestry
 	renameRows   []dpuserspace.PolicySessionRebind
 	iterErr      error
-	// delErr, when non-nil, is returned by BatchDeleteSessions/V6 WITHOUT
-	// deleting anything — models a dataplane batch-delete that fails, so the
-	// MATCHED sessions stay INSTALLED. Exercises the delete-error propagation
-	// path in clearSessionsForPolicyIDs (#5578 stale-authorization gap).
-	delErr error
+	// delErr, when non-nil, is returned by BatchDeleteSessions/V6 after the
+	// configured prefix is removed. A zero prefix models a fully failed delete.
+	delErr          error
+	partialDeleteV4 int
+	partialDeleteV6 int
+	deletedV4       []dataplane.SessionKey
+	deletedV6       []dataplane.SessionKeyV6
 }
 
 func (d *policyInvalTestDP) Start(context.Context) error { return nil }
@@ -334,32 +378,54 @@ func (d *policyInvalTestDP) BatchIterateSessionsV6(fn func(dataplane.SessionKeyV
 	return nil
 }
 
-func (d *policyInvalTestDP) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) {
-	if d.delErr != nil {
-		// Model a failed batch delete: nothing is removed, so the matched
-		// sessions stay installed under their now-stale authorization.
-		return 0, d.delErr
+func (d *policyInvalTestDP) GetSessionV4(key dataplane.SessionKey) (dataplane.SessionValue, error) {
+	value, ok := d.v4[key]
+	if !ok {
+		return dataplane.SessionValue{}, ebpf.ErrKeyNotExist
 	}
+	return value, nil
+}
+
+func (d *policyInvalTestDP) GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
+	value, ok := d.v6[key]
+	if !ok {
+		return dataplane.SessionValueV6{}, ebpf.ErrKeyNotExist
+	}
+	return value, nil
+}
+
+func (d *policyInvalTestDP) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) {
 	n := 0
-	for _, k := range keys {
+	for i, k := range keys {
+		if d.delErr != nil && i >= d.partialDeleteV4 {
+			return n, d.delErr
+		}
+		d.deletedV4 = append(d.deletedV4, k)
 		if _, ok := d.v4[k]; ok {
 			delete(d.v4, k)
 			n++
 		}
 	}
+	if d.delErr != nil {
+		return n, d.delErr
+	}
 	return n, nil
 }
 
 func (d *policyInvalTestDP) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, error) {
-	if d.delErr != nil {
-		return 0, d.delErr
-	}
 	n := 0
-	for _, k := range keys {
+	for i, k := range keys {
+		if d.delErr != nil && i >= d.partialDeleteV6 {
+			return n, d.delErr
+		}
+		d.deletedV6 = append(d.deletedV6, k)
 		if _, ok := d.v6[k]; ok {
 			delete(d.v6, k)
 			n++
 		}
+	}
+	if d.delErr != nil {
+		return n, d.delErr
 	}
 	return n, nil
 }
@@ -458,6 +524,74 @@ func TestClearSessionsForPolicyIDsDeleteErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestDeleteInvalidatedSessionsErrorSyncsExactSet is the RED-on-revert cell
+// for #10598 policy invalidation: a partially successful V4/V6 delete returns
+// an error, but the HA queue receives only the keys actually deleted.
+func TestDeleteInvalidatedSessionsErrorSyncsExactSet(t *testing.T) {
+	_, _, store, firstV4, firstV6 := deletedPolicyInvalFixture()
+	secondV4 := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 3}, DstIP: [4]byte{10, 0, 0, 4},
+		SrcPort: 40002, DstPort: 22, Protocol: 6,
+	}
+	secondV6 := dataplane.SessionKeyV6{
+		SrcIP: [16]byte{0x20, 0x01, 15: 0x03}, DstIP: [16]byte{0x20, 0x01, 15: 0x04},
+		SrcPort: 40004, DstPort: 22, Protocol: 6,
+	}
+	store.v4[secondV4] = dataplane.SessionValue{State: dataplane.SessStateEstablished}
+	store.v6[secondV6] = dataplane.SessionValueV6{State: dataplane.SessStateEstablished}
+	store.delErr = errors.New("partial policy delete")
+	store.partialDeleteV4 = 1
+	store.partialDeleteV6 = 1
+
+	sender := cluster.NewSessionSync(":0", ":0", store)
+	sender.SetConnectedForTesting(true)
+	receiverStore := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			firstV4:  {State: dataplane.SessStateEstablished},
+			secondV4: {State: dataplane.SessStateEstablished},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			firstV6:  {State: dataplane.SessStateEstablished},
+			secondV6: {State: dataplane.SessStateEstablished},
+		},
+	}
+	receiver := cluster.NewSessionSync(":0", ":0", receiverStore)
+
+	d := &Daemon{
+		cluster:     newClusterManager(true),
+		sessionSync: sender,
+	}
+	d.setDataplane(store)
+	err := d.deleteInvalidatedSessions(capturedSessions{
+		targets: 1,
+		v4:      []dataplane.SessionEntryV4{{Key: firstV4}, {Key: secondV4}},
+		v6:      []dataplane.SessionEntryV6{{Key: firstV6}, {Key: secondV6}},
+	}, dataplane.DeleteReasonPolicyDeleted, "partial exact test")
+	if !errors.Is(err, store.delErr) {
+		t.Fatalf("deleteInvalidatedSessions error = %v, want %v", err, store.delErr)
+	}
+
+	types, applyErr := sender.ApplyQueuedMessagesForTesting(receiver)
+	if applyErr != nil {
+		t.Fatalf("apply queued delete messages: %v", applyErr)
+	}
+	if len(types) != 2 || types[0] != "delete_v4" || types[1] != "delete_v6" {
+		t.Fatalf("queued message types = %v, want [delete_v4 delete_v6]", types)
+	}
+	if len(receiverStore.deletedV4) != 1 || receiverStore.deletedV4[0] != firstV4 {
+		t.Fatalf("queued v4 deletes = %+v, want [%+v]", receiverStore.deletedV4, firstV4)
+	}
+	if len(receiverStore.deletedV6) != 1 || receiverStore.deletedV6[0] != firstV6 {
+		t.Fatalf("queued v6 deletes = %+v, want [%+v]", receiverStore.deletedV6, firstV6)
+	}
+	if _, ok := receiverStore.v4[secondV4]; !ok {
+		t.Fatalf("queued v4 over-sync removed retained key %+v", secondV4)
+	}
+	if _, ok := receiverStore.v6[secondV6]; !ok {
+		t.Fatalf("queued v6 over-sync removed retained key %+v", secondV6)
+	}
+}
+
 // TestApplyAndSyncCommittedSurfacesInvalidationError proves the CALLER surfaces
 // the propagated error (#5578): a successful config apply whose post-apply
 // policy-session invalidation fails must return a non-nil commit error while
@@ -492,6 +626,92 @@ func TestApplyAndSyncCommittedSurfacesInvalidationError(t *testing.T) {
 		t.Fatalf("applyAndSyncCommitted returned config %p, want the committed config %p "+
 			"(a non-fatal invalidation error must not drop the commit)", got, compiled)
 	}
+}
+
+// N3c: capture-level scheduler/feed stamping. The capture loop stamps
+// each binding with policyInactiveFn(newSched) + feedOverlay; these cells pin
+// the OBSERVED capture behavior (renamed iff active+resolving). Feed overlay
+// honoring itself is pinned at unit level below (a populated feed Manager is
+// covered by the feeds package + 5036/9588 tests, not rebuilt here).
+func TestCaptureRenameStampingSchedulerAndFeed10592(t *testing.T) {
+	captureWith := func(t *testing.T, sched *config.SchedulerConfig, feedName string, keepAlternate bool) *policyInvalidationCapture {
+		t.Helper()
+		oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+		newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+		if sched != nil {
+			oldCfg.Security.Policies[1].Policies[0].SchedulerName = sched.Name
+			newCfg.Security.Policies[1].Policies[0].SchedulerName = sched.Name
+			oldCfg.Schedulers = map[string]*config.SchedulerConfig{sched.Name: sched}
+			newCfg.Schedulers = map[string]*config.SchedulerConfig{sched.Name: sched}
+		}
+		if feedName != "" {
+			for _, cfg := range []*config.Config{oldCfg, newCfg} {
+				cfg.Security.Policies[1].Policies[0].Match.SourceAddresses = []string{feedName}
+			}
+		}
+		if !keepAlternate {
+			// Isolate feed/scheduler semantics from alternate-permit fallback.
+			for _, cfg := range []*config.Config{oldCfg, newCfg} {
+				cfg.Security.Policies[1].Policies = cfg.Security.Policies[1].Policies[:1]
+			}
+		}
+		oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+		key := dataplane.SessionKey{
+			SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+			SrcPort: 1234, DstPort: 443, Protocol: 6,
+		}
+		dp := &policyInvalTestDP{
+			v4: map[dataplane.SessionKey]dataplane.SessionValue{
+				key: {
+					State:       dataplane.SessStateEstablished,
+					PolicyID:    oldID,
+					IngressZone: config.StableZoneID("lan"),
+					EgressZone:  config.StableZoneID("wan"),
+				},
+			},
+			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+		}
+		d := &Daemon{}
+		d.setDataplane(dp)
+		d.armPolicyInvalidationPlanWithRename(oldCfg, newCfg, &pendingRenameApply{
+			descriptors: []configstore.RenameDescriptor{
+				policyRenameDescriptor("p-old", "p-new"),
+			},
+		})
+		d.capturePolicyInvalidationLocked(newCfg)
+		capture := d.policyInvalidationCapture
+		if capture == nil {
+			t.Fatal("rename apply did not produce a pre-publication capture")
+		}
+		return capture
+	}
+	t.Run("scheduler-active-retains", func(t *testing.T) {
+		capture := captureWith(t,
+			&config.SchedulerConfig{Name: "biz", Daily: true, AllDay: true}, "", true)
+		if len(capture.renamed) != 1 {
+			t.Fatalf("active-scheduler renamed rows = %d, want 1", len(capture.renamed))
+		}
+	})
+	t.Run("scheduler-inactive-drops", func(t *testing.T) {
+		capture := captureWith(t,
+			&config.SchedulerConfig{Name: "biz", StartDate: "2000-01-01", StopDate: "2000-01-02"}, "", true)
+		// The inactive renamed rule must not retain; retention via the
+		// match-any alternate (no scheduler) is correct and expected.
+		for _, row := range capture.renamed {
+			if row.RuleID == "lan->wan/p-new" {
+				t.Fatalf("inactive-scheduler renamed rule retained: %+v", row)
+			}
+		}
+	})
+	t.Run("feed-unresolved-drops", func(t *testing.T) {
+		// Feed-backed name with a nil feed manager: overlay is nil, the name
+		// cannot resolve, the row is not retained. (populated-Manager
+		// plumbing is covered by feeds + 5036/9588 tests.)
+		capture := captureWith(t, nil, "bad-actors", false)
+		if len(capture.renamed) != 0 {
+			t.Fatalf("unresolved-feed renamed rows = %d, want 0: %+v", len(capture.renamed), capture.renamed)
+		}
+	})
 }
 
 // TestCommitWindowArmApplySweepOrder10591 drives the real commit wrapper far
@@ -588,6 +808,40 @@ func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 	if !(armAt < applyAt && applyAt < sweepAt) {
 		t.Fatalf("commit phases out of order: arm=%s apply=%s sweep=%s",
 			fset.Position(armAt), fset.Position(applyAt), fset.Position(sweepAt))
+	}
+}
+
+// N3c feed unit: the evaluator honors a hand-injected feed overlay
+// (feed-backed name + overlay resolves) and denies without it. Capture-level
+// stamping of the overlay is pinned by the scheduler matrix above (same loop).
+func TestFeedOverlayRenameEvaluatorUnit10592(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.SourceAddresses = []string{"bad-actors"}
+	}
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")},
+	)
+	if !ok {
+		t.Fatal("valid policy ancestry rejected")
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	binding := bindings[oldID]
+	mkQuery := func() policymatch.Query {
+		return policymatch.Query{
+			FromZone: "lan", ToZone: "wan",
+			SrcIP: net.ParseIP("203.0.113.7"), DstIP: net.ParseIP("10.0.0.20"),
+			Protocol: "tcp", SrcPort: 40000, DstPort: 443,
+		}
+	}
+	withOverlay := binding
+	withOverlay.feedOverlay = map[string][]string{"bad-actors": {"203.0.113.0/24"}}
+	if _, permitted := permittedRenameResult(newCfg, withOverlay, mkQuery()); !permitted {
+		t.Fatal("feed-backed name with overlay was not retained")
+	}
+	if _, permitted := permittedRenameResult(newCfg, binding, mkQuery()); permitted {
+		t.Fatal("feed-backed name without overlay was retained")
 	}
 }
 

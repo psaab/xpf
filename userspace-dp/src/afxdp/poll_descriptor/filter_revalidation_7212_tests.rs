@@ -1862,3 +1862,115 @@ fn a_pbr_term_that_rejects_keeps_its_reject_action_8114() {
     );
     assert_eq!(hit.revoked_key.as_ref(), Some(&flow.forward_key));
 }
+
+/// #10605: a TUNNELED decision is endpoint-pinned and table-free — the miss
+/// path stamps it (0,0) by rule (`install_table_stamp_for_miss`), not by
+/// absence of a PBR term. Hit revalidation must want (0,0) too: re-deriving
+/// the PBR term's nonzero identity mismatches the installed (0,0) on every
+/// first hit (install stamps UNVALIDATED) and revokes every PBR-steered
+/// tunnel flow on its second packet. Direct pin for the exemption predicate
+/// (6075 covers it end-to-end).
+#[test]
+fn a_tunneled_pbr_steer_wants_zero_identity_on_hit_10605() {
+    let forwarding = forwarding_with_empty_blue_pbr();
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let mut tunneled = decision();
+    tunneled.resolution.tunnel_endpoint_id = 1;
+
+    assert!(
+        revalidate_static_pbr_route_on_session_hit(
+            &forwarding,
+            &neighbors,
+            &sessions,
+            &flow.forward_key,
+            &flow,
+            &frame(),
+            meta(LAN_IFINDEX as u32, 0, false),
+            Some(TEST_LAN_ZONE_ID),
+            tunneled,
+        )
+        .is_none(),
+        "a tunneled decision must produce NO route-transition result: the PBR \
+         term's identity is not its table identity (the miss stamped (0,0))"
+    );
+}
+
+/// #10605 control: the SAME stale PBR steer with an UNTUNNELED decision still
+/// revalidates. Pins the exemption's scope — widening it past tunneled
+/// decisions reds here.
+#[test]
+fn an_untunneled_pbr_steer_still_revalidates_on_hit_10605() {
+    let forwarding = forwarding_with_empty_blue_pbr();
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        decision(),
+    )
+    .expect("an untunneled stale PBR steer must produce a route-transition result");
+    assert_eq!(route.canonical_key, flow.forward_key);
+}
+
+/// #10605: a TUNNELED decision under a DROP PBR term still defers to the
+/// ordinary evaluator — the exemption must not swallow the deny. The route
+/// revalidator returns None (Drop terms are owned by the composed static
+/// evaluator), and the ordinary evaluator produces the Discard verdict with
+/// its revocation key.
+#[test]
+fn a_tunneled_pbr_drop_still_denies_via_the_ordinary_evaluator_10605() {
+    let forwarding = forwarding_with_input_filter(
+        LAN_IFINDEX,
+        false,
+        vec![pbr_term("pbr-drop", "5201", "discard")],
+    );
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let mut tunneled = decision();
+    tunneled.resolution.tunnel_endpoint_id = 1;
+
+    assert!(
+        revalidate_static_pbr_route_on_session_hit(
+            &forwarding,
+            &neighbors,
+            &sessions,
+            &flow.forward_key,
+            &flow,
+            &frame(),
+            meta(LAN_IFINDEX as u32, 0, false),
+            Some(TEST_LAN_ZONE_ID),
+            tunneled,
+        )
+        .is_none(),
+        "a Drop PBR term produces no route-transition result (owned by the \
+         ordinary evaluator), tunneled or not"
+    );
+    let hit = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    )
+    .0
+    .expect("the Drop term must still produce a deny verdict for tunnels");
+    assert_eq!(
+        hit.eval.action,
+        crate::filter::FilterAction::Discard,
+        "the backstop verdict for a tunneled Drop steer is a Discard"
+    );
+    assert_eq!(hit.revoked_key.as_ref(), Some(&flow.forward_key));
+}

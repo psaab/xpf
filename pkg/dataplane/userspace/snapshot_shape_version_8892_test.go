@@ -367,6 +367,12 @@ const (
 	// v30 -> v31 BUMPED (#10510): zone_set_validated authenticates the
 	// collision-free zone identity set before removed-zone purge. The re-pinned
 	// golden additionally fences the #10511 ancestry/rebind/extensive fields.
+	// v30 -> v31 STANDS (#10512): the helper-first session verbs (epoch/
+	// idempotency identities, policy READ matches, mirror counts) ride the
+	// session-sync control wire, not any ConfigSnapshot struct walked by this
+	// digest. The shared protocol version still moves so the manager can fence
+	// old helpers before the new verbs, while this shape's field set and
+	// golden remain unchanged.
 	snapshotShapeVersion8892 = 31
 )
 

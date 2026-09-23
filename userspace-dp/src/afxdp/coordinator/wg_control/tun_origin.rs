@@ -67,10 +67,11 @@ pub(in crate::afxdp) fn parse_wg_tun_origin_flow(
     meta.payload_offset = meta.payload_offset.saturating_add(14);
     let mut flow = parse_session_flow_from_bytes(&frame, meta)?;
     // Parent-review (GPT-3 + SPARK-A1): TUN-read provenance. The kernel
-    // routes ANYTHING onto a wgN TUN — including, under misconfig,
-    // peer-originated transit an Uncovered-ingress TUN write looped back
-    // (`dispatch_inbound` writes AllowedIPs-gated but possibly non-local-src
-    // plaintext the kernel may route out this or another TUN). Only a
+    // routes ANYTHING onto a wgN TUN — including, pre-#10527, peer-originated
+    // transit an Uncovered-ingress TUN write looped back (`dispatch_inbound`
+    // then wrote AllowedIPs-gated but possibly non-local-src plaintext the
+    // kernel could route out this or another TUN; #10527 refuses uncovered
+    // transit, and this gate stays as defense-in-depth). Only a
     // firewall-LOCAL inner source is self-originated; anything else is
     // encap-only (None), never published as TUN-origin. `owns_configured_ip`
     // covers tunnel + physical + SNAT-WAN + NAT-external addrs (local_v*

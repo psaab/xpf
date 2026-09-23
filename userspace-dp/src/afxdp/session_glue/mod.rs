@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(in crate::afxdp) mod commands;
 mod delete_drop_sweep;
@@ -499,6 +500,14 @@ pub(super) struct WorkerCommandResults {
     /// operator `clear security flow session`, cluster-stale sweep, and HA
     /// DeleteSynced paths all funnel through this command).
     pub deleted_synced_keys: Vec<SessionKey>,
+    /// #10612: every session key refused by the stale-replay fence this tick
+    /// (an `UpsertSynced` whose recorded zones are absent from the current
+    /// validated set — see `synced_entry_is_stale_replay`). `apply_worker_commands`
+    /// has no shared-map access; the worker loop drains this list and evicts
+    /// each key from shared authority, so the purge-deleted row stays deleted
+    /// on both sides. Same record-here/apply-where-the-handles-are split as
+    /// `deleted_synced_keys` above.
+    pub stale_replay_dropped_keys: Vec<SessionKey>,
     pub exported_sequences: Vec<u64>,
     /// #7919: answers to `QuerySessionCounters` processed this tick. The
     /// command handler reads the table (it has `sessions` in scope); the WORKER
@@ -563,6 +572,7 @@ impl WorkerCommandResults {
         WorkerCommandResults {
             cancelled_keys: Vec::new(),
             deleted_synced_keys: Vec::new(),
+            stale_replay_dropped_keys: Vec::new(),
             exported_sequences: Vec::new(),
             session_counter_answers: Vec::new(),
             export_owner_rgs: Vec::new(),
@@ -785,6 +795,75 @@ pub(super) fn purge_sessions_with_removed_zone_ids(
         );
     }
     purged
+}
+
+/// #10612: stale-replay fence — is this synced entry's recorded zone identity
+/// absent from the CURRENT validated zone set?
+///
+/// The #10510 rotation purge is a one-shot delete: it removes the unbound
+/// sync-derived id-0 rows whose zones vanished and retains nothing. Every
+/// replay/install ingress must therefore re-validate zone membership against
+/// the current view at install time, or a pre-purge snapshot re-published
+/// post-purge reinstalls the exact row the purge deleted (shared map and
+/// worker table alike).
+///
+/// Mirrors the purge predicate it fences (`purge_sessions_with_removed_zone_ids`):
+/// unbound (`policy_counter.is_none()`), `policy_id == 0`, sync-family
+/// (`is_peer_synced()` or `SharedPromote`), either recorded zone absent from
+/// the current set. Same fail-opens: an unvalidated or empty current set
+/// admits (legacy/empty-snapshot safe), and zone id 0 never matches
+/// (`populate_zones` never admits it; 0 is unknown/unset on the wire).
+///
+/// Deliberately does NOT mirror the purge's `is_reverse` exemption (review
+/// finding 10619/M2): the purge deletes the pair via the forward (companion
+/// expansion), but the fence drops only the fenced entry — exempting reverses
+/// would install stale reverse halves standalone after their forward was
+/// dropped. Zone-membership is pair-symmetric (the check ORs both legs), so
+/// live reverses (zones present) still admit while stale-zone reverses drop,
+/// exactly like forwards. Legitimate rotation survivors, including reverse
+/// halves, remain replayable via zone presence, not via exemption.
+///
+/// Never-member zones (an id absent from the current set that was never a
+/// member, e.g. legacy/foreign rows): the fence drops these on REPLAY paths
+/// (fail-closed on unvalidatable input). Local installs are unaffected (the
+/// fence guards sync/replay ingress only, never the local path).
+///
+/// Known gap (#10620): cross-generation id reuse (same id, new name) is
+/// ADMITTED here (`contains_key` sees the reused id) while the purge DELETES
+/// it. No stateless predicate can distinguish the two (identical observables);
+/// the vintage-stamped fix is tracked separately. Window: id-reuse + racing
+/// stale replay.
+pub(in crate::afxdp) fn synced_entry_is_stale_replay(
+    origin: SessionOrigin,
+    metadata: &SessionMetadata,
+    forwarding: &ForwardingState,
+) -> bool {
+    // NOTE: no is_reverse exemption (see doc above). Reverses are judged by
+    // zone membership exactly like forwards.
+    if !forwarding.zone_set_validated || forwarding.zone_id_to_name.is_empty() {
+        return false;
+    }
+    if metadata.policy_counter.is_some() || metadata.policy_id != 0 {
+        return false;
+    }
+    if !(origin.is_peer_synced() || origin == SessionOrigin::SharedPromote) {
+        return false;
+    }
+    let zone_absent = |zone: u16| zone != 0 && !forwarding.zone_id_to_name.contains_key(&zone);
+    zone_absent(metadata.ingress_zone) || zone_absent(metadata.egress_zone)
+}
+/// #10612 (R2 observability): process-wide count of stale-zone replay drops
+/// across all 8 fence decision sites (worker arm, coordinator filter, coordinator
+/// purge, import, prewarm, promote, materialize-as-miss, republish BPF skip). Bumped per fence DECISION (the worker drain evicts
+/// already-counted drops; the purge bumps only on actual removal). A row
+/// judged at two sites (filter + purge) counts twice — honest: two distinct
+/// decisions. Mirrors the
+/// `SESSION_PUBLISH_ERRORS_SHARED` static pattern (no stats-handle threading).
+pub(in crate::afxdp) static STALE_REPLAY_FENCE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// Bump [`STALE_REPLAY_FENCE_DROPS`] for one refused stale replay.
+pub(in crate::afxdp) fn note_stale_replay_fence_drop() {
+    STALE_REPLAY_FENCE_DROPS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// #9526: the stable rule id of the OLD snapshot's literal first policy (the
@@ -1102,6 +1181,7 @@ fn delete_terminal_half(
         conntrack_v4_fd,
         conntrack_v6_fd,
     );
+    let closed_id = sessions.session_id_for(key);
     sessions.delete(key);
     remove_shared_session(
         shared_sessions,
@@ -1124,7 +1204,7 @@ fn delete_terminal_half(
         metadata.is_reverse,
         now_ns,
     );
-    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false);
+    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false, closed_id);
 }
 
 /// #9856: slice size for the collecting export-candidate walk below. The
@@ -1234,6 +1314,11 @@ pub(super) fn apply_worker_commands(
     // bursts are control-plane paced and the common no-delete tick pays
     // no allocation (same policy as `cancelled_keys`).
     let mut deleted_synced_keys: Vec<SessionKey> = Vec::new();
+    // #10612: keys refused by the stale-replay fence this tick (see the
+    // `UpsertSynced` arm); drained by the worker loop into shared-map
+    // evictions. Not pre-sized — drops are control-plane paced and the
+    // common no-drop tick pays no allocation (same policy as its neighbors).
+    let mut stale_replay_dropped_keys: Vec<SessionKey> = Vec::new();
     // #5155: companion dedup set for `handle_demote_owner_rgs`. Kept
     // beside `cancelled_keys` (not pre-sized) so the O(1) membership
     // test persists across the multiple DemoteOwnerRGS arms in one
@@ -1367,18 +1452,154 @@ pub(super) fn apply_worker_commands(
                 };
                 session_counter_answers.push(answer);
             }
+            WorkerCommand::ListSessionsByPolicy {
+                request,
+                collected,
+                overflow,
+                errors,
+                pending,
+            } => {
+                let wanted = |policy_id: u32| {
+                    policy_id != 0 && request.policy_ids.iter().any(|candidate| *candidate == policy_id)
+                };
+                let family_allowed = |family: u8| {
+                    request.families.is_empty()
+                        || request.families.iter().any(|candidate| *candidate == family)
+                };
+                let class_allowed = |is_reverse: bool| {
+                    request.classes.is_empty()
+                        || request.classes.iter().any(|class| {
+                            (is_reverse && class == "reverse")
+                                || (!is_reverse && class == "forward")
+                        })
+                };
+                if request.mode == "legacy" && request.before_secs.is_none() {
+                    errors
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push("legacy-before-secs-missing".to_string());
+                } else {
+                    sessions.iter_with_identity(
+                        |key, decision, metadata, _origin, created_ns, session_id| {
+                            let family = crate::afxdp::ha::policy_wire_family(key.addr_family);
+                            if !family_allowed(family)
+                                || !class_allowed(metadata.is_reverse)
+                                || !wanted(metadata.policy_id)
+                            {
+                                return;
+                            }
+                            // Legacy time fence (#6948): keep sessions admitted
+                            // at or before the activation stamp (old numbering).
+                            // `Some(0)` is explicitly UNBOUNDED — Go sends the
+                            // raw activation stamp, and 0 means "boundary
+                            // unknown" (clear every matching id), never a real
+                            // timestamp. `None` in legacy mode is a caller bug
+                            // and is rejected above, not silently unbounded.
+                            if request.mode == "legacy"
+                                && request
+                                    .before_secs
+                                    .map(|before| {
+                                        before != 0 && created_ns / 1_000_000_000 > before
+                                    })
+                                    .unwrap_or(true)
+                            {
+                                return;
+                            }
+                            if session_id == 0 {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(format!(
+                                        "identity-missing:{}:{}",
+                                        key.src_ip, key.dst_ip
+                                    ));
+                                return;
+                            }
+                            // Shared admission: skip fast past the cap (no
+                            // lock), else reserve (dedups cross-worker
+                            // replicas) BEFORE building the row. The build
+                            // below runs unlocked; only reserve and push take
+                            // the collector lock.
+                            if overflow.load(std::sync::atomic::Ordering::Acquire) {
+                                return;
+                            }
+                            let admitted = collected
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .reserve(overflow.as_ref(), key.clone(), session_id);
+                            if !admitted {
+                                return;
+                            }
+                            let Some(mut row) = crate::afxdp::ha::policy_match_from_parts(
+                                key,
+                                metadata,
+                                session_id,
+                                created_ns,
+                            ) else {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push("unsupported-address-family".to_string());
+                                return;
+                            };
+                            if let Some((companion_key, companion_metadata, companion_id)) =
+                                sessions.policy_companion(key, decision.nat)
+                            {
+                                if companion_id == 0 {
+                                    errors
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .push(format!(
+                                            "companion-identity-missing:{}:{}",
+                                            key.src_ip, key.dst_ip
+                                        ));
+                                    return;
+                                }
+                                row.reverse_key =
+                                    crate::afxdp::ha::policy_tuple_from_key(&companion_key);
+                                if row.reverse_key.is_none() {
+                                    errors
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .push("unsupported-companion-family".to_string());
+                                    return;
+                                }
+                                row.companion_policy_id = companion_metadata.policy_id;
+                                row.expected_companion_rt_flow_session_id = companion_id;
+                            }
+                            collected
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(row);
+                        },
+                    );
+                }
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
             WorkerCommand::UpsertSynced(entry) => {
-                commands::handle_upsert_synced(
-                    sessions,
-                    session_map,
-                    forwarding,
-                    ha_state,
-                    dynamic_neighbors,
-                    entry,
-                    now_ns,
-                    now_secs,
-                    worker_id,
-                );
+                // #10612: fence a stale replay behind the rotation purge. A
+                // pre-purge snapshot re-published post-purge (backlog, late
+                // fan-out, re-import) must not reinstall the removed-zone row
+                // the purge deleted. Dropped here — before re-resolve, install,
+                // reserve, publish — and the key recorded so the worker loop
+                // evicts the stale row from shared authority (same
+                // record-here/evict-where-the-handles-are split as #6457).
+                if synced_entry_is_stale_replay(entry.origin, &entry.metadata, forwarding) {
+                    note_stale_replay_fence_drop();
+                    stale_replay_dropped_keys.push(entry.key);
+                } else {
+                    commands::handle_upsert_synced(
+                        sessions,
+                        session_map,
+                        forwarding,
+                        ha_state,
+                        dynamic_neighbors,
+                        entry,
+                        now_ns,
+                        now_secs,
+                        worker_id,
+                    );
+                }
             }
             WorkerCommand::UpsertLocal(entry) => {
                 // Kept inline (#1346 plan v2 §4.1): lifting a short
@@ -1439,6 +1660,85 @@ pub(super) fn apply_worker_commands(
                     &mut deleted_synced_keys,
                     worker_id,
                 );
+            }
+            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion } => {
+                commands::handle_delete_synced_conditional(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    key,
+                    expected_id,
+                    now_ns,
+                    now_secs,
+                    &mut deleted_synced_keys,
+                    worker_id,
+                    companion,
+                );
+            }
+            WorkerCommand::DeletePolicyBatch {
+                items,
+                applied,
+                pending,
+                report,
+                intents,
+            } => {
+                // Abort fence, phase 1 (table work ONLY): hold the report
+                // mutex across cancel-check and the per-item teardown loop, so
+                // cancel validation is atomic with the table mutations (see
+                // PolicyDeleteBatchReport). Microsecond, syscall-free, and
+                // tree-standard to hold — BPF redirect deletes are collected
+                // as intents and stashed into the shared handoff INSIDE this
+                // scope (table-side metadata only): holding syscalls would let
+                // a slow worker wedge the coordinator's abort indefinitely,
+                // and post-fence worker BPF would break abort-quiescence.
+                // The coordinator drains + executes after phase-1 acks, under
+                // the batch lease. Lock order fence -> applied slot / intents,
+                // never reversed: the coordinator reads slots and drains
+                // intents without the fence (after all acks) and takes the
+                // fence touching neither (on abort).
+                {
+                    let mut guard = report
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if !guard.cancelled {
+                        let mut applied_slot = applied
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let mut deferred = Vec::new();
+                        for (index, item) in items.iter().enumerate() {
+                            if commands::handle_remove_policy_item(
+                                sessions,
+                                session_map,
+                                forwarding,
+                                ha_state,
+                                item,
+                                &mut *guard,
+                                index,
+                                now_ns,
+                                now_secs,
+                                &mut deleted_synced_keys,
+                                worker_id,
+                                &mut deferred,
+                            ) {
+                                applied_slot[index] = true;
+                            }
+                        }
+                        intents
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .extend(deferred);
+                    }
+                }
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            WorkerCommand::ProbePolicyBatch {
+                bares,
+                found,
+                pending,
+            } => {
+                commands::handle_probe_policy_tuples(sessions, &bares, found.as_ref());
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
             WorkerCommand::DeleteSyncedIfTableUnknown { key, domain, check } => {
                 // #9752: conditional purge delete — decline (no-op, not even
@@ -1544,6 +1844,7 @@ pub(super) fn apply_worker_commands(
     WorkerCommandResults {
         cancelled_keys,
         deleted_synced_keys,
+        stale_replay_dropped_keys,
         exported_sequences,
         session_counter_answers,
         export_owner_rgs,
@@ -2006,6 +2307,70 @@ pub(super) fn replicate_session_delete_repairing(
     outcome
 }
 
+/// Stale-ordinary-close twin of [`replicate_session_delete_repairing`]:
+/// siblings delete only when the forward's live identity still matches
+/// the captured one, and the carried companion goes with it (same
+/// forward-match gate as the scoped HA path — no companion identity is
+/// capturable from a close delta). Drop repair mirrors the unconditional
+/// twin keystroke for keystroke (exact-keyed releases + epoch signal).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn replicate_session_delete_conditional(
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    forwarding: &ForwardingState,
+    key: &SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+    expected_id: u64,
+    companion: Option<SessionKey>,
+) -> DeleteReplicationOutcome {
+    let mut outcome = DeleteReplicationOutcome::default();
+    for commands in peer_worker_commands {
+        let mut pending = worker_queue::lock_recover(commands);
+        let queued = worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::DeleteSyncedConditional {
+                key: key.clone(),
+                expected_id,
+                companion: companion.clone(),
+            },
+        );
+        drop(pending);
+        if queued {
+            continue;
+        }
+        SESSION_DELETE_REPLICA_DROPPED.fetch_add(1, Ordering::Relaxed);
+        outcome.dropped += 1;
+        let Some(worker_id) = worker_id_for_command_queue(worker_commands_by_id, commands) else {
+            continue;
+        };
+        SESSION_DELETE_REPLICA_DROP_REPAIRED.fetch_add(1, Ordering::Relaxed);
+        outcome.repaired += 1;
+        if let Some(epoch) = SESSION_DELETE_DROP_EPOCH.get(worker_id as usize) {
+            epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        release_source_nat_allocation_for_worker(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            worker_id,
+        );
+        crate::nat64::release_nat64_allocation_for_worker(
+            &forwarding.nat64,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            worker_id,
+        );
+    }
+    outcome
+}
+
 /// #8586: drop this worker's LOCAL entries for peer-synced sessions that shared
 /// authority no longer holds, and hand their keys back for flow-cache eviction.
 ///
@@ -2332,8 +2697,16 @@ fn materialize_shared_session_hit(
     forwarding: &ForwardingState,
     now_ns: u64,
     tcp_flags: u8,
-) -> SessionLookup {
+) -> (SessionLookup, bool) {
     if let Some(shared) = resolved.shared_entry.take() {
+        // #10612 (N2): fence stale-zone shared hits at materialize ingress.
+        // A shared-transient stale row (import fail-open linger racing
+        // validation) must materialize as a MISS, not install into the
+        // worker table (the later arm-drop would not remove it).
+        if synced_entry_is_stale_replay(shared.origin, &shared.metadata, forwarding) {
+            note_stale_replay_fence_drop();
+            return (resolved.lookup.clone(), false);
+        }
         let mut replica = synced_replica_entry(&shared);
         // A zero token carries no leak provenance and is recomputed locally
         // for peer-synced rows. A nonzero token was computed before this
@@ -2353,7 +2726,7 @@ fn materialize_shared_session_hit(
             replica.leak_incarnation =
                 leak_incarnation_for_session(forwarding, replica.decision, target).unwrap_or(0);
         }
-        sessions.upsert_synced_with_origin(
+        let materialized = sessions.upsert_synced_with_origin(
             SessionInstall {
                 key: replica.key.clone(),
                 decision: replica.decision,
@@ -2373,20 +2746,24 @@ fn materialize_shared_session_hit(
             },
             false,
         );
-        // Local entries preserve their published stamp; peer entries above
-        // recompute it from this worker's forwarding state before reaching
-        // this point, so no remote numeric token is trusted.
-        if let Some(incarnation) =
-            (replica.leak_incarnation != 0).then_some(replica.leak_incarnation)
+        // A refused shared repair must not mutate the incumbent local row's
+        // leak provenance. The stamp is evidence for the materialized replica
+        // only; failed clobber attempts return install_failed instead.
+        if materialized
+            && let Some(incarnation) =
+                (replica.leak_incarnation != 0).then_some(replica.leak_incarnation)
         {
             sessions.stamp_leak_incarnation(&replica.key, incarnation);
         }
-        return SessionLookup {
-            decision: replica.decision,
-            metadata: replica.metadata,
-        };
+        return (
+            SessionLookup {
+                decision: replica.decision,
+                metadata: replica.metadata,
+            },
+            !materialized,
+        );
     }
-    resolved.lookup.clone()
+    (resolved.lookup.clone(), false)
 }
 
 // Test and non-worker callers retain the no-conntrack transition behavior.
@@ -2512,6 +2889,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                     hit_origin,
                 ))
             });
+        let shared_was_present = hit.shared_entry.is_some();
         let keep_transient = poison_key.is_some_and(|(key, decision, metadata, origin)| {
             should_keep_synced_hit_transient(ha_state, now_secs, key, decision, metadata, origin)
         });
@@ -2529,8 +2907,8 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 worker_id,
             );
         }
-        let resolved = if keep_transient {
-            hit.lookup.clone()
+        let (resolved, materialize_install_failed) = if keep_transient {
+            (hit.lookup.clone(), false)
         } else {
             materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags)
         };
@@ -2598,7 +2976,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);
         }
-        let metadata = if keep_transient {
+        let metadata = if keep_transient || materialize_install_failed {
             resolved.metadata
         } else {
             maybe_promote_synced_session_with_conntrack(
@@ -2625,7 +3003,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             metadata,
             origin: hit_origin,
             created: false,
-            install_failed: false,
+            install_failed: shared_was_present && materialize_install_failed,
         });
     }
 

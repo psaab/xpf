@@ -986,26 +986,29 @@ replay window and endpoint roaming behave as for a keepalive — and drops the
 plaintext, counting it as `rx_unsteered_transport_drops`: the `unsteered-port`
 receive-drop reason in `show security wireguard detail`, and
 `xpf_userspace_wg_transport_drops_total{direction="decap",reason="unsteered_port"}`.
-A snapshot that names no steered port delivers for no endpoint. The steered
-port's thread still delivers, because #8274 kept that write for ingress the
-shim does not cover (`docs/log/8274.md`, "The residual, stated rather than
-closed"). Worker decapsulation is not gated by the steered port — the worker
-matches every configured listen port — so a record the shim hands to the
-worker for any other reason is still adjudicated normally.
+A snapshot that names no steered port delivers for no endpoint. A steered
+port's thread applies the local-vs-transit posture to every kernel-path ingress:
+traffic addressed to the firewall is written/handed to the wgN TUN for the
+kernel input path, while transit is dropped and counted as
+`rx_degraded_transit_drops` (`#9594` for covered degraded ingress, `#10527`
+for shim-uncovered ingress). Worker decapsulation is not gated by the steered
+port — the worker matches every configured listen port — so a record the shim
+hands to the worker for any other reason is still adjudicated normally.
 
-**The steered port's kernel path while degraded (#9594).** The steered port's
-thread still delivers, but not everything. A healthy shim claims the steered
-port's transport for the worker, so a record that reaches the thread on an
-ingress the shim adjudicates means the dataplane is in a degraded window
+**The steered port's kernel path (#9594/#10527).** A healthy shim claims the
+steered port's transport for the worker, so a record that reaches the thread on
+an ingress the shim adjudicates means the dataplane is in a degraded window
 (helper start, a redundancy-group transition, a reth link cycle, a stale
-heartbeat). The thread then applies the shim's own degraded posture to the
-decapsulated packet: traffic addressed to the firewall is delivered, and
-transit is dropped and counted as `rx_degraded_transit_drops` — the
-`degraded-transit` receive-drop reason in `show security wireguard detail`, and
+heartbeat). The thread applies the shim's own local-vs-transit posture to the
+decapsulated packet: traffic addressed to the firewall is written/handed to the
+wgN TUN for the kernel input path, and transit is dropped and counted as
+`rx_degraded_transit_drops` — the `degraded-transit` receive-drop reason in
+`show security wireguard detail`, and
 `xpf_userspace_wg_transport_drops_total{direction="decap",reason="degraded_transit"}`.
 The ingress comes from `IP_PKTINFO`; coverage and locality are read from the
-shim's own pinned maps. Ingress the shim does not adjudicate (#8274's residual)
-is delivered exactly as before.
+shim's own pinned maps. An ingress the shim does not adjudicate (#8274's
+residual) receives the same posture (`#10527`): host-inbound is written/handed
+to the wgN TUN for the kernel input path, while transit is refused.
 
 So a ninth tunnel on a distinct port completes handshakes and sends, and gets
 no inbound traffic through the kernel path. It is refused, not dead: this

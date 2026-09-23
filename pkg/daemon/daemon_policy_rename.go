@@ -197,6 +197,14 @@ func expandPolicyRenameAncestry(
 		}
 		seenSource[sourceID] = struct{}{}
 		seenDestination[destinationID] = struct{}{}
+		// A global-only first policy yields ID 0 here (PolicySetID 0 with no
+		// zone-pair sets; with N sets globals bind at N*256+idx like zone-pair
+		// rules), so its renames expand wire-only. INTENDED per #10621: policy_id 0
+		// is overloaded (first policy + host/fabric/tunnel/unbound zeros), so Go
+		// cannot key bindings on it; Rust retains id-0 renames via wire ancestry
+		// + bound-counter discrimination (extensive) or deterministic purge
+		// (default/plain parity). See daemon_policy_invalidate.go (id-0
+		// exclusion) + session_glue README (Deleted first-policy purge).
 		if oldID != 0 {
 			bindings[oldID] = policyRenameBinding{
 				sourceRuleID: sourceID, destinationRuleID: destinationID,
@@ -245,6 +253,11 @@ func permittedRenameResult(cfg *config.Config, binding policyRenameBinding, q po
 	if !result.Matched || result.Action != config.PolicyPermit || result.RuleID == "" {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
+	// Defensive and currently unreachable via Match: no configured rule carries
+	// the sentinel (excluded by #9584's validator), and default-path results
+	// carry PolicyID 0 with RuleID "" (rejected above; probed in #10592 N3b).
+	// Kept as belt-and-suspenders against a corrupt result ever retaining
+	// under the default identity.
 	if result.PolicyID == dataplane.DefaultPolicySentinelID {
 		return dpuserspace.PolicySessionRebind{}, false
 	}

@@ -784,6 +784,19 @@ func (q queueDeltaSink) openV6(key dataplane.SessionKeyV6, val dataplane.Session
 // explicit delete. Under-matching is the safe direction — it never merges two
 // identities — which is why the install arm fails closed and this one does not.
 func (q queueDeltaSink) deleteV4(key dataplane.SessionKey, val dataplane.SessionValue) {
+	// #10512 P1: identity-carrying closes from a stated domain route
+	// scoped when the peer decodes them — a bare close under a colliding
+	// tuple would kill the survivor's peer row (fresh-drawn delete gens
+	// out-rank every install, either arrival order). Flags-nonzero
+	// implies learned (bits only land via a capability frame), so
+	// Capable alone routes; every fallback preserves current behavior:
+	// purge-marked (the marker has no scoped carrier), unstated domain
+	// (0 never matches a stated row), missing id, or an incapable peer.
+	if val.RTFlowSessionID != 0 && val.RoutingDomain != 0 &&
+		!cluster.PurgeRetirementOnly(val.LogFlags) && q.ss.ScopedPolicyDeleteCapable() {
+		q.ss.QueueDeleteScopedV4(val.RoutingDomain, key, val.RTFlowSessionID)
+		return
+	}
 	// #9752: forward the purge-retirement marker the converter set from the
 	// helper's close: the peer must retract exactly this key, not companions
 	// the purge preserved.
@@ -791,6 +804,11 @@ func (q queueDeltaSink) deleteV4(key dataplane.SessionKey, val dataplane.Session
 }
 
 func (q queueDeltaSink) deleteV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
+	if val.RTFlowSessionID != 0 && val.RoutingDomain != 0 &&
+		!cluster.PurgeRetirementOnly(val.LogFlags) && q.ss.ScopedPolicyDeleteCapable() {
+		q.ss.QueueDeleteScopedV6(val.RoutingDomain, key, val.RTFlowSessionID)
+		return
+	}
 	q.ss.QueueDeleteV6(key, cluster.PurgeRetirementOnly(val.LogFlags))
 }
 
@@ -829,10 +847,20 @@ func (p *pacedQueueDeltaSink) openV6(key dataplane.SessionKeyV6, val dataplane.S
 }
 
 func (p *pacedQueueDeltaSink) deleteV4(key dataplane.SessionKey, val dataplane.SessionValue) {
+	if val.RTFlowSessionID != 0 && val.RoutingDomain != 0 &&
+		!cluster.PurgeRetirementOnly(val.LogFlags) && p.ss.ScopedPolicyDeleteCapable() {
+		p.ss.QueueDeleteScopedV4(val.RoutingDomain, key, val.RTFlowSessionID)
+		return
+	}
 	p.ss.QueueDeleteV4(key, cluster.PurgeRetirementOnly(val.LogFlags))
 }
 
 func (p *pacedQueueDeltaSink) deleteV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
+	if val.RTFlowSessionID != 0 && val.RoutingDomain != 0 &&
+		!cluster.PurgeRetirementOnly(val.LogFlags) && p.ss.ScopedPolicyDeleteCapable() {
+		p.ss.QueueDeleteScopedV6(val.RoutingDomain, key, val.RTFlowSessionID)
+		return
+	}
 	p.ss.QueueDeleteV6(key, cluster.PurgeRetirementOnly(val.LogFlags))
 }
 

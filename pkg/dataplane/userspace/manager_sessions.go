@@ -8,13 +8,341 @@ package userspace
 // change to the authoritative Rust helper.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
+
+const (
+	// Helper pages stay below the control-response cap, while Go retains at
+	// most four pages for one commit-time invalidation capture.
+	policyReadPageMatchCap = 65536
+	policyReadMatchCap     = 262144
+	policyReadByteCap      = 48 * 1024 * 1024
+	policyReadDeadline     = 30 * time.Second
+	policyDeleteDeadline   = 30 * time.Second
+	// Plan §2.4 micro-batch caps: the helper acquires all of one batch's
+	// gate keys together, so Go packs forward matches and their captured
+	// companions under both ceilings.
+	policyDeleteBatchMatches = 64
+	policyDeleteBatchKeys    = 128
+	// Consecutive helper-determined batch failures before the driver stops
+	// issuing batches: sustained systemic failure (contention, overload)
+	// fails fast instead of burning the deadline batch by batch. Isolated
+	// failures (one corrupt batch among clean ones) continue past.
+	policyDeleteSemanticBreaker = 3
+)
+// Clear-all single-shot bound (#10512 P4/P8): the one clear RPC is
+// already bounded by the transport round-trip deadline; this absolute
+// deadline (checked before AND after the call) bounds a transport that
+// outlives its own deadlines. A var (not const) so the overrun cell can
+// shrink it like the 5380 deadline vars.
+var clearAllDeadline = 30 * time.Second
+// ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
+// session authority. It deliberately uses the control socket: this request is
+// the commit-time discovery boundary and must not be accepted on the dedicated
+// session socket, whose allowlist is limited to sync_session/ping/HA refresh.
+// Continuation pages share one absolute 30-second capture deadline. A complete
+// response with no continuation is the only authoritative result.
+func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlResponse, error) {
+	deadline := time.Now().Add(policyReadDeadline)
+	pageReq := req
+	seenContinuations := map[string]struct{}{}
+	var aggregate ControlResponse
+	aggregate.OK = true
+	for {
+		if time.Now().After(deadline) {
+			return ControlResponse{}, fmt.Errorf("policy session READ deadline exceeded after %s", policyReadDeadline)
+		}
+		m.mu.Lock()
+		page, err := m.requestDetailedLocked(ControlRequest{
+			Type:              "list_sessions_by_policy",
+			SuppressStatus:    true,
+			SessionPolicyList: &pageReq,
+		})
+		m.mu.Unlock()
+		if time.Now().After(deadline) {
+			return ControlResponse{}, fmt.Errorf("policy session READ deadline exceeded after %s", policyReadDeadline)
+		}
+		if err != nil {
+			return ControlResponse{}, err
+		}
+		if len(page.SessionPolicyMatches) > policyReadPageMatchCap {
+			return ControlResponse{}, fmt.Errorf(
+				"policy session READ page exceeds %d matches", policyReadPageMatchCap)
+		}
+		if len(page.SessionPolicyMatches) != 0 {
+			encoded, err := json.Marshal(page.SessionPolicyMatches)
+			if err != nil {
+				return ControlResponse{}, fmt.Errorf("policy session READ page encode: %w", err)
+			}
+			if len(encoded) > policyReadByteCap {
+				return ControlResponse{}, fmt.Errorf(
+					"policy session READ page exceeds %d encoded bytes", policyReadByteCap)
+			}
+		}
+		if len(aggregate.SessionPolicyMatches)+len(page.SessionPolicyMatches) > policyReadMatchCap {
+			return ControlResponse{}, fmt.Errorf(
+				"policy session READ exceeds %d matches", policyReadMatchCap)
+		}
+		aggregate.SessionPolicyMatches = append(
+			aggregate.SessionPolicyMatches, page.SessionPolicyMatches...)
+		aggregate.SessionPolicyPerWorkerErrors = append(
+			aggregate.SessionPolicyPerWorkerErrors, page.SessionPolicyPerWorkerErrors...)
+		if page.SessionPolicyContinuation == "" {
+			if !page.SessionPolicyComplete {
+				return ControlResponse{}, fmt.Errorf(
+					"policy session READ incomplete without continuation")
+			}
+			aggregate.SessionPolicyComplete = true
+			return aggregate, nil
+		}
+		if _, duplicate := seenContinuations[page.SessionPolicyContinuation]; duplicate {
+			return ControlResponse{}, fmt.Errorf(
+				"policy session READ repeated continuation token")
+		}
+		seenContinuations[page.SessionPolicyContinuation] = struct{}{}
+		pageReq.Continuation = page.SessionPolicyContinuation
+	}
+	}
+
+// PolicyDeleteResult records helper outcomes for one policy READ capture.
+// Stale rows are successful conditional no-ops; partial companion outcomes
+// remove the forward row but retain a replacement companion and therefore
+// remain visible to the caller.
+type PolicyDeleteResult struct {
+	Applied int
+	Stale   int
+	Partial int
+}
+
+// DeletePolicySessions performs helper-first, identity-conditional deletes for
+// the matches returned by ListSessionsByPolicy. The helper owns both the
+// authoritative table and the bare-key mirror repair; this method never uses a
+// Go-side mirror delete that could destroy a colliding survivor.
+//
+// Plan §2.4 micro-batches: at most 64 matches and 128 gate keys (forward plus
+// captured companion) per helper round trip, so a full 262144-match capture
+// costs at most 4096 round trips — never one per match. Batches share one
+// absolute 30-second delete deadline; at the deadline, on a batch transport
+// failure, or on an incomplete batch answer, it stops issuing new batches and
+// returns the partial counts with an error. The remainder is a SURFACED
+// PERSISTENT GAP, not a retryable backlog: the commit already activated the
+// new config, so no recommit re-captures these matches (§2.4: no cross-commit
+// retention) — the survivors forward until idle timeout unless the operator
+// clears sessions or recommits an touching change. Callers join the error
+// into the commit result (#5578) rather than reporting success.
+func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDeleteResult, error) {
+	var result PolicyDeleteResult
+	if len(matches) == 0 {
+		return result, nil
+	}
+	for _, match := range matches {
+		if match.ExpectedRTFlowSessionID == 0 {
+			return result, fmt.Errorf("policy session delete: identity-missing")
+		}
+		if match.ExpectedCompanionRTFlowSessionID != 0 && match.ReverseKey == nil {
+			return result, fmt.Errorf("policy session delete: companion-identity-missing")
+		}
+	}
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return result, errSessionHelperUnreachable
+	}
+	startProcGen := m.procGen
+	m.mu.Unlock()
+	deadline := time.Now().Add(policyDeleteDeadline)
+	var firstErr error
+	confirmed := 0
+	consecutiveSemantic := 0
+	for start := 0; start < len(matches); {
+		if time.Now().After(deadline) {
+			return result, policyDeleteGapError(
+				fmt.Errorf("deadline exceeded after %s", policyDeleteDeadline),
+				result, confirmed, len(matches))
+		}
+		// P5: m.mu covers one batch's prep+send only — response
+		// accounting below runs unlocked (locals only), so a 4096-batch
+		// invalidation never stalls workers/commits/HA across its 30s.
+		m.mu.Lock()
+		if m.proc == nil || m.procGen != startProcGen {
+			// Helper churned mid-invalidation (crash/restart/upgrade): the
+			// capture predates the new incarnation, whose rebuilt tables may
+			// carry reminted identities. Never evaluate a stale capture
+			// against fresh tables — gap loud and let a touching recommit
+			// re-capture (precedent: owner_rg_export_paging_9344 procGen fence).
+			cur := m.procGen
+			m.mu.Unlock()
+			return result, policyDeleteGapError(
+				fmt.Errorf("helper churned mid-invalidation (procGen %d -> %d)", startProcGen, cur),
+				result, confirmed, len(matches))
+		}
+		end := start + policyDeleteBatchMatches
+		if end > len(matches) {
+			end = len(matches)
+		}
+		// Shrink to the 128 gate-key cap: each match costs its forward key
+		// plus its captured companion when one is expected.
+		for end > start && policyDeleteBatchKeysOf(matches[start:end]) > policyDeleteBatchKeys {
+			end--
+		}
+		batch := matches[start:end]
+		req := SessionSyncRequest{
+			Operation:     "mirror_delete_policy_batch",
+			PolicyMatches: batch,
+			// Stable content identity across attempts and epochs: retries
+			// and restarts reconcile the SAME logical batch instead of
+			// minting a new one per attempt. OperationID stays per attempt
+			// (stamped once below and reused by the transport retry).
+			MutationID: policyDeleteBatchMutationID(batch),
+		}
+		// Stamp once so the transport retry below reuses identical
+		// identities (the send path only fills empty fields).
+		m.stampSessionMutationLocked(&req)
+		resp, err := m.syncSessionRequestResponseLocked(req)
+		if err != nil && errors.Is(err, errSessionHelperUnreachable) {
+			// Fence the retry: the send dropped m.mu, so the helper may have
+			// churned (crash/restart) during I/O. Never resend a pre-churn
+			// capture against rebuilt tables (reminted identities would
+			// all-stale-count a live revocation), and never hand a fresh
+			// helper generation a pre-churn request at all.
+			if m.proc == nil || m.procGen != startProcGen {
+				cur := m.procGen
+				m.mu.Unlock()
+				return result, policyDeleteGapError(
+					fmt.Errorf("helper churned during batch send (procGen %d -> %d)", startProcGen, cur),
+					result, confirmed, len(matches))
+			}
+			// Transport-unknown outcome (lost request/response, slow
+			// helper): resend ONCE with identical identities — the helper
+			// replays the recorded outcome if it executed, or executes
+			// first-time if the request never arrived (exactly-once per
+			// attempt pair).
+			resp, err = m.syncSessionRequestResponseLocked(req)
+		}
+		// Released before response accounting (P5).
+		m.mu.Unlock()
+		if err != nil {
+			if errors.Is(err, errSessionHelperUnreachable) {
+				// Helper down/hung (both attempts failed transport): #5380
+				// fast-fail — stop issuing batches rather than burning the
+				// deadline on a dead helper.
+				return result, policyDeleteGapError(err, result, confirmed, len(matches))
+			}
+			// Semantic determination (helper refused/failed this batch):
+			// record and CONTINUE — other batches carry different content
+			// and may succeed (revocation-maximizing). The breaker below
+			// stops sustained systemic failure fast.
+			if firstErr == nil {
+				firstErr = err
+			}
+			consecutiveSemantic++
+			if consecutiveSemantic >= policyDeleteSemanticBreaker {
+				return result, policyDeleteGapError(firstErr, result, confirmed, len(matches))
+			}
+			start = end
+			continue
+		}
+		if len(resp.PolicyDeleteOutcomes) != len(batch) || !resp.PolicyDeleteComplete {
+			// Contract breach (not a determination): the helper answered OK
+			// with an unusable batch result. Every batch would breach
+			// identically (same helper version) — stop fast.
+			return result, policyDeleteGapError(
+				fmt.Errorf("incomplete batch answer (%d outcomes for %d matches, complete=%v, errors=%v)",
+					len(resp.PolicyDeleteOutcomes), len(batch),
+					resp.PolicyDeleteComplete, resp.PolicyDeleteErrors),
+				result, confirmed, len(matches))
+		}
+		for _, outcome := range resp.PolicyDeleteOutcomes {
+			switch outcome {
+			case "applied":
+				result.Applied++
+			case "stale_forward", "refused_identity":
+				// Nothing removed; the live state differs from the capture.
+				// Refused (capture stale about the companion) and stale
+				// (forward gone or replaced) both mean "no-op, session live
+				// under a different incarnation".
+				result.Stale++
+			case "partial_companion":
+				result.Applied++
+				result.Partial++
+			default:
+				// Unknown token (helper newer than Go): contract breach — stop.
+				return result, policyDeleteGapError(
+					fmt.Errorf("unknown batch outcome %q", outcome),
+					result, confirmed, len(matches))
+			}
+		}
+		confirmed += len(batch)
+		consecutiveSemantic = 0
+		start = end
+	}
+	if firstErr != nil {
+		return result, policyDeleteGapError(firstErr, result, confirmed, len(matches))
+	}
+	if result.Partial != 0 {
+		return result, fmt.Errorf(
+			"policy session delete: %d partial companion outcome(s)", result.Partial)
+	}
+	return result, nil
+}
+
+// policyDeleteGapError reports a partial policy invalidation as the persistent
+// gap it is: `confirmed` counts only fully-resolved batches (a later success
+// never jumps over an earlier failed range), and every unconfirmed match will
+// NOT be re-captured by a recommit (the config is already active). Survivors
+// among them persist until idle timeout. Loud by construction (#5578).
+func policyDeleteGapError(err error, result PolicyDeleteResult, confirmed, total int) error {
+	return fmt.Errorf(
+		"policy session delete INCOMPLETE: %v (applied %d, stale %d, partial %d of %d matches, %d without confirmed outcomes; "+
+			"survivors persist until idle timeout — recommit does not re-capture; "+
+			"clear sessions or recommit an touching change to force)",
+		err, result.Applied, result.Stale, result.Partial, total, total-confirmed)
+}
+
+// policyDeleteBatchFallback numbers the unreachable digest fallback below.
+var policyDeleteBatchFallback atomic.Uint64
+
+// policyDeleteBatchMutationID derives the batch's stable content identity: the
+// ordered matches hashed (FNV-1a over the canonical JSON encoding — field
+// order fixed, no maps — so future fields join automatically) and hex-encoded.
+// Same batch content in the same order (any attempt, any epoch) yields the
+// same mutation ID, so the helper reconciles retries, re-sends, and restarts
+// instead of treating every attempt as a new logical batch. The "pb:" prefix
+// distinguishes batch digests from tuple mutations and op-derived fallbacks.
+func policyDeleteBatchMutationID(batch []SessionPolicyMatch) string {
+	encoded, err := json.Marshal(batch)
+	if err != nil {
+		// Unreachable for this struct shape (no maps/channels/functions);
+		// unique-per-call preserves correctness (no false reconcile).
+		return "pb:unencodable-" + strconv.FormatUint(policyDeleteBatchFallback.Add(1), 10)
+	}
+	sum := fnv.New64a()
+	sum.Write(encoded)
+	return "pb:" + strconv.FormatUint(sum.Sum64(), 16)
+}
+
+// policyDeleteBatchKeysOf counts the gate keys one micro-batch would acquire:
+// each match's forward key plus its captured companion when one is expected.
+func policyDeleteBatchKeysOf(batch []SessionPolicyMatch) int {
+	keys := 0
+	for _, match := range batch {
+		keys++
+		if match.ReverseKey != nil {
+			keys++
+		}
+	}
+	return keys
+}
 
 // ExportAllSessionsViaEventStream tells the Rust helper to push all current
 // sessions through the event stream as Open events. The Go daemon receives
@@ -34,13 +362,20 @@ func (m *Manager) ExportAllSessionsViaEventStream() error {
 }
 
 func (m *Manager) SetSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) error {
-	if err := m.bpfShim.SetSessionV4(key, val); err != nil {
-		return err
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.proc == nil || m.proc.Process == nil {
+		return errSessionHelperUnreachable
 	}
-	if !shouldMirrorUserspaceSession(val.IsReverse) {
-		return nil
+	op := "mirror_upsert"
+	if val.IsReverse != 0 {
+		op = "mirror_publish_only"
 	}
-	m.mirrorSessionV4(key, val)
+	if err := m.syncSessionV4Locked(op, key, &val); err != nil {
+		m.noteSyncedMirrorFailureLocked(err)
+		return fmt.Errorf("mirror v4 session to userspace helper: %w", err)
+	}
+	m.recordSessionMirrorSuccessLocked()
 	return nil
 }
 
@@ -83,213 +418,90 @@ func (m *Manager) mirrorSessionV4(key dataplane.SessionKey, val dataplane.Sessio
 	if m.proc == nil {
 		return
 	}
-	_ = m.syncSessionV4Locked("upsert", key, &val)
+	op := "mirror_upsert"
+	if val.IsReverse != 0 {
+		op = "mirror_publish_only"
+	}
+	_ = m.syncSessionV4Locked(op, key, &val)
 }
 
 func (m *Manager) SetClusterSyncedSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) error {
 	installVal := val
-	// The peer owns this row: strip every node-local field before it reaches
-	// this node's maps or the helper. Single-sourced in
-	// dataplane.SessionValue.ScrubNodeLocal (#7097) — this site kept its own
-	// copy of the list and it silently stopped covering the #4983 ingress
-	// identity when #6928 added it to the ABI. THIS is the site production
-	// reaches: the session_store.go fallback runs only when the dataplane does
-	// not implement clusterSyncedSessionInstaller, which the userspace manager
-	// does.
 	installVal.ScrubNodeLocal()
-	// The helper already synthesizes the correct reverse companion from the
-	// forward cluster-synced entry using local forwarding and HA state. An
-	// explicit reverse cluster update can overwrite that locally-derived
-	// companion with peer NAT/FIB metadata, so only mirror forward entries. A
-	// reverse entry is never mirrored, so there is no mirror failure to
-	// compensate: write the BPF mirror and return.
-	if !shouldMirrorUserspaceSession(val.IsReverse) {
-		return m.bpfShim.SetSessionV4(key, installVal)
-	}
-	// Forward entry: make the install transactional (#5305). Capture the
-	// pre-image of the BPF session entry BEFORE writing it, then mirror to the
-	// helper. On mirror failure RESTORE the pre-image (rewrite the prior value,
-	// or DELETE the key if it was absent) so a failed cluster-synced install
-	// leaves the BPF map exactly as it was. Otherwise the pinned map holds a
-	// session the helper never received — a split truth the GC and fallback
-	// bulk export would propagate as if the install had succeeded, producing
-	// nondeterministic HA session ownership after takeover.
-	//
-	// snapshot + write + mirror + compensate run under m.mu so the sequence is
-	// atomic w.r.t. any other m.mu-holding path; the per-peer receiver apply
-	// loop is single-threaded (pkg/cluster/sync_conn.go installClusterSyncedV4),
-	// so no concurrent install of the SAME key races. syncSessionV4Locked drops
-	// m.mu only for the socket send and reacquires it before returning, so the
-	// compensate that follows still observes our own BPF write.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	prior, hadPrior, err := m.snapshotBPFSessionV4Locked(key)
-	if err != nil {
-		// The pre-image could not be read; refuse the install rather than write
-		// an entry that could not later be rolled back on a mirror failure.
-		return fmt.Errorf("snapshot synced v4 session pre-image: %w", err)
+	if m.proc == nil || m.proc.Process == nil {
+		return errSessionHelperUnreachable
 	}
-	if err := m.bpfShim.SetSessionV4(key, installVal); err != nil {
-		return err
+	op := "mirror_upsert"
+	if val.IsReverse != 0 {
+		op = "mirror_publish_only"
 	}
-	if err := m.syncSessionV4Locked("upsert", key, &installVal); err != nil {
+	if err := m.syncSessionV4Locked(op, key, &installVal); err != nil {
 		m.noteSyncedMirrorFailureLocked(err)
-		compErr := m.restoreBPFSessionV4Locked(key, prior, hadPrior)
-		return errors.Join(
-			fmt.Errorf("mirror synced v4 session to userspace helper: %w", err),
-			compErr,
-		)
+		return fmt.Errorf("mirror synced v4 session to userspace helper: %w", err)
 	}
-	// A successful mirror proves the helper session socket is healthy again;
-	// clear any sticky failure so the standby regains takeover-readiness
-	// without waiting for a helper restart (#5247).
 	m.recordSessionMirrorSuccessLocked()
 	return nil
 }
 
-// bpfSessionReadAbsent reports whether a bpfShim session GET error means the
-// key is ABSENT rather than a hard read failure. The transactional snapshot
-// (#5305) treats an absent pre-image as existed=false with a nil error so a
-// later mirror-failure rollback DELETES the freshly-installed key; any OTHER
-// read error is surfaced so the install is refused rather than leaving an
-// entry that could not be rolled back (the fail-safe direction).
-//
-// It accepts the SAME key-absent error set as the Layer-1
-// dataplane.sessionNotFound predicate — ebpf.ErrKeyNotExist OR unix.ENOENT,
-// via the shared dataplane.IsKeyNotFound helper — so the two transaction
-// layers agree on what "key absent" means (#6194). With the production cilium
-// bpfShim the two sentinels never diverge (a missing lookup yields
-// ErrKeyNotExist, not bare ENOENT), so this is a consistency fix, not a live
-// bug; sharing one predicate removes the latent skew.
+
+func (m *Manager) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.proc == nil || m.proc.Process == nil {
+		return errSessionHelperUnreachable
+	}
+	op := "mirror_upsert"
+	if val.IsReverse != 0 {
+		op = "mirror_publish_only"
+	}
+	if err := m.syncSessionV6Locked(op, key, &val); err != nil {
+		m.noteSyncedMirrorFailureLocked(err)
+		return fmt.Errorf("mirror v6 session to userspace helper: %w", err)
+	}
+	m.recordSessionMirrorSuccessLocked()
+	return nil
+}
+
+func (m *Manager) SetClusterSyncedSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
+	installVal := val
+	installVal.ScrubNodeLocal()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.proc == nil || m.proc.Process == nil {
+		return errSessionHelperUnreachable
+	}
+	op := "mirror_upsert"
+	if val.IsReverse != 0 {
+		op = "mirror_publish_only"
+	}
+	if err := m.syncSessionV6Locked(op, key, &installVal); err != nil {
+		m.noteSyncedMirrorFailureLocked(err)
+		return fmt.Errorf("mirror synced v6 session to userspace helper: %w", err)
+	}
+	m.recordSessionMirrorSuccessLocked()
+	return nil
+}
+
 func bpfSessionReadAbsent(err error) bool {
 	return dataplane.IsKeyNotFound(err)
 }
 
-// snapshotBPFSessionV4Locked reads the current BPF-mirror value for key so a
-// failed cluster-synced install can be rolled back to it (#5305). Returns
-// (value, existed, err); a missing key is existed=false with a nil error.
-// Named "Locked" for the m.mu convention of the compensation sequence — it
-// touches only the independently-locked bpfShim map, not m.mu directly.
-func (m *Manager) snapshotBPFSessionV4Locked(key dataplane.SessionKey) (dataplane.SessionValue, bool, error) {
-	val, err := m.bpfShim.GetSessionV4(key)
-	if err != nil {
-		if bpfSessionReadAbsent(err) {
-			return dataplane.SessionValue{}, false, nil
-		}
-		return dataplane.SessionValue{}, false, err
-	}
-	return val, true, nil
-}
-
-// restoreBPFSessionV4Locked reverts the BPF session entry for key to the
-// pre-install snapshot: rewrite the prior value, or delete the key if it was
-// absent (#5305). Deleting an already-absent key is treated as success.
-func (m *Manager) restoreBPFSessionV4Locked(key dataplane.SessionKey, prior dataplane.SessionValue, hadPrior bool) error {
-	if hadPrior {
-		if err := m.bpfShim.SetSessionV4(key, prior); err != nil {
-			return fmt.Errorf("restore synced v4 session pre-image: %w", err)
-		}
-		return nil
-	}
-	if err := m.bpfShim.DeleteSession(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("remove orphan synced v4 session: %w", err)
-	}
-	return nil
-}
-
-func (m *Manager) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
-	if err := m.bpfShim.SetSessionV6(key, val); err != nil {
-		return err
-	}
-	if !shouldMirrorUserspaceSession(val.IsReverse) {
-		return nil
-	}
-	m.mirrorSessionV6(key, val)
-	return nil
-}
-
-// mirrorSessionV6 is the IPv6 analogue of mirrorSessionV4 — see that method
-// for why the explicit reverse companion is gone (#8015).
+// mirrorSessionV6 is retained as a narrow test seam for helper-first mirroring.
 func (m *Manager) mirrorSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.proc == nil {
 		return
 	}
-	_ = m.syncSessionV6Locked("upsert", key, &val)
+	op := "mirror_upsert"
+	if val.IsReverse != 0 {
+		op = "mirror_publish_only"
+	}
+	_ = m.syncSessionV6Locked(op, key, &val)
 }
 
-func (m *Manager) SetClusterSyncedSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
-	installVal := val
-	// The peer owns this row: strip every node-local field before it reaches
-	// this node's maps or the helper. Single-sourced in
-	// dataplane.SessionValue.ScrubNodeLocal (#7097) — this site kept its own
-	// copy of the list and it silently stopped covering the #4983 ingress
-	// identity when #6928 added it to the ABI. THIS is the site production
-	// reaches: the session_store.go fallback runs only when the dataplane does
-	// not implement clusterSyncedSessionInstaller, which the userspace manager
-	// does.
-	installVal.ScrubNodeLocal()
-	// Reverse entries are never mirrored (see SetClusterSyncedSessionV4): write
-	// the BPF mirror and return — no mirror failure to compensate.
-	if !shouldMirrorUserspaceSession(val.IsReverse) {
-		return m.bpfShim.SetSessionV6(key, installVal)
-	}
-	// Forward entry: transactional install (#5305) — the IPv6 analogue of
-	// SetClusterSyncedSessionV4. Snapshot the BPF pre-image, write, mirror, and
-	// restore the pre-image on mirror failure so a failed install never leaves
-	// an orphan split-truth BPF entry the helper never received.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	prior, hadPrior, err := m.snapshotBPFSessionV6Locked(key)
-	if err != nil {
-		return fmt.Errorf("snapshot synced v6 session pre-image: %w", err)
-	}
-	if err := m.bpfShim.SetSessionV6(key, installVal); err != nil {
-		return err
-	}
-	if err := m.syncSessionV6Locked("upsert", key, &installVal); err != nil {
-		m.noteSyncedMirrorFailureLocked(err)
-		compErr := m.restoreBPFSessionV6Locked(key, prior, hadPrior)
-		return errors.Join(
-			fmt.Errorf("mirror synced v6 session to userspace helper: %w", err),
-			compErr,
-		)
-	}
-	// A successful mirror proves the helper session socket is healthy again;
-	// clear any sticky failure so the standby regains takeover-readiness
-	// without waiting for a helper restart (#5247).
-	m.recordSessionMirrorSuccessLocked()
-	return nil
-}
-
-// snapshotBPFSessionV6Locked is the IPv6 sibling of snapshotBPFSessionV4Locked
-// (#5305).
-func (m *Manager) snapshotBPFSessionV6Locked(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, bool, error) {
-	val, err := m.bpfShim.GetSessionV6(key)
-	if err != nil {
-		if bpfSessionReadAbsent(err) {
-			return dataplane.SessionValueV6{}, false, nil
-		}
-		return dataplane.SessionValueV6{}, false, err
-	}
-	return val, true, nil
-}
-
-// restoreBPFSessionV6Locked is the IPv6 sibling of restoreBPFSessionV4Locked
-// (#5305).
-func (m *Manager) restoreBPFSessionV6Locked(key dataplane.SessionKeyV6, prior dataplane.SessionValueV6, hadPrior bool) error {
-	if hadPrior {
-		if err := m.bpfShim.SetSessionV6(key, prior); err != nil {
-			return fmt.Errorf("restore synced v6 session pre-image: %w", err)
-		}
-		return nil
-	}
-	if err := m.bpfShim.DeleteSessionV6(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("remove orphan synced v6 session: %w", err)
-	}
-	return nil
-}
 
 func shouldMirrorUserspaceSession(isReverse uint8) bool {
 	return isReverse == 0
@@ -326,6 +538,18 @@ func deleteScopeValV6(routingDomain uint32) *dataplane.SessionValueV6 {
 	return &dataplane.SessionValueV6{RoutingDomain: routingDomain}
 }
 
+// scopedWireDomain encodes a scoped-delete domain for the HA wire (#10512):
+// the scoped verb always STATES its domain (never absent), so domain 0
+// rides as Rust's WIRE_DEFAULT_INSTANCE marker (1, DEFAULT stated) rather
+// than 0 (ABSENT, derive/probe — which could probe another tenant's row
+// on a collision). Nonzero domains ride raw.
+func scopedWireDomain(domain uint32) uint32 {
+	if domain == 0 {
+		return 1
+	}
+	return domain
+}
+
 func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 	// Read the value BEFORE asking the helper to delete so the request names the
 	// session's routing domain and can also delete its pre-installed reverse
@@ -333,18 +557,15 @@ func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 	val, valErr := m.bpfShim.GetSessionV4(key)
 
 	// The Rust helper owns forwarding state; the BPF map is only its read model.
-	// Delete the authoritative row FIRST.  The old order removed the mirror
-	// before IPC, so a transient helper failure made the row undiscoverable and
-	// left the helper session forwarding until idle timeout.  Keeping the mirror
-	// on failure lets the periodic reconcile or an operator retry the exact row.
 	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return errSessionHelperUnreachable
+	}
 	err := m.syncDeleteV4Locked(key, val, valErr == nil)
 	m.mu.Unlock()
 	if err != nil {
 		return surfaceSingularHelperDeleteError("v4", err)
-	}
-	if err := m.bpfShim.DeleteSession(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return err
 	}
 	return nil
 }
@@ -366,18 +587,9 @@ func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.Ses
 	if haveVal {
 		scope = deleteScopeVal(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV4("delete", key, scope)
+	req := m.buildSessionSyncRequestV4("mirror_delete", key, scope)
 	if err := m.syncSessionRequestLocked(req); err != nil {
 		return err
-	}
-	// The reverse companion is the same flow in the same tenant, so it carries
-	// the same domain. A forward-only delete (#9752) retires exactly the named
-	// key; the ordinary clear/delete path removes the companion too.
-	if haveVal && val.ReverseKey.Protocol != 0 {
-		reverse := m.buildSessionSyncRequestV4("delete", val.ReverseKey, scope)
-		if err := m.syncSessionRequestLocked(reverse); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -386,29 +598,30 @@ func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.Ses
 // both helper requests (the key and its reverse companion). It reports whether the
 // helper REFUSED the marked delete of the key; a refused key keeps its reverse
 // companion, so that request is not sent.
-func (m *Manager) syncDeleteV4LockedMarked(key dataplane.SessionKey, val dataplane.SessionValue, haveVal, peer, forwardOnly bool) bool {
+func (m *Manager) syncDeleteV4LockedMarkedErr(key dataplane.SessionKey, val dataplane.SessionValue, haveVal, peer, forwardOnly bool) (bool, error) {
 	if m.proc == nil {
-		return false
+		return false, errSessionHelperUnreachable
 	}
 	scope := (*dataplane.SessionValue)(nil)
 	if haveVal {
 		scope = deleteScopeVal(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV4("delete", key, scope)
+	req := m.buildSessionSyncRequestV4("mirror_delete", key, scope)
 	req.PeerDelete = peer
 	req.ForwardOnly = forwardOnly
-	if err := m.syncSessionRequestLocked(req); peer && peerDeleteRefused(err) {
-		return true
+	err := m.syncSessionRequestLocked(req)
+	if err != nil {
+		if peer && peerDeleteRefused(err) {
+			return true, nil
+		}
+		return false, err
 	}
-	// The reverse companion is the same flow in the same tenant, so it carries
-	// the same domain. A forward-only delete (#9752 round 3) retires exactly
-	// the named key — the sender already decided the companion.
-	if !forwardOnly && haveVal && val.ReverseKey.Protocol != 0 {
-		reverse := m.buildSessionSyncRequestV4("delete", val.ReverseKey, scope)
-		reverse.PeerDelete = peer
-		_ = m.syncSessionRequestLocked(reverse)
-	}
-	return false
+	return false, nil
+}
+
+func (m *Manager) syncDeleteV4LockedMarked(key dataplane.SessionKey, val dataplane.SessionValue, haveVal, peer, forwardOnly bool) bool {
+	refused, _ := m.syncDeleteV4LockedMarkedErr(key, val, haveVal, peer, forwardOnly)
+	return refused
 }
 
 func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
@@ -416,13 +629,14 @@ func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 	// deletion succeeds, so a transient IPC failure remains retryable.
 	val, valErr := m.bpfShim.GetSessionV6(key)
 	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return errSessionHelperUnreachable
+	}
 	err := m.syncDeleteV6Locked(key, val, valErr == nil)
 	m.mu.Unlock()
 	if err != nil {
 		return surfaceSingularHelperDeleteError("v6", err)
-	}
-	if err := m.bpfShim.DeleteSessionV6(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return err
 	}
 	return nil
 }
@@ -436,41 +650,38 @@ func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.S
 	if haveVal {
 		scope = deleteScopeValV6(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV6("delete", key, scope)
+	req := m.buildSessionSyncRequestV6("mirror_delete", key, scope)
 	if err := m.syncSessionRequestLocked(req); err != nil {
 		return err
-	}
-	if haveVal && val.ReverseKey.Protocol != 0 {
-		reverse := m.buildSessionSyncRequestV6("delete", val.ReverseKey, scope)
-		if err := m.syncSessionRequestLocked(reverse); err != nil {
-			return err
-		}
 	}
 	return nil
 }
 
 // syncDeleteV6LockedMarked is the IPv6 analogue of syncDeleteV4LockedMarked (#9714).
-func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer, forwardOnly bool) bool {
+func (m *Manager) syncDeleteV6LockedMarkedErr(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer, forwardOnly bool) (bool, error) {
 	if m.proc == nil {
-		return false
+		return false, errSessionHelperUnreachable
 	}
 	scope := (*dataplane.SessionValueV6)(nil)
 	if haveVal {
 		scope = deleteScopeValV6(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV6("delete", key, scope)
+	req := m.buildSessionSyncRequestV6("mirror_delete", key, scope)
 	req.PeerDelete = peer
 	req.ForwardOnly = forwardOnly
-	if err := m.syncSessionRequestLocked(req); peer && peerDeleteRefused(err) {
-		return true
+	err := m.syncSessionRequestLocked(req)
+	if err != nil {
+		if peer && peerDeleteRefused(err) {
+			return true, nil
+		}
+		return false, err
 	}
-	// #9752 round 3: v6 twin of the forward-only gate above.
-	if !forwardOnly && haveVal && val.ReverseKey.Protocol != 0 {
-		reverse := m.buildSessionSyncRequestV6("delete", val.ReverseKey, scope)
-		reverse.PeerDelete = peer
-		_ = m.syncSessionRequestLocked(reverse)
-	}
-	return false
+	return false, nil
+}
+
+func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer, forwardOnly bool) bool {
+	refused, _ := m.syncDeleteV6LockedMarkedErr(key, val, haveVal, peer, forwardOnly)
+	return refused
 }
 
 // DeletePeerSyncedSession deletes a session on behalf of the PEER (#9714). The
@@ -483,12 +694,65 @@ func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val datap
 func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey, forwardOnly bool) (bool, error) {
 	val, valErr := m.bpfShim.GetSessionV4(key)
 	m.mu.Lock()
-	refused := m.syncDeleteV4LockedMarked(key, val, valErr == nil, true, forwardOnly)
-	m.mu.Unlock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return false, errSessionHelperUnreachable
+	}
+	defer m.mu.Unlock()
+	refused, err := m.syncDeleteV4LockedMarkedErr(key, val, valErr == nil, true, forwardOnly)
+	if err != nil {
+		return false, err
+	}
 	if refused {
 		return true, nil
 	}
-	if err := m.bpfShim.DeleteSession(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+	return false, nil
+}
+
+// DeletePeerSyncedSessionScoped deletes the session row carrying the
+// expected RT_FLOW identity on behalf of the PEER (#10512). The helper
+// answers FIRST with the explicit domain + identity (no local mirror
+// probe gates it — a probe could misattribute a colliding tuple); it
+// deletes only the matching incarnation and refuses otherwise (keeping
+// rows, reporting true). Scope comes from the wire (authoritative).
+func (m *Manager) DeletePeerSyncedSessionScoped(key dataplane.SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return false, errSessionHelperUnreachable
+	}
+	defer m.mu.Unlock()
+	refused, err := m.syncDeleteScopedV4Locked(key, domain, expectedID)
+	if err != nil {
+		return false, err
+	}
+	if refused {
+		return true, nil
+	}
+	return false, nil
+}
+
+// syncDeleteScopedV4Locked issues one identity-conditional peer delete
+// (#10512) via the distinct mirror_delete_scoped verb with req.session_id
+// = the expected originator identity (NOT the local mirror's id) and
+// scope from the wire domain (NOT a local probe, which could name another
+// tenant's row). A distinct verb, not a mirror_delete flag: the builder
+// already stamps session_id from local values on every request, so
+// presence-gating would condition all peer deletes on the wrong id.
+// ForwardOnly false: the peer derives its own reverse.
+func (m *Manager) syncDeleteScopedV4Locked(key dataplane.SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	if m.proc == nil {
+		return false, errSessionHelperUnreachable
+	}
+	req := m.buildSessionSyncRequestV4("mirror_delete_scoped", key, deleteScopeVal(domain))
+	req.PeerDelete = true
+	req.RTFlowSessionID = expectedID
+	req.RoutingDomain = scopedWireDomain(domain)
+	err := m.syncSessionRequestLocked(req)
+	if err != nil {
+		if peerDeleteRefused(err) {
+			return true, nil
+		}
 		return false, err
 	}
 	return false, nil
@@ -498,12 +762,53 @@ func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey, forwardOnly 
 func (m *Manager) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6, forwardOnly bool) (bool, error) {
 	val, valErr := m.bpfShim.GetSessionV6(key)
 	m.mu.Lock()
-	refused := m.syncDeleteV6LockedMarked(key, val, valErr == nil, true, forwardOnly)
-	m.mu.Unlock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return false, errSessionHelperUnreachable
+	}
+	defer m.mu.Unlock()
+	refused, err := m.syncDeleteV6LockedMarkedErr(key, val, valErr == nil, true, forwardOnly)
+	if err != nil {
+		return false, err
+	}
 	if refused {
 		return true, nil
 	}
-	if err := m.bpfShim.DeleteSessionV6(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+	return false, nil
+}
+
+// DeletePeerSyncedSessionScopedV6 is the IPv6 analogue of DeletePeerSyncedSessionScoped (#10512).
+func (m *Manager) DeletePeerSyncedSessionScopedV6(key dataplane.SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return false, errSessionHelperUnreachable
+	}
+	defer m.mu.Unlock()
+	refused, err := m.syncDeleteScopedV6Locked(key, domain, expectedID)
+	if err != nil {
+		return false, err
+	}
+	if refused {
+		return true, nil
+	}
+	return false, nil
+}
+
+// syncDeleteScopedV6Locked is the IPv6 analogue of syncDeleteScopedV4Locked (#10512).
+func (m *Manager) syncDeleteScopedV6Locked(key dataplane.SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	if m.proc == nil {
+		return false, errSessionHelperUnreachable
+	}
+	req := m.buildSessionSyncRequestV6("mirror_delete_scoped", key, deleteScopeValV6(domain))
+	req.PeerDelete = true
+	req.RTFlowSessionID = expectedID
+	req.RoutingDomain = scopedWireDomain(domain)
+	err := m.syncSessionRequestLocked(req)
+	if err != nil {
+		if peerDeleteRefused(err) {
+			return true, nil
+		}
 		return false, err
 	}
 	return false, nil
@@ -525,27 +830,16 @@ const sessionHelperDeleteChunk = 256
 //
 // The LegacyDataPlaneAdapter embeds the bpfShim as its dataplane.DataPlane, so
 // without this method Go promotion would dispatch a batch delete to the mirror
-// map ONLY — leaving the helper, which owns packet lookup/lifetime, forwarding
-// under the just-revoked decision until it re-publishes the mirror ~10s later.
-// The singular DeleteSession already routes per-session deletes to the helper;
-// this does the same for the batch path used by policy invalidation and the
-// cluster-stale sweep. The bpf mirror's delete count is returned unchanged so
-// caller count semantics are preserved.
 func (m *Manager) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) {
-	deleted, err := m.bpfShim.BatchDeleteSessions(keys)
-	// Attempt the helper delete for every key regardless of the mirror result:
-	// a batch where a key vanished concurrently returns ErrKeyNotExist with a
-	// partial count, and the helper delete of an already-absent key is a no-op,
-	// so skipping on error would strand the still-present helper sessions.
-	//
-	// The bare batch path keeps the #5096 best-effort contract — the periodic
-	// session sync and GC delta reconcile a transient helper miss — so the
-	// helper IPC error is intentionally discarded here. The scoped batch
-	// (#9364, the production path through the adapter) propagates it instead
-	// (#10513, #5578), as does the operator clear-all path (ClearAllSessions,
-	// #5881).
-	_ = m.deleteHelperSessionsV4(keys)
-	return deleted, err
+	scoped := make([]dataplane.ScopedSessionKey, 0, len(keys))
+	for _, key := range keys {
+		scoped = append(scoped, dataplane.ScopedSessionKey{Key: key})
+	}
+	var applied []dataplane.ScopedSessionKey
+	if err := m.deleteHelperSessionsScopedV4Marked(scoped, false, false, nil, &applied); err != nil {
+		return len(applied), err
+	}
+	return len(applied), nil
 }
 
 // BatchDeleteSessionsScoped is the #9364 domain-carrying batch delete.
@@ -558,43 +852,20 @@ func (m *Manager) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) 
 // row left behind by the BPF-first order cannot masquerade as a clean delete
 // (#10513, #5578).
 func (m *Manager) BatchDeleteSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, error) {
-	deleted, err := m.bpfShim.BatchDeleteSessions(bareKeysV4(scoped))
-	// Attempt the helper delete regardless of the mirror result (a batch where
-	// a key vanished concurrently still needs its helper rows retired), but
-	// PROPAGATE the helper IPC error (#10513): discarding it reported
-	// commit-clear success while authoritative helper rows remained, and
-	// applyAndSyncCommitted marked the config converged on joined==nil. The
-	// #5578 invalidation contract requires errors to surface; the mirror half
-	// is already deleted here (BPF-first), so surfacing is what keeps a helper
-	// failure from going silent. Precedence: a helper failure wins over a
-	// mirror key-not-found error — a joined error would read as NotFound and
-	// take the batchDeleteV4 per-key retry, which discards helper errors again.
-	// A real mirror error joins with the helper error.
-	helperErr := m.deleteHelperSessionsScopedV4(scoped)
-	if helperErr == nil {
-		return deleted, err
+	var applied []dataplane.ScopedSessionKey
+	if helperErr := m.deleteHelperSessionsScopedV4Marked(scoped, false, false, nil, &applied); helperErr != nil {
+		return len(applied), surfaceScopedHelperDeleteError("v4", helperErr)
 	}
-	helperErr = surfaceScopedHelperDeleteError("v4", helperErr)
-	if err == nil || dataplane.IsKeyNotFound(err) {
-		return deleted, helperErr
-	}
-	return deleted, errors.Join(err, helperErr)
+	return len(applied), nil
 }
 
-// BatchDeleteSessionsScopedV6 is the IPv6 analogue (#9364). Same #10513
-// propagation contract as the V4 twin: the helper IPC error surfaces (a helper
-// failure wins over any mirror key-not-found error; a real mirror error joins).
+// BatchDeleteSessionsScopedV6 is the IPv6 analogue (#9364).
 func (m *Manager) BatchDeleteSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, error) {
-	deleted, err := m.bpfShim.BatchDeleteSessionsV6(bareKeysV6(scoped))
-	helperErr := m.deleteHelperSessionsScopedV6(scoped)
-	if helperErr == nil {
-		return deleted, err
+	var applied []dataplane.ScopedSessionKeyV6
+	if helperErr := m.deleteHelperSessionsScopedV6Marked(scoped, false, false, nil, &applied); helperErr != nil {
+		return len(applied), surfaceScopedHelperDeleteError("v6", helperErr)
 	}
-	helperErr = surfaceScopedHelperDeleteError("v6", helperErr)
-	if err == nil || dataplane.IsKeyNotFound(err) {
-		return deleted, helperErr
-	}
-	return deleted, errors.Join(err, helperErr)
+	return len(applied), nil
 }
 
 // surfaceScopedHelperDeleteError preserves the helper classification at the
@@ -648,21 +919,44 @@ func peerDeleteRefused(err error) bool {
 // unlike the unmarked scoped batch, this path has a distinct #9714 contract.
 func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) (int, []dataplane.ScopedSessionKey, error) {
 	var refused, applied []dataplane.ScopedSessionKey
-	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
-	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKey) error {
-		return m.bpfShim.DeleteSession(sk.Key)
-	})
-	return deleted, refused, err
+	err := m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
+	if err != nil {
+		return len(applied), refused, err
+	}
+	return len(applied), refused, nil
 }
 
 // BatchDeletePeerSyncedSessionsScopedV6 is the IPv6 analogue (#9714).
 func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) (int, []dataplane.ScopedSessionKeyV6, error) {
 	var refused, applied []dataplane.ScopedSessionKeyV6
+	err := m.deleteHelperSessionsScopedV6Marked(scoped, true, forwardOnly, &refused, &applied)
+	if err != nil {
+		return len(applied), refused, err
+	}
+	return len(applied), refused, nil
+}
+
+// BatchDeletePeerSyncedSessionsExactScoped is the exact peer-delete projection
+// used by SessionStore's DeleteBatchKnownExactV4/V6 path (#10598). It returns
+// mirror keys whose delete call actually succeeded and the helper-applied set;
+// already-absent mirror rows are excluded from the first set.
+func (m *Manager) BatchDeletePeerSyncedSessionsExactScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) ([]dataplane.ScopedSessionKey, []dataplane.ScopedSessionKey, error) {
+	var refused, applied []dataplane.ScopedSessionKey
+	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
+	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKey) error {
+		return m.bpfShim.DeleteSession(sk.Key)
+	})
+	return deleted, applied, err
+}
+
+// BatchDeletePeerSyncedSessionsExactScopedV6 is the IPv6 analogue.
+func (m *Manager) BatchDeletePeerSyncedSessionsExactScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) ([]dataplane.ScopedSessionKeyV6, []dataplane.ScopedSessionKeyV6, error) {
+	var refused, applied []dataplane.ScopedSessionKeyV6
 	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, forwardOnly, &refused, &applied)
-	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKeyV6) error {
+	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKeyV6) error {
 		return m.bpfShim.DeleteSessionV6(sk.Key)
 	})
-	return deleted, refused, err
+	return deleted, applied, err
 }
 
 // deleteAppliedMirrorRows deletes the BPF mirror row of every key the helper
@@ -679,12 +973,19 @@ func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.Scope
 // Rows go one at a time, and a row that is already gone is not an error, so one
 // missing row does not strand the rest.
 func deleteAppliedMirrorRows[K comparable](applied []K, del func(K) error) (int, error) {
-	deleted := 0
+	deleted, err := deleteAppliedMirrorRowsExact(applied, del)
+	return len(deleted), err
+}
+
+// deleteAppliedMirrorRowsExact returns the keys whose mirror delete actually
+// succeeded, excluding benign already-absent rows. It preserves input order.
+func deleteAppliedMirrorRowsExact[K comparable](applied []K, del func(K) error) ([]K, error) {
+	deleted := make([]K, 0, len(applied))
 	var firstErr error
 	for _, key := range applied {
 		switch err := del(key); {
 		case err == nil:
-			deleted++
+			deleted = append(deleted, key)
 		case errors.Is(err, ebpf.ErrKeyNotExist):
 		case firstErr == nil:
 			firstErr = err
@@ -711,92 +1012,80 @@ func bareKeysV6(scoped []dataplane.ScopedSessionKeyV6) []dataplane.SessionKeyV6 
 
 // BatchDeleteSessionsV6 is the IPv6 analogue of BatchDeleteSessions (#5096).
 func (m *Manager) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, error) {
-	deleted, err := m.bpfShim.BatchDeleteSessionsV6(keys)
-	_ = m.deleteHelperSessionsV6(keys)
-	return deleted, err
+	scoped := make([]dataplane.ScopedSessionKeyV6, 0, len(keys))
+	for _, key := range keys {
+		scoped = append(scoped, dataplane.ScopedSessionKeyV6{Key: key})
+	}
+	var applied []dataplane.ScopedSessionKeyV6
+	if err := m.deleteHelperSessionsScopedV6Marked(scoped, false, false, nil, &applied); err != nil {
+		return len(applied), err
+	}
+	return len(applied), nil
 }
 
-// ClearAllSessions clears the BPF mirror AND issues an authoritative "delete" to
-// the Rust helper for every session so an operator `clear security flow session
-// all` actually stops forwarding under revoked decisions (#5096). The helper
-// exposes no bulk-clear verb (only the per-session "delete" the singular path
-// uses), so every mirror key — forward AND reverse conntrack entries — must be
-// deleted on the helper too.
+// ClearAllSessions revokes every session authoritatively via ONE helper
+// round trip (single-shot mirror_clear_chunk) so an operator
+// `clear security flow session all` stops forwarding under revoked
+// decisions (#5096). The helper natively enumerates all routing
+// domains under its clear fence, deletes helper authority + BPF rows,
+// and reports deleted counts; Go holds no key snapshot at all.
 //
-// The keys are NOT snapshotted here. Enumerating the full v4+v6 mirror into
-// wrapper-owned slices while the shim's own clear snapshots them AGAIN (plus the
-// dynamic-DNAT key lists) stacked ~1 GB of duplicate key slices in RSS on a
-// max-loaded 10M/family table — enough for the recovery command to stall or
-// OOM-kill the daemon (#5304). Instead the shim's ClearAllSessionsChunked drives
-// a per-chunk callback: it collects a bounded chunk, deletes it from the mirror,
-// and hands that same bounded chunk here for deletion on the helper, so neither
-// side ever holds more than one chunk of keys. deleteHelperSessions{V4,V6} keeps
-// the #5096 chunked-transmission behaviour (sessionHelperDeleteChunk).
+// Bounds (P4): the helper snapshot is hard-capped at 262144 keys
+// (take(cap+1) bounds the transient Vec ≈18MB max even against a
+// hostile table; over-cap fails closed touching nothing and surfaces
+// here as an error). Go sends one request and retains one response
+// (counts only) — no paging state, no continuation loop, no fence
+// tracking. Memory: Go O(1) keys; helper O(min(table, cap)) one-shot.
 //
-// The Rust helper is AUTHORITATIVE in userspace mode — it owns packet
-// lookup/forwarding while the BPF mirror is a read model. A helper-delete IPC
-// failure therefore means a session the operator asked to revoke may still be
-// forwarding, even though the mirror was emptied. Losing that error (as the
-// pre-#5881 void callbacks did) let `clear security flow session all` report
-// success while sessions lived on — a security bug. So the first helper-delete
-// error is captured across chunks and, when the mirror clear itself succeeded,
-// surfaced as ClearAllSessions's returned error. The bpf mirror's partial
-// (v4, v6) counts are still returned alongside the error, matching the #5882
-// non-atomic clear-all reporting contract, so a caller learns what the mirror
-// side revoked while also learning the authoritative revocation is unconfirmed.
-// A mirror-side error still takes precedence and is returned as before.
+// Fail-closed atomic (P11, revises #5882): counts are
+// helper-confirmed DELETED sessions — (0,0) on ANY failure,
+// including pre-response transport errors. Nothing is partially
+// reported as cleared: the BPF mirror is the helper's read model
+// (its per-key deletes empty it on success), so Go never sweeps BPF
+// here — a Go sweep would race the helper's own deletes and
+// reintroduce the #5304 full-table enumeration this design deleted.
+// The old #5882 "mirror cleared + partial counts alongside error"
+// contract belonged to the Go-driven chunked design and does not
+// apply: under single-shot there is no Go-cleared portion to report.
+// The #5881 security property (helper failure surfaced, never
+// reported as success) is preserved — strictly: failure now means
+// nothing was revoked anywhere, not "mirror revoked, authority
+// unconfirmed".
 //
-// #5380 residual: the per-chunk callbacks skip the helper delete once a
-// transport failure is recorded, so a full clear-all under a hung helper pays
-// ~one round-trip deadline total rather than one per 4096-key mirror chunk.
-// See the helperDown guard below.
+// Terminal: complete-with-empty is the only success. Incomplete,
+// complete-with-continuation (contradictory), or any continuation
+// (the helper never pages) is a contract-breach error. #5380's
+// multi-dial fast-fail is structural now: one dial exists, so a hung
+// helper costs exactly one round-trip deadline by construction.
 func (m *Manager) ClearAllSessions() (int, int, error) {
-	var helperErr error
-	recordHelperErr := func(err error) {
-		if err != nil && helperErr == nil {
-			helperErr = err
-		}
+	deadline := time.Now().Add(clearAllDeadline)
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return 0, 0, errSessionHelperUnreachable
 	}
-	// Fast-fail the WHOLE clear-all once the helper transport is down, not just
-	// the 256-request loop inside a single deleteHelperSessions call (#5380
-	// only aborted that inner loop). ClearAllSessionsChunked invokes these
-	// callbacks ONCE PER sessionClearSnapshotChunk (4096-key) mirror chunk, and
-	// the callbacks return void, so an inner abort does not propagate up: the
-	// shim keeps handing every remaining chunk to a hung helper. A max table is
-	// ~10M keys / 4096 ≈ 2440 chunks per family, so without this guard a
-	// clear-all under a hung helper still pays ~one round-trip deadline PER
-	// chunk (~2 h/family) even though each chunk's own delete already
-	// fast-fails. Once a TRANSPORT failure has been recorded, skip the helper
-	// delete for the remaining chunks so the clear-all pays ~one deadline
-	// total. Only errSessionHelperUnreachable (a hung/unreachable helper) trips
-	// the skip; an application-level rejection (helper alive, resp.OK=false) is
-	// NOT wrapped as the sentinel, so a live helper that refuses one delete
-	// keeps clearing the rest of the batch (#5881). The BPF mirror still clears
-	// fully — the shim deletes each chunk BEFORE invoking the callback — and
-	// helperErr stays set, so the #5881 error-propagation and #5882
-	// partial-count contracts are unchanged.
-	helperDown := func() bool { return errors.Is(helperErr, errSessionHelperUnreachable) }
-	v4, v6, mirrorErr := m.bpfShim.ClearAllSessionsChunked(
-		func(keys []dataplane.SessionKey) {
-			if helperDown() {
-				return
-			}
-			recordHelperErr(m.deleteHelperSessionsV4(keys))
-		},
-		func(keys []dataplane.SessionKeyV6) {
-			if helperDown() {
-				return
-			}
-			recordHelperErr(m.deleteHelperSessionsV6(keys))
-		},
-	)
-	if mirrorErr != nil {
-		return v4, v6, mirrorErr
+	req := SessionSyncRequest{Operation: "mirror_clear_chunk"}
+	resp, err := m.syncSessionRequestResponseLocked(req)
+	m.mu.Unlock()
+	if err != nil {
+		return 0, 0, fmt.Errorf("clear-all: authoritative helper session revocation failed: %w", err)
 	}
-	if helperErr != nil {
-		return v4, v6, fmt.Errorf("clear-all: authoritative helper session revocation failed: %w", helperErr)
+	// P8: re-check post-RPC before accepting terminal (a terminal
+	// arriving past the deadline is still authoritative, so this is
+	// latency accounting against a transport that outlived its own
+	// bounds — it fails the call, never the revocation).
+	if time.Now().After(deadline) {
+		return 0, 0, fmt.Errorf("clear-all: response arrived after %s", clearAllDeadline)
 	}
-	return v4, v6, nil
+	// P10: single-shot never pages — any continuation is a breach,
+	// as is incomplete-with-empty (stranded remainder, no way on).
+	if resp.SessionMirrorContinuation != "" {
+		return 0, 0, fmt.Errorf("clear-all: unexpected continuation %q (single-shot helper never pages)", resp.SessionMirrorContinuation)
+	}
+	if !resp.SessionMirrorComplete {
+		return 0, 0, fmt.Errorf("clear-all: incomplete without continuation")
+	}
+	return int(resp.SessionMirrorV4Count), int(resp.SessionMirrorV6Count), nil
 }
 
 // deleteHelperSessionsV4 tells the Rust helper to delete every key so the batch
@@ -861,7 +1150,7 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 			// as ambiguous. deleteScopeVal returns nil at domain 0, which is the
 			// pre-#9364 bare request, bit-identical.
 			req := m.buildSessionSyncRequestV4(
-				"delete", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
+				"mirror_delete_batch", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
 			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
@@ -943,7 +1232,7 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 		for i := start; i < end; i++ {
 			// #9364: name the domain — see the V4 twin.
 			req := m.buildSessionSyncRequestV6(
-				"delete", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
+				"mirror_delete_batch", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
 			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly

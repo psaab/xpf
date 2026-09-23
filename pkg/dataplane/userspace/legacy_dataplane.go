@@ -863,6 +863,30 @@ func (a *LegacyDataPlaneAdapter) BatchDeleteSessionsScopedV6(scoped []dataplane.
 	}
 	return m.BatchDeleteSessionsScopedV6(scoped)
 }
+// ListSessionsByPolicy performs the helper-owned READ phase (#10512). It is an
+// optional capability so non-userspace runtimes retain their existing
+// SessionStore surface.
+func (a *LegacyDataPlaneAdapter) ListSessionsByPolicy(
+	req SessionPolicyListRequest,
+) (ControlResponse, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return ControlResponse{}, err
+	}
+	return m.ListSessionsByPolicy(req)
+	}
+
+// DeletePolicySessions forwards the helper-first identity-conditional policy
+// invalidation path to the published userspace adapter.
+func (a *LegacyDataPlaneAdapter) DeletePolicySessions(
+	matches []SessionPolicyMatch,
+) (PolicyDeleteResult, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return PolicyDeleteResult{}, err
+	}
+	return m.DeletePolicySessions(matches)
+}
 
 // BatchDeletePeerSyncedSessionsScoped forwards the #9714 peer-delete batch. The
 // store's type assertion is handed this adapter, not the Manager (see
@@ -885,6 +909,25 @@ func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsScopedV6(scoped []
 	return m.BatchDeletePeerSyncedSessionsScopedV6(scoped, forwardOnly)
 }
 
+// BatchDeletePeerSyncedSessionsExactScoped forwards the exact #10598 peer
+// delete result to the session store.
+func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsExactScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) ([]dataplane.ScopedSessionKey, []dataplane.ScopedSessionKey, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.BatchDeletePeerSyncedSessionsExactScoped(scoped, forwardOnly)
+}
+
+// BatchDeletePeerSyncedSessionsExactScopedV6 forwards the IPv6 analogue.
+func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsExactScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) ([]dataplane.ScopedSessionKeyV6, []dataplane.ScopedSessionKeyV6, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.BatchDeletePeerSyncedSessionsExactScopedV6(scoped, forwardOnly)
+}
+
 // DeletePeerSyncedSession forwards the #9714 single-key peer delete.
 func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSession(key dataplane.SessionKey, forwardOnly bool) (bool, error) {
 	m, err := a.managerOrErr()
@@ -894,6 +937,15 @@ func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSession(key dataplane.SessionKe
 	return m.DeletePeerSyncedSession(key, forwardOnly)
 }
 
+// DeletePeerSyncedSessionScoped forwards the #10512 scoped single-key peer delete.
+func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionScoped(key dataplane.SessionKey, domain uint32, expectedID uint64) (bool, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, err
+	}
+	return m.DeletePeerSyncedSessionScoped(key, domain, expectedID)
+}
+
 // DeletePeerSyncedSessionV6 forwards the IPv6 analogue (#9714).
 func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6, forwardOnly bool) (bool, error) {
 	m, err := a.managerOrErr()
@@ -901,6 +953,15 @@ func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionV6(key dataplane.Session
 		return false, err
 	}
 	return m.DeletePeerSyncedSessionV6(key, forwardOnly)
+}
+
+// DeletePeerSyncedSessionScopedV6 forwards the IPv6 analogue (#10512).
+func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionScopedV6(key dataplane.SessionKeyV6, domain uint32, expectedID uint64) (bool, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, err
+	}
+	return m.DeletePeerSyncedSessionScopedV6(key, domain, expectedID)
 }
 
 func (a *LegacyDataPlaneAdapter) SessionSyncSweepProfile() (bool, time.Duration, time.Duration) {
