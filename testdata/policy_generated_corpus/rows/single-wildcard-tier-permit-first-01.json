@@ -1,0 +1,116 @@
+{
+  "config_set_lines": [
+    "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+    "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+    "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+    "set security zones security-zone trust interfaces ge-0/0/0.0",
+    "set security zones security-zone untrust interfaces ge-0/0/1.0",
+    "set security zones security-zone dmz interfaces ge-0/0/2.0",
+    "set security policies default-policy deny-all",
+    "set security policies from-zone untrust to-zone any policy to-any-permit match source-address any",
+    "set security policies from-zone untrust to-zone any policy to-any-permit match destination-address any",
+    "set security policies from-zone untrust to-zone any policy to-any-permit match application any",
+    "set security policies from-zone untrust to-zone any policy to-any-permit then permit",
+    "set security policies from-zone any to-zone trust policy from-any-deny match source-address any",
+    "set security policies from-zone any to-zone trust policy from-any-deny match destination-address any",
+    "set security policies from-zone any to-zone trust policy from-any-deny match application any",
+    "set security policies from-zone any to-zone trust policy from-any-deny then deny"
+  ],
+  "go_verdict": {
+    "action": "permit",
+    "default_used": false,
+    "matched": true,
+    "policy_id": 0,
+    "policy_name": "to-any-permit"
+  },
+  "id": "single-wildcard-tier-permit-first-01",
+  "query": {
+    "dst_ip": "10.0.1.5",
+    "dst_port": 80,
+    "frag": false,
+    "from_zone": "untrust",
+    "icmp_code": null,
+    "icmp_type": null,
+    "l4_present": true,
+    "protocol": "tcp",
+    "src_ip": "10.0.2.5",
+    "src_port": 1234,
+    "to_zone": "trust"
+  },
+  "rust_verdict": {
+    "action": "permit",
+    "default_used": false,
+    "matched": true,
+    "policy_id": 0,
+    "policy_name": "to-any-permit"
+  },
+  "schema_version": 1,
+  "snapshot": {
+    "default_policy": "deny",
+    "rules": [
+      {
+        "action": "permit",
+        "applications": [
+          "any"
+        ],
+        "destination_addresses": [
+          "any"
+        ],
+        "destination_literals": [
+          "any"
+        ],
+        "from_zone": "untrust",
+        "name": "to-any-permit",
+        "rule_id": "untrust->any/to-any-permit",
+        "source_addresses": [
+          "any"
+        ],
+        "source_literals": [
+          "any"
+        ],
+        "to_zone": "any"
+      },
+      {
+        "action": "deny",
+        "applications": [
+          "any"
+        ],
+        "destination_addresses": [
+          "any"
+        ],
+        "destination_literals": [
+          "any"
+        ],
+        "from_zone": "any",
+        "name": "from-any-deny",
+        "policy_id": 256,
+        "rule_id": "any->trust/from-any-deny",
+        "source_addresses": [
+          "any"
+        ],
+        "source_literals": [
+          "any"
+        ],
+        "to_zone": "trust"
+      }
+    ],
+    "zones": [
+      {
+        "host_inbound_configured": true,
+        "id": 56918,
+        "name": "dmz"
+      },
+      {
+        "host_inbound_configured": true,
+        "id": 50675,
+        "name": "trust"
+      },
+      {
+        "host_inbound_configured": true,
+        "id": 20665,
+        "name": "untrust"
+      }
+    ]
+  },
+  "source_case": "single-wildcard-tier-permit-first"
+}
