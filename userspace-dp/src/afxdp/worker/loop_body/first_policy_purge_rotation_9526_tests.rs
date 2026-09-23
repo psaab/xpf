@@ -94,10 +94,16 @@ fn view_with_policy_metadata(
     forwarding.zone_id_to_name.insert(3, "dmz".to_string());
     forwarding.zone_set_validated = true;
     forwarding.ingress_logical_ifindex.insert((11, 0), 11);
+    // Fixture interface 11 is a concrete LAN port in every cell; its zone is
+    // the first KNOWN from-zone, not necessarily rules[0]'s. Prod maps an
+    // interface to its assigned zone regardless of policy shape, so a global
+    // first rule (unscoped, not in the map) must not zero the interface.
+    // Identical for all zone-pair cells (rules[0].from is always known there).
     let ingress_zone = rules
-        .first()
-        .and_then(|rule| forwarding.zone_name_to_id.get(&rule.from_zone))
+        .iter()
+        .filter_map(|rule| forwarding.zone_name_to_id.get(&rule.from_zone))
         .copied()
+        .next()
         .unwrap_or(0);
     forwarding.ifindex_to_zone_id.insert(11, ingress_zone);
     let forwarding = Arc::new(forwarding);
@@ -303,14 +309,32 @@ impl RotationHarness {
         extra: &[SyncedSessionEntry],
         unbound_origin: SessionOrigin,
     ) -> Self {
+        Self::start_with_extra_origin_old_rules(
+            extra,
+            unbound_origin,
+            &[rule("p-first", 0), rule("p-web", 1)],
+            "lan->wan/p-first",
+        )
+    }
+
+    /// `start_with_extra_and_origin` with caller-supplied generation-1 rules
+    /// (the junos-global cell rotates FROM a global first rule, not
+    /// `lan->wan/p-first`). The expected id pins counter idx 1 to the
+    /// caller's first rule, exactly as the fixed fixture does.
+    fn start_with_extra_origin_old_rules(
+        extra: &[SyncedSessionEntry],
+        unbound_origin: SessionOrigin,
+        old_rules: &[crate::PolicyRuleSnapshot],
+        expected_first_rule_id: &str,
+    ) -> Self {
         let coord = Coordinator::new();
         let channel = RuntimeViewChannel::default();
-        let (old_view, old_forwarding) = view(1, &[rule("p-first", 0), rule("p-web", 1)]);
+        let (old_view, old_forwarding) = view(1, old_rules);
         let first_counter = old_forwarding.policy.hit_counter_by_idx(1).cloned();
         let old_first_counter = first_counter.clone();
         assert_eq!(
             first_counter.as_ref().map(|c| c.rule_id()),
-            Some("lan->wan/p-first"),
+            Some(expected_first_rule_id),
             "fixture: counter idx 1 is the first rule's handle"
         );
         channel.publish(old_view);
@@ -597,6 +621,129 @@ fn rotate_with_metadata(
     let presence = harness.presence();
     harness.shutdown();
     presence
+}
+
+/// `rotate_with_metadata` starting FROM caller-supplied generation-1 rules
+/// (the junos-global cell rotates from a global first rule). Sessions are
+/// installed exactly as in `start` (a lan->wan pair bound to policy id 0):
+/// a global rule admits any flow zones, so the fixed fixture pair is a
+/// faithful global-bound session.
+fn rotate_with_old_rules(
+    old_rules: &[crate::PolicyRuleSnapshot],
+    expected_first_rule_id: &str,
+    new_rules: &[crate::PolicyRuleSnapshot],
+    policy_rematch_extensive: bool,
+    policy_rename_ancestry: &[crate::protocol::PolicyRenameAncestry],
+) -> Presence {
+    let harness = RotationHarness::start_with_extra_origin_old_rules(
+        &[],
+        SessionOrigin::SharedPromote,
+        old_rules,
+        expected_first_rule_id,
+    );
+    harness.publish(
+        2,
+        new_rules,
+        policy_rematch_extensive,
+        policy_rename_ancestry,
+        None,
+    );
+    let presence = harness.presence();
+    harness.shutdown();
+    presence
+}
+
+/// #10625: the extensive id-0 rotation rematch handles a GLOBAL first-rule
+/// rename (g-old -> g-new) through the junos-global ancestry arms — the
+/// zone-pair 10511 cell pins only zone-pair ancestry. The bound pair keeps
+/// its flow zones (the junos-global destination arm returns the fallback),
+/// and the rebind replaces the counter Arc with the new global rule's.
+///
+/// RED-on-revert: breaking either junos-global arm (source match or
+/// destination fallback) fails the retain expects — the pair purges instead
+/// of rebinding, exactly the zone-pair behavior without ancestry.
+#[test]
+fn extensive_rotation_rebinds_global_first_policy_via_junos_global_ancestry_10625() {
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "junos-global->junos-global/g-old".to_string(),
+        destination_rule_id: "junos-global->junos-global/g-new".to_string(),
+        source_from_zone: "junos-global".to_string(),
+        source_to_zone: "junos-global".to_string(),
+        destination_from_zone: "junos-global".to_string(),
+        destination_to_zone: "junos-global".to_string(),
+        source_from_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        source_to_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        destination_from_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        destination_to_zone_id: crate::policy::JUNOS_GLOBAL_ZONE_ID,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let retained = rotate_with_old_rules(
+        &[
+            rule_with_zones("g-old", 0, "junos-global", "junos-global"),
+            // p-web is lan->dmz: its from-zone keeps fixture interface 11
+            // on lan (the first-known fallback), while its to-zone keeps it
+            // from matching the lan->wan fixture flow — zone-pair rules
+            // evaluate before the global tier, so a lan->wan p-web would
+            // shadow the global in the re-eval and land the rebind on
+            // policy 1 instead of the renamed global.
+            rule_with_zones("p-web", 1, "lan", "dmz"),
+        ],
+        "junos-global->junos-global/g-old",
+        &[
+            rule_with_zones("g-new", 0, "junos-global", "junos-global"),
+            rule_with_zones("p-web", 1, "lan", "dmz"),
+        ],
+        true,
+        &[ancestry],
+    );
+    let forward = retained
+        .first_forward_entry
+        .as_ref()
+        .expect("extensive rematch must retain the forward half");
+    let reverse = retained
+        .first_reverse_entry
+        .as_ref()
+        .expect("extensive rematch must retain the reverse half");
+    assert_eq!(forward.metadata.policy_id, 0);
+    assert_eq!(reverse.metadata.policy_id, 0);
+    assert_eq!(forward.metadata.policy_counter_idx, 1);
+    assert_eq!(reverse.metadata.policy_counter_idx, 1);
+    let forward_counter = forward
+        .metadata
+        .policy_counter
+        .as_ref()
+        .expect("forward half must carry the new counter Arc");
+    let reverse_counter = reverse
+        .metadata
+        .policy_counter
+        .as_ref()
+        .expect("reverse half must carry the new counter Arc");
+    assert_eq!(
+        forward_counter.rule_id(),
+        "junos-global->junos-global/g-new"
+    );
+    assert_eq!(
+        reverse_counter.rule_id(),
+        "junos-global->junos-global/g-new"
+    );
+    assert!(Arc::ptr_eq(forward_counter, reverse_counter));
+    assert!(
+        !Arc::ptr_eq(
+            forward_counter,
+            retained
+                .old_first_counter
+                .as_ref()
+                .expect("fixture must expose the old counter"),
+        ),
+        "the rebind must replace, not reuse, the old policy counter Arc"
+    );
+    assert_eq!(forward.metadata.ingress_zone, 1);
+    assert_eq!(forward.metadata.egress_zone, 2);
+    assert_eq!(reverse.metadata.ingress_zone, 2);
+    assert_eq!(reverse.metadata.egress_zone, 1);
 }
 
 #[test]
