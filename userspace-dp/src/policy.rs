@@ -4239,3 +4239,10 @@ mod policy_verdict_corpus_9167;
 #[cfg(test)]
 #[path = "policy_junos_global_9570_tests.rs"]
 mod policy_junos_global_9570_tests;
+
+// #10587: generated policy-config/packet property and Go differential rows.
+// Kept beside the existing shared-corpus test so it can reach the evaluator's
+// crate-private `PolicyState` parser without exposing test-only APIs.
+#[cfg(test)]
+#[path = "policy_prop_tests/mod.rs"]
+mod policy_prop_tests;

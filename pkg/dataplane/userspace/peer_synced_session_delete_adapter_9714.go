@@ -23,6 +23,8 @@ var (
 type peerSyncedSessionDeleter interface {
 	BatchDeletePeerSyncedSessionsScoped([]dataplane.ScopedSessionKey, bool) (int, []dataplane.ScopedSessionKey, error)
 	BatchDeletePeerSyncedSessionsScopedV6([]dataplane.ScopedSessionKeyV6, bool) (int, []dataplane.ScopedSessionKeyV6, error)
+	BatchDeletePeerSyncedSessionsExactScoped([]dataplane.ScopedSessionKey, bool) ([]dataplane.ScopedSessionKey, []dataplane.ScopedSessionKey, error)
+	BatchDeletePeerSyncedSessionsExactScopedV6([]dataplane.ScopedSessionKeyV6, bool) ([]dataplane.ScopedSessionKeyV6, []dataplane.ScopedSessionKeyV6, error)
 	DeletePeerSyncedSession(dataplane.SessionKey, bool) (bool, error)
 	DeletePeerSyncedSessionV6(dataplane.SessionKeyV6, bool) (bool, error)
 }

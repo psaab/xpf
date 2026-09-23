@@ -3044,6 +3044,302 @@ fn run_stage11_ike_poll_10525(
     )
 }
 
+fn run_stage11_ike_poll_with_binding_10585(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    ike_exchanges: &Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+    interface: &str,
+) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    usize,
+    Vec<bool>,
+    BatchCounters,
+    DebugPollCounters,
+) {
+    let forwarding = build_forwarding_state(snapshot);
+    forwarding.ipsec_sa.publish_empty_dump_for_test();
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(
+        1500,
+    ));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from(interface);
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path_and_ike(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+        ike_exchanges,
+    );
+    (
+        reinjector.status(),
+        reinjector.delegated_status(),
+        binding.scratch.scratch_recycle.len(),
+        reinjector.test_enqueued_delegated(),
+        batch,
+        dbg,
+    )
+}
+
+fn run_stage11_ike_poll_10585(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    ike_exchanges: &Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    usize,
+    Vec<bool>,
+    BatchCounters,
+    DebugPollCounters,
+) {
+    let interface = match meta.ingress_ifindex {
+        12 => "reth0.80",
+        24 => "reth1.0",
+        _ => "ge-0-0-0",
+    };
+    run_stage11_ike_poll_with_binding_10585(snapshot, frame, meta, ike_exchanges, interface)
+}
+
+fn run_stage11_gre_ike_poll_10585(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    ike_exchanges: &Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    usize,
+    Vec<bool>,
+    BatchCounters,
+    DebugPollCounters,
+) {
+    run_stage11_ike_poll_with_binding_10585(snapshot, frame, meta, ike_exchanges, "ge-0-0-0")
+}
+
+fn junos_host_ike_deny_10585(
+    from_zone: &str,
+    source: &str,
+    destination: &str,
+    application: &str,
+) -> PolicyRuleSnapshot {
+    let application_terms = if application == "any" {
+        Vec::new()
+    } else {
+        vec![crate::protocol::PolicyApplicationSnapshot {
+            name: application.to_string(),
+            protocol: "udp".to_string(),
+            source_port: String::new(),
+            destination_port: application
+                .strip_prefix("ike-")
+                .unwrap_or("500")
+                .to_string(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }]
+    };
+    PolicyRuleSnapshot {
+        name: format!("deny-{application}"),
+        from_zone: from_zone.to_string(),
+        to_zone: "junos-host".to_string(),
+        source_addresses: vec![source.to_string()],
+        destination_addresses: vec![destination.to_string()],
+        applications: vec![application.to_string()],
+        application_terms,
+        action: "deny".to_string(),
+        ..Default::default()
+    }
+}
+
+fn build_gre_inner_ike_frame_10585(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    initiator_spi: u64,
+    responder_spi: u64,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(if dst_port == 4500 { 20 } else { 16 });
+    if dst_port == 4500 {
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    payload.extend_from_slice(&initiator_spi.to_be_bytes());
+    payload.extend_from_slice(&responder_spi.to_be_bytes());
+    payload.extend_from_slice(&[0; 8]);
+    let mut inner = build_gre_inner_v4(PROTO_UDP, 8 + payload.len());
+    inner[12..16].copy_from_slice(&src.octets());
+    inner[16..20].copy_from_slice(&dst.octets());
+    inner[10..12].fill(0);
+    let ip_sum = checksum16(&inner[0..20]);
+    inner[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+    inner[20..22].copy_from_slice(&src_port.to_be_bytes());
+    inner[22..24].copy_from_slice(&dst_port.to_be_bytes());
+    inner[24..26].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    inner[26..28].fill(0);
+    inner[28..].copy_from_slice(&payload);
+    build_gre_to_self_outer_frame_with_inner(0x0800, &inner)
+}
+
+fn gre_ike_meta_10585(frame: &[u8]) -> UserspaceDpMeta {
+    gre_to_self_outer_meta(0, frame.len())
+}
+
+fn build_gre_inner_ike_v6_frame_10585(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    initiator_spi: u64,
+    responder_spi: u64,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(if dst_port == 4500 { 20 } else { 16 });
+    if dst_port == 4500 {
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    payload.extend_from_slice(&initiator_spi.to_be_bytes());
+    payload.extend_from_slice(&responder_spi.to_be_bytes());
+    payload.extend_from_slice(&[0; 8]);
+    let mut inner = vec![0x60, 0, 0, 0, 0, 0, PROTO_UDP, 64];
+    inner.extend_from_slice(&src.octets());
+    inner.extend_from_slice(&dst.octets());
+    inner.extend_from_slice(&src_port.to_be_bytes());
+    inner.extend_from_slice(&dst_port.to_be_bytes());
+    inner.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    inner.extend_from_slice(&[0, 0]);
+    inner.extend_from_slice(&payload);
+    let inner_payload_len = (inner.len() - 40) as u16;
+    inner[4..6].copy_from_slice(&inner_payload_len.to_be_bytes());
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(&mut inner, 40, PROTO_UDP)
+        .expect("GRE-inner IPv6 UDP checksum");
+
+    let mut gre = vec![0, 0, 0x86, 0xdd];
+    gre.extend_from_slice(&inner);
+    let mut frame = vec![
+        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, // outer destination MAC
+        0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, // outer peer MAC
+        0x86, 0xdd, // IPv6
+        0x60, 0, 0, 0, // version and traffic class
+    ];
+    frame.extend_from_slice(&(gre.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&[PROTO_GRE, 64]);
+    frame.extend_from_slice(&GRE_V6_PEER);
+    frame.extend_from_slice(&GRE_V6_LOCAL);
+    frame.extend_from_slice(&gre);
+    frame
+}
+
+fn build_stage11_ike_v6_frame_10585(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    initiator_spi: u64,
+    responder_spi: u64,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(if dst_port == 4500 { 20 } else { 16 });
+    if dst_port == 4500 {
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    payload.extend_from_slice(&initiator_spi.to_be_bytes());
+    payload.extend_from_slice(&responder_spi.to_be_bytes());
+    payload.extend_from_slice(&[0; 8]);
+    let mut frame = vec![
+        0, 0, 0, 0, 0, 0, // destination MAC
+        0x02, 0x11, 0x22, 0x33, 0x44, 0x55, // peer source MAC
+        0x86, 0xdd, // IPv6
+        0x60, 0, 0, 0, // version and traffic class
+    ];
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
+    frame.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[PROTO_UDP, 64]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    frame.extend_from_slice(&src_port.to_be_bytes());
+    frame.extend_from_slice(&dst_port.to_be_bytes());
+    frame.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0]); // checksum field filled below.
+    frame.extend_from_slice(&payload);
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(&mut frame[14..], 40, PROTO_UDP)
+        .expect("IPv6 UDP checksum");
+    frame
+}
+
+fn stage11_ipv6_udp_meta_10585(
+    frame: &[u8],
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    ingress_ifindex: u32,
+    src_port: u16,
+    dst_port: u16,
+) -> UserspaceDpMeta {
+    let mut src_addr = [0u8; 16];
+    src_addr.copy_from_slice(&src.octets());
+    let mut dst_addr = [0u8; 16];
+    dst_addr.copy_from_slice(&dst.octets());
+    UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex,
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 62,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        flow_src_port: src_port,
+        flow_dst_port: dst_port,
+        flow_src_addr: src_addr,
+        flow_dst_addr: dst_addr,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    }
+}
+
+fn static_nat_to_self_snapshot_10585() -> ConfigSnapshot {
+    let mut snapshot = nat_snapshot();
+    snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+        name: "ike-static-self".to_string(),
+        from_zone: "wan".to_string(),
+        external_ip: "203.0.113.10".to_string(),
+        internal_ip: "10.0.61.1".to_string(),
+        match_destination_port: 500,
+        mapped_port: 500,
+        ..Default::default()
+    }];
+    snapshot
+}
+
+fn v6_dnat_to_self_snapshot_10585() -> ConfigSnapshot {
+    let mut snapshot = dnat_to_self_snapshot_10525();
+    snapshot
+        .destination_nat_rules
+        .push(DestinationNATRuleSnapshot {
+            name: "vip6-to-self-ike".to_string(),
+            from_zone: "wan".to_string(),
+            destination_address: "2001:db8:1058::9".to_string(),
+            destination_port: 500,
+            protocol: "udp".to_string(),
+            pool_address: "2001:559:8585:ef00::1".to_string(),
+            pool_port: 500,
+            ..Default::default()
+        });
+    snapshot
+}
+
 #[test]
 // R1 / RED-on-revert: removing the pre-reinject fine gate restores delegated
 // reinject + seed; moving the seed before gates restores the table entry.
@@ -3190,5 +3486,381 @@ fn c2_dnat_to_self_ike_coarse_deny_drops_without_seed_10525() {
         0,
         "control: a coarse-denied IKE must never seed (#6471)"
     );
+    assert_eq!(batch.host_inbound_denied_packets, 1);
+}
+
+#[test]
+// T1 / RED-on-revert: the shared Stage-11 fine gate must apply to an
+// application-any DENY on an IKE packet after GRE decapsulation.
+fn t1_gre_inner_ike_application_any_deny_drops_10585() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let dst = Ipv4Addr::new(10, 255, 0, 1);
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "198.51.100.10/32",
+        "10.255.0.1/32",
+        "any",
+    ));
+    let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_5001, 0);
+    let meta = gre_ike_meta_10585(&frame);
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_gre_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 0);
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// T2 / RED-on-revert: GRE decapsulation must preserve tunnel-zone attribution
+// for the existing IKE-tuple application match as well as application-any.
+fn t2_gre_inner_ike_tuple_deny_drops_10585() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let dst = Ipv4Addr::new(10, 255, 0, 1);
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "198.51.100.10/32",
+        "10.255.0.1/32",
+        "ike-500",
+    ));
+    let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_5002, 0);
+    let meta = gre_ike_meta_10585(&frame);
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_gre_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 0);
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// T3 / RED-on-revert: a seeded GRE-inner follow-up is re-evaluated per packet,
+// while the pre-existing seed remains available for later traffic.
+fn t3_gre_inner_seeded_followup_late_deny_drops_10585() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let dst = Ipv4Addr::new(10, 255, 0, 1);
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "198.51.100.10/32",
+        "10.255.0.1/32",
+        "any",
+    ));
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let key = crate::afxdp::forwarding::IkeExchangeKey::new(
+        0x1058_5003,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+    ike_exchanges.seed(key.clone(), 123_000_000_000);
+    let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_5003, 0xaabb_ccdd);
+    let meta = gre_ike_meta_10585(&frame);
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_gre_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 1);
+    assert!(ike_exchanges.matches(&key, 123_000_000_000));
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// T4 / control: the same GRE-inner positive IKE remains delegated and seeded
+// when no fine policy or lo0 rule matches.
+fn t4_gre_inner_ike_control_delegates_and_seeds_10585() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let dst = Ipv4Addr::new(10, 255, 0, 1);
+    let snapshot = gre_to_self_snapshot();
+    let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_5004, 0);
+    let meta = gre_ike_meta_10585(&frame);
+    let key = crate::afxdp::forwarding::IkeExchangeKey::new(
+        0x1058_5004,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_gre_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 1);
+    assert_eq!(queues, vec![true]);
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 1);
+    assert!(ike_exchanges.matches(&key, 123_000_000_000));
+    assert_eq!(dbg.local, 0, "control local counter must stay zero");
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// T5 / RED-on-revert: static-NAT external addresses must take the same
+// fine-gated Stage-11 path as DNAT external addresses.
+fn t5_static_nat_to_self_ike_application_any_deny_drops_10585() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let dst = Ipv4Addr::new(203, 0, 113, 10);
+    let mut snapshot = static_nat_to_self_snapshot_10585();
+    snapshot.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "198.51.100.10/32",
+        "203.0.113.10/32",
+        "any",
+    ));
+    let mut frame = build_stage11_ike_v4_frame_10516(src, dst, 40_000, 500, 0x1058_5005, 0);
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
+    let meta = stage11_ipv4_udp_meta_10516(&frame, src, dst, 12, 40_000, 500);
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 0);
+    assert_eq!(
+        dbg.local, 1,
+        "static-NAT fine deny counters: local={} policy={} host={}",
+        dbg.local, dbg.policy_deny, dbg.host_inbound_deny
+    );
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// T6 / RED-on-revert: the existing DNAT pin must also cover application-any,
+// not only the narrower ike-500 application.
+fn t6_dnat_to_self_ike_application_any_deny_drops_10585() {
+    let mut snapshot = dnat_to_self_snapshot_10525();
+    snapshot.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "198.51.100.10/32",
+        "203.0.113.9/32",
+        "any",
+    ));
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let frame = new_ike_frame_10525();
+    let meta = ike_meta_10525(&frame);
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 0);
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// T7 / RED-on-revert: NAT-T IKE uses the same fine gate on both DNAT and
+// GRE-inner ingress; a non-ESP-marker UDP/4500 packet remains SA-gated data.
+fn t7_natt_4500_dnat_gre_and_esp_controls_10585() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let gre_dst = Ipv4Addr::new(10, 255, 0, 1);
+    let mut dnat_deny = dnat_to_self_snapshot_10525();
+    dnat_deny.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "198.51.100.10/32",
+        "203.0.113.9/32",
+        "any",
+    ));
+    for rule in dnat_deny.destination_nat_rules.iter_mut() {
+        rule.destination_port = 4500;
+        rule.pool_port = 4500;
+    }
+    let mut dnat_frame =
+        build_stage11_ike_v4_frame_10516(src, IKE_10525_VIP, 40_000, 4500, 0x1058_5007, 0);
+    dnat_frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
+    let dnat_meta = stage11_ipv4_udp_meta_10516(&dnat_frame, src, IKE_10525_VIP, 12, 40_000, 4500);
+    let dnat_ike = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10585(&dnat_deny, &dnat_frame, dnat_meta, &dnat_ike);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(dnat_ike.len(), 0);
+    assert_eq!(
+        dbg.policy_deny, 1,
+        "NAT-T DNAT fine deny counters: local={} policy={} host={}",
+        dbg.local, dbg.policy_deny, dbg.host_inbound_deny
+    );
+    assert_eq!(dbg.local, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+
+    let mut gre_deny = gre_to_self_snapshot();
+    gre_deny.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "198.51.100.10/32",
+        "10.255.0.1/32",
+        "any",
+    ));
+    let gre_frame = build_gre_inner_ike_frame_10585(src, gre_dst, 40_000, 4500, 0x1058_5008, 0);
+    let gre_meta = gre_ike_meta_10585(&gre_frame);
+    let gre_ike = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_gre_ike_poll_10585(&gre_deny, &gre_frame, gre_meta, &gre_ike);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(gre_ike.len(), 0);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(dbg.local, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+
+    let gre_control = gre_to_self_snapshot();
+    let gre_control_frame =
+        build_gre_inner_ike_frame_10585(src, gre_dst, 40_000, 4500, 0x1058_5009, 0);
+    let gre_control_meta = gre_ike_meta_10585(&gre_control_frame);
+    let gre_control_ike = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) = run_stage11_gre_ike_poll_10585(
+        &gre_control,
+        &gre_control_frame,
+        gre_control_meta,
+        &gre_control_ike,
+    );
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 1);
+    assert_eq!(queues, vec![true]);
+    assert_eq!(recycled, 1);
+    assert_eq!(gre_control_ike.len(), 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(dbg.local, 0);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+
+    let esp_frame = build_stage11_esp_udp_frame_10516(0x0102_0304);
+    let esp_meta = stage11_esp_udp_meta_10516(&esp_frame);
+    let mut esp_snapshot = dnat_to_self_snapshot_10525();
+    esp_snapshot.policies.push(junos_host_ike_deny_10585(
+        "lan",
+        "10.0.61.102/32",
+        "10.0.61.1/32",
+        "any",
+    ));
+    let esp_ike = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10585(&esp_snapshot, &esp_frame, esp_meta, &esp_ike);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(esp_ike.len(), 0);
+    assert_eq!(dbg.local, 0, "ESP-in-UDP must bypass junos-host IKE gating");
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+    let (_, delegated, sa_counters, recycled, queues) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &esp_snapshot,
+            &esp_frame,
+            esp_meta,
+            None,
+            false,
+            false,
+        );
+    assert_eq!(delegated.queued_packets, 0);
+    assert_eq!(queues, Vec::<bool>::new());
+    assert_eq!(recycled, 1);
+    assert_eq!(sa_counters.sa_miss_dropped_packets, 1);
+}
+
+#[test]
+// T8 / RED-on-revert: the v6 DNAT-to-self path must use the same fine policy
+// evaluation and same-family host-bound destination as v4.
+fn t8_v6_dnat_to_self_ike_application_any_deny_drops_10585() {
+    let src = "2001:db8:1058::10".parse::<Ipv6Addr>().unwrap();
+    let dst = "2001:db8:1058::9".parse::<Ipv6Addr>().unwrap();
+    let mut snapshot = v6_dnat_to_self_snapshot_10585();
+    snapshot.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "2001:db8:1058::10/128",
+        "2001:db8:1058::9/128",
+        "any",
+    ));
+    let frame = build_stage11_ike_v6_frame_10585(src, dst, 40_000, 500, 0x1058_500a, 0);
+    let meta = stage11_ipv6_udp_meta_10585(&frame, src, dst, 12, 40_000, 500);
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 0);
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+    let mut gre_snapshot = gre_to_self_snapshot_v6();
+    let gre_src = "2001:db8:1058::10".parse::<Ipv6Addr>().unwrap();
+    let gre_dst = "2001:db8:1058::1".parse::<Ipv6Addr>().unwrap();
+    for interface in gre_snapshot.interfaces.iter_mut() {
+        if interface.ifindex == 77 {
+            interface.addresses.push(InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8:1058::1/128".to_string(),
+                scope: 0,
+            });
+        }
+    }
+    gre_snapshot.policies.push(junos_host_ike_deny_10585(
+        "wan",
+        "2001:db8:1058::10/128",
+        "2001:db8:1058::1/128",
+        "any",
+    ));
+    let gre_frame =
+        build_gre_inner_ike_v6_frame_10585(gre_src, gre_dst, 40_000, 500, 0x1058_500c, 0);
+    let gre_meta = gre_to_self_outer_meta_v6(0, gre_frame.len());
+    let gre_ike = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_gre_ike_poll_10585(&gre_snapshot, &gre_frame, gre_meta, &gre_ike);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(gre_ike.len(), 0);
+    assert_eq!(dbg.local, 1);
+    assert_eq!(dbg.policy_deny, 1);
+    assert_eq!(batch.host_inbound_denied_packets, 0);
+}
+
+#[test]
+// T9 / control: GRE-inner coarse denial remains first and is not re-admitted
+// by the fine policy path.
+fn t9_gre_inner_coarse_deny_remains_first_10585() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let dst = Ipv4Addr::new(10, 255, 0, 1);
+    let mut snapshot = gre_to_self_snapshot();
+    for zone in snapshot.zones.iter_mut() {
+        zone.host_inbound_system_services.clear();
+    }
+    let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_500b, 0);
+    let meta = gre_ike_meta_10585(&frame);
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let (trusted, delegated, recycled, queues, batch, dbg) =
+        run_stage11_gre_ike_poll_10585(&snapshot, &frame, meta, &ike_exchanges);
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(ike_exchanges.len(), 0);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(dbg.local, 0);
     assert_eq!(batch.host_inbound_denied_packets, 1);
 }

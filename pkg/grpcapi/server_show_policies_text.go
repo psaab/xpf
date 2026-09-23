@@ -136,6 +136,40 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 	// the dataplane read) rather than surfacing live counts the operator
 	// did not enable.
 	statsEnabled := cfg.Security.PolicyStatsEnabled
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	isQuarantined := func(name string) bool {
+		_, ok := quarantinedZones[name]
+		return ok
+	}
+	qualifyZone := func(name string) string {
+		if isQuarantined(name) {
+			return name + " " + config.ZoneQuarantinePoliciesQualifier
+		}
+		return name
+	}
+	qualifyScopeLabel := func(zones []string, placeholder string) string {
+		label := config.ScopeLabelOr(zones, placeholder)
+		if len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+			return label
+		}
+		parts := strings.Fields(label)
+		for i, name := range parts {
+			parts[i] = qualifyZone(name)
+		}
+		return strings.Join(parts, " ")
+	}
+	scopeQuarantined := func(from, to []string) bool {
+		for _, name := range append(append([]string{}, from...), to...) {
+			if isQuarantined(name) {
+				return true
+			}
+		}
+		return false
+	}
 	// #3408: surface a per-policy counter read failure as a warning AFTER all
 	// reads rather than printing clean-zero hit counts.
 	var readErr error
@@ -190,10 +224,11 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 			case 2:
 				action = "reject"
 			}
+			ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
 			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 			var pkts, bytes uint64
 			published := true
-			if (statsEnabled || pol.Count) && readPolicy != nil {
+			if !ruleQuarantined && (statsEnabled || pol.Count) && readPolicy != nil {
 				counters, err := readPolicy(ruleID)
 				switch {
 				case err == nil:
@@ -207,14 +242,22 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 						readErr = err
 					}
 				}
-			} else if !statsEnabled && !pol.Count {
+			} else if !ruleQuarantined && !statsEnabled && !pol.Count {
 				statsDisabled++
 			}
 			totalPkts += pkts
 			totalBytes += bytes
+			fromDisplay := qualifyZone(zpp.FromZone)
+			toDisplay := qualifyZone(zpp.ToZone)
+			packetDisplay := policyCounterCell(pkts, published)
+			byteDisplay := policyCounterCell(bytes, published)
+			if ruleQuarantined {
+				packetDisplay = config.ZoneQuarantineLiveCountersUnavailable
+				byteDisplay = config.ZoneQuarantineLiveCountersUnavailable
+			}
 			fmt.Fprintf(buf, "%-12s %-12s %-24s %-8s %12s %16s\n",
-				zpp.FromZone, zpp.ToZone, pol.Name, action,
-				policyCounterCell(pkts, published), policyCounterCell(bytes, published))
+				fromDisplay, toDisplay, pol.Name, action,
+				packetDisplay, byteDisplay)
 		}
 		policySetID++
 	}
@@ -250,10 +293,11 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 			case 2:
 				action = "reject"
 			}
+			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
 			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 			var pkts, bytes uint64
 			published := true
-			if (statsEnabled || pol.Count) && readPolicy != nil {
+			if !ruleQuarantined && (statsEnabled || pol.Count) && readPolicy != nil {
 				counters, err := readPolicy(ruleID)
 				switch {
 				case err == nil:
@@ -267,7 +311,7 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 						readErr = err
 					}
 				}
-			} else if !statsEnabled && !pol.Count {
+			} else if !ruleQuarantined && !statsEnabled && !pol.Count {
 				statsDisabled++
 			}
 			totalPkts += pkts
@@ -275,11 +319,17 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 			// #3286/#4626: a scoped global (#3148) reports its zone SET in the
 			// From/To columns so the hit-count row is not ambiguous; an
 			// unscoped global keeps "*"/"*".
-			hcFrom := config.ScopeLabelOr(pol.Match.FromZones, "*")
-			hcTo := config.ScopeLabelOr(pol.Match.ToZones, "*")
+			hcFrom := qualifyScopeLabel(pol.Match.FromZones, "*")
+			hcTo := qualifyScopeLabel(pol.Match.ToZones, "*")
+			packetDisplay := policyCounterCell(pkts, published)
+			byteDisplay := policyCounterCell(bytes, published)
+			if ruleQuarantined {
+				packetDisplay = config.ZoneQuarantineLiveCountersUnavailable
+				byteDisplay = config.ZoneQuarantineLiveCountersUnavailable
+			}
 			fmt.Fprintf(buf, "%-12s %-12s %-24s %-8s %12s %16s\n",
 				hcFrom, hcTo, pol.Name, action,
-				policyCounterCell(pkts, published), policyCounterCell(bytes, published))
+				packetDisplay, byteDisplay)
 		}
 	}
 	// #3363: the IMPLICIT default-policy catch-all has a reserved hit counter
@@ -362,6 +412,45 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 	// the "Session statistics" block is per-policy hit-count display, so
 	// it must honor the knob for cross-surface consistency.
 	statsEnabled := cfg.Security.PolicyStatsEnabled
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	isQuarantined := func(name string) bool {
+		_, ok := quarantinedZones[name]
+		return ok
+	}
+	qualifyZone := func(name string) string {
+		if isQuarantined(name) {
+			return name + " " + config.ZoneQuarantinePoliciesQualifier
+		}
+		return name
+	}
+	qualifyScopeLabel := func(zones []string, placeholder string) string {
+		label := config.ScopeLabelOr(zones, placeholder)
+		if len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+			return label
+		}
+		parts := strings.Fields(label)
+		for i, name := range parts {
+			parts[i] = qualifyZone(name)
+		}
+		return strings.Join(parts, " ")
+	}
+	scopeQuarantined := func(from, to []string) bool {
+		for _, name := range from {
+			if isQuarantined(name) {
+				return true
+			}
+		}
+		for _, name := range to {
+			if isQuarantined(name) {
+				return true
+			}
+		}
+		return false
+	}
 	// #8177: policies whose "Session statistics" block was OMITTED because the
 	// knob is off and the rule carries no `count`. This surface had no trailing
 	// note of any kind — its #7016 sibling case prints "not available (not yet
@@ -422,12 +511,14 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 			policySetID++
 			continue
 		}
-		fmt.Fprintf(buf, "Policy: %s -> %s, State: enabled\n", zpp.FromZone, zpp.ToZone)
+		fmt.Fprintf(buf, "Policy: %s -> %s, State: enabled\n",
+			qualifyZone(zpp.FromZone), qualifyZone(zpp.ToZone))
 		for i, pol := range zpp.Policies {
 			// #3476: skip a nil rule like the runtime walker does.
 			if pol == nil {
 				continue
 			}
+			ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
 			action := "permit"
 			switch pol.Action {
 			case 1:
@@ -448,8 +539,8 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 				fmt.Fprintf(buf, "    Description: %s\n", pol.Description)
 			}
 			fmt.Fprintf(buf, "    Match:\n")
-			fmt.Fprintf(buf, "      Source zone: %s\n", zpp.FromZone)
-			fmt.Fprintf(buf, "      Destination zone: %s\n", zpp.ToZone)
+			fmt.Fprintf(buf, "      Source zone: %s\n", qualifyZone(zpp.FromZone))
+			fmt.Fprintf(buf, "      Destination zone: %s\n", qualifyZone(zpp.ToZone))
 			printAddrs("Source addresses", pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded)
 			printAddrs("Destination addresses", pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded)
 			fmt.Fprintf(buf, "      Applications:\n")
@@ -468,7 +559,9 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 			if pol.Count {
 				fmt.Fprintf(buf, "      count\n")
 			}
-			if (statsEnabled || pol.Count) && readPolicy != nil {
+			if ruleQuarantined {
+				fmt.Fprintf(buf, "    Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
+			} else if (statsEnabled || pol.Count) && readPolicy != nil {
 				counters, err := readPolicy(ruleID)
 				switch {
 				case err == nil:
@@ -514,6 +607,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 				fmt.Fprintf(buf, "Global policies:\n")
 				globalHeaderPrinted = true
 			}
+			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
 			action := "permit"
 			switch pol.Action {
 			case 1:
@@ -535,10 +629,12 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 			// SET; surface the configured scope so the detail view does not
 			// read as all-zones. Omitted for an unscoped global (no regression).
 			if len(pol.Match.FromZones) > 0 {
-				fmt.Fprintf(buf, "      Source zone: %s\n", config.ZoneScopeSetLabel(pol.Match.FromZones))
+				fmt.Fprintf(buf, "      Source zone: %s\n",
+					qualifyScopeLabel(pol.Match.FromZones, ""))
 			}
 			if len(pol.Match.ToZones) > 0 {
-				fmt.Fprintf(buf, "      Destination zone: %s\n", config.ZoneScopeSetLabel(pol.Match.ToZones))
+				fmt.Fprintf(buf, "      Destination zone: %s\n",
+					qualifyScopeLabel(pol.Match.ToZones, ""))
 			}
 			printAddrs("Source addresses", pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded)
 			printAddrs("Destination addresses", pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded)
@@ -558,7 +654,9 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 			if pol.Count {
 				fmt.Fprintf(buf, "      count\n")
 			}
-			if (statsEnabled || pol.Count) && readPolicy != nil {
+			if ruleQuarantined {
+				fmt.Fprintf(buf, "    Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
+			} else if (statsEnabled || pol.Count) && readPolicy != nil {
 				counters, err := readPolicy(ruleID)
 				switch {
 				case err == nil:

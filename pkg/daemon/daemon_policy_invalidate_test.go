@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"github.com/cilium/ebpf"
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -319,11 +321,13 @@ type policyInvalTestDP struct {
 	renameWire   []dpuserspace.PolicyRenameAncestry
 	renameRows   []dpuserspace.PolicySessionRebind
 	iterErr      error
-	// delErr, when non-nil, is returned by BatchDeleteSessions/V6 WITHOUT
-	// deleting anything — models a dataplane batch-delete that fails, so the
-	// MATCHED sessions stay INSTALLED. Exercises the delete-error propagation
-	// path in clearSessionsForPolicyIDs (#5578 stale-authorization gap).
-	delErr error
+	// delErr, when non-nil, is returned by BatchDeleteSessions/V6 after the
+	// configured prefix is removed. A zero prefix models a fully failed delete.
+	delErr          error
+	partialDeleteV4 int
+	partialDeleteV6 int
+	deletedV4       []dataplane.SessionKey
+	deletedV6       []dataplane.SessionKeyV6
 }
 
 func (d *policyInvalTestDP) Start(context.Context) error { return nil }
@@ -372,32 +376,54 @@ func (d *policyInvalTestDP) BatchIterateSessionsV6(fn func(dataplane.SessionKeyV
 	return nil
 }
 
-func (d *policyInvalTestDP) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) {
-	if d.delErr != nil {
-		// Model a failed batch delete: nothing is removed, so the matched
-		// sessions stay installed under their now-stale authorization.
-		return 0, d.delErr
+func (d *policyInvalTestDP) GetSessionV4(key dataplane.SessionKey) (dataplane.SessionValue, error) {
+	value, ok := d.v4[key]
+	if !ok {
+		return dataplane.SessionValue{}, ebpf.ErrKeyNotExist
 	}
+	return value, nil
+}
+
+func (d *policyInvalTestDP) GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
+	value, ok := d.v6[key]
+	if !ok {
+		return dataplane.SessionValueV6{}, ebpf.ErrKeyNotExist
+	}
+	return value, nil
+}
+
+func (d *policyInvalTestDP) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) {
 	n := 0
-	for _, k := range keys {
+	for i, k := range keys {
+		if d.delErr != nil && i >= d.partialDeleteV4 {
+			return n, d.delErr
+		}
+		d.deletedV4 = append(d.deletedV4, k)
 		if _, ok := d.v4[k]; ok {
 			delete(d.v4, k)
 			n++
 		}
 	}
+	if d.delErr != nil {
+		return n, d.delErr
+	}
 	return n, nil
 }
 
 func (d *policyInvalTestDP) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, error) {
-	if d.delErr != nil {
-		return 0, d.delErr
-	}
 	n := 0
-	for _, k := range keys {
+	for i, k := range keys {
+		if d.delErr != nil && i >= d.partialDeleteV6 {
+			return n, d.delErr
+		}
+		d.deletedV6 = append(d.deletedV6, k)
 		if _, ok := d.v6[k]; ok {
 			delete(d.v6, k)
 			n++
 		}
+	}
+	if d.delErr != nil {
+		return n, d.delErr
 	}
 	return n, nil
 }
@@ -493,6 +519,74 @@ func TestClearSessionsForPolicyIDsDeleteErrorPropagates(t *testing.T) {
 	}
 	if _, ok := dp.v6[webSessV6]; !ok {
 		t.Error("precondition: v6 session should still be present after a failed delete (models stale authorization)")
+	}
+}
+
+// TestDeleteInvalidatedSessionsErrorSyncsExactSet is the RED-on-revert cell
+// for #10598 policy invalidation: a partially successful V4/V6 delete returns
+// an error, but the HA queue receives only the keys actually deleted.
+func TestDeleteInvalidatedSessionsErrorSyncsExactSet(t *testing.T) {
+	_, _, store, firstV4, firstV6 := deletedPolicyInvalFixture()
+	secondV4 := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 3}, DstIP: [4]byte{10, 0, 0, 4},
+		SrcPort: 40002, DstPort: 22, Protocol: 6,
+	}
+	secondV6 := dataplane.SessionKeyV6{
+		SrcIP: [16]byte{0x20, 0x01, 15: 0x03}, DstIP: [16]byte{0x20, 0x01, 15: 0x04},
+		SrcPort: 40004, DstPort: 22, Protocol: 6,
+	}
+	store.v4[secondV4] = dataplane.SessionValue{State: dataplane.SessStateEstablished}
+	store.v6[secondV6] = dataplane.SessionValueV6{State: dataplane.SessStateEstablished}
+	store.delErr = errors.New("partial policy delete")
+	store.partialDeleteV4 = 1
+	store.partialDeleteV6 = 1
+
+	sender := cluster.NewSessionSync(":0", ":0", store)
+	sender.SetConnectedForTesting(true)
+	receiverStore := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			firstV4:  {State: dataplane.SessStateEstablished},
+			secondV4: {State: dataplane.SessStateEstablished},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			firstV6:  {State: dataplane.SessStateEstablished},
+			secondV6: {State: dataplane.SessStateEstablished},
+		},
+	}
+	receiver := cluster.NewSessionSync(":0", ":0", receiverStore)
+
+	d := &Daemon{
+		cluster:     newClusterManager(true),
+		sessionSync: sender,
+	}
+	d.setDataplane(store)
+	err := d.deleteInvalidatedSessions(capturedSessions{
+		targets: 1,
+		v4:      []dataplane.SessionEntryV4{{Key: firstV4}, {Key: secondV4}},
+		v6:      []dataplane.SessionEntryV6{{Key: firstV6}, {Key: secondV6}},
+	}, dataplane.DeleteReasonPolicyDeleted, "partial exact test")
+	if !errors.Is(err, store.delErr) {
+		t.Fatalf("deleteInvalidatedSessions error = %v, want %v", err, store.delErr)
+	}
+
+	types, applyErr := sender.ApplyQueuedMessagesForTesting(receiver)
+	if applyErr != nil {
+		t.Fatalf("apply queued delete messages: %v", applyErr)
+	}
+	if len(types) != 2 || types[0] != "delete_v4" || types[1] != "delete_v6" {
+		t.Fatalf("queued message types = %v, want [delete_v4 delete_v6]", types)
+	}
+	if len(receiverStore.deletedV4) != 1 || receiverStore.deletedV4[0] != firstV4 {
+		t.Fatalf("queued v4 deletes = %+v, want [%+v]", receiverStore.deletedV4, firstV4)
+	}
+	if len(receiverStore.deletedV6) != 1 || receiverStore.deletedV6[0] != firstV6 {
+		t.Fatalf("queued v6 deletes = %+v, want [%+v]", receiverStore.deletedV6, firstV6)
+	}
+	if _, ok := receiverStore.v4[secondV4]; !ok {
+		t.Fatalf("queued v4 over-sync removed retained key %+v", secondV4)
+	}
+	if _, ok := receiverStore.v6[secondV6]; !ok {
+		t.Fatalf("queued v6 over-sync removed retained key %+v", secondV6)
 	}
 }
 

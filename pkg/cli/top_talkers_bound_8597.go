@@ -178,7 +178,7 @@ func (c *topTalkerCollector) top(f sessionFilter, zoneNames map[uint16]string, n
 
 // zoneLabel renders the ingress->egress pair, falling back to the numeric id
 // for a zone the apply result does not name.
-func zoneLabel(zoneNames map[uint16]string, in, out uint16) string {
+func zoneLabel(f sessionFilter, zoneNames map[uint16]string, in, out uint16) string {
 	inZone := zoneNames[in]
 	outZone := zoneNames[out]
 	if inZone == "" {
@@ -187,6 +187,8 @@ func zoneLabel(zoneNames map[uint16]string, in, out uint16) string {
 	if outZone == "" {
 		outZone = strconv.FormatUint(uint64(out), 10)
 	}
+	inZone = f.zoneDisplay(in, inZone)
+	outZone = f.zoneDisplay(out, outZone)
 	return inZone + "->" + outZone
 }
 
@@ -203,7 +205,7 @@ func (cd *topTalkerCandidate) entry(f sessionFilter, zoneNames map[uint16]string
 			src:      fmt.Sprintf("[%s]:%d", srcIP, ntohs(key.SrcPort)),
 			dst:      fmt.Sprintf("[%s]:%d", dstIP, ntohs(key.DstPort)),
 			proto:    protoNameFromNum(key.Protocol),
-			zone:     zoneLabel(zoneNames, val.IngressZone, val.EgressZone),
+			zone:     zoneLabel(f, zoneNames, val.IngressZone, val.EgressZone),
 			state:    sessionStateName(val.State),
 			app:      appid.ResolveSessionName(f.appNames, f.cfg, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID),
 			fwdPkts:  val.FwdPackets,
@@ -224,7 +226,7 @@ func (cd *topTalkerCandidate) entry(f sessionFilter, zoneNames map[uint16]string
 		src:      fmt.Sprintf("%s:%d", srcIP, ntohs(key.SrcPort)),
 		dst:      fmt.Sprintf("%s:%d", dstIP, ntohs(key.DstPort)),
 		proto:    protoNameFromNum(key.Protocol),
-		zone:     zoneLabel(zoneNames, val.IngressZone, val.EgressZone),
+		zone:     zoneLabel(f, zoneNames, val.IngressZone, val.EgressZone),
 		state:    sessionStateName(val.State),
 		app:      appid.ResolveSessionName(f.appNames, f.cfg, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID),
 		fwdPkts:  val.FwdPackets,

@@ -1311,3 +1311,55 @@ func TestWalkUserspaceSessionDeltasDropsUnownedFabricRedirect6599(t *testing.T) 
 		t.Fatalf("expected the owned-ingress handoff to emit the session and its alias; got n=%d opens=%v", n, okSink.opensV4)
 	}
 }
+
+// #10589 (Leg A of the failover-before-rename joint): bind the WALK arm, not
+// just the predicate. The TestShouldSyncUserspaceDelta* cells prove
+// shouldSyncUserspaceDelta refuses a non-primary owner RG; this cell proves
+// the close arm of walkUserspaceSessionDeltas consults that same gate, so a
+// demoted ex-owner emits n=0 for a CLOSE and the new owner never learns the
+// close on the sync leg. The Rust joint
+// failover_before_rename_joint_purges_10589 assumes this n=0 precondition and
+// proves the receiver converges anyway via the removed-zone purge.
+func TestWalkDemotedOwnerCloseFilteredJointPrecondition10589(t *testing.T) {
+	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	// No SetZoneRGMap: OwnerRGID>0 short-circuits through the owner-RG gate
+	// before the zone fallback is ever consulted.
+	ss := &cluster.SessionSync{
+		IsPrimaryFn:      func() bool { return false },
+		IsPrimaryForRGFn: func(rgID int) bool { return false },
+	}
+	d := &Daemon{sessionSync: ss}
+
+	closed := dpuserspace.SessionDeltaInfo{
+		Event:         "close",
+		AddrFamily:    dataplane.AFInet,
+		Protocol:      6,
+		SrcIP:         "10.0.61.102",
+		DstIP:         "172.16.80.200",
+		SrcPort:       39906,
+		DstPort:       5201,
+		IngressZone:   "lan",
+		EgressZone:    "wan",
+		OwnerRGID:     2,
+		EgressIfindex: 12,
+		TXIfindex:     11,
+		TXVLANID:      80,
+		NeighborMAC:   "aa:bb:cc:dd:ee:ff",
+		SrcMAC:        "02:bf:72:00:50:08",
+		NATSrcIP:      "172.16.80.8",
+		NATSrcPort:    39906,
+	}
+	var sink captureDeltaSink
+	n := d.walkUserspaceSessionDeltas(ss, zoneIDs, []dpuserspace.SessionDeltaInfo{closed}, &sink)
+	if n != 0 || len(sink.deletesV4) != 0 {
+		t.Fatalf("expected the demoted-owner close to be filtered (n=0, no deletes); got n=%d deletes=%v", n, sink.deletesV4)
+	}
+
+	// Positive control: the same close from the primary for RG 2 emits the delete.
+	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 2 }
+	var okSink captureDeltaSink
+	n = d.walkUserspaceSessionDeltas(ss, zoneIDs, []dpuserspace.SessionDeltaInfo{closed}, &okSink)
+	if n != 1 || len(okSink.deletesV4) != 1 {
+		t.Fatalf("expected the primary-owner close to emit one delete; got n=%d deletes=%v", n, okSink.deletesV4)
+	}
+}

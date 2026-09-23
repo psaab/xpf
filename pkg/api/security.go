@@ -39,6 +39,7 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 			TcpRst:      zone.TCPRst,
 			Interfaces:  zone.Interfaces,
 		}
+		quarantined := config.ZoneQuarantineExcludedReason(zoneName, cfg) != ""
 		if zone.ScreenProfile != "" {
 			zi.ScreenProfile = zone.ScreenProfile
 		}
@@ -94,7 +95,12 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 		if cr != nil {
 			if id, ok := cr.ZoneIDs[zoneName]; ok {
 				zi.ID = id
-				if s.dp != nil && s.dp.IsLoaded() {
+				// A quarantined name shares its stable id with the survivor, but
+				// its interfaces and policy references would be omitted if this
+				// snapshot is applied. Never attribute the survivor's live volume
+				// to that desired-config row: keep the existing fields and leave
+				// the four counts at their zero values with availability false.
+				if !quarantined && s.dp != nil && s.dp.IsLoaded() {
 					ing, errIn := s.dp.ReadZoneCounters(id, 0)
 					eg, errOut := s.dp.ReadZoneCounters(id, 1)
 					switch {
@@ -160,6 +166,53 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 	// collector and the CLI/gRPC display surfaces. When the knob is off,
 	// hit_packets/hit_bytes stay 0 (we skip the dataplane read).
 	statsEnabled := cfg.Security.PolicyStatsEnabled
+	// #10530: policy inventory remains an authored-config view, but a rule
+	// whose endpoint/scope is quarantined would be scrubbed from the applied
+	// snapshot. Reuse the config verdict once per request so the existing
+	// fields can distinguish "0 hits" from "no live attribution" without
+	// changing the REST schema.
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	isQuarantinedZone := func(name string) bool {
+		_, ok := quarantinedZones[name]
+		return ok
+	}
+	appendPolicyQualifier := func(description string) string {
+		if strings.Contains(description, config.ZoneQuarantinePoliciesQualifier) {
+			return description
+		}
+		if description == "" {
+			return config.ZoneQuarantinePoliciesQualifier
+		}
+		return description + " " + config.ZoneQuarantinePoliciesQualifier
+	}
+	pruneQuarantinedScope := func(scope []string) ([]string, bool) {
+		if len(scope) == 0 {
+			return scope, false
+		}
+		pruned := make([]string, 0, len(scope))
+		touched := false
+		for _, name := range scope {
+			if isQuarantinedZone(name) {
+				touched = true
+				continue
+			}
+			pruned = append(pruned, name)
+		}
+		if !touched {
+			return scope, false
+		}
+		// Keep an explicitly empty result as an empty display scope. Do not
+		// turn a configured side whose every member was quarantined into the
+		// all-zones wildcard; the qualifier marks it as a scrubbed candidate.
+		// PolicyRule uses omitempty for the plural fields, so a fully-pruned
+		// side may be absent on the wire; consumers must not read empty/missing
+		// plural scope alone as an all-zones wildcard.
+		return pruned, true
+	}
 	// #3408: surface a per-policy counter read failure as HTTP 500 after
 	// building, rather than reporting clean-zero hit counts.
 	var readErr error
@@ -212,6 +265,7 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 			if rule == nil {
 				continue
 			}
+			ruleQuarantined := isQuarantinedZone(zpp.FromZone) || isQuarantinedZone(zpp.ToZone)
 			pr := PolicyRule{
 				Name:        rule.Name,
 				Description: rule.Description,
@@ -249,8 +303,14 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 			if pr.Applications == nil {
 				pr.Applications = []string{}
 			}
+			if ruleQuarantined {
+				pr.Description = appendPolicyQualifier(pr.Description)
+				if statsEnabled || rule.Count {
+					pr.HitCountersUnavailable = true
+				}
+			}
 
-			if statsEnabled || rule.Count {
+			if !ruleQuarantined && (statsEnabled || rule.Count) {
 				if readPolicy != nil {
 					// #3474: the counter read handle MUST use the RAW slice
 					// index i, not len(pi.Rules) (the compacted, nil-skipped
@@ -318,6 +378,9 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 			if rule == nil {
 				continue
 			}
+			displayFromZones, fromScopeQuarantined := pruneQuarantinedScope(rule.Match.FromZones)
+			displayToZones, toScopeQuarantined := pruneQuarantinedScope(rule.Match.ToZones)
+			scopeQuarantined := fromScopeQuarantined || toScopeQuarantined
 			pr := PolicyRule{
 				Name:        rule.Name,
 				Description: rule.Description,
@@ -334,11 +397,15 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 				// a global narrowed to a zone list is not reported as
 				// all-zones. The singular fields keep the first zone for
 				// backward compatibility; the plural fields carry the full
-				// set. Empty for an unscoped global — no regression.
+				// set. Empty for an unscoped global — no regression. Keep
+				// these authored singular fields even when a quarantined
+				// member is pruned from the new plural display copies: this
+				// REST compatibility split intentionally differs from the
+				// runtime snapshot, which regenerates singulars from survivors.
 				MatchFromZone:  config.ScopeSingular(rule.Match.FromZones),
 				MatchToZone:    config.ScopeSingular(rule.Match.ToZones),
-				MatchFromZones: rule.Match.FromZones,
-				MatchToZones:   rule.Match.ToZones,
+				MatchFromZones: displayFromZones,
+				MatchToZones:   displayToZones,
 				// #3336: match-inversion flags + independent log modes + runtime
 				// identity. The global rule_id uses the "junos-global" sentinel
 				// zones, matching the snapshot builder so it joins to the same
@@ -362,8 +429,14 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 			if pr.Applications == nil {
 				pr.Applications = []string{}
 			}
+			if scopeQuarantined {
+				pr.Description = appendPolicyQualifier(pr.Description)
+				if statsEnabled || rule.Count {
+					pr.HitCountersUnavailable = true
+				}
+			}
 
-			if statsEnabled || rule.Count {
+			if !scopeQuarantined && (statsEnabled || rule.Count) {
 				if readPolicy != nil {
 					policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 					ctrs, err := readPolicy(policyID)

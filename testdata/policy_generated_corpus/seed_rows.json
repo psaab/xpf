@@ -1,0 +1,4708 @@
+{
+  "_note": "Generated aggregate of rows/*.json; do not hand-edit.",
+  "rows": [
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "id": "boundary-port-0",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 0,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 0,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "exact-zone-pair-permit"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "id": "boundary-port-1",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 1,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "port-boundary"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "id": "boundary-port-65535",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 65535,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 65535,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "port-boundary"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy permit-all"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "default-policy-permit-all-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "default-policy-permit-all"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy permit-all"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "default-port-boundary",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 65535,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 0,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "default-policy-permit-all"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh then deny",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-deny-ssh"
+      },
+      "id": "duplicate-tier-deny-first",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 22,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-deny-ssh"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-ssh",
+            "rule_id": "trust->untrust/p-deny-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh then permit",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match application any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest then deny"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-permit-ssh"
+      },
+      "id": "duplicate-tier-permit-first",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 22,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-permit-ssh"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-permit-ssh",
+            "rule_id": "trust->untrust/p-permit-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-rest",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-deny-rest",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair-permit-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "empty-policy-deny-all",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "empty-policy-deny-all"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy zp-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy zp-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy zp-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy zp-allow then permit",
+        "set security policies global policy g-deny match from-zone trust",
+        "set security policies global policy g-deny match to-zone untrust",
+        "set security policies global policy g-deny match source-address any",
+        "set security policies global policy g-deny match destination-address any",
+        "set security policies global policy g-deny match application any",
+        "set security policies global policy g-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "zp-allow"
+      },
+      "id": "exact-pair-outranks-scoped-global-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "zp-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "zp-allow",
+            "rule_id": "trust->untrust/zp-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "junos-global",
+            "match_from_zone": "trust",
+            "match_from_zones": [
+              "trust"
+            ],
+            "match_to_zone": "untrust",
+            "match_to_zones": [
+              "untrust"
+            ],
+            "name": "g-deny",
+            "policy_id": 256,
+            "rule_id": "junos-global->junos-global/g-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-global"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "exact-pair-outranks-scoped-global"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "id": "exact-zone-pair-permit-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "exact-zone-pair-permit"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "exact-zone-pair-permit-02",
+      "query": {
+        "dst_ip": "10.0.1.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "untrust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.2.5",
+        "src_port": 1234,
+        "to_zone": "trust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "exact-zone-pair-permit"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address a-lab 10.0.1.100/32",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match source-address a-lab",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match source-address-excluded",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match application any",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "excluded-source-address-scoping-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.100",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 3495241515,
+            "name": "a-lab",
+            "prefixes_v4": [
+              "10.0.1.100/32"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-nonlab",
+            "rule_id": "trust->untrust/p-nonlab",
+            "source_address_excluded": true,
+            "source_addresses": [
+              "10.0.1.100/32"
+            ],
+            "source_book_ids": [
+              3495241515
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "excluded-source-address-scoping"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address a-lab 10.0.1.100/32",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match source-address a-lab",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match source-address-excluded",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab match application any",
+        "set security policies from-zone trust to-zone untrust policy p-nonlab then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-nonlab"
+      },
+      "id": "excluded-source-address-scoping-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.101",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-nonlab"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 3495241515,
+            "name": "a-lab",
+            "prefixes_v4": [
+              "10.0.1.100/32"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-nonlab",
+            "rule_id": "trust->untrust/p-nonlab",
+            "source_address_excluded": true,
+            "source_addresses": [
+              "10.0.1.100/32"
+            ],
+            "source_book_ids": [
+              3495241515
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "excluded-source-address-scoping"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh then deny",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-allow"
+      },
+      "id": "first-match-port-1",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 1,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-ssh",
+            "rule_id": "trust->untrust/p-deny-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh then deny",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-allow"
+      },
+      "id": "first-match-port-65535",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 65535,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 65535,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-ssh",
+            "rule_id": "trust->untrust/p-deny-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh then deny",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-deny-ssh"
+      },
+      "id": "first-match-wins-within-a-pair-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 22,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-deny-ssh"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-ssh",
+            "rule_id": "trust->untrust/p-deny-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-deny-ssh then deny",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-allow"
+      },
+      "id": "first-match-wins-within-a-pair-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-ssh",
+            "rule_id": "trust->untrust/p-deny-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh then permit",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match application any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest then deny"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-permit-ssh"
+      },
+      "id": "first-match-wins-within-a-pair-permit-first-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 22,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-permit-ssh"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-permit-ssh",
+            "rule_id": "trust->untrust/p-permit-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-rest",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-deny-rest",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair-permit-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-ssh protocol tcp",
+        "set applications application app-ssh destination-port 22",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh match application app-ssh",
+        "set security policies from-zone trust to-zone untrust policy p-permit-ssh then permit",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest match application any",
+        "set security policies from-zone trust to-zone untrust policy p-deny-rest then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-deny-rest"
+      },
+      "id": "first-match-wins-within-a-pair-permit-first-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "p-deny-rest"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "app-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "app-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-permit-ssh",
+            "rule_id": "trust->untrust/p-permit-ssh",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          },
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-deny-rest",
+            "policy_id": 1,
+            "rule_id": "trust->untrust/p-deny-rest",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "first-match-wins-within-a-pair-permit-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-icmp protocol icmp",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match application app-icmp",
+        "set security policies from-zone trust to-zone untrust policy p-icmp then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-icmp"
+      },
+      "id": "icmp-type-zero-code-zero",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 0,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": 0,
+        "icmp_type": 0,
+        "l4_present": true,
+        "protocol": "icmp",
+        "src_ip": "10.0.1.5",
+        "src_port": 0,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-icmp"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "application_terms": [
+              {
+                "name": "app-icmp",
+                "protocol": "icmp"
+              }
+            ],
+            "applications": [
+              "app-icmp"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-icmp",
+            "rule_id": "trust->untrust/p-icmp",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "icmp-unknown-application"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-icmp protocol icmp",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match application app-icmp",
+        "set security policies from-zone trust to-zone untrust policy p-icmp then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-icmp"
+      },
+      "id": "icmp-unknown-application-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 0,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "icmp",
+        "src_ip": "10.0.1.5",
+        "src_port": 0,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-icmp"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "application_terms": [
+              {
+                "name": "app-icmp",
+                "protocol": "icmp"
+              }
+            ],
+            "applications": [
+              "app-icmp"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-icmp",
+            "rule_id": "trust->untrust/p-icmp",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "icmp-unknown-application"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set applications application app-icmp protocol icmp",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-icmp match application app-icmp",
+        "set security policies from-zone trust to-zone untrust policy p-icmp then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "icmp-unknown-application-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 0,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "udp",
+        "src_ip": "10.0.1.5",
+        "src_port": 0,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "application_terms": [
+              {
+                "name": "app-icmp",
+                "protocol": "icmp"
+              }
+            ],
+            "applications": [
+              "app-icmp"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-icmp",
+            "rule_id": "trust->untrust/p-icmp",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "icmp-unknown-application"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address trust-net 10.0.0.0/8",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match source-address trust-net",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match application junos-ssh",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh then deny",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match source-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match application any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "block-host-ssh"
+      },
+      "id": "junos-host-fragment-associated-deny-01",
+      "query": {
+        "dst_ip": "10.0.1.1",
+        "dst_port": 22,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "junos-host"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "block-host-ssh"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 488896378,
+            "name": "trust-net",
+            "prefixes_v4": [
+              "10.0.0.0/8"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "junos-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "junos-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "block-host-ssh",
+            "rule_id": "trust->junos-host/block-host-ssh",
+            "source_addresses": [
+              "10.0.0.0/8"
+            ],
+            "source_book_ids": [
+              488896378
+            ],
+            "to_zone": "junos-host"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "permit-host-all",
+            "policy_id": 1,
+            "rule_id": "trust->junos-host/permit-host-all",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-host"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "junos-host-fragment-associated-deny"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address trust-net 10.0.0.0/8",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match source-address trust-net",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match application junos-ssh",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh then deny",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match source-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match application any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "permit-host-all"
+      },
+      "id": "junos-host-fragment-associated-deny-02",
+      "query": {
+        "dst_ip": "10.0.1.1",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "junos-host"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "permit-host-all"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 488896378,
+            "name": "trust-net",
+            "prefixes_v4": [
+              "10.0.0.0/8"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "junos-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "junos-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "block-host-ssh",
+            "rule_id": "trust->junos-host/block-host-ssh",
+            "source_addresses": [
+              "10.0.0.0/8"
+            ],
+            "source_book_ids": [
+              488896378
+            ],
+            "to_zone": "junos-host"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "permit-host-all",
+            "policy_id": 1,
+            "rule_id": "trust->junos-host/permit-host-all",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-host"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "junos-host-fragment-associated-deny"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address trust-net 10.0.0.0/8",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match source-address trust-net",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match application junos-ssh",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh then deny",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match source-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match application any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "block-host-ssh"
+      },
+      "id": "junos-host-fragment-associated-deny-03",
+      "query": {
+        "dst_ip": "10.0.1.1",
+        "dst_port": 0,
+        "frag": true,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": false,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 0,
+        "to_zone": "junos-host"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "block-host-ssh"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 488896378,
+            "name": "trust-net",
+            "prefixes_v4": [
+              "10.0.0.0/8"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "junos-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "junos-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "block-host-ssh",
+            "rule_id": "trust->junos-host/block-host-ssh",
+            "source_addresses": [
+              "10.0.0.0/8"
+            ],
+            "source_book_ids": [
+              488896378
+            ],
+            "to_zone": "junos-host"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "permit-host-all",
+            "policy_id": 1,
+            "rule_id": "trust->junos-host/permit-host-all",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-host"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "junos-host-fragment-associated-deny"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address trust-net 10.0.0.0/8",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match source-address trust-net",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh match application junos-ssh",
+        "set security policies from-zone trust to-zone junos-host policy block-host-ssh then deny",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match source-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match destination-address any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all match application any",
+        "set security policies from-zone trust to-zone junos-host policy permit-host-all then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "permit-host-all"
+      },
+      "id": "junos-host-fragment-associated-deny-04",
+      "query": {
+        "dst_ip": "10.0.1.1",
+        "dst_port": 0,
+        "frag": true,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": false,
+        "protocol": "tcp",
+        "src_ip": "192.168.9.9",
+        "src_port": 0,
+        "to_zone": "junos-host"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 1,
+        "policy_name": "permit-host-all"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 488896378,
+            "name": "trust-net",
+            "prefixes_v4": [
+              "10.0.0.0/8"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "application_terms": [
+              {
+                "destination_port": "22",
+                "name": "junos-ssh",
+                "protocol": "tcp"
+              }
+            ],
+            "applications": [
+              "junos-ssh"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "block-host-ssh",
+            "rule_id": "trust->junos-host/block-host-ssh",
+            "source_addresses": [
+              "10.0.0.0/8"
+            ],
+            "source_book_ids": [
+              488896378
+            ],
+            "to_zone": "junos-host"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "permit-host-all",
+            "policy_id": 1,
+            "rule_id": "trust->junos-host/permit-host-all",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-host"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "junos-host-fragment-associated-deny"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "id": "mapped-v6-source",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "::ffff:10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "exact-zone-pair-permit"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy permit-all",
+        "set security policies from-zone trust to-zone untrust policy p-reject match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-reject match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-reject match application any",
+        "set security policies from-zone trust to-zone untrust policy p-reject then reject"
+      ],
+      "go_verdict": {
+        "action": "reject",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-reject"
+      },
+      "id": "named-policy-then-reject-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "reject",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-reject"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "reject",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-reject",
+            "rule_id": "trust->untrust/p-reject",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "named-policy-then-reject"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy permit-all",
+        "set security policies from-zone trust to-zone untrust policy p-reject match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-reject match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-reject match application any",
+        "set security policies from-zone trust to-zone untrust policy p-reject then reject"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "named-policy-then-reject-02",
+      "query": {
+        "dst_ip": "10.0.1.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "untrust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.2.5",
+        "src_port": 1234,
+        "to_zone": "trust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "reject",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-reject",
+            "rule_id": "trust->untrust/p-reject",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "named-policy-then-reject"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies global policy g-deny match from-zone trust",
+        "set security policies global policy g-deny match source-address any",
+        "set security policies global policy g-deny match destination-address any",
+        "set security policies global policy g-deny match application any",
+        "set security policies global policy g-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny"
+      },
+      "id": "scoped-global-applies-only-in-scope-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "junos-global",
+            "match_from_zone": "trust",
+            "match_from_zones": [
+              "trust"
+            ],
+            "name": "g-deny",
+            "rule_id": "junos-global->junos-global/g-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-global"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "scoped-global-applies-only-in-scope"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies global policy g-deny match from-zone trust",
+        "set security policies global policy g-deny match source-address any",
+        "set security policies global policy g-deny match destination-address any",
+        "set security policies global policy g-deny match application any",
+        "set security policies global policy g-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "scoped-global-applies-only-in-scope-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "dmz",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.3.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "junos-global",
+            "match_from_zone": "trust",
+            "match_from_zones": [
+              "trust"
+            ],
+            "name": "g-deny",
+            "rule_id": "junos-global->junos-global/g-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-global"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "scoped-global-applies-only-in-scope"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies from-zone any to-zone any policy any-to-untrust-deny match source-address any",
+        "set security policies from-zone any to-zone any policy any-to-untrust-deny match destination-address any",
+        "set security policies from-zone any to-zone any policy any-to-untrust-deny match application any",
+        "set security policies from-zone any to-zone any policy any-to-untrust-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "id": "single-tier-both-any",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "any-to-untrust-deny",
+            "rule_id": "any->any/any-to-untrust-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "any"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "zone-pair-wildcards"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone trust to-zone untrust policy p-allow match source-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-allow match application any",
+        "set security policies from-zone trust to-zone untrust policy p-allow then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "id": "single-tier-exact",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-allow"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-allow",
+            "rule_id": "trust->untrust/p-allow",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "exact-zone-pair-permit"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies global policy g-deny-all match source-address any",
+        "set security policies global policy g-deny-all match destination-address any",
+        "set security policies global policy g-deny-all match application any",
+        "set security policies global policy g-deny-all then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny-all"
+      },
+      "id": "single-tier-global",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny-all"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "junos-global",
+            "name": "g-deny-all",
+            "rule_id": "junos-global->junos-global/g-deny-all",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-global"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "unscoped-global-applies-everywhere"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match source-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match destination-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match application any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "id": "single-tier-single-wildcard",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "any-to-untrust-deny",
+            "rule_id": "any->untrust/any-to-untrust-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "zone-pair-wildcards"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone any to-zone trust policy from-any-deny match source-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match destination-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match application any",
+        "set security policies from-zone any to-zone trust policy from-any-deny then deny",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match source-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match destination-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match application any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "from-any-deny"
+      },
+      "id": "single-wildcard-tier-deny-first-01",
+      "query": {
+        "dst_ip": "10.0.1.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "untrust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.2.5",
+        "src_port": 1234,
+        "to_zone": "trust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "from-any-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "from-any-deny",
+            "rule_id": "any->trust/from-any-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "trust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "untrust",
+            "name": "to-any-permit",
+            "policy_id": 256,
+            "rule_id": "untrust->any/to-any-permit",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "any"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "single-wildcard-tier-deny-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone any to-zone trust policy from-any-deny match source-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match destination-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match application any",
+        "set security policies from-zone any to-zone trust policy from-any-deny then deny",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match source-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match destination-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match application any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "from-any-deny"
+      },
+      "id": "single-wildcard-tier-deny-first-02",
+      "query": {
+        "dst_ip": "10.0.1.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "dmz",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.3.5",
+        "src_port": 1234,
+        "to_zone": "trust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "from-any-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "from-any-deny",
+            "rule_id": "any->trust/from-any-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "trust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "untrust",
+            "name": "to-any-permit",
+            "policy_id": 256,
+            "rule_id": "untrust->any/to-any-permit",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "any"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "single-wildcard-tier-deny-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone any to-zone trust policy from-any-deny match source-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match destination-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match application any",
+        "set security policies from-zone any to-zone trust policy from-any-deny then deny",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match source-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match destination-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match application any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 256,
+        "policy_name": "to-any-permit"
+      },
+      "id": "single-wildcard-tier-deny-first-03",
+      "query": {
+        "dst_ip": "10.0.3.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "untrust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.2.5",
+        "src_port": 1234,
+        "to_zone": "dmz"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 256,
+        "policy_name": "to-any-permit"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "from-any-deny",
+            "rule_id": "any->trust/from-any-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "trust"
+          },
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "untrust",
+            "name": "to-any-permit",
+            "policy_id": 256,
+            "rule_id": "untrust->any/to-any-permit",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "any"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "single-wildcard-tier-deny-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match source-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match destination-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match application any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit then permit",
+        "set security policies from-zone any to-zone trust policy from-any-deny match source-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match destination-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match application any",
+        "set security policies from-zone any to-zone trust policy from-any-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "to-any-permit"
+      },
+      "id": "single-wildcard-tier-permit-first-01",
+      "query": {
+        "dst_ip": "10.0.1.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "untrust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.2.5",
+        "src_port": 1234,
+        "to_zone": "trust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "to-any-permit"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "untrust",
+            "name": "to-any-permit",
+            "rule_id": "untrust->any/to-any-permit",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "any"
+          },
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "from-any-deny",
+            "policy_id": 256,
+            "rule_id": "any->trust/from-any-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "trust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "single-wildcard-tier-permit-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match source-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match destination-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match application any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit then permit",
+        "set security policies from-zone any to-zone trust policy from-any-deny match source-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match destination-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match application any",
+        "set security policies from-zone any to-zone trust policy from-any-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 256,
+        "policy_name": "from-any-deny"
+      },
+      "id": "single-wildcard-tier-permit-first-02",
+      "query": {
+        "dst_ip": "10.0.1.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "dmz",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.3.5",
+        "src_port": 1234,
+        "to_zone": "trust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 256,
+        "policy_name": "from-any-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "untrust",
+            "name": "to-any-permit",
+            "rule_id": "untrust->any/to-any-permit",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "any"
+          },
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "from-any-deny",
+            "policy_id": 256,
+            "rule_id": "any->trust/from-any-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "trust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "single-wildcard-tier-permit-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy deny-all",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match source-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match destination-address any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit match application any",
+        "set security policies from-zone untrust to-zone any policy to-any-permit then permit",
+        "set security policies from-zone any to-zone trust policy from-any-deny match source-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match destination-address any",
+        "set security policies from-zone any to-zone trust policy from-any-deny match application any",
+        "set security policies from-zone any to-zone trust policy from-any-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "to-any-permit"
+      },
+      "id": "single-wildcard-tier-permit-first-03",
+      "query": {
+        "dst_ip": "10.0.3.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "untrust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.2.5",
+        "src_port": 1234,
+        "to_zone": "dmz"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "to-any-permit"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "untrust",
+            "name": "to-any-permit",
+            "rule_id": "untrust->any/to-any-permit",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "any"
+          },
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "from-any-deny",
+            "policy_id": 256,
+            "rule_id": "any->trust/from-any-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "trust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "single-wildcard-tier-permit-first"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address a-lab 10.0.1.100/32",
+        "set security policies from-zone trust to-zone untrust policy p-lab match source-address a-lab",
+        "set security policies from-zone trust to-zone untrust policy p-lab match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-lab match application any",
+        "set security policies from-zone trust to-zone untrust policy p-lab then permit"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-lab"
+      },
+      "id": "source-address-scoping-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.100",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "p-lab"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 3495241515,
+            "name": "a-lab",
+            "prefixes_v4": [
+              "10.0.1.100/32"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-lab",
+            "rule_id": "trust->untrust/p-lab",
+            "source_addresses": [
+              "10.0.1.100/32"
+            ],
+            "source_book_ids": [
+              3495241515
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "source-address-scoping"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security policies default-policy deny-all",
+        "set security address-book global address a-lab 10.0.1.100/32",
+        "set security policies from-zone trust to-zone untrust policy p-lab match source-address a-lab",
+        "set security policies from-zone trust to-zone untrust policy p-lab match destination-address any",
+        "set security policies from-zone trust to-zone untrust policy p-lab match application any",
+        "set security policies from-zone trust to-zone untrust policy p-lab then permit"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "source-address-scoping-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.101",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "address_books": [
+          {
+            "id": 3495241515,
+            "name": "a-lab",
+            "prefixes_v4": [
+              "10.0.1.100/32"
+            ]
+          }
+        ],
+        "default_policy": "deny",
+        "rules": [
+          {
+            "action": "permit",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "trust",
+            "name": "p-lab",
+            "rule_id": "trust->untrust/p-lab",
+            "source_addresses": [
+              "10.0.1.100/32"
+            ],
+            "source_book_ids": [
+              3495241515
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "source-address-scoping"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies global policy g-deny-all match source-address any",
+        "set security policies global policy g-deny-all match destination-address any",
+        "set security policies global policy g-deny-all match application any",
+        "set security policies global policy g-deny-all then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny-all"
+      },
+      "id": "unscoped-global-applies-everywhere-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny-all"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "junos-global",
+            "name": "g-deny-all",
+            "rule_id": "junos-global->junos-global/g-deny-all",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-global"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "unscoped-global-applies-everywhere"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies global policy g-deny-all match source-address any",
+        "set security policies global policy g-deny-all match destination-address any",
+        "set security policies global policy g-deny-all match application any",
+        "set security policies global policy g-deny-all then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny-all"
+      },
+      "id": "unscoped-global-applies-everywhere-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "dmz",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.3.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "g-deny-all"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "junos-global",
+            "name": "g-deny-all",
+            "rule_id": "junos-global->junos-global/g-deny-all",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "junos-global"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "unscoped-global-applies-everywhere"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match source-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match destination-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match application any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "id": "zone-pair-wildcards-01",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "any-to-untrust-deny",
+            "rule_id": "any->untrust/any-to-untrust-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "zone-pair-wildcards"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match source-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match destination-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match application any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "id": "zone-pair-wildcards-02",
+      "query": {
+        "dst_ip": "10.0.2.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "dmz",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.3.5",
+        "src_port": 1234,
+        "to_zone": "untrust"
+      },
+      "rust_verdict": {
+        "action": "deny",
+        "default_used": false,
+        "matched": true,
+        "policy_id": 0,
+        "policy_name": "any-to-untrust-deny"
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "any-to-untrust-deny",
+            "rule_id": "any->untrust/any-to-untrust-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "zone-pair-wildcards"
+    },
+    {
+      "config_set_lines": [
+        "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+        "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
+        "set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24",
+        "set security zones security-zone trust interfaces ge-0/0/0.0",
+        "set security zones security-zone untrust interfaces ge-0/0/1.0",
+        "set security zones security-zone dmz interfaces ge-0/0/2.0",
+        "set security policies default-policy permit-all",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match source-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match destination-address any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny match application any",
+        "set security policies from-zone any to-zone untrust policy any-to-untrust-deny then deny"
+      ],
+      "go_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "id": "zone-pair-wildcards-03",
+      "query": {
+        "dst_ip": "10.0.3.5",
+        "dst_port": 80,
+        "frag": false,
+        "from_zone": "trust",
+        "icmp_code": null,
+        "icmp_type": null,
+        "l4_present": true,
+        "protocol": "tcp",
+        "src_ip": "10.0.1.5",
+        "src_port": 1234,
+        "to_zone": "dmz"
+      },
+      "rust_verdict": {
+        "action": "permit",
+        "default_used": true,
+        "matched": false,
+        "policy_id": 0,
+        "policy_name": ""
+      },
+      "schema_version": 1,
+      "snapshot": {
+        "default_policy": "permit",
+        "rules": [
+          {
+            "action": "deny",
+            "applications": [
+              "any"
+            ],
+            "destination_addresses": [
+              "any"
+            ],
+            "destination_literals": [
+              "any"
+            ],
+            "from_zone": "any",
+            "name": "any-to-untrust-deny",
+            "rule_id": "any->untrust/any-to-untrust-deny",
+            "source_addresses": [
+              "any"
+            ],
+            "source_literals": [
+              "any"
+            ],
+            "to_zone": "untrust"
+          }
+        ],
+        "zones": [
+          {
+            "host_inbound_configured": true,
+            "id": 56918,
+            "name": "dmz"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 50675,
+            "name": "trust"
+          },
+          {
+            "host_inbound_configured": true,
+            "id": 20665,
+            "name": "untrust"
+          }
+        ]
+      },
+      "source_case": "zone-pair-wildcards"
+    }
+  ],
+  "schema_version": 1
+}

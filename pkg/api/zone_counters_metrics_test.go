@@ -387,6 +387,50 @@ func TestZoneUnpopulatedGaugeMatchesRESTAvailability(t *testing.T) {
 	}
 }
 
+func TestZoneUnpopulatedGaugeMatchesRESTQuarantineCollision10530(t *testing.T) {
+	s, ids := quarantinedZonesConfig10530(t)
+	mgr := dataplane.New()
+	mgr.SetZoneCounterOffset(ids["z174"],
+		dataplane.CounterValue{Packets: 1, Bytes: 100},
+		dataplane.CounterValue{Packets: 2, Bytes: 200})
+	mgr.SetZoneCounterOffset(ids["trust"],
+		dataplane.CounterValue{Packets: 3, Bytes: 300},
+		dataplane.CounterValue{Packets: 4, Bytes: 400})
+	dp := &zoneRealReadDP{&descriptorCoverageDP{
+		Manager: mgr,
+		apply:   &dataplane.ApplyResult{ZoneIDs: ids},
+	}}
+	s.dp = dp
+	c := newCollector(s)
+
+	_, unpopulated := zoneSamples(t, c, dp)
+	if unpopulated != 1 {
+		t.Fatalf("xpf_zone_counters_unpopulated_zones = %v, want 1 quarantined zone", unpopulated)
+	}
+
+	rr := httptest.NewRecorder()
+	s.zonesHandler(rr, httptest.NewRequest(http.MethodGet, "/api/v1/security/zones", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("zonesHandler status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Data []ZoneInfo `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal zones response: %v; body=%s", err, rr.Body.String())
+	}
+	var restUnavailable int
+	for _, z := range resp.Data {
+		if !z.PerZoneCountersAvailable {
+			restUnavailable++
+		}
+	}
+	if restUnavailable != int(unpopulated) {
+		t.Fatalf("REST reports %d unavailable zones but gauge reports %v; collision surfaces diverged",
+			restUnavailable, unpopulated)
+	}
+}
+
 // TestZonesHandlerZoneCountersNotAvailable is the #3643 REST pin, retained: a
 // zone whose stable-hash id is >= MaxZones must NOT 500 the /security/zones
 // endpoint when its counters are unpopulated. It returns 200 with

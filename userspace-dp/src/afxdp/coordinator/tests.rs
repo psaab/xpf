@@ -424,6 +424,573 @@ fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
     );
 }
 
+/// #10540 (negative leg 1): an EMPTY row set WITHDRAWS the previously
+/// published generation through the production install+publish+load path, and
+/// an in-flight advisory stamped under the withdrawn authority denies
+/// `evaluator_unavailable` (E28) — not stale, not permit.
+///
+/// Mutants killed: (a) an empty-early-return in
+/// `set_ipsec_tunnel_rows_from_snapshot` (`if rows.is_empty() { return; }`)
+/// leaks the stale (rows, 42) binding, so the withdrawn advisory still joins
+/// → WouldPermit → RED on the deny; (b) deleting the gen-0 arm in
+/// `d14_zone_gate` re-reasons the deny as stale → RED on stage+reason.
+#[test]
+fn snapshot_empty_rows_withdraw_published_generation_deny_through_load_10540() {
+    use crate::afxdp::ipsec_inner::{
+        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
+    };
+    use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+
+    // Populate first: gen 42 / st0 is published and joinable.
+    let populated = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
+        ..Default::default()
+    };
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&populated);
+    coordinator.publish_runtime_view();
+    let before = coordinator.ha.runtime.load_full();
+    assert_eq!(before.ipsec_snapshot_generation(), 42);
+    assert_eq!(
+        before
+            .ipsec_tunnel_rows()
+            .exact("st0")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((9, 10))
+    );
+
+    // Withdraw: EMPTY rows with the capture stamp still 42. Production maps
+    // empty → generation 0; any leak keeps (rows, 42) worker-visible.
+    let withdrawn = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: Vec::new(),
+        ..Default::default()
+    };
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&withdrawn);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 0);
+    assert!(view.ipsec_tunnel_rows().is_empty());
+
+    // The previously-valid advisory (42, 7, 3, zone 1, if 9) is now an
+    // in-flight packet stamped under WITHDRAWN authority → E28 deny.
+    let packet = [0x45; 20];
+    let decision = adjudicate_ipsec_inner(
+        &view,
+        IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st0",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 10,
+            rx_queue_index: 0,
+            advisory: IpsecInnerAdvisory {
+                snapshot_generation: 42,
+                config_generation: 7,
+                fib_generation: 3,
+                zone_id: 1,
+                if_id: 9,
+            },
+            descriptor: None,
+        },
+    );
+    assert!(
+        matches!(
+            decision,
+            IpsecInnerDecision::Deny {
+                stage: "d14_evaluator_unavailable",
+                reason: reason::EVALUATOR_UNAVAILABLE,
+                ..
+            }
+        ),
+        "withdrawn tunnels must deny evaluator-unavailable, not stale or permit: {decision:?}"
+    );
+}
+
+/// #10540 (negative leg 2): ambiguous if_id claimants deny THROUGH
+/// adjudication, while the unrelated unambiguous row still joins.
+///
+/// Mutant killed: a D14 call-site bypass of `rows.exact()` (ambiguity-blind
+/// map lookup) lets st0/st1 WouldPermit → RED on the deny. (Deleting the
+/// ambiguity set itself is also caught by the `*_10485` `exact()` cell.)
+#[test]
+fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
+    use crate::afxdp::ipsec_inner::{
+        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
+    };
+    use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+    coordinator.forwarding.ifindex_to_zone_id.insert(11, 1);
+    coordinator.forwarding.ifindex_to_zone_id.insert(12, 1);
+    // st0/st1 share if_id 7 (ambiguous claimants); st2 is an unrelated row.
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![
+            IpsecTunnelRowSnapshot {
+                stn: "st0".to_string(),
+                if_id: 7,
+                logical_ifindex: 10,
+            },
+            IpsecTunnelRowSnapshot {
+                stn: "st1".to_string(),
+                if_id: 7,
+                logical_ifindex: 11,
+            },
+            IpsecTunnelRowSnapshot {
+                stn: "st2".to_string(),
+                if_id: 8,
+                logical_ifindex: 12,
+            },
+        ],
+        ..Default::default()
+    };
+    assert!(!snapshot.ipsec_tunnel_rows.is_empty());
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    // Mid-asserts guard vacuity: the publication itself must be non-empty.
+    assert_eq!(view.ipsec_snapshot_generation(), 42);
+    assert!(!view.ipsec_tunnel_rows().is_empty());
+    assert!(
+        view.ipsec_tunnel_rows().duplicate(),
+        "publication must retain the duplicate-if_id marker"
+    );
+    assert_eq!(
+        view.ipsec_tunnel_rows()
+            .exact("st2")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((8, 12))
+    );
+
+    let packet = [0x45; 20];
+    for (stn, ifindex, if_id) in [("st0", 10i32, 7u32), ("st1", 11i32, 7u32)] {
+        let decision = adjudicate_ipsec_inner(
+            &view,
+            IpsecInnerInput {
+                slab_id: 0,
+                inner_packet: &packet,
+                stn,
+                inner_family: libc::AF_INET as u8,
+                inner_eth_proto: 0x0800,
+                protocol: 6,
+                rel_l4_offset: 20,
+                payload_offset: 20,
+                logical_ifindex: ifindex,
+                rx_queue_index: 0,
+                advisory: IpsecInnerAdvisory {
+                    snapshot_generation: 42,
+                    config_generation: 7,
+                    fib_generation: 3,
+                    zone_id: 1,
+                    if_id,
+                },
+                descriptor: None,
+            },
+        );
+        assert!(
+            matches!(
+                decision,
+                IpsecInnerDecision::Deny {
+                    stage: "d14_unknown_or_ambiguous_stn",
+                    reason: reason::IFID_UNDERIVABLE,
+                    ..
+                }
+            ),
+            "ambiguous claimant {stn} must deny ifid-underivable: {decision:?}"
+        );
+    }
+
+    // Control leg: the unambiguous row completes the D11/D14 join.
+    let permit = adjudicate_ipsec_inner(
+        &view,
+        IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st2",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 12,
+            rx_queue_index: 0,
+            advisory: IpsecInnerAdvisory {
+                snapshot_generation: 42,
+                config_generation: 7,
+                fib_generation: 3,
+                zone_id: 1,
+                if_id: 8,
+            },
+            descriptor: None,
+        },
+    );
+    assert!(
+        permit.is_would_permit(),
+        "unambiguous st2 must still complete the D11/D14 join: {permit:?}"
+    );
+}
+
+/// #10540 (negative leg 3): an advisory stamped FROM a previously published
+/// view denies stale after ANY single-generation rotation — snapshot-only,
+/// config-only, or fib-only.
+///
+/// Mutants killed: (a) dropping the config/fib conjuncts in `d14_zone_gate`
+/// (comparing only snapshot_generation) lets the config-only and fib-only
+/// rotations WouldPermit → RED on those sub-cases; (b) reading the worker
+/// generation from a wrong/stale source instead of the passed view's binding
+/// agrees on single-generation fixtures but WouldPermits here → RED.
+#[test]
+fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
+    use crate::afxdp::ipsec_inner::{
+        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
+    };
+    use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    for (name, tunnel_gen, config_gen, fib_gen) in [
+        ("snapshot-only", 43u64, 7u64, 3u32),
+        ("config-only", 42u64, 8u64, 3u32),
+        ("fib-only", 42u64, 7u64, 4u32),
+    ] {
+        let mut coordinator = Coordinator::new();
+        coordinator.validation = ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 3,
+        };
+        coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+
+        // view1: the authority the in-flight packet was stamped under.
+        let first = ConfigSnapshot {
+            generation: 7,
+            fib_generation: 3,
+            ipsec_tunnel_snapshot_generation: 42,
+            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+                stn: "st0".to_string(),
+                if_id: 9,
+                logical_ifindex: 10,
+            }],
+            ..Default::default()
+        };
+        coordinator.set_ipsec_tunnel_rows_from_snapshot(&first);
+        coordinator.publish_runtime_view();
+        let view1 = coordinator.ha.runtime.load_full();
+        assert_eq!(view1.ipsec_snapshot_generation(), 42);
+        // Production shape: the advisory is stamped FROM the published view,
+        // not hand-supplied constants.
+        let advisory = IpsecInnerAdvisory {
+            snapshot_generation: view1.ipsec_snapshot_generation(),
+            config_generation: view1.validation().config_generation,
+            fib_generation: view1.validation().fib_generation,
+            zone_id: 1,
+            if_id: 9,
+        };
+
+        // view2: rotate exactly one generation, keep the same rows.
+        let second = ConfigSnapshot {
+            generation: config_gen,
+            fib_generation: fib_gen,
+            ipsec_tunnel_snapshot_generation: tunnel_gen,
+            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+                stn: "st0".to_string(),
+                if_id: 9,
+                logical_ifindex: 10,
+            }],
+            ..Default::default()
+        };
+        coordinator.validation = ValidationState {
+            snapshot_installed: true,
+            config_generation: config_gen,
+            fib_generation: fib_gen,
+        };
+        coordinator.set_ipsec_tunnel_rows_from_snapshot(&second);
+        coordinator.publish_runtime_view();
+        let view2 = coordinator.ha.runtime.load_full();
+        // Vacuity guards: the intended rotation landed, rows stayed joined.
+        assert_eq!(view2.ipsec_snapshot_generation(), tunnel_gen);
+        assert_eq!(view2.validation().config_generation, config_gen);
+        assert_eq!(view2.validation().fib_generation, fib_gen);
+        let rotated = u8::from(tunnel_gen != advisory.snapshot_generation)
+            + u8::from(config_gen != advisory.config_generation)
+            + u8::from(fib_gen != advisory.fib_generation);
+        assert_eq!(rotated, 1, "{name}: exactly one generation must rotate");
+        assert_eq!(
+            view2
+                .ipsec_tunnel_rows()
+                .exact("st0")
+                .map(|row| (row.if_id, row.logical_ifindex)),
+            Some((9, 10))
+        );
+
+        let packet = [0x45; 20];
+        let decision = adjudicate_ipsec_inner(
+            &view2,
+            IpsecInnerInput {
+                slab_id: 0,
+                inner_packet: &packet,
+                stn: "st0",
+                inner_family: libc::AF_INET as u8,
+                inner_eth_proto: 0x0800,
+                protocol: 6,
+                rel_l4_offset: 20,
+                payload_offset: 20,
+                logical_ifindex: 10,
+                rx_queue_index: 0,
+                advisory,
+                descriptor: None,
+            },
+        );
+        assert!(
+            matches!(
+                decision,
+                IpsecInnerDecision::Deny {
+                    stage: "d14_stale_generation",
+                    reason: reason::STALE_GENERATION,
+                    ..
+                }
+            ),
+            "{name} rotation must deny the prior-view advisory as stale: {decision:?}"
+        );
+    }
+}
+
+/// #10540 (negative leg 4): `stop_inner` teardown denies a previously-valid
+/// advisory (stamped FROM the published view) as `evaluator_unavailable`,
+/// for BOTH `clear_synced_state` values (`stop()`/`stop_with_event_stream`
+/// pass `true`).
+///
+/// Mutants killed: (a) deleting both D13/D14 evaluator-unavailable arms
+/// re-reasons as `d14_stale_generation`; deleting only D13 changes the
+/// expected D13/E28 result to D14/E28 — each is RED on stage+reason; (b) any
+/// true/false teardown asymmetry → RED on the twin. Clear/publish deletions
+/// already fail the field-level `*_10485` stop cell; this leg adds the deny
+/// proof + reason pin for the teardown shape.
+#[test]
+fn snapshot_stop_inner_teardown_denies_previously_valid_advisory_10540() {
+    use crate::afxdp::ipsec_inner::{
+        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
+    };
+    use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    for clear_synced_state in [false, true] {
+        let mut coordinator = Coordinator::new();
+        coordinator.validation = ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 3,
+        };
+        coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+        let snapshot = ConfigSnapshot {
+            generation: 7,
+            fib_generation: 3,
+            ipsec_tunnel_snapshot_generation: 42,
+            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+                stn: "st0".to_string(),
+                if_id: 9,
+                logical_ifindex: 10,
+            }],
+            ..Default::default()
+        };
+        coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+        coordinator.publish_runtime_view();
+        let before = coordinator.ha.runtime.load_full();
+        assert_eq!(before.ipsec_snapshot_generation(), 42);
+        let advisory = IpsecInnerAdvisory {
+            snapshot_generation: before.ipsec_snapshot_generation(),
+            config_generation: before.validation().config_generation,
+            fib_generation: before.validation().fib_generation,
+            zone_id: 1,
+            if_id: 9,
+        };
+
+        coordinator.stop_inner(clear_synced_state);
+        let view = coordinator.ha.runtime.load_full();
+        assert_eq!(
+            view.ipsec_snapshot_generation(),
+            0,
+            "clear={clear_synced_state}: teardown must withdraw the generation"
+        );
+        assert!(
+            view.ipsec_tunnel_rows().is_empty(),
+            "clear={clear_synced_state}: teardown must withdraw the rows"
+        );
+        assert!(
+            !view.validation().snapshot_installed,
+            "clear={clear_synced_state}: teardown must withdraw the install stamp"
+        );
+
+        let packet = [0x45; 20];
+        let decision = adjudicate_ipsec_inner(
+            &view,
+            IpsecInnerInput {
+                slab_id: 0,
+                inner_packet: &packet,
+                stn: "st0",
+                inner_family: libc::AF_INET as u8,
+                inner_eth_proto: 0x0800,
+                protocol: 6,
+                rel_l4_offset: 20,
+                payload_offset: 20,
+                logical_ifindex: 10,
+                rx_queue_index: 0,
+                advisory,
+                descriptor: None,
+            },
+        );
+        assert!(
+            matches!(
+                decision,
+                IpsecInnerDecision::Deny {
+                    stage: "d13_snapshot_unavailable",
+                    reason: reason::EVALUATOR_UNAVAILABLE,
+                    ..
+                }
+            ),
+            "clear={clear_synced_state}: teardown must deny evaluator-unavailable: {decision:?}"
+        );
+    }
+}
+
+/// #10540 (negative leg 5, real-path companion): the empty-withdrawal shape
+/// through the REAL same-plan refresh path (`refresh_runtime_snapshot`
+/// builds + installs + publishes via production). A populated refresh
+/// publishes gen 42; an empty-rows refresh withdraws to gen 0; the
+/// previously-valid advisory then denies `evaluator_unavailable`.
+///
+/// Mutant killed: same as leg 1, plus any refresh call-site that skips the
+/// shared install (a same-plan refresh that never calls
+/// `set_ipsec_tunnel_rows_from_snapshot` leaks the populated binding →
+/// WouldPermit → RED).
+#[test]
+fn snapshot_empty_rows_refresh_path_withdraws_generation_deny_10540() {
+    use crate::afxdp::ipsec_inner::{
+        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
+    };
+    use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::protocol::snapshot::{
+        ConfigSnapshot, InterfaceSnapshot, IpsecTunnelRowSnapshot, ZoneSnapshot,
+    };
+
+    const GEN: u64 = 7;
+    const FIB_GEN: u32 = 3;
+
+    let make_snapshot = |rows: Vec<IpsecTunnelRowSnapshot>| ConfigSnapshot {
+        generation: GEN,
+        fib_generation: FIB_GEN,
+        zones: vec![ZoneSnapshot {
+            name: "zone1".to_string(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![InterfaceSnapshot {
+            name: "st0.0".to_string(),
+            linux_name: "st0".to_string(),
+            ifindex: 10,
+            zone: "zone1".to_string(),
+            ..Default::default()
+        }],
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: rows,
+        ..Default::default()
+    };
+
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&make_snapshot(vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }]))
+        .expect("populated refresh must succeed");
+    let before = coordinator.ha.runtime.load_full();
+    assert_eq!(before.ipsec_snapshot_generation(), 42);
+    assert_eq!(
+        before
+            .ipsec_tunnel_rows()
+            .exact("st0")
+            .map(|row| (row.if_id, row.logical_ifindex)),
+        Some((9, 10))
+    );
+    let advisory = IpsecInnerAdvisory {
+        snapshot_generation: before.ipsec_snapshot_generation(),
+        config_generation: before.validation().config_generation,
+        fib_generation: before.validation().fib_generation,
+        zone_id: 1,
+        if_id: 9,
+    };
+
+    coordinator
+        .refresh_runtime_snapshot(&make_snapshot(Vec::new()))
+        .expect("empty-rows refresh must succeed");
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 0);
+    assert!(view.ipsec_tunnel_rows().is_empty());
+    assert!(view.validation().snapshot_installed);
+
+    let packet = [0x45; 20];
+    let decision = adjudicate_ipsec_inner(
+        &view,
+        IpsecInnerInput {
+            slab_id: 0,
+            inner_packet: &packet,
+            stn: "st0",
+            inner_family: libc::AF_INET as u8,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 10,
+            rx_queue_index: 0,
+            advisory,
+            descriptor: None,
+        },
+    );
+    assert!(
+        matches!(
+            decision,
+            IpsecInnerDecision::Deny {
+                stage: "d14_evaluator_unavailable",
+                reason: reason::EVALUATOR_UNAVAILABLE,
+                ..
+            }
+        ),
+        "refresh-path withdrawal must deny evaluator-unavailable: {decision:?}"
+    );
+}
+
 /// #6563: a `ForwardingState` that OWNS the given addresses, i.e. they are in
 /// the global local-address membership sets `local_v4`/`local_v6`. The
 /// emit-on-wire source gate admits exactly these.
@@ -4225,13 +4792,86 @@ fn gre1881_attachment_change_restarts_thread() {
 /// #1881 / Codex plan r1 MAJOR 1 companion: a same-id mode flip
 /// gre→wireguard (reachable because ids are name-derived) prunes the
 /// GRE entry; the WG pass owns the id from then on.
+///
+/// #10553: the GRE thread holds a registered TUN stand-in, so the
+/// prune exercises a LIVE thread (unpublish-before-join against a
+/// running poll loop), not an already-exited one. Post-#10409 the
+/// delivery map also publishes live WG entries, so the flip leaves
+/// exactly the WG delivery behind.
 #[test]
 fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
+    use crate::afxdp::coordinator::wg_control::{TEST_WG_TUN_STANDINS, register_tun_standin_9521};
+    use crate::afxdp::tunnel::{TEST_GRE_TUN_STANDINS, register_tun_standin_10553};
+    let _gre_tun = register_tun_standin_10553("gre1881f");
+    // Keep the post-flip WG thread live through publication: its
+    // stand-in holds the fd/port and avoids expected unprivileged
+    // open_tun EPERM noise.
+    let _wg_tun = register_tun_standin_9521("gre1881f");
     let mut coordinator = gre1881_coordinator_with_worker();
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36287, "gre1881f", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
-    assert!(coordinator.tunnel_sources.contains_key(&1));
     coordinator
-        .refresh_runtime_snapshot(&wg1866_snapshot(1, 36287, "gre1881f", crate::test_ports::reserve_ephemeral_udp_port(), WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36287, "gre1881f", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
+    assert!(coordinator.tunnel_sources.contains_key(&1));
+    // The spawned GRE thread must take the stand-in: registry drain
+    // proves it holds a live fd when the flip prunes it below.
+    let deadline = std::time::Instant::now() + Duration::from_millis(5_000);
+    loop {
+        let drained = TEST_GRE_TUN_STANDINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
+        if drained {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "spawned GRE thread took the registered TUN stand-in"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let gre_wake = coordinator
+        .tunnel_sources
+        .get(&1)
+        .expect("GRE entry")
+        .delivery_tx
+        .as_ref()
+        .expect("GRE delivery")
+        .wake
+        .clone();
+    super::tunnel_supervision::arm_test_gre_unpublish_before_join(36287);
+
+    coordinator
+        .refresh_runtime_snapshot(&wg1866_snapshot(
+            1,
+            36287,
+            "gre1881f",
+            crate::test_ports::reserve_ephemeral_udp_port(),
+            WG1866_PRIVKEY_A,
+        ))
+        .expect("refresh_runtime_snapshot must succeed");
+    assert!(
+        super::tunnel_supervision::take_test_gre_unpublish_before_join_observed(),
+        "GRE stale delivery was absent immediately before the live-thread join"
+    );
+    // The WG thread must consume its own stand-in too. It keeps
+    // the WG fd/port live through publication and silences expected
+    // unprivileged open_tun EPERM noise.
+    let wg_deadline = std::time::Instant::now() + Duration::from_millis(5_000);
+    loop {
+        let consumed = !TEST_WG_TUN_STANDINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(name, _)| name == "gre1881f");
+        if consumed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < wg_deadline,
+            "spawned WG thread took the registered TUN stand-in"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         !coordinator.tunnel_sources.contains_key(&1),
         "mode flip prunes the GRE local-origin entry"
@@ -4240,7 +4880,36 @@ fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
         coordinator.wg_control_threads.contains_key(&1),
         "the WG pass owns the id after the flip"
     );
-    assert!(coordinator.local_tunnel_deliveries.load().is_empty());
+    // Post-#10409 contract: live WG entries publish too — the flip
+    // leaves exactly the WG delivery; the GRE sender was unpublished
+    // before the live thread was joined (Store #1 excludes the stale
+    // id; stop_remove_local_tunnel_entry joins synchronously).
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "flip leaves exactly the WG delivery published"
+    );
+    let published = deliveries
+        .get(&36287)
+        .expect("WG delivery published at the flipped ifindex");
+    let wg_wake = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("WG entry")
+        .delivery_tx
+        .as_ref()
+        .expect("WG delivery")
+        .wake
+        .clone();
+    assert!(
+        Arc::ptr_eq(&published.wake, &wg_wake),
+        "published sender is the WG entry's"
+    );
+    assert!(
+        !Arc::ptr_eq(&published.wake, &gre_wake),
+        "GRE sender unpublished before the live thread was joined"
+    );
 }
 
 /// #1881 (mirrors the #1866 disarmed rule): a disarmed same-plan

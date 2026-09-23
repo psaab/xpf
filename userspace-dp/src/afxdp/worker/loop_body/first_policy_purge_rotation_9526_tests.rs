@@ -101,7 +101,8 @@ fn view_with_policy_metadata(
         .unwrap_or(0);
     forwarding.ifindex_to_zone_id.insert(11, ingress_zone);
     let forwarding = Arc::new(forwarding);
-    let view = Arc::new(RuntimeView::new(  // runtime-view-canary: test-local
+    let view = Arc::new(RuntimeView::new(
+        // runtime-view-canary: test-local
         ValidationState {
             snapshot_installed: true,
             config_generation: generation,
@@ -129,7 +130,7 @@ fn view_with_removed_zone_metadata(
     let mut forwarding = (*base_forwarding).clone();
     forwarding.zone_id_to_name.remove(&removed_zone_id);
     let forwarding = Arc::new(forwarding);
-    let view = Arc::new(RuntimeView::new(base_view.validation(), forwarding.clone()));  // runtime-view-canary: test-local
+    let view = Arc::new(RuntimeView::new(base_view.validation(), forwarding.clone())); // runtime-view-canary: test-local
     (view, forwarding)
 }
 
@@ -256,6 +257,7 @@ struct RotationHarness {
     commands: Arc<Mutex<VecDeque<WorkerCommand>>>,
     stop: Arc<AtomicBool>,
     heartbeat: Arc<AtomicU64>,
+    runtime_atomics: Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>,
     worker: Option<std::thread::JoinHandle<()>>,
     first_forward: SessionKey,
     first_reverse: SessionKey,
@@ -271,11 +273,36 @@ impl RotationHarness {
         Self::start_with_extra(&[])
     }
 
+    /// Starts the same worker fixture with the unbound victim carrying the
+    /// requested origin. The failover-before-rename joint starts it as a
+    /// `SyncImport`, then promotes it through the worker's real
+    /// `UpsertSynced` command path before rotating the forwarding view.
+    fn start_with_unbound_origin(
+        extra: &[SyncedSessionEntry],
+        unbound_origin: SessionOrigin,
+    ) -> Self {
+        Self::start_with_extra_and_origin(extra, unbound_origin)
+    }
+
+    /// Starts the fixture with an initial `SyncImport` victim so the joint can
+    /// exercise the failover retag instead of beginning with the post-failover
+    /// `SharedPromote` fixture used by the single-leg cells.
+    fn start_for_failover(extra: &[SyncedSessionEntry]) -> Self {
+        Self::start_with_unbound_origin(extra, SessionOrigin::SyncImport)
+    }
+
     /// `start` plus additional caller-supplied rows, installed through the
     /// same shared-map + command-queue path (SharedPromote rows via
     /// UpsertSynced, all others via UpsertLocal). Selectivity cells use this
     /// to install rows the rotation must NOT purge.
     fn start_with_extra(extra: &[SyncedSessionEntry]) -> Self {
+        Self::start_with_extra_and_origin(extra, SessionOrigin::SharedPromote)
+    }
+
+    fn start_with_extra_and_origin(
+        extra: &[SyncedSessionEntry],
+        unbound_origin: SessionOrigin,
+    ) -> Self {
         let coord = Coordinator::new();
         let channel = RuntimeViewChannel::default();
         let (old_view, old_forwarding) = view(1, &[rule("p-first", 0), rule("p-web", 1)]);
@@ -314,12 +341,13 @@ impl RotationHarness {
             DnatTableFds::default(),
         );
         let cos = WorkerCoSState::from_coord(&coord);
+        let runtime_atomics = Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new());
         let telemetry = WorkerPublishedTelemetry::new(
             Arc::new(Mutex::new(ExceptionEventRing::new())),
             Arc::new(Mutex::new(VecDeque::new())),
             Arc::new(Mutex::new(None)),
             Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
+            runtime_atomics.clone(),
             Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new()),
         );
         let worker = std::thread::spawn(move || worker_loop(plan, shared, control, cos, telemetry));
@@ -329,7 +357,7 @@ impl RotationHarness {
         let unbound = key(40003);
         let mut unbound_entry = entry(unbound.clone(), false, None);
         unbound_entry.metadata.ingress_zone = 3;
-        unbound_entry.origin = SessionOrigin::SharedPromote;
+        unbound_entry.origin = unbound_origin;
         let mut entries = vec![
             entry(first_forward.clone(), false, first_counter.clone()),
             entry(first_reverse.clone(), true, first_counter),
@@ -361,7 +389,9 @@ impl RotationHarness {
             std::thread::sleep(Duration::from_millis(1));
         }
         // Queue emptiness only proves the commands moved out of the shared deque;
-        // let the worker finish its local scratch batch before rotating the view.
+        // let the worker finish its local scratch batch before any caller rotates
+        // the view. This synchronization is required by every existing rotation
+        // cell, not just the failover-before-rename joint.
         wait_for_iterations(&heartbeat, 2);
         Self {
             channel,
@@ -369,6 +399,7 @@ impl RotationHarness {
             commands,
             stop,
             heartbeat,
+            runtime_atomics,
             worker: Some(worker),
             first_forward,
             first_reverse,
@@ -403,6 +434,115 @@ impl RotationHarness {
         };
         self.channel.publish(new_view);
         wait_for_iterations(&self.heartbeat, 3);
+    }
+
+    /// Re-publish the victim through the same shared-map + worker-command path
+    /// used by a failover promotion. The real packet-side promoter is not
+    /// reachable from this empty-binding worker fixture; this is its queue
+    /// contract: the authoritative shared row is retagged first, then the
+    /// worker receives the SharedPromote upsert.
+    fn promote_unbound_for_failover(&self) {
+        let mut promoted = self
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .get(&self.unbound)
+            .cloned()
+            .expect("failover victim must be in the shared map");
+        assert_eq!(
+            promoted.origin,
+            SessionOrigin::SyncImport,
+            "joint setup must begin with a peer-synced victim"
+        );
+        promoted.origin = SessionOrigin::SharedPromote;
+        self.synced
+            .lock()
+            .expect("shared synced map")
+            .insert(self.unbound.clone(), promoted.clone());
+        self.commands
+            .lock()
+            .expect("worker command queue")
+            .push_back(WorkerCommand::UpsertSynced(promoted));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self
+            .commands
+            .lock()
+            .expect("worker command queue")
+            .is_empty()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the worker never drained the failover promotion command"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        wait_for_iterations(&self.heartbeat, 2);
+    }
+
+    /// Queue a diagnostic read against the real worker-local SessionTable.
+    /// `counter_query_replica` distinguishes the pre-failover SyncImport from
+    /// the post-failover SharedPromote origin because SharedPromote is
+    /// intentionally excluded from `is_peer_synced`.
+    fn query_worker_presence(&self, key: &SessionKey, sequence: u64) -> (bool, bool) {
+        self.commands
+            .lock()
+            .expect("worker command queue")
+            .push_back(WorkerCommand::QuerySessionCounters {
+                sequence,
+                key: key.clone(),
+            });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self
+            .runtime_atomics
+            .counter_query_seq
+            .load(Ordering::Acquire)
+            != sequence
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the worker never answered the session presence query"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        (
+            self.runtime_atomics
+                .counter_query_found
+                .load(Ordering::Acquire)
+                != 0,
+            self.runtime_atomics
+                .counter_query_replica
+                .load(Ordering::Acquire)
+                != 0,
+        )
+    }
+
+    /// Model a late bulk/incremental replay: reinsert the stale authoritative
+    /// row into the shared map and enqueue its worker import, exactly as the
+    /// fixture setup does. Keeping both sides observable prevents a
+    /// shared-map-only assertion from passing while the worker resurrects it.
+    fn replay_unbound(&self, stale: SyncedSessionEntry) {
+        self.synced
+            .lock()
+            .expect("shared synced map")
+            .insert(stale.key.clone(), stale.clone());
+        self.commands
+            .lock()
+            .expect("worker command queue")
+            .push_back(WorkerCommand::UpsertSynced(stale));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self
+            .commands
+            .lock()
+            .expect("worker command queue")
+            .is_empty()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the worker never drained the stale replay command"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        wait_for_iterations(&self.heartbeat, 2);
     }
 
     fn presence(&self) -> Presence {
@@ -771,6 +911,297 @@ fn rotation_purge_keeps_unbound_id_zero_outside_the_removed_set_10510() {
             .expect("shared synced map")
             .contains_key(&survivor_key),
         "an unbound id-0 row outside the removed set must survive the purge"
+    );
+    harness.shutdown();
+}
+
+/// #10588 (N1): the nonzero-policy arm. A forward, unbound, SharedPromote row
+/// stamped with the removed zone 3 must SURVIVE the purge when its policy_id
+/// is nonzero — only the `policy_id != 0` exemption saves it (Z=true, S=true,
+/// R=false, B=false). The zone-3 unbound id-0 control must still purge, so
+/// the cell cannot pass vacuously when the purge is omitted.
+#[test]
+fn rotation_purge_keeps_nonzero_policy_id_when_zone_vanishes_10588() {
+    let survivor_key = key(40006);
+    let mut survivor = entry(survivor_key.clone(), false, None);
+    survivor.metadata.policy_id = 1;
+    survivor.metadata.ingress_zone = 3;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SharedPromote;
+    let harness = RotationHarness::start_with_extra(std::slice::from_ref(&survivor));
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let purged = harness.presence();
+    assert!(
+        !purged.unbound,
+        "the removed-zone unbound id-0 row must purge"
+    );
+    assert!(
+        purged.first_forward && purged.first_reverse,
+        "a bound policy session must survive when its policy remains"
+    );
+    assert!(
+        harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&survivor_key),
+        "a nonzero-policy row stamped with the removed zone must survive the purge"
+    );
+    harness.shutdown();
+}
+
+/// #10588 (R1): the reverse arm. A reverse, unbound, id-0, SharedPromote row
+/// stamped with the removed zone 3 must SURVIVE the purge — only the
+/// `is_reverse` exemption saves it (Z=true, S=true, N=false, B=false).
+/// Forward owns the pair; the purge must never take a reverse half directly.
+#[test]
+fn rotation_purge_keeps_reverse_when_zone_vanishes_10588() {
+    let survivor_key = key(40007);
+    let mut survivor = entry(survivor_key.clone(), true, None);
+    survivor.metadata.policy_id = 0;
+    survivor.metadata.ingress_zone = 3;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SharedPromote;
+    let harness = RotationHarness::start_with_extra(std::slice::from_ref(&survivor));
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let purged = harness.presence();
+    assert!(
+        !purged.unbound,
+        "the removed-zone unbound id-0 row must purge"
+    );
+    assert!(
+        purged.first_forward && purged.first_reverse,
+        "a bound policy session must survive when its policy remains"
+    );
+    assert!(
+        harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&survivor_key),
+        "a reverse row stamped with the removed zone must survive the purge"
+    );
+    harness.shutdown();
+}
+
+/// #10588 (B1): the bound arm. A forward, bound (`policy_counter.is_some()`),
+/// id-0, peer-synced row stamped with the removed zone 3 must SURVIVE the
+/// purge — only the bound exemption saves it (Z=true, S=true, N=false,
+/// R=false). This pins the rebind/purge disjointness: rebind owns bound
+/// rows, the removed-zone purge owns unbound id-0 rows.
+#[test]
+fn rotation_purge_keeps_bound_when_zone_vanishes_10588() {
+    let survivor_key = key(40008);
+    let fixture = policy(&[rule("p-first", 0), rule("p-web", 1)]);
+    let counter = fixture
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose the first rule counter");
+    let mut survivor = entry(survivor_key.clone(), false, Some(counter));
+    survivor.metadata.policy_id = 0;
+    survivor.metadata.ingress_zone = 3;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SyncImport;
+    let harness = RotationHarness::start_with_extra(std::slice::from_ref(&survivor));
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let purged = harness.presence();
+    assert!(
+        !purged.unbound,
+        "the removed-zone unbound id-0 row must purge"
+    );
+    assert!(
+        purged.first_forward && purged.first_reverse,
+        "a bound policy session must survive when its policy remains"
+    );
+    let map = harness.synced.lock().expect("shared synced map");
+    let kept = map
+        .get(&survivor_key)
+        .expect("a bound row stamped with the removed zone must survive the purge");
+    assert!(
+        kept.metadata.policy_counter.is_some(),
+        "the surviving bound row must still carry its policy counter"
+    );
+    drop(map);
+    harness.shutdown();
+}
+
+/// #10589 joint: bind the demoted-owner CLOSE precondition to a real
+/// failover-before-rename worker rotation. Leg A's paired Go cell proves that
+/// the demoted owner emits no CLOSE delete; this shared helper drives the
+/// receiver's independent leg through failover, rename, and purge. The normal
+/// #10589 test below runs Steps 1-2 green; the ignored #10612 repro runs only
+/// the post-purge stale replay.
+struct JointRotationSetup {
+    harness: RotationHarness,
+    stale_victim: SyncedSessionEntry,
+}
+
+fn setup_failover_before_rename_joint_10589() -> JointRotationSetup {
+    let survivor_key = key(40009);
+    let mut survivor = entry(survivor_key.clone(), false, None);
+    survivor.metadata.ingress_zone = 1;
+    survivor.metadata.egress_zone = 2;
+    survivor.origin = SessionOrigin::SharedPromote;
+
+    let bound_key = key(40010);
+    let bound_counter = policy(&[rule("p-first", 0), rule("p-web", 1)])
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose the first-rule counter");
+    let mut bound = entry(bound_key.clone(), false, Some(bound_counter));
+    bound.metadata.ingress_zone = 3;
+    bound.metadata.egress_zone = 2;
+    bound.origin = SessionOrigin::SyncImport;
+
+    let harness = RotationHarness::start_for_failover(&[survivor, bound]);
+    let stale_victim = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&harness.unbound)
+        .cloned()
+        .expect("joint victim must be installed");
+    assert_eq!(stale_victim.origin, SessionOrigin::SyncImport);
+    let (found, replica) = harness.query_worker_presence(&harness.unbound, 1);
+    assert!(found, "failover victim must be present before promotion");
+    assert!(replica, "pre-failover victim must remain peer-synced");
+
+    // FAILOVER before the rename: the queue-driven republish is the
+    // harness's fallback for the production packet-side promoter.
+    harness.promote_unbound_for_failover();
+    let (found, replica) = harness.query_worker_presence(&harness.unbound, 2);
+    assert!(found, "failover promotion must retain the victim");
+    assert!(
+        !replica,
+        "promoted victim must be SharedPromote, not peer-synced"
+    );
+    let promoted = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&harness.unbound)
+        .cloned()
+        .expect("promoted victim must remain authoritative");
+    assert_eq!(promoted.origin, SessionOrigin::SharedPromote);
+    assert!(
+        promoted.metadata.policy_counter.is_none(),
+        "failover victim must remain unbound"
+    );
+    assert_eq!(promoted.metadata.policy_id, 0);
+    assert_eq!(promoted.metadata.ingress_zone, 3);
+    assert_eq!(promoted.metadata.egress_zone, 2);
+
+    assert!(
+        harness.channel.load().forwarding().zone_set_validated,
+        "joint setup must begin with a validated old zone set"
+    );
+
+    // RENAME rotation: p-first survives, but zone 3 disappears. Both the old
+    // fixture generation and this new generation are explicitly validated;
+    // the positive removed-set contract must not be silently weakened.
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    let current_view = harness.channel.load();
+    assert!(
+        current_view.forwarding().zone_set_validated,
+        "joint rotation must publish a validated new zone set"
+    );
+    assert!(
+        !current_view.forwarding().zone_id_to_name.contains_key(&3),
+        "joint rename must remove zone 3 from the new generation"
+    );
+    let rotated = harness.presence();
+    assert!(
+        !rotated.unbound,
+        "the failover-promoted, owner-absent id-0 victim must purge"
+    );
+    assert!(
+        rotated.first_forward && rotated.first_reverse,
+        "the bound first-policy pair must survive the zone purge"
+    );
+    let map = harness.synced.lock().expect("shared synced map");
+    assert!(
+        map.contains_key(&survivor_key),
+        "the unbound id-0 survivor outside the removed set must remain"
+    );
+    let kept_bound = map
+        .get(&bound_key)
+        .expect("the bound control stamped with zone 3 must survive");
+    assert!(
+        kept_bound.metadata.policy_counter.is_some(),
+        "the bound control must retain its policy counter"
+    );
+    drop(map);
+    let (found, _) = harness.query_worker_presence(&harness.unbound, 3);
+    assert!(
+        !found,
+        "the receiver worker must remove the purged victim, not only its shared row"
+    );
+
+    JointRotationSetup {
+        harness,
+        stale_victim,
+    }
+}
+
+/// #10589 GREEN cell: failover-before-rename purges the promoted, unbound
+/// id-0 row while retaining the outside-set and bound controls.
+#[test]
+fn failover_before_rename_joint_purges_10589() {
+    let setup = setup_failover_before_rename_joint_10589();
+    setup.harness.shutdown();
+}
+
+/// #10612 repro pin: this cell intentionally remains ignored until the
+/// stale-replay fix lands. `replay_unbound` reinserts the purged victim into
+/// the shared map and queues `WorkerCommand::UpsertSynced` after rotation;
+/// today's worker therefore resurrects the removed-zone row. Run unignored to
+/// preserve the exact RED evidence for the dedicated #10612 fix lane.
+#[test]
+#[ignore = "repro for #10612 stale replay resurrection"]
+fn failover_before_rename_joint_stale_replay_does_not_resurrect_10612() {
+    let setup = setup_failover_before_rename_joint_10589();
+    let harness = setup.harness;
+
+    // NO-RESURRECTION replay: model a late stale import through both
+    // authoritative shared state and the worker command queue. The delete
+    // contract requires the purged key to remain absent after the replay.
+    harness.replay_unbound(setup.stale_victim);
+    let (found, _) = harness.query_worker_presence(&harness.unbound, 4);
+    assert!(
+        !found,
+        "a stale replay must not resurrect the removed-zone victim"
+    );
+    assert!(
+        !harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&harness.unbound),
+        "a stale replay must not restore shared authority for the purged victim"
     );
     harness.shutdown();
 }
