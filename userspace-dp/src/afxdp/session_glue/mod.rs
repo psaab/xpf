@@ -2291,7 +2291,7 @@ fn materialize_shared_session_hit(
     forwarding: &ForwardingState,
     now_ns: u64,
     tcp_flags: u8,
-) -> SessionLookup {
+) -> (SessionLookup, bool) {
     if let Some(shared) = resolved.shared_entry.take() {
         let mut replica = synced_replica_entry(&shared);
         // A zero token carries no leak provenance and is recomputed locally
@@ -2312,7 +2312,7 @@ fn materialize_shared_session_hit(
             replica.leak_incarnation =
                 leak_incarnation_for_session(forwarding, replica.decision, target).unwrap_or(0);
         }
-        sessions.upsert_synced_with_origin(
+        let materialized = sessions.upsert_synced_with_origin(
             SessionInstall {
                 key: replica.key.clone(),
                 decision: replica.decision,
@@ -2340,12 +2340,15 @@ fn materialize_shared_session_hit(
         {
             sessions.stamp_leak_incarnation(&replica.key, incarnation);
         }
-        return SessionLookup {
-            decision: replica.decision,
-            metadata: replica.metadata,
-        };
+        return (
+            SessionLookup {
+                decision: replica.decision,
+                metadata: replica.metadata,
+            },
+            !materialized,
+        );
     }
-    resolved.lookup.clone()
+    (resolved.lookup.clone(), false)
 }
 
 // Test and non-worker callers retain the no-conntrack transition behavior.
@@ -2471,6 +2474,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                     hit_origin,
                 ))
             });
+        let shared_was_present = hit.shared_entry.is_some();
         let keep_transient = poison_key.is_some_and(|(key, decision, metadata, origin)| {
             should_keep_synced_hit_transient(ha_state, now_secs, key, decision, metadata, origin)
         });
@@ -2488,8 +2492,8 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 worker_id,
             );
         }
-        let resolved = if keep_transient {
-            hit.lookup.clone()
+        let (resolved, materialize_install_failed) = if keep_transient {
+            (hit.lookup.clone(), false)
         } else {
             materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags)
         };
@@ -2584,7 +2588,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             metadata,
             origin: hit_origin,
             created: false,
-            install_failed: false,
+            install_failed: shared_was_present && materialize_install_failed,
         });
     }
 

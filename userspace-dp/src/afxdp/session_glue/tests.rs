@@ -6,6 +6,7 @@
 // session_glue/mod.rs.
 
 use super::*;
+use crate::session::PolicyRevalidationTarget;
 use crate::afxdp::worker_queue::WORKER_COMMAND_DRAIN_BUDGET;
 
 // #7201: `apply_worker_commands` now drains a BOUNDED PREFIX
@@ -2401,7 +2402,7 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
 }
 
 #[test]
-fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inactive_fabric_ingress()
+fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inactive_fabric_ingress_10582_t4()
 {
     let mut sessions = SessionTable::new();
     let key = test_key();
@@ -2459,7 +2460,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let _resolved = resolve_flow_session_decision(
+    let resolved = resolve_flow_session_decision(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         &shared_sessions,
@@ -2483,6 +2484,41 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     )
     .expect("translated shared hit should resolve");
 
+
+    // T4: keep_transient deliberately skips local materialization. The result
+    // must remain an explicit HA outcome (or fabric redirect), never a local
+    // ForwardCandidate that silently seeds an unadjudicated cache row.
+    assert!(!resolved.install_failed);
+    assert!(matches!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::HAInactive | ForwardingDisposition::FabricRedirect
+    ));
+
+    // Exercise the same post-purge revalidation shape with the live default
+    // deny. There is no local entry to tear down, so the sessionless verdict
+    // must return a canonical-less revocation and leave the table empty.
+    let deny_forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    );
+    let mut purged_sessions = SessionTable::new();
+    let sessionless_denied =
+        crate::afxdp::poll_descriptor::revalidate_zone_policy_sessionless_denies_for_test(
+            &deny_forwarding,
+            &mut purged_sessions,
+            &translated_key,
+            &test_metadata(),
+            test_decision(),
+            Some(&flow),
+            UserspaceDpMeta {
+                ingress_ifindex: 24,
+                protocol: PROTO_TCP,
+                tcp_flags: 0x18,
+                ..UserspaceDpMeta::default()
+            },
+            false,
+        );
+    assert!(sessionless_denied, "purged keep-transient hit must be denied");
+    assert_eq!(purged_sessions.len(), 0);
     assert!(sessions.lookup(&translated_key, 1_000_000, 0x18).is_none());
 }
 
@@ -7403,6 +7439,172 @@ fn nat_reverse_key_warn_throttle_claims_once_per_window() {
     assert!(
         try_claim_nat_reverse_key_warn(base + 60_000_000_000),
         "claim at the window boundary must win"
+    );
+}
+
+// #10582 T1/T2: a shared-only hit must still materialize at the session cap,
+// then become STALE when the policy generation moves. The at-cap row is a
+// deliberate disagreement fixture: the shared replica is a permit-shaped
+// ForwardCandidate while the live snapshot is default-deny for LAN→WAN.
+fn capped_shared_hit_fixture_10582(
+    policy_generation: u64,
+) -> (
+    ForwardingState,
+    SessionTable,
+    SessionKey,
+    ResolvedFlowSessionDecision,
+) {
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(1);
+    sessions.set_policy_revalidation_gen(policy_generation);
+    let filler = SessionKey {
+        src_port: 40_000,
+        ..test_key()
+    };
+    assert!(sessions.install_with_protocol(
+        filler,
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let key = test_key();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &SyncedSessionEntry {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+    );
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &[],
+        &forwarding,
+        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+        &Arc::new(ShardedNeighborMap::new()),
+        &SessionFlow {
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            forward_key: key.clone(),
+        },
+        1_000_000,
+        1_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        24,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("at-cap shared hit should materialize");
+    (forwarding, sessions, key, resolved)
+}
+
+/// The filed trigger's cap step is not reachable: the uncapped sync-family
+/// install materializes the shared row, so revalidation sees `Stale`, not
+/// `NoLocalEntry`, and the live deny is applied to the hit.
+#[test]
+fn at_cap_shared_hit_revalidates_and_revokes_10582_t1() {
+    let (forwarding, mut sessions, key, resolved) = capped_shared_hit_fixture_10582(7);
+    assert!(
+        !resolved.install_failed,
+        "sync-family materialization is uncapped; the upsert must succeed"
+    );
+    assert_eq!(sessions.len(), 2, "the shared hit must be installed past cap");
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Stale(key.clone()),
+        "a materialized shared hit must be policy-stale, not sessionless"
+    );
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let revocation = crate::afxdp::poll_descriptor::revalidate_zone_policy_revokes_for_test(
+        &forwarding,
+        &mut sessions,
+        &key,
+        &test_metadata(),
+        test_decision(),
+        Some(&flow),
+        UserspaceDpMeta {
+            ingress_ifindex: 24,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            ..UserspaceDpMeta::default()
+        },
+        false,
+    );
+    assert!(
+        revocation,
+        "the live default-deny must revoke the materialized shared hit"
+    );
+    assert!(
+        sessions.entry_with_origin(&key).is_some(),
+        "the policy stage only reports the revocation; the owner tears down later"
+    );
+}
+
+/// Scheduler's inactive→active edge is a generation bump, not a per-ID sweep.
+/// The same at-cap shared hit therefore follows the normal stale re-derive.
+#[test]
+fn scheduler_generation_bump_revalidates_at_cap_shared_hit_10582_t2() {
+    let (forwarding, mut sessions, key, resolved) = capped_shared_hit_fixture_10582(7);
+    assert!(!resolved.install_failed);
+    sessions.mark_policy_revalidated(&key);
+    sessions.set_policy_revalidation_gen(8);
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Stale(key.clone())
+    );
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    assert!(
+        crate::afxdp::poll_descriptor::revalidate_zone_policy_revokes_for_test(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &test_metadata(),
+            test_decision(),
+            Some(&flow),
+            UserspaceDpMeta {
+                ingress_ifindex: 24,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_FLAG_ACK,
+                ..UserspaceDpMeta::default()
+            },
+            false,
+        ),
+        "the post-activation generation bump must re-derive the deny"
     );
 }
 

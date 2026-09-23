@@ -222,8 +222,15 @@ use std::sync::{Arc, Mutex};
 /// direction entry: `delete_terminal_filtered_session` and
 /// `collect_revoked_flow_cache_keys` both derive the companion from the
 /// carried nat, and a mismatched pairing misses it (see §5.3 of the #9604 plan).
+///
+/// #10582: `canonical_key` is `None` for a SESSIONLESS revocation — a forward
+/// judgment derived with no local entry (the keep_transient peer-synced hit,
+/// or a stale primary handle). The caller drops the packet and evicts its
+/// flow-cache slots but runs NO session teardown: there is no entry, and the
+/// teardown would emit a close delta and release NAT state for a flow this
+/// node never owned. Mirrors #8114's `revoked_key: None`.
 pub(super) struct PolicyRevocation {
-    pub(super) canonical_key: SessionKey,
+    pub(super) canonical_key: Option<SessionKey>,
     pub(super) decision: SessionDecision,
     pub(super) metadata: SessionMetadata,
     pub(super) origin: SessionOrigin,
@@ -297,6 +304,10 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // INSTALLED from a fabric-punted packet, which tells you nothing about where
     // this one arrived.
     packet_fabric_ingress: bool,
+    // #10582: the resolved hit's origin, carried ONLY for the sessionless
+    // revocation (which has no entry to reload one from). The Stale path still
+    // reloads the judged entry's own origin below.
+    origin: SessionOrigin,
 ) -> Option<PolicyRevocation> {
     let flow = flow?;
     // GATE 1: the reverse companion is never independently policy-adjudicated.
@@ -307,7 +318,17 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // same generation stamp, forward tuple and zones, both halves revoked on a
     // non-permit verdict — the reverse pair itself is never evaluated.
     if metadata.is_reverse {
-        return reverse_hit_zone_policy(forwarding, sessions, session_key);
+        return reverse_hit_zone_policy(
+            forwarding,
+            sessions,
+            session_key,
+            decision,
+            metadata,
+            flow,
+            meta,
+            packet_fabric_ingress,
+            origin,
+        );
     }
     // GATE 1b: DECLINE for ICMP, but ONLY when the type actually matters.
     //
@@ -388,10 +409,23 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     let canonical_key = match sessions.policy_revalidation_target(session_key) {
         PolicyRevalidationTarget::Fresh => return None,
         // No entry this tuple may safely name (#2120 transient synced hit, or a
-        // reused slab slot). There is nothing to stamp and nothing to tear down,
-        // and deriving a verdict we could not act on would only risk acting on
-        // the WRONG session. Same answer #7212 gives.
-        PolicyRevalidationTarget::NoLocalEntry => return None,
+        // reused slab slot). There is nothing to stamp and nothing to tear
+        // down — but the verdict itself IS derivable from the flow and the
+        // arrival zone (the #8114 item 2 answer for filters), and declining it
+        // forwarded — and, for a cacheable FabricRedirect, SEEDED — under a
+        // denying policy (#10582). Derive sessionlessly; a DENY drops this
+        // packet without touching session state.
+        PolicyRevalidationTarget::NoLocalEntry => {
+            return sessionless_zone_policy_verdict(
+                forwarding,
+                decision,
+                metadata,
+                flow,
+                meta,
+                packet_fabric_ingress,
+                origin,
+            )
+        }
         PolicyRevalidationTarget::Stale(k) => k,
     };
     // #10038 Part C (forward arm): a TUN-origin forward is declined — a
@@ -435,12 +469,13 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
         }
         ZonePolicyJudgment::Decline => None,
         ZonePolicyJudgment::Revoke => {
-            // The origin is the one input the hit path does not carry: reload it
-            // from the entry just judged. A miss means the entry vanished between
-            // the probe and the verdict — nothing left to tear down.
+            // The judged entry's OWN origin: reloaded from the entry just judged
+            // rather than trusting the threaded hit origin, which on the NAT
+            // alias path names a different tuple. A miss means the entry vanished
+            // between the probe and the verdict — nothing left to tear down.
             let (_, _, origin) = sessions.entry_with_origin(&canonical_key)?;
             Some(PolicyRevocation {
-                canonical_key,
+                canonical_key: Some(canonical_key),
                 decision: input.decision,
                 metadata: input.metadata,
                 origin,
@@ -470,8 +505,62 @@ pub(crate) fn revalidate_zone_policy_declines_for_test(
         flow,
         meta,
         packet_fabric_ingress,
+        SessionOrigin::ForwardFlow,
     )
     .is_none()
+}
+
+/// Test-only seam for proving that a stale local hit is revoked rather than
+/// declined. The canonical key is present on this path, unlike the
+/// sessionless NoLocalEntry verdict.
+#[cfg(test)]
+pub(crate) fn revalidate_zone_policy_revokes_for_test(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    decision: SessionDecision,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    packet_fabric_ingress: bool,
+) -> bool {
+    revalidate_zone_policy_on_session_hit(
+        forwarding,
+        sessions,
+        session_key,
+        metadata,
+        decision,
+        flow,
+        meta,
+        packet_fabric_ingress,
+        SessionOrigin::ForwardFlow,
+    )
+    .is_some_and(|revocation| revocation.canonical_key.is_some())
+}
+/// Test-only view of the #10582 sessionless deny arm.
+#[cfg(test)]
+pub(crate) fn revalidate_zone_policy_sessionless_denies_for_test(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    decision: SessionDecision,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    packet_fabric_ingress: bool,
+) -> bool {
+    revalidate_zone_policy_on_session_hit(
+        forwarding,
+        sessions,
+        session_key,
+        metadata,
+        decision,
+        flow,
+        meta,
+        packet_fabric_ingress,
+        SessionOrigin::ForwardFlow,
+    )
+    .is_some_and(|revocation| revocation.canonical_key.is_none())
 }
 
 /// #10038: is this FORWARD entry firewall-self-originated (TUN-originated)?
@@ -526,7 +615,7 @@ pub(super) fn tun_origin_forward(
 /// locally). A local hit DECIDES (a non-marker local forward fails closed
 /// without consulting shared — local shadows). Lone reverse (no forward
 /// anywhere) fails closed, per the #9604 lone-reverse philosophy.
-///
+
 /// Callers keep the lo0 packet filter, TTL, and input-filter gates: only the
 /// two NEW-session gates (host-inbound admission, junos-host policy) are
 /// skipped, matching Junos (self-originated + solicited replies run no
@@ -548,6 +637,65 @@ pub(super) fn tun_origin_reverse_exempt(
     match crate::afxdp::shared_ops::lookup_shared_session(shared_sessions, &fwd_key) {
         Some(entry) => tun_origin_forward(&entry.decision, &entry.metadata, entry.origin),
         None => false,
+    }
+}
+
+/// #10582: derive a zone-policy verdict without a local session entry.
+///
+/// A keep-transient synced hit can deliberately purge both the local and
+/// shared rows before the established-hit policy stage runs. The tuple,
+/// decision, metadata, and arrival identity still determine the same zone
+/// policy verdict as the ordinary forward arm; only stamping and teardown are
+/// unavailable. A non-permit verdict therefore returns a revocation with no
+/// canonical key, which tells the caller to drop this packet without touching
+/// session or NAT state.
+#[cold]
+#[inline(never)]
+fn sessionless_zone_policy_verdict(
+    forwarding: &ForwardingState,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    packet_fabric_ingress: bool,
+    origin: SessionOrigin,
+) -> Option<PolicyRevocation> {
+    // The caller supplies authoritative FORWARD data. A reverse hit never
+    // reaches this helper with its swapped row; the reverse arm resolves its
+    // companion first, preserving #9604's direction invariant.
+    if decision.resolution.disposition == super::ForwardingDisposition::LocalDelivery
+        || tun_origin_forward(&decision, metadata, origin)
+        || forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(meta.protocol)
+    {
+        return None;
+    }
+    let input = PolicyJudgmentInput {
+        decision,
+        metadata: metadata.clone(),
+        protocol: meta.protocol,
+        src_ip: flow.src_ip,
+        dst_ip: flow.dst_ip,
+        src_port: flow.forward_key.src_port,
+        dst_port: flow.forward_key.dst_port,
+        from_source: if packet_fabric_ingress {
+            FromZoneSource::RecordedZone(metadata.ingress_zone)
+        } else {
+            FromZoneSource::LiveIfindex {
+                ifindex: meta.ingress_ifindex as i32,
+                vlan: meta.ingress_vlan_id,
+            }
+        },
+    };
+    match zone_policy_deny_on_session_hit(forwarding, &input) {
+        ZonePolicyJudgment::Permit | ZonePolicyJudgment::Decline => None,
+        ZonePolicyJudgment::Revoke => Some(PolicyRevocation {
+            canonical_key: None,
+            decision: input.decision,
+            metadata: input.metadata,
+            origin,
+        }),
     }
 }
 
@@ -573,10 +721,53 @@ fn reverse_hit_zone_policy(
     forwarding: &ForwardingState,
     sessions: &mut SessionTable,
     session_key: &SessionKey,
+    fallback_decision: SessionDecision,
+    fallback_metadata: &SessionMetadata,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    packet_fabric_ingress: bool,
+    origin: SessionOrigin,
 ) -> Option<PolicyRevocation> {
     let rev_canonical = match sessions.policy_revalidation_target(session_key) {
-        PolicyRevalidationTarget::Fresh | PolicyRevalidationTarget::NoLocalEntry => {
-            return None
+        PolicyRevalidationTarget::Fresh => return None,
+        PolicyRevalidationTarget::NoLocalEntry => {
+            // A reverse row can only be judged through an authoritative
+            // FORWARD companion (#9604). Reconstruct its key with the
+            // reverse hit's own NAT decision, then use the companion's actual
+            // decision/metadata/origin to build the sessionless input. Never
+            // feed the swapped reverse row to the forward helper.
+            let fwd_key = crate::session::reverse_session_key(session_key, fallback_decision.nat);
+            if fwd_key == *session_key {
+                return None;
+            }
+            let Some((fwd_decision, fwd_metadata, fwd_origin)) =
+                sessions.entry_with_origin(&fwd_key)
+            else {
+                // Lone reverse: there is no forward egress/NAT/zone context
+                // from which to derive a verdict. Keep this legitimate
+                // #9604 population alive; this accepted residual is pinned by
+                // `lone_reverse_companion_reaching_revalidation_is_declined_9604`.
+                return None;
+            };
+            if fwd_metadata.is_reverse {
+                return None;
+            }
+            let fwd_flow = SessionFlow {
+                src_ip: fwd_key.src_ip,
+                dst_ip: fwd_key.dst_ip,
+                forward_key: fwd_key.clone(),
+            };
+            let mut fwd_meta = meta;
+            fwd_meta.protocol = fwd_key.protocol;
+            return sessionless_zone_policy_verdict(
+                forwarding,
+                fwd_decision,
+                &fwd_metadata,
+                &fwd_flow,
+                fwd_meta,
+                packet_fabric_ingress,
+                fwd_origin,
+            );
         }
         PolicyRevalidationTarget::Stale(k) => k,
     };
@@ -690,7 +881,7 @@ fn reverse_hit_zone_policy(
         }
         ZonePolicyJudgment::Decline => None,
         ZonePolicyJudgment::Revoke => Some(PolicyRevocation {
-            canonical_key: fwd_key,
+            canonical_key: Some(fwd_key),
             decision: fwd_decision,
             metadata: fwd_metadata,
             origin: fwd_origin,

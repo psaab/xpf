@@ -49,7 +49,10 @@ mod prerouting_scope;
 
 mod policy_revalidation;
 #[cfg(test)]
-pub(crate) use policy_revalidation::revalidate_zone_policy_declines_for_test;
+pub(crate) use policy_revalidation::{
+    revalidate_zone_policy_declines_for_test, revalidate_zone_policy_revokes_for_test,
+    revalidate_zone_policy_sessionless_denies_for_test,
+};
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;
@@ -1650,19 +1653,20 @@ pub(super) fn poll_binding_process_descriptor(
                         }
                         let zone_policy_revocation = match foreign_arrival_zone {
                             None => revalidate_zone_policy_on_session_hit(
-                                    worker_ctx.forwarding,
-                                    sessions,
-                                    &resolved.key,
-                                    &resolved.metadata,
-                                    resolved.decision,
-                                    Some(flow),
-                                    meta,
-                                    // #9384: THIS packet's fabric ingress. The from-zone
-                                    // is resolved live from the arrival interface, and a
-                                    // fabric-punted packet arrives on the fabric link —
-                                    // not in the flow's zone — so it keeps the entry's
-                                    // recorded zone instead.
-                                    packet_fabric_ingress,
+                                worker_ctx.forwarding,
+                                sessions,
+                                &resolved.key,
+                                &resolved.metadata,
+                                resolved.decision,
+                                Some(flow),
+                                meta,
+                                // #9384: THIS packet's fabric ingress. The from-zone
+                                // is resolved live from the arrival interface, and a
+                                // fabric-punted packet arrives on the fabric link —
+                                // not in the flow's zone — so it keeps the
+                                // recorded zone instead.
+                                packet_fabric_ingress,
+                                resolved.origin,
                             ),
                             Some(arrival_zone) => match foreign_hit_verdict(
                                 worker_ctx.forwarding,
@@ -1711,31 +1715,33 @@ pub(super) fn poll_binding_process_descriptor(
                             // SAME direction entry or the companion is missed
                             // (a degenerate third key under pure SNAT/DNAT, a
                             // self-identical elision under combined SNAT+DNAT).
-                            delete_terminal_filtered_session(
-                                sessions,
-                                binding.bpf_maps.session_map.handle(),
-                                conntrack_v4_fd,
-                                conntrack_v6_fd,
-                                worker_ctx.shared_sessions,
-                                worker_ctx.shared_nat_sessions,
-                                worker_ctx.shared_forward_wire_sessions,
-                                &worker_ctx.shared_owner_rg_indexes,
-                                worker_ctx.peer_worker_commands,
-                                worker_ctx.worker_commands_by_id,
-                                worker_ctx.forwarding,
-                                &revocation.canonical_key,
-                                revocation.decision,
-                                &revocation.metadata,
-                                revocation.origin,
-                                now_ns,
-                                worker_id,
-                            );
-                            collect_revoked_flow_cache_keys(
-                                &resolved.key,
-                                &revocation.canonical_key,
-                                revocation.decision.nat,
-                                &mut binding.scratch.scratch_filter_revoked_keys,
-                            );
+                            if let Some(canonical_key) = revocation.canonical_key.as_ref() {
+                                delete_terminal_filtered_session(
+                                    sessions,
+                                    binding.bpf_maps.session_map.handle(),
+                                    conntrack_v4_fd,
+                                    conntrack_v6_fd,
+                                    worker_ctx.shared_sessions,
+                                    worker_ctx.shared_nat_sessions,
+                                    worker_ctx.shared_forward_wire_sessions,
+                                    &worker_ctx.shared_owner_rg_indexes,
+                                    worker_ctx.peer_worker_commands,
+                                    worker_ctx.worker_commands_by_id,
+                                    worker_ctx.forwarding,
+                                    canonical_key,
+                                    revocation.decision,
+                                    &revocation.metadata,
+                                    revocation.origin,
+                                    now_ns,
+                                    worker_id,
+                                );
+                                collect_revoked_flow_cache_keys(
+                                    &resolved.key,
+                                    canonical_key,
+                                    revocation.decision.nat,
+                                    &mut binding.scratch.scratch_filter_revoked_keys,
+                                );
+                            }
                             telemetry.dbg.policy_revoked_sessions += 1;
                             binding
                                 .live

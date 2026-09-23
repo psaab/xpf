@@ -433,6 +433,19 @@ fn a_permit_rule_still_survives_the_widened_revoke_predicate_9381() {
     );
 }
 
+/// T3 control: widening the sessionless deny path must not affect an ordinary
+/// owner TCP hit that still has a local row and an agreeing permit policy.
+#[test]
+fn owner_tcp_permit_hit_remains_admitted_10582_t3() {
+    let out = drive_one_packet_with_action(Some("permit"), false, WAN_IFINDEX, DST);
+    assert_eq!(out.revoked, 0, "an owner permit hit must not be revoked");
+    assert_eq!(
+        out.sessions.len(),
+        1,
+        "the ordinary owner hit must retain its local session"
+    );
+}
+
 /// The `deny` point of the same three-way axis, driven through the action-taking
 /// path rather than the bool one.
 ///
@@ -2194,6 +2207,44 @@ fn an_arrival_with_no_interface_identity_still_declines_9513() {
          unzoned interface, and must DECLINE (#9513)"
     );
     assert_eq!(session_count(&sessions), 1, "the session must survive");
+}
+
+/// A sessionless established-hit verdict must still enforce a deny. This is
+/// the #10582 keep-transient shape: the shared row was purged, so the policy
+/// stage has no local stamp or teardown target, but the flow and arrival
+/// identity are sufficient to derive the packet verdict.
+#[test]
+fn sessionless_no_local_entry_denies_without_teardown_10582() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    let key = flow_key_to(DST);
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(SRC),
+        dst_ip: IpAddr::V4(DST),
+        forward_key: key.clone(),
+    };
+    let metadata = metadata(false);
+    let decision = decision(WAN_IFINDEX);
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, 0);
+    assert!(
+        super::poll_descriptor::revalidate_zone_policy_sessionless_denies_for_test(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            Some(&flow),
+            meta,
+            false,
+        ),
+        "NoLocalEntry must derive the live deny instead of forwarding"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "sessionless denial must not fabricate or tear down a local row"
+    );
 }
 
 /// The descriptor path must recycle an identity-less arrival at the ingress

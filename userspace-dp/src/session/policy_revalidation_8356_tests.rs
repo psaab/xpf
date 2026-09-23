@@ -205,3 +205,40 @@ fn a_tuple_with_no_entry_is_not_reported_stale_8356() {
          the caller into a revocation for a session it does not hold"
     );
 }
+
+/// A reused slab handle is a sessionless miss, not a stale canonical row. The
+/// shared-hit materializer refreshes this mapping before policy revalidation;
+/// this cell pins the guard that makes a pre-refresh lookup fail closed.
+#[test]
+fn stale_handle_policy_target_is_no_local_entry_10582_t5() {
+    let mut table = SessionTable::new();
+    let stale_key = key(443);
+    let live_key = key(8443);
+    assert!(table.install_with_protocol_with_origin(
+        stale_key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    assert!(table.install_with_protocol_with_origin(
+        live_key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    let live_handle = table
+        .debug_handle_for_key(&live_key)
+        .expect("live row handle");
+    table.debug_force_handle(&stale_key, live_handle);
+    assert_eq!(
+        table.policy_revalidation_target(&stale_key),
+        PolicyRevalidationTarget::NoLocalEntry,
+        "a reused slab slot must not make the wrong row look stale"
+    );
+}
