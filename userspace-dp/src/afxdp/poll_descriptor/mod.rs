@@ -425,15 +425,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     (meta, owned_packet_frame)
                 };
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
-                // #10597 G5: the shim's Local classification is advisory.
-                // Re-resolve the injected destination on the worker before
-                // flow-cache/session lookup so an underlay view skew can never
-                // retain or transmit this frame as transit. The two local
-                // helpers cover ordinary interface ownership and NAT-owned
-                // local targets; all other injected records are terminal.
-                // Native AF_XDP records retain the existing full resolver.
-                // #946 Phase 1 stage 7+8: parse session flow and
-                // learn the source-side dynamic neighbor.
+                // #946 Phase 1 stage 7+8: parse session flow and learn the
+                // source-side dynamic neighbor.
                 let mut flow = stage_parse_flow_and_learn(
                     unsafe { &*area },
                     desc,
@@ -443,34 +436,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     &mut binding.last_learned_neighbor,
                     worker_ctx,
                 );
-                if is_injected {
-                    let Some(injected_flow) = flow.as_ref() else {
-                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
-                            .fetch_add(1, Ordering::Relaxed);
-                        recycle_desc!(desc.addr);
-                        continue;
-                    };
-                    let local = ingress_interface_local_resolution_on_session_miss(
-                        worker_ctx.forwarding,
-                        meta.ingress_ifindex as i32,
-                        meta.ingress_vlan_id,
-                        injected_flow.dst_ip,
-                        meta.protocol,
-                    )
-                    .is_some()
-                        || interface_nat_local_resolution_on_session_miss(
-                            worker_ctx.forwarding,
-                            injected_flow.dst_ip,
-                            meta.protocol,
-                        )
-                        .is_some();
-                    if !local {
-                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
-                            .fetch_add(1, Ordering::Relaxed);
-                        recycle_desc!(desc.addr);
-                        continue;
-                    }
-                }
                 if flow.is_none() {
                     flow = crate::afxdp::gre_discriminator::pptp_data_session_flow(
                         packet_frame,
@@ -1239,6 +1204,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         ha_startup_grace_until_secs,
                         worker_id,
                     ) {
+                        // #10597 G5: a queued WireGuard record may only enter
+                        // the worker's local-delivery path. Use the pipeline's
+                        // final FIB result here (not the ingress interface's
+                        // primary address helpers), so loopback/management
+                        // addresses on another interface remain reachable.
+                        if is_injected
+                            && resolved.decision.resolution.disposition
+                                != ForwardingDisposition::LocalDelivery
+                        {
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                                .fetch_add(1, Ordering::Relaxed);
+                            recycle_desc!(desc.addr);
+                            continue;
+                        }
                         telemetry.counters.session_hits += 1;
                         telemetry.dbg.session_hit += 1;
                         // #9519: may THIS packet act for the session it hit? A
@@ -2984,6 +2963,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             from_zone_id,
                             ha_startup_grace_until_secs,
                         );
+                        // #10597 G5: apply the local-only fence to the
+                        // pipeline's final FIB resolution. This intentionally
+                        // allows addresses owned by lo0/management/another
+                        // interface; the earlier ingress-interface helpers
+                        // were only advisory and are not sufficient here.
+                        if is_injected
+                            && decision.resolution.disposition
+                                != ForwardingDisposition::LocalDelivery
+                        {
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                                .fetch_add(1, Ordering::Relaxed);
+                            recycle_desc!(desc.addr);
+                            continue;
+                        }
                         // #4400/#10270: fail closed on any non-SYN TCP
                         // session-MISS packet. A bare ACK/PSH/data tuple with
                         // no matching session is either a late segment for an
@@ -4994,6 +4987,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         now_secs,
                         hit.resolution,
                     );
+                    // #10597 G5: an injected record inheriting a fragment
+                    // association must still resolve local under the
+                    // authoritative FIB. The association may have been
+                    // installed by a native first fragment with matching L3
+                    // identity; inheriting its transit decision would bypass
+                    // the flow-backed gates above.
+                    if is_injected
+                        && hit.resolution.disposition != ForwardingDisposition::LocalDelivery
+                    {
+                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                            .fetch_add(1, Ordering::Relaxed);
+                        recycle_desc!(desc.addr);
+                        continue;
+                    }
                     hit
                 } else {
                     // #7359: build the L3 identity and run the INTERFACE INPUT
@@ -5351,6 +5358,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     } else {
                         base_resolution
                     };
+                    // #10597 G5: flowless injected records (non-first
+                    // fragments, ICMP errors) fence on the same final
+                    // resolution as the flow-backed arms. Placed before
+                    // policy so a non-local record drops as nonlocal
+                    // without adjudication it can never use.
+                    if is_injected
+                        && final_resolution.disposition != ForwardingDisposition::LocalDelivery
+                    {
+                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                            .fetch_add(1, Ordering::Relaxed);
+                        recycle_desc!(desc.addr);
+                        continue;
+                    }
 
                     // #6458 V2: honor the zone-encoded fabric stamp for this
                     // flowless enforcement only when the resolution's owner RG

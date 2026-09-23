@@ -56,26 +56,18 @@ pub(in crate::afxdp) const WG_UNCOVERED_QUEUE_DEPTH: usize = 128;
 /// budget, same discipline as `WORKER_COMMAND_DRAIN_BUDGET`).
 pub(in crate::afxdp) const WG_UNCOVERED_DRAIN_BUDGET: usize = 64;
 
-/// Sentinel `XdpDesc.addr` for injected items inside
-/// `poll_binding_process_descriptor`. Real UMEM addrs are offsets into the
-/// worker's UMEM region (far below this); the sentinel is filtered out of
-/// `scratch_recycle` before the fill-ring drain, so it can never reach the
-/// kernel rings. Lengths travel in the real `desc.len` field, so every
-/// `desc.len` accounting site reads the true injected length untouched.
-pub(in crate::afxdp) const WG_UNCOVERED_SENTINEL_ADDR: u64 = u64::MAX;
-
-/// #10597 G6a: number of uncovered host-inbound records that had to use the
-/// explicit zero-worker reachability fallback. This is NOT the normal path:
-/// while a live worker set exists, queue pressure and stale attachment are
-/// fail-closed drops. The fallback is retained only for the startup / total
-/// worker-loss window so management reachability is not silently black-holed.
-pub(in crate::afxdp) static WG_UNCOVERED_FALLBACK_WRITES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// #10597: records successfully accepted into a worker queue.
 pub(in crate::afxdp) static WG_UNCOVERED_ENQUEUED_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// #10597: descriptors dropped at the worker because the advisory
 /// generation/attachment no longer matches the live view.
 pub(in crate::afxdp) static WG_UNCOVERED_STALE_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// #10597: descriptors whose inner bytes fail to parse (bad IP version
+/// nibble, short/truncated header, unparseable L4 offsets). Counted apart
+/// from `STALE`: a malformed inner is a corrupt/decrypt-mismatched record,
+/// not a rotation-gate fence hit, and conflating the two would hide either
+/// signal.
+pub(in crate::afxdp) static WG_UNCOVERED_MALFORMED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// #10597: descriptors that were admitted by the shim-local view but resolved
 /// non-local under the worker's authoritative FIB. They are dropped rather
@@ -161,7 +153,14 @@ impl WgUncoveredIngressQueue {
         if self.closed.load(Ordering::Acquire) {
             return Err(desc);
         }
-        let mut pending = self.lock_recover();
+        let mut pending = match self.pending.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                WG_UNCOVERED_QUEUE_POISON_RECOVERIES.fetch_add(1, Ordering::Relaxed);
+                poisoned.into_inner()
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return Err(desc),
+        };
         // Re-check under the lock: `close_and_drain` sets closed before
         // draining, so anything enqueued after this point would strand.
         if self.closed.load(Ordering::Acquire) {
@@ -300,7 +299,13 @@ pub(in crate::afxdp) fn build_injected_packet(
         WG_UNCOVERED_STALE_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;
     }
-    let endpoint = forwarding.tunnel_endpoints.get(&descriptor.tunnel_endpoint_id)?;
+    let endpoint = match forwarding.tunnel_endpoints.get(&descriptor.tunnel_endpoint_id) {
+        Some(endpoint) => endpoint,
+        None => {
+            WG_UNCOVERED_STALE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
     if endpoint.mode != "wireguard"
         || endpoint.logical_ifindex != descriptor.logical_ifindex
         || forwarding
@@ -315,15 +320,26 @@ pub(in crate::afxdp) fn build_injected_packet(
         Some(4) => (libc::AF_INET as u8, 0x0800u16),
         Some(6) => (libc::AF_INET6 as u8, 0x86ddu16),
         _ => {
-            WG_UNCOVERED_STALE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
             return None;
         }
     };
-    let inner_len =
-        crate::afxdp::gre::packet_trimmed_len(&descriptor.inner, inner_family)?;
-    let inner = descriptor.inner.get(..inner_len)?;
-    let (protocol, rel_l4_offset, payload_offset) =
-        crate::afxdp::gre::parse_inner_protocol_and_offsets(inner, inner_family)?;
+    let Some(inner_len) =
+        crate::afxdp::gre::packet_trimmed_len(&descriptor.inner, inner_family)
+    else {
+        WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    let Some(inner) = descriptor.inner.get(..inner_len) else {
+        WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    let Some((protocol, rel_l4_offset, payload_offset)) =
+        crate::afxdp::gre::parse_inner_protocol_and_offsets(inner, inner_family)
+    else {
+        WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
     crate::afxdp::logical_ingress::build_logical_ingress_packet(
         forwarding,
         &crate::afxdp::logical_ingress::LogicalIngressParams {
@@ -518,8 +534,113 @@ mod tests {
             owners.insert(steer_uncovered_queue(&table, wg_uncovered_flow_hash(&flow)).unwrap().0);
         }
         assert!(owners.len() > 1, "hash must spread, got {owners:?}");
-        // Empty table => None (zero-worker fallback), never a panic.
+        // Empty table => no consumer: the caller must fail closed.
         assert!(steer_uncovered_queue(&BTreeMap::new(), hash).is_none());
+    }
+
+    fn valid_inner_v4(ecn: u8) -> Vec<u8> {
+        let mut inner = vec![0u8; 40];
+        let total_len = inner.len() as u16;
+        inner[0] = 0x45;
+        inner[1] = ecn & 0x03;
+        inner[2..4].copy_from_slice(&total_len.to_be_bytes());
+        inner[8] = 64;
+        inner[9] = 6;
+        inner[12..16].copy_from_slice(&[10, 123, 0, 2]);
+        inner[16..20].copy_from_slice(&[10, 123, 0, 1]);
+        inner[20..22].copy_from_slice(&12345u16.to_be_bytes());
+        inner[22..24].copy_from_slice(&80u16.to_be_bytes());
+        inner[32] = 0x50;
+        inner
+    }
+
+    fn attached_descriptor(outer_ecn: Option<u8>, inner: Vec<u8>) -> WgUncoveredDescriptor {
+        WgUncoveredDescriptor {
+            tunnel_endpoint_id: 1,
+            logical_ifindex: 400,
+            tunnel_name: "wg0".to_string(),
+            inner,
+            outer_ecn,
+            config_generation: 7,
+            fib_generation: 9,
+            ingress_ifindex: Some(12),
+        }
+    }
+
+    #[test]
+    fn injected_entry_builds_post_decap_frame_and_meta_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+        );
+        let validation = crate::afxdp::ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        };
+        let (frame, meta) = build_injected_packet(
+            &attached_descriptor(Some(0), valid_inner_v4(0b10)),
+            &forwarding,
+            validation,
+            3,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        assert_eq!(frame.len(), 54, "Ethernet header plus inner IPv4");
+        assert_eq!(meta.l3_offset, 14);
+        assert_eq!(meta.pkt_len as usize, frame.len());
+        assert_eq!(frame[14], 0x45, "the worker entry receives inner L3");
+    }
+
+    #[test]
+    fn injected_entry_applies_rfc6040_ecn_once_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+        );
+        let validation = crate::afxdp::ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        };
+        let (frame, _) = build_injected_packet(
+            &attached_descriptor(Some(0b11), valid_inner_v4(0b10)),
+            &forwarding,
+            validation,
+            3,
+        )
+        .expect("ECT inner plus outer CE is a legal RFC 6040 upgrade");
+        assert_eq!(frame[15] & 0x03, 0b11, "outer CE upgrades inner to CE");
+    }
+
+    #[test]
+    fn injected_entry_rejects_attachment_or_generation_rotation_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+        );
+        let validation = crate::afxdp::ValidationState {
+            snapshot_installed: true,
+            config_generation: 8,
+            fib_generation: 9,
+        };
+        assert!(
+            build_injected_packet(
+                &attached_descriptor(None, valid_inner_v4(0)),
+                &forwarding,
+                validation,
+                3,
+            )
+            .is_none(),
+            "rotation generation must fence a queued descriptor"
+        );
+        let mut detached = attached_descriptor(None, valid_inner_v4(0));
+        detached.tunnel_name = "wg1".to_string();
+        let current = crate::afxdp::ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        };
+        assert!(
+            build_injected_packet(&detached, &forwarding, current, 3).is_none(),
+            "attachment-name drift must fence a queued descriptor"
+        );
     }
 
     #[test]
@@ -537,5 +658,293 @@ mod tests {
         batch.clear();
         assert!(batch.is_empty());
         assert_eq!(batch.remaining(), 0);
+    }
+    // #10597 traversal helpers + cells: drive one control-thread WG
+    // plaintext record through the REAL worker pipeline
+    // (`build_injected_packet` + `txn_run_descriptor_with_injected`) and
+    // observe the #10409 delivery channel — the same bytes the wgN TUN
+    // write would carry.
+    fn wg_uncovered_host_snapshot(default_policy: &str) -> crate::afxdp::ConfigSnapshot {
+        let mut snapshot = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
+        snapshot.default_policy = default_policy.to_string();
+        snapshot.policies.clear();
+        snapshot
+    }
+
+    fn wg_inner_icmp_echo(src: [u8; 4], dst: [u8; 4], ecn: u8) -> Vec<u8> {
+        let mut packet = vec![
+            0x45, ecn & 0x03, 0x00, 0x24, 0x00, 0x01, 0x00, 0x00, 64,
+            crate::ip_proto::PROTO_ICMP, 0x00, 0x00, src[0], src[1], src[2],
+            src[3], dst[0], dst[1], dst[2], dst[3],
+        ];
+        let ip_sum = crate::afxdp::frame::checksum16(&packet[0..20]);
+        packet[10] = (ip_sum >> 8) as u8;
+        packet[11] = ip_sum as u8;
+        let mut icmp = vec![8u8, 0, 0, 0, 0x12, 0x34, 0x00, 0x01];
+        icmp.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33]);
+        let icmp_sum = crate::afxdp::frame::checksum16(&icmp);
+        icmp[2] = (icmp_sum >> 8) as u8;
+        icmp[3] = icmp_sum as u8;
+        packet.extend_from_slice(&icmp);
+        packet
+    }
+
+    fn wg_uncovered_icmp_descriptor(
+        inner: Vec<u8>,
+        outer_ecn: Option<u8>,
+    ) -> WgUncoveredDescriptor {
+        WgUncoveredDescriptor {
+            tunnel_endpoint_id: 1,
+            logical_ifindex: 400,
+            tunnel_name: "wg0".to_string(),
+            inner,
+            outer_ecn,
+            config_generation: 7,
+            fib_generation: 9,
+            ingress_ifindex: Some(12),
+        }
+    }
+
+    fn wg_deliveries(
+        ifindex: i32,
+    ) -> (
+        Arc<arc_swap::ArcSwap<BTreeMap<i32, crate::afxdp::tunnel::LocalTunnelDelivery>>>,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let wake = Arc::new(crate::afxdp::tunnel::TunnelWake::new().expect("eventfd"));
+        let mut map = BTreeMap::new();
+        map.insert(
+            ifindex,
+            crate::afxdp::tunnel::LocalTunnelDelivery { tx, wake },
+        );
+        (
+            Arc::new(arc_swap::ArcSwap::from_pointee(map)),
+            rx,
+        )
+    }
+
+    fn wg_injected_validation() -> crate::afxdp::ValidationState {
+        crate::afxdp::ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        }
+    }
+
+    #[test]
+    fn injected_permit_delivers_inner_via_delivery_map_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &wg_uncovered_host_snapshot("permit"),
+        );
+        let ha_state = crate::afxdp::tests_support::txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+        let mut sessions = crate::session::SessionTable::new();
+        // ECT inner + outer CE: the traversal must carry the exactly-once
+        // RFC 6040 upgrade all the way to the TUN-bound bytes.
+        let inner = wg_inner_icmp_echo([10, 123, 0, 2], [10, 123, 0, 1], 0b10);
+        let injected = build_injected_packet(
+            &wg_uncovered_icmp_descriptor(inner, Some(0b11)),
+            &forwarding,
+            wg_injected_validation(),
+            0,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        let (deliveries, rx) = wg_deliveries(400);
+        let (_batch, dbg) = crate::afxdp::tests_support::txn_run_descriptor_with_injected(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            injected,
+            &deliveries,
+        );
+        assert_eq!(dbg.local, 1, "host-bound record must take LocalDelivery");
+        assert_eq!(dbg.policy_deny, 0, "permit snapshot must not deny");
+        let delivered = rx
+            .try_recv()
+            .expect("inner must reach the wg0 delivery channel");
+        assert_eq!(
+            delivered[0] >> 4,
+            4,
+            "TUN-bound payload starts with the IP nibble (IFF_NO_PI)"
+        );
+        assert_eq!(
+            delivered[12..20].to_vec(),
+            vec![10, 123, 0, 2, 10, 123, 0, 1],
+            "addrs survive the control->worker->map round trip"
+        );
+        assert_eq!(
+            delivered[1] & 0x03,
+            0b11,
+            "outer CE upgrades the delivered inner to CE"
+        );
+        assert!(rx.try_recv().is_err(), "exactly one delivery per record");
+    }
+
+    #[test]
+    fn injected_deny_drops_without_delivery_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &wg_uncovered_host_snapshot("deny"),
+        );
+        let ha_state = crate::afxdp::tests_support::txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+        let mut sessions = crate::session::SessionTable::new();
+        let nonlocal_before = WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed);
+        let inner = wg_inner_icmp_echo([10, 123, 0, 2], [10, 123, 0, 1], 0);
+        let injected = build_injected_packet(
+            &wg_uncovered_icmp_descriptor(inner, None),
+            &forwarding,
+            wg_injected_validation(),
+            0,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        let (deliveries, rx) = wg_deliveries(400);
+        let (_batch, dbg) = crate::afxdp::tests_support::txn_run_descriptor_with_injected(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            injected,
+            &deliveries,
+        );
+        assert_eq!(
+            dbg.policy_deny, 1,
+            "default-deny must adjudicate-deny the host-bound record"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "denied record must never reach the delivery map"
+        );
+        assert_eq!(sessions.len(), 0, "denied record must not install a session");
+        assert_eq!(
+            WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed) - nonlocal_before,
+            0,
+            "resolved local: G5 must not pre-drop what policy denies"
+        );
+    }
+
+    #[test]
+    fn injected_frame_recycles_tx_pool_exactly_once_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &wg_uncovered_host_snapshot("permit"),
+        );
+        let ha_state = crate::afxdp::tests_support::txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+        let mut sessions = crate::session::SessionTable::new();
+        let free_before = binding.tx_pipeline.free_tx_frames.len();
+        let head = *binding
+            .tx_pipeline
+            .free_tx_frames
+            .front()
+            .expect("seeded TX pool");
+        let inner = wg_inner_icmp_echo([10, 123, 0, 2], [10, 123, 0, 1], 0);
+        let injected = build_injected_packet(
+            &wg_uncovered_icmp_descriptor(inner, None),
+            &forwarding,
+            wg_injected_validation(),
+            0,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        let (deliveries, rx) = wg_deliveries(400);
+        crate::afxdp::tests_support::txn_run_descriptor_with_injected(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            injected,
+            &deliveries,
+        );
+        assert!(rx.try_recv().is_ok(), "UMEM cell still delivers");
+        assert_eq!(
+            binding.tx_pipeline.free_tx_frames.len(),
+            free_before,
+            "pop+recycle nets zero: no leak, no double-recycle"
+        );
+        assert!(
+            binding.tx_pipeline.free_tx_frames.contains(&head),
+            "the injected frame returns to the free pool, not the fill ring"
+        );
+    }
+
+    #[test]
+    fn injected_nonlocal_transit_drops_without_delivery_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &wg_uncovered_host_snapshot("permit"),
+        );
+        let ha_state = crate::afxdp::tests_support::txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+        let mut sessions = crate::session::SessionTable::new();
+        let nonlocal_before = WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed);
+        // 203.0.113.7 routes via reth0.80: transit under the worker FIB.
+        let inner = wg_inner_icmp_echo([10, 123, 0, 2], [203, 0, 113, 7], 0);
+        let injected = build_injected_packet(
+            &wg_uncovered_icmp_descriptor(inner, None),
+            &forwarding,
+            wg_injected_validation(),
+            0,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        let (deliveries, rx) = wg_deliveries(400);
+        let (_batch, dbg) = crate::afxdp::tests_support::txn_run_descriptor_with_injected(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            injected,
+            &deliveries,
+        );
+        assert_eq!(
+            WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed) - nonlocal_before,
+            1,
+            "transit-resolving record must fence as nonlocal"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nonlocal record must never reach the delivery map"
+        );
+        assert_eq!(sessions.len(), 0, "nonlocal record must not install a session");
+        assert_eq!(
+            dbg.policy_deny, 0,
+            "nonlocal drops before policy adjudication"
+        );
+    }
+
+    #[test]
+    fn injected_other_interface_local_passes_g5_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &wg_uncovered_host_snapshot("permit"),
+        );
+        let ha_state = crate::afxdp::tests_support::txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+        let mut sessions = crate::session::SessionTable::new();
+        let nonlocal_before = WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed);
+        // 172.16.80.8 is reth0.80's primary: local on another interface.
+        let inner = wg_inner_icmp_echo([10, 123, 0, 2], [172, 16, 80, 8], 0);
+        let injected = build_injected_packet(
+            &wg_uncovered_icmp_descriptor(inner, None),
+            &forwarding,
+            wg_injected_validation(),
+            0,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        let (deliveries, rx) = wg_deliveries(400);
+        crate::afxdp::tests_support::txn_run_descriptor_with_injected(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            injected,
+            &deliveries,
+        );
+        assert_eq!(
+            WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed) - nonlocal_before,
+            0,
+            "another interface's local addr must pass the G5 fence"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no wg0-map entry for ifindex 12: must not deliver on the WG channel"
+        );
     }
 }

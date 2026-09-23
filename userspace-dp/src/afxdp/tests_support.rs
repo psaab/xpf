@@ -1315,6 +1315,98 @@ pub(super) fn txn_run_descriptor_with_shared_sessions(
 }
 
 
+
+/// #10597 driver: run one control-thread WG plaintext record end-to-end
+/// through `poll_binding_process_descriptor_with_injection` with a
+/// caller-provided `local_tunnel_deliveries` map, so the traversal cells
+/// observe exactly the bytes that would be written to the wgN TUN.
+/// `injected` is the `build_injected_packet` output (synthetic Ethernet
+/// frame + logical-ingress meta); no native RX descriptor is pushed, so
+/// the pass adjudicates exactly one packet. WorkerContext mirrors
+/// `txn_run_descriptor_inner_with_slow_path_impl` (same generations,
+/// timestamps, and maps) apart from the injection itself.
+pub(super) fn txn_run_descriptor_with_injected(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    injected: (Vec<u8>, UserspaceDpMeta),
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+) -> (BatchCounters, DebugPollCounters) {
+    let ident = binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let default_ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let ike_exchanges = &default_ike_exchanges;
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &__pptp_control_7699,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding,
+        ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: None,
+        local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext {
+        dbg: &mut dbg,
+        counters: &mut batch,
+    };
+    let area_ptr = binding.umem.area() as *const MmapArea;
+    super::poll_descriptor::poll_binding_process_descriptor_with_injection(
+        binding,
+        0,
+        area_ptr,
+        0,
+        Some(injected),
+        sessions,
+        &mut screen,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        123_000_000_000,
+        123,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+    (batch, dbg)
+}
+
 /// Descriptor driver variant that overrides the frame length while leaving
 /// metadata and frame bytes in a valid UMEM location.
 pub(super) fn txn_run_descriptor_with_desc_len(

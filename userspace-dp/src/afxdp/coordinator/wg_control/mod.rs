@@ -622,15 +622,14 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
 
     while !stop.load(Ordering::Relaxed) {
         let mut did_work = false;
-        // #10038: ONE forwarding Arc + ONE HA snapshot per outer iteration,
-        // reused across the whole burst (the GRE loop's coherence shape).
-        // A validation-only publish rotates the view but not the inner
-        // forwarding Arc, so `load_forwarding_if_changed` correctly sees no
-        // change there; the attachment gate recomputes ONLY on rotation.
-        if let Some(new_forwarding) =
-            crate::afxdp::types::load_forwarding_if_changed(&forwarding, shared_runtime)
-        {
-            forwarding = new_forwarding;
+        // #10038/#10597: acquire one immutable runtime view for this outer
+        // iteration. Its forwarding Arc and validation generations are a
+        // paired snapshot; never load the validation half independently in
+        // the datagram loop.
+        let runtime_view = shared_runtime.load();
+        let validation = runtime_view.validation();
+        if !std::sync::Arc::ptr_eq(&forwarding, runtime_view.forwarding()) {
+            forwarding = runtime_view.forwarding().clone();
             tun_origin_attached = tun_origin::wg_endpoint_attachment_valid(
                 &forwarding,
                 tunnel_endpoint_id,
@@ -711,7 +710,6 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
                     // after the datagram cryptographically authenticates
                     // (Codex r3 MAJOR): updating on any inbound packet
                     // would let a spoofed source redirect our egress.
-                    let validation = shared_runtime.load().validation();
                     let outcome = dispatch_inbound(
                         engine,
                         socket,

@@ -238,24 +238,11 @@ pub(super) fn dispatch_inbound(
                             .as_ref()
                             .map_or(true, |table| table.is_empty())
                         {
-                            // #10597 G6a: keep management reachability during
-                            // the explicit zero-worker/startup window. This
-                            // is the sole remaining control-thread inbound
-                            // TUN write and is counted loudly; a live queue
-                            // set never reaches this arm.
-                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_FALLBACK_WRITES_TOTAL
+                            // No live worker owns this record. Fail closed:
+                            // WG decap must never bypass the worker policy
+                            // pipeline with a control-thread TUN write.
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if let Err(e) = crate::slowpath::write_packet_nonblocking(
-                                tun.as_raw_fd(),
-                                &decap_buf[..outcome.len],
-                            ) {
-                                WgCounters::bump(&engine.counters().tun_write_errors);
-                                record_local_tunnel_exception(
-                                    recent_exceptions,
-                                    tunnel_name,
-                                    format!("wg_tun_write_fallback:{e}"),
-                                );
-                            }
                             return InboundOutcome::Authenticated(outcome.peer_pubkey);
                         }
                         let queue_table = queue_table.expect("non-empty queue table");
