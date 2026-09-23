@@ -78,10 +78,7 @@ pub(super) fn dispatch_inbound(
     forward_queues: Option<
         &Arc<
             ArcSwap<
-                BTreeMap<
-                    u32,
-                    Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>,
-                >,
+                BTreeMap<u32, Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>>,
             >,
         >,
     >,
@@ -234,10 +231,7 @@ pub(super) fn dispatch_inbound(
                             return InboundOutcome::Authenticated(outcome.peer_pubkey);
                         }
                         let queue_table = forward_queues.map(|queues| queues.load());
-                        if queue_table
-                            .as_ref()
-                            .map_or(true, |table| table.is_empty())
-                        {
+                        if queue_table.as_ref().map_or(true, |table| table.is_empty()) {
                             // No live worker owns this record. Fail closed:
                             // WG decap must never bypass the worker policy
                             // pipeline with a control-thread TUN write.
@@ -272,24 +266,15 @@ pub(super) fn dispatch_inbound(
                         match queue.try_enqueue(descriptor) {
                             Ok(()) => {
                                 crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_ENQUEUED_TOTAL
-                                    .fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Err(_descriptor) if queue.is_closed() => {
                                 crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
-                                    .fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Err(_descriptor) => {
                                 crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_FULL_TOTAL
-                                    .fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         return InboundOutcome::Authenticated(outcome.peer_pubkey);

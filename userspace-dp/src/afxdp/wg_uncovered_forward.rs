@@ -56,7 +56,6 @@ pub(in crate::afxdp) const WG_UNCOVERED_QUEUE_DEPTH: usize = 128;
 /// budget, same discipline as `WORKER_COMMAND_DRAIN_BUDGET`).
 pub(in crate::afxdp) const WG_UNCOVERED_DRAIN_BUDGET: usize = 64;
 
-
 /// #10597: records successfully accepted into a worker queue.
 pub(in crate::afxdp) static WG_UNCOVERED_ENQUEUED_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// #10597: descriptors dropped at the worker because the advisory
@@ -256,14 +255,10 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
         Some(6) if inner.len() >= 40 => {
             let proto = inner[6];
             let (src_port, dst_port) = match proto {
-                crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP
-                    if inner.len() >= 44 =>
-                {
-                    (
-                        u16::from_be_bytes([inner[40], inner[41]]),
-                        u16::from_be_bytes([inner[42], inner[43]]),
-                    )
-                }
+                crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP if inner.len() >= 44 => (
+                    u16::from_be_bytes([inner[40], inner[41]]),
+                    u16::from_be_bytes([inner[42], inner[43]]),
+                ),
                 _ => (0, 0),
             };
             Some((&inner[8..24], &inner[24..40], proto, src_port, dst_port))
@@ -299,7 +294,10 @@ pub(in crate::afxdp) fn build_injected_packet(
         WG_UNCOVERED_STALE_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;
     }
-    let endpoint = match forwarding.tunnel_endpoints.get(&descriptor.tunnel_endpoint_id) {
+    let endpoint = match forwarding
+        .tunnel_endpoints
+        .get(&descriptor.tunnel_endpoint_id)
+    {
         Some(endpoint) => endpoint,
         None => {
             WG_UNCOVERED_STALE_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -324,8 +322,7 @@ pub(in crate::afxdp) fn build_injected_packet(
             return None;
         }
     };
-    let Some(inner_len) =
-        crate::afxdp::gre::packet_trimmed_len(&descriptor.inner, inner_family)
+    let Some(inner_len) = crate::afxdp::gre::packet_trimmed_len(&descriptor.inner, inner_family)
     else {
         WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;
@@ -517,21 +514,37 @@ mod tests {
 
     #[test]
     fn steering_stable_and_spread_10597() {
-        let table: BTreeMap<u32, Arc<WgUncoveredIngressQueue>> =
-            [(0, Arc::new(WgUncoveredIngressQueue::new())), (1, Arc::new(WgUncoveredIngressQueue::new())), (2, Arc::new(WgUncoveredIngressQueue::new()))].into_iter().collect();
+        let table: BTreeMap<u32, Arc<WgUncoveredIngressQueue>> = [
+            (0, Arc::new(WgUncoveredIngressQueue::new())),
+            (1, Arc::new(WgUncoveredIngressQueue::new())),
+            (2, Arc::new(WgUncoveredIngressQueue::new())),
+        ]
+        .into_iter()
+        .collect();
         // Same inner => same worker, every time (per-flow order).
-        let inner = [0x45u8, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2, 0, 80, 1, 187];
+        let inner = [
+            0x45u8, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2, 0, 80, 1, 187,
+        ];
         let hash = wg_uncovered_flow_hash(&inner);
         let first = steer_uncovered_queue(&table, hash).unwrap().0;
         for _ in 0..8 {
-            assert_eq!(steer_uncovered_queue(&table, wg_uncovered_flow_hash(&inner)).unwrap().0, first);
+            assert_eq!(
+                steer_uncovered_queue(&table, wg_uncovered_flow_hash(&inner))
+                    .unwrap()
+                    .0,
+                first
+            );
         }
         // Distinct flows spread across more than one worker.
         let mut owners = std::collections::BTreeSet::new();
         for i in 0u8..24 {
             let mut flow = inner.to_vec();
             flow[15] = i;
-            owners.insert(steer_uncovered_queue(&table, wg_uncovered_flow_hash(&flow)).unwrap().0);
+            owners.insert(
+                steer_uncovered_queue(&table, wg_uncovered_flow_hash(&flow))
+                    .unwrap()
+                    .0,
+            );
         }
         assert!(owners.len() > 1, "hash must spread, got {owners:?}");
         // Empty table => no consumer: the caller must fail closed.
@@ -668,14 +681,39 @@ mod tests {
         let mut snapshot = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
         snapshot.default_policy = default_policy.to_string();
         snapshot.policies.clear();
+        // The WG fixture zones carry no host-inbound stanza, which is
+        // default-deny (#3405). Admit ping on the ingress (sfmix) zone so
+        // the traversal cells reach policy/delivery; the deny cell below
+        // deliberately omits this.
+        for zone in snapshot.zones.iter_mut().filter(|z| z.name == "sfmix") {
+            zone.host_inbound_configured = true;
+            zone.host_inbound_system_services = vec!["ping".to_string()];
+        }
         snapshot
     }
 
     fn wg_inner_icmp_echo(src: [u8; 4], dst: [u8; 4], ecn: u8) -> Vec<u8> {
         let mut packet = vec![
-            0x45, ecn & 0x03, 0x00, 0x24, 0x00, 0x01, 0x00, 0x00, 64,
-            crate::ip_proto::PROTO_ICMP, 0x00, 0x00, src[0], src[1], src[2],
-            src[3], dst[0], dst[1], dst[2], dst[3],
+            0x45,
+            ecn & 0x03,
+            0x00,
+            0x24,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+            64,
+            crate::ip_proto::PROTO_ICMP,
+            0x00,
+            0x00,
+            src[0],
+            src[1],
+            src[2],
+            src[3],
+            dst[0],
+            dst[1],
+            dst[2],
+            dst[3],
         ];
         let ip_sum = crate::afxdp::frame::checksum16(&packet[0..20]);
         packet[10] = (ip_sum >> 8) as u8;
@@ -718,10 +756,7 @@ mod tests {
             ifindex,
             crate::afxdp::tunnel::LocalTunnelDelivery { tx, wake },
         );
-        (
-            Arc::new(arc_swap::ArcSwap::from_pointee(map)),
-            rx,
-        )
+        (Arc::new(arc_swap::ArcSwap::from_pointee(map)), rx)
     }
 
     fn wg_injected_validation() -> crate::afxdp::ValidationState {
@@ -784,9 +819,11 @@ mod tests {
 
     #[test]
     fn injected_deny_drops_without_delivery_10597() {
-        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
-            &wg_uncovered_host_snapshot("deny"),
-        );
+        // No ping admit: the bare fixture zone is host-inbound default-deny.
+        let mut denied = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
+        denied.default_policy = "deny".to_string();
+        denied.policies.clear();
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&denied);
         let ha_state = crate::afxdp::tests_support::txn_ha_state();
         let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
         let mut sessions = crate::session::SessionTable::new();
@@ -809,18 +846,88 @@ mod tests {
             &deliveries,
         );
         assert_eq!(
-            dbg.policy_deny, 1,
-            "default-deny must adjudicate-deny the host-bound record"
+            dbg.local, 1,
+            "host-bound record takes the LocalDelivery arm"
+        );
+        assert_eq!(
+            dbg.host_inbound_deny, 1,
+            "unconfigured-zone host-inbound must deny the echo"
+        );
+        assert_eq!(
+            dbg.policy_deny, 0,
+            "host-inbound denies before policy is judged"
         );
         assert!(
             rx.try_recv().is_err(),
             "denied record must never reach the delivery map"
         );
-        assert_eq!(sessions.len(), 0, "denied record must not install a session");
+        assert_eq!(
+            sessions.len(),
+            0,
+            "denied record must not install a session"
+        );
         assert_eq!(
             WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed) - nonlocal_before,
             0,
-            "resolved local: G5 must not pre-drop what policy denies"
+            "resolved local: G5 must not pre-drop what host-inbound denies"
+        );
+    }
+
+    #[test]
+    fn injected_junos_host_deny_drops_without_delivery_10597() {
+        // Host-inbound admits (ping), but a to-zone junos-host deny policy
+        // adjudicates after it (Junos order, #3019): the record must drop
+        // with policy_deny, proving the pipeline's policy stage judges
+        // control-thread plaintext.
+        let mut snapshot = wg_uncovered_host_snapshot("permit");
+        snapshot.policies.push(crate::PolicyRuleSnapshot {
+            name: "host-deny".to_string(),
+            from_zone: "sfmix".to_string(),
+            to_zone: "junos-host".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "deny".to_string(),
+            ..Default::default()
+        });
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
+        let ha_state = crate::afxdp::tests_support::txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+        let mut sessions = crate::session::SessionTable::new();
+        let inner = wg_inner_icmp_echo([10, 123, 0, 2], [10, 123, 0, 1], 0);
+        let injected = build_injected_packet(
+            &wg_uncovered_icmp_descriptor(inner, None),
+            &forwarding,
+            wg_injected_validation(),
+            0,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        let (deliveries, rx) = wg_deliveries(400);
+        let (_batch, dbg) = crate::afxdp::tests_support::txn_run_descriptor_with_injected(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            injected,
+            &deliveries,
+        );
+        assert_eq!(
+            dbg.local, 1,
+            "host-bound record takes the LocalDelivery arm"
+        );
+        assert_eq!(
+            dbg.policy_deny, 1,
+            "junos-host deny must adjudicate-deny the host-bound record"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "policy-denied record must never reach the delivery map"
+        );
+        assert_eq!(
+            sessions.len(),
+            0,
+            "policy-denied record must not install a session"
         );
     }
 
@@ -903,7 +1010,11 @@ mod tests {
             rx.try_recv().is_err(),
             "nonlocal record must never reach the delivery map"
         );
-        assert_eq!(sessions.len(), 0, "nonlocal record must not install a session");
+        assert_eq!(
+            sessions.len(),
+            0,
+            "nonlocal record must not install a session"
+        );
         assert_eq!(
             dbg.policy_deny, 0,
             "nonlocal drops before policy adjudication"
@@ -946,5 +1057,117 @@ mod tests {
             rx.try_recv().is_err(),
             "no wg0-map entry for ifindex 12: must not deliver on the WG channel"
         );
+    }
+    #[test]
+    fn injected_entry_rejects_attachment_triple_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+        );
+        let stale_before = WG_UNCOVERED_STALE_TOTAL.load(Ordering::Relaxed);
+        // Unknown endpoint id: no attachment to revalidate against.
+        let mut unknown = attached_descriptor(None, valid_inner_v4(0));
+        unknown.tunnel_endpoint_id = 999;
+        assert!(
+            build_injected_packet(&unknown, &forwarding, wg_injected_validation(), 3).is_none(),
+            "missing endpoint must fence a queued descriptor"
+        );
+        // Mode drift: the endpoint row is no longer WireGuard.
+        let mut gre_mode = forwarding.clone();
+        gre_mode
+            .tunnel_endpoints
+            .get_mut(&1)
+            .expect("wg endpoint")
+            .mode = "gre".to_string();
+        assert!(
+            build_injected_packet(
+                &attached_descriptor(None, valid_inner_v4(0)),
+                &gre_mode,
+                wg_injected_validation(),
+                3
+            )
+            .is_none(),
+            "mode drift must fence a queued descriptor"
+        );
+        // Logical-ifindex drift: the row no longer owns the named unit.
+        let mut drifted = forwarding.clone();
+        drifted
+            .tunnel_endpoints
+            .get_mut(&1)
+            .expect("wg endpoint")
+            .logical_ifindex = 401;
+        assert!(
+            build_injected_packet(
+                &attached_descriptor(None, valid_inner_v4(0)),
+                &drifted,
+                wg_injected_validation(),
+                3
+            )
+            .is_none(),
+            "logical-ifindex drift must fence a queued descriptor"
+        );
+        assert_eq!(
+            WG_UNCOVERED_STALE_TOTAL.load(Ordering::Relaxed) - stale_before,
+            3,
+            "each attachment fence arm counts STALE exactly once"
+        );
+    }
+
+    #[test]
+    fn injected_entry_counts_malformed_apart_from_stale_10597() {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+        );
+        let stale_before = WG_UNCOVERED_STALE_TOTAL.load(Ordering::Relaxed);
+        let malformed_before = WG_UNCOVERED_MALFORMED_TOTAL.load(Ordering::Relaxed);
+        // Bad IP version nibble.
+        let mut bad_nibble = valid_inner_v4(0);
+        bad_nibble[0] = 0x50;
+        assert!(
+            build_injected_packet(
+                &attached_descriptor(None, bad_nibble),
+                &forwarding,
+                wg_injected_validation(),
+                3
+            )
+            .is_none(),
+            "bad nibble must reject before any policy/session work"
+        );
+        // Truncated inner: passes the nibble, fails trim/parse.
+        assert!(
+            build_injected_packet(
+                &attached_descriptor(None, vec![0x45, 0, 0, 20]),
+                &forwarding,
+                wg_injected_validation(),
+                3
+            )
+            .is_none(),
+            "short inner must reject before any policy/session work"
+        );
+        assert_eq!(
+            WG_UNCOVERED_MALFORMED_TOTAL.load(Ordering::Relaxed) - malformed_before,
+            2,
+            "each malformed inner counts MALFORMED exactly once"
+        );
+        assert_eq!(
+            WG_UNCOVERED_STALE_TOTAL.load(Ordering::Relaxed) - stale_before,
+            0,
+            "malformed inners must not pollute the fence counter"
+        );
+    }
+
+    #[test]
+    fn enqueue_refuses_under_lock_contention_10597() {
+        let queue = WgUncoveredIngressQueue::new();
+        let held = queue.pending.lock().expect("test lock");
+        let refused = queue
+            .try_enqueue(test_descriptor(1))
+            .expect_err("contended try_lock must refuse, never block");
+        assert_eq!(refused.tunnel_endpoint_id, 1, "refusal hands it back");
+        drop(held);
+        assert!(
+            queue.try_enqueue(test_descriptor(1)).is_ok(),
+            "released lock admits"
+        );
+        assert_eq!(queue.len(), 1);
     }
 }

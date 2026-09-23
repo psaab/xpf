@@ -1315,7 +1315,6 @@ pub(super) fn txn_run_descriptor_with_shared_sessions(
 }
 
 
-
 /// #10597 driver: run one control-thread WG plaintext record end-to-end
 /// through `poll_binding_process_descriptor_with_injection` with a
 /// caller-provided `local_tunnel_deliveries` map, so the traversal cells
@@ -1348,7 +1347,8 @@ pub(super) fn txn_run_descriptor_with_injected(
     let peer_worker_commands = Vec::new();
     let dnat_fds = DnatTableFds::default();
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,

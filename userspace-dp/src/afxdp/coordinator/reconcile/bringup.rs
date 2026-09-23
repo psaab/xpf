@@ -150,9 +150,7 @@ pub(super) fn bring_up_workers(
     // every worker has bound its full queue set; planned worker IDs are not
     // valid consumers and must never strand control-thread records.
     let old_wg_queues = coord.wg_uncovered_queues.load_full();
-    coord
-        .wg_uncovered_queues
-        .store(Arc::new(BTreeMap::new()));
+    coord.wg_uncovered_queues.store(Arc::new(BTreeMap::new()));
     for queue in old_wg_queues.values() {
         let orphaned = queue.close_and_drain();
         crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL
