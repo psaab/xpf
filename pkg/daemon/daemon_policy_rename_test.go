@@ -352,7 +352,7 @@ func TestRematchRenamedV4DNATPortQueriesTranslatedRecordsWire10592(t *testing.T)
 	}
 	value := dataplane.SessionValue{
 		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
-		Flags: dataplane.SessFlagDNAT, NATDstIP: 0x0100000a, NATDstPort: 8443,
+		Flags: dataplane.SessFlagDNAT, NATDstIP: 0x0100000a, NATDstPort: userspaceHostToNetwork16(8443),
 	}
 	record, permitted := rematchRenamedV4(oldCfg, newCfg, bindings[oldID], key, value)
 	if !permitted || record.RuleID != "lan->wan/p-new" {
@@ -407,7 +407,13 @@ func TestPermittedRenameResultAnyPermitAlternate10592(t *testing.T) {
 func TestPermittedRenameResultAlternateRemovedDenies10592(t *testing.T) {
 	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
 	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
-	// Remove the alternate: only the renamed rule (Permit) + default-deny remain.
+	// Scope the renamed rule to 10.0.0.1/32 in both generations (fingerprints
+	// must match for expand), then remove the alternate: the 10.0.0.20 query
+	// below misses the renamed rule and, with no alternate, falls to
+	// default-deny. Reverting the removal (keeping alternate) retains.
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.DestinationAddresses = []string{"10.0.0.1/32"}
+	}
 	newCfg.Security.Policies[1].Policies = newCfg.Security.Policies[1].Policies[:1]
 	bindings, _, ok := expandPolicyRenameAncestry(
 		oldCfg, newCfg, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")},
@@ -420,10 +426,9 @@ func TestPermittedRenameResultAlternateRemovedDenies10592(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing binding for old policy id %d", oldID)
 	}
-	// Query the p-seed pair (other->wan, Deny): no permit anywhere.
-	q := policymatch.Query{FromZone: "other", ToZone: "wan", DstPort: 443}
+	q := policymatch.Query{FromZone: "lan", ToZone: "wan", DstIP: net.ParseIP("10.0.0.20"), DstPort: 444}
 	if _, permitted := permittedRenameResult(newCfg, binding, q); permitted {
-		t.Fatal("denied query retained without any alternate permit")
+		t.Fatal("query retained without the alternate permit")
 	}
 }
 
@@ -477,7 +482,26 @@ func TestExpandAnyZoneRenameSetsWireAnyFlags10592(t *testing.T) {
 // snapshot-builder errors (scheduler/feed resolution, JSON), uncraftable via
 // config shapes (probed: inactive schedulers + unresolvable feed names still
 // yield fingerprints).
+// findStableZoneIDCollision brute-forces any StableZoneID collision (u16
+// space: found in milliseconds) so collision cells stay self-maintaining
+// across hash changes — no magic constants.
+func findStableZoneIDCollision(t *testing.T) (string, string) {
+	t.Helper()
+	for i := 0; i < 100000; i++ {
+		a := "zone-a-" + string(rune(i))
+		for j := i + 1; j < 100000; j++ {
+			b := "zone-b-" + string(rune(j))
+			if config.StableZoneID(a) == config.StableZoneID(b) {
+				return a, b
+			}
+		}
+	}
+	t.Fatal("no collision found in brute-force window")
+	return "", ""
+}
+
 func TestExpandValidatorsRejectBranchTable10592(t *testing.T) {
+	collideA, collideB := findStableZoneIDCollision(t)
 	fresh := func() (oldCfg, newCfg *config.Config) {
 		return policyRenameEvaluatorConfig("p-old", config.PolicyPermit),
 			policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
@@ -503,26 +527,15 @@ func TestExpandValidatorsRejectBranchTable10592(t *testing.T) {
 			o.Security.Policies = nil
 			return o, n, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")}
 		}},
+		{"empty-policies-new", func() (*config.Config, *config.Config, []configstore.RenameDescriptor) {
+			o, n := fresh()
+			n.Security.Policies = nil
+			return o, n, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")}
+		}},
 		{"zone-collision", func() (*config.Config, *config.Config, []configstore.RenameDescriptor) {
 			o, n := fresh()
-			// Brute-force a StableZoneID collision (u16 space, instant).
-			var first, second string
-		outer:
-			for i := 0; i < 100000; i++ {
-				a := "zone-a-" + string(rune(i))
-				for j := i + 1; j < 100000; j++ {
-					b := "zone-b-" + string(rune(j))
-					if config.StableZoneID(a) == config.StableZoneID(b) {
-						first, second = a, b
-						break outer
-					}
-				}
-			}
-			if first == "" {
-				panic("no collision found in brute-force window")
-			}
-			o.Security.Zones[first] = &config.ZoneConfig{Name: first}
-			o.Security.Zones[second] = &config.ZoneConfig{Name: second}
+			o.Security.Zones[collideA] = &config.ZoneConfig{Name: collideA}
+			o.Security.Zones[collideB] = &config.ZoneConfig{Name: collideB}
 			return o, n, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")}
 		}},
 		{"half-policy", func() (*config.Config, *config.Config, []configstore.RenameDescriptor) {
@@ -637,10 +650,11 @@ func TestExpandGlobalPolicyRename10592(t *testing.T) {
 		if !ok || len(wire) != 1 {
 			t.Fatalf("valid global rename rejected: wire=%v ok=%v", wire, ok)
 		}
-		// Globals carry numeric ID 0, so expand yields wire-only by design
-		// (`if oldID != 0` skips the binding). Whether wire-only-global is
-		// intended (vs a rematch gap) is tracked in #10621; this pins the
-		// current contract either way.
+		// Global-only configs yield numeric ID 0 (PolicySetID 0 with no
+		// zone-pair sets; with N sets globals get N*256+idx and DO bind), so
+		// expand yields wire-only here by design (`if oldID != 0` skips the
+		// binding). Whether global-only wire-only is intended is tracked in
+		// #10621; this pins the current contract either way.
 		if len(bindings) != 0 {
 			t.Fatalf("global rename bound locally, want wire-only: %v", bindings)
 		}
@@ -670,26 +684,73 @@ func TestZoneNamesByIDRejectsCollisions10592(t *testing.T) {
 	if _, ok := zoneNamesByID(cfg); !ok {
 		t.Fatal("distinct zones rejected")
 	}
-	// Brute-force any colliding pair (birthday bound ~256 tries).
-	var first, second string
-outer:
-	for i := 0; i < 100000; i++ {
-		a := "zone-a-" + string(rune(i))
-		for j := i + 1; j < 100000; j++ {
-			b := "zone-b-" + string(rune(j))
-			if config.StableZoneID(a) == config.StableZoneID(b) {
-				first, second = a, b
-				break outer
-			}
-		}
-	}
-	if first == "" {
-		t.Fatal("no collision found in brute-force window")
-	}
+	first, second := findStableZoneIDCollision(t)
 	cfg.Security.Zones[first] = &config.ZoneConfig{Name: first}
 	cfg.Security.Zones[second] = &config.ZoneConfig{Name: second}
 	if _, ok := zoneNamesByID(cfg); ok {
 		t.Fatalf("colliding zones %q/%q accepted", first, second)
+	}
+}
+
+// N3d-query: port-scoped rematch through the evaluator. The renamed rule
+// admits only junos-https (TCP/443): 443 retains, 444 falls to default-deny.
+// Dropping networkPort at the rematch query sites (:356/:389) breaks the
+// app match (ports arrive network-order) and flips both directions.
+func TestRematchPortScopedV4V610592(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.Applications = []string{"junos-https"}
+		cfg.Security.Policies[1].Policies = cfg.Security.Policies[1].Policies[:1]
+	}
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")},
+	)
+	if !ok {
+		t.Fatal("valid policy ancestry rejected")
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	binding, ok := bindings[oldID]
+	if !ok {
+		t.Fatalf("missing binding for old policy id %d", oldID)
+	}
+	mkValue := func() dataplane.SessionValue {
+		return dataplane.SessionValue{
+			PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		}
+	}
+	// Wire-native ports (BPF yields network bytes read natively): host 443
+	// arrives as 0xBB01, host 444 as 0xBC01. Dropping networkPort at the
+	// rematch query sites (:356/:389) breaks the app match both ways.
+	v4key := func(wirePort uint16) dataplane.SessionKey {
+		return dataplane.SessionKey{
+			SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+			SrcPort: 40000, DstPort: wirePort, Protocol: 6,
+		}
+	}
+	if record, permitted := rematchRenamedV4(oldCfg, newCfg, binding, v4key(0xBB01), mkValue()); !permitted || record.RuleID != "lan->wan/p-new" {
+		t.Fatalf("v4 443 not retained through renamed junos-https: %+v permitted=%v", record, permitted)
+	}
+	if _, permitted := rematchRenamedV4(oldCfg, newCfg, binding, v4key(0xBC01), mkValue()); permitted {
+		t.Fatal("v4 444 retained despite no covering rule")
+	}
+	v6key := func(wirePort uint16) dataplane.SessionKeyV6 {
+		return dataplane.SessionKeyV6{
+			SrcIP:   [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a},
+			DstIP:   [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14},
+			SrcPort: 40000, DstPort: wirePort, Protocol: 6,
+		}
+	}
+	v6value := func() dataplane.SessionValueV6 {
+		return dataplane.SessionValueV6{
+			PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		}
+	}
+	if record, permitted := rematchRenamedV6(oldCfg, newCfg, binding, v6key(0xBB01), v6value()); !permitted || record.RuleID != "lan->wan/p-new" {
+		t.Fatalf("v6 443 not retained through renamed junos-https: %+v permitted=%v", record, permitted)
+	}
+	if _, permitted := rematchRenamedV6(oldCfg, newCfg, binding, v6key(0xBC01), v6value()); permitted {
+		t.Fatal("v6 444 retained despite no covering rule")
 	}
 }
 
