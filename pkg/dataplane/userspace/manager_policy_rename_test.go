@@ -331,3 +331,61 @@ func TestStatusPartialRepublishStripsConsumedRenameMetadataAfterFIBBump(t *testi
 			sent.PolicyRenameAncestry, sent.PolicySessionRebinds)
 	}
 }
+
+// TestStatusPartialRepublishPreservesRenameMetadataWhenFullPending pins the
+// latch-TRUE (preserve) side of the status-path branch in syncSnapshotLocked
+// (process_status.go): when a FIB bump advanced lastSnapshot.Generation without
+// publishing a full snapshot, a later status tick can be the FIRST accepted
+// publication of a deferred or unknown-outcome full snapshot, so its one-shot
+// rename metadata must be preserved — the status-path twin of
+// TestDeferredFullThenRouteOverlayPreservesRenameMetadata, and the mirror of
+// TestStatusPartialRepublishStripsConsumedRenameMetadataAfterFIBBump (latch
+// FALSE). RED-on-revert: delete the latch guard so the status path always
+// strips, and this cell fails while both twins stay green — the mutant loses
+// ancestry+rebinds on the first accepted publication and tears down renamed
+// sessions (fail-closed availability regress, #10592 N1).
+func TestStatusPartialRepublishPreservesRenameMetadataWhenFullPending(t *testing.T) {
+	f := newDeferredPublishFixture9337(t, nil)
+	f.m.xskLivenessProven = true
+	f.m.pendingFullSnapshotMetadata = true
+	f.m.publishedSnapshot = f.snap.Generation
+	f.m.generation = f.snap.Generation + 1
+	f.m.lastSnapshot.Generation = f.m.generation
+	f.m.partialOutcomeUnknown = partialFabrics
+	f.snap.PolicyRenameAncestry = []PolicyRenameAncestry{
+		{SourceRuleID: "old", DestinationRuleID: "new"},
+	}
+	f.snap.PolicySessionRebinds = []PolicySessionRebind{
+		{Family: "ipv4", RuleID: "new", PolicyID: 2},
+	}
+	var sent *ConfigSnapshot
+	f.m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "apply_snapshot" {
+			sent = req.Snapshot
+		}
+		if status != nil {
+			*status = ProcessStatus{
+				ConfigSnapshotProtocolVersion: ProtocolVersion,
+				LastSnapshotGeneration:        req.Snapshot.Generation,
+				LastFIBGeneration:             req.Snapshot.FIBGeneration,
+			}
+		}
+		return nil
+	}
+	f.m.mu.Lock()
+	err := f.m.syncSnapshotLocked()
+	f.m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("status partial republish: %v", err)
+	}
+	if sent == nil {
+		t.Fatal("status partial republish did not send apply_snapshot")
+	}
+	if len(sent.PolicyRenameAncestry) != 1 || len(sent.PolicySessionRebinds) != 1 {
+		t.Fatalf("deferred-first status publish stripped rename metadata: ancestry=%v rebinds=%v",
+			sent.PolicyRenameAncestry, sent.PolicySessionRebinds)
+	}
+	if f.m.pendingFullSnapshotMetadata {
+		t.Fatal("successful status-first publication did not clear the full-snapshot metadata latch")
+	}
+}
