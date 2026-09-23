@@ -725,12 +725,19 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         );
         return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_EARLY_FILTER);
     }
-    // ICMPv6 NDP messages (NS/NA/RS/RA/Redirect, types 133-137) are
-    // link-local control plane. Prefer cpumap delivery when available,
-    // falling back to XDP_PASS only if cpumap is unavailable.
-    if parsed.protocol == PROTO_ICMPV6 && parsed.icmp_type >= 133 && parsed.icmp_type <= 137 {
-        return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_EARLY_FILTER);
-    }
+    // #10640: NO unconditional ICMPv6 NDP (types 133-137) arm. One used to
+    // sit here, handing every RS/RA/NS/NA/Redirect to the kernel on a
+    // TYPE-ONLY test with no destination predicate, so NDP addressed to a
+    // TRANSIT destination bypassed the userspace policy engine entirely
+    // (the kernel forward path plus the armed fence's ingress-name pinhole
+    // forwarded it with no zone policy — the same shape #304 closed for
+    // ESP and non-native GRE). NDP still reaches the kernel through the
+    // destination-qualified arms below: multicast NDP (solicited-node,
+    // all-nodes, all-routers) via should_fallback_early's multicast arm
+    // above, and unicast NDP to a firewall-local address via the
+    // is_local_destination arm of the session-miss path. A remote
+    // destination continues to the AF_XDP redirect and is adjudicated by
+    // the worker.
     if !native_gre {
         match live_userspace_session_action(&parsed) {
             USERSPACE_SESSION_ACTION_REDIRECT => {
