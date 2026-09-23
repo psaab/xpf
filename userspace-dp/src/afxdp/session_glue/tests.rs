@@ -6428,7 +6428,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         &shared_owner_rg_indexes,
         SteeringMap::unshared_for_test(-1),
         &[1],
-        false,
+        &ForwardingState::default(),
     );
     assert_eq!(count, 0, "fd=-1 should produce 0 successful publishes");
 
@@ -6438,7 +6438,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         &shared_owner_rg_indexes,
         SteeringMap::unshared_for_test(-1),
         &[2],
-        false,
+        &ForwardingState::default(),
     );
     assert_eq!(count, 0, "should find 0 sessions for RG2");
 }

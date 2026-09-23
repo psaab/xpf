@@ -235,7 +235,6 @@ pub(in crate::afxdp) fn purge_stale_replayed_synced_sessions(
         ) {
             continue;
         }
-        crate::afxdp::session_glue::note_stale_replay_fence_drop();
         let remove_if_stale = |candidate: &SyncedSessionEntry| {
             crate::afxdp::session_glue::synced_entry_is_stale_replay(
                 candidate.origin,
@@ -243,25 +242,39 @@ pub(in crate::afxdp) fn purge_stale_replayed_synced_sessions(
                 &coord.forwarding,
             )
         };
-        let _ = crate::afxdp::shared_ops::remove_shared_session_if(
-            &coord.sessions.synced,
-            &coord.sessions.nat,
-            &coord.sessions.forward_wire,
-            &coord.sessions.owner_rg_indexes,
-            &entry.key,
-            remove_if_stale,
-        );
-        if !entry.metadata.is_reverse {
-            let reverse_key =
-                crate::session::reverse_session_key(&entry.key, entry.decision.nat);
-            let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+        // #10612 (N3): count actual removals, not decisions — a Declined
+        // live-replacement (nothing dropped) must not count. (Filter+purge may
+        // still count one row twice — once per site — which is honest: two
+        // distinct fence decisions. See the counter doc.)
+        if matches!(
+            crate::afxdp::shared_ops::remove_shared_session_if(
                 &coord.sessions.synced,
                 &coord.sessions.nat,
                 &coord.sessions.forward_wire,
                 &coord.sessions.owner_rg_indexes,
-                &reverse_key,
+                &entry.key,
                 remove_if_stale,
-            );
+            ),
+            crate::afxdp::shared_ops::SharedRemoval::Removed(_)
+        ) {
+            crate::afxdp::session_glue::note_stale_replay_fence_drop();
+        }
+        if !entry.metadata.is_reverse {
+            let reverse_key =
+                crate::session::reverse_session_key(&entry.key, entry.decision.nat);
+            if matches!(
+                crate::afxdp::shared_ops::remove_shared_session_if(
+                    &coord.sessions.synced,
+                    &coord.sessions.nat,
+                    &coord.sessions.forward_wire,
+                    &coord.sessions.owner_rg_indexes,
+                    &reverse_key,
+                    remove_if_stale,
+                ),
+                crate::afxdp::shared_ops::SharedRemoval::Removed(_)
+            ) {
+                crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            }
         }
     }
 }

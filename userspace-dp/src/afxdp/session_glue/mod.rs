@@ -854,8 +854,10 @@ pub(in crate::afxdp) fn synced_entry_is_stale_replay(
 }
 /// #10612 (R2 observability): process-wide count of stale-zone replay drops
 /// across all fence sites (worker arm, coordinator filter/purge, import,
-/// prewarm, promote). Bumped at the DECISION point only (the worker drain
-/// evicts already-counted drops; no double count). Mirrors the
+/// prewarm, promote). Bumped per fence DECISION (the worker drain evicts
+/// already-counted drops; the purge bumps only on actual removal). A row
+/// judged at two sites (filter + purge) counts twice — honest: two distinct
+/// decisions. Mirrors the
 /// `SESSION_PUBLISH_ERRORS_SHARED` static pattern (no stats-handle threading).
 pub(in crate::afxdp) static STALE_REPLAY_FENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
@@ -2697,6 +2699,14 @@ fn materialize_shared_session_hit(
     tcp_flags: u8,
 ) -> (SessionLookup, bool) {
     if let Some(shared) = resolved.shared_entry.take() {
+        // #10612 (N2): fence stale-zone shared hits at materialize ingress.
+        // A shared-transient stale row (import fail-open linger racing
+        // validation) must materialize as a MISS, not install into the
+        // worker table (the later arm-drop would not remove it).
+        if synced_entry_is_stale_replay(shared.origin, &shared.metadata, forwarding) {
+            note_stale_replay_fence_drop();
+            return (resolved.lookup.clone(), false);
+        }
         let mut replica = synced_replica_entry(&shared);
         // A zero token carries no leak provenance and is recomputed locally
         // for peer-synced rows. A nonzero token was computed before this

@@ -1249,6 +1249,55 @@ fn stale_removed_zone_replay_does_not_resurrect_10612() {
     harness.shutdown();
 }
 
+/// #10612 (N4): a stale REVERSE replay must not resurrect either authority.
+/// The predicate judges reverses by zone membership (no exemption); this cell
+/// pins the worker-level integrated behavior for the reverse half (the
+/// forward half is pinned above; unit + filter levels pin the parts).
+/// Fails pre-M2 (standalone stale reverse installed).
+#[test]
+fn stale_removed_zone_reverse_replay_does_not_resurrect_10612() {
+    let harness = RotationHarness::start();
+    let stale = harness
+        .synced
+        .lock()
+        .expect("shared synced map")
+        .get(&harness.unbound)
+        .cloned()
+        .expect("the pre-rotation victim must be installed");
+
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        false,
+        &[],
+        Some(3),
+    );
+    assert!(
+        !harness.presence().unbound,
+        "the rotation purge must remove the old removed-zone victim first"
+    );
+
+    let reverse_key =
+        crate::session::reverse_session_key(&harness.unbound, stale.decision.nat);
+    let mut reversed = stale;
+    reversed.key = reverse_key.clone();
+    reversed.metadata.is_reverse = true;
+    harness.replay_unbound(reversed);
+    assert!(
+        !harness.query_worker_presence(&reverse_key, 10614).0,
+        "a stale post-purge reverse replay must not resurrect the worker row"
+    );
+    assert!(
+        !harness
+            .synced
+            .lock()
+            .expect("shared synced map")
+            .contains_key(&reverse_key),
+        "a stale post-purge reverse replay must not restore shared authority"
+    );
+    harness.shutdown();
+}
+
 /// #10612 live pin: an unbound id-0 replay whose zones are still current
 /// must install through BOTH authorities — the fence drops only the
 /// removed-zone shape, never live rows or rotation survivors.

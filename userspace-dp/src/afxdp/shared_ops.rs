@@ -589,7 +589,9 @@ pub(super) fn republish_bpf_session_entries_for_owner_rgs(
     owner_rgs: &[i32],
     // #9517: this republishes peer-synced sessions on RG activation, which is
     // exactly where PASS_TO_KERNEL rows come from.
-    has_routing_domains: bool,
+    // #10612 (N1): takes forwarding (not just the domains bool) to fence
+    // stale-zone rows: a shared-transient stale row must not be BPF-resurrected.
+    forwarding: &ForwardingState,
 ) -> u32 {
     if owner_rgs.is_empty() {
         return 0;
@@ -609,19 +611,29 @@ pub(super) fn republish_bpf_session_entries_for_owner_rgs(
             .filter_map(|key| {
                 sessions
                     .get(key)
-                    .map(|e| (e.key.clone(), e.decision, e.metadata.clone()))
+                    .map(|e| (e.key.clone(), e.decision, e.metadata.clone(), e.origin))
             })
             .collect()
     };
     let mut published = 0u32;
     let mut errors = 0u32;
-    for (key, decision, metadata) in &entries {
+    for (key, decision, metadata, origin) in &entries {
+        // #10612 (N1): skip stale-zone rows (fence BEFORE the BPF publish,
+        // mirroring prewarm). BPF-only gap: narrow race, heals on demotion.
+        if crate::afxdp::session_glue::synced_entry_is_stale_replay(
+            *origin,
+            metadata,
+            forwarding,
+        ) {
+            crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            continue;
+        }
         if publish_session_map_entry_for_session(
             session_map,
             key,
             *decision,
             metadata,
-            has_routing_domains,
+            forwarding.has_routing_domains,
         )
         .is_ok()
         {

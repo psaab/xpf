@@ -1697,6 +1697,35 @@ pub(crate) fn worker_loop(
                 },
             );
         }
+        // #10612 (N2 companion): evict the derived reverse companion too
+        // (mirrors the coordinator purge) so an unqueued stale reverse half
+        // does not linger shared-side until next bringup. Poisoned lock ->
+        // skip companion (the forward eviction above already landed).
+        for key in &stale_replay_dropped_keys {
+            let companion_key = shared_sessions.lock().ok().and_then(|map| {
+                map.get(key)
+                    .filter(|entry| !entry.metadata.is_reverse)
+                    .map(|entry| {
+                        crate::session::reverse_session_key(&entry.key, entry.decision.nat)
+                    })
+            });
+            if let Some(reverse_key) = companion_key {
+                let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+                    &shared_sessions,
+                    &shared_nat_sessions,
+                    &shared_forward_wire_sessions,
+                    &shared_owner_rg_indexes,
+                    &reverse_key,
+                    |entry| {
+                        crate::afxdp::session_glue::synced_entry_is_stale_replay(
+                            entry.origin,
+                            &entry.metadata,
+                            forwarding.as_ref(),
+                        )
+                    },
+                );
+            }
+        }
         if !shaped_tx_requests.is_empty() {
             apply_worker_shaped_tx_requests(
                 &mut bindings,
