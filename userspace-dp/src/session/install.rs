@@ -214,6 +214,7 @@ impl SessionTable {
                 // would pay for the re-derivation is served by the flow cache
                 // this install populates, not by the session-hit path.
                 policy_revalidated_gen: 0,
+                policy_revalidation_kind: PolicyRevalidationKind::Unvalidated,
                 expires_after_ns: session_timeout_ns(
                     protocol,
                     tcp_flags,
@@ -549,6 +550,7 @@ impl SessionTable {
                 // `filter_revalidated` gets, for the verdict #7323 accepted as a
                 // residual and this issue closes.
                 policy_revalidated_gen: 0,
+                policy_revalidation_kind: PolicyRevalidationKind::Unvalidated,
                 // #9412: a peer-stated close class puts the copy on its close
                 // window, through the same formula the owning node used. Without
                 // one, it imports ESTABLISHED exactly as before (#3152).

@@ -50,6 +50,8 @@ mod prerouting_scope;
 mod policy_revalidation;
 #[cfg(test)]
 pub(crate) use policy_revalidation::revalidate_zone_policy_declines_for_test;
+#[cfg(test)]
+pub(crate) use policy_revalidation::revalidate_zone_policy_revocation_for_test;
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;
@@ -1650,19 +1652,25 @@ pub(super) fn poll_binding_process_descriptor(
                         }
                         let zone_policy_revocation = match foreign_arrival_zone {
                             None => revalidate_zone_policy_on_session_hit(
-                                    worker_ctx.forwarding,
-                                    sessions,
-                                    &resolved.key,
-                                    &resolved.metadata,
-                                    resolved.decision,
-                                    Some(flow),
-                                    meta,
-                                    // #9384: THIS packet's fabric ingress. The from-zone
-                                    // is resolved live from the arrival interface, and a
-                                    // fabric-punted packet arrives on the fabric link —
-                                    // not in the flow's zone — so it keeps the entry's
-                                    // recorded zone instead.
-                                    packet_fabric_ingress,
+                                worker_ctx.forwarding,
+                                sessions,
+                                &resolved.key,
+                                &resolved.metadata,
+                                resolved.decision,
+                                Some(flow),
+                                meta,
+                                // #9384: THIS packet's fabric ingress. The from-zone
+                                // is resolved live from the arrival interface, and a
+                                // fabric-punted packet arrives on the fabric link —
+                                // not in the flow's zone — so it keeps the entry's
+                                // recorded zone instead.
+                                packet_fabric_ingress,
+                                fabric_link_ingress,
+                                worker_ctx.ha_state,
+                                worker_ctx.dynamic_neighbors,
+                                now_secs,
+                                meta.ingress_ifindex as i32,
+                                ha_startup_grace_until_secs,
                             ),
                             Some(arrival_zone) => match foreign_hit_verdict(
                                 worker_ctx.forwarding,

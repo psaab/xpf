@@ -630,6 +630,54 @@ pub(crate) enum PolicyRevalidationTarget {
     /// path, or a reused slab slot. Nothing to stamp, nothing to tear down.
     NoLocalEntry,
 }
+/// #10507: receiver-local provenance for the zone-policy stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyRevalidationKind {
+    /// Constructor/upsert default; generation 0 remains stale.
+    Unvalidated,
+    /// Permit derived using a current local forwarding egress.
+    LiveEgress,
+    /// Permit derived from a recorded (non-current) egress: the non-local
+    /// `FabricRedirect` case by design, or a stored forward egress consumed
+    /// on the reverse path (§4.3). Either way it must re-judge before it may
+    /// authorize local forwarding.
+    RecordedEgress,
+}
+
+/// #10507: the packet-time CURRENT forwarding posture the gate judges the
+/// stamp against. Interpreted from the disposition by the afxdp caller, which
+/// owns `ForwardingDisposition` semantics; the gate only combines it with
+/// the single probe below. Intent and egress validity are SEPARATE: a
+/// would-forward disposition without a valid egress is rule-4 fail-closed,
+/// never "non-local".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyGateCurrent {
+    /// Would locally forward with a valid egress (§4.2 rules 1/3).
+    LocalForwarding,
+    /// Would locally forward but has no valid egress (§4.2 rule 4).
+    LocalForwardingNoEgress,
+    /// Non-local: redirect, seed, terminal, or host delivery.
+    NonLocal,
+}
+
+/// #10507: one probe answering the combined freshness/authority question
+/// (§4.2: "one helper ... rather than sprinkling origin tests beside the old
+/// generation compare"). The caller supplies the packet-time posture; every
+/// field below derives from it plus a SINGLE `revalidation_record` probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyGateAnswer {
+    /// Generation-only freshness, exactly what `policy_revalidation_target`
+    /// answers (kept so callers keep one match shape).
+    pub target: PolicyRevalidationTarget,
+    /// Stamped provenance (`Unvalidated` when no entry resolves).
+    pub kind: PolicyRevalidationKind,
+    /// Rules 3/4: run the cold walk even when `target` is `Fresh`.
+    pub force_cold: bool,
+    /// A cold-walk `Decline` must revoke rather than stand.
+    pub fail_closed_decline: bool,
+    /// A type-armed ICMP exit must revoke rather than decline.
+    pub fail_closed_icmp: bool,
+}
 
 #[derive(Clone, Debug)]
 struct SessionEntry {
@@ -828,6 +876,9 @@ struct SessionEntry {
     /// `SessionEntry` carries no serde, so this is on no wire and is not part of
     /// session identity.
     policy_revalidated_gen: u64,
+    /// #10507: receiver-local provenance for the zone-policy stamp. This is
+    /// intentionally not carried on the HA wire.
+    policy_revalidation_kind: PolicyRevalidationKind,
     /// #2120: the RG epoch (`rg_epochs[owner_rg_id]`, or the node-level
     /// `rg_epochs[0]` for `owner_rg_id <= 0`) recorded the last time this
     /// entry was self-healed (the expire pass observed this node START
@@ -1854,6 +1905,11 @@ impl SessionTable {
     /// which took a bug to get right (#7212, #8114 item 2). Only the staleness
     /// COMPARISON differs, and it is made here against the generation-only
     /// stamp.
+    ///
+    /// #10507: production now answers through `policy_revalidation_gate`
+    /// (freshness AND authority, one probe); this accessor is retained for
+    /// test assertions of the generation-only stamp shape.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn policy_revalidation_target(&self, key: &SessionKey) -> PolicyRevalidationTarget {
         let Some(record) = self.revalidation_record(key) else {
             return PolicyRevalidationTarget::NoLocalEntry;
@@ -1865,17 +1921,102 @@ impl SessionTable {
         }
     }
 
-    /// #8356: record that this entry's zone-policy verdict has been re-derived
-    /// under the live generation. Takes the CANONICAL key, so it is a
-    /// primary-index write; idempotent, and a miss is a no-op (the session was
-    /// torn down between the probe and here).
-    pub(crate) fn mark_policy_revalidated(&mut self, key: &SessionKey) {
+    /// #10507: resolve the entry this WIRE tuple names and answer freshness
+    /// AND authority against the packet-time posture, in ONE probe.
+    ///
+    /// `force_cold` is rule 3 (+ the rule-4 Fresh sub-case): a non-live stamp
+    /// plus a would-forward packet is always stale, even generation-equal
+    /// (the A1/A2 reset shape). A Fresh stamp plus a would-forward packet
+    /// without a valid egress is likewise always stale, even `LiveEgress`:
+    /// rule 4 is fail-closed, never a fast-path coast. (A stale no-egress
+    /// packet already runs cold via the `Stale` arm; no force bit is needed.)
+    /// `fail_closed_decline` fires on fenced authority: `Recorded` + intent
+    /// (fresh or stale — recorded authorization exists to fence), Fresh
+    /// non-live + intent (rule-3 forced, incl. A1/A2 reset), or ANY
+    /// no-egress (rule 4 unconditional). Only a stale with-egress walk with
+    /// no recorded authorization — stale `Live` or never-validated stale
+    /// `Unvalidated` (#8618) — keeps `Decline` (#9513 survives; its
+    /// no-route retention is `NonLocal`, not no-egress).
+    /// `fail_closed_icmp` is §4.4 rule 3: recorded + now-local + type-armed
+    /// revokes, as does the generation-equal `Unvalidated` stamp (the A1/A2
+    /// reset case), and any no-egress packet even when live or stale. A
+    /// never-validated stale WITH-EGRESS entry keeps the #8618 decline: it
+    /// carries no derived Permit, so no recorded authorization exists to
+    /// fence, and revoking it would reintroduce the manufactured-DENY harm
+    /// #8618 accepted its residual to avoid.
+    pub(crate) fn policy_revalidation_gate(
+        &self,
+        key: &SessionKey,
+        current: PolicyGateCurrent,
+    ) -> PolicyGateAnswer {
+        let Some(record) = self.revalidation_record(key) else {
+            return PolicyGateAnswer {
+                target: PolicyRevalidationTarget::NoLocalEntry,
+                kind: PolicyRevalidationKind::Unvalidated,
+                force_cold: false,
+                fail_closed_decline: false,
+                fail_closed_icmp: false,
+            };
+        };
+        let fresh = record.entry.policy_revalidated_gen == self.policy_revalidation_gen;
+        let kind = record.entry.policy_revalidation_kind;
+        let target = if fresh {
+            PolicyRevalidationTarget::Fresh
+        } else {
+            PolicyRevalidationTarget::Stale(record.key.clone())
+        };
+        let non_live = !matches!(kind, PolicyRevalidationKind::LiveEgress);
+        let intent = !matches!(current, PolicyGateCurrent::NonLocal);
+        let no_egress = matches!(current, PolicyGateCurrent::LocalForwardingNoEgress);
+        // Rule 4 is unconditional: any would-forward disposition without a
+        // valid egress fails closed, regardless of freshness or kind. #9513's
+        // lookup-failure retention lives on the `NonLocal` branch (NoRoute,
+        // HAInactive, redirect with egress 0), never here. Recorded
+        // authorization exists to fence whether fresh or stale; Unvalidated
+        // fences only when fresh (A1/A2 reset — a prior verdict was
+        // distrusted), never when never-validated stale (#8618).
+        let fenced_provenance = matches!(kind, PolicyRevalidationKind::RecordedEgress)
+            || (matches!(kind, PolicyRevalidationKind::Unvalidated) && fresh);
+        PolicyGateAnswer {
+            target,
+            kind,
+            force_cold: fresh && intent && (non_live || no_egress),
+            fail_closed_decline: no_egress || (intent && fenced_provenance),
+            fail_closed_icmp: no_egress || (intent && fenced_provenance),
+        }
+    }
+
+    /// #10507: the receiver-local provenance paired with the zone policy
+    /// stamp. The hit-row fast path answers freshness+authority through
+    /// [`SessionTable::policy_revalidation_gate`] (one probe on the hit key);
+    /// this single-probe accessor serves the reverse forward-companion check,
+    /// which names a DIFFERENT key and therefore costs its own hash by
+    /// necessity, not a double hash. A missing entry is conservatively
+    /// unvalidated.
+    pub(crate) fn policy_revalidation_kind(
+        &self,
+        key: &SessionKey,
+    ) -> PolicyRevalidationKind {
+        self.revalidation_record(key)
+            .map(|record| record.entry.policy_revalidation_kind)
+            .unwrap_or(PolicyRevalidationKind::Unvalidated)
+    }
+
+    /// #8356/#10507: record that this entry's zone-policy verdict has been
+    /// re-derived under the live generation and retain how that verdict was
+    /// derived. Takes the CANONICAL key; a miss is a no-op.
+    pub(crate) fn mark_policy_revalidated(
+        &mut self,
+        key: &SessionKey,
+        kind: PolicyRevalidationKind,
+    ) {
         let live_gen = self.policy_revalidation_gen;
         if let Some(handle) = self.key_to_handle.get(key).copied()
             && let Some(record) = self.entries.get_mut(handle as usize)
             && record.key == *key
         {
             record.entry.policy_revalidated_gen = live_gen;
+            record.entry.policy_revalidation_kind = kind;
         }
     }
 
@@ -2755,6 +2896,8 @@ impl SessionTable {
         // #3527: resolve the per-zone half-open override before borrowing the
         // record mutably (the timeout selection below cannot re-borrow self).
         let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
+        // #10507 A1: live policy generation for the Fresh-only reset below.
+        let live_policy_gen = self.policy_revalidation_gen;
         {
             let record = self
                 .entries
@@ -2763,6 +2906,25 @@ impl SessionTable {
             record.entry.decision = decision;
             record.entry.metadata = metadata.clone();
             record.entry.origin = origin;
+            // #10507 A1 (Main-approved deviation from §4.5 unconditional —
+            // Option A, Stale retains its fence): a peer-to-local promotion
+            // revokes provenance only when Fresh. A Fresh Recorded Permit
+            // must not coast into local forwarding — reset to Unvalidated
+            // so the next local packet cold-judges. A Stale row already
+            // re-judges via the Stale arm; resetting Stale Recorded to
+            // Unvalidated would launder a fenced recorded authorization
+            // into the never-validated carve-out (Decline instead of
+            // fail-closed on type-armed ICMP / unidentified arrival).
+            // Preserving the Stale kind keeps the Recorded fence through
+            // the transition. Fresh behavior is bit-identical to
+            // unconditional; packet-time fencing stays authoritative.
+            if was_peer_synced
+                && !origin.is_peer_synced()
+                && record.entry.policy_revalidated_gen == live_policy_gen
+            {
+                record.entry.policy_revalidation_kind =
+                    PolicyRevalidationKind::Unvalidated;
+            }
             // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #3046: RST is sticky — once observed it keeps the entry on the
@@ -3044,6 +3206,7 @@ impl SessionTable {
 
     /// Convenience: refresh for HA activation (always updates regardless
     /// of origin). Preserves existing origin.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn refresh_for_ha_activation(
         &mut self,
         key: &SessionKey,
@@ -3118,6 +3281,8 @@ impl SessionTable {
             self.remove_forward_nat_index_parts(key, handle, old_nat, old_is_reverse);
             remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
         }
+        // #10507 A2: live policy generation for the Fresh-only reset below.
+        let live_policy_gen = self.policy_revalidation_gen;
 
         {
             let record = self
@@ -3126,6 +3291,12 @@ impl SessionTable {
                 .expect("handle validated above");
             record.entry.decision = decision;
             record.entry.metadata = metadata;
+            // #10507 A2 (Main-approved deviation, Option A — see A1): Fresh-only.
+            // Stale retains its Recorded fence; Fresh resets to force cold.
+            // Packet-time fencing remains authoritative if delayed/skipped.
+            if record.entry.policy_revalidated_gen == live_policy_gen {
+                record.entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+            }
             // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #2120: promotion refresh re-stamps `last_seen_ns` (the entry
