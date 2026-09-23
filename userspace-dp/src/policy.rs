@@ -3300,7 +3300,12 @@ fn evaluate_policy_result_counted(
     // unmatched zone-0 host-bound flow still delivers — and both production
     // callers of this function are transit (`ForwardCandidate` and the
     // flowless MissingNeighbor arm). Management on an unzoned fxp0 cannot be
-    // locked out by this.
+    // locked out by this TRANSIT arm. UPGRADE NOTE (#10644 host-inbound
+    // half): a configured from-any/global `to-zone junos-host` DENY now
+    // fires for zone-0 host-bound ingress, so unzoned-fxp0 management under
+    // a from-any deny-all flips deliver -> deny on upgrade. Intended
+    // explicit-deny semantics (default configs unaffected); recourse is to
+    // zone the port or order permits above the deny. Release-note worthy.
     if from_id == 0 {
         UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return PolicyEvaluationResult {

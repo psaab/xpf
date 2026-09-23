@@ -5710,6 +5710,66 @@ fn from_zone_any_to_junos_host_denies_zone_zero_ingress_10644() {
     );
 }
 
+/// #10644 global tier: a global `match to-zone junos-host deny` fires for
+/// zone-0 host-bound ingress (same walk, next tier after from-any), and an
+/// unmatched zone-0 flow still delivers.
+///
+/// RED-on-revert: restoring the `from_id == 0` early return makes the zone-0
+/// deny assertion return `None` (deliver) instead of Deny.
+#[test]
+fn global_to_zone_junos_host_denies_zone_zero_ingress_10644() {
+    let state = parse_policy_state(
+        "permit",
+        &[global_zone_rule("host-block", "", "junos-host", "deny")],
+        &test_zone_name_to_id(),
+    );
+    assert!(
+        state.has_junos_host_rules,
+        "a global match to-zone junos-host must arm the host gate"
+    );
+    for from in [0, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, TEST_UNTRUST_ZONE_ID] {
+        let res = evaluate_junos_host_policy(
+            &state,
+            from,
+            "10.0.0.1".parse().expect("src"),
+            "10.0.0.2".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            22,
+            None,
+            64,
+        );
+        assert_eq!(
+            res.map(|r| r.action),
+            Some(PolicyAction::Deny),
+            "global match to-zone junos-host deny must block host-inbound from zone {from}"
+        );
+    }
+    // Unmatched-delivers half: a global rule scoped elsewhere leaves zone-0
+    // host-bound evaluation at `None` (deliver) — the tier is consulted, not
+    // assumed.
+    let other = parse_policy_state(
+        "permit",
+        &[global_zone_rule("other", "", "wan", "deny")],
+        &test_zone_name_to_id(),
+    );
+    assert!(
+        evaluate_junos_host_policy(
+            &other,
+            0,
+            "10.0.0.1".parse().expect("src"),
+            "10.0.0.2".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            22,
+            None,
+            64,
+        )
+        .is_none(),
+        "no applicable global junos-host rule: zone-0 host-bound must still deliver"
+    );
+}
+
 #[test]
 fn zone_zero_junos_host_no_match_still_delivers_10644() {
     // #10644 lifeline pins: without a matching from-any/global rule, zone-0

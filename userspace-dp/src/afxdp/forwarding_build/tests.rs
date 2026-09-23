@@ -10252,6 +10252,12 @@ fn quarantine_row_never_overwrites_survivor_ifindex_claim_9956() {
 // exposure guard skips the sentinel and zone-0 `None => true` admits every
 // host-bound service. Fail-on-revert: removing the #10644 unzoned-unit
 // sentinel makes the ssh/bgp assertions RED.
+// Refused-posture note (no exposed refused set exists to assert): the
+// collapsed same-ifindex fixture rows refuse the sibling's fan-UP by the
+// #10520 refused mechanics (collapsed family at tests.rs:2351+); were
+// fixture drift to make this shape contested instead, #10503 would arm the
+// same asserts green while #10644's loop went untested — keep this cell's
+// fixture refused by construction.
 #[test]
 fn refused_native_unit_zero_trunk_parent_denies_host_inbound_10644() {
     use crate::ZoneSnapshot;
