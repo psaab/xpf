@@ -498,7 +498,11 @@ func TestApplyAndSyncCommittedSurfacesInvalidationError(t *testing.T) {
 // enough to prove arm-before-apply plus sweep-deletes-row in one transaction:
 // the plan is armed before the apply body, the body takes the pre-publication
 // capture, and the post-apply sweep consumes the old-policy row before the
-// wrapper returns. The capture-at-publish-boundary placement itself is pinned
+// wrapper returns. This is sibling commit-pipeline discipline (the POLICY
+// invalidation sweep, p-web deleted), NOT the zone-rotation purge that
+// terminates the Rust window cells (worker snapshot rotation, different
+// plane) — it pins ordering, not window closure. The
+// capture-at-publish-boundary placement itself is pinned
 // by TestCaptureRunsBeforeTheDataplanePublish6948; the AST order guard below
 // catches an arm, apply, or sweep moved behind the wrong boundary even if this
 // seam is later simplified.
@@ -523,11 +527,11 @@ func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 		if d.policyInvalidationPlan == nil {
 			t.Fatal("commit apply reached the publish body without an armed invalidation plan")
 		}
-		// R1: take the pre-publication capture the production body takes at
-		// the publish boundary (daemon_apply_dataplane.go:160-171). Without
+		// R1: take the pre-publication capture through the ONE production
+		// handoff (daemon_apply_dataplane.go:171). Without
 		// this call the sweep below falls back to the legacy scan and the
 		// plan/capture-consumption asserts prove nothing — deleting it must RED.
-		d.capturePolicyInvalidationLocked(cfg)
+		d.captureAndStagePolicyRenameAncestry(cfg)
 		phases = append(phases, "apply")
 	}
 	if _, err := d.applyAndSyncCommitted(oldCfg, newCfg, peerSyncNever); err != nil {

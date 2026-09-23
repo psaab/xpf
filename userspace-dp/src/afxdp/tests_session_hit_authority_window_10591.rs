@@ -48,15 +48,17 @@ const WINDOW_PPS: u64 = 1;
 // dataplane publish (`pkg/daemon/daemon_apply_dataplane.go:160-196`), while
 // the sweep follows the apply (`pkg/daemon/daemon_apply_commit.go:314-359`).
 // One assumed activation-second of boundary slack plus a full wheel horizon
-// is the independently-derived LOOSE-CEILING bound; it is not the
-// packet-loop count and not a measured commit delay.
+// is the assumed-slack-plus-horizon loop ceiling: a mutation tripwire that
+// moves when production GC/wheel inputs change, not an independent production
+// bound (it shares its formula with the loop cap below) and not a measured
+// commit delay.
 const GO_POLICY_ACTIVATION_SECONDS: u64 = 1;
 const GO_POLICY_ACTIVATION_NS: u64 = GO_POLICY_ACTIVATION_SECONDS * 1_000_000_000;
 const GC_TICK_NS: u64 = SESSION_GC_INTERVAL_NS_FOR_TEST;
 const PRODUCTION_BOUND_TICKS: u64 = WHEEL_BUCKETS_FOR_TEST as u64
     + (GO_POLICY_ACTIVATION_NS + SESSION_GC_INTERVAL_NS_FOR_TEST - 1)
         / SESSION_GC_INTERVAL_NS_FOR_TEST;
-// Controls run through the independently-derived production horizon. Drop
+// Controls run through the assumed-slack-plus-horizon loop ceiling. Drop
 // cells terminate earlier when the real rotation purge fires.
 const OBSERVATION_TICKS: u64 = PRODUCTION_BOUND_TICKS;
 
@@ -65,7 +67,7 @@ const OBSERVATION_TICKS: u64 = PRODUCTION_BOUND_TICKS;
 // repeated independently of the observed terminal packet count so a
 // production-input mutation moves the MAX even when rotation still
 // terminates on tick one. Tight operative bounds live in the terminal pins
-// and the M1 worst-case cells, not here.
+// and the M1 assumed-delay cells, not here.
 const MAX_DROPS_PER_RENAME_SINGLE_ZONE_DEFAULT_DENY: u64 = (WHEEL_BUCKETS_FOR_TEST as u64
     + (GO_POLICY_ACTIVATION_NS + SESSION_GC_INTERVAL_NS_FOR_TEST - 1)
         / SESSION_GC_INTERVAL_NS_FOR_TEST)
@@ -81,24 +83,28 @@ const FIXTURE_SESSION_COUNT: usize = 4;
 const MAX_SESSIONS_AFFECTED: usize = crate::session::default_max_sessions();
 const MAX_TOTAL_DROPS_PER_RENAME: u64 =
     MAX_SESSIONS_AFFECTED as u64 * MAX_DROPS_PER_RENAME_SINGLE_ZONE_DEFAULT_DENY;
-// Provenance: `policy_revoked_sessions` counts one pair teardown, not packets;
-// its packet observation bound is one activation-second plus one wheel tick.
+// Provenance: `policy_revoked_sessions` counts one pair teardown, not packets.
+// Revoke is a synchronous packet-path verdict with no commit/GC involvement,
+// so this is an arbitrary small cap (a pair tears down on its next packet),
+// not a derived horizon.
 const MAX_REVOKES_PER_RENAME: u64 = 1;
 const MAX_REVOKE_TICKS: u64 =
     ((GO_POLICY_ACTIVATION_NS + WHEEL_TICK_NS_FOR_TEST - 1) / WHEEL_TICK_NS_FOR_TEST) + 1;
 
-// M1 worst-case: bounded commit delay. One activation-second tick of Go
+// M1 assumed-delay: bounded-delay cells, NOT a production worst case (the
+// production tail is unbounded per #10624). One activation-second tick of Go
 // publish→sweep slack (the same assumed-slack input as the ceiling,
-// `pkg/daemon/daemon.go:681-685`) plus one worker tick to observe the new
-// snapshot and run the rotation purge. N=2 is deliberately decoupled from
-// the 257-tick loop cap: the worst-case cells below offer exactly N packets
-// and pin drops to N*PPS, so +1 tick or +1 drop REDs them.
+// `pkg/daemon/daemon.go:681-685` locates the window; its duration is assumed,
+// see the header) plus one worker tick to observe the new snapshot and run
+// the rotation purge. N=2 is deliberately decoupled from the 257-tick loop
+// cap: the assumed-delay cells below offer exactly N packets and pin drops
+// to N*PPS, so +1 tick or +1 drop REDs them.
 const COMMIT_DELAY_TICKS: u64 = (GO_POLICY_ACTIVATION_NS + SESSION_GC_INTERVAL_NS_FOR_TEST - 1)
     / SESSION_GC_INTERVAL_NS_FOR_TEST
     + 1;
-const MAX_DROPS_WORST_CASE_PER_RENAME: u64 = COMMIT_DELAY_TICKS * WINDOW_PPS;
-const MAX_TOTAL_DROPS_WORST_CASE: u64 =
-    FIXTURE_SESSION_COUNT as u64 * MAX_DROPS_WORST_CASE_PER_RENAME;
+const MAX_DROPS_ASSUMED_DELAY_PER_RENAME: u64 = COMMIT_DELAY_TICKS * WINDOW_PPS;
+const MAX_TOTAL_DROPS_ASSUMED_DELAY: u64 =
+    FIXTURE_SESSION_COUNT as u64 * MAX_DROPS_ASSUMED_DELAY_PER_RENAME;
 
 const LAN_IFINDEX: i32 = 24;
 const DMZ_IFINDEX: i32 = 26;
@@ -453,8 +459,8 @@ fn c1_drop_window_has_per_shape_upper_bounds_and_commit_terminal_10591() {
 }
 
 #[test]
-fn c1_worst_case_delayed_purge_bounds_drops_10591() {
-    // M1: worst case — the rotation purge lands COMMIT_DELAY_TICKS late
+fn c1_assumed_delay_purge_bounds_drops_10591() {
+    // M1: assumed delay — the rotation purge lands COMMIT_DELAY_TICKS late
     // (bounded Go publish→sweep slack + one worker rotation tick) while
     // traffic keeps arriving. Drops must stay within N*PPS. The 257-tick
     // loop cap is not the bound: offering +1 tick or inflating drops by
@@ -464,10 +470,10 @@ fn c1_worst_case_delayed_purge_bounds_drops_10591() {
         COMMIT_DELAY_TICKS, 2,
         "M1 delay must stay a small credible N"
     );
-    assert_eq!(MAX_DROPS_WORST_CASE_PER_RENAME, 2);
+    assert_eq!(MAX_DROPS_ASSUMED_DELAY_PER_RENAME, 2);
     assert!(
-        MAX_DROPS_WORST_CASE_PER_RENAME <= MAX_DROPS_PER_RENAME_SINGLE_ZONE_DEFAULT_DENY,
-        "worst-case bound must sit under the loose ceiling"
+        MAX_DROPS_ASSUMED_DELAY_PER_RENAME <= MAX_DROPS_PER_RENAME_SINGLE_ZONE_DEFAULT_DENY,
+        "assumed-delay bound must sit under the loose ceiling"
     );
     for shape in MATRIX_SHAPES {
         if shape.permit_control {
@@ -491,17 +497,17 @@ fn c1_worst_case_delayed_purge_bounds_drops_10591() {
             );
             assert_eq!(
                 dbg.session_hit, 1,
-                "{}/worst: tick {tick} must hit",
+                "{}/assumed-delay: tick {tick} must hit",
                 shape.name
             );
             assert_eq!(
                 dbg.policy_revoked_sessions, 0,
-                "{}/worst: no Revoke",
+                "{}/assumed-delay: no Revoke",
                 shape.name
             );
             assert_eq!(
                 dbg.tx, 0,
-                "{}/worst: deny lane must not forward",
+                "{}/assumed-delay: deny lane must not forward",
                 shape.name
             );
             drops += dbg.foreign_authority_drops;
@@ -514,24 +520,24 @@ fn c1_worst_case_delayed_purge_bounds_drops_10591() {
             );
             assert!(
                 expired.is_empty(),
-                "{}/worst: row must survive the delay",
+                "{}/assumed-delay: row must survive the delay",
                 shape.name
             );
             assert_eq!(
                 row_for_slot(&sessions, 0),
                 2,
-                "{}/worst: retention through delay",
+                "{}/assumed-delay: retention through delay",
                 shape.name
             );
         }
         assert_eq!(
             drops, COMMIT_DELAY_TICKS,
-            "{}/worst: one Drop per delay tick",
+            "{}/assumed-delay: one Drop per delay tick",
             shape.name
         );
         assert!(
-            drops <= MAX_DROPS_WORST_CASE_PER_RENAME,
-            "{}/worst: drops={drops} exceeds N*PPS",
+            drops <= MAX_DROPS_ASSUMED_DELAY_PER_RENAME,
+            "{}/assumed-delay: drops={drops} exceeds N*PPS",
             shape.name
         );
         let purge_ns = T0_NS + COMMIT_DELAY_TICKS * GC_TICK_NS;
@@ -539,18 +545,18 @@ fn c1_worst_case_delayed_purge_bounds_drops_10591() {
             production_rotation_purge_for_test(&mut sessions, &binding, &old, &new, purge_ns);
         assert!(
             removed > 0,
-            "{}/worst: rename must derive removed zone",
+            "{}/assumed-delay: rename must derive removed zone",
             shape.name
         );
         assert_eq!(
             purged, 1,
-            "{}/worst: delayed purge terminal forward row",
+            "{}/assumed-delay: delayed purge terminal forward row",
             shape.name
         );
         assert_eq!(
             session_count(&sessions),
             0,
-            "{}/worst: terminal by sweep",
+            "{}/assumed-delay: terminal by sweep",
             shape.name
         );
     }
@@ -752,7 +758,7 @@ fn c4_multi_session_drop_bound_attributes_distinct_rows_10591() {
 }
 
 #[test]
-fn c4_worst_case_delayed_purge_bounds_total_drops_10591() {
+fn c4_assumed_delay_purge_bounds_total_drops_10591() {
     // M1 multi-row twin: four distinct synced rows each absorb the full
     // N-tick delay before the single rotation purge. Total drops pin to
     // exactly rows*N; +1 tick or +1 drop REDs the asserts below.
@@ -791,45 +797,51 @@ fn c4_worst_case_delayed_purge_bounds_total_drops_10591() {
             }
         }
         let expired = production_sweep_for_test(&mut sessions, &mut bindings, &live, now_ns, None);
-        assert!(expired.is_empty(), "C4/worst: rows must survive the delay");
+        assert!(
+            expired.is_empty(),
+            "C4/assumed-delay: rows must survive the delay"
+        );
         for slot in 0..FIXTURE_SESSION_COUNT as u16 {
             assert_eq!(
                 row_for_slot(&sessions, slot),
                 2,
-                "C4/worst: slot {slot} retained"
+                "C4/assumed-delay: slot {slot} retained"
             );
         }
     }
     assert_eq!(
         affected.len(),
         FIXTURE_SESSION_COUNT,
-        "C4/worst: distinct attribution"
+        "C4/assumed-delay: distinct attribution"
     );
     assert_eq!(
         drops,
         FIXTURE_SESSION_COUNT as u64 * COMMIT_DELAY_TICKS,
-        "C4/worst: one Drop per row per delay tick"
+        "C4/assumed-delay: one Drop per row per delay tick"
     );
     assert!(
-        drops <= MAX_TOTAL_DROPS_WORST_CASE,
-        "C4/worst: total drops={drops}"
+        drops <= MAX_TOTAL_DROPS_ASSUMED_DELAY,
+        "C4/assumed-delay: total drops={drops}"
     );
     assert!(
         drops <= MAX_TOTAL_DROPS_PER_RENAME,
-        "C4/worst: total under loose ceiling"
+        "C4/assumed-delay: total under loose ceiling"
     );
     let purge_ns = T0_NS + COMMIT_DELAY_TICKS * GC_TICK_NS;
     let (removed, purged) =
         production_rotation_purge_for_test(&mut sessions, &bindings[0], &old, &new, purge_ns);
-    assert!(removed > 0, "C4/worst: rename set must be non-empty");
+    assert!(
+        removed > 0,
+        "C4/assumed-delay: rename set must be non-empty"
+    );
     assert_eq!(
         purged, FIXTURE_SESSION_COUNT,
-        "C4/worst: pair attribution at purge"
+        "C4/assumed-delay: pair attribution at purge"
     );
     assert_eq!(
         session_count(&sessions),
         0,
-        "C4/worst: terminal after purge"
+        "C4/assumed-delay: terminal after purge"
     );
 }
 
