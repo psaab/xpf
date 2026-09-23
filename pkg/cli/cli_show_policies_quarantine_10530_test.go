@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -111,5 +112,20 @@ func TestCLIPolicyTextQuarantineQualifier10530(t *testing.T) {
 	if strings.Contains(ordinary, config.ZoneQuarantinePoliciesQualifier) ||
 		strings.Contains(ordinary, config.ZoneQuarantineLiveCountersUnavailable) {
 		t.Fatalf("ordinary control gained quarantine text:\n%s", ordinary)
+	}
+
+	ordinaryHit := captureStdout(t, func() {
+		if err := c.showPoliciesHitCount(cfg, "trust", "trust"); err != nil {
+			t.Fatalf("showPoliciesHitCount ordinary: %v", err)
+		}
+	})
+	if strings.Contains(ordinaryHit, config.ZoneQuarantinePoliciesQualifier) ||
+		strings.Contains(ordinaryHit, config.ZoneQuarantineLiveCountersUnavailable) {
+		t.Fatalf("ordinary hit-count gained quarantine text:\n%s", ordinaryHit)
+	}
+	wantOrdinaryRow := fmt.Sprintf("%-8d%-17s%-18s%-24s%-14s%s",
+		1, "trust", "trust", "ordinary-rule", "0", "Permit")
+	if got := lineContaining(ordinaryHit, "ordinary-rule"); got != wantOrdinaryRow {
+		t.Fatalf("ordinary hit-count row = %q, want %q:\n%s", got, wantOrdinaryRow, ordinaryHit)
 	}
 }

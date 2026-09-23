@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -103,5 +104,17 @@ func TestShowPoliciesTextQuarantineQualifier10530(t *testing.T) {
 	if strings.Contains(ordinary.String(), config.ZoneQuarantinePoliciesQualifier) ||
 		strings.Contains(ordinary.String(), config.ZoneQuarantineLiveCountersUnavailable) {
 		t.Fatalf("ordinary control gained quarantine text:\n%s", ordinary.String())
+	}
+
+	var ordinaryHit strings.Builder
+	s.showPoliciesHitCount("from-zone trust to-zone trust", &ordinaryHit)
+	if strings.Contains(ordinaryHit.String(), config.ZoneQuarantinePoliciesQualifier) ||
+		strings.Contains(ordinaryHit.String(), config.ZoneQuarantineLiveCountersUnavailable) {
+		t.Fatalf("ordinary hit-count gained quarantine text:\n%s", ordinaryHit.String())
+	}
+	wantOrdinaryRow := fmt.Sprintf("%-12s %-12s %-24s %-8s %12s %16s",
+		"trust", "trust", "ordinary-rule", "permit", "0", "0")
+	if got := lineContaining(ordinaryHit.String(), "ordinary-rule"); got != wantOrdinaryRow {
+		t.Fatalf("ordinary hit-count row = %q, want %q:\n%s", got, wantOrdinaryRow, ordinaryHit.String())
 	}
 }
