@@ -7962,3 +7962,214 @@ fn refresh_status_projects_the_delete_replica_counters_8586() {
          deletes and repairing none of them"
     );
 }
+
+/// #9506 counter slice: the lowercase ECN name is an ALIAS of the canonical
+/// cell, not a second counter. D13's shared-helper path bumps only
+/// `IPSEC_INNER_ECN_ILLEGAL_DROPS`; before the unification, reads of
+/// `ipsec_inner_ecn_illegal_drops` observed a permanent 0 while drops
+/// accumulated invisibly in the canonical cell.
+///
+/// Pointer equality is the load-bearing assert (it cannot pass for two
+/// distinct statics); the store/load round-trip pins that a write through
+/// one name is visible through the other. The canonical cell is restored
+/// before the value assertion, so the global is undisturbed for the
+/// serial-suite posture (`make test-rust` runs `--test-threads=1`).
+#[test]
+fn ipsec_inner_ecn_alias_is_the_canonical_cell_9506() {
+    use std::sync::atomic::Ordering;
+
+    assert!(
+        std::ptr::eq(
+            &crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS,
+            &crate::afxdp::ipsec_inner::ipsec_inner_ecn_illegal_drops,
+        ),
+        "the lowercase ECN name must alias the canonical cell — two storage \
+         cells means D13 drops are counted where no reader looks"
+    );
+
+    let before =
+        crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::ipsec_inner_ecn_illegal_drops.store(before + 7, Ordering::Relaxed);
+    let through_canonical =
+        crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS.store(before, Ordering::Relaxed);
+    assert_eq!(
+        through_canonical,
+        before + 7,
+        "a write through the alias must be visible through the canonical name"
+    );
+}
+
+/// #9506 counter slice, THE WIRING: every snapshot member must reach its own
+/// status field, and not a sibling's.
+///
+/// Distinct fixed non-zero seeds make a transposition visible; equal values
+/// would let a swap pass. The process-global counters are saved and restored
+/// around the refresh so a failed assertion cannot poison later tests.
+/// Reverting any projection line leaves its field at the default 0 while its
+/// seeded counter remains non-zero, which reds this cell.
+#[test]
+fn refresh_status_projects_ipsec_inner_counters() {
+    use std::sync::atomic::Ordering;
+    use crate::afxdp::ipsec_inner::ipsec_inner_counters_snapshot;
+
+    let state = new_state(ProcessStatus::default());
+    let mut guard = state.lock().expect("server state");
+
+    let before = ipsec_inner_counters_snapshot();
+
+    crate::afxdp::ipsec_inner::zone_gate_unzoned_total.store(3, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::zone_gate_ambiguous_total.store(5, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::zone_gate_stale_total.store(7, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::zone_gate_no_generation_total.store(11, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::ipsec_inner_parse_drops_total.store(13, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::ipsec_inner_ecn_illegal_drops.store(17, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
+        .store(19, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
+        .store(23, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_EXHAUSTED_TOTAL
+        .store(29, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_RETIRED_TOTAL
+        .store(31, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL
+        .store(37, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
+        .store(41, Ordering::Relaxed);
+
+    refresh_status(&mut guard);
+    // Restore process-global counters before assertions so a failed assertion
+    // cannot poison later tests in this process.
+    crate::afxdp::ipsec_inner::zone_gate_unzoned_total
+        .store(before.zone_gate_unzoned_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::zone_gate_ambiguous_total
+        .store(before.zone_gate_ambiguous_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::zone_gate_stale_total
+        .store(before.zone_gate_stale_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::zone_gate_no_generation_total
+        .store(before.zone_gate_no_generation_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::ipsec_inner_parse_drops_total
+        .store(before.ipsec_inner_parse_drops_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS
+        .store(before.ipsec_inner_ecn_illegal_drops, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
+        .store(before.ipsec_inner_worker_queue_full_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
+        .store(before.ipsec_inner_verdict_queue_full_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_EXHAUSTED_TOTAL
+        .store(before.ipsec_inner_slab_exhausted_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_RETIRED_TOTAL
+        .store(before.ipsec_inner_worker_retired_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL
+        .store(before.ipsec_inner_worker_orphan_reaped_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
+        .store(before.ipsec_inner_orphan_provisional_total, Ordering::Relaxed);
+
+    assert_eq!(
+        guard.status.zone_gate_unzoned_total,
+        3,
+        "the unzoned-gate counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.zone_gate_ambiguous_total,
+        5,
+        "the ambiguous-gate counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.zone_gate_stale_total,
+        7,
+        "the stale-gate counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.zone_gate_no_generation_total,
+        11,
+        "the missing-generation counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_parse_drops_total,
+        13,
+        "the parse-drop counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_ecn_illegal_drops,
+        17,
+        "the ECN-refusal counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_worker_queue_full_total,
+        19,
+        "the worker-queue-full counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_verdict_queue_full_total,
+        23,
+        "the verdict-queue-full counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_slab_exhausted_total,
+        29,
+        "the slab-exhausted counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_worker_retired_total,
+        31,
+        "the worker-retired counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_worker_orphan_reaped_total,
+        37,
+        "the orphan-reaped counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_orphan_provisional_total,
+        41,
+        "the provisional-orphan counter must reach its own status field"
+    );
+}
+
+/// #9506 counter slice: the twelve fields SERIALIZE under their snake_case
+/// contract keys. The wiring cell pins that `refresh_status` fills them from
+/// the right sources; this pins the wire spelling that a separate Go decoder
+/// and Prometheus collector slice must map explicitly.
+/// Both are needed and neither implies the other — a `refresh_status` that
+/// filled the fields correctly while serde renamed a key would leave the
+/// wiring cell green and ship a key the Go follow-up never maps.
+#[test]
+fn process_status_ipsec_inner_counters_serialize_under_snake_case_keys_9506() {
+    let status = ProcessStatus {
+        zone_gate_unzoned_total: 3,
+        zone_gate_ambiguous_total: 5,
+        zone_gate_stale_total: 7,
+        zone_gate_no_generation_total: 11,
+        ipsec_inner_parse_drops_total: 13,
+        ipsec_inner_ecn_illegal_drops: 17,
+        ipsec_inner_worker_queue_full_total: 19,
+        ipsec_inner_verdict_queue_full_total: 23,
+        ipsec_inner_slab_exhausted_total: 29,
+        ipsec_inner_worker_retired_total: 31,
+        ipsec_inner_worker_orphan_reaped_total: 37,
+        ipsec_inner_orphan_provisional_total: 41,
+        ..Default::default()
+    };
+    let wire = serde_json::to_value(&status).expect("ProcessStatus serializes");
+    for (key, want) in [
+        ("zone_gate_unzoned_total", 3),
+        ("zone_gate_ambiguous_total", 5),
+        ("zone_gate_stale_total", 7),
+        ("zone_gate_no_generation_total", 11),
+        ("ipsec_inner_parse_drops_total", 13),
+        ("ipsec_inner_ecn_illegal_drops", 17),
+        ("ipsec_inner_worker_queue_full_total", 19),
+        ("ipsec_inner_verdict_queue_full_total", 23),
+        ("ipsec_inner_slab_exhausted_total", 29),
+        ("ipsec_inner_worker_retired_total", 31),
+        ("ipsec_inner_worker_orphan_reaped_total", 37),
+        ("ipsec_inner_orphan_provisional_total", 41),
+    ] {
+        assert_eq!(
+            wire.get(key).and_then(serde_json::Value::as_u64),
+            Some(want),
+            "status JSON must carry {key} with the field value"
+        );
+    }
+}

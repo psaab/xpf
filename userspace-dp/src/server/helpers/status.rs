@@ -204,6 +204,27 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.session_delete_replica_dropped_total();
     state.status.session_delete_replica_drop_repaired =
         state.afxdp.session_delete_replica_drop_repaired_total();
+    // #9506 counter slice: IPsec-inner deny-cause + queue counters. ONE
+    // snapshot call for all twelve fields — the projection below is a pure
+    // member copy, so a field can only disagree with its counter if the
+    // copy line names the wrong member (pinned by
+    // `refresh_status_projects_ipsec_inner_counters` with distinct seeds).
+    let ipsec_inner = crate::afxdp::ipsec_inner::ipsec_inner_counters_snapshot();
+    state.status.zone_gate_unzoned_total = ipsec_inner.zone_gate_unzoned_total;
+    state.status.zone_gate_ambiguous_total = ipsec_inner.zone_gate_ambiguous_total;
+    state.status.zone_gate_stale_total = ipsec_inner.zone_gate_stale_total;
+    state.status.zone_gate_no_generation_total = ipsec_inner.zone_gate_no_generation_total;
+    state.status.ipsec_inner_parse_drops_total = ipsec_inner.ipsec_inner_parse_drops_total;
+    state.status.ipsec_inner_ecn_illegal_drops = ipsec_inner.ipsec_inner_ecn_illegal_drops;
+    state.status.ipsec_inner_worker_queue_full_total = ipsec_inner.ipsec_inner_worker_queue_full_total;
+    state.status.ipsec_inner_verdict_queue_full_total =
+        ipsec_inner.ipsec_inner_verdict_queue_full_total;
+    state.status.ipsec_inner_slab_exhausted_total = ipsec_inner.ipsec_inner_slab_exhausted_total;
+    state.status.ipsec_inner_worker_retired_total = ipsec_inner.ipsec_inner_worker_retired_total;
+    state.status.ipsec_inner_worker_orphan_reaped_total =
+        ipsec_inner.ipsec_inner_worker_orphan_reaped_total;
+    state.status.ipsec_inner_orphan_provisional_total =
+        ipsec_inner.ipsec_inner_orphan_provisional_total;
     // #9720: the per-command split of the drops aggregate for the three
     // RG-transition commands (pushes), plus the stale-skip dispositions
     // (RG applications). Each refusal was recorded as transition debt and
