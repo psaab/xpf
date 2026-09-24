@@ -145,9 +145,11 @@ Without that sentence, "bounded" reads as a style preference.
 
 `compiler_ipsec_plaintext_warn.go` emits one aggregated commit-time advisory
 naming the affected tunnels. Deliberately a **warning, not a rejection**, under
-the #1960 no-brick posture: route-based (st0/XFRM) is the only IPsec model xpf
-supports, so rejecting would be feature removal rather than a guard. The function
-has no error return and takes no `lenient` flag, so the no-brick property is
+the #1960 no-brick posture: #3114 rejects only the unsupported `then permit
+tunnel` policy action, not an IPsec VPN object. A missing bind-interface is a
+separate strict-commit error (#10638); a valid route-based VPN remains supported,
+so rejecting it would be feature removal rather than a guard. The function has
+no error return and takes no `lenient` flag, so the no-brick property is
 structural.
 
 This changes how the eventual change is described to operators: it is

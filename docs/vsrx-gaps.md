@@ -26,7 +26,8 @@ Last updated: 2026-02-13
 >   NAT is Done for BOTH IPv4 subscribers (mode 1) and IPv6/NAPT64 subscribers
 >   (mode 2), enforced on the userspace dataplane (#4559).
 > - **§4 VPN:** IPsec DPD (#3994) and traffic selectors — Done. (Policy-
->   based IPsec VPN remains a real gap — rejected at commit, #3114; see
+>   based IPsec VPN remains a real gap — the `then permit tunnel`
+>   action is rejected at commit (#3114, action scope only); see
 >   `docs/feature-gaps.md` §15.)
 > - **§6 Management:** apply-groups, System Login Classes (RBAC), SNMP v2c
 >   traps (linkUp/Down), SNMPv3 USM (partial), event policies — all

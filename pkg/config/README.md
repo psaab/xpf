@@ -1031,6 +1031,11 @@ follow-up. The tolerant load/peer-sync path downgrades to a warning
 (`lenientPolicyThenPermit`) so an already-persisted or peer-synced config an older
 binary silently accepted still boots — the modifier stays dropped (the
 pre-existing behaviour), now flagged (#1960 no-brick doctrine, same as #3113).
+Scope note: #3114 rejects unsupported children of the `then permit` policy
+action; it does not claim that an IPsec VPN object is itself unsupported or
+rejected. VPN-object validation, such as the separate missing-bind-interface
+gate (#10638), is independent.
+
 
 **The tolerant-path downgrade of #3044/#3113/#3114 must NOT widen the permit
 (#5575):** the #1960 lenient downgrade keeps the daemon booting, but the compiler

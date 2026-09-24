@@ -369,10 +369,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// READS as enforced. This states the truth at commit.
 	//
 	// WARNING ONLY, on EVERY path — there is no lenient flag and no error
-	// return, because route-based IPsec is the only IPsec model xpf supports
-	// (#3114 rejects policy-based) and rejecting it would be a feature removal
-	// that also blocks an unrelated commit on a box with a working tunnel
-	// (#1960 no-brick).
+	// return, because route-based VPNs with a bind-interface are supported
+	// (#3114 rejects only the `then permit tunnel` policy action; a VPN
+	// without bind-interface is rejected at strict commit separately, #10638),
+	// and rejecting a supported route-based VPN would be a feature removal that
+	// also blocks an unrelated commit on a box with a working tunnel (#1960 no-brick).
 	plaintextWarnings := warnSecureTunnelPlaintextUnadjudicatedAST(tree.Children)
 
 	// #5618 WireGuard plaintext advisory. Since #8274 the AF_XDP worker
