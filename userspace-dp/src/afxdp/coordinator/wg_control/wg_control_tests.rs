@@ -2063,13 +2063,18 @@ fn wg_tun_burst_publishes_pair_on_sent_10038() {
     )));
     let reader = channel.reader();
     let mut ha_map = BTreeMap::new();
+    // Live lease (#10645): the reverse publish now attributes its real owner
+    // RG, so the RG must actually be active — a 1970-stale lease reads
+    // HAInactive and the reverse publishes HAInactive instead of
+    // LocalDelivery. Pre-fix the owner collapsed to 0 and skipped the check.
+    let now_secs = crate::afxdp::neighbor::monotonic_nanos() / 1_000_000_000;
     for rg in [1, 2] {
         ha_map.insert(
             rg,
             HAGroupRuntime {
                 active: true,
-                watchdog_timestamp: 123,
-                lease: HAGroupRuntime::active_lease_until(123, 123),
+                watchdog_timestamp: now_secs,
+                lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
             },
         );
     }

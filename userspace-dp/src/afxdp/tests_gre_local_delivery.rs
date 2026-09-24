@@ -105,9 +105,14 @@ fn unencapsulated_local_delivery_reinjects_slow_path_exactly_once() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
 
+    // #10645: dst is reth1.0's own 10.0.61.1, not the tunnel address: with
+    // truthful attribution a packet to 10.255.0.1/30 resolves local_ifindex
+    // 77 and takes the gr- tunnel channel, so it no longer exercises the
+    // slow-path outlet this cell pins. The lan address keeps local_ifindex
+    // 24 with no registered channel — the slow path, exactly once.
     let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
-        Ipv4Addr::new(10, 255, 0, 1),
+        Ipv4Addr::new(10, 0, 61, 1),
         12345,
         179,
         TCP_FLAG_SYN,
@@ -225,9 +230,12 @@ fn poll_descriptor_no_junos_host_policy_local_delivery_unchanged_session_miss() 
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
 
+    // #10645: dst is reth1.0's own address so the packet exercises the
+    // slow-path outlet (the tunnel address now resolves local_ifindex 77
+    // and takes the gr- channel instead).
     let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
-        Ipv4Addr::new(10, 255, 0, 1),
+        Ipv4Addr::new(10, 0, 61, 1),
         12345,
         179,
         TCP_FLAG_SYN,
