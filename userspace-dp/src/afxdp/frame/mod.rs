@@ -2246,6 +2246,11 @@ mod tests_shim_wg_classify_8274;
 #[cfg(test)]
 #[path = "tests_shim_early_filter_10640.rs"]
 mod tests_shim_early_filter_10640;
+// #10651: the shim's native-GRE kernel-pass decision, executed rather than
+// modelled — same shape as above.
+#[cfg(test)]
+#[path = "tests_shim_gre_classify_10651.rs"]
+mod tests_shim_gre_classify_10651;
 #[cfg(test)]
 #[path = "tests_9782_copy.rs"]
 mod tests_9782_copy;
