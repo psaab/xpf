@@ -112,11 +112,14 @@ pub(crate) struct ExtChainFragment {
 
 /// Result of [`walk_ipv6_ext_chain`]: the terminal verdict plus the
 /// first Fragment header sighted along the way, when the chain declared
-/// one. Only the FIRST Fragment header is recorded — a (hostile) chain
-/// with a second Fragment header keeps the first sighting, matching the
-/// stop-at-first-fragment pre-#6435 fragment predicates; consumers that
-/// judged EVERY sighting pre-#6435 (the #1838 embedded-ICMP resolver)
-/// read [`ExtChainWalk::non_first_fragment_offset_seen`] instead.
+/// one. Only the FIRST Fragment header is recorded in
+/// [`ExtChainWalk::fragment`] — a (hostile) chain with a second Fragment
+/// header keeps the first sighting, matching the stop-at-first-fragment
+/// pre-#6435 declares-match consumers (`ipv6_is_any_fragment`, the NDP
+/// NA refusal); consumers that judge EVERY sighting (the #1838
+/// embedded-ICMP resolver, and since #10661 every fragment-status
+/// predicate) read [`ExtChainWalk::non_first_fragment_offset_seen`] and
+/// [`ExtChainWalk::first_non_atomic_fragment`] instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ExtChainWalk {
     pub outcome: ExtChainOutcome,
@@ -127,7 +130,23 @@ pub(crate) struct ExtChainWalk {
     /// resolver (#1838) judges EVERY sighted Fragment header, not just
     /// the first recorded one — this flag is what preserves that
     /// every-header judgement on top of the single recorded sighting.
+    /// Since #10661 the forwarding non-first predicates fold this too,
+    /// matching the shim's every-sighting verdict.
     pub non_first_fragment_offset_seen: bool,
+    /// #10661: the FIRST readably non-ATOMIC Fragment header sighted
+    /// along the walk — offset != 0 or M != 0 in readable bytes — with
+    /// its header offset, so the overlap tracker keys its range off the
+    /// header the plain single-header control carries. `None` when the
+    /// chain declared no Fragment header or every sighting was ATOMIC
+    /// (offset 0, M 0). A declared-but-truncated sighting is never
+    /// recorded here (its bits are unreadable); it sets
+    /// [`ExtChainWalk::fragment_truncated`] instead.
+    pub first_non_atomic_fragment: Option<ExtChainFragment>,
+    /// #10661: set when ANY declared Fragment header's 8 bytes lay past
+    /// the buffer end. Bit-reading verdicts (the overlap tracker, the
+    /// non-atomic predicate) fail closed on this rather than judging
+    /// the chain from a readable ATOMIC sighting alone.
+    pub fragment_truncated: bool,
 }
 
 /// #6435: the single IPv6 extension-header chain walk shared by every
@@ -167,11 +186,15 @@ pub(crate) struct ExtChainWalk {
 pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
     let mut fragment = None;
     let mut non_first_fragment_offset_seen = false;
+    let mut first_non_atomic_fragment = None;
+    let mut fragment_truncated = false;
     if buf.len() < l3 + 40 {
         return ExtChainWalk {
             outcome: ExtChainOutcome::Truncated,
             fragment,
             non_first_fragment_offset_seen,
+            first_non_atomic_fragment,
+            fragment_truncated,
         };
     }
     let mut protocol = buf[l3 + 6];
@@ -207,6 +230,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 };
                 protocol = opt[0];
@@ -215,6 +240,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 };
                 offset = next;
@@ -223,6 +250,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 }
             }
@@ -232,6 +261,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 };
                 protocol = opt[0];
@@ -240,6 +271,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 };
                 offset = next;
@@ -248,19 +281,42 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 }
             }
             44 => {
                 let header = buf.get(offset..offset + 8);
-                // Record the sighting before the byte-validated advance
-                // below; shared with the #10665 bound early-return.
+                // The shared recorder preserves the first declaration and updates the every-sighting non-first verdict; it is also used by the #10665 bound early-return.
                 record_fragment_sighting(buf, offset, &mut fragment, &mut non_first_fragment_offset_seen);
+                if let Some(f) = header {
+                    // #10661: record the FIRST readably non-ATOMIC header
+                    // (offset != 0 or M != 0), so an `[ATOMIC][real]`
+                    // chain tracks like its plain single-header control.
+                    // `f` is the 8 walked bytes, so copying is in-bounds.
+                    if first_non_atomic_fragment.is_none()
+                        && (u16::from_be_bytes([f[2], f[3]]) & 0xFFF9) != 0
+                    {
+                        first_non_atomic_fragment = Some(ExtChainFragment {
+                            bytes: Some([
+                                f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
+                            ]),
+                            header_offset: offset,
+                        });
+                    }
+                } else {
+                    // A declared-but-unreadable Fragment header — first or
+                    // repeat — poisons bit-reading verdicts.
+                    fragment_truncated = true;
+                }
                 let Some(frag) = header else {
                     return ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 };
                 protocol = frag[0];
@@ -269,6 +325,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 };
                 offset = next;
@@ -277,6 +335,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
                     };
                 }
             }
@@ -286,6 +346,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     fragment,
                     non_first_fragment_offset_seen,
                 };
+                first_non_atomic_fragment,
+                fragment_truncated,
             }
             _ => {
                 return ExtChainWalk {
@@ -293,6 +355,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     fragment,
                     non_first_fragment_offset_seen,
                 };
+                first_non_atomic_fragment,
+                fragment_truncated,
             }
         }
     }
@@ -300,6 +364,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
         outcome: ExtChainOutcome::OverLimit,
         fragment,
         non_first_fragment_offset_seen,
+        first_non_atomic_fragment,
+        fragment_truncated,
     }
 }
 
