@@ -658,6 +658,14 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             metadata: SessionMetadata {
                 ingress_zone: zone_id,
                 egress_zone: zone_id,
+                ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                    &forwarding.zone_id_to_name,
+                    zone_id,
+                ),
+                egress_zone_check: crate::session::zone_vintage_check_for_id(
+                    &forwarding.zone_id_to_name,
+                    zone_id,
+                ),
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),

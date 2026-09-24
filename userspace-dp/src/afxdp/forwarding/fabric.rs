@@ -792,6 +792,14 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     Some(SessionMetadata {
         ingress_zone: from_zone_id,
         egress_zone: to_zone_id,
+        ingress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            from_zone_id,
+        ),
+        egress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            to_zone_id,
+        ),
         // #4983: the TRUE ingress identity of the frame that created the seed.
         // Unlike the fabric-ingress case this one is knowable and real — the
         // packet arrived on one of THIS node's own interfaces, which is the

@@ -959,6 +959,14 @@ pub(super) fn build_missing_neighbor_session_metadata(
         ingress_vlan_id,
         ingress_zone,
         egress_zone,
+        ingress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            ingress_zone,
+        ),
+        egress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            egress_zone,
+        ),
         owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
         fabric_ingress,
         is_reverse: false,

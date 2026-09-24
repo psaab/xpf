@@ -78,11 +78,81 @@ pub(crate) fn stamped_ingress_identity(
     }
     (ingress_ifindex, ingress_vlan_id)
 }
+/// #10620: FNV-1a/64 over a zone name — the exact iteration Go's `hash/fnv`
+/// `New64a` performs (offset basis `0xcbf29ce484222325`, prime
+/// `0x100000001b3`, wrapping multiply), mirroring
+/// `session/routing_domain_wire.rs` (which pins agreement vectors against
+/// Go-computed literals). Duplicated rather than shared so this vintage
+/// stamp has no cross-module coupling; the vectors test below pins the
+/// same published FNV-1a/64 outputs.
+fn fnv1a64(name: &str) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// #10620: vintage check for a zone NAME: high 32 of the FNV-1a/64 above —
+/// the same derivation as #9752's `install_table_check` (high 32 of the
+/// FNV-64 whose fold is the numeric id). The zone id alone cannot
+/// distinguish a stale generation (zone A, id 3) from a live reuse (zone
+/// B, id 3); this check binds an entry to the NAME its id was bound to
+/// when stamped, so a same-id/different-name rotation fails the fence
+/// instead of installing under the new zone's live id.
+///
+/// Never returns 0 for a real name (`filter/compiler.rs` applies the same
+/// `0 -> 1` reservation): 0 is reserved for "unknown/legacy" (unstamped
+/// rows, id-0 legs, nameless peer imports), which the fence fails OPEN
+/// on, falling back to the #10612 stateless arms.
+pub(crate) fn zone_identity_check(name: &str) -> u32 {
+    let check = (fnv1a64(name) >> 32) as u32;
+    if check == 0 {
+        1
+    } else {
+        check
+    }
+}
+
+/// #10620: the vintage stamp for one zone-id leg at install time: the
+/// CURRENT name's check, or 0 when the id has no binding (id 0, or an id
+/// absent from the map). Called at every production install site with the
+/// installing view's map, so the entry carries the vintage it was stamped
+/// under; the fence later compares this against the then-current name for
+/// the same id.
+pub(crate) fn zone_vintage_check_for_id(
+    zone_id_to_name: &rustc_hash::FxHashMap<u16, String>,
+    zone_id: u16,
+) -> u32 {
+    if zone_id == 0 {
+        return 0;
+    }
+    zone_id_to_name
+        .get(&zone_id)
+        .map(|name| zone_identity_check(name))
+        .unwrap_or(0)
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionMetadata {
     pub(crate) ingress_zone: u16,
     pub(crate) egress_zone: u16,
+    /// #10620: vintage check binding `ingress_zone` to the NAME its id was
+    /// bound to when this entry was stamped (`zone_identity_check` of the
+    /// then-current `zone_id_to_name` entry). A same-id/different-name
+    /// rotation (zone A removed, zone B reusing id 3) changes the CURRENT
+    /// check while the stale entry keeps A's: the fence drops it instead
+    /// of installing A's dead session under B's live id. 0 =
+    /// unknown/legacy (unstamped row, id-0 leg, nameless peer import):
+    /// the fence fails open on that leg to the #10612 stateless arms.
+    /// Excluded from `PartialEq` (derived enforcement state, #3322
+    /// pattern): equality is flow identity, not stamp vintage.
+    pub(crate) ingress_zone_check: u32,
+    /// #10620: vintage check for `egress_zone` (see `ingress_zone_check`).
+    pub(crate) egress_zone_check: u32,
     /// #4983: the ifindex of the binding this session's FIRST packet arrived
     /// on — the session's TRUE ingress-interface identity. Stamped ONCE at
     /// install from `UserspaceDpMeta::ingress_ifindex` (the binding the frame
@@ -312,8 +382,12 @@ pub(crate) struct SessionMetadata {
 // the admitting rule's shared counter (resolved from `policy_counter_idx`), not
 // part of the session's wire/identity — two metadatas that agree on every wire
 // field are equal whether or not the counter Arc has been resolved yet (e.g. a
-// peer-synced entry before binding vs. a locally-installed one). Every other
-// field participates, mirroring the previous `#[derive(PartialEq, Eq)]`.
+// peer-synced entry before binding vs. a locally-installed one).
+// #10620: equality likewise ignores the zone vintage checks. They are derived
+// enforcement state (a pure function of the ambient zone map at stamp time),
+// not flow identity: a stale-vintage and a current-vintage copy of one row
+// are the same flow. Every other field participates, mirroring the previous
+// `#[derive(PartialEq, Eq)]`.
 impl PartialEq for SessionMetadata {
     fn eq(&self, other: &Self) -> bool {
         self.ingress_zone == other.ingress_zone
@@ -357,6 +431,8 @@ impl SessionMetadata {
         Self {
             ingress_zone: self.ingress_zone,
             egress_zone: self.egress_zone,
+            ingress_zone_check: self.ingress_zone_check,
+            egress_zone_check: self.egress_zone_check,
             ingress_ifindex: self.ingress_ifindex,
             ingress_vlan_id: self.ingress_vlan_id,
             owner_rg_id: self.owner_rg_id,
@@ -684,4 +760,59 @@ pub(crate) struct ExpiredSession {
     /// means the Close was accepted by the ring (or this is a tombstone from
     /// a removal path that does not emit an expiry Close).
     pub(crate) overflow_close: Option<SessionDelta>,
+}
+
+#[cfg(test)]
+mod zone_vintage_10620_tests {
+    use super::{zone_identity_check, zone_vintage_check_for_id};
+
+    #[test]
+    fn identity_check_matches_published_fnv_vectors_10620() {
+        // Pinned FNV-1a/64 outputs (same vectors as
+        // `protocol/session_delta_schema.rs`); the check is the high 32.
+        // foobar: 0x85944171f73967e8 -> 0x85944171.
+        assert_eq!(zone_identity_check("foobar"), 0x8594_4171);
+        // Empty name: offset basis -> high 32 of 0xcbf29ce484222325.
+        assert_eq!(zone_identity_check(""), 0xcbf2_9ce4);
+        // Distinct names check distinctly (the property the fence relies on).
+        assert_ne!(zone_identity_check("lan"), zone_identity_check("dmz"));
+    }
+
+    #[test]
+    fn identity_check_never_returns_zero_10620() {
+        // 0 is reserved for unknown/legacy; a real name must never stamp it.
+        for name in ["lan", "wan", "dmz", "trust", "untrust", "junos-host", ""] {
+            assert_ne!(
+                zone_identity_check(name),
+                0,
+                "name {name:?} must not check to 0"
+            );
+        }
+    }
+
+    #[test]
+    fn vintage_lookup_falls_back_to_zero_10620() {
+        let map = rustc_hash::FxHashMap::from_iter([
+            (1u16, "lan".to_string()),
+            (2u16, "wan".to_string()),
+        ]);
+        assert_eq!(
+            zone_vintage_check_for_id(&map, 1),
+            zone_identity_check("lan")
+        );
+        assert_eq!(
+            zone_vintage_check_for_id(&map, 2),
+            zone_identity_check("wan")
+        );
+        assert_eq!(
+            zone_vintage_check_for_id(&map, 0),
+            0,
+            "id 0 is unset, never stamped"
+        );
+        assert_eq!(
+            zone_vintage_check_for_id(&map, 9),
+            0,
+            "an unmapped id stamps unknown"
+        );
+    }
 }

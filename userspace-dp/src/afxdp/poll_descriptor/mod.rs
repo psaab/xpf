@@ -3268,6 +3268,14 @@ pub(super) fn poll_binding_process_descriptor(
                             let local_metadata = SessionMetadata {
                                 ingress_zone: from_zone_id,
                                 egress_zone: to_zone_id,
+                                ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                                    &worker_ctx.forwarding.zone_id_to_name,
+                                    from_zone_id,
+                                ),
+                                egress_zone_check: crate::session::zone_vintage_check_for_id(
+                                    &worker_ctx.forwarding.zone_id_to_name,
+                                    to_zone_id,
+                                ),
                                 // #4983: stamp the session's TRUE ingress identity from the frame that
                                 // created it — the binding it was actually received on plus its 802.1Q
                                 // tag. Recorded ONCE here and never re-derived from the zone, which is
@@ -3984,6 +3992,14 @@ pub(super) fn poll_binding_process_descriptor(
                                     let forward_metadata = SessionMetadata {
                                         ingress_zone: from_zone_id,
                                         egress_zone: to_zone_id,
+                                        ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                                            &worker_ctx.forwarding.zone_id_to_name,
+                                            from_zone_id,
+                                        ),
+                                        egress_zone_check: crate::session::zone_vintage_check_for_id(
+                                            &worker_ctx.forwarding.zone_id_to_name,
+                                            to_zone_id,
+                                        ),
                                         // #4983: stamp the session's TRUE ingress identity from the frame that
                                         // created it — the binding it was actually received on plus its 802.1Q
                                         // tag. Recorded ONCE here and never re-derived from the zone, which is
@@ -4362,6 +4378,14 @@ pub(super) fn poll_binding_process_descriptor(
                                     let reverse_metadata = SessionMetadata {
                                         ingress_zone: to_zone_id,
                                         egress_zone: from_zone_id,
+                                        ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                                            &worker_ctx.forwarding.zone_id_to_name,
+                                            to_zone_id,
+                                        ),
+                                        egress_zone_check: crate::session::zone_vintage_check_for_id(
+                                            &worker_ctx.forwarding.zone_id_to_name,
+                                            from_zone_id,
+                                        ),
                                         // #4983: the reverse companion has NO ingress identity of its own —
                                         // the reply's ingress has not been OBSERVED yet, and routing may be
                                         // asymmetric, so there is nothing truthful to stamp. Note the forward

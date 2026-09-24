@@ -1278,6 +1278,14 @@ pub(super) fn build_reverse_session_from_forward_match_in_table(
         // adjudicates a packet in a zone it never arrived in.
         ingress_zone: forward_match.metadata.egress_zone,
         egress_zone: forward_match.metadata.ingress_zone,
+        ingress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            forward_match.metadata.egress_zone,
+        ),
+        egress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            forward_match.metadata.ingress_zone,
+        ),
         // #7917: DELIBERATELY 0, and not to be "fixed" by inheriting
         // `forward_match.metadata.ingress_ifindex`.
         //
