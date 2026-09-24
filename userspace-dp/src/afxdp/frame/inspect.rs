@@ -173,11 +173,12 @@ pub(crate) struct ExtChainWalk {
 /// shim's 7-iteration walk, which never reads header 8 at all.
 ///
 /// The walk ALWAYS runs to a terminal (or the bound), even past a
-/// Fragment header: the first Fragment header is RECORDED in
-/// [`ExtChainWalk::fragment`] instead of stopping the walk, so one loop
-/// serves both the L4 resolvers (which walk past first/atomic fragments)
-/// and the fragment predicates (which read only the recorded sighting —
-/// see the type's doc for the verdict-equivalence argument).
+/// Fragment header: the first declared Fragment header is RECORDED in
+/// [`ExtChainWalk::fragment`] for declaration-sensitive consumers. Status
+/// predicates use every readable sighting (`non_first_fragment_offset_seen`)
+/// or the first readable non-ATOMIC sighting
+/// (`first_non_atomic_fragment`), so an ATOMIC prefix cannot mask a later
+/// real fragment.
 /// `#[inline(always)]` keeps the shared body folded into each caller per
 /// the repo hot-path convention (in-crate, LTO off, codegen-units 16 —
 /// explicit attrs are required for cross-CGU inlining); the common
@@ -207,17 +208,26 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
         // walk never reads header 8 at all, so neither do we: no length byte
         // is touched on this path. A terminal (L4/59/ESP) at this iteration
         // still resolves below — only a TRAVERSABLE protocol is over-limit.
-        // The declared Fragment sighting is still recorded (bytes `None` when
-        // truncated) so `ipv6_is_any_fragment` keeps its declares-match
-        // semantics at the bound.
+        // The shared recorder runs at the bound too, preserving every
+        // fragment-status field while OverLimit takes precedence over a
+        // truncated Fragment header at this position.
         if i + 1 == MAX_IPV6_EXT_HEADERS && ipv6_ext_header_is_traversable(protocol) {
             if protocol == 44 {
-                record_fragment_sighting(buf, offset, &mut fragment, &mut non_first_fragment_offset_seen);
+                record_fragment_sighting(
+                    buf,
+                    offset,
+                    &mut fragment,
+                    &mut non_first_fragment_offset_seen,
+                    &mut first_non_atomic_fragment,
+                    &mut fragment_truncated,
+                );
             }
             return ExtChainWalk {
                 outcome: ExtChainOutcome::OverLimit,
                 fragment,
                 non_first_fragment_offset_seen,
+                first_non_atomic_fragment,
+                fragment_truncated,
             };
         }
         match protocol {
@@ -287,29 +297,14 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                 }
             }
             44 => {
-                let header = buf.get(offset..offset + 8);
-                // The shared recorder preserves the first declaration and updates the every-sighting non-first verdict; it is also used by the #10665 bound early-return.
-                record_fragment_sighting(buf, offset, &mut fragment, &mut non_first_fragment_offset_seen);
-                if let Some(f) = header {
-                    // #10661: record the FIRST readably non-ATOMIC header
-                    // (offset != 0 or M != 0), so an `[ATOMIC][real]`
-                    // chain tracks like its plain single-header control.
-                    // `f` is the 8 walked bytes, so copying is in-bounds.
-                    if first_non_atomic_fragment.is_none()
-                        && (u16::from_be_bytes([f[2], f[3]]) & 0xFFF9) != 0
-                    {
-                        first_non_atomic_fragment = Some(ExtChainFragment {
-                            bytes: Some([
-                                f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
-                            ]),
-                            header_offset: offset,
-                        });
-                    }
-                } else {
-                    // A declared-but-unreadable Fragment header — first or
-                    // repeat — poisons bit-reading verdicts.
-                    fragment_truncated = true;
-                }
+                let header = record_fragment_sighting(
+                    buf,
+                    offset,
+                    &mut fragment,
+                    &mut non_first_fragment_offset_seen,
+                    &mut first_non_atomic_fragment,
+                    &mut fragment_truncated,
+                );
                 let Some(frag) = header else {
                     return ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
@@ -345,18 +340,18 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     outcome: ExtChainOutcome::NoNextHeader,
                     fragment,
                     non_first_fragment_offset_seen,
+                    first_non_atomic_fragment,
+                    fragment_truncated,
                 };
-                first_non_atomic_fragment,
-                fragment_truncated,
             }
             _ => {
                 return ExtChainWalk {
                     outcome: ExtChainOutcome::L4(offset, protocol),
                     fragment,
                     non_first_fragment_offset_seen,
+                    first_non_atomic_fragment,
+                    fragment_truncated,
                 };
-                first_non_atomic_fragment,
-                fragment_truncated,
             }
         }
     }
@@ -369,20 +364,21 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
     }
 }
 
-/// #10665: record one declared Fragment (44) header sighting at `offset`.
-/// Shared by the in-loop Fragment arm and the bound early-return so the
-/// two can never drift apart. Records the FIRST declaration only
-/// (`bytes: None` when the buffer truncates the header, preserving
-/// `ipv6_is_any_fragment`'s declares-match semantics) while the #1838
-/// every-sighting non-first-offset judgement runs on every call. Never
-/// panics: the header is read through `buf.get`.
+/// #10665/#10661: record all status derived from one declared Fragment
+/// header. Shared by the in-loop arm and bound early-return so both paths
+/// agree. `fragment` retains the first declaration; offset status accumulates
+/// across sightings; `first_non_atomic_fragment` retains the first readable
+/// header with offset != 0 or M != 0; and an unreadable header sets
+/// `fragment_truncated`. Returns the bytes when readable.
 #[inline(always)]
-fn record_fragment_sighting(
-    buf: &[u8],
+fn record_fragment_sighting<'a>(
+    buf: &'a [u8],
     offset: usize,
     fragment: &mut Option<ExtChainFragment>,
     non_first_fragment_offset_seen: &mut bool,
-) {
+    first_non_atomic_fragment: &mut Option<ExtChainFragment>,
+    fragment_truncated: &mut bool,
+) -> Option<&'a [u8]> {
     let header = buf.get(offset..offset + 8);
     if fragment.is_none() {
         *fragment = Some(ExtChainFragment {
@@ -391,13 +387,22 @@ fn record_fragment_sighting(
         });
     }
     if let Some(f) = header {
-        // #1838 every-sighting judgement: a non-zero offset in ANY
-        // sighted Fragment header (not just the recorded first) is a
-        // quoted/forwarded non-first fragment.
-        if (u16::from_be_bytes([f[2], f[3]]) & 0xFFF8) != 0 {
+        let word = u16::from_be_bytes([f[2], f[3]]);
+        // #1838 every-sighting judgement: a non-zero offset in ANY sighted
+        // Fragment header is a quoted/forwarded non-first fragment.
+        if (word & 0xFFF8) != 0 {
             *non_first_fragment_offset_seen = true;
         }
+        if first_non_atomic_fragment.is_none() && (word & 0xFFF9) != 0 {
+            *first_non_atomic_fragment = Some(ExtChainFragment {
+                bytes: Some([f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]]),
+                header_offset: offset,
+            });
+        }
+    } else {
+        *fragment_truncated = true;
     }
+    header
 }
 
 /// #4555/#6923: `true` iff `protocol` is an IPv6 next-header value the walk
@@ -734,31 +739,15 @@ pub(in crate::afxdp) fn ipv4_is_non_first_fragment(packet: &[u8]) -> bool {
 
 /// #1852: is this L3-relative IPv6 packet a NON-first fragment?
 ///
-/// Walks the extension-header chain (bounded, same iteration limit as
-/// `packet_rel_l4_offset` — `MAX_IPV6_EXT_HEADERS`) looking for a
-/// fragment header (44). Returns
-/// `true` iff a fragment header is present AND its fragment-offset bits
-/// (upper 13 bits of bytes 2-3, mask `0xFFF8`, RFC 8200 §4.5) are
-/// non-zero. First/atomic fragments (offset 0) and packets without a
-/// fragment header return `false`. Mirrors `screen/extract.rs` /
-/// `parse_embedded_v6_l4` fragment semantics. Read-only, no mutation;
-/// unlike the defect-2 fix this is a separate predicate so the shared
-/// `packet_rel_l4_offset_and_protocol` (read by GRE decap / tunnel
-/// local-origin to FORWARD fragments) stays unchanged.
-/// #6435: folds the shared `walk_ipv6_ext_chain`'s recorded first
-/// Fragment-header sighting. A declared-but-truncated Fragment header
-/// (bytes unreadable) fails closed (`false`), exactly like the pre-#6435
-/// walker's `packet.get(offset..offset + 8)` else-return. The shared walk
-/// continues past the Fragment header to the chain terminal, but this
-/// predicate reads only the recorded FIRST sighting, so a (hostile)
-/// double-Fragment chain still judges by the first header — identical to
-/// the pre-#6435 stop-at-first-fragment walk.
+/// Returns true when ANY readable Fragment header in the bounded extension
+/// chain has non-zero offset bits (`0xFFF8`, RFC 8200 §4.5). Atomic and
+/// first-fragment sightings do not mask a later non-first header. A declared
+/// but truncated Fragment header contributes no readable status (false),
+/// while consumers requiring a fragment range fail closed on that truncation.
+/// NAT64 consumes the same every-sighting value from the shared walk.
 #[inline]
 pub(in crate::afxdp) fn ipv6_is_non_first_fragment(packet: &[u8]) -> bool {
-    walk_ipv6_ext_chain(packet, 0)
-        .fragment
-        .and_then(|frag| frag.bytes)
-        .is_some_and(|b| (u16::from_be_bytes([b[2], b[3]]) & 0xFFF8) != 0)
+    walk_ipv6_ext_chain(packet, 0).non_first_fragment_offset_seen
 }
 
 /// #1852: family-dispatched non-first-fragment predicate over the
@@ -790,43 +779,25 @@ pub(in crate::afxdp) fn ipv4_is_any_fragment(packet: &[u8]) -> bool {
     packet.len() >= 8 && (u16::from_be_bytes([packet[6], packet[7]]) & 0x3FFF) != 0
 }
 
-/// #2362: is this L3-relative IPv6 packet ANY fragment? IPv6 carries
-/// fragmentation in a Fragment extension header (next-header 44). Junos
-/// `is-fragment` matches any datagram that carries a fragment header, including
-/// the first fragment (offset 0, M=1). Walks the extension-header chain
-/// (bounded by `MAX_IPV6_EXT_HEADERS`) and returns `true` as soon as a fragment
-/// header is found. Packets with no fragment header return `false`.
-/// #6435: folds the shared `walk_ipv6_ext_chain`'s recorded first
-/// Fragment-header sighting. The DECLARATION alone matches — a chain that
-/// declares a Fragment header whose 8 bytes are then truncated still
-/// returns `true`, exactly like the pre-#6435 predicate's `44 => return
-/// true` arm, which matched on the declared type without reading the
-/// header bytes. Only the FIRST sighting is consulted, matching the
-/// pre-#6435 stop-at-first-fragment walk on a double-Fragment chain.
+/// #2362: is this L3-relative IPv6 packet ANY fragment? Junos `is-fragment`
+/// matches any datagram that carries a declared Fragment header, including
+/// atomic headers and a declaration truncated before all 8 bytes are readable.
+/// The first declared sighting is retained for this declaration-sensitive
+/// verdict; readable fragment-status predicates instead consume the walk's
+/// every-sighting or first-non-atomic fields.
 #[inline]
 pub(in crate::afxdp) fn ipv6_is_any_fragment(packet: &[u8]) -> bool {
     walk_ipv6_ext_chain(packet, 0).fragment.is_some()
 }
 
-/// #9901 (F-077): is this L3-relative IPv6 packet NON-ATOMICALLY fragmented —
-/// i.e. could a LATER fragment explain a short quote? A Fragment header with
-/// offset == 0 AND M == 0 (an ATOMIC fragment, RFC 8200 §4.5) carries the
-/// whole datagram: no later fragment exists, so it must NOT disable the
-/// quoted-L4 adequacy floor the way a genuine first fragment (M == 1) or a
-/// non-first fragment (offset != 0) does. A declaration with UNREADABLE
-/// bytes (truncated header) conservatively counts as fragmenting — the bits
-/// cannot be inspected, so the old declares-match behavior is kept there.
+/// #9901 (F-077): is this L3-relative IPv6 chain non-atomically fragmented?
+/// Returns true when any readable Fragment header has offset != 0 or M != 0.
+/// A truncated declared header fails closed as potentially non-atomic; a
+/// chain containing only atomic headers remains false.
 #[inline]
 pub(in crate::afxdp) fn ipv6_is_nonatomically_fragmented(packet: &[u8]) -> bool {
-    match walk_ipv6_ext_chain(packet, 0).fragment {
-        None => false,
-        Some(f) => match f.bytes {
-            // Fragment-header bytes 2-3: 13-bit offset (high bits) + 2
-            // reserved bits + M. Non-atomic iff offset != 0 or M != 0.
-            Some(b) => (u16::from_be_bytes([b[2], b[3]]) & 0xFFF9) != 0,
-            None => true,
-        },
-    }
+    let walk = walk_ipv6_ext_chain(packet, 0);
+    walk.fragment_truncated || walk.first_non_atomic_fragment.is_some()
 }
 
 /// #2362: family-dispatched ANY-fragment predicate over the L3-relative packet

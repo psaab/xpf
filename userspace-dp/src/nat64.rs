@@ -2176,22 +2176,12 @@ pub(crate) fn frame_is_nat64_exthdr_ineligible(frame: &[u8], addr_family: i32) -
 
 /// Is this L3-relative IPv6 packet a NON-first fragment (#2290)?
 ///
-/// Folds the shared `walk_ipv6_ext_chain` (#6435): returns `true` iff the
-/// chain declared a Fragment header (44) whose fragment offset (upper 13
-/// bits of bytes 2-3, mask `0xFFF8`, RFC 8200 §4.5) is non-zero. A
-/// non-first fragment carries no L4 header, so its payload bytes must NOT
-/// be read as L4 — the translators fail closed on it. First/atomic
-/// fragments (offset 0) and packets without a fragment header return
-/// `false`; a declared-but-truncated Fragment header (offset bits
-/// unreadable) fails closed (`false`), exactly like the pre-#6435
-/// walker's `packet.get(offset..offset + 8)` else-return. Mirrors
-/// `afxdp::frame::inspect::ipv6_is_non_first_fragment` — literally: both
-/// fold the same recorded first-Fragment sighting.
+/// Uses the shared walk's every-sighting non-zero-offset verdict, so an
+/// ATOMIC header cannot mask a later real non-first header. An unreadable
+/// Fragment header contributes no readable offset and returns false, as
+/// before; paths that require valid L4 or overlap bounds fail closed elsewhere.
 fn ipv6_is_non_first_fragment(packet: &[u8]) -> bool {
-    walk_ipv6_ext_chain(packet, 0)
-        .fragment
-        .and_then(|frag| frag.bytes)
-        .is_some_and(|b| (u16::from_be_bytes([b[2], b[3]]) & 0xFFF8) != 0)
+    walk_ipv6_ext_chain(packet, 0).non_first_fragment_offset_seen
 }
 
 /// Parsed IPv6 Fragment Header (next-header 44) fields, RFC 8200 §4.5.
@@ -2214,19 +2204,21 @@ pub(crate) struct Ipv6FragInfo {
     pub(crate) next_header: u8,
 }
 
-/// Parse the IPv6 Fragment Header (next-header 44) if present (#2488).
+/// Parse an IPv6 Fragment header (next-header 44) if present (#2488).
 ///
-/// Folds the shared `walk_ipv6_ext_chain` (#6435) and reads the FIRST
-/// Fragment Header's offset / M flag / Identification from its recorded
-/// sighting. Returns `None` for a packet that carries no Fragment Header
-/// (an ordinary, non-fragmented datagram), so the v6→v4 translator can
-/// fall back to its option-gated atomic-datagram framing. A
-/// declared-but-truncated Fragment header (bytes unreadable) also returns
-/// `None`, exactly like the pre-#6435 walker's `packet.get(offset..offset
-/// + 8)?`; only the FIRST sighting is consulted, matching the pre-#6435
-/// stop-at-first-fragment walk.
+/// Uses the first readable non-ATOMIC header when any exists, so preceding
+/// ATOMIC headers do not hide real fragmentation. For an all-ATOMIC chain,
+/// retains the first declared header to preserve RFC 6946 translation
+/// behavior. Returns `None` for no readable header or a truncated chain.
 pub(crate) fn ipv6_fragment_header(packet: &[u8]) -> Option<Ipv6FragInfo> {
-    let bytes = walk_ipv6_ext_chain(packet, 0).fragment?.bytes?;
+    let walk = walk_ipv6_ext_chain(packet, 0);
+    if walk.fragment_truncated {
+        return None;
+    }
+    let bytes = walk
+        .first_non_atomic_fragment
+        .or(walk.fragment)?
+        .bytes?;
     // bytes 2-3: FragmentOffset[15:3] | Res[2:1] | M[0].
     let word = u16::from_be_bytes([bytes[2], bytes[3]]);
     Some(Ipv6FragInfo {
@@ -2241,28 +2233,22 @@ pub(crate) fn ipv6_fragment_header(packet: &[u8]) -> Option<Ipv6FragInfo> {
 /// #2562: does this L3-relative IPv6 packet trigger the NAT64 v6→v4
 /// fail-closed FRAGMENT drop in [`write_v6_to_v4_into`]?
 ///
-/// True for a non-first fragment (offset > 0, ANY protocol) or a real fragment
-/// (Fragment Header present with MF=1 or offset > 0) carrying ICMPv6. An ATOMIC
-/// fragment (Fragment Header present, MF=0, offset 0 — RFC 6946) and a
-/// non-fragmented datagram return false. This mirrors the drop conditions of
-/// `write_v6_to_v4_into` (the `ipv6_is_non_first_fragment` drop plus the ICMPv6
-/// real-fragment guard) and is the single source of truth the
-/// `nat64_frag_dropped` counter reads to attribute a translate-returned-`None`
-/// to a fragment drop (vs an unrelated build failure).
+/// Any readable non-zero offset in the chain drops, regardless of preceding
+/// ATOMIC sightings. A real first fragment (M=1, offset 0) drops only for
+/// ICMPv6. An all-ATOMIC or non-fragment chain returns false.
 pub(crate) fn v6_to_v4_is_fragment_drop(packet: &[u8]) -> bool {
-    let Some(info) = ipv6_fragment_header(packet) else {
-        return false; // no Fragment Header → not a fragment
-    };
-    if info.offset_units != 0 {
-        return true; // non-first fragment, any protocol
+    if ipv6_is_non_first_fragment(packet) {
+        return true;
     }
+    let Some(info) = ipv6_fragment_header(packet) else {
+        return false;
+    };
     if !info.more {
         return false; // atomic fragment (MF=0, offset 0) — still translates
     }
     // First fragment (MF=1, offset 0): dropped only when it carries ICMPv6.
     matches!(ipv6_l4_offset_and_protocol(packet), Some((_, PROTO_ICMPV6)))
 }
-
 /// #2562: v4→v6 twin of [`v6_to_v4_is_fragment_drop`] for the reverse NAT64
 /// direction, mirroring the drop conditions of [`write_v4_to_v6_into`].
 ///

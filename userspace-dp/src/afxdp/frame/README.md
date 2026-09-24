@@ -414,6 +414,18 @@ inspect or rewrite a packet sitting in a UMEM frame.
     construction; the two deliberate keep-outs (`screen/extract.rs`,
     `nat64_v6_translation_ineligible`) MUST keep the SAME set or the screen,
     meta, forwarding, and NAT64 paths disagree on the same packet.
+    **Repeated Fragment-header status (#10661):** the XDP shim judges every
+    sighting, so the shared walk carries `non_first_fragment_offset_seen`;
+    forwarding and NAT64 non-first guards use that all-sightings offset verdict.
+    The overlap tracker keys range data to `first_non_atomic_fragment`, ignoring
+    leading ATOMIC headers and returning Unreadable if any declared Fragment
+    header is truncated. NAT64 retains first-declared data for an all-ATOMIC
+    chain but uses the first non-ATOMIC header when one exists. Screens keep
+    their own ordered extraction: `[real-first][ATOMIC]` may report
+    non-fragment while the tracker records a range and L4 parsing remains safe.
+    The #10661 cells pin this deliberate residual instead of claiming every
+    consumer has identical wire-state behavior.
+
   PR-1 of #2150 fixed the three parsers that DISAGREED on a single 0x88a8
   tag / ext-headered NDP (`parse_eth_offsets` treated 0x88a8 as the inner
   ethertype → l3=14; `nat64::frame_l3_offset` treated it as untagged →

@@ -148,6 +148,14 @@ fn atomic_then_real_nonfirst_tracker_records_fragment_10661() {
         }
         other => panic!("#10661: tracker must track the real header, got {other:?}"),
     }
+    let nat64_fragment = crate::nat64::ipv6_fragment_header(&pkt)
+        .expect("#10661: NAT64 must select the real non-atomic header");
+    assert_eq!(
+        (nat64_fragment.offset_units, nat64_fragment.ident),
+        (1, IDENT_REAL),
+        "#10661: NAT64 must not retain the leading ATOMIC header"
+    );
+    assert!(crate::nat64::v6_to_v4_is_fragment_drop(&pkt));
 }
 
 #[test]
@@ -163,6 +171,7 @@ fn atomic_then_real_nonfirst_forwarding_sees_no_l4_10661() {
         ipv6_is_non_first_fragment(&pkt),
         "#10661: the wire predicate must judge every sighting, not the first"
     );
+    assert!(ipv6_is_nonatomically_fragmented(&pkt));
     let frame = eth14(&pkt);
     assert!(
         frame_is_non_first_fragment(&frame, v6_meta(PROTO_TCP)),
@@ -243,6 +252,10 @@ fn atomic_chains_stay_nonfragment_everywhere_10661() {
             !ipv6_is_non_first_fragment(&pkt),
             "#10661: forwarding must see L4 on {name}"
         );
+        assert!(
+            !ipv6_is_nonatomically_fragmented(&pkt),
+            "#10661: atomic-only chains are not non-atomically fragmented"
+        );
         let frame = eth14(&pkt);
         let info = screen_of(&frame, PROTO_TCP);
         assert!(
@@ -274,10 +287,18 @@ fn atomic_then_real_first_agreement_10661() {
         }
         other => panic!("#10661: tracker must track the real first header, got {other:?}"),
     }
+    let nat64_fragment = crate::nat64::ipv6_fragment_header(&pkt)
+        .expect("#10661: NAT64 must select the real first header");
+    assert_eq!(
+        (nat64_fragment.offset_units, nat64_fragment.more, nat64_fragment.ident),
+        (0, true, IDENT_REAL),
+        "#10661: NAT64 must not retain the leading ATOMIC header"
+    );
     assert!(
         !ipv6_is_non_first_fragment(&pkt),
         "#10661: offset 0 in every sighting keeps the L4"
     );
+    assert!(ipv6_is_nonatomically_fragmented(&pkt));
     let frame = eth14(&pkt);
     let info = screen_of(&frame, PROTO_TCP);
     assert!(
@@ -400,6 +421,11 @@ fn atomic_then_truncated_second_header_10661() {
     assert!(
         !ipv6_is_non_first_fragment(&pkt),
         "#10661: no READABLE non-zero offset was sighted"
+    );
+    assert!(ipv6_is_nonatomically_fragmented(&pkt));
+    assert!(
+        crate::nat64::ipv6_fragment_header(&pkt).is_none(),
+        "#10661: NAT64 must fail closed on a truncated later header"
     );
     let frame = eth14(&pkt);
     assert!(
