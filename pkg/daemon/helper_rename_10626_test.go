@@ -493,7 +493,8 @@ func TestRematchRenamedMatchZoneRename10626(t *testing.T) {
 
 // #10626 n1/m7: the NATDstPort query encoding is pinned — a regression
 // reintroducing networkPort() on the translated port (8443=0x20FB would read
-// as 64288=0xFB20) flips both halves below.
+// as 64288=0xFB20) flips the permit half below (the deny half guards
+// port-agnostic retain, not encoding).
 func TestRematchRenamedMatchDNATPortSensitive10626(t *testing.T) {
 	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
 	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
@@ -504,8 +505,8 @@ func TestRematchRenamedMatchDNATPortSensitive10626(t *testing.T) {
 			"svc-8443": {Name: "svc-8443", Protocol: "tcp", DestinationPort: "8443"},
 		}
 		cfg.Security.Policies[1].Policies[0].Match.Applications = []string{"svc-8443"}
-		newCfg.Security.Policies[1].Policies = newCfg.Security.Policies[1].Policies[:1]
 	}
+	newCfg.Security.Policies[1].Policies = newCfg.Security.Policies[1].Policies[:1]
 	oldID, binding := helperRenameBinding10626(t, oldCfg, newCfg)
 	match := helperRenameMatch10626(oldID)
 	match.DNAT = true
