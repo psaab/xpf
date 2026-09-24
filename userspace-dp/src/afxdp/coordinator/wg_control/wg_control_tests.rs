@@ -1711,6 +1711,11 @@ fn observe_one_record_forwarded_10597(
 /// #10527 cell 1: a steered-port transport record on a shim-uncovered
 /// configured ingress is authenticated, counted as transit refusal, and never
 /// written to the wgN TUN. Both outer families exercise the real pktinfo path.
+///
+/// #10597: migrated to the forwarded observer. Half-B routes uncovered decap
+/// through the worker queue for adjudication, so the cell additionally pins
+/// that transit is NOT queued — the legacy observer cannot see the queue and
+/// would pass while transit rode to a worker.
 #[test]
 fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
     use super::kernel_path::WgKernelPathIngress::Uncovered;
@@ -1722,7 +1727,7 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
         (true, super::inner_v6_9521()),
     ] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
-        let obs = observe_one_record_9594(Deliver, Uncovered, false, outer_v6, &inner);
+        let obs = observe_one_record_forwarded_10597(Deliver, Uncovered, false, outer_v6, &inner);
         assert_eq!(
             obs.decap_packets,
             1,
@@ -1737,6 +1742,10 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
             "{family}: uncovered transit was written to the wgN TUN: {:?}",
             obs.delivered
         );
+        assert!(
+            obs.forwarded.is_empty(),
+            "{family}: uncovered transit was queued for worker adjudication instead of refused"
+        );
         assert_eq!(
             obs.asked,
             vec![Some(lo)],
@@ -1745,11 +1754,13 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
     }
 }
 
-/// #10527 cell 2: the uncovered-ingress fix is not a blanket drop. A
-/// steered-port record addressed to the firewall still reaches the TUN handoff
-/// in both outer families; the test stand-in observes bytes before kernel input.
+/// #10597 successor of #10527 cell 2: the uncovered-ingress fix is not a
+/// blanket drop. A steered-port record addressed to the firewall is QUEUED
+/// for worker adjudication (Half-B) instead of written straight to the TUN
+/// (Half-A); the queued descriptor carries the exact inner bytes. Both outer
+/// families exercise the real pktinfo path.
 #[test]
-fn steered_port_uncovered_host_inbound_still_delivered_10527() {
+fn steered_port_uncovered_host_inbound_still_forwarded_10597() {
     use super::kernel_path::WgKernelPathIngress::Uncovered;
     use crate::afxdp::types::WgKernelTransport::Deliver;
     for (outer_v6, inner) in [
@@ -1757,11 +1768,20 @@ fn steered_port_uncovered_host_inbound_still_delivered_10527() {
         (true, super::inner_v6_9521()),
     ] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
-        let obs = observe_one_record_9594(Deliver, Uncovered, true, outer_v6, &inner);
+        let obs = observe_one_record_forwarded_10597(Deliver, Uncovered, true, outer_v6, &inner);
         assert_eq!(
-            obs.delivered.as_deref(),
-            Some(&inner[..]),
-            "{family}: uncovered host-inbound traffic was not delivered"
+            obs.forwarded.len(),
+            1,
+            "{family}: uncovered host-inbound traffic was not queued for adjudication"
+        );
+        assert_eq!(
+            obs.forwarded[0].inner, inner,
+            "{family}: the queued descriptor does not carry the inner bytes"
+        );
+        assert!(
+            obs.delivered.is_none(),
+            "{family}: uncovered host-inbound bypassed the queue with a direct TUN write: {:?}",
+            obs.delivered
         );
         assert_eq!(
             obs.degraded_drops, 0,
@@ -1782,13 +1802,17 @@ fn steered_port_uncovered_host_inbound_still_delivered_10527() {
 /// receiving interface — the loopback ifindex, from the kernel's pktinfo cmsg
 /// through `wg_recvmsg` — is what the posture was asked about, so the decision
 /// is not being made on a value the loop never learned.
+///
+/// #10597: migrated to the forwarded observer. Half-B queues covered
+/// host-inbound for worker adjudication instead of TUN-writing it, and the
+/// transit arms additionally pin that refused transit is NOT queued.
 #[test]
 fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594() {
     use super::kernel_path::WgKernelPathIngress::{Covered, Unknown};
     use crate::afxdp::types::WgKernelTransport::Deliver;
     for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
-        let transit = observe_one_record_9594(Deliver, Covered, false, outer_v6, &inner);
+        let transit = observe_one_record_forwarded_10597(Deliver, Covered, false, outer_v6, &inner);
         assert_eq!(
             transit.decap_packets, 1,
             "{family}: the covered-ingress record never authenticated, so this run observed nothing"
@@ -1803,20 +1827,37 @@ fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_95
              where the kernel forwards it with no zone policy (#9594): {:?}",
             transit.delivered
         );
+        assert!(
+            transit.forwarded.is_empty(),
+            "{family}: refused covered transit was queued for adjudication instead of dropped"
+        );
 
-        let host_inbound = observe_one_record_9594(Deliver, Covered, true, outer_v6, &inner);
+        let host_inbound = observe_one_record_forwarded_10597(Deliver, Covered, true, outer_v6, &inner);
         assert_eq!(
-            host_inbound.delivered.as_deref(),
-            Some(&inner[..]),
-            "{family}: a covered-ingress record addressed to the firewall must still be delivered — \
+            host_inbound.forwarded.len(),
+            1,
+            "{family}: a covered-ingress record addressed to the firewall must still be queued — \
              the shim's degraded posture passes local traffic, and a blanket drop would cut \
              management over the VPN during a failover"
         );
+        assert_eq!(
+            host_inbound.forwarded[0].inner, inner,
+            "{family}: the queued descriptor does not carry the inner bytes"
+        );
+        assert!(
+            host_inbound.delivered.is_none(),
+            "{family}: covered host-inbound bypassed the queue with a direct TUN write: {:?}",
+            host_inbound.delivered
+        );
         assert_eq!(host_inbound.degraded_drops, 0, "{family}: host-inbound counted a degraded drop");
 
-        let unknown = observe_one_record_9594(Deliver, Unknown, false, outer_v6, &inner);
+        let unknown = observe_one_record_forwarded_10597(Deliver, Unknown, false, outer_v6, &inner);
         assert_eq!(unknown.degraded_drops, 1, "{family}: an unplaceable ingress must fail closed for transit");
         assert!(unknown.delivered.is_none(), "{family}: unplaceable-ingress transit reached the TUN");
+        assert!(
+            unknown.forwarded.is_empty(),
+            "{family}: unplaceable-ingress transit was queued instead of refused"
+        );
     }
 }
 

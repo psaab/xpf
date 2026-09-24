@@ -11331,13 +11331,13 @@ fn wg_resteering_restarts_control_threads_with_the_new_decision_9521() {
 /// per-tunnel map seam instead of bpffs — decides. The steered endpoint's ingress
 /// (loopback) is placed in the shim's adjudicated set, so its record is a
 /// degraded-window arrival: transit must be refused and counted, and the same
-/// record addressed to the firewall must still be delivered to the TUN stand-in.
+/// record addressed to the firewall must be queued for worker adjudication.
 ///
 /// This production-spawn proof is deliberately bounded at the control-thread
-/// TUN handoff: the stand-in observes the bytes before any kernel input/nft
-/// processing. An uncovered-production local-delivery pin would duplicate the
-/// seam that Half B (#10597) will rework, so the dedicated Half-A cells pin its
-/// uncovered disposition and TUN handoff without claiming beyond-TUN policy.
+/// handoff: the stand-in queue observes the record, and the TUN stand-in must
+/// stay empty (#10597 removed the direct TUN write — a bypass write here is
+/// the fail-open the queue exists to prevent). The dedicated disposition cells
+/// pin the uncovered legs without claiming beyond-handoff policy.
 /// The existing configured-ingress placement cell below still proves that the
 /// production view classifies uncovered interfaces from runtime state.
 ///
@@ -11442,13 +11442,45 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
          wgN TUN (#9594)"
     );
 
+    // #10597: Half-B queues host-inbound for worker adjudication instead of
+    // TUN-writing it. This coordinator spawns no workers, so publish one
+    // stand-in queue and prove the spawned thread's local record lands on it
+    // — through the real spawn path, production view, and real encap — with
+    // no legacy direct-TUN bypass write.
+    let queue = std::sync::Arc::new(
+        crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue::new(),
+    );
+    coordinator.wg_uncovered_queues.store(std::sync::Arc::new(
+        [(0u32, queue.clone())].into_iter().collect(),
+    ));
     set_maps(true);
-    let (delivered, _) = send_until(true);
+    thread::sleep(Duration::from_millis(200));
+    while tun_standin_recv_9521(&tun).is_some() {}
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut queued = Vec::new();
+    while std::time::Instant::now() < deadline && queued.is_empty() {
+        let mut wire = vec![0u8; 2048];
+        let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+        let _ = sender.send_to(&wire[..enc.len], dst);
+        thread::sleep(Duration::from_millis(40));
+        queue.drain_into(&mut queued, 64);
+    }
+    // Settle: a bypass TUN write racing the queue drain must still be caught.
+    thread::sleep(Duration::from_millis(50));
+    queue.drain_into(&mut queued, 64);
     assert_eq!(
-        delivered.as_deref(),
-        Some(&inner[..]),
+        queued.len(),
+        1,
         "positive control through the same spawned thread: a record addressed to the firewall \
-         must still be delivered on an adjudicated ingress"
+         must be queued for worker adjudication on an adjudicated ingress"
+    );
+    assert_eq!(
+        queued[0].inner, inner,
+        "the queued descriptor must carry the exact inner bytes"
+    );
+    assert!(
+        tun_standin_recv_9521(&tun).is_none(),
+        "the spawned thread bypassed the worker queue with a direct TUN write (#10597)"
     );
 
     TEST_SHIM_MAPS_9594
