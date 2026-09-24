@@ -68,6 +68,7 @@ const USERSPACE_CTRL_FLAG_STRICT: u32 = 8;
 /// property.
 const USERSPACE_CTRL_FLAG_WG_RX: u32 = 16;
 mod binding_index;
+mod early_filter;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod wg_classify;
@@ -725,12 +726,19 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         );
         return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_EARLY_FILTER);
     }
-    // ICMPv6 NDP messages (NS/NA/RS/RA/Redirect, types 133-137) are
-    // link-local control plane. Prefer cpumap delivery when available,
-    // falling back to XDP_PASS only if cpumap is unavailable.
-    if parsed.protocol == PROTO_ICMPV6 && parsed.icmp_type >= 133 && parsed.icmp_type <= 137 {
-        return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_EARLY_FILTER);
-    }
+    // #10640: NO unconditional ICMPv6 NDP (types 133-137) arm. One used to
+    // sit here, handing every RS/RA/NS/NA/Redirect to the kernel on a
+    // TYPE-ONLY test with no destination predicate, so NDP addressed to a
+    // TRANSIT destination bypassed the userspace policy engine entirely
+    // (the kernel forward path plus the armed fence's ingress-name pinhole
+    // forwarded it with no zone policy — the same shape #304 closed for
+    // ESP and non-native GRE). NDP still reaches the kernel through the
+    // destination-qualified arms below: multicast NDP (solicited-node,
+    // all-nodes, all-routers) via should_fallback_early's multicast arm
+    // above, and unicast NDP to a firewall-local address via the
+    // is_local_destination arm of the session-miss path. A remote
+    // destination continues to the AF_XDP redirect and is adjudicated by
+    // the worker.
     if !native_gre {
         match live_userspace_session_action(&parsed) {
             USERSPACE_SESSION_ACTION_REDIRECT => {
@@ -1808,22 +1816,14 @@ fn should_fallback_early(pkt: &ParsedPacket) -> bool {
     // ahead of this function; they are classified here like any other
     // protocol and reach the kernel only through the destination-qualified
     // local-destination / interface-NAT arms of the session-miss path.
+    // #10640: the verdict lives in `early_filter` (host-executed by the
+    // userspace-dp regression test). IPv4 169.254/16 no longer passes
+    // early: scope alone never made a destination local to this box, and
+    // genuinely local link-local addresses still deliver via the
+    // `is_local_destination` arm of the session-miss path.
     match pkt.addr_family {
-        AF_INET => {
-            if pkt.dst_v4 == 0xffff_ffff
-                || is_ipv4_multicast(pkt.dst_v4)
-                || is_ipv4_link_local(pkt.dst_v4)
-            {
-                return true;
-            }
-            false
-        }
-        AF_INET6 => {
-            if pkt.dst_addr[0] == 0xff || is_ipv6_link_local(pkt.dst_addr) {
-                return true;
-            }
-            false
-        }
+        AF_INET => early_filter::ipv4_early_pass_to_kernel(pkt.dst_v4),
+        AF_INET6 => early_filter::ipv6_early_pass_to_kernel(pkt.dst_addr),
         _ => true,
     }
 }
@@ -1911,18 +1911,6 @@ fn is_connection_initiating(pkt: &ParsedPacket) -> bool {
         PROTO_UDP | PROTO_ICMP | PROTO_ICMPV6 => true,
         _ => true,
     }
-}
-
-fn is_ipv4_multicast(ip: u32) -> bool {
-    (ip & 0xf000_0000) == 0xe000_0000
-}
-
-fn is_ipv4_link_local(ip: u32) -> bool {
-    (ip & 0xffff_0000) == 0xa9fe_0000
-}
-
-fn is_ipv6_link_local(ip: [u8; 16]) -> bool {
-    ip[0] == 0xfe && (ip[1] & 0xc0) == 0x80
 }
 
 /// #9901 (F-075): the L4 tuple for a FIRST fragment, whose L4 header is

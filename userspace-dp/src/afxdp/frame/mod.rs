@@ -2240,6 +2240,12 @@ mod tests_shim_ext_parity;
 #[cfg(test)]
 #[path = "tests_shim_wg_classify_8274.rs"]
 mod tests_shim_wg_classify_8274;
+// #10640: the shim's early kernel-pass destination filter, executed rather
+// than modelled — same shape: the verdict lives in the `core`-only
+// `early_filter` module the shim calls, pulled in here by source.
+#[cfg(test)]
+#[path = "tests_shim_early_filter_10640.rs"]
+mod tests_shim_early_filter_10640;
 #[cfg(test)]
 #[path = "tests_9782_copy.rs"]
 mod tests_9782_copy;
