@@ -406,16 +406,18 @@ startup-phase and shutdown ordering is untouched:
   must have completed by then, because only they are fail-closed — everything
   else is best-effort cleanup whose loss costs telemetry, not correctness:
 
-  1. **kernel transit closed** (#9686), on the non-hitless (fail-closed) stop
-     only: `markDataplaneNotArmed` installs the #7191 barrier and writes
-     `ip_forward` and `conf.all.forwarding` to 0, before `Teardown` detaches
-     every XDP program. Without it the "fail-closed" stop ended with the kernel
+  1. **kernel transit closed** (#9686, #10643): `markDataplaneNotArmed`
+     installs the #7191 barrier and writes `ip_forward` and
+     `conf.all.forwarding` to 0, before `Teardown`/`Close` detaches or
+     releases the dataplane. Without it the stop ended with the kernel
      routing any transit that still reached the node (surviving interface
      addresses, static/BGP or link-local next hops) with no policy, session or
-     NAT, for the whole downtime. It keys on `hitless` alone, not on a
-     published runtime, and nothing on the way out re-opens it. A hitless stop
-     keeps the dataplane attached with the shim dropping transit, so it leaves
-     forwarding as it was;
+     NAT, for the whole downtime. It keys on the stop mode, not on a
+     published runtime, and nothing on the way out re-opens it. Only the
+     hitless HA restart leaves forwarding as it was (the peer takes over via
+     the VRRP priority-0 resign); the standalone stop closes the kernel legs
+     too, since the NAME-based armed fence and the sysctls outlive the
+     process with nothing reasserting them during the downtime.
   2. **`rg_active` cleared**, so this node stops forwarding; and
   3. **the Kea units stopped** (#6787), so it stops answering DHCP.
 

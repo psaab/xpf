@@ -203,12 +203,33 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	// installs the barrier and writes both sysctls to 0, and nothing on the way
 	// out re-opens them.
 	//
-	// It keys on hitless alone, not on a published runtime: forwarding can be
-	// open from an earlier arm whether or not a dataplane is still published. A
-	// hitless stop (standalone, or `hitless-restart`) keeps the dataplane
-	// attached and the shim dropping transit, so it leaves forwarding as it is.
-	if !hitless {
-		d.markDataplaneNotArmed("shutdown", "HA fail-closed stop: closing kernel transit before the dataplane detach")
+	// It keys on the stop mode, not on a published runtime: forwarding can be
+	// open from an earlier arm whether or not a dataplane is still published.
+	//
+	// #10643: a standalone stop must close kernel transit too, before Close.
+	// The armed forward fence is NAME-based (AllowedIfnames resolved at arm
+	// time) and it outlives the process in nftables, as do the sysctls — so a
+	// standalone stop that left them open left the whole downtime, plus early
+	// start before applyBootTransitPolicy runs, forwarding under a fence nothing
+	// reasserts. Two halves are live, not masked: shutdownIpsecCapture above
+	// removes the IPsec divert, so policy-IPsec plaintext keeps flowing, and a
+	// netdev re-registered under an allowlisted NAME during the downtime carries
+	// no XDP (xpfd is down, nothing attaches) yet matches the stale fence by
+	// name and is kernel-forwarded with ip_forward=1 and no adjudication at all.
+	// Closing here makes the downtime and the early-start window fail-closed;
+	// the next start already reasserts closed-until-attached at boot and reopens
+	// only after a live XDP link proves (#9725), so restart behaviour is
+	// unchanged. Close still preserves the pins and XDP state (the hitless
+	// state mechanism), and on userspace stopLocked already disables helper
+	// forwarding so the shim drops transit — only the kernel legs close.
+	// HA `hitless-restart` keeps the old behaviour (the peer takes over via the
+	// VRRP priority-0 resign below, which fires even on a hitless HA restart).
+	if !hitless || !haMode {
+		reason := "HA fail-closed stop: closing kernel transit before the dataplane detach"
+		if !haMode {
+			reason = "standalone stop: closing kernel transit before the dataplane close"
+		}
+		d.markDataplaneNotArmed("shutdown", reason)
 	}
 
 	// In HA fail-closed mode, clear rg_active and watchdog immediately so

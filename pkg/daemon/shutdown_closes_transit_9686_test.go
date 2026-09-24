@@ -17,7 +17,8 @@ import (
 )
 
 // #9686: the fail-closed HA stop closes kernel transit BEFORE it detaches the
-// dataplane, and the hitless stops leave forwarding alone.
+// dataplane. #10643 extends the close to the standalone stop (Close path);
+// only the hitless HA restart leaves forwarding alone.
 //
 // transitWitnessDP records, at the moment Close or Teardown is called, what the
 // two forwarding sysctls held and which barrier calls had already happened.
@@ -117,11 +118,15 @@ chassis {
 			wantBarrier: nil,
 		},
 		{
+			// #10643: the standalone stop closes kernel transit before Close.
+			// The armed fence is NAME-based and outlives the process, as do
+			// the sysctls — leaving them open forwarded the whole downtime
+			// under a fence nothing reasserts.
 			name:        "standalone stop",
 			config:      "system {\n    host-name fw9686;\n}\n",
 			wantCall:    "Close",
-			wantSysctl:  "1",
-			wantBarrier: nil,
+			wantSysctl:  "0",
+			wantBarrier: []string{"install"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,9 +170,9 @@ chassis {
 			}
 			for i, fam := range []string{"IPv4 ip_forward", "IPv6 conf.all.forwarding"} {
 				if dp.sysctlsAtCall[i] != tc.wantSysctl {
-					t.Errorf("%s read %q when %s ran, want %q. A fail-closed stop must close "+
-						"kernel transit BEFORE detaching the dataplane, and a hitless stop must "+
-						"leave it open (#9686)", fam, dp.sysctlsAtCall[i], dp.called, tc.wantSysctl)
+					t.Errorf("%s read %q when %s ran, want %q. A fail-closed or standalone stop must close "+
+						"kernel transit BEFORE detaching the dataplane, and only a hitless HA stop must "+
+						"leave it open (#9686, #10643)", fam, dp.sysctlsAtCall[i], dp.called, tc.wantSysctl)
 				}
 			}
 			if strings.Join(dp.barrierAtCall, ",") != strings.Join(tc.wantBarrier, ",") {
