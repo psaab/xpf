@@ -48,6 +48,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 			// and no dynamic hostname.
 			"set security ike gateway bare-gw ike-policy pol1",
 			"set security ipsec vpn tun gateway bare-gw",
+			"set security ipsec vpn tun bind-interface st0.0",
 		})
 		_, err := CompileConfig(tree)
 		if err == nil {
@@ -73,6 +74,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 		tree := buildTree2074(t, []string{
 			"set security ike gateway remote-gw address 203.0.113.1",
 			"set security ipsec vpn tun gateway remote-gw",
+			"set security ipsec vpn tun bind-interface st0.0",
 		})
 		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("defined+addressed gateway should compile, got: %v", err)
@@ -83,6 +85,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 		tree := buildTree2074(t, []string{
 			"set security ike gateway dyn-gw dynamic hostname peer.example.com",
 			"set security ipsec vpn tun gateway dyn-gw",
+			"set security ipsec vpn tun bind-interface st0.0",
 		})
 		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("dynamic-hostname gateway should compile, got: %v", err)

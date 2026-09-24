@@ -49,8 +49,11 @@ func twoRGIPsecStore(t *testing.T) *configstore.Store {
 		"set security ike gateway gw-plain address 198.51.100.3",
 		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
+		"set security ipsec vpn vpn-rg1 bind-interface st0",
 		"set security ipsec vpn vpn-rg2 ike gateway gw-rg2",
+		"set security ipsec vpn vpn-rg2 bind-interface st0",
 		"set security ipsec vpn vpn-plain ike gateway gw-plain",
+		"set security ipsec vpn vpn-plain bind-interface st0",
 	})
 }
 
@@ -186,6 +189,7 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 		"set security ike gateway gw-plain address 198.51.100.3",
 		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
 		"set security ipsec vpn vpn-plain ike gateway gw-plain",
+		"set security ipsec vpn vpn-plain bind-interface st0",
 	}
 
 	t.Run("RG0 undeclared falls back to primary-for-anything", func(t *testing.T) {
@@ -314,7 +318,9 @@ func TestApplyRethServicesForRGReinitiatesIPsec9139(t *testing.T) {
 		"set security ike gateway gw-rg2 address 198.51.100.2",
 		"set security ike gateway gw-rg2 external-interface reth2.0",
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
+		"set security ipsec vpn vpn-rg1 bind-interface st0",
 		"set security ipsec vpn vpn-rg2 ike gateway gw-rg2",
+		"set security ipsec vpn vpn-rg2 bind-interface st0",
 	})
 	cfg := store.ActiveConfig()
 	if !cfg.Chassis.Cluster.IPsecSASync {
@@ -393,6 +399,7 @@ func TestApplyRethServicesForRGRespectsSASyncFlag9139(t *testing.T) {
 		"set security ike gateway gw-rg1 address 198.51.100.1",
 		"set security ike gateway gw-rg1 external-interface reth1.0",
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
+		"set security ipsec vpn vpn-rg1 bind-interface st0",
 	})
 	cfg := store.ActiveConfig()
 	if cfg.Chassis.Cluster.IPsecSASync {

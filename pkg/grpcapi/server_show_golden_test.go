@@ -195,6 +195,7 @@ var showGoldenConfigCommands = []string{
 	"security dynamic-address feed-server office url http://example.com/feed feed-name blocklist",
 	"security address-book global address host1 10.0.1.1/32",
 	"security ipsec vpn v1 vpn-monitor optimized",
+	"security ipsec vpn v1 bind-interface st0",
 	"security ike gateway gw1 address 198.51.100.1",
 	"security ike gateway gw1 external-interface ge-0-0-1.0",
 	"security ike gateway gw1 ike-policy pol1",

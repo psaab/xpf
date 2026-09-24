@@ -229,6 +229,14 @@ func TestIPsecTrafficSelectorGateReadsTheRun8939(t *testing.T) {
 	tree := &ConfigTree{}
 	const cmd = "set security ipsec vpn v1 traffic-selector ts1 " +
 		"local-ip 10.0.0.0/8 remote-ip 172.16.0.0/12"
+	const bind = "set security ipsec vpn v1 bind-interface st0"
+	pb, err := ParseSetCommand(bind)
+	if err != nil {
+		t.Fatalf("ParseSetCommand(%q): %v", bind, err)
+	}
+	if err := tree.SetPath(pb); err != nil {
+		t.Fatalf("SetPath(%q): %v", bind, err)
+	}
 	p, err := ParseSetCommand(cmd)
 	if err != nil {
 		t.Fatalf("ParseSetCommand(%q): %v", cmd, err)

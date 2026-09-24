@@ -46,6 +46,7 @@ func TestIdentityFQDNRejectedStrict(t *testing.T) {
 		t.Run(leaf, func(t *testing.T) {
 			tree := buildTree8003(t, []string{
 				`set security ipsec vpn v1 ` + leaf + ` vpn.example.com`,
+				`set security ipsec vpn v1 bind-interface st0`,
 			})
 			_, err := CompileConfig(tree)
 			if err == nil {
@@ -63,6 +64,7 @@ func TestIdentityFQDNRejectedStrict(t *testing.T) {
 func TestIdentityDistinguishedNameRejectedStrict(t *testing.T) {
 	tree := buildTree8003(t, []string{
 		`set security ipsec vpn v1 local-identity "CN=gw1.example.com"`,
+		`set security ipsec vpn v1 bind-interface st0`,
 	})
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("CompileConfig accepted a distinguished-name local-identity (#8003)")
@@ -110,6 +112,7 @@ func TestIdentitySelectorShapesAccepted(t *testing.T) {
 			tree := buildTree8003(t, []string{
 				`set security ipsec vpn v1 local-identity ` + val,
 				`set security ipsec vpn v1 remote-identity ` + val,
+				`set security ipsec vpn v1 bind-interface st0`,
 			})
 			cfg, err := CompileConfig(tree)
 			if err != nil {

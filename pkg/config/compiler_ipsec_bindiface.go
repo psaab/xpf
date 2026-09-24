@@ -43,8 +43,11 @@ import (
 // carries no traffic. This is a DISTINCT failure from the #2933 collision
 // (which needs two VALID, non-zero if_ids): the gate now rejects such a name on
 // the strict path (naming the canonical st<N>[.unit] requirement) and warns on
-// the tolerant path, mirroring the same strict/lenient split. An empty
-// bind-interface (none configured) is still skipped.
+// the tolerant path, mirroring the same strict/lenient split. A missing or
+// empty bind-interface (none configured) is rejected on the strict path and
+// warned on the tolerant path (#10638): without a bind-interface the runtime
+// capture plan marks the VPN IFIDUnderivable and every apply installs a
+// box-wide quarantine guard dropping all non-loopback traffic.
 //
 // This is an AST pre-walk (like validateUnsupportedInterfaceStanzasAST / the other
 // reject-at-commit gates) rather than a typed-Config validator so it runs on
@@ -82,6 +85,15 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 	type invalidBind struct{ vpn, iface string }
 	var invalid []invalidBind
 
+	// #10638: union of VPN names carrying at least one bind-bearing
+	// instance. The typed compiler MERGES duplicate VPN stanzas across
+	// blocks (compiler_ipsec.go: vpn := sec.IPsec.VPNs[inst.name]), so a
+	// bind-interface in ANY instance satisfies the VPN and missing is
+	// decided after the walk (vpnNames minus hasBind), not per instance.
+	hasBind := map[string]bool{}
+	var vpnNames []string
+	seenVPN := map[string]bool{}
+
 	// #3562: iterate EVERY top-level `security` node and EVERY `ipsec` sibling,
 	// not the first match at any level. parseStatements APPENDS a repeated
 	// top-level block instead of merging it (parser.go) and compileExpanded /
@@ -97,6 +109,13 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 	collect := forEachChild(nodes, "security", func(security *Node) error {
 		return forEachChild(security.Children, "ipsec", func(ipsec *Node) error {
 			for _, inst := range namedInstances(ipsec.FindChildren("vpn")) {
+				// #10638: record every VPN instance; missing is decided after
+				// the walk (vpnNames minus hasBind) because the typed compiler
+				// merges duplicate VPN stanzas across blocks.
+				if !seenVPN[inst.name] {
+					seenVPN[inst.name] = true
+					vpnNames = append(vpnNames, inst.name)
+				}
 				// #9088: expand a packed flat run before looking for the leaf.
 				// This gate walks the AST, and a one-liner such as
 				//
@@ -122,6 +141,10 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 				if bindIface == "" {
 					continue
 				}
+				// #10638: presence (even an invalid name) satisfies "has a
+				// bind-interface"; a bad value is the #5297 arm's subject, not
+				// the missing arm's.
+				hasBind[inst.name] = true
 				_, ifID := XFRMIfNameAndID(bindIface)
 				if ifID == 0 {
 					// #5297: not a recognizable st<N>[.unit] secure-tunnel
@@ -185,6 +208,28 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 				"interface, so the route-based VPN commits successfully but "+
 				"carries no traffic (silent tunnel down) (#5297)",
 			bad.iface, bad.vpn); err != nil {
+			return nil, err
+		}
+	}
+
+	// #10638: fail closed on a VPN with no bind-interface at all (or an
+	// empty value). Without a usable bind-interface the runtime capture
+	// plan marks the VPN IFIDUnderivable and stageIpsecCapture installs a
+	// box-wide quarantine guard on every apply, dropping management, IKE,
+	// BGP and cluster heartbeat until the config changes. Strict (commit /
+	// commit-check) hard-rejects; lenient (load / peer-sync) warns so an
+	// already-persisted config an older binary silently accepted still
+	// BOOTS (#1960). vpnNames is first-seen order: deterministic output.
+	for _, name := range vpnNames {
+		if hasBind[name] {
+			continue
+		}
+		if err := emit(
+			"security ipsec vpn %s has no bind-interface: route-based IPsec "+
+				"requires bind-interface st<N> or st<N>.<unit> (e.g. st0 or "+
+				"st0.1); without one every apply installs a box-wide capture "+
+				"quarantine dropping all non-loopback traffic (#10638)",
+			name); err != nil {
 			return nil, err
 		}
 	}

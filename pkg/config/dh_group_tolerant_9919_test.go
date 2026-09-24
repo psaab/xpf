@@ -181,6 +181,7 @@ func TestStrictDHGroupRejects_9919(t *testing.T) {
 			"set security ike gateway gw1 address 192.0.2.1",
 			"set security ike gateway gw1 ike-policy ike-pol",
 			"set security ipsec vpn tun1 ike gateway gw1",
+			"set security ipsec vpn tun1 bind-interface st0",
 		}
 	}
 	for _, tc := range []struct{ val, want string }{
@@ -205,6 +206,7 @@ func TestStrictDHGroupRejects_9919(t *testing.T) {
 			"set security ipsec policy ipsec-pol proposals esp-p2",
 			"set security ipsec policy ipsec-pol perfect-forward-secrecy keys " + v,
 			"set security ipsec vpn tun1 ike gateway 192.0.2.1",
+			"set security ipsec vpn tun1 bind-interface st0",
 			"set security ipsec vpn tun1 ike ipsec-policy ipsec-pol",
 		}
 	}
@@ -277,6 +279,7 @@ func TestDanglingVPNPolicyChain_9919(t *testing.T) {
 	dangling := []string{
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy does-not-exist",
 	}
 	if _, err := CompileConfig(buildTreeFromSet(t, dangling)); err == nil {
@@ -307,6 +310,7 @@ func TestDanglingVPNPolicyChain_9919(t *testing.T) {
 	empty := []string{
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	}
 	if _, err := CompileConfig(buildTreeFromSet(t, empty)); err != nil {
 		t.Errorf("strict commit rejected a VPN with no ipsec-policy (intentional default): %v", err)

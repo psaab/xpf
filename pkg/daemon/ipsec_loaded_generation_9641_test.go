@@ -114,7 +114,8 @@ func generations9641(t *testing.T) (*configstore.Store, string, string) {
 func syncApplyC1Plus9641(t *testing.T, store *configstore.Store, extra ...string) {
 	t.Helper()
 	lines := append(append(append([]string{}, clusterTwoRethIPsec9511...), blueOnRG1_9511...),
-		"set security ipsec vpn blue-red ike gateway gw-rg2")
+		"set security ipsec vpn blue-red ike gateway gw-rg2",
+		"set security ipsec vpn blue-red bind-interface st0")
 	lines = append(lines, extra...)
 	tr := &config.ConfigTree{}
 	for _, l := range lines {

@@ -532,7 +532,33 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 			packedLine += " " + lf.spell()
 			splitLines = append(splitLines, base+" "+lf.spell())
 		}
-		packed, ep := flatSetCompile([]string{packedLine})
+		// #10638: a pair under `security ipsec vpn` without bind-interface
+		// no longer compiles strictly, which would move the pair to
+		// `unmeasured` and blind the ratchet to chain loss there. Carry a
+		// vpn-level bind-interface as IDENTICAL context on both spellings
+		// (a separate split line even for the packed side — packed cannot
+		// name a leaf outside its own container): both sides compile, and
+		// the comparison still measures only the chain-walk difference.
+		// Skipped when the pair already names bind-interface.
+		packedLines := []string{packedLine}
+		if len(cont) >= 4 && cont[0] == "security" && cont[1] == "ipsec" && cont[2] == "vpn" {
+			hasBind := false
+			for _, lf := range leaves {
+				if lf.name == "bind-interface" {
+					hasBind = true
+					break
+				}
+			}
+			if !hasBind {
+				bindLine := "set security ipsec vpn " + cont[3] + " bind-interface st0"
+				packedLines = append(packedLines, bindLine)
+				// Prepend, not append: the vacuity/kind controls below
+				// slice prefixes (splitLines[:1], [:2], [:len-1]), so the
+				// context must sit OUTSIDE the measured leaf window.
+				splitLines = append([]string{bindLine}, splitLines...)
+			}
+		}
+		packed, ep := flatSetCompile(packedLines)
 		split, es := flatSetCompile(splitLines)
 		if ep != nil || es != nil || packed == nil || split == nil {
 			unmeasured++

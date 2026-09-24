@@ -67,6 +67,7 @@ func TestProposalSetStandardExpands_4297(t *testing.T) {
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec policy esp-pol proposal-set standard",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-pol",
 	})
 	cfg, err := CompileConfig(tree)
@@ -238,6 +239,7 @@ func TestVPNMonitorAdvisory_4299(t *testing.T) {
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec policy esp-pol proposal-set standard",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-pol",
 		"set security ipsec vpn tun1 vpn-monitor source-interface ge-0/0/0",
 		"set security ipsec vpn tun1 vpn-monitor destination-ip 172.16.0.1",
@@ -267,6 +269,7 @@ func TestManualKeyRejected_4300(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security ipsec vpn tun1 manual protocol esp",
 		"set security ipsec vpn tun1 manual spi 256",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 manual encryption-algorithm aes-256-cbc",
 	})
 	_, err := CompileConfig(tree)
