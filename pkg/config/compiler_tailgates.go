@@ -294,6 +294,24 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, tunnelFamilyWarnings...)
 
+	// #10654: duplicate-GRE-outer gate. Two GRE tunnels sharing an identical
+	// outer (source, destination, key) triple pass per-tunnel validation and
+	// COMMIT CLEAN, but the Rust decap lookup returns the first key-matching
+	// endpoint in snapshot order — so every inbound frame of the duplicated
+	// tunnel is attributed to whichever endpoint sorts first (counters, zone
+	// ingress, and session ownership all silently describe the wrong tunnel).
+	// Strict (commit / commit-check): hard-reject naming both tunnel refs.
+	// Lenient (load / peer-sync): warn so a config committed before this
+	// gate existed still boots — the snapshot builder drops the
+	// later-sorting duplicate loudly, so the snapshot carries one row per
+	// triple. Runs after the outer-family gate so a family error still
+	// wins the first-error slot.
+	greDupWarnings, err := validateGreDuplicateOuterStrict(cfg, opts.lenientGreDuplicateOuter)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, greDupWarnings...)
+
 	// #4785 half 1: IPIP (ip-in-ip, proto-4/41) has NO userspace dataplane
 	// primitive in either direction — the endpoint is never entered into
 	// gre_decap_index (only TunnelKind::Gre is) and the egress encap
