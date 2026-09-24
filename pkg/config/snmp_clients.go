@@ -167,7 +167,6 @@ func clientPrefixContains(prefix *net.IPNet, srcIP net.IP) bool {
 	}
 }
 
-
 // parseClientPrefix parses a `clients` entry as either a CIDR prefix
 // (10.0.0.0/24, 2001:db8::/32) or a bare address (192.168.1.5, ::1), the bare
 // form treated as a host route (/32 or /128).
