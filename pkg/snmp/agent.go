@@ -902,10 +902,7 @@ func (a *Agent) Serve() {
 			continue
 		}
 
-		var srcIP net.IP
-		if remoteAddr != nil {
-			srcIP = remoteAddr.IP
-		}
+		srcIP := sourceIPForUDP(remoteAddr)
 		// #9917 F-139: per-source request budget plus a global aggregate
 		// backstop. The loop stays strictly serial -- which is what keeps the
 		// lastPacket auth pattern safe -- so fairness comes from shedding an
@@ -933,6 +930,22 @@ func (a *Agent) Serve() {
 			}
 		}
 	}
+}
+
+// sourceIPForUDP preserves the source family used by the listener. A dual-stack
+// socket represents an IPv4 peer as a 16-byte IPv4-mapped address; that is a
+// kernel transport representation of an IPv4 datagram, so pass its 4-byte
+// form to the family-strict SNMP clients matcher. An explicit mapped IPv6
+// identity outside this socket path remains 16 bytes and cannot match IPv4
+// client prefixes.
+func sourceIPForUDP(remoteAddr *net.UDPAddr) net.IP {
+	if remoteAddr == nil {
+		return nil
+	}
+	if ip4 := remoteAddr.IP.To4(); ip4 != nil {
+		return ip4
+	}
+	return remoteAddr.IP
 }
 
 // Stop shuts down the SNMP agent. It is idempotent and safe to call

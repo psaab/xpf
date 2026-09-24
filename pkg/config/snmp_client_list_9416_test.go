@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"net"
 	"strings"
 	"testing"
 )
@@ -28,7 +27,7 @@ import (
 // predicate observable: only the middle one changed, and a fix that simply
 // deleted the early return would red the third.
 func TestSNMPAllowsSourceDistinguishesQuarantineFromUnrestricted9416(t *testing.T) {
-	probe := net.ParseIP("203.0.113.9")
+	probe := snmpClientTestSource10687("203.0.113.9")
 
 	// (1) No restriction authored at all: allow-all is CORRECT.
 	unrestricted := &SNMPCommunity{Name: "c"}
@@ -44,7 +43,7 @@ func TestSNMPAllowsSourceDistinguishesQuarantineFromUnrestricted9416(t *testing.
 			"quarantine overrides clientNets only, so an `len(Clients) == 0 -> allow-all` early " +
 			"return makes it unreachable exactly when the restriction resolved to nothing")
 	}
-	if quarantined.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if quarantined.AllowsSource(snmpClientTestSource10687("10.1.2.3")) {
 		t.Error("#9416: a quarantined community must deny EVERY source, not only unlisted ones")
 	}
 
@@ -55,7 +54,7 @@ func TestSNMPAllowsSourceDistinguishesQuarantineFromUnrestricted9416(t *testing.
 	if restricted.AllowsSource(probe) {
 		t.Error("an allowlisted community must deny an unlisted source")
 	}
-	if !restricted.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if !restricted.AllowsSource(snmpClientTestSource10687("10.1.2.3")) {
 		t.Error("an allowlisted community must admit a listed source")
 	}
 
@@ -66,7 +65,7 @@ func TestSNMPAllowsSourceDistinguishesQuarantineFromUnrestricted9416(t *testing.
 	if uncompiled.AllowsSource(probe) {
 		t.Error("an uncompiled community must still deny an unlisted source (the on-the-fly parse path)")
 	}
-	if !uncompiled.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if !uncompiled.AllowsSource(snmpClientTestSource10687("10.1.2.3")) {
 		t.Error("an uncompiled community must still admit a listed source")
 	}
 }

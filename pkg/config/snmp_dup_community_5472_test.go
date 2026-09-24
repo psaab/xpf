@@ -1,7 +1,6 @@
 package config
 
 import (
-	"net"
 	"testing"
 )
 
@@ -48,7 +47,7 @@ snmp {
 		"8.8.8.8":  false, // not allowlisted → must be denied (fail-open guard)
 	}
 	for src, want := range cases {
-		if got := c.AllowsSource(net.ParseIP(src)); got != want {
+		if got := c.AllowsSource(snmpClientTestSource10687(src)); got != want {
 			t.Errorf("AllowsSource(%s) = %v, want %v (a later empty duplicate must not erase the allowlist)", src, got, want)
 		}
 	}
@@ -79,7 +78,7 @@ snmp {
 		"172.16.0.1":  false, // neither → default-deny
 	}
 	for src, want := range cases {
-		if got := c.AllowsSource(net.ParseIP(src)); got != want {
+		if got := c.AllowsSource(snmpClientTestSource10687(src)); got != want {
 			t.Errorf("AllowsSource(%s) = %v, want %v (merged allowlist must be the union)", src, got, want)
 		}
 	}
@@ -146,10 +145,10 @@ snmp {
 	if len(c.Clients) != 2 {
 		t.Fatalf("expected 2 client entries, got %+v", c.Clients)
 	}
-	if !c.AllowsSource(net.ParseIP("10.0.0.5")) {
+	if !c.AllowsSource(snmpClientTestSource10687("10.0.0.5")) {
 		t.Error("AllowsSource(10.0.0.5) = false, want true (in 10.0.0.0/24)")
 	}
-	if c.AllowsSource(net.ParseIP("8.8.8.8")) {
+	if c.AllowsSource(snmpClientTestSource10687("8.8.8.8")) {
 		t.Error("AllowsSource(8.8.8.8) = true, want false (only 0.0.0.0/0 restrict matches)")
 	}
 }

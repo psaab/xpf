@@ -1,7 +1,6 @@
 package config
 
 import (
-	"net"
 	"testing"
 )
 
@@ -47,7 +46,7 @@ func TestSNMPClientsFlatSetParseAndEnforce(t *testing.T) {
 		"8.8.8.8":     false, // only 0.0.0.0/0 restrict matches → deny
 	}
 	for src, want := range cases {
-		if got := c.AllowsSource(net.ParseIP(src)); got != want {
+		if got := c.AllowsSource(snmpClientTestSource10687(src)); got != want {
 			t.Errorf("AllowsSource(%s) = %v, want %v", src, got, want)
 		}
 	}
@@ -75,7 +74,7 @@ snmp {
 		"192.0.2.1": false, // no match → default-deny
 	}
 	for src, want := range cases {
-		if got := c.AllowsSource(net.ParseIP(src)); got != want {
+		if got := c.AllowsSource(snmpClientTestSource10687(src)); got != want {
 			t.Errorf("AllowsSource(%s) = %v, want %v", src, got, want)
 		}
 	}
@@ -89,7 +88,7 @@ func TestSNMPClientsAbsentIsAllowAll(t *testing.T) {
 		t.Fatalf("expected no clients, got %+v", c.Clients)
 	}
 	for _, src := range []string{"10.0.0.1", "8.8.8.8", "2001:db8::1"} {
-		if !c.AllowsSource(net.ParseIP(src)) {
+		if !c.AllowsSource(snmpClientTestSource10687(src)) {
 			t.Errorf("AllowsSource(%s) = false on an unscoped community, want allow-all", src)
 		}
 	}
@@ -107,10 +106,10 @@ snmp {
     }
 }
 `), "v6")
-	if got := c.AllowsSource(net.ParseIP("2001:db8::1")); !got {
+	if got := c.AllowsSource(snmpClientTestSource10687("2001:db8::1")); !got {
 		t.Error("AllowsSource(2001:db8::1) = false, want true (in 2001:db8::/32)")
 	}
-	if got := c.AllowsSource(net.ParseIP("2001:dead::1")); got {
+	if got := c.AllowsSource(snmpClientTestSource10687("2001:dead::1")); got {
 		t.Error("AllowsSource(2001:dead::1) = true, want false (outside 2001:db8::/32)")
 	}
 }
