@@ -1218,6 +1218,93 @@ fn gre_decap_well_formed_udp_inner_v4_still_decaps_with_ports() {
         "synthetic frame and inner meta must stay self-consistent"
     );
 }
+
+// ====================================================================
+// #10652: GRE decap PT/nibble agreement (kernel TUN parses by nibble).
+//
+// The GRE Protocol Type is the sender's CLAIM about the inner family;
+// the inner packet's own version nibble is what the kernel TUN
+// (`IFF_NO_PI`) parses by. Everything below the PT lookup — the
+// family-keyed trim, the inner parse, and the `inner_family` stamped
+// into `meta.addr_family` — keys on the PT-derived family, so a
+// PT/nibble mismatch was adjudicated as one family and delivered as
+// another. The fix fails CLOSED (no decap) on mismatch. These cells
+// pin both mismatch directions plus the v6 matched happy path (no
+// v6-inner success pin existed); they drive
+// `try_native_gre_decap_from_frame` directly so the assertion is on
+// the decap chokepoint, not a downstream consumer.
+// ====================================================================
+
+/// PT claims IPv4 (0x0800) but the inner version nibble says 6: fail
+/// closed (decap returns `None`). The fixture is the well-formed v4
+/// UDP inner with ONLY the version nibble flipped 4 -> 6 (IHL 5 and
+/// the header checksum preserved) — pre-#10652 no decap-stage reader
+/// inspected the version nibble, so this decapped exactly like the
+/// #2376 happy path. FAILS if the nibble guard is removed.
+#[test]
+fn gre_decap_drops_pt_v4_inner_nibble_v6_mismatch() {
+    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut inner = build_gre_inner_v4(PROTO_UDP, 8 + 4); // full UDP header + 4B payload
+    inner[20..28].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x00, 0x10, 0x00, 0x00]);
+    inner[0] = 0x65; // version 6, IHL 5 — PT still claims IPv4
+    inner[10] = 0;
+    inner[11] = 0;
+    let sum = checksum16(&inner[0..20]);
+    inner[10] = (sum >> 8) as u8;
+    inner[11] = sum as u8;
+    let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "PT=IPv4 with an inner version nibble of 6 must fail closed \
+         (no decap), not adjudicate-as-v4 and deliver-as-v6"
+    );
+}
+
+/// PT claims IPv6 (0x86dd) but the inner version nibble says 4: fail
+/// closed. Mirror of the above: the well-formed v6 UDP inner with
+/// ONLY the version nibble flipped 6 -> 4 (TC-high 0 preserved; IPv6
+/// has no header checksum to reseal). FAILS if the nibble guard is
+/// removed.
+#[test]
+fn gre_decap_drops_pt_v6_inner_nibble_v4_mismatch() {
+    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut inner = build_gre_inner_v6(PROTO_UDP, 8 + 4); // full UDP header + 4B payload
+    inner[40..48].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x00, 0x10, 0x00, 0x00]);
+    inner[0] = 0x40; // version 4, TC-high 0 — PT still claims IPv6
+    let frame = build_gre_to_self_outer_frame_with_inner(0x86dd, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "PT=IPv6 with an inner version nibble of 4 must fail closed \
+         (no decap), not adjudicate-as-v6 and deliver-as-v4"
+    );
+}
+
+/// #10652 anti-over-reject: a PT/nibble MATCHED v6 inner (PT 0x86dd,
+/// nibble 6) still decaps with the v6 family stamped. The mismatch
+/// cells above also pass under a broken comparison that drops every
+/// v6-PT frame, so this pins the happy path they cannot see.
+#[test]
+fn gre_decap_pt_v6_inner_nibble_v6_still_decaps() {
+    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut inner = build_gre_inner_v6(PROTO_UDP, 8 + 4); // full UDP header + 4B payload
+    inner[40..48].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x00, 0x10, 0x00, 0x00]);
+    let frame = build_gre_to_self_outer_frame_with_inner(0x86dd, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    let decap = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
+        .expect("a PT/nibble-matched v6 inner must still decap");
+    assert_eq!(decap.meta.addr_family, libc::AF_INET6 as u8);
+    assert_eq!(decap.meta.protocol, PROTO_UDP);
+    assert_eq!(decap.meta.l4_offset, 14 + 40, "inner L4 at eth+IPv6 header");
+    assert_eq!(decap.meta.flow_src_port, 0x1234, "stamped UDP src port");
+    assert_eq!(decap.meta.flow_dst_port, 0x5678, "stamped UDP dst port");
+    assert_eq!(
+        &decap.frame[decap.meta.l3_offset as usize..],
+        &inner[..],
+        "synthetic frame and inner meta must stay self-consistent"
+    );
+}
 /// #10516 required poll composition: native GRE decapsulation must expose the
 /// inner local UDP/4500 ESP payload to the Stage-11 SA gate, which may then
 /// delegate the packet only after a matching SA hit.
