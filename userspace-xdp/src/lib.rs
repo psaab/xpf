@@ -53,7 +53,8 @@ const USERSPACE_FALLBACK_REASON_STRICT_DROP: u32 = 13;
 const USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL: u32 = 14;
 const USERSPACE_FALLBACK_REASON_TRANSIT_DROP: u32 = 15;
 const USERSPACE_FALLBACK_REASON_QINQ_DROP: u32 = 16;
-const USERSPACE_FALLBACK_REASON_MAX: u32 = 17;
+const USERSPACE_FALLBACK_REASON_STAG_DROP: u32 = 17;
+const USERSPACE_FALLBACK_REASON_MAX: u32 = 18;
 const USERSPACE_CTRL_FLAG_CPUMAP: u32 = 1;
 const USERSPACE_CTRL_FLAG_TRACE: u32 = 2;
 const USERSPACE_CTRL_FLAG_NATIVE_GRE: u32 = 4;
@@ -493,7 +494,8 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
 
     let data = ctx.data();
     let data_end = ctx.data_end();
-    let Some((eth_proto, vlan_id, vlan_pcp, vlan_present, l3_offset)) = parse_l2(data, data_end)
+    let Some((eth_proto, vlan_id, vlan_pcp, vlan_present, outer_stag, l3_offset)) =
+        parse_l2(data, data_end)
     else {
         return Ok(cpumap_or_pass(ctrl));
     };
@@ -512,6 +514,18 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         // the fail-closed posture.
         if is_vlan_tpid(eth_proto) {
             return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_QINQ_DROP);
+        }
+        // #10655: a SINGLE outer S-tag (0x88a8) is an explicit DROP, never
+        // the XDP_PASS below. The kernel side is 802.1Q-only, so passing
+        // it would hand an S-tag-domain frame to a stack with no S-tag
+        // unit — and steering it would stamp (parent, VID) metadata the
+        // workers resolve to the C-tag unit with the same VID: zone
+        // confusion. There is no S-tag identity to steer by, so the fix
+        // is a dedicated reason, not TPID-aware keying (which would only
+        // relocate the alias). Ordered AFTER the QinQ check: a double
+        // tag with an 88a8 outer is still qinq_drop, never stag_drop.
+        if outer_stag {
+            return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_STAG_DROP);
         }
         return Ok(pass_non_ip_l2_direct());
     }
@@ -556,6 +570,18 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         return Ok(cpumap_or_pass(ctrl));
     }
 
+    // #10655: a single outer S-tag carrying IP is an explicit DROP, never
+    // steered to the helper. Deliberately BELOW the #8279 ingress gate:
+    // an ifindex this shim does not adjudicate still takes cpumap_or_pass
+    // above, so this drop only ever fires on an adjudicated interface.
+    // Below the non-IP guard eth_proto is IP-or-IPv6, so `outer_stag`
+    // here is provably a SINGLE S-tag — a double tag's inner TPID took
+    // the qinq_drop arm above instead (taxonomy pinned by
+    // TestUserspaceXDPSTagOuterDoubleTagStaysQinQ_10655).
+    if outer_stag {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_STAG_DROP);
+    }
+
     let parsed = match eth_proto {
         ETH_P_IP => parse_ipv4(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
         ETH_P_IPV6 => parse_ipv6(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
@@ -565,10 +591,15 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         // takes, so a future edit that weakened the guard would not silently
         // change what a non-IP frame does here. That includes the #9888
         // nested-VLAN drop: without the mirror, weakening the guard would
-        // silently re-PASS QinQ frames to the kernel.
+        // silently re-PASS QinQ frames to the kernel. The #10655 single-S-tag
+        // drop is mirrored for the same reason: without it, weakening the
+        // guard would silently re-PASS S-tagged L2 to the kernel.
         _ => {
             if is_vlan_tpid(eth_proto) {
                 return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_QINQ_DROP);
+            }
+            if outer_stag {
+                return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_STAG_DROP);
             }
             return Ok(pass_non_ip_l2_direct());
         }
@@ -1321,10 +1352,20 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
 fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Result<u32, i64> {
     let data = ctx.data();
     let data_end = ctx.data_end();
-    let Some((eth_proto, vlan_id, vlan_pcp, vlan_present, l3_offset)) = parse_l2(data, data_end)
+    let Some((eth_proto, vlan_id, vlan_pcp, vlan_present, outer_stag, l3_offset)) =
+        parse_l2(data, data_end)
     else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     };
+    // #10655: a single outer S-tag (0x88a8) is an explicit DROP, on the IP
+    // and non-IP degraded arms alike. This entry has no ingress-interface
+    // test by design — it fails closed on all attached interfaces — so one
+    // check above the match covers both. The `!is_vlan_tpid` guard keeps
+    // the #9888 taxonomy: a double tag with an 88a8 outer still takes the
+    // qinq_drop arm below, never stag_drop.
+    if outer_stag && !is_vlan_tpid(eth_proto) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_STAG_DROP);
+    }
     let parsed = match eth_proto {
         ETH_P_IP => parse_ipv4(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
         ETH_P_IPV6 => parse_ipv6(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
@@ -1549,15 +1590,20 @@ fn is_vlan_tpid(eth_proto: u16) -> bool {
         || eth_proto == ETH_P_9300
 }
 
-fn parse_l2(data: usize, data_end: usize) -> Option<(u16, u16, u8, bool, u16)> {
+fn parse_l2(data: usize, data_end: usize) -> Option<(u16, u16, u8, bool, bool, u16)> {
     let eth = unsafe { read_bytes(data, data_end, 0, 14) }?;
     let mut eth_proto = u16::from_be_bytes([eth[12], eth[13]]);
     let mut l3_offset = mem::size_of::<EthHdr>() as u16;
     let mut vlan_id = 0u16;
     let mut vlan_pcp = 0u8;
     let mut vlan_present = false;
+    let mut outer_stag = false;
 
     if eth_proto == ETH_P_8021Q || eth_proto == ETH_P_8021AD {
+        // #10655: record the OUTER TPID before the shared unwrap erases it.
+        // The unwrap itself stays shared (single tag → l3+4 either way);
+        // only the disposition differs, keyed on this bit by both callers.
+        outer_stag = eth_proto == ETH_P_8021AD;
         let vlan = unsafe { read_bytes(data, data_end, l3_offset as usize, 4) }?;
         let tci = u16::from_be_bytes([vlan[0], vlan[1]]);
         vlan_id = tci & 0x0fff;
@@ -1567,7 +1613,7 @@ fn parse_l2(data: usize, data_end: usize) -> Option<(u16, u16, u8, bool, u16)> {
         l3_offset += mem::size_of::<VlanHdr>() as u16;
     }
 
-    Some((eth_proto, vlan_id, vlan_pcp, vlan_present, l3_offset))
+    Some((eth_proto, vlan_id, vlan_pcp, vlan_present, outer_stag, l3_offset))
 }
 
 #[inline(always)]
