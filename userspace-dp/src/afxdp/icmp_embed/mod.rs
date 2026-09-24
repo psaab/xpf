@@ -77,6 +77,18 @@ pub(super) struct EmbeddedIcmpMatch {
     /// `NotHandled` (unbuildable frame) keeps the charge: the error falls
     /// through to flowless enforcement, which may still deliver it.
     pub(super) budget_key: SessionKey,
+    /// #10671: the arrival zone a RELATED (untranslated) error quoting this
+    /// match must arrive from. The quoted packet is the session's forward
+    /// packet (an inbound error) except when it matched via the reply key
+    /// against a forward entry or as-is against a reverse entry (an outbound
+    /// error about the reply) — `via_reply_key XOR is_reverse` — so this is
+    /// the session's egress zone for inbound matches and its ingress zone
+    /// for outbound ones. The poll-side RELATED gate admits without a second
+    /// policy evaluation only when the actual arrival zone is nonzero and
+    /// equals this one; 0 means unresolved and falls through to the standard
+    /// arrival-to-egress policy gate. Set on every arm; translated matches
+    /// ignore it.
+    pub(super) related_expected_zone: u16,
 }
 
 /// Borrow bundle threaded through both v4/v6 NAT-match paths and the
