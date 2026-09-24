@@ -1,7 +1,9 @@
 use super::*;
 use super::parse::{embedded_reply_key, parse_embedded_v4};
 use super::outer_error_atomic;
-use super::return_resolution::embedded_icmp_return_resolution;
+use super::return_resolution::{
+    embedded_icmp_quoted_reply_resolution, embedded_icmp_return_resolution,
+};
 
 /// IPv4-outer branch of `try_embedded_icmp_nat_match_from_frame`.
 /// Mirrors `icmp_embed.rs:210-332` literally. Tries the forward-NAT
@@ -143,9 +145,10 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     }
 
     // Session-fallback path: look up the embedded packet as-is or in
-    // reverse. If the matched entry is the reverse direction, its
-    // resolution already points back to the client; otherwise resolve
-    // the return path via embedded_icmp_return_resolution.
+    // reverse. An as-is hit on the forward half is a quote of the forward
+    // packet and uses embedded_icmp_return_resolution. An as-is hit on the
+    // reverse half is a quote of the REPLY packet; #10672 resolves it toward
+    // the quoted sender, not via the reverse half's cached client-side route.
     //
     // #6474: the two lookups are mapped SEPARATELY so the direction of the
     // matched error is recoverable. An ICMP error is always addressed to
@@ -153,11 +156,9 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     //   * as-is hit with `is_reverse == false`: the quote is the session's
     //     FORWARD wire packet (forward-wire key match) — INBOUND error, the
     //     #5690 reversal applies.
-    //   * as-is hit with `is_reverse == true`: the quote is the REPLY wire
-    //     packet — an error about the reply, outbound toward the remote.
-    //     The reverse decision carries no `rewrite_src`, so the caller's
-    //     historical gate already declines it to clean untranslated
-    //     flowless forwarding.
+    //   * as-is hit with `is_reverse == true`: quote of the REPLY wire
+    //     packet — an error about the reply; route toward the quoted server
+    //     with embedded_icmp_quoted_reply_resolution (#10672).
     //   * reply-key hit with `is_reverse == false` on a pure source-NAT
     //     flow: the quote is the session's reply in PRE-NAT form (the
     //     internal host emitted the error about the reply it declined) —
@@ -209,7 +210,15 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     // non-delivery terminal (TTL-expire, CoS drop, policy-refuse).
     let budget_key = resolved.key.as_ref(query_key).clone();
     let sl = resolved.lookup;
-    let resolution = if sl.metadata.is_reverse {
+    // #10672: an as-is hit on the REVERSE half means the quote IS the reply
+    // wire packet (server → client) — the error is about the reply, so it is
+    // addressed to the reply's source (the server, RFC 792) and must egress
+    // toward the quoted sender, not back out the client leg. A reply-key hit
+    // on a reverse half instead quotes the forward packet, so it keeps the
+    // historical cached-reverse rule below.
+    let resolution = if sl.metadata.is_reverse && !via_reply_key {
+        embedded_icmp_quoted_reply_resolution(ctx, &reverse_key, emb_src, now_ns)
+    } else if sl.metadata.is_reverse {
         sl.decision.resolution
     } else {
         embedded_icmp_return_resolution(ctx, &embedded_key, sl.decision, emb_src, now_ns)
