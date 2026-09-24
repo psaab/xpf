@@ -344,10 +344,11 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     decision: crate::session::SessionDecision,
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
-    // #9384: did THIS packet arrive over the fabric link? A fabric-ingress
-    // packet's arrival interface is the fabric, NOT the flow's logical ingress,
-    // so its live arrival zone is structurally not the flow's and the entry's
-    // recorded zone is the only honest answer.
+    // #9384/#10670: owner-only fabric hits use the recorded zone because the
+    // fabric link is not the packet's logical arrival interface. Hit authority
+    // admits a stamped packet only when its validated zone matches this entry;
+    // an unstamped overlay keeps #9519's exemption. A foreign stamp takes the
+    // per-packet foreign path before revalidation.
     packet_fabric_ingress: bool,
     fabric_link_ingress: bool,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -507,10 +508,12 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     {
         return None;
     }
-    // The forward pair, judged as itself: the packet's tuple and protocol with
-    // the from-zone resolved live from the packet's arrival interface (#9384),
-    // except that a fabric arrival keeps the entry's recorded zone (the fabric
-    // link's zone is structurally not the flow's).
+    // The forward pair, judged as itself: the packet's tuple and protocol use
+    // the from-zone derived from its arrival identity (#9384). An Owner fabric
+    // arrival keeps the entry's recorded zone because the fabric link's zone
+    // is structurally not the flow's, and hit authority has already checked
+    // the validated stamp against that zone. A foreign stamp does not reach
+    // this revalidation path.
     let input = PolicyJudgmentInput {
         decision,
         metadata: (*metadata).clone(),

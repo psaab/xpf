@@ -137,11 +137,13 @@ fn a_re_stamped_session_is_fresh_until_the_generation_moves_8356() {
 /// Generation-only is still right, for a reason that now holds by
 /// construction. Only an OWNER reaches the re-derivation
 /// (`afxdp/poll_descriptor/session_hit_authority.rs`), and an owner arrived IN
-/// the entry's admitting zone (or over the fabric, which keeps the entry's
-/// zone). Every packet that can read or write this stamp therefore judges from
-/// the same from-zone within a generation, and an ifindex in the key would only
-/// re-walk terms for a LAG member or an ECMP path in that zone. What varies with
-/// the arrival interface is the authority check, not the stamp.
+/// the entry's admitting zone. A stamped fabric owner carries a validated
+/// matching zone; an unstamped overlay retains #9519's exemption, while a
+/// foreign stamp takes the packet-only verdict. Every packet that can read or
+/// write this stamp therefore judges from the same from-zone within a
+/// generation, and an ifindex in the key would only re-walk terms for a LAG
+/// member or an ECMP path in that zone. What varies with the arrival interface
+/// is the authority check, not the stamp.
 #[test]
 fn the_policy_stamp_does_not_vary_with_the_arrival_interface_8356() {
     let (mut table, k) = table_with_one_session(41);

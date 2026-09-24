@@ -84,6 +84,8 @@ pub(super) fn stage_flow_cache_hit(
     meta: UserspaceDpMeta,
     flow: &SessionFlow,
     packet_fabric_ingress: bool,
+    // #10670: validated peer-zone stamp for stamped fabric; absent otherwise.
+    fabric_arrival_zone: Option<u16>,
     // #10314: this is the actual parent-or-overlay arrival identity. It is
     // separate from the validated stamp/overlay flag above because an
     // unstamped parent frame must not serve a cached FabricRedirect.
@@ -100,6 +102,22 @@ pub(super) fn stage_flow_cache_hit(
     // this helper; NLL releases it before the take() at the
     // fallback-forward branch.
     let packet_frame: &[u8] = owned_packet_frame.as_deref().unwrap_or(raw_frame);
+    // #10670: the cache key omits the validated fabric arrival zone. Check
+    // the live session before lookup_counted can account a foreign packet as
+    // a cache hit or touch the owner's entry. Preserve same-zone hits; foreign
+    // stamps fall through to the session authority judgment without evicting.
+    let fabric_session_live = if let Some(arrival_zone) = fabric_arrival_zone {
+        match sessions.live_ingress_zone_matches_at(&flow.forward_key, now_ns, arrival_zone) {
+            Some(true) => true,
+            Some(false) => {
+                flow_state.flow_cache.misses += 1;
+                return FlowCacheOutcome::FallThrough;
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
 
     if let Some(cached) = flow_state.flow_cache.lookup_counted(
         &flow.forward_key,
@@ -161,11 +179,11 @@ pub(super) fn stage_flow_cache_hit(
         let cached_decision = cached.decision;
         let cached_descriptor = &cached.descriptor;
         let cached_metadata = &cached.metadata;
-        // #9991: a cached descriptor is admissible only while its backing
-        // local session remains within the strict idle deadline. Keep this
-        // read-only gate before TTL, filters, policers, logs, and accounting
-        // so an idle-crossed cache candidate cannot cause packet side effects.
-        if !sessions.session_is_live_at(&flow.forward_key, now_ns) {
+        // #9991/#10670: a cached descriptor requires a live backing session.
+        // The stamped-fabric preflight above checked liveness and zone together;
+        // other arrivals check the idle deadline here before TTL, filters,
+        // policers, logs, and accounting.
+        if !fabric_session_live && !sessions.session_is_live_at(&flow.forward_key, now_ns) {
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);

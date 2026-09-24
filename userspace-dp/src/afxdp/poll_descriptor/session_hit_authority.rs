@@ -38,9 +38,14 @@
 //! rebuilds the meta with the TUNNEL's logical ifindex (`logical_ingress.rs`),
 //! so it resolves to the tunnel's zone at admission and at every later hit.
 //!
-//! **Fabric ingress is exempt**, as at every sibling site (#7169, #9384). It
-//! arrives on the fabric link, whose zone is structurally not the flow's, and
-//! the peer already adjudicated it.
+//! **Stamped fabric ingress is judged by its validated arrival zone.** A
+//! zone-stamped arrival (#6458) names the peer-ingress zone; #10670 treats a
+//! matching session zone as the owner case (the same authority as a normal
+//! session hit), and a different stamp as foreign (including a peer-miss punt
+//! forwarded without any peer policy verdict). An UNSTAMPED fabric arrival —
+//! overlay ingress, which has no stamp — keeps the #9519 exemption: it
+//! arrives on the fabric link, whose zone is structurally not the flow's,
+//! and there is nothing to judge it by.
 //!
 //! An owner is the ONLY packet that re-derives the entry (#8356), which is what
 //! makes the generation-only policy stamp sound: every packet that can consult
@@ -120,11 +125,13 @@ use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin
 /// Whether THIS packet may act for the session it hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HitAuthority {
-    /// Arrived in the admitting zone, or over the fabric. The ordinary hit path
-    /// applies unchanged, revalidation included. An ICMP packet whose policy
-    /// is type-dependent (forward, or a reverse non-answer, #10637) is
-    /// checked separately by [`owner_hit_icmp_verdict`] without changing
-    /// this authority.
+    /// Arrived in the admitting zone, or is unstamped fabric with no arrival
+    /// identity (#9519). A stamped fabric arrival is an owner only when its
+    /// validated zone equals the entry's admitting zone; a different stamp is
+    /// foreign. The ordinary hit path applies unchanged, revalidation included.
+    /// An ICMP packet whose policy is type-dependent (forward, or a reverse
+    /// non-answer, #10637) is checked separately by [`owner_hit_icmp_verdict`]
+    /// without changing this authority.
     Owner,
     /// Arrived in a different zone. `arrival_zone` is the live zone the packet
     /// is judged by (0 when the arrival resolves to none);
@@ -143,9 +150,34 @@ pub(super) fn session_hit_authority(
     origin: SessionOrigin,
     meta: UserspaceDpMeta,
     packet_fabric_ingress: bool,
+    // #10670: the validated #6458 zone stamp (`ingress_zone_override` at the
+    // call site), or `None` for unstamped fabric (overlay) and non-fabric
+    // traffic. This is the arrival-zone proof: a stamped punt carries the
+    // peer-ingress zone whether or not the peer adjudicated it.
+    fabric_arrival_zone: Option<u16>,
 ) -> HitAuthority {
     if packet_fabric_ingress {
-        return HitAuthority::Owner;
+        // #10670: a stamped arrival is judged by its stamp, not trusted as
+        // adjudicated. A peer-side session HIT was evaluated under the
+        // stamp's zone and forwards here with the session's own zone, so it
+        // stays Owner; a peer-side session MISS (the sync-lag window of a
+        // split-RG pair) is punted unadjudicated, and when its stamp names a
+        // foreign zone it is judged as that zone's — the same foreign path a
+        // direct arrival takes. `on_admitting_interface` is always false
+        // here: the admitting identity is a (peer) ifindex pair unknowable
+        // from a zone stamp, and fabric-seeded entries record 0 (#4983).
+        match fabric_arrival_zone {
+            Some(zone) if zone == metadata.ingress_zone => return HitAuthority::Owner,
+            Some(zone) => {
+                return HitAuthority::Foreign {
+                    arrival_zone: zone,
+                    on_admitting_interface: false,
+                }
+            }
+            // Unstamped overlay: no arrival identity to judge. The #9519
+            // exemption stands, as at the #7169/#9384 sibling sites.
+            None => return HitAuthority::Owner,
+        }
     }
     let arrival_logical = resolve_ingress_logical_ifindex(
         forwarding,
@@ -220,10 +252,11 @@ pub(super) fn owner_hit_icmp_verdict(
     packet_frame: &[u8],
     packet_fabric_ingress: bool,
 ) -> Option<OwnerHitIcmpVerdict> {
-    // Host-bound packets have a different authority plane (`junos-host`), and
-    // the existing hit path re-evaluates that plane on every packet. Fabric
-    // ingress is also exempt: the peer already adjudicated the packet before
-    // it crossed the fabric. Keep both paths untouched.
+    // Host-bound packets have a different authority plane (`junos-host`). This
+    // helper is reached only for Owner hits: a stamped fabric arrival has
+    // already matched the session's ingress zone, while an unstamped overlay
+    // retains the #9519 exemption. A foreign stamp exits through the foreign
+    // path first.
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery
         || packet_fabric_ingress
         || !forwarding

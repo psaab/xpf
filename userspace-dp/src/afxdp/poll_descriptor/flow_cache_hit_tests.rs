@@ -1148,6 +1148,7 @@ fn run_stage_seeded(
         meta,
         &flow,
         false,
+        None,
         seed.fabric_link_ingress,
         ValidationState::default(),
         &mut sessions,
