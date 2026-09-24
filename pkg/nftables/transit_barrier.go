@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
+	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 )
 
@@ -224,9 +226,41 @@ func transitBarrierChain(tbl *nftables.Table) *nftables.Chain {
 	}
 }
 
+// bridgeTransitFenceEtherTypes is the fixed link-layer allowlist for the
+// bridge-leg unmarked pinhole (#10641, residual of #9888). The userspace XDP
+// shim XDP_PASSes single-tag and untagged non-IP ethertypes for local-stack
+// delivery; on a bridge-domain member that PASS also hands the frame to the
+// kernel bridge, so the fence qualifies the pinhole by ethertype: IP, IPv6,
+// and ARP (the explicit L2-control allowlist the bridge needs to function).
+// Every other non-IP ethertype falls through to the base-chain DROP. Order is
+// load-bearing: emission, desired-shape, and live decode all use it.
+var bridgeTransitFenceEtherTypes = []uint16{0x0800, 0x86dd, 0x0806}
+
+// etherType appends an `ether type` equality (link-layer header @12/2) to the
+// rule under assembly. The value is wire-order (BigEndian): a host-order flip
+// would never match a real frame (the #10410 P0 class), so the golden pins the
+// bytes literally. Only the bridge leg uses this; the link-layer header is not
+// addressable in the inet family.
+func (a *ruleAsm) etherType(ether uint16) *ruleAsm {
+	return a.add(
+		&expr.Payload{Base: expr.PayloadBaseLLHeader, Offset: 12, Len: 2, DestRegister: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(ether)},
+	)
+}
+
 func emitTransitFencePinhole(p *nlPlan, spec ForwardFenceSpec) {
 	if len(spec.AllowedIfnames) > 0 {
-		p.rule().iifname(spec.AllowedIfnames).emit(verdictAccept()...)
+		if p.table.Family == nftables.TableFamilyBridge {
+			// #10641: one ACCEPT per allowlisted ethertype, each carrying
+			// its own iifname match (and its own anonymous set in the
+			// multi-name case — no cross-rule set sharing). The marked TUN
+			// rules below stay ether-less: a TUN can never be a bridge port.
+			for _, ether := range bridgeTransitFenceEtherTypes {
+				p.rule().iifname(spec.AllowedIfnames).etherType(ether).emit(verdictAccept()...)
+			}
+		} else {
+			p.rule().iifname(spec.AllowedIfnames).emit(verdictAccept()...)
+		}
 	}
 	witnessDeclared := false
 	for _, marked := range spec.AllowedMarks {

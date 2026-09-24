@@ -62,6 +62,10 @@ type transitFenceRuleShape struct {
 	ifnames []string
 	mark    *ForwardFenceMark
 	counter string
+	// hasEther/ether is the #10641 bridge-leg ethertype conjunction. Inet and
+	// marked shapes never carry it (hasEther=false).
+	hasEther bool
+	ether    uint16
 }
 
 type transitFenceLiveShape struct {
@@ -74,7 +78,17 @@ type transitFenceLiveShape struct {
 func desiredTransitFenceRuleShapes(spec ForwardFenceSpec, family gnft.TableFamily) []transitFenceRuleShape {
 	out := make([]transitFenceRuleShape, 0, len(spec.AllowedIfnames)+len(spec.AllowedMarks))
 	if len(spec.AllowedIfnames) > 0 {
-		out = append(out, transitFenceRuleShape{ifnames: canonicalFenceNames(spec.AllowedIfnames)})
+		if family == gnft.TableFamilyBridge {
+			// #10641: the desired bridge shape is three ether-qualified
+			// rules in emission order, so a live table that lost the
+			// qualification reads back UNEQUAL and takes the replace path.
+			names := canonicalFenceNames(spec.AllowedIfnames)
+			for _, ether := range bridgeTransitFenceEtherTypes {
+				out = append(out, transitFenceRuleShape{ifnames: names, hasEther: true, ether: ether})
+			}
+		} else {
+			out = append(out, transitFenceRuleShape{ifnames: canonicalFenceNames(spec.AllowedIfnames)})
+		}
 	}
 	for _, mark := range spec.AllowedMarks {
 		counter := ""
@@ -184,13 +198,15 @@ func forwardFenceLiveShapeEqual(spec ForwardFenceSpec, family gnft.TableFamily, 
 			usedSets[setName] = struct{}{}
 		}
 	}
-	wantSetCount := 0
-	if len(spec.AllowedIfnames) > 1 {
-		wantSetCount = 1
-	}
-	if len(live.sets) != wantSetCount || len(usedSets) != wantSetCount {
-		return false
-	}
+	// The set check is reference-closure, not cardinality. The bridge leg
+	// allocates one anonymous iifname set per ether rule (#10641), but
+	// pre-flush anonymous sets share the literal "__set%d" name the kernel
+	// substitutes on install, so a synthetic live shape may collapse them to
+	// one map entry while the kernel reads back three. Both are the same
+	// policy: every rule's set VALUES are verified against the desired names
+	// by the decoder above, so it suffices that every live set is referenced
+	// (no junk) and every referenced set exists with the right values (a gap
+	// already failed the decode).
 	for name := range live.sets {
 		if _, ok := usedSets[name]; !ok {
 			return false
@@ -215,7 +231,8 @@ func forwardFenceLiveShapeEqual(spec ForwardFenceSpec, family gnft.TableFamily, 
 }
 
 func transitFenceRuleShapeEqual(a, b transitFenceRuleShape) bool {
-	if len(a.ifnames) != len(b.ifnames) || a.counter != b.counter {
+	if len(a.ifnames) != len(b.ifnames) || a.counter != b.counter ||
+		a.hasEther != b.hasEther || (a.hasEther && a.ether != b.ether) {
 		return false
 	}
 	for i := range a.ifnames {
@@ -274,6 +291,26 @@ afterIfname:
 	if lookup, ok := rule.Exprs[1].(*expr.Lookup); ok {
 		setName = lookup.SetName
 	}
+	// #10641: the bridge-leg unmarked pinhole carries an ethertype
+	// conjunction (LL payload load @12/2 + equality) between the ingress
+	// match and the verdict. Fence rules contain no other payload expr, so a
+	// Payload here is always that load: any other base/offset/len/register
+	// is an unknown shape and fails the comparison toward reinstall. The
+	// value is wire-order (BigEndian); the mark path below stays NativeEndian
+	// (host-order skb mark, #10410 P0).
+	if pay, ok := rule.Exprs[idx].(*expr.Payload); ok {
+		if pay.Base != expr.PayloadBaseLLHeader || pay.Offset != 12 || pay.Len != 2 ||
+			pay.DestRegister != 1 || idx+2 > len(rule.Exprs)-1 {
+			return transitFenceRuleShape{}, "", false
+		}
+		ecmp, ok := rule.Exprs[idx+1].(*expr.Cmp)
+		if !ok || ecmp.Op != expr.CmpOpEq || ecmp.Register != 1 || len(ecmp.Data) != 2 {
+			return transitFenceRuleShape{}, "", false
+		}
+		out.hasEther = true
+		out.ether = binaryutil.BigEndian.Uint16(ecmp.Data)
+		idx += 2
+	}
 	if idx < len(rule.Exprs)-1 {
 		markMeta, ok := rule.Exprs[idx].(*expr.Meta)
 		if !ok || markMeta.Key != expr.MetaKeyMARK || markMeta.SourceRegister || markMeta.Register == 0 {
@@ -310,6 +347,13 @@ afterIfname:
 			out.counter = obj.Name
 			idx++
 		}
+	}
+	// #10641: the ether conjunction above can consume the trailing exprs of
+	// a truncated live rule; without this guard the verdict read indexes
+	// past the end. (The pre-existing marked path shares the exposure for a
+	// verdict-less live rule; this closes both.)
+	if idx >= len(rule.Exprs) {
+		return transitFenceRuleShape{}, "", false
 	}
 	verdict, ok := rule.Exprs[idx].(*expr.Verdict)
 	if !ok || verdict.Kind != expr.VerdictAccept || idx != len(rule.Exprs)-1 {
