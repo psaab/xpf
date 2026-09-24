@@ -41,14 +41,13 @@ pub(super) enum FlowlessLocalVerdict {
     Filtered,
 }
 
-/// #4743: fail-closed drop gate for an over-limit IPv6 extension-header chain.
-/// Returns `true` (and bumps `ipv6_ext_header_dropped` on `counters`) when
-/// `frame` is an IPv6 packet whose extension-header chain is still on an
-/// extension header after `MAX_IPV6_EXT_HEADERS` iterations — an uninspectable
-/// chain the helper walkers fail closed on. The caller recycles the descriptor
-/// and continues. A truncated chain, a real-L4 chain, a non-first fragment, and
-/// a non-IPv6 packet all return `false` (unchanged flowless/normal handling), so
-/// only the genuine over-limit chain is dropped. The caller gates this on
+/// #4743/#10665: fail-closed drop gate for an over-limit IPv6 extension-header
+/// chain. Returns `true` (and bumps `ipv6_ext_header_dropped` on `counters`)
+/// when `frame` declares a traversable 8th header. Its bytes need not be
+/// present: over-limit takes precedence over truncation at that bound. The
+/// caller recycles the descriptor and continues. A truncation before the
+/// 8th-header declaration, a real-L4 chain, or a non-IPv6 packet returns
+/// `false` (unchanged flowless/normal handling). The caller gates this on
 /// `flow.is_none()` so it fires only when the helper could not derive an L4
 /// tuple; before #4743 that packet was forwarded flowless (`l4_present =
 /// false`), an ext-header IDS-evasion. Factored out (rather than inlined) so it

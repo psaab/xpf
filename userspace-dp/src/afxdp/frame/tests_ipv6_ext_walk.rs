@@ -315,3 +315,127 @@ fn term_match_extra_meta_flavors_produce_identical_extra() {
     assert!(!a.flex_l3.expect("l3 slice").ends_with(&FLEX_SLACK_MARKER));
     assert!(!a.flex_l4.expect("l4 slice").ends_with(&FLEX_SLACK_MARKER));
 }
+
+#[test]
+fn ext_walk_truncated_eighth_header_is_over_limit_10665() {
+    // #10665: 7 complete extension headers + an 8th header whose bytes
+    // overrun the frame. The chain is over-limit — resolving it would need
+    // a 9th iteration even with the bytes present — so OverLimit takes
+    // precedence over Truncated and the #4743 drop gate fires.
+
+    // Short-read shape: the packet ends one byte into the 8th header.
+    let mut body = Vec::new();
+    for _ in 0..7 {
+        body.extend_from_slice(&ext8(60));
+    }
+    body.push(60); // 8th header: next byte present, length byte missing
+    let pkt = v6_pkt(60, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::OverLimit
+    );
+    assert!(ipv6_ext_chain_over_limit(
+        &frame_of(&pkt),
+        libc::AF_INET6 as u8
+    ));
+    assert_eq!(packet_rel_l4_offset(&pkt, libc::AF_INET6 as u8), None);
+    assert_eq!(
+        packet_rel_l4_offset_and_protocol(&pkt, libc::AF_INET6 as u8),
+        None
+    );
+
+    // Declared-length-overrun shape: the 8th header's HdrExtLen runs past
+    // the packet.
+    let mut body = Vec::new();
+    for _ in 0..7 {
+        body.extend_from_slice(&ext8(60));
+    }
+    body.extend_from_slice(&[PROTO_TCP, 5]); // declares (5+1)*8 = 48 bytes
+    let pkt = v6_pkt(60, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::OverLimit
+    );
+    assert!(ipv6_ext_chain_over_limit(
+        &frame_of(&pkt),
+        libc::AF_INET6 as u8
+    ));
+
+    // Fragment shape: the 8th header declares Fragment but truncates it.
+    // The declaration is still recorded (pre-#6435 `ipv6_is_any_fragment`
+    // semantics) while the verdict is OverLimit.
+    let mut body = Vec::new();
+    for _ in 0..6 {
+        body.extend_from_slice(&ext8(60));
+    }
+    body.extend_from_slice(&ext8(44));
+    body.extend_from_slice(&[PROTO_TCP, 0, 0, 0]); // partial Fragment header
+    let pkt = v6_pkt(60, &body);
+    let w = walk_ipv6_ext_chain(&pkt, 0);
+    assert_eq!(w.outcome, ExtChainOutcome::OverLimit);
+    assert_eq!(w.fragment.map(|f| f.bytes), Some(None));
+    assert!(ipv6_is_any_fragment(&pkt));
+    assert!(!ipv6_is_non_first_fragment(&pkt));
+    assert!(ipv6_ext_chain_over_limit(
+        &frame_of(&pkt),
+        libc::AF_INET6 as u8
+    ));
+
+    // AH shape: the 8th header is an AH whose length byte is missing.
+    let mut body = Vec::new();
+    for _ in 0..6 {
+        body.extend_from_slice(&ext8(60));
+    }
+    body.extend_from_slice(&ext8(51));
+    body.push(PROTO_TCP);
+    let pkt = v6_pkt(60, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::OverLimit
+    );
+    assert!(ipv6_ext_chain_over_limit(
+        &frame_of(&pkt),
+        libc::AF_INET6 as u8
+    ));
+}
+
+#[test]
+fn ext_walk_truncation_before_eighth_header_stays_truncated_10665() {
+    // #10665 negative control: truncation BEFORE the 8th header is still
+    // Truncated, not OverLimit — the precedence only engages at the bound.
+    // 6 complete headers + a 7th truncated to one byte.
+    let mut body = Vec::new();
+    for _ in 0..6 {
+        body.extend_from_slice(&ext8(60));
+    }
+    body.push(60);
+    let pkt = v6_pkt(60, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::Truncated
+    );
+    assert!(!ipv6_ext_chain_over_limit(
+        &frame_of(&pkt),
+        libc::AF_INET6 as u8
+    ));
+}
+
+#[test]
+fn ext_walk_eight_complete_headers_fire_the_drop_gate_10665() {
+    // #10665 control: 8 COMPLETE headers were already OverLimit (truth
+    // table above); pin that the #4743 gate fires for them too, so the
+    // truncated-8th case above is held to the same bar.
+    let mut body = Vec::new();
+    for _ in 0..MAX_IPV6_EXT_HEADERS {
+        body.extend_from_slice(&ext8(60));
+    }
+    let pkt = v6_pkt(60, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::OverLimit
+    );
+    assert!(ipv6_ext_chain_over_limit(
+        &frame_of(&pkt),
+        libc::AF_INET6 as u8
+    ));
+}

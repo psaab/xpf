@@ -88,6 +88,46 @@ mod ipv6_ext_header_drop_tests {
         );
         assert!(counters.touched, "touched must be set so the batch flushes");
     }
+    #[test]
+    fn truncated_eighth_header_drops_and_counts_but_seventh_does_not() {
+        // Seven complete headers put the next declaration at the bound. Both
+        // a missing length byte and a declared-length overrun on header 8 are
+        // OverLimit and count exactly once; truncation of header 7 stays
+        // Truncated, with no drop or counter change.
+        for last_header in [&[60u8][..], &[60u8, 5][..]] {
+            let mut tail = Vec::new();
+            for _ in 0..crate::afxdp::MAX_IPV6_EXT_HEADERS - 1 {
+                tail.extend_from_slice(&[60, 0, 0, 0, 0, 0, 0, 0]);
+            }
+            tail.extend_from_slice(last_header);
+            let frame = v6_frame(60, &tail);
+            let mut counters = BatchCounters::default();
+
+            assert!(
+                ipv6_ext_header_over_limit_drop(&frame, v6(), &mut counters),
+                "an 8th extension-header declaration must fail closed"
+            );
+            assert_eq!(counters.ipv6_ext_header_dropped, 1);
+            assert!(counters.touched);
+        }
+
+        let mut tail = Vec::new();
+        for _ in 0..crate::afxdp::MAX_IPV6_EXT_HEADERS - 2 {
+            tail.extend_from_slice(&[60, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        tail.push(60); // The 7th header has no length byte.
+        let frame = v6_frame(60, &tail);
+        let mut counters = BatchCounters::default();
+
+        assert!(!ipv6_ext_header_over_limit_drop(
+            &frame,
+            v6(),
+            &mut counters
+        ));
+        assert_eq!(counters.ipv6_ext_header_dropped, 0);
+        assert!(!counters.touched);
+    }
+
 
     #[test]
     fn normal_frame_helper_neither_drops_nor_counts() {
