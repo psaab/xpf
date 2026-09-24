@@ -505,15 +505,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         now_ns,
                     );
                 }
-                // #4743: fail-closed drop for an OVER-LIMIT IPv6 extension-header
-                // chain. `stage_parse_flow_and_learn` returns `None` (flowless)
-                // when the #2292 helper walkers give up past
-                // MAX_IPV6_EXT_HEADERS; the flowless path would otherwise forward
-                // the packet uninspectable (`l4_present = false`) — an ext-header
-                // IDS-evasion. Gate on `flow.is_none()` (helper could not derive
-                // an L4 tuple) and drop+count ONLY the genuine over-limit chain;
-                // a non-first fragment / ICMPv6 / truncated packet is not
-                // over-limit and keeps its existing flowless handling.
+                // #4743/#10665: fail-closed drop for an over-limit IPv6
+                // extension-header chain. `stage_parse_flow_and_learn` returns
+                // `None` (flowless) when the helper walkers give up at their
+                // bound; the flowless path would otherwise forward the packet
+                // uninspectable (`l4_present = false`) — an ext-header
+                // IDS-evasion. Gate on `flow.is_none()` and drop+count an
+                // 8th traversable-header declaration, even when header 8 itself
+                // is truncated. A truncation before header 8, non-first
+                // fragment, or ICMPv6 chain within the bound keeps its existing
+                // flowless handling.
                 if flow.is_none()
                     && ipv6_ext_header_over_limit_drop(
                         packet_frame,

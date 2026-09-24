@@ -127,14 +127,13 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// ordinary route miss and correlate it with the filter-`accept` log.
     /// Surfaced as the `Martian drops` operator counter.
     pub(super) martian_dropped: AtomicU64,
-    /// #4743: cumulative fail-closed drops of an IPv6 packet whose
-    /// extension-header chain is still on an extension header after
-    /// `MAX_IPV6_EXT_HEADERS` (8) iterations (an over-limit, uninspectable
-    /// chain). The #2292 walkers already fail closed (`None`) on this chain;
-    /// before #4743 the flowless path forwarded it uninspectable
-    /// (`l4_present = false`), an ext-header IDS-evasion. Now dropped explicitly
-    /// and counted. Distinct from a TRUNCATED chain (which stays flowless).
-    /// Surfaced as the `IPv6 ext-header drops` operator counter.
+    /// #4743/#10665: cumulative fail-closed drops of IPv6 packets whose
+    /// extension-header chain declares a traversable 8th header, even when
+    /// that header is truncated. The #2292 walkers fail closed on this
+    /// over-limit chain; before #4743 the flowless path forwarded it
+    /// uninspectable (`l4_present = false`), an ext-header IDS-evasion. Now
+    /// dropped explicitly and counted. Truncation before the 8th declaration
+    /// stays flowless. Surfaced as the `IPv6 ext-header drops` operator counter.
     pub(super) ipv6_ext_header_dropped: AtomicU64,
     /// #10498: named pre-L3 drops that previously had no dedicated
     /// operator-visible telemetry.

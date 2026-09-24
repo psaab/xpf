@@ -365,10 +365,12 @@ inspect or rewrite a packet sitting in a UMEM frame.
   contract than L4 resolution) and `nat64.rs::nat64_v6_translation_ineligible`
   (#5625 — per-type translation-eligibility verdicts incl. the Routing
   Segments-Left read, not an L4-resolution walk). All of them share the
-  `MAX_IPV6_EXT_HEADERS` (8) bound AND fail CLOSED when the chain is
-  still on an extension header at that bound — the shared walk yields
-  `OverLimit` (its wrappers return `None`/`false`), `screen/extract.rs`
-  returns `Err` (drop, #2189). The CANONICAL CONTRACT they MUST agree on:
+  `MAX_IPV6_EXT_HEADERS` (8) bound AND fail CLOSED when the chain declares a
+  traversable 8th header: the shared walk yields `OverLimit` (its wrappers
+  return `None`/`false`), and `screen/extract.rs` returns `Err` (drop, #2189).
+  #10665 makes that over-limit verdict take precedence when the 8th header's
+  bytes are themselves truncated; truncation before that declaration remains
+  `Truncated`. The CANONICAL CONTRACT they MUST agree on:
   - **L2**: untagged → l3 = 14; a single 0x8100 (802.1Q) OR 0x88a8 (802.1ad)
     tag → l3 = 18 (the inner ethertype, possibly still a VLAN TPID for a
     QinQ double tag, is returned as-is). A QinQ DOUBLE tag is NOT unwound in

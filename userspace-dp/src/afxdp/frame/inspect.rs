@@ -84,7 +84,8 @@ pub(crate) enum ExtChainOutcome {
     /// Still on an extension header after `MAX_IPV6_EXT_HEADERS`
     /// iterations — the over-limit, uninspectable chain the #2292
     /// walkers fail closed on and #4743's `ipv6_ext_chain_over_limit`
-    /// reports.
+    /// reports. #10665: the 8th header's DECLARATION is over-limit even
+    /// when its bytes overrun the buffer (`OverLimit`, not `Truncated`).
     OverLimit,
 }
 
@@ -146,7 +147,11 @@ pub(crate) struct ExtChainWalk {
 /// like any real upper-layer protocol), No-Next-Header (59) is its own
 /// verdict, every advance re-validates against `buf.len()`, and a chain
 /// still on an extension header after `MAX_IPV6_EXT_HEADERS` iterations
-/// is [`ExtChainOutcome::OverLimit`] (#2292/#4743 fail-closed).
+/// is [`ExtChainOutcome::OverLimit`] (#2292/#4743 fail-closed). #10665:
+/// the 8th header's DECLARATION is over-limit even when its bytes overrun
+/// the buffer — `OverLimit` takes precedence over `Truncated` at the bound
+/// (checked before any length byte of header 8 is touched), matching the
+/// shim's 7-iteration walk, which never reads header 8 at all.
 ///
 /// The walk ALWAYS runs to a terminal (or the bound), even past a
 /// Fragment header: the first Fragment header is RECORDED in
@@ -171,7 +176,27 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
     }
     let mut protocol = buf[l3 + 6];
     let mut offset = l3 + 40;
-    for _ in 0..MAX_IPV6_EXT_HEADERS {
+    for i in 0..MAX_IPV6_EXT_HEADERS {
+        // #10665: at the bound the DECLARATION of an 8th extension header is
+        // over-limit even when its bytes overrun the frame — `OverLimit` takes
+        // precedence over `Truncated`. Resolving the chain would need a 9th
+        // iteration even with the bytes present, and the shim's 7-iteration
+        // walk never reads header 8 at all, so neither do we: no length byte
+        // is touched on this path. A terminal (L4/59/ESP) at this iteration
+        // still resolves below — only a TRAVERSABLE protocol is over-limit.
+        // The declared Fragment sighting is still recorded (bytes `None` when
+        // truncated) so `ipv6_is_any_fragment` keeps its declares-match
+        // semantics at the bound.
+        if i + 1 == MAX_IPV6_EXT_HEADERS && ipv6_ext_header_is_traversable(protocol) {
+            if protocol == 44 {
+                record_fragment_sighting(buf, offset, &mut fragment, &mut non_first_fragment_offset_seen);
+            }
+            return ExtChainWalk {
+                outcome: ExtChainOutcome::OverLimit,
+                fragment,
+                non_first_fragment_offset_seen,
+            };
+        }
         match protocol {
             // #4517: generic length-prefixed EHs (see the set at
             // MAX_IPV6_EXT_HEADERS): HbH/Routing/DestOpt +
@@ -228,25 +253,9 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
             }
             44 => {
                 let header = buf.get(offset..offset + 8);
-                // Record the FIRST declared Fragment header before the
-                // byte-validated advance below: a chain that declares but
-                // truncates the header still reports the declaration
-                // (bytes: None), preserving `ipv6_is_any_fragment`'s
-                // declares-match semantics.
-                if fragment.is_none() {
-                    fragment = Some(ExtChainFragment {
-                        bytes: header.and_then(|h| <[u8; 8]>::try_from(h).ok()),
-                        header_offset: offset,
-                    });
-                }
-                if let Some(f) = header {
-                    // #1838 every-sighting judgement: a non-zero offset in
-                    // ANY sighted Fragment header (not just the recorded
-                    // first) is a quoted/forwarded non-first fragment.
-                    if (u16::from_be_bytes([f[2], f[3]]) & 0xFFF8) != 0 {
-                        non_first_fragment_offset_seen = true;
-                    }
-                }
+                // Record the sighting before the byte-validated advance
+                // below; shared with the #10665 bound early-return.
+                record_fragment_sighting(buf, offset, &mut fragment, &mut non_first_fragment_offset_seen);
                 let Some(frag) = header else {
                     return ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
@@ -291,6 +300,37 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
         outcome: ExtChainOutcome::OverLimit,
         fragment,
         non_first_fragment_offset_seen,
+    }
+}
+
+/// #10665: record one declared Fragment (44) header sighting at `offset`.
+/// Shared by the in-loop Fragment arm and the bound early-return so the
+/// two can never drift apart. Records the FIRST declaration only
+/// (`bytes: None` when the buffer truncates the header, preserving
+/// `ipv6_is_any_fragment`'s declares-match semantics) while the #1838
+/// every-sighting non-first-offset judgement runs on every call. Never
+/// panics: the header is read through `buf.get`.
+#[inline(always)]
+fn record_fragment_sighting(
+    buf: &[u8],
+    offset: usize,
+    fragment: &mut Option<ExtChainFragment>,
+    non_first_fragment_offset_seen: &mut bool,
+) {
+    let header = buf.get(offset..offset + 8);
+    if fragment.is_none() {
+        *fragment = Some(ExtChainFragment {
+            bytes: header.and_then(|h| <[u8; 8]>::try_from(h).ok()),
+            header_offset: offset,
+        });
+    }
+    if let Some(f) = header {
+        // #1838 every-sighting judgement: a non-zero offset in ANY
+        // sighted Fragment header (not just the recorded first) is a
+        // quoted/forwarded non-first fragment.
+        if (u16::from_be_bytes([f[2], f[3]]) & 0xFFF8) != 0 {
+            *non_first_fragment_offset_seen = true;
+        }
     }
 }
 
@@ -525,7 +565,9 @@ pub(in crate::afxdp) fn frame_l4_offset(frame: &[u8], addr_family: u8) -> Option
 /// uninspectable chain that `frame_l4_offset` fails closed on (the post-loop
 /// `None` at the bound). Deliberately distinguishes over-limit from TRUNCATION:
 /// any in-loop short read / declared-length overrun returns `false` (a truncated
-/// chain stays on the existing flowless path, unchanged), as does a chain that
+/// chain stays on the existing flowless path, unchanged) — EXCEPT a short read /
+/// overrun OF the 8th header's own bytes: its declaration is over-limit even
+/// when its bytes overrun the buffer (#10665), so the gate fires there. A chain
 /// terminates on a real L4 within the bound or a non-IPv6 packet. This is the
 /// gate for the explicit fail-closed drop: before #4743 an over-limit chain was
 /// forwarded flowless (`l4_present = false`), an ext-header IDS-evasion; now it

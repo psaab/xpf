@@ -408,11 +408,11 @@ pub(crate) struct BindingStatus {
     /// drops` status row.
     #[serde(rename = "martian_dropped", default)]
     pub martian_dropped: u64,
-    /// #4743: fail-closed drops of an IPv6 packet whose extension-header chain
-    /// is still on an extension header after `MAX_IPV6_EXT_HEADERS` (8)
-    /// iterations (an over-limit, uninspectable chain). Distinct from a
-    /// truncated chain (which stays flowless). `default` keeps cross-version
-    /// wire safety. Surfaced as the `IPv6 ext-header drops` status row.
+    /// #4743/#10665: fail-closed drops of IPv6 packets whose extension-header
+    /// chain declares a traversable 8th header (even when that header is
+    /// truncated). A truncated chain before that bound stays flowless. `default`
+    /// keeps cross-version wire safety. Surfaced as the `IPv6 ext-header drops`
+    /// status row.
     #[serde(rename = "ipv6_ext_header_dropped", default)]
     pub ipv6_ext_header_dropped: u64,
     #[serde(rename = "umem_slice_dropped", default)]
