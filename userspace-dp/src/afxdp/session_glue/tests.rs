@@ -14820,6 +14820,85 @@ fn stale_replay_fence_admits_live_and_exempt_rows_10612() {
     );
 }
 
+/// #10620: the reuse race. Zone "lan" held id 1; the operator renames so id 1
+/// now binds "dmz". `removed_zone_ids_for_rotation` treats the same-id /
+/// different-name row as REMOVED (the purge deletes it, pinned by #10510),
+/// but the #10612 stateless arm checks `contains_key(id)` against the CURRENT
+/// set — id 1 is PRESENT, so a stale replay of A's dead row is ADMITTED and
+/// installs under B's live id: cross-zone session confusion in the fail-open
+/// direction. The vintage arm closes it: the stale entry keeps "lan"'s check
+/// while the current name for id 1 checks as "dmz".
+///
+/// RED-on-revert: deleting the vintage arm (stateless only) admits the stale
+/// row and flips the first two asserts.
+#[test]
+fn stale_replay_fence_drops_cross_generation_reuse_10620() {
+    use crate::session::zone_identity_check;
+
+    // Current generation: id 1 rebound from "lan" to "dmz".
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "dmz".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+
+    // A's dead row, stamped under the old name, replayed after the rename.
+    // The id is present, so the stateless arm alone admits it.
+    let mut stale = test_metadata();
+    stale.ingress_zone = 1;
+    stale.egress_zone = 2;
+    stale.ingress_zone_check = zone_identity_check("lan");
+    stale.egress_zone_check = zone_identity_check("wan");
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SyncImport, &stale, &forwarding),
+        "a replay stamped under the previous name for a reused id must fence, \
+         even though the id itself is present in the current set"
+    );
+
+    // Pair-symmetric: the egress leg alone fences too.
+    let mut stale_egress = test_metadata();
+    stale_egress.ingress_zone = 2;
+    stale_egress.egress_zone = 1;
+    stale_egress.ingress_zone_check = zone_identity_check("wan");
+    stale_egress.egress_zone_check = zone_identity_check("lan");
+    assert!(
+        synced_entry_is_stale_replay(SessionOrigin::SyncImport, &stale_egress, &forwarding),
+        "a stale egress leg must fence exactly like a stale ingress leg"
+    );
+
+    // No regression to legit reuse: B's live row, stamped under the current
+    // name, installs.
+    let mut live = test_metadata();
+    live.ingress_zone = 1;
+    live.egress_zone = 2;
+    live.ingress_zone_check = zone_identity_check("dmz");
+    live.egress_zone_check = zone_identity_check("wan");
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &live, &forwarding),
+        "a row stamped under the CURRENT name for a reused id must install"
+    );
+    // Unknown vintage fails open to the stateless arms (which admit a
+    // present id): unstamped rows, id-0 legs, and nameless peer imports
+    // keep legacy behavior.
+    let mut unknown = test_metadata();
+    unknown.ingress_zone = 1;
+    unknown.egress_zone = 2;
+    unknown.ingress_zone_check = 0;
+    unknown.egress_zone_check = 0;
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &unknown, &forwarding),
+        "a 0-stamped row must fail open, never fail closed on vintage"
+    );
+    let mut zero_leg = test_metadata();
+    zero_leg.ingress_zone = 0;
+    zero_leg.egress_zone = 2;
+    zero_leg.ingress_zone_check = zone_identity_check("lan");
+    zero_leg.egress_zone_check = zone_identity_check("wan");
+    assert!(
+        !synced_entry_is_stale_replay(SessionOrigin::SyncImport, &zero_leg, &forwarding),
+        "an id-0 leg must never fence on vintage, whatever it stamps"
+    );
+}
+
 /// #10612 (M4): activation prewarm must skip stale-zone entries — no worker
 /// fan-out for purged rows — while prewarming live entries normally. Also
 /// pins the R2 drop counter wiring (delta >= 1).
