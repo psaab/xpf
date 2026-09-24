@@ -83,21 +83,20 @@ pub(super) fn ndp_na_refusal_counter_test_lock() -> std::sync::MutexGuard<'stati
 /// `cos/ecn.rs::ethernet_l3`) already treat 0x88a8 as a single tag with
 /// l3 at 18; this learning parser must agree. A QinQ DOUBLE tag (a tag
 /// whose inner ethertype is itself a VLAN TPID) is NOT unwound here —
-/// for frames with a complete L2 header, the upstream XDP shim drops
-/// double-tagged frames (and legacy-0x9100 outers) before they reach
-/// userspace: after its single unwrap, a still-VLAN ethertype takes an
-/// explicit XDP_DROP with the `qinq_drop` degraded-path counter
-/// (`userspace-xdp/src/lib.rs::is_vlan_tpid`, #9888) on both the armed
-/// and the degraded non-IP arms, never the XDP_PASS handoff. (A runt
-/// truncating inside the tag takes `parse_l2`'s `None` path instead —
+/// for complete L2 headers, the upstream XDP shim drops double-tagged
+/// frames and legacy-TPID outers (0x9100/0x9200/0x9300) before userspace:
+/// after its single unwrap, a still-VLAN ethertype takes an explicit
+/// XDP_DROP with the `qinq_drop` degraded-path counter
+/// (`userspace-xdp/src/lib.rs::is_vlan_tpid`, #9888/#10657) on both the
+/// armed and degraded non-IP arms, never XDP_PASS. (A runt truncating
+/// inside the tag takes `parse_l2`'s `None` path instead —
 /// `cpumap_or_pass` on the armed path — and carries no L3 payload, so
-/// no transit rides that shape.) The DISPOSITION is enforced by the Go
-/// BPF cells (`pkg/dataplane/userspace/qinq_disposition_9888_test.go`),
-/// which run the real program; what the QinQ section of the L2 canary
-/// in parser_tests.rs pins is only this parser's contract — "single
-/// tag → l3=18; the inner (possibly still-VLAN) ethertype is returned
-/// as-is" — so a future edit to the parser reds there rather than
-/// silently reinterpreting the inner tag.
+/// no transit rides that shape.) The Go BPF cells enforce this disposition
+/// by running the real program. The QinQ section of the L2 canary in
+/// parser_tests.rs pins only this parser's contract — "single tag → l3=18;
+/// the inner (possibly still-VLAN) ethertype is returned as-is" — so a
+/// future edit to the parser reds there rather than silently reinterpreting
+/// the inner tag.
 #[inline(always)]
 pub(super) fn parse_eth_offsets(raw_frame: &[u8]) -> Option<(usize, u16)> {
     if raw_frame.len() < ETH_HDR_LEN {

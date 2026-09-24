@@ -17,6 +17,8 @@ const USERSPACE_DEFAULT_HEARTBEAT_TIMEOUT_MS: u32 = 5000;
 const ETH_P_8021Q: u16 = 0x8100;
 const ETH_P_8021AD: u16 = 0x88a8;
 const ETH_P_9100: u16 = 0x9100;
+const ETH_P_9200: u16 = 0x9200;
+const ETH_P_9300: u16 = 0x9300;
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_IPV6: u16 = 0x86dd;
 const AF_INET: u8 = 2;
@@ -496,18 +498,18 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         return Ok(cpumap_or_pass(ctrl));
     };
     if eth_proto != ETH_P_IP && eth_proto != ETH_P_IPV6 {
-        // #9888: a still-VLAN post-unwrap ethertype is a QinQ-shaped frame
-        // this single-unwrap shim cannot adjudicate (see `is_vlan_tpid`):
-        // #5879 refuses QinQ configs, so there is no stacked-VLAN identity
-        // to steer it by. Drop-and-count fail-closed instead of the silent
-        // XDP_PASS below, which on a bridged port forwards with no zone
-        // policy. Flat: three compares, no unwrap loop.
+        // #9888/#10657: a still-VLAN post-unwrap ethertype is nested or
+        // legacy-tagged and this single-unwrap shim cannot adjudicate it
+        // (see `is_vlan_tpid`). #5879 refuses QinQ configs, so there is no
+        // stacked-VLAN identity to steer it by. Drop-and-count fail-closed
+        // instead of the silent XDP_PASS below, which on a bridged port
+        // forwards with no zone policy. Flat comparisons; no unwrap loop.
         //
-        // Disclosed cost, not an oversight: a single legacy-0x9100 outer
-        // may hide ARP/LLDP the shim never unwraps, so this drops L2 the
-        // old code passed to the kernel on XDP-bound ports. Passing a
-        // shape that cannot be parsed is the hole; dropping it is the
-        // fail-closed posture.
+        // Disclosed cost, not an oversight: a single legacy-TPID outer
+        // (0x9100/0x9200/0x9300) may hide ARP/LLDP the shim never unwraps, so
+        // this drops L2 the old code passed to the kernel on XDP-bound ports.
+        // Passing a shape that cannot be parsed is the hole; dropping it is
+        // the fail-closed posture.
         if is_vlan_tpid(eth_proto) {
             return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_QINQ_DROP);
         }
@@ -1327,9 +1329,9 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
         ETH_P_IP => parse_ipv4(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
         ETH_P_IPV6 => parse_ipv6(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
         _ => {
-            // #9888: same nested-VLAN drop as the armed path (see
-            // `is_vlan_tpid` for the fail-closed rationale, including the
-            // disclosed single-0x9100-outer cost).
+            // #9888/#10657: same nested/legacy-TPID drop as the armed path
+            // (see `is_vlan_tpid` for the fail-closed rationale, including
+            // the disclosed legacy-outer cost).
             if is_vlan_tpid(eth_proto) {
                 return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_QINQ_DROP);
             }
@@ -1517,28 +1519,34 @@ struct ParsedPacket {
 /// #9888: is this post-unwrap ethertype a VLAN tag protocol identifier?
 ///
 /// `parse_l2` below unwraps exactly ONE 0x8100/0x88a8 tag (`if`, not `while`
-/// — the single unwrap is deliberate verifier-cost control, and 0x9100 is
-/// never unwrapped). So when dispatch sees one of these three values it is
-/// NOT a first tag: 0x8100/0x88a8 here is an INNER tag (the frame is
-/// double-tagged QinQ), and 0x9100 here is a legacy outer tag or a legacy
-/// inner one. Either shape is unadjudicable — #5879 refuses QinQ configs, so
-/// the dataplane has no stacked-VLAN identity to steer it by — and must drop
-/// rather than take a non-IP XDP_PASS arm: this interface is XDP-bound, so a
-/// passed frame matches the armed forward fence's allowlist (#10302,
-/// pkg/nftables/transit_barrier.go) and forwards — by MAC on bridged ports —
-/// with no zone verdict. (Pre-fence this read "the kernel forward path that
-/// is deliberately open while armed" — #10642.) Complete L2 headers only:
+/// — the single unwrap is deliberate verifier-cost control, and 0x9100 /
+/// 0x9200 / 0x9300 are never unwrapped). So when dispatch sees one of these
+/// five values it is NOT a first tag: 0x8100/0x88a8 here is an INNER tag
+/// (the frame is double-tagged QinQ), and 0x9100/0x9200/0x9300 here is a
+/// legacy outer tag or a legacy inner one. Either shape is unadjudicable —
+/// #5879 refuses QinQ configs, so the dataplane has no stacked-VLAN identity
+/// to steer it by — and must drop rather than take a non-IP XDP_PASS arm:
+/// this interface is XDP-bound, so a passed frame matches the armed forward
+/// fence's allowlist (#10302, pkg/nftables/transit_barrier.go) and forwards
+/// — by MAC on bridged ports — with no zone verdict. (Pre-fence this read
+/// "the kernel forward path that is deliberately open while armed" — #10642.)
+/// Complete L2 headers only:
 /// this predicate runs on a successful `parse_l2`, never on its `None` path.
 ///
-/// NOTE the single-0x9100-outer cost, stated plainly: the shim never
-/// unwraps 0x9100, so that outer may hide ARP/LLDP this drop now denies
-/// the kernel on XDP-bound ports. Deliberate fail-closed trade-off, not
-/// an oversight — passing an opaque shape unadjudicated on bridged
-/// ports is the #9888 hole — and #5879 already refuses to configure
-/// anything behind such a tag.
+/// NOTE the single-legacy-outer cost, stated plainly: the shim never unwraps
+/// 0x9100/0x9200/0x9300, so such an outer may hide ARP/LLDP this drop now
+/// denies the kernel on XDP-bound ports. Deliberate fail-closed trade-off,
+/// not an oversight — passing an opaque shape unadjudicated on bridged
+/// ports is the #9888 hole (#10657 extends it to 0x9200/0x9300, which took
+/// the same silent PASS) — and #5879 already refuses to configure anything
+/// behind such a tag.
 #[inline(always)]
 fn is_vlan_tpid(eth_proto: u16) -> bool {
-    eth_proto == ETH_P_8021Q || eth_proto == ETH_P_8021AD || eth_proto == ETH_P_9100
+    eth_proto == ETH_P_8021Q
+        || eth_proto == ETH_P_8021AD
+        || eth_proto == ETH_P_9100
+        || eth_proto == ETH_P_9200
+        || eth_proto == ETH_P_9300
 }
 
 fn parse_l2(data: usize, data_end: usize) -> Option<(u16, u16, u8, bool, u16)> {
