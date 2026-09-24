@@ -47,6 +47,7 @@ func TestProposalSetStandardRenders_4297(t *testing.T) {
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec policy esp-pol proposal-set standard",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-pol",
 	})
 	conn := parseSwanctlDoc(t, New().generateConfig(prepared)).at(t, "connections", "tun1")
@@ -79,6 +80,7 @@ func TestProposalSetSuiteB128Renders_4297(t *testing.T) {
 		"set security ike gateway gw1 local-certificate my-cert",
 		"set security ipsec policy esp-sb proposal-set suiteb-gcm-128",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-sb",
 	})
 	conn := parseSwanctlDoc(t, New().generateConfig(prepared)).at(t, "connections", "tun1")

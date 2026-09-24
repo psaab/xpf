@@ -83,6 +83,12 @@ func TestPackedIPsecVPNRunKeepsEveryLeaf9088(t *testing.T) {
 // NARROWNESS: each leaf alone must set only itself. A run-splitter that is too
 // eager invents values, which on this container means binding a VPN to an XFRM
 // interface nobody asked for.
+//
+// #10638: strict commit now rejects a VPN with no bind-interface at all, so
+// the single-leaf rows carry bind-interface as required context (the leaf
+// under test must still set nothing BEYOND itself and the context). The
+// instrument stays on the strict operator channel; the bind-interface row
+// itself is unchanged — it compiles alone.
 func TestPackedIPsecVPNRunIsNarrow9088(t *testing.T) {
 	one := func(t *testing.T, line string) *config.IPsecVPN {
 		t.Helper()
@@ -93,12 +99,12 @@ func TestPackedIPsecVPNRunIsNarrow9088(t *testing.T) {
 		}
 		return cfg.Security.IPsec.VPNs["v1"]
 	}
-	if v := one(t, "gateway G;"); v.IPsecPolicy != "" || v.BindInterface != "" {
-		t.Errorf("`gateway G` alone set ipsec-policy=%q bind-interface=%q",
+	if v := one(t, "gateway G bind-interface st0;"); v.IPsecPolicy != "" || v.BindInterface != "st0" {
+		t.Errorf("`gateway G` set ipsec-policy=%q bind-interface=%q, want only gateway + the bind context",
 			v.IPsecPolicy, v.BindInterface)
 	}
-	if v := one(t, "ipsec-policy P;"); v.Gateway != "" || v.BindInterface != "" {
-		t.Errorf("`ipsec-policy P` alone set gateway=%q bind-interface=%q",
+	if v := one(t, "ipsec-policy P bind-interface st0;"); v.Gateway != "" || v.BindInterface != "st0" {
+		t.Errorf("`ipsec-policy P` set gateway=%q bind-interface=%q, want only ipsec-policy + the bind context",
 			v.Gateway, v.BindInterface)
 	}
 	if v := one(t, "bind-interface st0.1;"); v.Gateway != "" || v.IPsecPolicy != "" {

@@ -122,6 +122,7 @@ func TestAttributionKeepsThePromotedConfigForIdenticalConnections9641(t *testing
 		"set security ike gateway gw-x external-interface reth1.0",
 		"set security ike gateway gw-x local-address 10.0.9.9",
 		"set security ipsec vpn same ike gateway gw-x",
+		"set security ipsec vpn same bind-interface st0",
 	)
 	c0, d0 := store.ActiveConfig(), store.ActiveDigest()
 	if err := store.SetFromInput("security ike gateway gw-x external-interface reth2.0"); err != nil {
@@ -166,6 +167,7 @@ func TestAttributionKeepsThePromotedConfigWhenItCannotBeCompared9641(t *testing.
 		"set security ike gateway gw-dhcp address 198.51.100.7",
 		"set security ike gateway gw-dhcp external-interface ge-0/0/4.0",
 		"set security ipsec vpn dyn ike gateway gw-dhcp",
+		"set security ipsec vpn dyn bind-interface st0",
 	)
 	if _, err := ipsec.ExpectedLoadedConns(store.ActiveConfig()); err == nil {
 		t.Fatal("FIXTURE: the promoted config must be uncomparable (a DHCP-derived local address)")

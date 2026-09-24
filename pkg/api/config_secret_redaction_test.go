@@ -60,6 +60,7 @@ var secretSetCommands = []string{
 	"set security ipsec proposal aes256 authentication-algorithm hmac-sha-256",
 	"set security ipsec proposal aes256 dh-group 14",
 	"set security ipsec vpn site-a gateway 10.0.0.1",
+	"set security ipsec vpn site-a bind-interface st0",
 	"set security ipsec vpn site-a ipsec-policy aes256",
 	"set security ipsec vpn site-a pre-shared-key LEAK-IPSEC-VPN-PSK",
 	// OSPF interface auth key.

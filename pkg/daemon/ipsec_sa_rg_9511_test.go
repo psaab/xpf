@@ -65,6 +65,7 @@ func multiSelectorIPsecStore9511(t *testing.T) *configstore.Store {
 	store := testStoreWithSetConfig(t, append(append([]string{}, clusterTwoRethIPsec9511...),
 		// The subject: two selectors, anchored on the RG1 reth.
 		"set security ipsec vpn vpn-ms ike gateway gw-rg1",
+		"set security ipsec vpn vpn-ms bind-interface st0",
 		"set security ipsec vpn vpn-ms traffic-selector ts1 local-ip 10.0.1.0/24",
 		"set security ipsec vpn vpn-ms traffic-selector ts1 remote-ip 10.9.1.0/24",
 		"set security ipsec vpn vpn-ms traffic-selector ts2 local-ip 10.0.11.0/24",
@@ -72,8 +73,11 @@ func multiSelectorIPsecStore9511(t *testing.T) *configstore.Store {
 		// Controls: no selector (child name == VPN name) on RG1 and RG2, and an
 		// unanchored VPN that follows RG0.
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
+		"set security ipsec vpn vpn-rg1 bind-interface st0",
 		"set security ipsec vpn vpn-rg2 ike gateway gw-rg2",
+		"set security ipsec vpn vpn-rg2 bind-interface st0",
 		"set security ipsec vpn vpn-plain ike gateway gw-plain",
+		"set security ipsec vpn vpn-plain bind-interface st0",
 	))
 	cfg := store.ActiveConfig()
 	vpn := cfg.Security.IPsec.VPNs["vpn-ms"]
@@ -226,11 +230,13 @@ func TestIPsecSAsToReinitiateSkipsMultiSelectorVPNOnRG0Takeover9511(t *testing.T
 func TestIPsecSANameRenderedByTwoVPNsNeedsEveryCandidateRG9511(t *testing.T) {
 	store := syncedStore9511(t, append(append([]string{}, clusterTwoRethIPsec9511...),
 		"set security ipsec vpn blue ike gateway gw-rg1",
+		"set security ipsec vpn blue bind-interface st0",
 		"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
 		"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
 		"set security ipsec vpn blue traffic-selector green local-ip 10.0.21.0/24",
 		"set security ipsec vpn blue traffic-selector green remote-ip 10.9.21.0/24",
 		"set security ipsec vpn blue-red ike gateway gw-rg2",
+		"set security ipsec vpn blue-red bind-interface st0",
 	))
 	cfg := store.ActiveConfig()
 	idx := ipsecSANameIndex(cfg)
@@ -279,10 +285,13 @@ func TestAmbiguousSANameNeedsDeclaredRG0_9511(t *testing.T) {
 		"set security ike gateway gw-plain address 198.51.100.3",
 		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
 		"set security ipsec vpn blue ike gateway gw-rg1",
+		"set security ipsec vpn blue bind-interface st0",
 		"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
 		"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
 		"set security ipsec vpn blue-red ike gateway gw-plain",
+		"set security ipsec vpn blue-red bind-interface st0",
 		"set security ipsec vpn lone ike gateway gw-plain",
+		"set security ipsec vpn lone bind-interface st0",
 	})
 	cfg := store.ActiveConfig()
 	idx := ipsecSANameIndex(cfg)
@@ -357,6 +366,7 @@ func TestCachedIPsecSANameIndexColdMissesBuildOnce9511(t *testing.T) {
 		v := fmt.Sprintf("vpn-gen%03d", i)
 		lines = append(lines,
 			"set security ipsec vpn "+v+" ike gateway gw-rg1",
+			"set security ipsec vpn "+v+" bind-interface st0",
 			fmt.Sprintf("set security ipsec vpn %s traffic-selector a local-ip 10.1.%d.0/24", v, i),
 			fmt.Sprintf("set security ipsec vpn %s traffic-selector a remote-ip 10.2.%d.0/24", v, i),
 			fmt.Sprintf("set security ipsec vpn %s traffic-selector b local-ip 10.3.%d.0/24", v, i),
@@ -455,6 +465,7 @@ func syncedStore9511(t *testing.T, lines []string) *configstore.Store {
 
 var blueOnRG1_9511 = []string{
 	"set security ipsec vpn blue ike gateway gw-rg1",
+	"set security ipsec vpn blue bind-interface st0",
 	"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
 	"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
 }
@@ -474,7 +485,8 @@ func reinitiatesFor9511(t *testing.T, promoted, loaded *configstore.Store, name 
 func TestIPsecAttributionFollowsLoadedGenerationOnFailedAddition9511(t *testing.T) {
 	c0 := storeWith9511(t, blueOnRG1_9511...)
 	c1 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
-		"set security ipsec vpn blue-red ike gateway gw-rg2")...)
+		"set security ipsec vpn blue-red ike gateway gw-rg2",
+		"set security ipsec vpn blue-red bind-interface st0")...)
 	if !reinitiatesFor9511(t, c1, c0, "blue-red", 1) {
 		t.Error("S1: owning RG1 with C0 loaded, blue-red is blue's RG1 child and must be " +
 			"re-initiated; the promoted C1 made it ambiguous with a VPN charon never loaded")
@@ -491,7 +503,8 @@ func TestIPsecAttributionFollowsLoadedGenerationOnFailedAddition9511(t *testing.
 // the promoted config initiated, and master did not.
 func TestIPsecAttributionFollowsLoadedGenerationOnFailedDeletion9511(t *testing.T) {
 	c0 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
-		"set security ipsec vpn blue-red ike gateway gw-rg2")...)
+		"set security ipsec vpn blue-red ike gateway gw-rg2",
+		"set security ipsec vpn blue-red bind-interface st0")...)
 	c1 := storeWith9511(t, blueOnRG1_9511...)
 	if reinitiatesFor9511(t, c1, c0, "blue-red", 1) {
 		t.Error("S2: owning only RG1 initiated blue-red, which the LOADED generation " +
@@ -506,8 +519,8 @@ func TestIPsecAttributionFollowsLoadedGenerationOnFailedDeletion9511(t *testing.
 // Gateway RG move under a failed apply: C1 moves VPN mover from reth1 to reth2, but
 // C0 is loaded, so the SA still binds the RG1 address.
 func TestIPsecAttributionFollowsLoadedGenerationOnRGMove9511(t *testing.T) {
-	c0 := storeWith9511(t, "set security ipsec vpn mover ike gateway gw-rg1")
-	c1 := storeWith9511(t, "set security ipsec vpn mover ike gateway gw-rg2")
+	c0 := storeWith9511(t, "set security ipsec vpn mover ike gateway gw-rg1", "set security ipsec vpn mover bind-interface st0")
+	c1 := storeWith9511(t, "set security ipsec vpn mover ike gateway gw-rg2", "set security ipsec vpn mover bind-interface st0")
 	if !reinitiatesFor9511(t, c1, c0, "mover", 1) {
 		t.Error("RG move: the loaded SA binds reth1 (RG1); owning RG1 must initiate it")
 	}
@@ -522,7 +535,8 @@ func TestIPsecAttributionFollowsLoadedGenerationOnRGMove9511(t *testing.T) {
 func TestIPsecAttributionAbsentNameKeepsTheRG0Default9511(t *testing.T) {
 	c0 := storeWith9511(t, blueOnRG1_9511...)
 	c1 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
-		"set security ipsec vpn newx ike gateway gw-rg1")...)
+		"set security ipsec vpn newx ike gateway gw-rg1",
+		"set security ipsec vpn newx bind-interface st0")...)
 	if reinitiatesFor9511(t, c1, c0, "newx", 1) {
 		t.Error("newx is not in the loaded generation, so it must take the RG 0 default; " +
 			"owning RG1 without RG0 must skip it rather than attribute it through the " +
@@ -621,7 +635,8 @@ func TestApplyIPsecTrackedRecordsOnlyALoadedGeneration9511(t *testing.T) {
 func TestCachedIPsecSANameIndexReusesTheLoadedGenerationIndex9511(t *testing.T) {
 	c0 := storeWith9511(t, blueOnRG1_9511...)
 	c1 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
-		"set security ipsec vpn newx ike gateway gw-rg1")...)
+		"set security ipsec vpn newx ike gateway gw-rg1",
+		"set security ipsec vpn newx bind-interface st0")...)
 	d := &Daemon{store: c1}
 	d.ipsecLoadedCfg.Store(c0.ActiveConfig())
 	src := d.ipsecAttributionConfig()
@@ -692,7 +707,8 @@ func TestIPsecLeaseChangeApplyRecordsTheLoadedGeneration9511(t *testing.T) {
 // C0 and the answer flips: TestAttributionFollowsCharonsGenerationAfterARestart9641.
 func TestAttributionFallsBackToPromotedConfigBeforeFirstLoad9511(t *testing.T) {
 	c0 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
-		"set security ipsec vpn blue-red ike gateway gw-rg2")...)
+		"set security ipsec vpn blue-red ike gateway gw-rg2",
+		"set security ipsec vpn blue-red bind-interface st0")...)
 	c1 := storeWith9511(t, blueOnRG1_9511...)
 	if got := strings.Join(ipsecSANameIndex(c0.ActiveConfig()).VPNs("blue-red"), ","); got != "blue,blue-red" {
 		t.Fatalf("FIXTURE: blue-red must be ambiguous in the charon-held generation C0, got [%s]", got)
@@ -720,6 +736,7 @@ func TestApplyActiveConfigRecordsTheLoadedIPsecGeneration9511(t *testing.T) {
 	d.store = testStoreWithSetConfig(t, []string{
 		"set security ike gateway gw1 address 198.51.100.1",
 		"set security ipsec vpn vpn1 ike gateway gw1",
+		"set security ipsec vpn vpn1 bind-interface st0",
 	})
 	m := ipsec.NewWithConfigDir(t.TempDir())
 	m.SetSwanctlForTesting(successfulSwanctl9511)
@@ -743,7 +760,8 @@ func TestApplyActiveConfigRecordsTheLoadedIPsecGeneration9511(t *testing.T) {
 // master's answer and the generation charon will load.
 func TestFailedReloadWindowAttributesLikeThePromotedConfig9511(t *testing.T) {
 	c0 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
-		"set security ipsec vpn blue-red ike gateway gw-rg2")...)
+		"set security ipsec vpn blue-red ike gateway gw-rg2",
+		"set security ipsec vpn blue-red bind-interface st0")...)
 	c1 := storeWith9511(t, blueOnRG1_9511...)
 	names := []string{"blue-red", "blue"}
 
@@ -779,7 +797,8 @@ func TestFailedReloadWindowAttributesLikeThePromotedConfig9511(t *testing.T) {
 func TestWriteFailureKeepsTheLoadedRecord9511(t *testing.T) {
 	c0 := storeWith9511(t, blueOnRG1_9511...)
 	c1 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
-		"set security ipsec vpn newx ike gateway gw-rg1")...)
+		"set security ipsec vpn newx ike gateway gw-rg1",
+		"set security ipsec vpn newx bind-interface st0")...)
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)

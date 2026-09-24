@@ -72,6 +72,7 @@ import (
 var fabricSecretConfig = []string{
 	"set security ike policy pol1 pre-shared-key ascii-text FAB6532-IKE-PSK",
 	"set security ipsec vpn site-a pre-shared-key FAB6532-IPSEC-VPN-PSK",
+	"set security ipsec vpn site-a bind-interface st0",
 	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key FAB6532-OSPF-MD5KEY",
 	"set protocols ospf area 0.0.0.0 interface ge-0-0-9 authentication simple-password FAB6532-OSPF-SIMPLE",
 	// #9105: each key needs an explicit `authentication-type`. An absent type
