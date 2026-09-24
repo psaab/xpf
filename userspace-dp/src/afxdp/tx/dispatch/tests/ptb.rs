@@ -787,3 +787,146 @@ fn unknown_tunnel_kind_mtu_forwards_and_counts_9901() {
         "the ingress descriptor is recycled exactly once"
     );
 }
+
+/// #10705: the PTB forwarding state plus a native-tunnel endpoint of the
+/// given `mode` (mirrors the #9901 unknown-tunnel fixture, rebuilt here
+/// because that module's helpers are private). Transport MTU 1400 via the
+/// `tunnel_outer_mtu` chain (tx_ifindex 22 misses, egress_ifindex 80 hits),
+/// so the GRE inner budget is 1376 (1400 - outer_ip(20) - gre(4)) and the
+/// WG inner budget is 1325 (1400 - WG_OVERHEAD_V4(60) - max_pad(15)).
+fn forwarding_for_ptb_with_tunnel(mtu: usize, mode: &str) -> ForwardingState {
+    let mut forwarding = forwarding_for_ptb(mtu);
+    forwarding.tunnel_endpoints.insert(
+        7,
+        TunnelEndpoint {
+            id: 7,
+            logical_ifindex: 24,
+            interface_label: "tun0".into(),
+            interface: "tun0.0".into(),
+            redundancy_group: 0,
+            mode: mode.into(),
+            outer_family: libc::AF_INET,
+            source: std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 8)),
+            destination: std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 1)),
+            key: 0,
+            ttl: 64,
+            transport_table: String::new(),
+            wg_listen_port: 51820,
+            wg_local_privkey: zeroize::Zeroizing::new([0u8; 32]),
+            wg_peers: Vec::new(),
+        },
+    );
+    forwarding
+}
+
+/// #10705 fail-on-revert: an oversized DF-CLEAR UDP inner on a native-GRE
+/// path emits an ICMP Frag-Needed advertising the GRE inner MTU (1376)
+/// and drops the original — NOT the pre-fix counter-only
+/// `GRE_ENCAP_DF_OVERSIZE_DROPS` death. Reverting the dispatcher
+/// conversion restores the silent drop and reds every assertion below.
+#[test]
+fn tunnel_gre_nodf_oversize_emits_ptb_with_inner_mtu_10705() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let (bindings, _dbg, _counters, reasons) =
+        run_ptb_dispatch_full(forwarding_for_ptb_with_tunnel(1400, "gre"), 0, false, 7);
+    let ingress_tx = &bindings[0].tx_pipeline.pending_tx_local;
+    assert_eq!(
+        ingress_tx.len(),
+        1,
+        "exactly one ICMP Frag-Needed must be enqueued on the ingress binding"
+    );
+    let b = &ingress_tx[0].bytes;
+    let icmp = 14 + 20;
+    assert_eq!(b[icmp], 3, "ICMP type 3");
+    assert_eq!(b[icmp + 1], 4, "code 4 (Frag Needed)");
+    assert_eq!(
+        u16::from_be_bytes([b[icmp + 6], b[icmp + 7]]),
+        1376,
+        "advertised next-hop MTU = GRE inner budget (1400 - 20 - 4)"
+    );
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len()
+            + bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        0,
+        "oversized original must not be forwarded"
+    );
+    assert_eq!(ingress_recycled_count(&bindings[0]), 1);
+    assert!(
+        reasons.iter().any(|r| r == "egress_mtu_exceeded"),
+        "egress-MTU exception recorded: {reasons:?}"
+    );
+    assert!(
+        !reasons
+            .iter()
+            .any(|r| r == "egress_mtu_exceeded_forwarded_no_df"),
+        "the frame was signalled, not forwarded-whole: {reasons:?}"
+    );
+}
+
+/// #10705 WG arm: the same conversion for a WireGuard endpoint, quoting
+/// the pad-aware WG inner MTU (1325). The dispatcher override is
+/// mode-agnostic (tunnel_endpoint_id + resolved inner budget); this cell
+/// pins the WG number, not just the GRE one.
+#[test]
+fn tunnel_wg_nodf_oversize_emits_ptb_with_inner_mtu_10705() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let (bindings, _dbg, _counters, reasons) = run_ptb_dispatch_full(
+        forwarding_for_ptb_with_tunnel(1400, "wireguard"),
+        0,
+        false,
+        7,
+    );
+    let ingress_tx = &bindings[0].tx_pipeline.pending_tx_local;
+    assert_eq!(
+        ingress_tx.len(),
+        1,
+        "exactly one ICMP Frag-Needed must be enqueued on the ingress binding"
+    );
+    let b = &ingress_tx[0].bytes;
+    let icmp = 14 + 20;
+    assert_eq!(
+        u16::from_be_bytes([b[icmp + 6], b[icmp + 7]]),
+        1325,
+        "advertised next-hop MTU = WG inner budget (1400 - 60 - 15)"
+    );
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len()
+            + bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        0,
+        "oversized original must not be forwarded"
+    );
+    assert_eq!(ingress_recycled_count(&bindings[0]), 1);
+    assert!(
+        reasons.iter().any(|r| r == "egress_mtu_exceeded"),
+        "egress-MTU exception recorded: {reasons:?}"
+    );
+}
+
+/// #10705 counterfactual: a DF-clear inner that FITS the tunnel inner
+/// budget takes no PTB arm — no reply, no MTU exception. (The frame then
+/// falls through to the encap build, #2327's domain; this cell pins that
+/// the MTU gate itself stays silent, i.e. the retransmitted smaller
+/// packet "passes".) Without the transport fixture resolving, this would
+/// be the #9901 fail-open instead — the GRE row above keeps it a real
+/// budget comparison (1600 < 8976).
+#[test]
+fn tunnel_nodf_in_mtu_takes_no_ptb_arm_10705() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let (bindings, _dbg, _counters, reasons) =
+        run_ptb_dispatch_full(forwarding_for_ptb_with_tunnel(9000, "gre"), 0, false, 7);
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_tx_local.len(),
+        0,
+        "no PTB for an inner that fits the tunnel budget"
+    );
+    assert!(
+        !reasons.iter().any(|r| r == "egress_mtu_exceeded"),
+        "no egress-MTU exception when the inner fits: {reasons:?}"
+    );
+    assert!(
+        !reasons
+            .iter()
+            .any(|r| r == "egress_mtu_exceeded_forwarded_no_df"),
+        "no oversize exception at all when the inner fits: {reasons:?}"
+    );
+}
