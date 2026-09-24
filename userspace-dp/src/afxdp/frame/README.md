@@ -375,10 +375,11 @@ inspect or rewrite a packet sitting in a UMEM frame.
     userspace — and crucially the upstream XDP shim
     (`userspace-xdp/src/lib.rs::parse_l2`) strips exactly ONE tag (an `if`,
     not a `while`), so after the outer tag the dispatched `eth_proto` is the
-    inner TPID (0x8100), which is neither `ETH_P_IP` nor `ETH_P_IPV6`. Since
-    #9888 that shape (with a complete L2 header) no longer takes the non-IP
-    `XDP_PASS` arm: a still-VLAN post-unwrap ethertype (inner
-    0x8100/0x88a8/0x9100, or a legacy 0x9100 outer the shim never unwraps)
+    inner TPID (for example, 0x8100), which is neither `ETH_P_IP` nor
+    `ETH_P_IPV6`. Since #9888, extended by #10657, that shape (with a complete
+    L2 header) no longer takes the non-IP `XDP_PASS` arm: a still-VLAN
+    post-unwrap ethertype (inner 0x8100/0x88a8/0x9100/0x9200/0x9300, or a
+    legacy 0x9100/0x9200/0x9300 outer the shim never unwraps)
     is an explicit `XDP_DROP` with the `qinq_drop` degraded-path counter
     (`is_vlan_tpid`, on both the armed and the degraded non-IP arms) — NOT
     delivered to the XSK and NOT handed to the kernel. (A runt truncating

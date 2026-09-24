@@ -498,18 +498,18 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         return Ok(cpumap_or_pass(ctrl));
     };
     if eth_proto != ETH_P_IP && eth_proto != ETH_P_IPV6 {
-        // #9888: a still-VLAN post-unwrap ethertype is a QinQ-shaped frame
-        // this single-unwrap shim cannot adjudicate (see `is_vlan_tpid`):
-        // #5879 refuses QinQ configs, so there is no stacked-VLAN identity
-        // to steer it by. Drop-and-count fail-closed instead of the silent
-        // XDP_PASS below, which on a bridged port forwards with no zone
-        // policy. Flat: three compares, no unwrap loop.
+        // #9888/#10657: a still-VLAN post-unwrap ethertype is nested or
+        // legacy-tagged and this single-unwrap shim cannot adjudicate it
+        // (see `is_vlan_tpid`). #5879 refuses QinQ configs, so there is no
+        // stacked-VLAN identity to steer it by. Drop-and-count fail-closed
+        // instead of the silent XDP_PASS below, which on a bridged port
+        // forwards with no zone policy. Flat comparisons; no unwrap loop.
         //
-        // Disclosed cost, not an oversight: a single legacy-0x9100 outer
-        // may hide ARP/LLDP the shim never unwraps, so this drops L2 the
-        // old code passed to the kernel on XDP-bound ports. Passing a
-        // shape that cannot be parsed is the hole; dropping it is the
-        // fail-closed posture.
+        // Disclosed cost, not an oversight: a single legacy-TPID outer
+        // (0x9100/0x9200/0x9300) may hide ARP/LLDP the shim never unwraps, so
+        // this drops L2 the old code passed to the kernel on XDP-bound ports.
+        // Passing a shape that cannot be parsed is the hole; dropping it is
+        // the fail-closed posture.
         if is_vlan_tpid(eth_proto) {
             return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_QINQ_DROP);
         }
@@ -1329,9 +1329,9 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
         ETH_P_IP => parse_ipv4(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
         ETH_P_IPV6 => parse_ipv6(data, data_end, vlan_id, vlan_pcp, vlan_present, l3_offset),
         _ => {
-            // #9888: same nested-VLAN drop as the armed path (see
-            // `is_vlan_tpid` for the fail-closed rationale, including the
-            // disclosed single-0x9100-outer cost).
+            // #9888/#10657: same nested/legacy-TPID drop as the armed path
+            // (see `is_vlan_tpid` for the fail-closed rationale, including
+            // the disclosed legacy-outer cost).
             if is_vlan_tpid(eth_proto) {
                 return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_QINQ_DROP);
             }

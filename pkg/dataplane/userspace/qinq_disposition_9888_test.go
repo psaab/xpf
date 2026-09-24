@@ -7,32 +7,32 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// Behavioural coverage for #9888: a double-tagged (QinQ) frame with a
-// complete L2 header must be dropped-and-counted by the shim, never
+// Behavioural coverage for #9888/#10657: nested and legacy-tagged frames with
+// a complete L2 header must be dropped-and-counted by the shim, never
 // XDP_PASSed to the kernel. (A runt truncating inside the tag takes
 // parse_l2's None path and carries no L3 payload, so no transit rides
 // that shape — it is out of this contract.)
 //
 // WHY THIS EXISTS. userspace-xdp/src/lib.rs::parse_l2 unwraps exactly ONE
-// 0x8100/0x88a8 tag, so a double-tagged frame leaves the inner TPID as
-// eth_proto. That is neither ETH_P_IP nor ETH_P_IPV6, so the frame took the
-// non-IP arm (pass_non_ip_l2_direct = XDP_PASS) ABOVE the ingress-ifindex
-// gate — an unadjudicated handoff to the kernel. While ARMED the kernel
-// forward path is deliberately open and unfiltered
-// (pkg/nftables/transit_barrier.go: the forward-hook DROP is scoped strictly
-// to the unarmed window), and on a bridged port the bridge forwards by MAC
-// irrespective of ethertype: zone policy, screens, and session accounting
-// never see the frame. The #5879 gate refuses QinQ CONFIGS, not frames.
+// 0x8100/0x88a8 tag. A nested tag therefore leaves its TPID as eth_proto;
+// 0x9100/0x9200/0x9300 legacy outer tags are never unwrapped. Without
+// recognition, these non-IP shapes took the pass_non_ip_l2_direct XDP_PASS
+// arm ABOVE the ingress-ifindex gate — an unadjudicated handoff to the
+// kernel. While ARMED the kernel forward path is deliberately open and
+// unfiltered (pkg/nftables/transit_barrier.go: the forward-hook DROP is
+// scoped strictly to the unarmed window), and on a bridged port the bridge
+// forwards by MAC irrespective of ethertype: zone policy, screens, and
+// session accounting never see the frame. The #5879 gate refuses QinQ
+// CONFIGS, not frames.
 //
-// THE FIX UNDER TEST. After the single unwrap, an ethertype that is still a
-// VLAN TPID (0x8100/0x88a8 inner, or a 0x9100 outer/inner — 0x9100 is never
-// unwrapped, so it arrives here as the outer ethertype) is an explicit
-// XDP_DROP via drop_degraded_transit with the qinq_drop reason, plus the
-// transit_drop verdict all degraded drops carry. No unwrap loop (the single
-// `if` stays, keeping verifier cost flat). Applied on the armed non-IP arm,
-// its unreachable-by-construction match twin, and the degraded-path non-IP
-// arm, so the invariant is total for complete-L2-header frames: the shim
-// never XDP_PASSes a nested-VLAN frame on any path.
+// THE FIX UNDER TEST. A post-unwrap TPID still in the VLAN set (0x8100/
+// 0x88a8/0x9100/0x9200/0x9300) is an explicit XDP_DROP via
+// drop_degraded_transit with the qinq_drop reason, plus the transit_drop
+// verdict all degraded drops carry. No unwrap loop (the single `if` stays,
+// keeping verifier cost flat). Applied on the armed non-IP arm, its
+// unreachable-by-construction match twin, and the degraded-path non-IP arm,
+// so the invariant is total for complete-L2-header frames: the shim never
+// XDP_PASSes a nested or legacy-tagged VLAN frame on any path.
 //
 // HARNESS. Same BPF_PROG_TEST_RUN surface as xdp_shim_decouple_test.go
 // (loadUserspaceXDPTestCollection + name-based degraded-path stat asserts),
@@ -45,20 +45,23 @@ import (
 // loadUserspaceXDPTestCollection helper, already registered; the census
 // scans call sites, not callers.
 //
-// RED-ON-BASE. Against the pre-fix object every drop cell below fails at the
-// action check: the frame returns XDP_PASS(2) with no reason firing, which
-// is the defect. The unchanged-behaviour controls pass on BOTH objects: they
-// assert shared-baseline counters (slots 0-15, present in both maps)
+// RED-ON-BASE. The #9888 rows fail against their pre-fix object; the #10657
+// 0x9200/0x9300 rows fail against the pre-#10657 object. Each regression
+// fails at the action check: the frame returns XDP_PASS(2), without the
+// qinq_drop reason. The unchanged-behaviour controls pass on BOTH objects:
+// they assert shared-baseline counters (slots 0-15, present in both maps)
 // strictly and read the head-only qinq_drop slot tolerantly —
 // qinqDropCountTolerant treats a missing slot 16 as zero rather than
-// fataling the way the strict helpers do on a lookup error. Measured by
-// swapping in the base object and running the controls alone: all green.
+// fataling the way the strict helpers do on a lookup error. The #10657
+// red is reproduced by using the tracked pre-fix object; controls remain
+// green against it.
 //
-// DISCLOSED COST (see is_vlan_tpid). A single legacy-0x9100 outer may hide
-// ARP/LLDP the shim never unwraps; dropping it fail-closed denies that L2
-// the kernel on XDP-bound ports. Passing an opaque shape unadjudicated on
-// bridged ports is the hole, so the drop stands — but it is a behaviour
-// change for 0x9100-tagged segments, stated here rather than buried.
+// DISCLOSED COST (see is_vlan_tpid). A single legacy-TPID outer
+// (0x9100/0x9200/0x9300) may hide ARP/LLDP the shim never unwraps; dropping
+// it fail-closed denies that L2 to the kernel on XDP-bound ports. Passing
+// an opaque shape unadjudicated on bridged ports is the hole, so the drop
+// stands — but it is a behaviour change for those tagged segments, stated
+// here rather than buried.
 
 // qinqTestPacket builds dst/src MAC + outer TPID/TCI + inner TPID/TCI +
 // inner ethertype + zero body. The body is never parsed: the shim drops at
@@ -155,7 +158,7 @@ func TestUserspaceXDPQinQDoubleTagDropsAndCounts_9888(t *testing.T) {
 		name          string
 		outer, inner  uint16
 		payload       uint16
-		singleTagOnly bool // legacy 0x9100 outer: one tag, never unwrapped
+		singleTagOnly bool // legacy outer: one tag, never unwrapped
 	}{
 		{name: "q-in-q", outer: 0x8100, inner: 0x8100, payload: 0x0800},
 		{name: "ad-over-q", outer: 0x88a8, inner: 0x8100, payload: 0x0800},
@@ -164,6 +167,12 @@ func TestUserspaceXDPQinQDoubleTagDropsAndCounts_9888(t *testing.T) {
 		{name: "legacy-9100-inner", outer: 0x8100, inner: 0x9100, payload: 0x0800},
 		{name: "ad-9100-inner", outer: 0x88a8, inner: 0x9100, payload: 0x0800},
 		{name: "legacy-9100-outer", outer: 0x9100, payload: 0x0800, singleTagOnly: true},
+		{name: "legacy-9200-inner", outer: 0x8100, inner: 0x9200, payload: 0x0800},
+		{name: "ad-9200-inner", outer: 0x88a8, inner: 0x9200, payload: 0x0800},
+		{name: "legacy-9300-inner", outer: 0x8100, inner: 0x9300, payload: 0x0800},
+		{name: "ad-9300-inner", outer: 0x88a8, inner: 0x9300, payload: 0x0800},
+		{name: "legacy-9200-outer", outer: 0x9200, payload: 0x0800, singleTagOnly: true},
+		{name: "legacy-9300-outer", outer: 0x9300, payload: 0x0800, singleTagOnly: true},
 	}
 	for _, sh := range shapes {
 		t.Run(sh.name, func(t *testing.T) {
@@ -262,13 +271,12 @@ func TestUserspaceXDPQinQSingleTagBehaviorUnchanged_9888(t *testing.T) {
 }
 
 func TestUserspaceXDPQinQDegradedPathDrops_9888(t *testing.T) {
-	// The degraded (ctrl-disabled) non-IP arm drops nested-VLAN frames
-	// too. This is fail-closed on a shape the shim cannot adjudicate
-	// (#5879 refuses QinQ configs, so no stacked identity exists) —
-	// including, as a disclosed cost, a single-0x9100 outer that may
-	// hide ARP/LLDP the shim never unwraps. (Degraded ARP PASS is pinned
-	// by TestUserspaceXDPDegradedNonIPL2PassesDirect and is not
-	// re-asserted here.)
+	// The degraded (ctrl-disabled) non-IP arm drops nested and legacy-tagged
+	// VLAN frames too. This is fail-closed on shapes the shim cannot
+	// adjudicate (#5879 refuses QinQ configs, so no stacked identity exists)
+	// — including, as a disclosed cost, single legacy-TPID outers that may
+	// hide ARP/LLDP the shim never unwraps. (Degraded ARP PASS is pinned by
+	// TestUserspaceXDPDegradedNonIPL2PassesDirect and is not re-asserted here.)
 	shapes := []struct {
 		name          string
 		outer, inner  uint16
@@ -279,14 +287,18 @@ func TestUserspaceXDPQinQDegradedPathDrops_9888(t *testing.T) {
 		{name: "ad-over-ad", outer: 0x88a8, inner: 0x88a8, payload: 0x0800},
 		{name: "legacy-9100-inner", outer: 0x8100, inner: 0x9100, payload: 0x0800},
 		{name: "legacy-9100-outer", outer: 0x9100, payload: 0x0800, singleTagOnly: true},
+		{name: "legacy-9200-inner", outer: 0x8100, inner: 0x9200, payload: 0x0800},
+		{name: "ad-9200-inner", outer: 0x88a8, inner: 0x9200, payload: 0x0800},
+		{name: "legacy-9300-inner", outer: 0x8100, inner: 0x9300, payload: 0x0800},
+		{name: "ad-9300-inner", outer: 0x88a8, inner: 0x9300, payload: 0x0800},
+		{name: "legacy-9200-outer", outer: 0x9200, payload: 0x0800, singleTagOnly: true},
+		{name: "legacy-9300-outer", outer: 0x9300, payload: 0x0800, singleTagOnly: true},
 	}
 	for _, sh := range shapes {
 		t.Run(sh.name, func(t *testing.T) {
 			coll := loadUserspaceXDPTestCollection(t)
 			updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
 				Enabled:            0,
-				MetadataVersion:    userspaceMetadataVersion,
-				Workers:            1,
 				QueueCount:         1,
 				HeartbeatTimeoutMS: 30000,
 			})
