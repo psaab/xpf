@@ -755,10 +755,21 @@ would take a box down:
   revoking it on a deny and re-stamping it on a permit (#9519). The stamp is
   still generation-only, for a reason that now holds by construction: only an
   OWNER reaches the re-derivation (`afxdp/poll_descriptor/session_hit_authority.rs`),
-  and an owner arrived in the entry's own zone or over the fabric, which keeps the
-  entry's zone. Every packet that reads or writes the stamp judges from the same
-  from-zone within a generation, so an ifindex in the key would only re-walk
-  terms for a LAG member or an ECMP path in that zone.
+  and an owner arrived in the entry's own zone. A stamped fabric arrival is an
+  owner only when its validated stamp matches that zone; a foreign stamp takes
+  the per-packet arrival-zone verdict, while unstamped overlay retains the
+  #9519 exemption. The validated fabric stamp is carried separately from the
+  new-flow RG-gated override: stamped session hits must still be judged by the
+  peer's arrival zone even when that gate declines the stamp for a new flow.
+  The flow-cache key omits the stamp, and HA validity alone is insufficient
+  for reverse companions: they retain the forward owner's RG even when their
+  cached reverse egress belongs to a locally active RG. #10670 therefore checks
+  a stamped cache candidate against the live session ingress zone before lookup
+  side effects; same-zone hits remain cacheable, while a foreign stamp falls
+  through to this authority check without evicting the owner's descriptor.
+  Every packet that reads or writes the policy stamp therefore judges from the
+  same from-zone within a generation, so an ifindex in the key would only
+  re-walk terms for a LAG member or ECMP path in that zone.
 * **Side-effect freedom is a property of the CALL, not of the type signature.**
   This bullet used to call it structural, saying `evaluate_policy_result_with_icmp`
   "cannot count, log or meter by itself". That was false: the rule and default hit

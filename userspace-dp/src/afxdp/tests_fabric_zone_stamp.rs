@@ -38,22 +38,22 @@ const TEST_CONTROL_ZONE_ID: u16 = 9;
 
 /// The fabric link in `nat_snapshot_with_fabric` (parent ifindex 21) has
 /// local MAC 02:bf:72:ff:00:01; the legitimate peer unicasts the redirect
-/// to it. Build a LAN→WAN TCP SYN frame carrying the zone-encoded stamp
-/// for `zone_id` in the source MAC, addressed to the fabric link's MAC —
-/// byte-identical to what the legitimate sender emits, except the RG
+/// to it. Build a LAN→WAN TCP frame with flags `tcp_flags`, carrying the
+/// zone-encoded stamp for `zone_id` in the source MAC, addressed to the fabric
+/// link's MAC — byte-identical to what the legitimate sender emits, except the
 /// placement decides whether it is legitimate. The destination (8.8.8.8)
 /// resolves via the default route to the fixture's REACHABLE gateway
 /// neighbor (172.16.80.1), so an admitted flow installs a session AND
 /// queues a forward — the two observables the forged-frame pins assert
 /// against (a connected-subnet dst would strand in MissingNeighbor and
 /// make the deny assertions vacuous).
-fn stamped_fabric_frame(zone_id: u16) -> Vec<u8> {
+fn stamped_fabric_frame(zone_id: u16, tcp_flags: u8) -> Vec<u8> {
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
         12345,
         443,
-        TCP_FLAG_SYN,
+        tcp_flags,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     let [hi, lo] = zone_id.to_be_bytes();
@@ -89,7 +89,7 @@ fn forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // Single-primary placement: BOTH RGs forwarding-active locally.
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
-    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID);
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
 
     let mut binding = fabric_binding();
@@ -303,7 +303,7 @@ fn legitimate_fabric_punted_flow_still_admitted_6458() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // Split placement: WAN RG (1) is local; LAN RG (2) is the peer's.
     let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
-    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID);
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
 
     let mut binding = fabric_binding();
@@ -1688,6 +1688,326 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
         sessions.len(),
         1,
         "the imported cross-chassis session must survive"
+    );
+}
+
+/// #10670 fail-on-revert: this receiver has an admitted LAN -> WAN session.
+/// A same-zone stamped ACK models a peer-adjudicated session hit. The
+/// same-tuple ACK stamped `dmz` models a peer-side session-MISS punt in the
+/// split-RG sync-lag window.
+///
+/// This fixture keeps the WAN owner RG locally active so #6458 validates both
+/// stamps and the session path honors the LAN stamp. The HA cache-validity
+/// gate intentionally sends stamped fabric packets through session lookup;
+/// this test pins the authority decision, not a cache hit. The foreign ACK
+/// must be dropped under `dmz -> wan` default-deny without revoking the
+/// owner's session, and a later LAN ACK must still forward. Reverting the
+/// stamped-zone authority judgment makes the foreign ACK forward and reds the
+/// drop assertions.
+#[test]
+fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
+    let forwarding = build_forwarding_state(&frag_stamp_snapshot());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // WAN RG (1) is local. LAN and DMZ are on RG (2), so both zone stamps
+    // validate as peer arrivals.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+
+    let syn = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    let (_batch, admitted) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        txn_meta_v4(21, TCP_FLAG_SYN, syn.len() as u16),
+        true,
+    );
+    assert_eq!(admitted.tx, 1, "the stamped lan -> wan SYN must be admitted");
+    assert_eq!(sessions.len(), 2, "admission must install the session pair");
+
+    let owner_ack = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_ACK);
+    let (_batch, owner) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &owner_ack,
+        txn_meta_v4(21, TCP_FLAG_ACK, owner_ack.len() as u16),
+        true,
+    );
+    assert_eq!(owner.session_hit, 1, "the matching-stamp ACK must hit conntrack");
+    assert_eq!(owner.tx, 1, "the adjudicated-hit forward remains served");
+    assert_eq!(sessions.len(), 2, "the owner session pair remains installed");
+
+    let punted_miss = stamped_fabric_frame(TEST_DMZ_ZONE_ID, TCP_FLAG_ACK);
+    let (_batch, foreign) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &punted_miss,
+        txn_meta_v4(21, TCP_FLAG_ACK, punted_miss.len() as u16),
+        true,
+    );
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz-stamped peer-miss punt must reach the session authority path"
+    );
+    assert_eq!(
+        foreign.foreign_authority_drops, 1,
+        "the owner must evaluate the punt under dmz's default-deny policy, not \
+         trust it as a peer-adjudicated hit"
+    );
+    assert_eq!(foreign.tx, 0, "the unadjudicated punt must not inherit lan's permit");
+    assert_eq!(
+        foreign.policy_revoked_sessions, 0,
+        "a foreign punt is dropped as a packet and cannot revoke the lan session"
+    );
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the unadjudicated punt cannot revoke the owner session pair"
+    );
+    let owner_ack_after_foreign = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_ACK);
+    let (_batch, owner_after_foreign) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &owner_ack_after_foreign,
+        txn_meta_v4(
+            21,
+            TCP_FLAG_ACK,
+            owner_ack_after_foreign.len() as u16,
+        ),
+        true,
+    );
+    assert_eq!(
+        owner_after_foreign.session_hit,
+        1,
+        "the same-zone adjudicated-hit packet still reaches its owner session"
+    );
+    assert_eq!(
+        owner_after_foreign.tx, 1,
+        "a denied foreign punt leaves the admitted owner flow usable"
+    );
+}
+
+/// #10670 fail-on-revert for the reverse cache case: the imported reverse
+/// companion retains its forward owner's RG (2), while this node's reverse
+/// egress is locally active RG (1). The HA cache gate therefore accepts the
+/// same-zone cache hit. A foreign zone stamp on the same tuple must preflight
+/// against the reverse entry's ingress zone and fall through to session
+/// authority instead of replaying that descriptor.
+#[test]
+fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
+    let mut snapshot = frag_stamp_snapshot();
+    for iface in &mut snapshot.interfaces {
+        match iface.ifindex {
+            12 => iface.redundancy_group = 2, // WAN: peer-owned forward egress
+            24 => iface.redundancy_group = 1, // LAN: local reverse egress
+            _ => {}
+        }
+    }
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: "10.0.61.102".to_string(),
+        mac: "00:22:33:44:55:66".to_string(),
+        state: "reachable".to_string(),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let now_ns = monotonic_nanos();
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        src_port: 443,
+        dst_port: 12345,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone: TEST_WAN_ZONE_ID,
+        egress_zone: TEST_LAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        // Reverse companions carry the original forward egress owner RG.
+        owner_rg_id: 2,
+        fabric_ingress: true,
+        is_reverse: true,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 24,
+            tx_ifindex: 24,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+            neighbor_mac: Some([0x00, 0x22, 0x33, 0x44, 0x55, 0x66]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut sessions = SessionTable::new();
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key,
+            decision,
+            metadata,
+            SessionOrigin::SyncImport,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ),
+        "the peer-imported reverse companion must install before cache assertions"
+    );
+    assert_eq!(sessions.len(), 1);
+
+    let reverse_ack = |zone_id: u16| {
+        let mut frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(8, 8, 8, 8),
+            Ipv4Addr::new(10, 0, 61, 102),
+            443,
+            12345,
+            TCP_FLAG_ACK,
+            crate::afxdp::tests_support::TEST_FABRIC_MAC,
+        );
+        let [hi, lo] = zone_id.to_be_bytes();
+        frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+        frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+        frame
+    };
+    let reverse_meta = |frame: &[u8]| {
+        let mut meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&[8, 8, 8, 8]);
+        meta.flow_dst_addr[..4].copy_from_slice(&[10, 0, 61, 102]);
+        meta.flow_src_port = 443;
+        meta.flow_dst_port = 12345;
+        meta
+    };
+
+    let owner_ack = reverse_ack(TEST_WAN_ZONE_ID);
+    let owner_meta = reverse_meta(&owner_ack);
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &owner_ack,
+            owner_meta,
+            &forwarding,
+            &ha_state,
+            now_secs,
+        ),
+        Some(TEST_WAN_ZONE_ID),
+        "the matching remote-RG stamp must be validated"
+    );
+    let mut binding = fabric_binding();
+    let (_batch, owner) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &owner_ack,
+        owner_meta,
+        true,
+    );
+    assert_eq!(owner.session_hit, 1, "the first owner ACK hits the import");
+    assert_eq!(owner.tx, 1, "the adjudicated reverse ACK forwards");
+    assert_eq!(txn_flow_cache_entries(&binding), 1, "the hit seeds its descriptor");
+
+    let (_batch, cached_owner) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &owner_ack,
+        reverse_meta(&owner_ack),
+        true,
+    );
+    assert_eq!(
+        cached_owner.session_hit, 0,
+        "the RG-mismatched reverse companion must prove a real same-zone cache hit"
+    );
+    assert_eq!(cached_owner.tx, 1, "the adjudicated cached ACK still forwards");
+    assert_eq!(binding.flow.flow_cache.hits, 1);
+
+    let punted_miss = reverse_ack(TEST_DMZ_ZONE_ID);
+    let punted_meta = reverse_meta(&punted_miss);
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &punted_miss,
+            punted_meta,
+            &forwarding,
+            &ha_state,
+            now_secs,
+        ),
+        Some(TEST_DMZ_ZONE_ID),
+        "the foreign peer-miss stamp must also be validated"
+    );
+    let (_batch, foreign) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &punted_miss,
+        punted_meta,
+        true,
+    );
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the foreign stamp must fall through the cache to reverse-session authority"
+    );
+    assert_eq!(
+        foreign.foreign_authority_drops, 1,
+        "the punt must be judged under dmz -> lan default-deny"
+    );
+    assert_eq!(foreign.tx, 0, "the punt cannot inherit the peer-adjudicated cache permit");
+    assert_eq!(foreign.policy_revoked_sessions, 0);
+    assert_eq!(sessions.len(), 1, "a foreign punt cannot revoke the imported entry");
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        1,
+        "the foreign stamp must not evict the matching-zone reverse descriptor"
+    );
+    assert_eq!(
+        binding.flow.flow_cache.hits, 1,
+        "the foreign stamp must not be accounted as a served cache hit"
+    );
+
+    let (_batch, owner_after_foreign) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &owner_ack,
+        reverse_meta(&owner_ack),
+        true,
+    );
+    assert_eq!(owner_after_foreign.session_hit, 0);
+    assert_eq!(owner_after_foreign.tx, 1);
+    assert_eq!(
+        binding.flow.flow_cache.hits, 2,
+        "the same-zone reverse cache entry remains usable after the punt"
     );
 }
 

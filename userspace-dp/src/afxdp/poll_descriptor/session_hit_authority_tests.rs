@@ -113,12 +113,26 @@ fn a_packet_from_another_zone_is_foreign_9519() {
     let fw = forwarding(false);
     let lan = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
     assert_eq!(
-        session_hit_authority(&fw, &lan, SessionOrigin::ForwardFlow, arrival(LAN_A, 0), false),
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::ForwardFlow,
+            arrival(LAN_A, 0),
+            false,
+            None,
+        ),
         HitAuthority::Owner,
         "control: the admitting interface in the admitting zone is the owner"
     );
     assert_eq!(
-        session_hit_authority(&fw, &lan, SessionOrigin::ForwardFlow, arrival(DMZ, 0), false),
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::ForwardFlow,
+            arrival(DMZ, 0),
+            false,
+            None,
+        ),
         foreign(TEST_DMZ_ZONE_ID, false),
         "the same tuple from a dmz interface did not come from the zone that \
          admitted the session, and must be judged as dmz's (#9519)"
@@ -126,21 +140,60 @@ fn a_packet_from_another_zone_is_foreign_9519() {
 }
 
 #[test]
-fn fabric_ingress_is_exempt_9519() {
+fn unstamped_fabric_ingress_remains_exempt_9519() {
     let fw = forwarding(false);
     let lan = session(TEST_LAN_ZONE_ID, 0, 0, false);
     assert_eq!(
-        session_hit_authority(&fw, &lan, SessionOrigin::SyncImport, arrival(DMZ, 0), false),
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::SyncImport,
+            arrival(DMZ, 0),
+            false,
+            None,
+        ),
         foreign(TEST_DMZ_ZONE_ID, false),
         "control: without the fabric flag this arrival is foreign, or the \
          exemption below is asserting nothing"
     );
     assert_eq!(
-        session_hit_authority(&fw, &lan, SessionOrigin::SyncImport, arrival(DMZ, 0), true),
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::SyncImport,
+            arrival(DMZ, 0),
+            true,
+            None,
+        ),
         HitAuthority::Owner,
-        "a fabric-ingress packet arrives on the fabric link, whose zone is \
-         structurally not the flow's. Judging it by that zone drops every \
-         cross-chassis session — TCP death on failback (#9519, as #7169/#9384)"
+        "unstamped fabric overlay has no arrival identity to judge and keeps \
+         the #9519 exemption"
+    );
+    assert_eq!(
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::SyncImport,
+            arrival(DMZ, 0),
+            true,
+            Some(TEST_LAN_ZONE_ID),
+        ),
+        HitAuthority::Owner,
+        "a peer session hit is adjudicated under the session's zone; its \
+         same-zone stamp remains an owner arrival"
+    );
+    assert_eq!(
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::SyncImport,
+            arrival(DMZ, 0),
+            true,
+            Some(TEST_DMZ_ZONE_ID),
+        ),
+        foreign(TEST_DMZ_ZONE_ID, false),
+        "a peer-side session miss is punted without adjudication; its foreign \
+         zone stamp must be judged on the owner rather than trusted as a hit"
     );
 }
 
@@ -149,7 +202,14 @@ fn a_second_interface_in_the_admitting_zone_is_an_owner_9519() {
     let fw = forwarding(false);
     let lan = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
     assert_eq!(
-        session_hit_authority(&fw, &lan, SessionOrigin::ForwardFlow, arrival(LAN_B, 0), false),
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::ForwardFlow,
+            arrival(LAN_B, 0),
+            false,
+            None,
+        ),
         HitAuthority::Owner,
         "authority is the ZONE, not the interface: a LAG member, an ECMP path or \
          another unit in the same zone must keep forwarding (#9519)"
@@ -161,7 +221,14 @@ fn a_re_zoned_admitting_interface_is_foreign_but_may_revoke_9519() {
     let fw = forwarding(true);
     let lan = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
     assert_eq!(
-        session_hit_authority(&fw, &lan, SessionOrigin::ForwardFlow, arrival(LAN_A, 0), false),
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::ForwardFlow,
+            arrival(LAN_A, 0),
+            false,
+            None,
+        ),
         foreign(TEST_DMZ_ZONE_ID, true),
         "the admitting interface was moved to dmz by a commit: its packets are \
          judged as dmz's, and — being the session's OWN interface — may revoke \
@@ -175,7 +242,7 @@ fn a_re_zoned_admitting_interface_is_foreign_but_may_revoke_9519() {
         SessionOrigin::ReverseFlow,
     ] {
         assert_eq!(
-            session_hit_authority(&fw, &lan, origin, arrival(LAN_A, 0), false),
+            session_hit_authority(&fw, &lan, origin, arrival(LAN_A, 0), false, None),
             foreign(TEST_DMZ_ZONE_ID, false),
             "an entry whose ingress_ifindex was not stamped from THIS node's frame \
              ({origin:?}) cannot prove the packet came in on its admitting \
@@ -191,12 +258,26 @@ fn a_peer_ifindex_that_collides_with_a_local_one_confers_nothing_9519() {
     // interface at an ifindex this node uses for reth1.0 (lan).
     let import = session(TEST_WAN_ZONE_ID, LAN_A, 0, false);
     assert_eq!(
-        session_hit_authority(&fw, &import, SessionOrigin::SyncImport, arrival(WAN, 0), false),
+        session_hit_authority(
+            &fw,
+            &import,
+            SessionOrigin::SyncImport,
+            arrival(WAN, 0),
+            false,
+            None,
+        ),
         HitAuthority::Owner,
         "control: the import's packets arriving in wan here are its owner"
     );
     assert_eq!(
-        session_hit_authority(&fw, &import, SessionOrigin::SyncImport, arrival(LAN_A, 0), false),
+        session_hit_authority(
+            &fw,
+            &import,
+            SessionOrigin::SyncImport,
+            arrival(LAN_A, 0),
+            false,
+            None,
+        ),
         foreign(TEST_LAN_ZONE_ID, false),
         "a lan packet on the local interface whose ifindex happens to equal the \
          peer's must be foreign and must NOT qualify to revoke (#9519)"
@@ -208,12 +289,26 @@ fn a_vlan_unit_is_judged_by_its_own_zone_9519() {
     let fw = forwarding(false);
     let unit = session(TEST_LAN_ZONE_ID, TRUNK, LAN_VLAN, false);
     assert_eq!(
-        session_hit_authority(&fw, &unit, SessionOrigin::ForwardFlow, arrival(TRUNK, LAN_VLAN), false),
+        session_hit_authority(
+            &fw,
+            &unit,
+            SessionOrigin::ForwardFlow,
+            arrival(TRUNK, LAN_VLAN),
+            false,
+            None,
+        ),
         HitAuthority::Owner,
         "control: the lan unit's own VLAN is the owner"
     );
     assert_eq!(
-        session_hit_authority(&fw, &unit, SessionOrigin::ForwardFlow, arrival(TRUNK, DMZ_VLAN), false),
+        session_hit_authority(
+            &fw,
+            &unit,
+            SessionOrigin::ForwardFlow,
+            arrival(TRUNK, DMZ_VLAN),
+            false,
+            None,
+        ),
         foreign(TEST_DMZ_ZONE_ID, false),
         "the dmz unit on the SAME trunk is a different zone. Resolving the \
          physical port instead of the logical unit would answer the trunk's \
@@ -227,12 +322,26 @@ fn a_reply_is_an_owner_only_from_the_zone_the_flow_went_to_9519() {
     let fw = forwarding(false);
     let reverse = session(TEST_WAN_ZONE_ID, 0, 0, true);
     assert_eq!(
-        session_hit_authority(&fw, &reverse, SessionOrigin::ReverseFlow, arrival(WAN, 0), false),
+        session_hit_authority(
+            &fw,
+            &reverse,
+            SessionOrigin::ReverseFlow,
+            arrival(WAN, 0),
+            false,
+            None,
+        ),
         HitAuthority::Owner,
         "control: the reply from wan, where the flow went, is the owner"
     );
     assert_eq!(
-        session_hit_authority(&fw, &reverse, SessionOrigin::ReverseFlow, arrival(DMZ, 0), false),
+        session_hit_authority(
+            &fw,
+            &reverse,
+            SessionOrigin::ReverseFlow,
+            arrival(DMZ, 0),
+            false,
+            None,
+        ),
         foreign(TEST_DMZ_ZONE_ID, false),
         "a reply must come back from where the flow went — #7169's rule for the \
          reverse fallback, now on the direct reverse hit (#9519)"
@@ -244,7 +353,14 @@ fn an_arrival_that_resolves_to_no_zone_is_foreign_9519() {
     let fw = forwarding(false);
     let lan = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
     assert_eq!(
-        session_hit_authority(&fw, &lan, SessionOrigin::ForwardFlow, arrival(NOT_CONFIGURED, 0), false),
+        session_hit_authority(
+            &fw,
+            &lan,
+            SessionOrigin::ForwardFlow,
+            arrival(NOT_CONFIGURED, 0),
+            false,
+            None,
+        ),
         foreign(0, false),
         "an arrival the box puts in no zone cannot be the lan session's owner; it \
          is judged as a zone-0 arrival, which policy refuses to match (#3110)"

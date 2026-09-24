@@ -533,6 +533,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     ingress_zone_override,
                     packet_fabric_ingress,
                 } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
+                // #10670: preserve the validated #6458 stamp for session-hit
+                // authority. New-flow policy uses a separate RG-gated copy;
+                // a session hit must still judge the peer's claimed arrival
+                // zone when that new-flow gate declines the stamp.
+                let fabric_arrival_zone = if packet_fabric_ingress {
+                    ingress_zone_override
+                } else {
+                    None
+                };
                 // #7160 (#2387) stage 9b: stamp the flow's ROUTING DOMAIN.
                 //
                 // THE single site that populates `SessionKey.routing_domain`
@@ -1133,6 +1142,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         meta,
                         flow,
                         packet_fabric_ingress,
+                        fabric_arrival_zone,
                         fabric_link_ingress,
                         validation,
                         sessions,
@@ -1282,19 +1292,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         telemetry.counters.session_hits += 1;
                         telemetry.dbg.session_hit += 1;
-                        // #9519: may THIS packet act for the session it hit? A
-                        // session belongs to the zone that admitted it. A packet
-                        // from another zone is FOREIGN: it is judged by its own
-                        // zone's policy below and may not revoke, re-stamp,
-                        // tear down or cache the entry — except from the
-                        // session's own admitting interface, which only a commit
-                        // can have moved (#9384). See `session_hit_authority.rs`.
+                        // #9519/#10670: may THIS packet act for the session it
+                        // hit? A session belongs to the zone that admitted it.
+                        // Direct arrivals resolve their live zone; a stamped
+                        // fabric arrival uses its validated peer-zone stamp.
+                        // A different zone is FOREIGN: it is judged by its own
+                        // policy below and may not revoke, re-stamp, tear down
+                        // or cache the entry — except from the session's own
+                        // admitting interface, which only a commit can have
+                        // moved (#9384). Unstamped overlay fabric has no arrival
+                        // identity and retains the #9519 exemption.
                         let (foreign_arrival_zone, may_revoke) = match session_hit_authority(
                             worker_ctx.forwarding,
                             &resolved.metadata,
                             resolved.origin,
                             meta,
                             packet_fabric_ingress,
+                            fabric_arrival_zone,
                         ) {
                             HitAuthority::Owner => (None, true),
                             HitAuthority::Foreign {
@@ -1952,8 +1966,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // gates below enforce arrival-zone authority
                         // (`foreign_hit_verdict`). Skipping both for a foreign
                         // packet would admit unauthenticated spoofs no WG
-                        // decap ever validated. Legitimate replies always
-                        // arrive via tunnel decap (tunnel/fabric zone = Owner).
+                        // decap ever validated. Legitimate replies arrive via
+                        // tunnel decap or a fabric stamp that matches the
+                        // reverse session's recorded ingress zone; an
+                        // unstamped overlay retains the #9519 exemption.
                         let solicited_exempt = foreign_arrival_zone.is_none()
                             && resolved.metadata.is_reverse
                             && resolved.decision.resolution.disposition

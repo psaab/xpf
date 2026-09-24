@@ -787,6 +787,23 @@ impl SessionTable {
         record.entry.metadata.policy_counter.as_ref()
     }
 
+    /// #10670: validate a stamped fabric cache candidate without cloning its
+    /// session metadata. `None` means absent or idle-expired; `Some(false)`
+    /// means live in another zone; `Some(true)` means live in `arrival_zone`.
+    #[inline]
+    pub(crate) fn live_ingress_zone_matches_at(
+        &self,
+        key: &SessionKey,
+        now_ns: u64,
+        arrival_zone: u16,
+    ) -> Option<bool> {
+        let entry = self.entry_by_key(key)?;
+        if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
+            return None;
+        }
+        Some(entry.metadata.ingress_zone == arrival_zone)
+    }
+
     pub fn entry_with_origin(
         &self,
         key: &SessionKey,
