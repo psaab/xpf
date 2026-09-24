@@ -539,23 +539,25 @@ pub(super) fn retry_pending_neigh(
                 })
                 .unwrap_or(crate::fragment_overlap::OverlapParse::Unreadable)
         {
-            // Routing domain from the same SSOT as session keys (the buffered
-            // flow's stamped value when present, else the identical ingress
-            // expression) so flow-backed and flowless agree by construction. A
-            // deferred packet is never a fabric ingress (the fabric redirect
-            // path forwards immediately and never buffers), so no zone override.
-            okey.routing_domain = pkt
-                .flow_key
-                .as_ref()
-                .map(|f| f.routing_domain)
-                .unwrap_or_else(|| {
-                    crate::afxdp::forwarding::ingress_routing_domain(
-                        forwarding,
-                        pkt.meta.ingress_ifindex as i32,
-                        pkt.meta.ingress_vlan_id,
-                        None,
-                    )
-                });
+            // Routing domain from the ingress SSOT unconditionally — the same
+            // expression the inline hook falls back to when `flow` is None, which
+            // is every fragment (#2344). The buffered `flow_key` is NOT a safe
+            // substitute: a parked first fragment carries the meta-fallback key
+            // (`parse_session_flow_from_meta`), which stamps `routing_domain: 0`,
+            // while its inline sibling keys under the tenant's domain — preferring
+            // the buffered value would miss the overlap in any multi-domain
+            // deployment. Real flows need no preference either: stage 9b stamped
+            // their domain from this same expression. No fabric zone override is
+            // available at retry (`PendingNeighPacket` carries no fabric stamp):
+            // a fabric-ingress fragment that parks keys here under the fabric
+            // link's domain rather than its encoded zone's, a known residual for
+            // that corner only.
+            okey.routing_domain = crate::afxdp::forwarding::ingress_routing_domain(
+                forwarding,
+                pkt.meta.ingress_ifindex as i32,
+                pkt.meta.ingress_vlan_id,
+                None,
+            );
             let mut pre_overlap = forwarding
                 .nat64
                 .frag_overlap
