@@ -229,6 +229,68 @@ fn legitimate_fabric_punted_host_inbound_still_admitted_6458() {
     );
 }
 
+/// #10645: the split-RG host-inbound punt above must evaluate under the
+/// CLAIMED zone (wan), not zone 0. The punt targets reth1.0's 10.0.61.1 —
+/// a /24 interface address, so the pre-fix miss path attributed
+/// local_ifindex 0, owner-RG attribution collapsed, and the #6458 gate
+/// stripped the fabric stamp: the packet then evaluated at zone 0 into
+/// the `None => true` admit, and the admit-cell above passed while
+/// claiming wan-zone evaluation. Restrict wan host-inbound to ping-only:
+/// a genuine wan evaluation must now DENY this SSH probe, while a zone-0
+/// evaluation would still admit it. RED pre-fix (session cached), GREEN
+/// post-fix (dropped, nothing cached).
+#[test]
+fn split_rg_host_inbound_punt_evaluates_under_the_claimed_zone_10645() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    for zone in snapshot.zones.iter_mut() {
+        if zone.id == TEST_WAN_ZONE_ID {
+            zone.host_inbound_system_services = vec!["ping".to_string()];
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Split placement: LAN RG (2) is local; WAN RG (1) is the peer's — the
+    // legitimate punt shape, so the stamp validates and the only question
+    // is which zone judges the host-inbound admission.
+    let ha_state = BTreeMap::from([(2, active_rg(now_secs))]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(10, 0, 61, 1),
+        43210,
+        22,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(
+        sessions.len(),
+        0,
+        "wan admits ping only: an SSH probe evaluated under the claimed wan \
+         zone must be denied. A cached session here means the stamp was \
+         stripped and the packet evaluated at zone 0 into the admit-all."
+    );
+    assert!(
+        binding.scratch.scratch_recycle.contains(&128),
+        "the zone-denied probe must be dropped"
+    );
+}
+
 /// #6458 preservation pin, split-RG active/active: the LAN RG (2) primary
 /// is the PEER, the WAN RG (1) primary is US. The peer legitimately punts
 /// a LAN→WAN new flow across the fabric stamped `lan`; the stamp
