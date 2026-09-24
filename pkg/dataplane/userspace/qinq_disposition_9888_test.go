@@ -209,9 +209,10 @@ func TestUserspaceXDPQinQDoubleTagDropsAndCounts_9888(t *testing.T) {
 }
 
 func TestUserspaceXDPQinQSingleTagBehaviorUnchanged_9888(t *testing.T) {
-	// Single-tagged ARP still takes the plain XDP_PASS: the QinQ predicate
-	// tests the POST-unwrap ethertype, and a single tag unwraps to ARP.
-	for _, tpid := range []uint16{0x8100, 0x88a8} {
+	// Single C-tagged ARP still takes plain XDP_PASS: the QinQ predicate
+	// tests post-unwrap ethertype, and one tag unwraps to ARP. S-tags are
+	// explicit drops under #10655; paired S-tag cells live in their own file.
+	for _, tpid := range []uint16{0x8100} {
 		coll := loadUserspaceXDPTestCollection(t)
 		updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
 			Enabled:            1,
@@ -233,14 +234,13 @@ func TestUserspaceXDPQinQSingleTagBehaviorUnchanged_9888(t *testing.T) {
 		assertQinqDropAbsentTolerant(t, coll, "single-tagged ARP")
 	}
 
-	// Single-tagged IPv4 UDP still steers to the userspace helper, for
-	// both recognized outer TPIDs. The XSK map is empty in the fixture,
-	// so the redirect errors — measured on the base object as ret=XDP_DROP
-	// with redirect_err + transit_drop, the same disposition an untagged
-	// transit frame produces — and crucially the frame is NOT accounted
-	// as a QinQ drop. The 0x88a8 twin guards a predicate that tested the
-	// outer ethertype instead of the post-unwrap one.
-	for _, tpid := range []uint16{0x8100, 0x88a8} {
+	// Single C-tagged IPv4 UDP still steers to the userspace helper. The
+	// XSK map is empty in the fixture, so the redirect errors — measured
+	// as XDP_DROP with redirect_err + transit_drop, the same disposition
+	// as an untagged transit frame — and it is NOT a QinQ drop. S-tags now
+	// have their own explicit drop disposition (#10655), covered by the
+	// S-tag cells in stag_disposition_10655_test.go.
+	for _, tpid := range []uint16{0x8100} {
 		coll := loadUserspaceXDPTestCollection(t)
 		updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
 			Enabled:            1,
