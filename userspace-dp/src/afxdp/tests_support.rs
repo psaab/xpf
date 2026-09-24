@@ -685,6 +685,7 @@ pub(super) fn icmpv6_te_match_fixture(
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     }
