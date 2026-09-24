@@ -446,24 +446,62 @@ pub(super) struct SessionHitPbrRouteRevalidation {
 /// the endpoint id (the tunnel resolver maps the outer disposition onto the
 /// endpoint), so the id alone cannot pin — the fresh disposition must be
 /// forwardable. `MissingNeighbor` pins (transient outer ARP/NDP; the
-/// non-tunneled path likewise never revokes on neighbor state), as does a
-/// symmetric served-local outcome (the `LocalDelivery`+tunnel-id shape the
-/// miss stamp matrix pins). Either direction of a local<->forward transition
-/// revokes (different egress behavior, not a steady state). Pure so the matrix
-/// is unit-testable.
+/// non-tunneled path likewise never revokes on neighbor state). A symmetric
+/// served-local outcome pins regardless of id: the fresh local arms
+/// hard-stamp tunnel id 0 (`fib.rs`) while a stored tunnel-interface local
+/// (NAT/interface-local on the tunnel netdev) may carry the endpoint id, so
+/// requiring id equality would revoke a steady local flow on EVERY
+/// generation bump. Either direction of a local<->forward transition revokes
+/// (different egress behavior, not a steady state). The endpoint id is
+/// config-assigned and can be temporally reused across commits, so the live
+/// egress must still be the stored egress when both sides name one —
+/// otherwise the pin would span an id re-homing that `session_glue` gates to
+/// `NoRoute` (#1873), a standing blackhole until GC. A stored dead-underlay
+/// `NoRoute` heals onto a live `ForwardCandidate` without teardown, matching
+/// the `MissingNeighbor`-healing precedent and the native path (which never
+/// revokes on underlay flaps) — only healing pins, a fresh `NoRoute` still
+/// revokes. Pure so the matrix is unit-testable.
 fn tunneled_hit_stays_pinned(
     stored: ForwardingResolution,
     fresh: ForwardingResolution,
 ) -> bool {
-    fresh.tunnel_endpoint_id == stored.tunnel_endpoint_id
-        && ((matches!(
-            fresh.disposition,
-            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
-        ) && matches!(
-            stored.disposition,
-            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
-        )) || (fresh.disposition == ForwardingDisposition::LocalDelivery
-            && stored.disposition == ForwardingDisposition::LocalDelivery))
+    // Symmetric served-local pins regardless of id (see doc above): the
+    // fresh local arms cannot produce a tunnel id, so any stored id beside a
+    // fresh local is a steady tunnel-interface local, not a retarget.
+    if stored.disposition == ForwardingDisposition::LocalDelivery
+        && fresh.disposition == ForwardingDisposition::LocalDelivery
+    {
+        return true;
+    }
+    if fresh.tunnel_endpoint_id != stored.tunnel_endpoint_id {
+        return false;
+    }
+    // #1873-mirror: a live tunneled resolution carries the owning netdev's
+    // logical ifindex as its egress, so a same-id fresh egress that names a
+    // DIFFERENT netdev is a temporally re-owned id, not a steady state —
+    // revoke so the flow re-misses onto the new tunnel instead of pinning a
+    // session `session_glue` gates to `NoRoute`. Either side unnamed (0)
+    // skips the check, matching the `#1873` guard's own `<= 0` arm.
+    if fresh.egress_ifindex > 0
+        && stored.egress_ifindex > 0
+        && fresh.egress_ifindex != stored.egress_ifindex
+    {
+        return false;
+    }
+    // Stored dead-underlay healing onto a live outer pins (see doc above);
+    // every other stored-`NoRoute` shape falls through to revoke.
+    if stored.disposition == ForwardingDisposition::NoRoute
+        && fresh.disposition == ForwardingDisposition::ForwardCandidate
+    {
+        return true;
+    }
+    matches!(
+        fresh.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) && matches!(
+        stored.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    )
 }
 
 pub(super) fn revalidate_static_pbr_route_on_session_hit(
