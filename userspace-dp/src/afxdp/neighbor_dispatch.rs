@@ -508,6 +508,115 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
+        // #10659 (residual of #9950 F-035): retry-time overlap re-check. A
+        // fragment admitted via the MissingNeighbor park-and-retry path was
+        // transmitted here without planting its range in the overlap tracker
+        // (`PendingNeighPacket` carries no admission and both TX builders below
+        // used `overlap_admissions: None`), so a later overlapping fragment of
+        // the same datagram was admitted — #9950's "denied in both fragment
+        // orders" failed when the head parked. Re-parse the geometry from the
+        // buffered frame (the park plants nothing, so this record cannot
+        // self-collide) and record it exactly like the ForwardCandidate
+        // post-commit hook (`poll_descriptor/mod.rs`): pre-translation range
+        // plus the translated re-check. A drop recycles + continues BEFORE
+        // CoS/mirror, mirroring the forward path's pre-accounting drop; an
+        // admission rides the TX request below and is committed by the queue
+        // service on TX accept (or RAII-failed on any later drop, pinning the
+        // ranges as protection until TTL — the same lifecycle as the forward
+        // queue's reservations).
+        let mut retry_overlap_admissions_10659: Option<
+            crate::fragment_overlap::OverlapAdmissionTokens,
+        > = None;
+        if let crate::fragment_overlap::OverlapParse::Fragment(mut okey, start, end, is_last) =
+            source_frame
+                .get(verified_l3_or_stamp(
+                    source_frame,
+                    pkt.meta.l3_offset,
+                    pkt.meta.addr_family,
+                )..)
+                .map(|l3| {
+                    crate::fragment_overlap::overlap_parse(l3, pkt.meta.addr_family as i32)
+                })
+                .unwrap_or(crate::fragment_overlap::OverlapParse::Unreadable)
+        {
+            // Routing domain from the same SSOT as session keys (the buffered
+            // flow's stamped value when present, else the identical ingress
+            // expression) so flow-backed and flowless agree by construction. A
+            // deferred packet is never a fabric ingress (the fabric redirect
+            // path forwards immediately and never buffers), so no zone override.
+            okey.routing_domain = pkt
+                .flow_key
+                .as_ref()
+                .map(|f| f.routing_domain)
+                .unwrap_or_else(|| {
+                    crate::afxdp::forwarding::ingress_routing_domain(
+                        forwarding,
+                        pkt.meta.ingress_ifindex as i32,
+                        pkt.meta.ingress_vlan_id,
+                        None,
+                    )
+                });
+            let mut pre_overlap = forwarding
+                .nat64
+                .frag_overlap
+                .check_and_record_fragment_detailed(
+                    okey,
+                    start,
+                    end,
+                    is_last,
+                    now_ns,
+                    &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                );
+            let pre_admission = pre_overlap.admission.take();
+            let pre_overlap_dropped = pre_overlap.dropped;
+            counters.record_frag_overlap_result(pre_overlap, false);
+            if pre_overlap_dropped {
+                binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                continue;
+            }
+            let egress_domain = if forwarding.has_routing_domains {
+                forwarding
+                    .ifindex_to_routing_domain
+                    .get(&decision.resolution.egress_ifindex)
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let frag_overlap = forwarding.nat64.frag_overlap.clone();
+            let mut admissions = crate::fragment_overlap::OverlapAdmissionTokens::new(
+                frag_overlap.clone(),
+                pre_admission,
+                None,
+            );
+            if let Some(post_key) = crate::fragment_overlap::translated_overlap_key(
+                &okey,
+                &decision.nat,
+                egress_domain,
+            ) {
+                if post_key != okey {
+                    let mut post_overlap = forwarding
+                        .nat64
+                        .frag_overlap
+                        .check_and_record_fragment_detailed(
+                            post_key,
+                            start,
+                            end,
+                            is_last,
+                            now_ns,
+                            &crate::fragment_overlap::FRAG_OVERLAP_POST_NAT_DROPPED,
+                        );
+                    admissions.post = post_overlap.admission.take();
+                    let post_overlap_dropped = post_overlap.dropped;
+                    counters.record_frag_overlap_result(post_overlap, true);
+                    if post_overlap_dropped {
+                        binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                        continue;
+                    }
+                }
+            }
+            retry_overlap_admissions_10659 = Some(admissions);
+        }
         // #2362 fold B: this is the ARP/NDP-resolved retransmit of a real
         // buffered transit frame — build the fragment-safe per-packet match
         // inputs from that frame so an output filter's tcp-flags / is-fragment /
@@ -635,7 +744,7 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
-        let req = PreparedTxRequest {
+        let mut req = PreparedTxRequest {
             offset: rewrite_result.offset,
             len: rewrite_result.len,
             recycle: PreparedTxRecycle::fill_on_slot(
@@ -651,7 +760,7 @@ pub(super) fn retry_pending_neigh(
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,
             mirror_clone: false,
-            overlap_admissions: None,
+            overlap_admissions: retry_overlap_admissions_10659.take(),
             enqueue_ns: 0,
         };
         if target_idx == binding_index {
@@ -709,7 +818,7 @@ pub(super) fn retry_pending_neigh(
                     cos_queue_id: req.cos_queue_id,
                     dscp_rewrite: req.dscp_rewrite,
                     mirror_clone: req.mirror_clone,
-                    overlap_admissions: None,
+                    overlap_admissions: req.overlap_admissions.take(),
                     enqueue_ns: req.enqueue_ns,
                 });
                 target.tx_counters.neighbor_retry_cross_umem_copies += 1;
