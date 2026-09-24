@@ -7090,6 +7090,125 @@ fn app_term_exact_listed_before_range_wins() {
         Some(Some(200))
     );
 }
+// ===========================================================================
+// #10649: port-range boundary cells — the range UPPER endpoint is load-bearing
+// (`port_ranges_match`: `port >= low && port <= high`), but the evaluator's
+// tests sampled interior points only (ports 80/85 of 80-90 above), so mutant
+// M9 (drop the `port <= high` conjunct) reddened nothing. These cells pin the
+// range endpoints so M9 reds.
+// ===========================================================================
+
+#[test]
+fn app_term_range_endpoints_are_inclusive_10649() {
+    // Range 80-90: both endpoints match (inclusive), the neighbors do not.
+    // RED-on-revert (M9): drop `port <= high` and 91 matches → 200, not None.
+    let apps = vec![range_app(80, 90, Some(200))];
+    let compiled = CompiledApplications::from_matches(&apps);
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 80, None, true),
+        Some(Some(200)),
+        "range lower endpoint is inclusive"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 90, None, true),
+        Some(Some(200)),
+        "range upper endpoint is inclusive"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 85, None, true),
+        Some(Some(200)),
+        "range interior still matches (anchor)"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 79, None, true),
+        None,
+        "port below the range must not match"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 91, None, true),
+        None,
+        "port above the range must not match (M9: unguarded upper)"
+    );
+}
+
+#[test]
+fn app_term_abutting_ranges_split_at_boundary_10649() {
+    // Abutting ranges 80-90 / 91-100: the boundary ports resolve to their own
+    // term, and ports outside both match nothing.
+    // RED-on-revert (M9): without the upper check the FIRST term (80-…) also
+    // matches 91-100 and 101+, so 91 returns 200 (not 300) and 101 returns 200
+    // (not None).
+    let apps = vec![
+        range_app(80, 90, Some(200)),
+        range_app(91, 100, Some(300)),
+    ];
+    let compiled = CompiledApplications::from_matches(&apps);
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 90, None, true),
+        Some(Some(200)),
+        "upper edge of the first abutting range matches the first term"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 91, None, true),
+        Some(Some(300)),
+        "lower edge of the second abutting range matches the second term"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 79, None, true),
+        None,
+        "port below both ranges must not match"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 12345, 101, None, true),
+        None,
+        "port above both ranges must not match (M9: unguarded upper)"
+    );
+}
+
+#[test]
+fn app_term_single_port_range_matches_only_that_port_10649() {
+    // A low==high range through the RANGE path (a source constraint keeps this
+    // out of the exact-port fast path, which requires empty source_ports):
+    // only dst 80 matches. The source slot pins the shared helper's upper
+    // endpoint too (src 2000 in, 2001 out).
+    // RED-on-revert (M9): drop `port <= high` and dst 81 (or src 2001) matches.
+    let app = ApplicationMatch {
+        protocol: PROTO_TCP,
+        source_ports: vec![PortRange { low: 1000, high: 2000 }],
+        destination_ports: vec![PortRange { low: 80, high: 80 }],
+        icmp_type: None,
+        icmp_code: None,
+        inactivity_timeout: Some(200),
+    };
+    let apps = vec![app];
+    let compiled = CompiledApplications::from_matches(&apps);
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 1500, 80, None, true),
+        Some(Some(200)),
+        "single-port range matches its own port (anchor)"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 1500, 79, None, true),
+        None,
+        "port below a single-port range must not match"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 1500, 81, None, true),
+        None,
+        "port above a single-port range must not match (M9: unguarded upper)"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 2000, 80, None, true),
+        Some(Some(200)),
+        "source-range upper endpoint is inclusive"
+    );
+    assert_eq!(
+        compiled.matches(PROTO_TCP, 2001, 80, None, true),
+        None,
+        "source port above the range must not match (M9: unguarded upper)"
+    );
+}
+
 
 #[test]
 fn app_term_icmp_constrained_before_all_icmp_wins() {
