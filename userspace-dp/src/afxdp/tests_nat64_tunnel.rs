@@ -130,7 +130,8 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    });
+    
+    ..Default::default()});
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);

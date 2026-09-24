@@ -796,7 +796,8 @@ pub(super) fn run_input_filter_accept_log_poll(
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    }];
+    
+    ..Default::default()}];
     snapshot.routes = vec![RouteSnapshot {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
@@ -2699,7 +2700,8 @@ pub(super) fn inbound_dnat_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsho
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    });
+    
+    ..Default::default()});
     // Replace the default lan->wan permit with the caller's wan->lan rule
     // so the only policy that can match the inbound flow is the one under
     // test (default-policy stays deny).
@@ -2757,7 +2759,8 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    });
+    
+    ..Default::default()});
     snapshot.policies = vec![policy];
     snapshot
 }
@@ -2971,7 +2974,8 @@ pub(super) fn frag_transit_wan_neighbor() -> NeighborSnapshot {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    }
+    
+    ..Default::default()}
 }
 
 

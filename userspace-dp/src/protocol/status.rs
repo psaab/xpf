@@ -20,6 +20,9 @@ use super::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ProcessStatus {
+    // #10647: every field carries `default` so a legacy `{}` payload decodes
+    // (additive wire evolution). `pid` never had one; the roundtrip cell pins it.
+    #[serde(default)]
     pub pid: i32,
     #[serde(rename = "config_snapshot_protocol_version", default)]
     pub config_snapshot_protocol_version: i32,

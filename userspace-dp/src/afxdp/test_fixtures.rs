@@ -178,7 +178,8 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                     state: "reachable".to_string(),
                     router: true,
                     link_local: false,
-                },
+                
+                ..Default::default()},
                 NeighborSnapshot {
                     interface: "ge-0-0-0.50".to_string(),
                     ifindex: 12,
@@ -188,7 +189,8 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                     state: "reachable".to_string(),
                     router: true,
                     link_local: false,
-                },
+                
+                ..Default::default()},
             ]
         } else {
             vec![]
@@ -310,7 +312,8 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 state: "reachable".to_string(),
                 router: true,
                 link_local: false,
-            }]
+            
+            ..Default::default()}]
         } else {
             vec![]
         },
@@ -637,7 +640,8 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                     state: "reachable".to_string(),
                     router: true,
                     link_local: false,
-                },
+                
+                ..Default::default()},
                 NeighborSnapshot {
                     interface: "ge-0-0-0.50".to_string(),
                     ifindex: 12,
@@ -647,7 +651,8 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                     state: "reachable".to_string(),
                     router: true,
                     link_local: false,
-                },
+                
+                ..Default::default()},
             ]
         } else {
             vec![]
@@ -806,7 +811,8 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                 state: "reachable".to_string(),
                 router: true,
                 link_local: false,
-            },
+            
+            ..Default::default()},
             NeighborSnapshot {
                 interface: "ge-0-0-0.80".to_string(),
                 ifindex: 12,
@@ -816,7 +822,8 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                 state: "reachable".to_string(),
                 router: true,
                 link_local: false,
-            },
+            
+            ..Default::default()},
         ],
         ..Default::default()
     })
@@ -945,7 +952,8 @@ pub(super) fn nat_snapshot_with_fabric() -> ConfigSnapshot {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    });
+    
+    ..Default::default()});
     snapshot
 }
 
