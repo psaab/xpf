@@ -1305,6 +1305,72 @@ fn gre_decap_pt_v6_inner_nibble_v6_still_decaps() {
         "synthetic frame and inner meta must stay self-consistent"
     );
 }
+
+/// #10653: the decap index is keyed by the outer tuple alone, so without a
+/// transport-domain gate an outer carrying the tunnel's addresses and key
+/// decaps in ANY routing domain and its inner is judged as the tunnel's
+/// zone. These cells pin the gate: same VRF decaps, cross-VRF refuses.
+fn gre_vrf_snapshot_10653(transport_table: &str, ingress_instance: Option<(&str, u32)>) -> ConfigSnapshot {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.tunnel_endpoints[0].transport_table = transport_table.to_string();
+    if let Some((instance, domain)) = ingress_instance {
+        for iface in snapshot.interfaces.iter_mut() {
+            if iface.ifindex == 11 {
+                iface.routing_instance = instance.to_string();
+                iface.routing_domain = domain;
+            }
+        }
+    }
+    snapshot
+}
+
+/// Cross-domain outer refused: the endpoint serves VRF "blue" but the
+/// outer arrives on an ingress in no instance — no decap, so the inner
+/// is never judged as the tunnel's zone. FAILS if the domain gate is
+/// removed (decaps on the tuple alone).
+#[test]
+fn gre_decap_cross_vrf_outer_refused_10653() {
+    let forwarding = build_forwarding_state(&gre_vrf_snapshot_10653("blue.inet.0", None));
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "an outer arriving outside the endpoint's transport VRF must not decap"
+    );
+}
+
+/// Same-domain outer decaps: endpoint and ingress both serve VRF "blue".
+/// The control that keeps the refusal above honest — a gate that refused
+/// everything would satisfy the deny cell while breaking legitimate VRF
+/// transport.
+#[test]
+fn gre_decap_same_vrf_outer_decaps_10653() {
+    let forwarding =
+        build_forwarding_state(&gre_vrf_snapshot_10653("blue.inet.0", Some(("blue", 7))));
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    let decap = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
+        .expect("same-VRF outer must still decap");
+    assert_eq!(decap.meta.addr_family, libc::AF_INET as u8);
+}
+
+/// Default-VRF transport is unaffected: an endpoint with a default table
+/// and an unscoped ingress still decap (the pre-#10653 behavior for the
+/// no-VRF deployment, pinned against a gate that over-refuses).
+#[test]
+fn gre_decap_default_vrf_transport_unaffected_10653() {
+    let forwarding = build_forwarding_state(&gre_vrf_snapshot_10653("inet.0", None));
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_some(),
+        "default-VRF transport with an unscoped ingress must still decap"
+    );
+}
+
 /// #10516 required poll composition: native GRE decapsulation must expose the
 /// inner local UDP/4500 ESP payload to the Stage-11 SA gate, which may then
 /// delegate the packet only after a matching SA hit.

@@ -97,6 +97,42 @@ pub(in crate::afxdp) fn canonical_next_table(table: &str, is_ipv6: bool) -> Cow<
         if is_ipv6 { "inet6.0" } else { "inet.0" }
     ))
 }
+/// #10653: the routing-instance name a canonical transport-table name
+/// belongs to — the endpoint side of the GRE decap transport-domain
+/// match.
+///
+/// `TunnelEndpoint.transport_table` is canonicalized at build
+/// (`canonical_route_table` in `forwarding_build/tunnels.rs`), so it is
+/// one of: a default table (`inet.0`/`inet6.0`), a per-instance table
+/// (`<instance>.inet.0`/`<instance>.inet6.0`), empty (unset — the
+/// pre-VRF / default shape), or a bare instance name passed through
+/// untouched. The default spellings and empty map to `""` (the default
+/// VRF — the same `""` `ifindex_to_routing_instance` yields for an
+/// interface in no instance); a qualified table maps to its instance by
+/// stripping the family suffix; anything else is returned as-is, which
+/// keeps a bare instance name comparing correctly.
+///
+/// The suffix strip anchors at the END (`strip_suffix`), so a dotted
+/// instance containing ".inet" (`a.inet.b` -> `a.inet.b.inet.0`) keeps
+/// its full name — the same LastIndex semantics Go's
+/// `parseNextTableInstance` uses (#5632).
+///
+/// Why a NAME and not the numeric domain: the numeric routing domain
+/// (`SessionKey.routing_domain`, `ifindex_to_routing_domain`) is
+/// `StableRoutingInstanceTableID`, a Go-computed hash OF this name.
+/// Rust treats it as opaque and never recomputes it; comparing the
+/// names compares the same identity losslessly (finer than the hash —
+/// a collision the commit gate missed would alias numerically but not
+/// here).
+pub(in crate::afxdp) fn transport_instance_of_table(table: &str) -> &str {
+    if table.is_empty() || table == DEFAULT_V4_TABLE || table == DEFAULT_V6_TABLE {
+        return "";
+    }
+    table
+        .strip_suffix(".inet.0")
+        .or_else(|| table.strip_suffix(".inet6.0"))
+        .unwrap_or(table)
+}
 
 pub(in crate::afxdp) fn parse_packet_destination(
     area: &MmapArea,
