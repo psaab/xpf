@@ -1071,6 +1071,215 @@ fn a_denied_icmp_type_cannot_ride_a_permitted_owner_session_9949() {
     );
 }
 
+/// #10637: the reverse twin of the #9949 cell above. The ICMP session key is
+/// typeless, and before this fix a reverse companion NEVER faced its own type
+/// check — the only session-hit direction with zero type consultation. The
+/// pinged host could therefore send echo/timestamp REQUESTS that hit the query
+/// session's reverse companion and forwarded to the pinger, bypassing a
+/// direction- or type-scoped deny on the reverse path.
+///
+/// The install goes through the REAL miss path (type 8, `lan -> wan`), so the
+/// reverse packets below hit the live query session's companion rather than a
+/// synthetic entry. The reverse pair carries a typed DENY for the request
+/// type: a reverted gate (reverse exempt) forwards the request and reds the
+/// deny cell, while a gate that dropped ALL reverse ICMP would red the
+/// answer-coast control. The pair is what makes the fix falsifiable.
+fn icmp_type_rule_10637(
+    name: &str,
+    action: &str,
+    icmp_type: u8,
+    from_zone: &str,
+    to_zone: &str,
+) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: name.into(),
+        from_zone: from_zone.into(),
+        to_zone: to_zone.into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec![name.into()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: name.into(),
+            protocol: "icmp".into(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            icmp_type: Some(icmp_type),
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: action.into(),
+        ..Default::default()
+    }
+}
+
+fn forwarding_with_reverse_icmp_split_10637() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    // The reverse answer egresses to lan: the unit needs its connected /24
+    // and a reachable neighbor for the pinger, or the answer dies on egress
+    // resolution instead of exercising the coast.
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == LAN_IFINDEX)
+        .expect("policy_deny_snapshot must carry reth1.0")
+        .addresses
+        .push(crate::InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.0.61.1/24".into(),
+            scope: 0,
+        });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: "10.0.61.102".into(),
+        mac: "02:aa:bb:cc:dd:01".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot
+        .policies
+        .push(icmp_type_rule_10637("echo-permit", "permit", 8, "lan", "wan"));
+    // The reverse pair denies the REQUEST type but is silent on the ANSWER
+    // type: the request must therefore drop by rule, while the answer coasts
+    // as return traffic even though no rule admits it.
+    snapshot
+        .policies
+        .push(icmp_type_rule_10637("reverse-echo-deny", "deny", 8, "wan", "lan"));
+    build_forwarding_state(&snapshot)
+}
+
+/// A wan-side frame of the live `lan -> wan` query session: swapped tuple,
+/// arriving on the wan unit untagged exactly as the #9519 authority cells
+/// drive it (zone resolution keys off the ingress ifindex, not the tag).
+fn icmp_reverse_frame_10637(icmp_type: u8) -> Vec<u8> {
+    let mut frame = build_icmp_echo_frame_v4(DST, SRC, 64, TEST_WAN_MAC);
+    frame[34] = icmp_type;
+    frame[36] = 0;
+    frame[37] = 0;
+    let csum = checksum16(&frame[34..]);
+    frame[36..38].copy_from_slice(&csum.to_be_bytes());
+    frame
+}
+
+fn drive_reverse_icmp_type_10637(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    icmp_type: u8,
+) -> DebugPollCounters {
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let frame = icmp_reverse_frame_10637(icmp_type);
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        sessions,
+        forwarding,
+        &BTreeMap::new(),
+        &frame,
+        meta,
+        true,
+    );
+    dbg
+}
+
+#[test]
+fn a_denied_reverse_icmp_request_cannot_ride_the_query_session_10637() {
+    let forwarding = forwarding_with_reverse_icmp_split_10637();
+    assert!(
+        forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "the fixture must arm the ICMP type predicate, or the reverse-hit \
+         assertion below is vacuous"
+    );
+    let mut sessions = SessionTable::new();
+    let admitted = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
+    assert_eq!(
+        (admitted.session_hit, admitted.session_create, admitted.tx, admitted.policy_deny),
+        (0, 2, 1, 0),
+        "the permitted echo query must miss, install, and forward before the \
+         reverse request is tried"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the admitted ICMP flow must install forward and reverse entries"
+    );
+
+    // The pinged host answers the query with a REQUEST of the denied type.
+    // Before #10637 the reverse companion was exempt from the owner type
+    // check, so this forwarded; now the reverse pair judges it and drops it.
+    let denied = drive_reverse_icmp_type_10637(&forwarding, &mut sessions, 8);
+    assert_eq!(
+        denied.session_hit, 1,
+        "the reverse request must hit the query session's companion"
+    );
+    assert_eq!(
+        denied.tx, 0,
+        "a denied reverse request must not ride the live query session"
+    );
+    assert_eq!(
+        denied.policy_deny, 1,
+        "the reverse-hit type denial must feed the existing policy-deny counter"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the denied reverse packet is rejected without tearing down the live session"
+    );
+}
+
+/// THE CONTROL for the cell above: a reverse ANSWER coasts as return traffic.
+/// Junos permits it because the session exists — the fixture's reverse pair
+/// has NO rule admitting type 0, so a forward is proof the answer never faced
+/// reverse policy at all, not proof a permit admitted it.
+#[test]
+fn a_reverse_icmp_answer_coasts_past_an_unpermitted_reverse_pair_10637() {
+    let forwarding = forwarding_with_reverse_icmp_split_10637();
+    let mut sessions = SessionTable::new();
+    let admitted = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
+    assert_eq!(
+        (admitted.session_hit, admitted.session_create, admitted.tx),
+        (0, 2, 1),
+        "the permitted echo query must miss, install, and forward before the \
+         reverse answer is tried"
+    );
+
+    let answer = drive_reverse_icmp_type_10637(&forwarding, &mut sessions, 0);
+    assert_eq!(
+        answer.session_hit, 1,
+        "the reverse answer must hit the query session's companion"
+    );
+    assert_eq!(
+        (answer.tx, answer.policy_deny),
+        (1, 0),
+        "a reverse answer is return traffic for the live session and must \
+         forward even though the reverse pair admits nothing"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the coasting answer must leave the live session untouched"
+    );
+}
+
 /// A `lan -> wan` junos-ping-shaped DENY, optionally with a broader `lan -> wan`
 /// permit BEHIND it.
 ///

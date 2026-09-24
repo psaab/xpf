@@ -121,9 +121,10 @@ use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HitAuthority {
     /// Arrived in the admitting zone, or over the fabric. The ordinary hit path
-    /// applies unchanged, revalidation included. A forward ICMP packet whose
-    /// policy is type-dependent is checked separately by
-    /// [`owner_hit_icmp_verdict`] without changing this authority.
+    /// applies unchanged, revalidation included. An ICMP packet whose policy
+    /// is type-dependent (forward, or a reverse non-answer, #10637) is
+    /// checked separately by [`owner_hit_icmp_verdict`] without changing
+    /// this authority.
     Owner,
     /// Arrived in a different zone. `arrival_zone` is the live zone the packet
     /// is judged by (0 when the arrival resolves to none);
@@ -193,10 +194,14 @@ pub(super) enum ForeignHitVerdict {
 /// What the type-informed OWNER packet check does.
 ///
 /// `None` means this check does not apply: the policy is type-blind, the hit is
-/// a reverse companion (whose forward policy is protected by GATE 1), or the
-/// resolution is host-bound (whose authority is checked by the host-inbound /
-/// `junos-host` path below). `Some` is only returned for a forward packet on a
-/// type-dependent ICMP policy. It deliberately does not mutate the session.
+/// a reverse companion carrying a query ANSWER (return traffic, which Junos
+/// permits because the session exists and GATE 1 judges by the forward
+/// companion, #10637), or the resolution is host-bound (whose authority is
+/// checked by the host-inbound / `junos-host` path below). `Some` is returned
+/// for a forward packet on a type-dependent ICMP policy, and for a reverse
+/// companion carrying any NON-answer type — a new query riding the typeless
+/// key, judged on the reverse pair with the packet's type. It deliberately
+/// does not mutate the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OwnerHitIcmpVerdict {
     Forward,
@@ -215,20 +220,51 @@ pub(super) fn owner_hit_icmp_verdict(
     packet_frame: &[u8],
     packet_fabric_ingress: bool,
 ) -> Option<OwnerHitIcmpVerdict> {
-    // Reverse companions are never independently adjudicated (#9604/GATE 1):
-    // their forward entry is the policy authority. Host-bound packets have a
-    // different authority plane (`junos-host`), and the existing hit path
-    // re-evaluates that plane on every packet. Fabric ingress is also exempt:
-    // the peer already adjudicated the packet before it crossed the fabric.
-    // Keep all three paths untouched.
-    if metadata.is_reverse
-        || decision.resolution.disposition == ForwardingDisposition::LocalDelivery
+    // Host-bound packets have a different authority plane (`junos-host`), and
+    // the existing hit path re-evaluates that plane on every packet. Fabric
+    // ingress is also exempt: the peer already adjudicated the packet before
+    // it crossed the fabric. Keep both paths untouched.
+    if decision.resolution.disposition == ForwardingDisposition::LocalDelivery
         || packet_fabric_ingress
         || !forwarding
             .policy
             .icmp_verdict_may_depend_on_type(meta.protocol)
     {
         return None;
+    }
+    let packet_icmp = policy_packet_icmp(packet_frame, meta);
+    // #10637: a reverse companion hit by a query ANSWER coasts — Junos permits
+    // return traffic because the session exists, and GATE 1 still judges the
+    // pair by the forward companion (#9604). Any other reverse type is a NEW
+    // query that merely shares the typeless session key: judge the reverse
+    // pair with the packet's type, exactly as the miss path would judge a
+    // packet arriving from that side. The companion's zones are stamped
+    // swapped (peer's side -> pinger's side), the tuple is the wire tuple,
+    // and the destination is un-rewritten — the same shape
+    // `foreign_hit_verdict` judges for a reverse hit, since an un-SNAT is
+    // never admission input.
+    if metadata.is_reverse {
+        if packet_icmp.is_some_and(|(icmp_type, _)| {
+            crate::afxdp::frame::icmp_reply_type(meta.protocol, icmp_type)
+        }) {
+            return None;
+        }
+        let result = evaluate_policy_result_without_counting(
+            &forwarding.policy,
+            metadata.ingress_zone,
+            metadata.egress_zone,
+            flow.src_ip,
+            flow.dst_ip,
+            meta.protocol,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+            packet_icmp,
+        );
+        return Some(if matches!(result.action, crate::policy::PolicyAction::Permit) {
+            OwnerHitIcmpVerdict::Forward
+        } else {
+            OwnerHitIcmpVerdict::Drop
+        });
     }
     let dst_ip = decision.nat.rewrite_dst.unwrap_or(flow.dst_ip);
     let dst_port = decision
@@ -244,7 +280,7 @@ pub(super) fn owner_hit_icmp_verdict(
         meta.protocol,
         flow.forward_key.src_port,
         dst_port,
-        policy_packet_icmp(packet_frame, meta),
+        packet_icmp,
     );
     Some(if matches!(result.action, crate::policy::PolicyAction::Permit) {
         OwnerHitIcmpVerdict::Forward
