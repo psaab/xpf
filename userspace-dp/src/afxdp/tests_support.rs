@@ -686,6 +686,20 @@ pub(super) fn icmpv6_te_match_fixture(
             policy_counter: None,
         },
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
+    }
+}
+
+pub(super) fn icmp_budget_test_key() -> crate::session::SessionKey {
+    crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        dst_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        src_port: 0,
+        dst_port: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 

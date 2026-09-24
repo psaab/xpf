@@ -1069,6 +1069,31 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         assert_eq!(event.src_ip, IpAddr::V4(router_ip));
         assert_eq!(event.dst_ip, IpAddr::V4(client_ip));
         assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+        if !allow_reverse_policy {
+            // #10667: the actual policy-refused reversal must refund the
+            // matcher's pre-policy token; the complete 64-token burst remains
+            // available for errors that a later policy permits.
+            let budget_key = SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol: PROTO_TCP,
+                src_ip: IpAddr::V4(client_ip),
+                dst_ip: IpAddr::V4(server_ip),
+                src_port: client_port,
+                dst_port: 80,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            };
+            for i in 0..64 {
+                assert!(
+                    sessions.note_icmp_error_delivered(&budget_key, 123_000_000_000),
+                    "policy-refused error must leave burst token {i} available"
+                );
+            }
+            assert!(
+                !sessions.note_icmp_error_delivered(&budget_key, 123_000_000_000),
+                "the one permitted error must still consume budget"
+            );
+        }
         return;
     }
 

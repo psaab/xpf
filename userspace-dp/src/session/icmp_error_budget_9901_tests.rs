@@ -94,6 +94,45 @@ fn budget_refills_over_time_9901() {
     );
 }
 
+/// #10667: each policy-refused match gives its pre-policy token back, so a
+/// burst of denied errors cannot consume the next permitted error's budget.
+/// Exercise both local sessions and shared/peer side-table budgets.
+#[test]
+fn policy_refused_icmp_burst_does_not_starve_permitted_10667() {
+    let key = key_v4();
+    let t0 = 3_500_000_000u64;
+
+    for shared in [false, true] {
+        let mut table = SessionTable::new();
+        if !shared {
+            install(&mut table, &key, t0);
+        }
+
+        for refused in 0..ICMP_ERROR_BURST {
+            assert!(
+                table.note_icmp_error_delivered(&key, t0),
+                "refused error {refused} must have a token before policy"
+            );
+            table.refund_icmp_error_not_delivered(&key, t0);
+        }
+
+        assert!(
+            table.note_icmp_error_delivered(&key, t0),
+            "the next policy-permitted error must survive 64 prior refusals (shared={shared})"
+        );
+        for delivered in 1..ICMP_ERROR_BURST {
+            assert!(
+                table.note_icmp_error_delivered(&key, t0),
+                "permitted error budget token {delivered} must remain available (shared={shared})"
+            );
+        }
+        assert!(
+            !table.note_icmp_error_delivered(&key, t0),
+            "64 permitted errors exhaust the ordinary burst (shared={shared})"
+        );
+    }
+}
+
 /// Same-router shape: one quoter, MANY sessions — draining session A's
 /// budget must not touch session B's. Per-session independence is the
 /// whole point; a global error budget would fail this.

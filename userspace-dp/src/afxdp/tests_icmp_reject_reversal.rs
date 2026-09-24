@@ -361,6 +361,7 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
             policy_counter: None,
         },
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v4(&frame, meta, &icmp_match)
@@ -525,6 +526,7 @@ fn icmp_te_nat_reversal_v4_with_port_snat() {
             policy_counter: None,
         },
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v4(&frame, meta, &icmp_match)
@@ -654,6 +656,7 @@ fn icmp_dest_unreach_nat_reversal_v4() {
             policy_counter: None,
         },
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v4(&frame, meta, &icmp_match)
@@ -719,6 +722,7 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
         resolution: icmp_err_resolution_v4(client_c),
         metadata: icmp_err_metadata(),
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v4(&frame, icmp_err_meta_v4(), &icmp_match)
@@ -792,6 +796,7 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
         resolution: icmp_err_resolution_v4(client_c),
         metadata: icmp_err_metadata(),
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v4(&frame, icmp_err_meta_v4(), &icmp_match)
@@ -846,6 +851,7 @@ fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
         resolution: icmp_err_resolution_v4(client_ip),
         metadata: icmp_err_metadata(),
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v4(&frame, icmp_err_meta_v4(), &icmp_match)
@@ -940,6 +946,7 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
             policy_counter: None,
         },
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v6(&frame, meta, &icmp_match)
@@ -1088,6 +1095,7 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
         },
         metadata: icmp_err_metadata(),
         outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
     };
 
     let result = build_nat_reversed_icmp_error_v6(&frame, meta, &icmp_match)
