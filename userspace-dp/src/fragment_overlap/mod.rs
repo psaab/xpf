@@ -27,14 +27,17 @@
 //! TTL-bounded: ≈48B key + 128B ranges (16×8B) + stamps ≈ 200B/entry × 1024 entries
 //! (16 shards × 64) ≈ 200KB fixed. The TTL only sets how long attack residue squats,
 //! which the absolute bound + shard caps contain.
+//! Fairness (#10658): one sender (`routing_domain`, family, `src`) holds at most
+//! 8 entries per shard; a routing domain holds at most 32 per shard. New keys over
+//! either cap fail closed without evicting live ranges, reserving at least half of
+//! every shard for other domains and preserving same-domain senders' overlap anchors.
+//! A sender's ninth key in a shard is dropped, not allowed to evict an older datagram.
 //!
 //! Failure directions (explicit — they differ from `fragment_assoc`):
-//!   * Overlap/empty/overflow/shard-full all fail CLOSED (drop). In particular a FULL
-//!     shard drops the new datagram's fragment rather than evicting a live entry:
-//!     evict-then-miss would FORWARD (fail-open evasion via a 65-packet same-shard
-//!     flood — FNV-1a is unkeyed and computable), which would invert this control's
-//!     direction and contradict the range-overflow fail-closed policy. Flood-time
-//!     availability loss is the correct trade for a security control.
+//!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender/domain quota and
+//!     full-shard limits drop new keys without evicting live ranges, preserving every
+//!     admitted datagram's overlap anchor. Flood-time availability loss at the
+//!     sender/domain quota is the correct trade for a security control.
 //!   * Check/record SPLIT (no refused-traffic planting): the early hook only CHECKS
 //!     (pure — drops overlaps before enforcement verdicts are earned); recording happens
 //!     post-commit at the TX site, so only ADMITTED fragments plant ranges. A refused
@@ -94,7 +97,7 @@ use crate::nat::NatDecision;
 pub(crate) static FRAG_OVERLAP_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Range-cap overflow drops (17th disjoint range, fail-closed).
 pub(crate) static FRAG_OVERLAP_OVERFLOW_DROPPED: AtomicU64 = AtomicU64::new(0);
-/// Shard-full drops (fail-closed; no live eviction — see module docs).
+/// Capacity drops (sender/domain quota or a full shard; fail-closed, no live eviction).
 pub(crate) static FRAG_OVERLAP_SHARD_FULL_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Post-translation overlap drops (TX-site hook, translated key).
 pub(crate) static FRAG_OVERLAP_POST_NAT_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -103,6 +106,10 @@ pub(crate) static FRAG_OVERLAP_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::ne
 
 pub(crate) const OVERLAP_SHARDS: usize = 16;
 pub(crate) const OVERLAP_CAP_PER_SHARD: usize = 64;
+/// Max entries one sender holds per shard (#10658).
+pub(crate) const OVERLAP_CAP_PER_SENDER_PER_SHARD: usize = 8;
+/// A routing domain can use at most half a shard, preserving capacity for other domains.
+pub(crate) const OVERLAP_CAP_PER_DOMAIN_PER_SHARD: usize = OVERLAP_CAP_PER_SHARD / 2;
 /// 30s idle TTL — covers the Linux `ipfrag_time` reassembly window (see docs).
 pub(crate) const OVERLAP_TTL_NS: u64 = 30_000_000_000;
 /// 60s absolute bound from first sighting — never refreshed by later fragments.
@@ -212,6 +219,13 @@ pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
     }
     (h as usize) & (OVERLAP_SHARDS - 1)
 }
+/// Fairness identity (#10658): the admitted sender. `dst`/`ident`/`protocol` are
+/// excluded — keying them would let one sender mint fresh quota by varying the
+/// destination, ident, or (v4) protocol byte.
+#[inline]
+fn overlap_sender(key: &OverlapKey) -> (u32, u8, IpAddr) {
+    (key.routing_domain, key.addr_family, key.src)
+}
 
 #[inline]
 fn overlap_entry_live(e: &OverlapEntry, now_ns: u64, lifetime_evictions: &mut u64) -> bool {
@@ -301,6 +315,7 @@ fn merge_ranges(
 pub(crate) enum OverlapDropReason {
     Overlap,
     Overflow,
+    /// Fairness quota or shard-capacity refusal; no live entry was evicted.
     ShardFull,
 }
 
@@ -687,9 +702,23 @@ impl OverlapTracker {
                 }
             }
         }
-        if shard.len() >= OVERLAP_CAP_PER_SHARD {
-            // Fail CLOSED: evicting a live entry would let a flood erase the
-            // anchor ranges and forward an overlap the screens never saw together.
+        // #10658: reserve shard capacity by routing domain and sender. Quota hits
+        // fail closed rather than evicting another datagram's live anchor ranges.
+        let sender = overlap_sender(&key);
+        let mut sender_entries = 0usize;
+        let mut domain_entries = 0usize;
+        for e in shard.iter() {
+            if overlap_sender(&e.key) == sender {
+                sender_entries += 1;
+            }
+            if e.key.routing_domain == key.routing_domain {
+                domain_entries += 1;
+            }
+        }
+        if sender_entries >= OVERLAP_CAP_PER_SENDER_PER_SHARD
+            || domain_entries >= OVERLAP_CAP_PER_DOMAIN_PER_SHARD
+            || shard.len() >= OVERLAP_CAP_PER_SHARD
+        {
             FRAG_OVERLAP_SHARD_FULL_DROPPED.fetch_add(1, Ordering::Relaxed);
             return OverlapCheckResult {
                 dropped: true,
@@ -1073,39 +1102,56 @@ mod tests {
 
     #[test]
     fn shard_full_drops_without_evicting_live_9950() {
-        // Fill one shard (64 entries, same-shard brute-forced idents — FNV-1a is
-        // unkeyed so the attacker computes this too), then prove the 65th drops
-        // fail-closed AND the first entry's ranges still detect overlap (no eviction).
+        // Fill one shard (8 domains × 8 senders) without hitting either fairness
+        // quota, then prove the 65th key drops fail-closed AND the first entry's
+        // ranges still detect overlap. The hash omits routing_domain, so brute-force
+        // (src, ident) pairs to place all keys in the target shard.
         // RED-on-revert: evict-oldest would admit the 65th and blind the first key.
         let t = OverlapTracker::new();
         let target = overlap_shard_index(&v4_key());
-        let mut idents = Vec::new();
-        for ident in 0u32.. {
-            let mut k = v4_key();
-            k.ident = ident;
-            if overlap_shard_index(&k) == target {
-                idents.push(ident);
-                if idents.len() == 65 {
-                    break;
+        let mut keys = Vec::new();
+        let mut per_sender = [0usize; 8];
+        let mut ident = 0u32;
+        while keys.len() < OVERLAP_CAP_PER_SHARD {
+            for s in 0..8 {
+                if per_sender[s] >= OVERLAP_CAP_PER_SENDER_PER_SHARD {
+                    continue;
+                }
+                let mut k = v4_key();
+                k.routing_domain = (s + 1) as u32;
+                k.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, (100 + s) as u8));
+                k.ident = ident;
+                if overlap_shard_index(&k) == target {
+                    keys.push(k);
+                    per_sender[s] += 1;
+                    if keys.len() == OVERLAP_CAP_PER_SHARD {
+                        break;
+                    }
                 }
             }
+            ident += 1;
         }
-        for &ident in &idents[..64] {
-            let mut k = v4_key();
-            k.ident = ident;
-            assert!(!t.check_and_record(k, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        for k in &keys {
+            assert!(!t.check_and_record(*k, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
         }
         let s0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
         let mut klast = v4_key();
-        klast.ident = idents[64];
+        klast.routing_domain = 99;
+        klast.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 108));
+        let mut li = 0u32;
+        loop {
+            klast.ident = li;
+            if overlap_shard_index(&klast) == target {
+                break;
+            }
+            li += 1;
+        }
         assert!(t.check_and_record(klast, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
         assert_eq!(
             FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed).wrapping_sub(s0),
             1
         );
-        let mut kfirst = v4_key();
-        kfirst.ident = idents[0];
-        assert!(t.check_and_record(kfirst, 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.check_and_record(keys[0], 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
@@ -1497,16 +1543,41 @@ mod tests {
         let t = OverlapTracker::new();
         let target = overlap_shard_index(&v4_key());
         let mut keys = Vec::new();
-        for ident in 0u32.. {
-            let mut key = v4_key();
-            key.ident = ident;
-            if overlap_shard_index(&key) == target {
-                keys.push(key);
-                if keys.len() == OVERLAP_CAP_PER_SHARD + 1 {
-                    break;
+        // 8 domains × 8 senders: filling the shard stays below both fairness caps.
+        let mut per_sender = [0usize; 8];
+        let mut ident = 0u32;
+        while keys.len() < OVERLAP_CAP_PER_SHARD {
+            for s in 0..8 {
+                if per_sender[s] >= OVERLAP_CAP_PER_SENDER_PER_SHARD {
+                    continue;
+                }
+                let mut key = v4_key();
+                key.routing_domain = (s + 1) as u32;
+                key.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, (100 + s) as u8));
+                key.ident = ident;
+                if overlap_shard_index(&key) == target {
+                    keys.push(key);
+                    per_sender[s] += 1;
+                    if keys.len() == OVERLAP_CAP_PER_SHARD {
+                        break;
+                    }
                 }
             }
+            ident += 1;
         }
+        // 65th key from a 9th domain in the same shard.
+        let mut last = v4_key();
+        last.routing_domain = 99;
+        last.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 108));
+        let mut li = 0u32;
+        loop {
+            last.ident = li;
+            if overlap_shard_index(&last) == target {
+                break;
+            }
+            li += 1;
+        }
+        keys.push(last);
         let mut tokens = Vec::new();
         for key in keys.iter().take(OVERLAP_CAP_PER_SHARD) {
             let mut result = t.check_and_record_fragment_detailed(
@@ -1624,6 +1695,171 @@ mod tests {
         assert_eq!(t.len(), 1);
         assert!(t.commit_admission(current));
         assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn cross_vrf_attacker_cannot_starve_victim_10658() {
+        // One tenant's never-completing, policy-admitted fragments must not
+        // blackhole another VRF: the attacker floods 2048 idents from VRF 7
+        // (~128/shard, first-fragment ranges, no tail so nothing completes),
+        // then a victim datagram in VRF 8 must still forward in every shard.
+        // RED-on-revert: pre-quota, the flood fills all 16 shards and every
+        // victim key drops fail-closed for the 30s window.
+        let t = OverlapTracker::new();
+        let now_ns = 1_000u64;
+        let mut atk = v4_key();
+        atk.routing_domain = 7;
+        for ident in 0..2048u32 {
+            atk.ident = ident;
+            let _ = t.check_and_record(atk, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
+        }
+        // 16 shards x 8 per-sender (named constant lands with the quota impl).
+        assert!(
+            t.len() <= 128,
+            "single sender must hold at most 8 entries per shard, len={}",
+            t.len()
+        );
+        let mut victim = v4_key();
+        victim.routing_domain = 8;
+        victim.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
+        let mut first_victim: Option<OverlapKey> = None;
+        for target in 0..OVERLAP_SHARDS {
+            let mut ident = 0u32;
+            let key = loop {
+                let mut k = victim;
+                k.ident = ident;
+                if overlap_shard_index(&k) == target {
+                    break k;
+                }
+                ident += 1;
+            };
+            if target == 0 {
+                first_victim = Some(key);
+            }
+            assert!(
+                !t.check_and_record(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
+                "cross-VRF victim must forward in shard {target}"
+            );
+        }
+        // Victim protection is intact: an overlapping tail on a victim key drops.
+        let v0 = first_victim.expect("shard-0 victim key");
+        assert!(t.check_and_record(v0, 4, 12, now_ns + 1, &FRAG_OVERLAP_DROPPED));
+    }
+
+    #[test]
+    fn one_domain_cannot_starve_other_domains_10658() {
+        // A tenant can vary source addresses, so the per-sender quota alone is not
+        // enough: fill VRF 7 to its 32-entry/domain/shard budget from 8 senders, then
+        // verify a VRF 8 victim still admits in every shard.
+        // RED-on-revert: without a per-domain cap, 8 senders × 8 keys fills all 64
+        // entries per shard and the victim fails closed.
+        let t = OverlapTracker::new();
+        let mut per_sender = [[0usize; OVERLAP_SHARDS]; 8];
+        for s in 0..8 {
+            let mut ident = 0u32;
+            while per_sender[s]
+                .iter()
+                .any(|&n| n < OVERLAP_CAP_PER_SENDER_PER_SHARD)
+            {
+                let mut attack = v4_key();
+                attack.routing_domain = 7;
+                attack.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, (100 + s) as u8));
+                attack.ident = ident;
+                let shard = overlap_shard_index(&attack);
+                if per_sender[s][shard] < OVERLAP_CAP_PER_SENDER_PER_SHARD {
+                    let dropped =
+                        t.check_and_record(attack, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED);
+                    if s < OVERLAP_CAP_PER_DOMAIN_PER_SHARD
+                        / OVERLAP_CAP_PER_SENDER_PER_SHARD
+                    {
+                        assert!(!dropped, "initial domain quota should admit sender {s}");
+                    } else {
+                        assert!(dropped, "domain quota should reject sender {s}");
+                    }
+                    per_sender[s][shard] += 1;
+                }
+                ident += 1;
+            }
+        }
+        assert_eq!(
+            t.len(),
+            OVERLAP_CAP_PER_DOMAIN_PER_SHARD * OVERLAP_SHARDS,
+            "one domain must stay at its per-shard quota"
+        );
+
+        let mut victim = v4_key();
+        victim.routing_domain = 8;
+        victim.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 200));
+        for target in 0..OVERLAP_SHARDS {
+            let mut ident = 0u32;
+            let key = loop {
+                let mut k = victim;
+                k.ident = ident;
+                if overlap_shard_index(&k) == target {
+                    break k;
+                }
+                ident += 1;
+            };
+            assert!(
+                !t.check_and_record(key, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED),
+                "other-domain victim must forward in shard {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_fill_leaves_victims_admitted_10658() {
+        // 1024 policy-admitted, never-completing datagrams arrive evenly across
+        // the 30s reassembly window (≈34pps). The attacker brute-forces ident values
+        // to plant 64 keys in every shard; a cross-VRF AND same-VRF other-sender
+        // victim must remain admitted at each quarter-window checkpoint.
+        // RED-on-revert: without quotas, the 1024th key fills all shards and the
+        // final victim insert fails closed before the first entries expire.
+        let t = OverlapTracker::new();
+        let mut atk = v4_key();
+        atk.routing_domain = 7;
+        let mut xvrf = v4_key();
+        xvrf.routing_domain = 8;
+        xvrf.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
+        let mut mate = v4_key();
+        mate.routing_domain = 7;
+        mate.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+        let mut attempts_per_shard = [0usize; OVERLAP_SHARDS];
+        let mut attempts = 0u64;
+        let mut ident = 0u32;
+        while attempts_per_shard
+            .iter()
+            .any(|&n| n < OVERLAP_CAP_PER_SHARD)
+        {
+            atk.ident = ident;
+            let shard = overlap_shard_index(&atk);
+            if attempts_per_shard[shard] < OVERLAP_CAP_PER_SHARD {
+                let now_ns = 1 + attempts * OVERLAP_TTL_NS / 1024;
+                let _ = t.check_and_record(atk, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
+                attempts_per_shard[shard] += 1;
+                attempts += 1;
+                if attempts % 256 == 0 {
+                    let round = (attempts / 256) as u32 - 1;
+                    xvrf.ident = 500_000 + round;
+                    assert!(
+                        !t.check_and_record(xvrf, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
+                        "cross-VRF victim must forward in round {round}"
+                    );
+                    mate.ident = 600_000 + round;
+                    assert!(
+                        !t.check_and_record(mate, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
+                        "same-VRF other-sender victim must forward in round {round}"
+                    );
+                }
+            }
+            ident += 1;
+        }
+        assert_eq!(attempts, OVERLAP_CAP_PER_SHARD as u64 * OVERLAP_SHARDS as u64);
+        assert_eq!(
+            t.len(),
+            OVERLAP_CAP_PER_SENDER_PER_SHARD * OVERLAP_SHARDS + 8,
+            "attacker residue must stay sender-quota-bounded alongside victims"
+        );
     }
 
 }
