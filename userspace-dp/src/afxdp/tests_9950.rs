@@ -785,17 +785,48 @@ fn f035_shard_full_drop_is_not_forward_accounted_10285() {
         routing_domain: 0,
     };
     let shard = crate::fragment_overlap::overlap_shard_index(&base);
+    // 8 distinct senders × 8 fills the shard (the #10658 per-sender cap bounds one
+    // sender to 8/shard). The probe frame below arrives from `src` (.100), which
+    // stays quota-free so its drop is the global shard-full, not a quota event.
     let mut keys = Vec::new();
-    for ident in 0u32.. {
-        let mut key = base;
-        key.ident = ident;
-        if crate::fragment_overlap::overlap_shard_index(&key) == shard {
-            keys.push(key);
-            if keys.len() == crate::fragment_overlap::OVERLAP_CAP_PER_SHARD + 1 {
-                break;
+    let mut per_sender = [0usize; 8];
+    let mut ident = 0u32;
+    while keys.len() < crate::fragment_overlap::OVERLAP_CAP_PER_SHARD {
+        for s in 0..8 {
+            if per_sender[s] >= crate::fragment_overlap::OVERLAP_CAP_PER_SENDER_PER_SHARD
+            {
+                continue;
+            }
+            let mut key = base;
+            key.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, (101 + s) as u8));
+            key.ident = ident;
+            if crate::fragment_overlap::overlap_shard_index(&key) == shard {
+                keys.push(key);
+                per_sender[s] += 1;
+                if keys.len() == crate::fragment_overlap::OVERLAP_CAP_PER_SHARD {
+                    break;
+                }
             }
         }
+        ident += 1;
     }
+    // 65th ident: same shard, but the probe sender (.100).
+    let probe_ident = {
+        let mut i = 0u32;
+        loop {
+            let mut key = base;
+            key.ident = i;
+            if crate::fragment_overlap::overlap_shard_index(&key) == shard {
+                break i;
+            }
+            i += 1;
+        }
+    };
+    keys.push({
+        let mut key = base;
+        key.ident = probe_ident;
+        key
+    });
     for key in keys.iter().take(crate::fragment_overlap::OVERLAP_CAP_PER_SHARD) {
         assert!(!tracker.check_and_record_fragment(
             *key,
