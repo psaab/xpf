@@ -287,8 +287,8 @@ pub(super) fn resolve_ingress_logical_ifindex(
         .copied()
 }
 
-/// #10313/#10656: true when a tagged frame arrived with a VID no configured
-/// row owns on that ingress bind.
+/// #10313/#10656: true when a tagged frame's VID is not configured on its
+/// ingress bind and the ingress ifindex is not already its logical VLAN child.
 ///
 /// The exact `(physical_ifindex, vlan_id)` map remains the logical-ingress
 /// resolver. This predicate is its miss-path authority: unlike an ordinary
@@ -296,18 +296,26 @@ pub(super) fn resolve_ingress_logical_ifindex(
 /// before cache/session/ARP/decap can observe a fallback zone — whether the
 /// bind is a trunk parent (the #10313 shape, inheriting the agreed sibling
 /// zone) or a unit-less port (the #10656 shape, inheriting the port's own
-/// zone). VID 0 (untagged and 802.1p priority-tagged, #2145) always resolves
-/// through the normal physical fallback.
+/// zone). XDP can also deliver on a configured VLAN child's own ifindex; the
+/// parent-keyed resolver has no `(child_ifindex, VID)` row, so only that
+/// child's configured VID is admitted on this miss path. VID 0 (untagged and
+/// 802.1p priority-tagged, #2145) always resolves through the normal fallback.
 #[inline]
 pub(in crate::afxdp) fn unknown_ingress_vlan(
     forwarding: &ForwardingState,
-    physical_ifindex: i32,
+    ingress_ifindex: i32,
     ingress_vlan_id: u16,
 ) -> bool {
-    ingress_vlan_id != 0
-        && !forwarding
+    if ingress_vlan_id == 0
+        || forwarding
             .ingress_logical_ifindex
-            .contains_key(&(physical_ifindex, ingress_vlan_id))
+            .contains_key(&(ingress_ifindex, ingress_vlan_id))
+    {
+        return false;
+    }
+    !forwarding.egress.get(&ingress_ifindex).is_some_and(|iface| {
+        iface.bind_ifindex != ingress_ifindex && iface.vlan_id == ingress_vlan_id
+    })
 }
 
 /// #7160 (#2387): the ROUTING DOMAIN a received frame's flow belongs to — the
