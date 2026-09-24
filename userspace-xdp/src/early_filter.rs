@@ -62,6 +62,9 @@ pub fn is_ipv4_multicast(ip: u32) -> bool {
 /// proving the "not passed" fixtures really are link-local — in the same
 /// way `wg_classify` keeps its message-type consts for its own test.
 #[inline(always)]
+// Test-only by design (see doc above): the shim must NOT call this, so the
+// dead-code lint would fire on every shim build without the allow.
+#[allow(dead_code)]
 pub fn is_ipv4_link_local(ip: u32) -> bool {
     (ip & 0xffff_0000) == 0xa9fe_0000
 }

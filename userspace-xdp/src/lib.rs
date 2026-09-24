@@ -68,6 +68,7 @@ const USERSPACE_CTRL_FLAG_STRICT: u32 = 8;
 /// property.
 const USERSPACE_CTRL_FLAG_WG_RX: u32 = 16;
 mod binding_index;
+mod early_filter;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod wg_classify;
@@ -1815,22 +1816,14 @@ fn should_fallback_early(pkt: &ParsedPacket) -> bool {
     // ahead of this function; they are classified here like any other
     // protocol and reach the kernel only through the destination-qualified
     // local-destination / interface-NAT arms of the session-miss path.
+    // #10640: the verdict lives in `early_filter` (host-executed by the
+    // userspace-dp regression test). IPv4 169.254/16 no longer passes
+    // early: scope alone never made a destination local to this box, and
+    // genuinely local link-local addresses still deliver via the
+    // `is_local_destination` arm of the session-miss path.
     match pkt.addr_family {
-        AF_INET => {
-            if pkt.dst_v4 == 0xffff_ffff
-                || is_ipv4_multicast(pkt.dst_v4)
-                || is_ipv4_link_local(pkt.dst_v4)
-            {
-                return true;
-            }
-            false
-        }
-        AF_INET6 => {
-            if pkt.dst_addr[0] == 0xff || is_ipv6_link_local(pkt.dst_addr) {
-                return true;
-            }
-            false
-        }
+        AF_INET => early_filter::ipv4_early_pass_to_kernel(pkt.dst_v4),
+        AF_INET6 => early_filter::ipv6_early_pass_to_kernel(pkt.dst_addr),
         _ => true,
     }
 }
@@ -1918,18 +1911,6 @@ fn is_connection_initiating(pkt: &ParsedPacket) -> bool {
         PROTO_UDP | PROTO_ICMP | PROTO_ICMPV6 => true,
         _ => true,
     }
-}
-
-fn is_ipv4_multicast(ip: u32) -> bool {
-    (ip & 0xf000_0000) == 0xe000_0000
-}
-
-fn is_ipv4_link_local(ip: u32) -> bool {
-    (ip & 0xffff_0000) == 0xa9fe_0000
-}
-
-fn is_ipv6_link_local(ip: [u8; 16]) -> bool {
-    ip[0] == 0xfe && (ip[1] & 0xc0) == 0x80
 }
 
 /// #9901 (F-075): the L4 tuple for a FIRST fragment, whose L4 header is
