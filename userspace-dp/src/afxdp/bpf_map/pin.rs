@@ -96,6 +96,7 @@ pub(in crate::afxdp) const DEGRADED_PATH_REASON_NAMES: &[&str] = &[
     "pass_to_kernel",           // 14
     "transit_drop",             // 15
     "qinq_drop",                // 16
+    "stag_drop",                // 17
 ];
 
 #[cfg(feature = "debug-log")]
