@@ -438,12 +438,15 @@ func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBind
 	}
 	var src, dst net.IP
 	var srcFam, dstFam string
+	// Parse once: the v6 mapped check below reuses these (ParseIP is
+	// deterministic, so this is identical to re-parsing).
+	srcRaw, dstRaw := net.ParseIP(match.Tuple.SrcIP), net.ParseIP(match.Tuple.DstIP)
 	switch family {
 	case 4:
-		src, dst = net.ParseIP(match.Tuple.SrcIP).To4(), net.ParseIP(match.Tuple.DstIP).To4()
+		src, dst = srcRaw.To4(), dstRaw.To4()
 		srcFam, dstFam = "v4", "v4"
 	case 6:
-		src, dst = net.ParseIP(match.Tuple.SrcIP).To16(), net.ParseIP(match.Tuple.DstIP).To16()
+		src, dst = srcRaw.To16(), dstRaw.To16()
 		srcFam, dstFam = "v6", "v6"
 	default:
 		return dpuserspace.PolicySessionRebind{}, false
@@ -451,7 +454,7 @@ func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBind
 	if src == nil || dst == nil {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
-	if family == 6 && (net.ParseIP(match.Tuple.SrcIP).To4() != nil || net.ParseIP(match.Tuple.DstIP).To4() != nil) {
+	if family == 6 && (srcRaw.To4() != nil || dstRaw.To4() != nil) {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
 	if match.DNAT && match.NATDstIP != "" {
@@ -469,26 +472,29 @@ func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBind
 		}
 		dst = translated
 	}
+	// Helper-wire ports are HOST order (the Rust SessionKey holds host order
+	// and policy_tuple_from_key copies them raw), so — unlike the BPF-keyed
+	// V4/V6 twins — no networkPort() conversion applies on this path.
 	q := policymatch.Query{
 		FromZone: from, ToZone: to,
 		SrcIP: src, DstIP: dst,
 		Protocol: policyQueryProtocol(match.Tuple.Protocol),
-		SrcPort:  networkPort(match.Tuple.SrcPort), DstPort: networkPort(match.Tuple.DstPort),
+		SrcPort:  int(match.Tuple.SrcPort), DstPort: int(match.Tuple.DstPort),
 		SrcFamily: srcFam, DstFamily: dstFam,
 	}
 	if match.DNAT && match.NATDstPort != 0 {
-		q.DstPort = networkPort(match.NATDstPort)
+		q.DstPort = int(match.NATDstPort)
 	}
 	record, permitted := permittedRenameResult(newCfg, binding, q)
 	if !permitted {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
 	// The record keeps the ORIGINAL tuple (like the V4/V6 twins): the
-	// translated dst fed only the query. Ports share the key encoding, so
-	// they take the same networkPort() conversion.
+	// translated dst fed only the query. Host-order wire ports pass through
+	// raw — Rust rebuilds its lookup key from the record without conversion.
 	record.SrcIP = match.Tuple.SrcIP
 	record.DstIP = match.Tuple.DstIP
-	record.SrcPort, record.DstPort = uint16(networkPort(match.Tuple.SrcPort)), uint16(networkPort(match.Tuple.DstPort))
+	record.SrcPort, record.DstPort = match.Tuple.SrcPort, match.Tuple.DstPort
 	record.IngressZone, record.EgressZone = newIngress, newEgress
 	record.RoutingDomain = match.RoutingDomain
 	if record.RoutingDomain == 0 {

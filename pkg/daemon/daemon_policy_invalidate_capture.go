@@ -292,11 +292,16 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 				if record, permitted := rematchRenamedMatch(plan.oldCfg, plan.newCfg, binding, match); permitted {
 					capture.renamed = append(capture.renamed, record)
 				} else {
-					capture.deleted.policy = append(capture.deleted.policy, match)
+					// Convert-then-append (mirrors the normal path below): a
+					// malformed denied match must not enter the batch, where
+					// Rust fails the WHOLE delete batch closed and zero
+					// deletes apply.
 					entry4, entry6, err := policyMatchEntries(match)
 					if err != nil {
 						capture.readErr = errors.Join(capture.readErr, err)
+						continue
 					}
+					capture.deleted.policy = append(capture.deleted.policy, match)
 					if entry4 != nil {
 						capture.deleted.v4 = append(capture.deleted.v4, *entry4)
 					}
@@ -447,9 +452,11 @@ func (d *Daemon) captureAndStagePolicyRenameAncestry(cfg *config.Config) {
 
 // #10626: the policy-ID set the helper READ is asked for: the three changed
 // classes plus the rename bindings' keys, deduplicated. The bindings union is
-// what keeps a renamed match from tripping the P6 extraneous-match guard —
-// binding-keyed IDs are explicitly requested, so they are never extraneous.
-// Identical output when no rename bindings exist (pure refactor).
+// defensive inclusion (over-requesting is harmless: unmatched IDs return no
+// rows); what keeps a renamed match from tripping the P6 extraneous-match
+// guard is the rename first-check `continue` below, not this union — binding
+// keys are old numerics of vanished stable keys and are normally already in
+// `deleted`. Identical output when no rename bindings exist (pure refactor).
 func captureRequestedPolicyIDs(deleted, modified, deflt map[uint32]struct{}, renameBindings map[uint32]policyRenameBinding) []uint32 {
 	ids := make([]uint32, 0, len(deleted)+len(modified)+len(deflt)+len(renameBindings))
 	seen := make(map[uint32]struct{}, len(deleted)+len(modified)+len(deflt)+len(renameBindings))

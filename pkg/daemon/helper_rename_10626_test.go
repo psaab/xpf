@@ -36,10 +36,11 @@ func helperRenameMatch10626(policyID uint32) dpuserspace.SessionPolicyMatch {
 		Tuple: dpuserspace.SessionPolicyTuple{
 			AddrFamily: 4, Protocol: 6,
 			SrcIP: "10.0.0.10", DstIP: "10.0.0.20",
-			// Wire-native ports (BPF yields network bytes read natively);
-			// the record must carry host order.
-			SrcPort: userspaceHostToNetwork16(1234),
-			DstPort: userspaceHostToNetwork16(443),
+			// Helper-wire ports are HOST order (Rust SessionKey holds host
+			// order and policy_tuple_from_key copies them raw) — unlike the
+			// BPF-keyed legacy path. The record passes them through raw.
+			SrcPort: 1234,
+			DstPort: 443,
 		},
 		PolicyID:      policyID,
 		IngressZoneID: config.StableZoneID("lan"),
@@ -54,7 +55,7 @@ func TestRematchRenamedMatchPermitted10626(t *testing.T) {
 	match := helperRenameMatch10626(oldID)
 	// Non-palindromic dst port: a byte-swap slip rematches the wrong
 	// service and reds below.
-	match.Tuple.DstPort = userspaceHostToNetwork16(5201)
+	match.Tuple.DstPort = 5201
 	record, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match)
 	if !permitted {
 		t.Fatal("matching renamed helper match was not retained")
@@ -120,7 +121,7 @@ func TestRematchRenamedMatchDNAT10626(t *testing.T) {
 	match := helperRenameMatch10626(oldID)
 	match.DNAT = true
 	match.NATDstIP = "10.0.0.1"
-	match.NATDstPort = userspaceHostToNetwork16(8443)
+	match.NATDstPort = 8443
 	record, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match)
 	if !permitted || record.RuleID != "lan->wan/p-new" {
 		t.Fatalf("DNAT row not rematched through renamed permit: %+v permitted=%v", record, permitted)
@@ -145,7 +146,8 @@ func TestCaptureRequestedPolicyIDs10626(t *testing.T) {
 	modified := map[uint32]struct{}{11: {}}
 	var deflt map[uint32]struct{}
 	renameBindings := map[uint32]policyRenameBinding{
-		// Binding-only key: must be requested even though no class holds it.
+		// Binding-only key: included + deduplicated by contract (normally
+		// already in `deleted`; the union is defensive, not load-bearing).
 		13: {},
 		// Overlapping key: must not duplicate the deleted entry.
 		7: {},
@@ -225,7 +227,7 @@ func TestHelperCaptureRetainsRenamedSession10626(t *testing.T) {
 	match := helperRenameMatch10626(oldID)
 	match.Tuple.SrcIP = "10.0.0.20"
 	match.Tuple.DstIP = "10.0.0.254"
-	match.Tuple.DstPort = userspaceHostToNetwork16(5201)
+	match.Tuple.DstPort = 5201
 	match.ExpectedRTFlowSessionID = 0xA11CE
 	match.CreatedSecs = 1_500_000_000
 	dp := &helperRenameDP10626{
@@ -280,7 +282,7 @@ func TestHelperCaptureDeniedRenameDeletesOnce10626(t *testing.T) {
 	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
 	match := helperRenameMatch10626(oldID)
 	match.Tuple.DstIP = "10.0.0.254"
-	match.Tuple.DstPort = userspaceHostToNetwork16(5201)
+	match.Tuple.DstPort = 5201
 	match.ExpectedRTFlowSessionID = 0xA11CE
 	match.CreatedSecs = 1_500_000_000
 	dp := &helperRenameDP10626{
@@ -369,5 +371,122 @@ func TestHelperCaptureDeniedGRE0DeletesViaPolicy10626(t *testing.T) {
 	}
 	if len(dp.deleted) != 1 || dp.deleted[0].ExpectedRTFlowSessionID != 0xB22CE {
 		t.Fatalf("delete recorder = %+v, want exactly the GRE0 match", dp.deleted)
+	}
+}
+
+// #10626 m4: port-sensitive rematch pins the query-port encoding (guards M1:
+// a byte-swap slip rematches the wrong service). Distinctive ports on an
+// otherwise identical shape: dst 5201 permits, dst 5202 denies.
+func TestRematchRenamedMatchPortSensitive10626(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Applications.Applications = map[string]*config.Application{
+			"svc-5201": {Name: "svc-5201", Protocol: "tcp", DestinationPort: "5201"},
+		}
+		for _, pair := range cfg.Security.Policies {
+			for _, pol := range pair.Policies {
+				if pol.Name == "p-old" || pol.Name == "p-new" {
+					pol.Match.Applications = []string{"svc-5201"}
+				}
+			}
+		}
+		// Remove the port-agnostic alternate (N3e): with it present the
+		// out-of-scope dst would retain under the alternate and the deny
+		// half would stay green for the wrong reason.
+		for _, pair := range cfg.Security.Policies {
+			kept := pair.Policies[:0]
+			for _, pol := range pair.Policies {
+				if pol.Name != "p-alternate" {
+					kept = append(kept, pol)
+				}
+			}
+			pair.Policies = kept
+		}
+	}
+	oldID, binding := helperRenameBinding10626(t, oldCfg, newCfg)
+	match := helperRenameMatch10626(oldID)
+	match.Tuple.DstPort = 5201
+	if record, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); !permitted || record.DstPort != 5201 {
+		t.Fatalf("in-scope dst port not retained: %+v permitted=%v", record, permitted)
+	}
+	match.Tuple.DstPort = 5202
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); permitted {
+		t.Fatal("out-of-scope dst port was retained, want denied")
+	}
+}
+
+// #10626 m4: v6 helper rematch — family-6 branch, v4-mapped rejection, v6 DNAT.
+func TestRematchRenamedMatchV610626(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	oldID, binding := helperRenameBinding10626(t, oldCfg, newCfg)
+	v6match := func() dpuserspace.SessionPolicyMatch {
+		m := helperRenameMatch10626(oldID)
+		m.AddrFamily = 6
+		m.Tuple.AddrFamily = 6
+		m.Tuple.Protocol = 6
+		m.Tuple.SrcIP = "2001:db8::10"
+		m.Tuple.DstIP = "2001:db8::20"
+		m.Tuple.SrcPort = 1234
+		m.Tuple.DstPort = 443
+		return m
+	}
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, v6match()); !permitted {
+		t.Fatal("v6 helper match was not retained")
+	}
+	mapped := v6match()
+	mapped.Tuple.SrcIP = "::ffff:10.0.0.10"
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, mapped); permitted {
+		t.Fatal("v4-mapped v6 helper match was retained, want rejected")
+	}
+	dnat := v6match()
+	dnat.DNAT = true
+	dnat.NATDstIP = "2001:db8::30"
+	dnat.NATDstPort = 8443
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, dnat); !permitted {
+		t.Fatal("v6 DNAT helper match was not retained")
+	}
+}
+
+// #10626 m4: zone rename drives remappedQueryZones off its no-op path — the
+// old-zone query rematches against the NEW zone rule and the record carries
+// the remapped zones.
+func TestRematchRenamedMatchZoneRename10626(t *testing.T) {
+	oldCfg, newCfg := zoneRenameEvaluatorConfigs()
+	// Single binding: drop the alternate so the zone fan-out yields exactly
+	// the renamed pair under test.
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		for _, pair := range cfg.Security.Policies {
+			kept := pair.Policies[:0]
+			for _, pol := range pair.Policies {
+				if pol.Name != "p-alternate" {
+					kept = append(kept, pol)
+				}
+			}
+			pair.Policies = kept
+		}
+	}
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg, []configstore.RenameDescriptor{{
+			SourcePath:      []string{"security", "zones", "security-zone", "lan"},
+			DestinationPath: []string{"security", "zones", "security-zone", "lan2"},
+		}},
+	)
+	if !ok || len(bindings) != 1 {
+		t.Fatalf("zone rename rejected or fanned out: bindings=%v ok=%v", bindings, ok)
+	}
+	var oldID uint32
+	var binding policyRenameBinding
+	for id, b := range bindings {
+		oldID, binding = id, b
+	}
+	match := helperRenameMatch10626(oldID)
+	record, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match)
+	if !permitted {
+		t.Fatal("zone-renamed helper match was not retained")
+	}
+	if record.IngressZone != config.StableZoneID("lan2") {
+		t.Fatalf("record kept stale ingress zone %d, want lan2", record.IngressZone)
 	}
 }
