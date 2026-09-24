@@ -490,3 +490,114 @@ func TestRematchRenamedMatchZoneRename10626(t *testing.T) {
 		t.Fatalf("record kept stale ingress zone %d, want lan2", record.IngressZone)
 	}
 }
+
+// #10626 n1/m7: the NATDstPort query encoding is pinned — a regression
+// reintroducing networkPort() on the translated port (8443=0x20FB would read
+// as 64288=0xFB20) flips both halves below.
+func TestRematchRenamedMatchDNATPortSensitive10626(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.DestinationAddresses =
+			[]string{"10.0.0.1/32"}
+		cfg.Applications.Applications = map[string]*config.Application{
+			"svc-8443": {Name: "svc-8443", Protocol: "tcp", DestinationPort: "8443"},
+		}
+		cfg.Security.Policies[1].Policies[0].Match.Applications = []string{"svc-8443"}
+		newCfg.Security.Policies[1].Policies = newCfg.Security.Policies[1].Policies[:1]
+	}
+	oldID, binding := helperRenameBinding10626(t, oldCfg, newCfg)
+	match := helperRenameMatch10626(oldID)
+	match.DNAT = true
+	match.NATDstIP = "10.0.0.1"
+	match.NATDstPort = 8443
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); !permitted {
+		t.Fatal("in-scope translated port was denied, want retained")
+	}
+	match.NATDstPort = 8444
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); permitted {
+		t.Fatal("out-of-scope translated port was retained, want denied")
+	}
+}
+
+// #10626 n2: invalid translations deny — garbage NATDstIP (v4 nil-translated)
+// and v4-mapped NATDstIP on a v6 DNAT row both fail closed.
+func TestRematchRenamedMatchDNATInvalidTranslation10626(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.DestinationAddresses =
+			[]string{"10.0.0.1/32", "2001:db8::30/128"}
+	}
+	newCfg.Security.Policies[1].Policies = newCfg.Security.Policies[1].Policies[:1]
+	oldID, binding := helperRenameBinding10626(t, oldCfg, newCfg)
+	match := helperRenameMatch10626(oldID)
+	match.DNAT = true
+	match.NATDstIP = "not-an-address!!"
+	match.NATDstPort = 8443
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); permitted {
+		t.Fatal("garbage NATDstIP was retained, want denied")
+	}
+	v6 := helperRenameMatch10626(oldID)
+	v6.AddrFamily = 6
+	v6.Tuple.AddrFamily = 6
+	v6.Tuple.SrcIP = "2001:db8::10"
+	v6.Tuple.DstIP = "2001:db8::20"
+	v6.DNAT = true
+	v6.NATDstIP = "::ffff:10.0.0.1"
+	v6.NATDstPort = 8443
+	if _, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, v6); permitted {
+		t.Fatal("v4-mapped v6 NATDstIP was retained, want denied")
+	}
+}
+
+// #10626 n3/m6/M1: a corrupt denied renamed match is EXCLUDED from
+// deleted.policy (convert-then-append) while a well-formed denied match in
+// the same batch still deletes exactly once. Reverting the `continue` lets
+// the corrupt match poison the batch (Rust fails the whole delete closed).
+func TestHelperCaptureDeniedMalformedExcluded10626(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		cfg.Security.Policies[1].Policies[0].Match.DestinationAddresses = []string{"10.0.0.1/32"}
+	}
+	newCfg.Security.Policies[1].Policies = newCfg.Security.Policies[1].Policies[:1]
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	good := helperRenameMatch10626(oldID)
+	good.Tuple.DstIP = "10.0.0.254"
+	good.Tuple.DstPort = 5201
+	good.ExpectedRTFlowSessionID = 0xA11CE
+	good.CreatedSecs = 1_500_000_000
+	bad := helperRenameMatch10626(oldID)
+	bad.Tuple.DstIP = "10.0.0.254"
+	bad.Tuple.SrcIP = "garbage!!"
+	bad.ExpectedRTFlowSessionID = 0
+	dp := &helperRenameDP10626{
+		policyInvalTestDP: &policyInvalTestDP{
+			v4: map[dataplane.SessionKey]dataplane.SessionValue{},
+			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+		},
+		matches: []dpuserspace.SessionPolicyMatch{good, bad},
+	}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	d.armPolicyInvalidationPlanWithRename(oldCfg, newCfg, &pendingRenameApply{
+		descriptors: []configstore.RenameDescriptor{
+			policyRenameDescriptor("p-old", "p-new"),
+		},
+	})
+	d.capturePolicyInvalidationLocked(newCfg)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("rename apply did not produce a pre-publication capture")
+	}
+	if len(capture.deleted.policy) != 1 {
+		t.Fatalf("deleted.policy = %d, want exactly 1 (well-formed only)", len(capture.deleted.policy))
+	}
+	if capture.deleted.policy[0].ExpectedRTFlowSessionID != 0xA11CE {
+		t.Fatalf("deleted.policy[0] = %+v, want the well-formed match", capture.deleted.policy[0])
+	}
+	if capture.readErr == nil {
+		t.Fatal("corrupt denied match produced no readErr")
+	}
+}
