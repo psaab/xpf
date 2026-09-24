@@ -28,8 +28,8 @@ import (
 // DENY an outside address, which is false of an empty allowlist however the
 // other spelling behaves. (Design constraint: team-lead.)
 func TestPackedCommunityStillEnforcesClients8778(t *testing.T) {
-	inside := net.ParseIP("10.1.2.3")
-	outside := net.ParseIP("192.0.2.7")
+	inside := net.ParseIP("10.1.2.3").To4()
+	outside := net.ParseIP("192.0.2.7").To4()
 
 	check := func(t *testing.T, label string, cm *SNMPCommunity) {
 		t.Helper()

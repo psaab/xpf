@@ -1,7 +1,6 @@
 package config
 
 import (
-	"net"
 	"strings"
 	"testing"
 )
@@ -76,7 +75,7 @@ func TestSNMPOrphanRestrictLenientQuarantines_5898(t *testing.T) {
 	// Quarantined = DENY-ALL: the surviving broad 0.0.0.0/0 allow must NOT be
 	// honored (fail-open), and IPv6 is denied too.
 	for _, src := range []string{"8.8.8.8", "10.1.2.3", "192.168.1.1", "2001:db8::1"} {
-		if mon.AllowsSource(net.ParseIP(src)) {
+		if mon.AllowsSource(snmpClientTestSource10687(src)) {
 			t.Errorf("quarantined community must DENY %s, but it was allowed — the orphan 'restrict' was "+
 				"dropped and the broad 0.0.0.0/0 allow survived (fail-open, #5898)", src)
 		}
@@ -87,10 +86,10 @@ func TestSNMPOrphanRestrictLenientQuarantines_5898(t *testing.T) {
 	if pub == nil {
 		t.Fatal("well-formed community 'pub' missing — the rest of the config failed to load")
 	}
-	if !pub.AllowsSource(net.ParseIP("192.168.1.1")) {
+	if !pub.AllowsSource(snmpClientTestSource10687("192.168.1.1")) {
 		t.Error("well-formed community 'pub' must ALLOW its listed source 192.168.1.1")
 	}
-	if pub.AllowsSource(net.ParseIP("8.8.8.8")) {
+	if pub.AllowsSource(snmpClientTestSource10687("8.8.8.8")) {
 		t.Error("well-formed community 'pub' must DENY an unlisted source 8.8.8.8")
 	}
 }
@@ -117,13 +116,13 @@ func TestSNMPValidRestrictOrderingUnaffected_5898(t *testing.T) {
 		t.Fatal("community 'mon' missing")
 	}
 	// Longest-prefix restrict/allow semantics intact:
-	if mon.AllowsSource(net.ParseIP("10.2.3.4")) {
+	if mon.AllowsSource(snmpClientTestSource10687("10.2.3.4")) {
 		t.Error("10.0.0.0/8 restrict must DENY 10.2.3.4")
 	}
-	if !mon.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if !mon.AllowsSource(snmpClientTestSource10687("10.1.2.3")) {
 		t.Error("more-specific 10.1.0.0/16 allow must PERMIT 10.1.2.3")
 	}
-	if !mon.AllowsSource(net.ParseIP("192.168.1.5")) {
+	if !mon.AllowsSource(snmpClientTestSource10687("192.168.1.5")) {
 		t.Error("bare-IP allow 192.168.1.5 must be PERMITTED")
 	}
 
@@ -146,7 +145,7 @@ func TestSNMPValidRestrictOrderingUnaffected_5898(t *testing.T) {
 		t.Fatalf("valid `<prefix> restrict` must NOT produce a token warning (no false quarantine), warnings=%v", lcfg.Warnings)
 	}
 	lmon := lcfg.System.SNMP.Communities["mon"]
-	if lmon == nil || lmon.AllowsSource(net.ParseIP("10.2.3.4")) || !lmon.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if lmon == nil || lmon.AllowsSource(snmpClientTestSource10687("10.2.3.4")) || !lmon.AllowsSource(snmpClientTestSource10687("10.1.2.3")) {
 		t.Fatal("valid restrict semantics must survive the lenient path unchanged (no false quarantine)")
 	}
 }

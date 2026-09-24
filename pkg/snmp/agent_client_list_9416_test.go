@@ -1,7 +1,6 @@
 package snmp
 
 import (
-	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/configstore"
@@ -45,14 +44,14 @@ snmp {
 	// POSITIVE CONTROL, same address family, same run: a listed source IS
 	// served. Without it the deny below is unreadable — an agent that answers
 	// nothing at all would pass a deny-only assertion.
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("10.0.0.9")); resp == nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("10.0.0.9")); resp == nil {
 		t.Fatal("CONTROL: a GET from a source the named list ADMITS (10.0.0.9 in 10.0.0.0/24) was " +
 			"dropped. The denial below cannot be interpreted without this")
 	}
 	// UNDER TEST: an unlisted source is refused. Before #9416 the named list
 	// compiled to nothing, the community had an empty allowlist, and
 	// AllowsSource read that as allow-all — so this GET was ANSWERED.
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("192.0.2.5")); resp != nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("192.0.2.5")); resp != nil {
 		t.Fatal("#9416: a GET from 192.0.2.5 — outside the client-list the operator named — was " +
 			"ANSWERED. The named spelling of the source restriction is failing open on the wire")
 	}
@@ -69,10 +68,10 @@ snmp {
 `)
 	pkt := buildV2cGetRequest("scoped", 2, oidSysDescr)
 
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("10.1.3.7")); resp == nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("10.1.3.7")); resp == nil {
 		t.Fatal("CONTROL: 10.1.3.7 is inside the /16 allow and outside the restricted /24 — it must be served")
 	}
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("10.1.2.7")); resp != nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("10.1.2.7")); resp != nil {
 		t.Fatal("#9416: 10.1.2.7 is inside the `restrict` /24, which is longer-prefix than the /16 allow — " +
 			"it must be refused. A named list that drops `restrict` degrades a deny-except entry into an " +
 			"unrestricted allow for every community referencing it")
@@ -88,10 +87,10 @@ snmp {
 `)
 	pkt := buildV2cGetRequest("scoped", 3, oidSysDescr)
 
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("10.0.0.9")); resp == nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("10.0.0.9")); resp == nil {
 		t.Fatal("CONTROL: a listed source must be served")
 	}
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("192.0.2.5")); resp != nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("192.0.2.5")); resp != nil {
 		t.Fatal("#9416: a restriction written inside a `routing-instance` block was ignored on the wire. " +
 			"xpf cannot honour the SCOPING (one socket, default instance) and says so at commit — but " +
 			"dropping the restriction entirely turns a narrowing into an allow-all")
@@ -107,7 +106,7 @@ snmp { community open { authorization read-only; } }
 `)
 	pkt := buildV2cGetRequest("open", 4, oidSysDescr)
 	for _, src := range []string{"10.0.0.9", "192.0.2.5", "203.0.113.7"} {
-		if resp := a.handlePacketFrom(pkt, net.ParseIP(src)); resp == nil {
+		if resp := a.handlePacketFrom(pkt, snmpSource10687(src)); resp == nil {
 			t.Fatalf("CONTROL: an unscoped community must answer %s — allow-all is the correct Junos "+
 				"default with no restriction authored, and a fix that closed it would be an availability "+
 				"regression wearing the shape of a security fix", src)

@@ -16,7 +16,7 @@ import (
 // FAIL-ON-REVERT: dropping the `cn.ones == bestBits && cn.restrict` deny-wins
 // branch makes the allow-then-restrict ordering ALLOW the source again.
 func TestSNMPAllowsSource_EqualLengthTie_DenyWins_5523(t *testing.T) {
-	src := net.ParseIP("10.0.0.5")
+	src := net.ParseIP("10.0.0.5").To4()
 	allow := config.SNMPClient{Prefix: "10.0.0.0/24"}
 	deny := config.SNMPClient{Prefix: "10.0.0.0/24", Restrict: true}
 
@@ -45,10 +45,10 @@ func TestSNMPAllowsSource_LongestPrefixIntact_5523(t *testing.T) {
 		{Prefix: "10.0.0.0/8", Restrict: true}, // deny 10/8 ...
 		{Prefix: "10.0.0.0/24"},                // ... except the more-specific /24 (allow)
 	}}
-	if !c.AllowsSource(net.ParseIP("10.0.0.5")) {
+	if !c.AllowsSource(net.ParseIP("10.0.0.5").To4()) {
 		t.Fatal("more-specific /24 allow must beat the broader /8 restrict (longest-prefix)")
 	}
-	if c.AllowsSource(net.ParseIP("10.9.9.9")) {
+	if c.AllowsSource(net.ParseIP("10.9.9.9").To4()) {
 		t.Fatal("10.9.9.9 matched only by the /8 restrict must be DENIED")
 	}
 }

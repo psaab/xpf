@@ -1,7 +1,6 @@
 package snmp
 
 import (
-	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -33,12 +32,12 @@ func TestV2cCommunityClientsSourceEnforced(t *testing.T) {
 	pkt := buildV2cGetRequest("scoped", 1, oidSysDescr)
 
 	// Permitted source (inside 10.0.0.0/24): served.
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("10.0.0.9")); resp == nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("10.0.0.9")); resp == nil {
 		t.Fatal("GET from a permitted source (10.0.0.9 in 10.0.0.0/24) was dropped; want a response")
 	}
 
 	// Non-permitted source (outside the allowlist): dropped.
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("192.0.2.5")); resp != nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("192.0.2.5")); resp != nil {
 		t.Fatal("GET from a non-permitted source (192.0.2.5, not in 10.0.0.0/24) was answered; want no response (fail-open)")
 	}
 }
@@ -54,7 +53,7 @@ func TestV2cCommunityNoClientsAllowAll(t *testing.T) {
 
 	pkt := buildV2cGetRequest("public", 2, oidSysDescr)
 	for _, src := range []string{"10.0.0.9", "192.0.2.5", "203.0.113.7"} {
-		if resp := a.handlePacketFrom(pkt, net.ParseIP(src)); resp == nil {
+		if resp := a.handlePacketFrom(pkt, snmpSource10687(src)); resp == nil {
 			t.Fatalf("GET from %s to an unscoped (allow-all) community was dropped; want a response", src)
 		}
 	}
@@ -78,10 +77,10 @@ func TestV2cCommunityClientsRestrictDenies(t *testing.T) {
 
 	pkt := buildV2cGetRequest("mgmt", 3, oidSysDescr)
 
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("10.1.5.1")); resp == nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("10.1.5.1")); resp == nil {
 		t.Fatal("GET from 10.1.5.1 (allowed by 10.1.0.0/16) was dropped; want a response")
 	}
-	if resp := a.handlePacketFrom(pkt, net.ParseIP("10.1.2.9")); resp != nil {
+	if resp := a.handlePacketFrom(pkt, snmpSource10687("10.1.2.9")); resp != nil {
 		t.Fatal("GET from 10.1.2.9 (restricted by 10.1.2.0/24) was answered; want no response")
 	}
 }

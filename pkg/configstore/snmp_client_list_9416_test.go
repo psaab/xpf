@@ -57,6 +57,9 @@ func allows9416(t *testing.T, c *config.SNMPCommunity, ip string) bool {
 	if parsed == nil {
 		t.Fatalf("bad probe address %q", ip)
 	}
+	if !strings.Contains(ip, ":") {
+		parsed = parsed.To4()
+	}
 	return c.AllowsSource(parsed)
 }
 
@@ -206,7 +209,7 @@ func TestSNMPUnresolvableClientListQuarantinesOnLoad9416(t *testing.T) {
 	if comm == nil {
 		t.Fatal("the community must still exist after a tolerated load")
 	}
-	if comm.AllowsSource(net.ParseIP("203.0.113.9")) || comm.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if comm.AllowsSource(net.ParseIP("203.0.113.9").To4()) || comm.AllowsSource(net.ParseIP("10.1.2.3").To4()) {
 		t.Error("#9416: on the tolerant path an unresolvable client-list reference must QUARANTINE the " +
 			"community to deny-all (the #5833 shape), not fall through to allow-all. A warning does not " +
 			"make an open community safe")
@@ -227,10 +230,10 @@ func TestSNMPUnresolvableClientListQuarantinesOnLoad9416(t *testing.T) {
 	if ctrl == nil {
 		t.Fatal("CONTROL: community missing")
 	}
-	if !ctrl.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if !ctrl.AllowsSource(net.ParseIP("10.1.2.3").To4()) {
 		t.Error("CONTROL: a resolvable reference must admit a listed source through the tolerant ingress")
 	}
-	if ctrl.AllowsSource(net.ParseIP("203.0.113.9")) {
+	if ctrl.AllowsSource(net.ParseIP("203.0.113.9").To4()) {
 		t.Error("CONTROL: a resolvable reference must still deny an unlisted source through the tolerant ingress")
 	}
 
@@ -316,10 +319,10 @@ func TestSNMPClientListSharedByTwoCommunities9416(t *testing.T) {
 		if comm == nil {
 			t.Fatalf("community %q missing", name)
 		}
-		if comm.AllowsSource(net.ParseIP("203.0.113.9")) {
+		if comm.AllowsSource(net.ParseIP("203.0.113.9").To4()) {
 			t.Errorf("community %q: a shared client-list must restrict every community that references it", name)
 		}
-		if !comm.AllowsSource(net.ParseIP("10.1.2.3")) {
+		if !comm.AllowsSource(net.ParseIP("10.1.2.3").To4()) {
 			t.Errorf("community %q: a listed source must be admitted", name)
 		}
 	}
@@ -411,11 +414,11 @@ func TestSNMPClientListFlatSetSpellings9416(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			comm := compile(t, tc.lines...)
-			if comm.AllowsSource(net.ParseIP("203.0.113.9")) {
+			if comm.AllowsSource(net.ParseIP("203.0.113.9").To4()) {
 				t.Errorf("#9416: the restriction was lost in this spelling — 203.0.113.9 is outside "+
 					"every prefix authored, and an empty allowlist reads as allow-all.\nlines: %v", tc.lines)
 			}
-			if !comm.AllowsSource(net.ParseIP("10.1.2.3")) {
+			if !comm.AllowsSource(net.ParseIP("10.1.2.3").To4()) {
 				t.Errorf("#9416: 10.1.2.3 is listed and must be admitted.\nlines: %v", tc.lines)
 			}
 		})
@@ -447,10 +450,10 @@ func TestSNMPClientListFlatSetSpellings9416(t *testing.T) {
 	} {
 		t.Run(tc.name+" keeps EVERY value", func(t *testing.T) {
 			comm := compile(t, tc.lines...)
-			if !comm.AllowsSource(net.ParseIP("10.1.2.3")) {
+			if !comm.AllowsSource(net.ParseIP("10.1.2.3").To4()) {
 				t.Errorf("the FIRST prefix was lost.\nlines: %v", tc.lines)
 			}
-			if !comm.AllowsSource(net.ParseIP("172.16.5.5")) {
+			if !comm.AllowsSource(net.ParseIP("172.16.5.5").To4()) {
 				t.Errorf("#2419: the SECOND value of the list was dropped — reading only the first "+
 					"value of a multi-value leaf is the collapse class, and here it narrows an SNMP "+
 					"allowlist below what the operator authored.\nlines: %v", tc.lines)

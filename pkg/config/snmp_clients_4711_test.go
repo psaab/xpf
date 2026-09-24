@@ -1,7 +1,6 @@
 package config
 
 import (
-	"net"
 	"testing"
 )
 
@@ -50,7 +49,7 @@ func TestSNMPClientsCompiledCacheEmptyIsAllowAll(t *testing.T) {
 		t.Errorf("unscoped community should have nil clientNets, got %+v", c.clientNets)
 	}
 	for _, src := range []string{"10.0.0.1", "8.8.8.8", "2001:db8::1"} {
-		if !c.AllowsSource(net.ParseIP(src)) {
+		if !c.AllowsSource(snmpClientTestSource10687(src)) {
 			t.Errorf("AllowsSource(%s) = false on an unscoped community, want allow-all", src)
 		}
 	}
@@ -95,7 +94,7 @@ func TestSNMPClientsCompiledVsFallbackParity(t *testing.T) {
 		"2001:dead::1":     false, // no match → default-deny
 	}
 	for src, want := range cases {
-		ip := net.ParseIP(src)
+		ip := snmpClientTestSource10687(src)
 		gd := direct.AllowsSource(ip)
 		gc := compiled.AllowsSource(ip)
 		if gd != gc {
@@ -123,10 +122,10 @@ func TestSNMPClientsMalformedSkippedInert(t *testing.T) {
 	}
 
 	c := &SNMPCommunity{Name: "m", Clients: clients, clientNets: nets}
-	if !c.AllowsSource(net.ParseIP("10.5.0.9")) {
+	if !c.AllowsSource(snmpClientTestSource10687("10.5.0.9")) {
 		t.Error("10.5.0.9 should be allowed by 10.5.0.0/24 despite a malformed sibling")
 	}
-	if c.AllowsSource(net.ParseIP("8.8.8.8")) {
+	if c.AllowsSource(snmpClientTestSource10687("8.8.8.8")) {
 		t.Error("8.8.8.8 should be denied — a malformed entry must not become allow-all")
 	}
 
@@ -136,7 +135,7 @@ func TestSNMPClientsMalformedSkippedInert(t *testing.T) {
 		t.Fatalf("all-malformed list should compile to a non-nil empty cache, got %+v", badOnly)
 	}
 	deny := &SNMPCommunity{Name: "b", Clients: []SNMPClient{{Prefix: "bad"}}, clientNets: badOnly}
-	if deny.AllowsSource(net.ParseIP("10.0.0.1")) {
+	if deny.AllowsSource(snmpClientTestSource10687("10.0.0.1")) {
 		t.Error("a community whose clients are all malformed must default-deny, not allow-all")
 	}
 }

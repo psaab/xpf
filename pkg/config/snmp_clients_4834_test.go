@@ -1,7 +1,6 @@
 package config
 
 import (
-	"net"
 	"strings"
 	"testing"
 )
@@ -96,7 +95,7 @@ func TestSNMPClients_RestrictTypoLenientQuarantines(t *testing.T) {
 	// 0.0.0.0/0 allow (and the 10.0.0.0/8 allow) must NOT be honored, and IPv6
 	// is denied too.
 	for _, src := range []string{"8.8.8.8", "10.1.2.3", "192.168.1.1", "2001:db8::1"} {
-		if mon.AllowsSource(net.ParseIP(src)) {
+		if mon.AllowsSource(snmpClientTestSource10687(src)) {
 			t.Errorf("quarantined community must DENY %s, but it was allowed "+
 				"(fail-open: the broad allow survived the malformed \"restrict\" token, #5833)", src)
 		}
@@ -108,10 +107,10 @@ func TestSNMPClients_RestrictTypoLenientQuarantines(t *testing.T) {
 	if pub == nil {
 		t.Fatal("well-formed community 'pub' missing — the rest of the config failed to load")
 	}
-	if !pub.AllowsSource(net.ParseIP("192.168.1.1")) {
+	if !pub.AllowsSource(snmpClientTestSource10687("192.168.1.1")) {
 		t.Error("well-formed community 'pub' must ALLOW its listed source 192.168.1.1")
 	}
-	if pub.AllowsSource(net.ParseIP("8.8.8.8")) {
+	if pub.AllowsSource(snmpClientTestSource10687("8.8.8.8")) {
 		t.Error("well-formed community 'pub' must DENY an unlisted source 8.8.8.8")
 	}
 }
@@ -151,10 +150,10 @@ func TestSNMPClients_WellFormedLenientNoQuarantine(t *testing.T) {
 	// Longest-prefix restrict semantics intact (no false quarantine):
 	//   10.2.3.4 -> matched only by 10.0.0.0/8 restrict -> DENY
 	//   10.1.2.3 -> matched by more-specific 10.1.0.0/16 allow           -> ALLOW
-	if mon.AllowsSource(net.ParseIP("10.2.3.4")) {
+	if mon.AllowsSource(snmpClientTestSource10687("10.2.3.4")) {
 		t.Error("10.0.0.0/8 restrict must DENY 10.2.3.4")
 	}
-	if !mon.AllowsSource(net.ParseIP("10.1.2.3")) {
+	if !mon.AllowsSource(snmpClientTestSource10687("10.1.2.3")) {
 		t.Error("more-specific 10.1.0.0/16 allow must PERMIT 10.1.2.3 (false quarantine?)")
 	}
 }

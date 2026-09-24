@@ -1,7 +1,6 @@
 package snmp
 
 import (
-	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -390,10 +389,10 @@ func TestV1_SourceAllowlistEnforced(t *testing.T) {
 	})
 	req := buildV1Request(pduGetRequest, "scoped", 1, [][]int{oidSysDescr})
 
-	if resp := a.handlePacketFrom(req, net.ParseIP("10.0.0.9")); resp == nil {
+	if resp := a.handlePacketFrom(req, snmpSource10687("10.0.0.9")); resp == nil {
 		t.Fatal("v1 GET from a permitted source (10.0.0.9) was dropped; want a response")
 	}
-	if resp := a.handlePacketFrom(req, net.ParseIP("192.0.2.5")); resp != nil {
+	if resp := a.handlePacketFrom(req, snmpSource10687("192.0.2.5")); resp != nil {
 		t.Fatal("v1 GET from a non-permitted source (192.0.2.5) was answered; source allowlist not enforced")
 	}
 }

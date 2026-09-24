@@ -60,10 +60,14 @@ func compileClientNets(clients []SNMPClient) []compiledSNMPClient {
 //
 //   - No `clients` configured (empty allowlist): allow all (the default).
 //   - Otherwise longest-prefix match wins: the most-specific entry containing
-//     srcIP decides — `restrict` denies, a plain entry allows.
+//     srcIP decides — `restrict` denies, a plain entry allows. IPv4 and IPv6
+//     are distinct families: a 4-byte IPv4 source matches only IPv4 prefixes;
+//     a 16-byte IPv6 source matches only IPv6 prefixes, including mapped IPv6.
+//     Callers must represent IPv4 sources in 4-byte form; a 16-byte mapped
+//     source is IPv6 here (the UDP serving path normalizes kernel-mapped IPv4).
 //   - `clients` configured but srcIP matches no entry: deny (an allowlist that
 //     lists some sources implicitly excludes the rest).
-//
+
 // A nil srcIP (e.g. a non-IP transport / test path with no address) is allowed
 // so enforcement never blocks a request whose source cannot be determined; the
 // real serving path always supplies the UDP source address.
@@ -111,7 +115,7 @@ func (c *SNMPCommunity) AllowsSource(srcIP net.IP) bool {
 	bestBits := -1
 	bestAllow := false
 	for _, cn := range nets {
-		if !cn.net.Contains(srcIP) {
+		if !clientPrefixContains(cn.net, srcIP) {
 			continue
 		}
 		switch {
@@ -131,6 +135,36 @@ func (c *SNMPCommunity) AllowsSource(srcIP net.IP) bool {
 		return false // clients configured, no match: default-deny
 	}
 	return bestAllow
+}
+
+// clientPrefixContains applies the allowlist's address-family boundary before
+// comparing bytes. net.IPNet.Contains calls To4 on every source, which folds a
+// 16-byte IPv4-mapped IPv6 address into IPv4 and can make it match an IPv4
+// prefix. Preserve the representation's family instead: only 4-byte sources
+// can match IPv4 prefixes, and only 16-byte sources can match IPv6 prefixes.
+//
+// IPv6 matching uses the mask bytes directly because net.IPNet.Contains would
+// fold mapped IPv6 sources to IPv4 even when the configured prefix is IPv6.
+func clientPrefixContains(prefix *net.IPNet, srcIP net.IP) bool {
+	if prefix == nil {
+		return false
+	}
+	switch len(prefix.Mask) {
+	case net.IPv4len:
+		return len(srcIP) == net.IPv4len && prefix.Contains(srcIP)
+	case net.IPv6len:
+		if len(srcIP) != net.IPv6len || len(prefix.IP) != net.IPv6len {
+			return false
+		}
+		for i, mask := range prefix.Mask {
+			if srcIP[i]&mask != prefix.IP[i]&mask {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // parseClientPrefix parses a `clients` entry as either a CIDR prefix
