@@ -1555,3 +1555,48 @@ fn term_match_extra_agrees_across_wrong_stamp_9900() {
         "a wrong L3 stamp must not change filter inputs"
     );
 }
+
+/// #10637: the reverse-companion answer set. A reverse-direction packet of an
+/// ANSWER type is return traffic for the live query session it hits (Junos
+/// permits it because the session exists); any other type is a NEW query
+/// riding the typeless session key and must face reverse-direction policy.
+/// Every identifier-bearing query type is sampled on both sides of the
+/// answer/request line, plus the error, ND/MLD, and non-ICMP fall-throughs.
+#[test]
+fn icmp_reply_type_pins_the_answer_set_10637() {
+    // Answers coast.
+    for t in [0, 14, 16] {
+        assert!(icmp_reply_type(PROTO_ICMP, t), "v4 type {t} is an answer");
+    }
+    assert!(
+        icmp_reply_type(PROTO_ICMPV6, 129),
+        "v6 echo reply is an answer"
+    );
+    // Requests are judged — every identifier-bearing request type, so a
+    // widened answer set (e.g. `8 |` folded into the reply arm) fails here.
+    for t in [8, 13, 15] {
+        assert!(!icmp_reply_type(PROTO_ICMP, t), "v4 type {t} is a request");
+    }
+    assert!(
+        !icmp_reply_type(PROTO_ICMPV6, 128),
+        "v6 echo request is a request"
+    );
+    // Unreachable fail-closed fall-throughs (#3290 gates these flowless, so
+    // they never hit a companion — but they must never read as answers).
+    for t in [3, 5, 11, 12] {
+        assert!(
+            !icmp_reply_type(PROTO_ICMP, t),
+            "v4 error type {t} is not an answer"
+        );
+    }
+    for t in [1, 2, 3, 4, 133, 134, 135, 136, 137] {
+        assert!(
+            !icmp_reply_type(PROTO_ICMPV6, t),
+            "v6 type {t} is not an answer"
+        );
+    }
+    assert!(
+        !icmp_reply_type(PROTO_TCP, 0),
+        "a non-ICMP protocol is never an answer"
+    );
+}
