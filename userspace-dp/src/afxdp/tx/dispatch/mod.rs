@@ -226,6 +226,33 @@ fn compute_forwarded_egress_ptb(
         }
         let egress_decision =
             forwarded_egress_mtu_decision(source_frame, l3, meta.addr_family, mtu);
+        // #10705: on a NATIVE-TUNNEL path a DF-clear oversize inner is NOT
+        // forwardable — the encap builders refuse to emit it (#2331 GRE /
+        // #1865 WG: the outer carries DF=1 and cannot fragment
+        // downstream), so #9395 forward-whole would die at the encap guard
+        // as a counter-only drop with no PMTUD signal back to the inner
+        // source (PMTUD-dependent applications hang rather than adapt).
+        // Convert to a PTB advertising the SAME post-transform inner MTU
+        // the DF arm quotes (`mtu` here IS that budget on tunnel paths),
+        // reusing the existing build + RFC suppression + per-ingress-zone
+        // rate-limit machinery below. Plain forwards keep #9395
+        // forward-whole (measured to deliver); NAT64-only (no tunnel
+        // endpoint) likewise — the override fires only when the tunnel
+        // arm resolved a usable inner budget (`mtu != 0`; the unknown-MTU
+        // fail-open above is untouched). A non-first-fragment trigger is
+        // still RFC-suppressed below (fail-closed drop, same disposition
+        // the encap guard gave it, now with an exception record).
+        let egress_decision = match egress_decision {
+            EgressMtuDecision::ForwardOversizeNoDf if uses_native_tunnel && mtu != 0 => {
+                EgressMtuDecision::EmitPacketTooBig {
+                    next_hop_mtu: crate::afxdp::icmp_ptb::clamp_next_hop_mtu(
+                        mtu,
+                        meta.addr_family,
+                    ),
+                }
+            }
+            d => d,
+        };
         // #9328: an oversized DF-CLEAR IPv4 datagram is still forwarded at full
         // length, but it is no longer booked as a plain successful forward. It
         // used to be indistinguishable from a frame that FITS: same `Forward`

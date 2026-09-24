@@ -87,7 +87,11 @@ pub(in crate::afxdp) enum EgressMtuDecision {
     /// NOT covered by that measurement, and not changed by the decision:
     ///   - a transformed path (NAT64, native GRE, WireGuard), where `mtu` is the
     ///     #2330 post-transform inner MTU and the translated or encapsulated
-    ///     frame then meets that path's own handling;
+    ///     frame then meets that path's own handling. On a NATIVE-TUNNEL path
+    ///     specifically the dispatcher converts this variant into a PTB
+    ///     advertising the tunnel inner MTU (#10705): the encap builders
+    ///     refuse to emit the frame (#2331 GRE / #1865 WG), so forward-whole
+    ///     would die there as a counter-only drop with no PMTUD signal;
     ///   - a plain datagram larger than the PHYSICAL egress link (#9758).
     ///
     /// The exception is SAMPLED (see `record_exception`), so it shows that such
@@ -125,7 +129,9 @@ pub(in crate::afxdp) enum EgressMtuDecision {
 ///
 /// An oversized IPv4 datagram without DF returns
 /// [`EgressMtuDecision::ForwardOversizeNoDf`]: no PTB, because the sender did
-/// not forbid fragmentation (#9328, #9395).
+/// not forbid fragmentation (#9328, #9395). The TX dispatcher converts that
+/// variant into a PTB on native-tunnel paths (#10705) — the encap builders
+/// would refuse the frame, so forward-whole is not an option there.
 #[inline]
 pub(in crate::afxdp) fn forwarded_egress_mtu_decision(
     frame: &[u8],
@@ -151,13 +157,7 @@ pub(in crate::afxdp) fn forwarded_egress_mtu_decision(
     if l3_len <= mtu {
         return EgressMtuDecision::Forward;
     }
-    // The next-hop MTU we advertise. Floor at the protocol minimum so a
-    // misconfigured tiny MTU never tells the sender to use an illegal MSS.
-    let floor = match addr_family as i32 {
-        libc::AF_INET6 => 1280usize,
-        _ => 68usize, // RFC 791 minimum IPv4 reassembly buffer / link MTU floor
-    };
-    let next_hop_mtu = mtu.max(floor).min(u16::MAX as usize) as u16;
+    let next_hop_mtu = clamp_next_hop_mtu(mtu, addr_family);
     match addr_family as i32 {
         libc::AF_INET => {
             // Only signal PTB when the sender forbade fragmentation
@@ -178,6 +178,21 @@ pub(in crate::afxdp) fn forwarded_egress_mtu_decision(
         libc::AF_INET6 => EgressMtuDecision::EmitPacketTooBig { next_hop_mtu },
         _ => EgressMtuDecision::Forward,
     }
+}
+
+/// Clamp an egress (or post-transform inner) MTU to the next-hop MTU a PTB
+/// advertises: floored at the per-family protocol minimum so a
+/// misconfigured tiny MTU never tells the sender to use an illegal MSS,
+/// capped at u16. Shared by the DF/IPv6 arm of
+/// `forwarded_egress_mtu_decision` and the #10705 tunnel-NoDf conversion
+/// so both quote the SAME value for one inner budget.
+#[inline]
+pub(in crate::afxdp) fn clamp_next_hop_mtu(mtu: usize, addr_family: u8) -> u16 {
+    let floor = match addr_family as i32 {
+        libc::AF_INET6 => 1280usize,
+        _ => 68usize, // RFC 791 minimum IPv4 reassembly buffer / link MTU floor
+    };
+    mtu.max(floor).min(u16::MAX as usize) as u16
 }
 
 /// #2330: the inner-source post-transform MTU for a size-changing forward
