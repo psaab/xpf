@@ -622,6 +622,11 @@ impl FlowCacheEntry {
             metadata: SessionMetadata {
                 ingress_zone: ingress_zone.unwrap_or(0),
                 egress_zone: 0,
+                ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                    &forwarding.zone_id_to_name,
+                    ingress_zone.unwrap_or(0),
+                ),
+                egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id,

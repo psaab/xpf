@@ -206,6 +206,8 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 2,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id: 1,
@@ -328,6 +330,8 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 2,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id: 1,
@@ -1070,6 +1074,8 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
         metadata: SessionMetadata {
             ingress_zone,
             egress_zone,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,

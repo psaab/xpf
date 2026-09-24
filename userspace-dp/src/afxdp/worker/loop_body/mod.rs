@@ -3188,6 +3188,8 @@ mod flow_cache_invalidation_tests {
         SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
@@ -3912,6 +3914,8 @@ mod gc_reap_source_nat_release_tests_6901 {
         SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
@@ -4119,6 +4123,8 @@ mod gc_reap_nat64_release_tests_7740 {
         crate::session::SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,

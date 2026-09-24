@@ -33,6 +33,8 @@ fn metadata() -> SessionMetadata {
     SessionMetadata {
         ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
         egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: IF_A as u32,
         ingress_vlan_id: 0,
         owner_rg_id: 1,

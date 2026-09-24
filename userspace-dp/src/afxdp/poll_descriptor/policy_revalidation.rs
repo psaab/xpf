@@ -1493,6 +1493,8 @@ mod tests {
             SessionMetadata {
                 ingress_zone: 5,
                 egress_zone: 5,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id: 1,

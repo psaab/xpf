@@ -1779,6 +1779,8 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             // #10628: stamp the OBSERVED LAN ingress (reth1.0, ifindex 24) like
             // the miss path does. A ForwardFlow forward with (0,0) is
             // fixture-only: the healed reply-2 hit resolves its from-zone LIVE

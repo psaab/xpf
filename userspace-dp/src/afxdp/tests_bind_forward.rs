@@ -1476,6 +1476,8 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
@@ -1529,6 +1531,8 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
@@ -1584,6 +1588,8 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
@@ -1650,6 +1656,8 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
@@ -2626,6 +2634,8 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 1,

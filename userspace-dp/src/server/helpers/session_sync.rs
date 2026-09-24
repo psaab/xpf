@@ -435,6 +435,21 @@ pub(crate) fn build_synced_session_entry(
                     .copied()
                     .unwrap_or(0)
             },
+            // #10620: stamp the vintage from the WIRE names (the origin's
+            // generation), not the local map: stamping from the local map
+            // would launder a stale peer row with the current generation.
+            // Empty name (id-only peer) stamps 0 = unknown, failing open
+            // to the #10612 stateless arms on that leg.
+            ingress_zone_check: if req.ingress_zone.is_empty() {
+                0
+            } else {
+                crate::session::zone_identity_check(&req.ingress_zone)
+            },
+            egress_zone_check: if req.egress_zone.is_empty() {
+                0
+            } else {
+                crate::session::zone_identity_check(&req.egress_zone)
+            },
             owner_rg_id: req.owner_rg_id,
             fabric_ingress: req.fabric_ingress,
             is_reverse: req.is_reverse,

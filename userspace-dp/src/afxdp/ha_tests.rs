@@ -215,6 +215,8 @@ fn test_metadata() -> SessionMetadata {
     SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 1,
@@ -6831,6 +6833,8 @@ fn rg_activation_at_full_queue_refreshes_worker_9720() {
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,
@@ -7275,6 +7279,8 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
         metadata: SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,
@@ -7622,6 +7628,8 @@ fn split_debt_supersedes_and_dispatches_per_rg_9720() {
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,

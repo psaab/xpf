@@ -1772,6 +1772,8 @@ impl crate::afxdp::ha::SessionDomain {
         let metadata = SessionMetadata {
             ingress_zone: 1,
             egress_zone: 3,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,

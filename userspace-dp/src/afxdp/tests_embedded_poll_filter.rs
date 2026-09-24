@@ -141,6 +141,8 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
     let metadata = SessionMetadata {
         ingress_zone: TEST_WAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 0,
@@ -277,6 +279,8 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -431,6 +435,8 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -746,6 +752,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -1113,6 +1121,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -1167,6 +1177,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
         SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
             egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -2147,6 +2159,8 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -2299,6 +2313,8 @@ fn n6474_install_snat_session(
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -2792,6 +2808,8 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -3655,6 +3673,8 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 0,
@@ -4080,6 +4100,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
     let local_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 0,
@@ -4396,6 +4418,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -4703,6 +4727,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -5064,6 +5090,8 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -5459,6 +5487,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -5646,6 +5676,8 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -5785,6 +5817,8 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -5910,6 +5944,8 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -5997,6 +6033,8 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -6131,6 +6169,8 @@ fn publish_pptp_gre_session_9298(
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -6469,6 +6509,8 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -6669,6 +6711,8 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -6887,6 +6931,8 @@ fn n9901_floor_fixture() -> (
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -7052,6 +7098,8 @@ fn n9901_install_snat_session(
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,
@@ -7502,6 +7550,8 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(install_session:
             SessionMetadata {
                 ingress_zone: TEST_LAN_ZONE_ID,
                 egress_zone: TEST_WAN_ZONE_ID,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id: 0,
@@ -7787,6 +7837,8 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,

@@ -174,6 +174,8 @@ fn metadata(is_reverse: bool) -> SessionMetadata {
     SessionMetadata {
         ingress_zone,
         egress_zone,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: LAN_IFINDEX as u32,
         ingress_vlan_id: 0,
         owner_rg_id: 0,
@@ -3230,6 +3232,8 @@ fn reverse_metadata_for_9604(fwd_ingress_zone: u16, fwd_egress_zone: u16) -> Ses
     SessionMetadata {
         ingress_zone: fwd_egress_zone,
         egress_zone: fwd_ingress_zone,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 0,

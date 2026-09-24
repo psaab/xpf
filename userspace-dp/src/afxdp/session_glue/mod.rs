@@ -828,11 +828,19 @@ pub(super) fn purge_sessions_with_removed_zone_ids(
 /// (fail-closed on unvalidatable input). Local installs are unaffected (the
 /// fence guards sync/replay ingress only, never the local path).
 ///
-/// Known gap (#10620): cross-generation id reuse (same id, new name) is
-/// ADMITTED here (`contains_key` sees the reused id) while the purge DELETES
-/// it. No stateless predicate can distinguish the two (identical observables);
-/// the vintage-stamped fix is tracked separately. Window: id-reuse + racing
-/// stale replay.
+/// #10620 vintage arm: cross-generation id reuse (same id, new name).
+/// `removed_zone_ids_for_rotation` treats same-id/different-name as REMOVED
+/// (the purge deletes those rows), but `contains_key` sees the reused id, so
+/// the stateless arm above ADMITS a stale replay the purge deleted — a dead
+/// zone-A row reinstalling under zone-B's live id. The entry now carries the
+/// vintage it was stamped under (`ingress_zone_check` / `egress_zone_check` =
+/// `zone_identity_check` of the then-current name for that id); a leg whose
+/// stamped check differs from the CURRENT name's check for the same id is
+/// stale and drops. Fail-open on either side unknown: a 0 stamped check
+/// (unstamped row, id-0 leg, peer import without vintage) or a 0/absent
+/// current leg falls back to the stateless arm. Same preconditions as the
+/// stateless arm (unbound + id-0 + sync-family + validated set);
+/// pair-symmetric OR over both legs, no is_reverse exemption.
 pub(in crate::afxdp) fn synced_entry_is_stale_replay(
     origin: SessionOrigin,
     metadata: &SessionMetadata,
@@ -850,7 +858,24 @@ pub(in crate::afxdp) fn synced_entry_is_stale_replay(
         return false;
     }
     let zone_absent = |zone: u16| zone != 0 && !forwarding.zone_id_to_name.contains_key(&zone);
-    zone_absent(metadata.ingress_zone) || zone_absent(metadata.egress_zone)
+    if zone_absent(metadata.ingress_zone) || zone_absent(metadata.egress_zone) {
+        return true;
+    }
+    // #10620: the id is present — compare the vintage the entry was stamped
+    // under against the CURRENT name's check for the same id. A mismatch is
+    // a stale generation (A's dead row under B's live id) and drops. The
+    // `None` arm is unreachable (absence returned above) and fails open.
+    let vintage_stale = |zone: u16, stamped: u32| {
+        if zone == 0 || stamped == 0 {
+            return false;
+        }
+        match forwarding.zone_id_to_name.get(&zone) {
+            Some(current_name) => stamped != crate::session::zone_identity_check(current_name),
+            None => false,
+        }
+    };
+    vintage_stale(metadata.ingress_zone, metadata.ingress_zone_check)
+        || vintage_stale(metadata.egress_zone, metadata.egress_zone_check)
 }
 /// #10612 (R2 observability): process-wide count of stale-zone replay drops
 /// across all 8 fence decision sites (worker arm, coordinator filter, coordinator
