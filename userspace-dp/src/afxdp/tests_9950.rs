@@ -785,9 +785,8 @@ fn f035_shard_full_drop_is_not_forward_accounted_10285() {
         routing_domain: 0,
     };
     let shard = crate::fragment_overlap::overlap_shard_index(&base);
-    // 8 distinct senders × 8 fills the shard (the #10658 per-sender cap bounds one
-    // sender to 8/shard). The probe frame below arrives from `src` (.100), which
-    // stays quota-free so its drop is the global shard-full, not a quota event.
+    // 8 domains × 8 senders fills the shard without hitting fairness quotas. The
+    // probe frame arrives in an unused domain so its drop is the global shard-full.
     let mut keys = Vec::new();
     let mut per_sender = [0usize; 8];
     let mut ident = 0u32;
@@ -798,6 +797,7 @@ fn f035_shard_full_drop_is_not_forward_accounted_10285() {
                 continue;
             }
             let mut key = base;
+            key.routing_domain = (s + 1) as u32;
             key.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, (101 + s) as u8));
             key.ident = ident;
             if crate::fragment_overlap::overlap_shard_index(&key) == shard {
@@ -865,7 +865,7 @@ fn f035_shard_full_drop_is_not_forward_accounted_10285() {
             .load(std::sync::atomic::Ordering::Relaxed)
             .wrapping_sub(full0),
         1,
-        "single-tenant shard flood must be observable as SHARD_FULL"
+        "full-shard capacity refusal must be observable as SHARD_FULL"
     );
     assert_eq!(
         dbg.forward, 0,
