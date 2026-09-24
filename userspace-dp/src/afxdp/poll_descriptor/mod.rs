@@ -148,7 +148,7 @@ use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply};
 use resolver_enqueue::try_enqueue_resolver;
 
-use policy_revalidation::{revalidate_zone_policy_on_session_hit, tun_origin_reverse_exempt};
+use policy_revalidation::{revalidate_zone_policy_on_session_hit, tun_origin_forward, tun_origin_reverse_exempt};
 use filter::{
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit,
@@ -1226,7 +1226,21 @@ pub(super) fn poll_binding_process_descriptor(
                         // forward/reverse route state.  Unchanged identities
                         // stay on the #8114 fast path; foreign arrivals cannot
                         // revoke the admitting session.
-                        let stale_pbr_route = if foreign_arrival_zone.is_none() {
+                        // #10038 Part C / #10630: a TUN-origin forward HIT
+                        // declines PBR revalidation outright. Self-originated
+                        // runs no PBR admission, so there is no admitting
+                        // identity to re-derive — and the tunneled endpoint
+                        // pin would revoke it against a native fresh lookup
+                        // that was never its admitting table. The #10605
+                        // blanket tunneled exemption used to decline this by
+                        // accident; the exemption is now explicit.
+                        let stale_pbr_route = if foreign_arrival_zone.is_none()
+                            && !tun_origin_forward(
+                                &resolved.decision,
+                                &resolved.metadata,
+                                resolved.origin,
+                            )
+                        {
                             revalidate_static_pbr_route_on_session_hit(
                                 worker_ctx.forwarding,
                                 worker_ctx.dynamic_neighbors,
