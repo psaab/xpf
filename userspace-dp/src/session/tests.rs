@@ -3242,6 +3242,40 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
         table.reverse_nat_fragment_requires_translation(&reply, 0, 2_000_000_000),
         "a live DNAT forward session must gate its reordered reply tail"
     );
+    let native_tail = l3_reverse_probe(
+        "10.0.61.102".parse().unwrap(),
+        "198.51.100.10".parse().unwrap(),
+        SHIM_PROTO_FRAGMENT_NO_L4,
+        libc::AF_INET as u8,
+    );
+    assert!(
+        table.reverse_nat_fragment_requires_translation(&native_tail, 0, 2_000_000_000),
+        "a native-255 reply tail must match the live real-protocol NAT session"
+    );
+    assert!(
+        table.reverse_nat_fragment_requires_translation(&native_tail, 99, 2_000_000_000),
+        "a native-255 probe with a cross-domain collision must fail closed, not borrow foreign NAT"
+    );
+    let other_family = l3_reverse_probe(
+        "::ffff:10.0.61.102".parse().unwrap(),
+        "::ffff:198.51.100.10".parse().unwrap(),
+        SHIM_PROTO_FRAGMENT_NO_L4,
+        libc::AF_INET6 as u8,
+    );
+    assert!(
+        !table.reverse_nat_fragment_requires_translation(&other_family, 0, 2_000_000_000),
+        "a native-255 IPv6 probe must not match the IPv4 session"
+    );
+    let wrong_protocol = l3_reverse_probe(
+        "10.0.61.102".parse().unwrap(),
+        "198.51.100.10".parse().unwrap(),
+        PROTO_UDP,
+        libc::AF_INET as u8,
+    );
+    assert!(
+        !table.reverse_nat_fragment_requires_translation(&wrong_protocol, 0, 2_000_000_000),
+        "a real-protocol probe must not match a session for another protocol"
+    );
     assert!(
         table.reverse_nat_fragment_requires_translation(&reply, 99, 2_000_000_000),
         "a live candidate in another non-default domain must fail closed"

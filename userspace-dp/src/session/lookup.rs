@@ -613,23 +613,22 @@ impl SessionTable {
         fallback
     }
 
-    /// #10130: session-gated discriminator for a flowless reply fragment.
+    /// #10130/#10674: session-gated discriminator for a flowless reply fragment.
     ///
-    /// The fragment path has only `(family, protocol, src, dst)`; L4 ports are
-    /// absent by definition for a non-first fragment. The L3 reverse index is
-    /// populated only by forward sessions carrying an address rewrite, so a
-    /// plain outbound fragment from a DNAT target cannot match merely because
-    /// its source happens to be in a translated pool. Candidates are still
-    /// validated against the live forward record and expiry, and a non-default
-    /// routing-domain collision is refused rather than borrowing another
-    /// tenant's session.
+    /// The L3 reverse index is keyed by `(family, src, dst)` rather than protocol
+    /// so the shim's `SHIM_PROTO_FRAGMENT_NO_L4` value 255 can select NAT sessions
+    /// without a global scan. A real-protocol probe still requires an exact
+    /// protocol match; 255 is an explicit unknown-protocol wildcard and matches
+    /// any real protocol. Candidates remain validated against live forward
+    /// records, expiry, and routing-domain compatibility.
     pub fn reverse_nat_fragment_requires_translation(
         &self,
         reply_key: &L3ReverseKey,
         reply_routing_domain: u32,
         now_ns: u64,
     ) -> bool {
-        let Some(bucket) = self.l3_reverse_index.get(reply_key) else {
+        let index_key = l3_reverse_fragment_index_key(*reply_key);
+        let Some(bucket) = self.l3_reverse_index.get(&index_key) else {
             return false;
         };
         let mut live_candidate = false;
@@ -638,10 +637,15 @@ impl SessionTable {
                 continue;
             };
             let entry = &record.entry;
+            let Some(forward_reply_key) =
+                l3_reverse_key_for_forward(&record.key, entry.decision.nat)
+            else {
+                continue;
+            };
             if entry.metadata.is_reverse
-                || l3_reverse_key_for_forward(&record.key, entry.decision.nat)
-                    .as_ref()
-                    != Some(reply_key)
+                || l3_reverse_fragment_index_key(forward_reply_key) != index_key
+                || (reply_key.protocol != SHIM_PROTO_FRAGMENT_NO_L4
+                    && forward_reply_key.protocol != reply_key.protocol)
                 || now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
             {
                 continue;

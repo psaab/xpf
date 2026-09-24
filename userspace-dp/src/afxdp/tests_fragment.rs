@@ -613,7 +613,7 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
     let mut binding_wan = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding_wan.interface = Arc::<str>::from("reth0.80");
     let reply_tail = udp_reply_frag_frame_10130(0x0001, 0xcafe);
-    let reply_meta = UserspaceDpMeta {
+    let mut reply_meta = UserspaceDpMeta {
         ingress_ifindex: 12,
         flow_src_port: 443,
         flow_dst_port: 33333,
@@ -621,6 +621,7 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
         flow_dst_addr: [172, 16, 80, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ..udp_frag_meta_5689()
     };
+    reply_meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
     let (batch_reply, dbg_reply) = txn_run_descriptor_checked(
         &mut binding_wan,
         &mut sessions,

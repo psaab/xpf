@@ -472,10 +472,11 @@ pub(super) fn flowless_fragment_requires_nat_translation(
     false
 }
 
-/// #10130: session-gated reverse discriminator for a same-family reply tail
-/// that missed its fragment association. Unlike a rules-only reverse arm, this
-/// asks the worker's live session table whether a forward NAT session exists
-/// whose reverse L3 identity is exactly this fragment's `(src,dst,protocol)`.
+/// #10130/#10674: session-gated reverse discriminator for a same-family reply
+/// tail that missed its fragment association. Unlike a rules-only reverse arm,
+/// this asks the worker's live session table whether a forward NAT session has
+/// the same reverse L3 addresses. Real-protocol probes require an exact protocol
+/// match; a native shim 255 sentinel is treated as an unknown-protocol wildcard.
 /// Plain outbound traffic from a translated target therefore has no matching
 /// session and remains forwardable.
 #[inline]

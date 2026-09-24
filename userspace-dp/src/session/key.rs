@@ -421,6 +421,22 @@ pub(crate) fn reverse_session_key(key: &SessionKey, nat: NatDecision) -> Session
         routing_domain: key.routing_domain,
     }
 }
+/// #10674: the shim's non-first-fragment protocol sentinel, mirrored here.
+/// `userspace-xdp` substitutes `PROTO_FRAGMENT_NO_L4` (255) for a native
+/// non-first fragment's protocol before `parse_l4`, and that value rides
+/// `meta.protocol` unchanged into every downstream reader. 255 is IANA
+/// "Reserved", so it can never collide with a real protocol number.
+///
+/// KEEP IN SYNC with `userspace-xdp/src/ipv6_ext_walk.rs`'s
+/// `PROTO_FRAGMENT_NO_L4` and `screen/extract.rs`'s
+/// `SHIM_PROTO_FRAGMENT_NO_L4`. The XDP shim is a separate crate and the screen
+/// reader independently mirrors this protocol sentinel.
+/// A 255 probe means "protocol unknown: this is a fragment tail". Readers
+/// MUST treat it as matching any real protocol (fail closed), never as a
+/// distinct protocol that matches nothing (fail open). See the #10674 design
+/// note on `reverse_nat_fragment_requires_translation`.
+pub(crate) const SHIM_PROTO_FRAGMENT_NO_L4: u8 = 255;
+
 /// #10130: L3-only reverse identity for the session-gated reply-fragment discriminator.
 ///
 /// A non-first fragment carries no L4 ports, so the full 5-tuple `nat_reverse_index`
@@ -437,6 +453,14 @@ pub(crate) struct L3ReverseKey {
     pub protocol: u8,
     pub src: IpAddr,
     pub dst: IpAddr,
+}
+
+/// Normalize the L3 reverse-index key to the address identity shared by all
+/// protocols. The candidate's real protocol is checked at lookup: exact probes
+/// must match it, while the shim's 255 sentinel intentionally accepts any
+/// real protocol for a native non-first fragment.
+pub(crate) fn l3_reverse_fragment_index_key(key: L3ReverseKey) -> L3ReverseKey {
+    L3ReverseKey { protocol: 0, ..key }
 }
 
 /// #10130: compute the L3 reverse key for a FORWARD session. Plain forwarding

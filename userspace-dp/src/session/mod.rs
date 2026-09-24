@@ -43,7 +43,7 @@ type NatIndexBucket = SmallVec<[u32; 2]>;
 type SeededReverseIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
 type SeededForwardWireIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
 type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
-/// #10130: address/protocol-only index for session-gated reply fragments.
+/// #10130/#10674: address-only index key for session-gated reply fragments.
 type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, FxSeededState>;
 
 // #1047 P2: SessionKey and the key-transform helpers (forward_wire_key,
@@ -1201,9 +1201,11 @@ pub(crate) struct SessionTable {
     /// colliding reverse sessions resolvable instead of displacing the earlier
     /// one.
     reverse_translated_index: SeededReverseTranslatedIndex,
-    /// #10130: forward-session handles indexed by the L3 tuple a reply
-    /// fragment carries before reverse NAT. Ports are intentionally absent
-    /// because non-first fragments have no L4 header.
+    /// #10130/#10674: forward-session handles indexed by reply fragment
+    /// family and addresses before reverse NAT. Ports are absent because a
+    /// non-first fragment has no L4 header; its protocol is validated per
+    /// candidate, or treated as unknown when metadata carries the shim's 255
+    /// sentinel.
     l3_reverse_index: SeededL3ReverseIndex,
     /// #964 Step 1: owner-RG sets keyed by handle (was Key).
     owner_rg_sessions: FxHashMap<i32, FxHashSet<u32>>,
@@ -3822,11 +3824,12 @@ impl SessionTable {
             }
         }
         if !is_reverse && let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
-            // #10130: this index is a gate, not a reverse session lookup. It
-            // intentionally carries no L4 identity and no collision telemetry;
-            // the packet itself has no ports, and the caller re-validates the
-            // live entry plus routing-domain compatibility before dropping.
-            let bucket = self.l3_reverse_index.entry(l3_key).or_default();
+            // #10130/#10674: the index buckets by family and reverse addresses;
+            // its real protocol is validated at lookup, with 255 acting as the
+            // native-fragment wildcard. The bucket stays indexed by hash rather
+            // than requiring a scan across every session for sentinel probes.
+            let index_key = l3_reverse_fragment_index_key(l3_key);
+            let bucket = self.l3_reverse_index.entry(index_key).or_default();
             if !bucket.contains(&handle) {
                 bucket.push(handle);
             }
@@ -3900,7 +3903,8 @@ impl SessionTable {
             handle,
         );
         if let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
-            l3_reverse_bucket_remove(&mut self.l3_reverse_index, &l3_key, handle);
+            let index_key = l3_reverse_fragment_index_key(l3_key);
+            l3_reverse_bucket_remove(&mut self.l3_reverse_index, &index_key, handle);
         }
     }
 

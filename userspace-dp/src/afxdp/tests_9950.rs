@@ -1037,6 +1037,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         client,
         reordered_tail.len() as u16,
     );
+    meta_reordered.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
     meta_reordered.flow_src_port = internal_port;
     meta_reordered.flow_dst_port = client_port;
     let (batch_reordered, dbg_reordered) = txn_run_descriptor_checked(
@@ -1055,6 +1056,34 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     assert_eq!(
         batch_reordered.nat_frag_untranslated_dropped, 1,
         "#10130: session-gated reply-tail drop is observable"
+    );
+    // A decapsulated inner fragment retains its real protocol in metadata.
+    // Pair that shape with the native shim's 255 sentinel above.
+    let decapped_tail =
+        ipv4_frag_frame_9950(internal, client, PROTO_TCP, 0xC003, 0x0003, &[0xAB; 16]);
+    let mut meta_decapped = frag_meta_9950(
+        24,
+        PROTO_TCP,
+        0,
+        internal,
+        client,
+        decapped_tail.len() as u16,
+    );
+    meta_decapped.flow_src_port = internal_port;
+    meta_decapped.flow_dst_port = client_port;
+    let (batch_decapped, dbg_decapped) = txn_run_descriptor_checked(
+        &mut binding_lan,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &decapped_tail,
+        meta_decapped,
+        true,
+    );
+    assert_eq!(dbg_decapped.forward, 0, "#10130: decapped DNAT reply tail must not forward");
+    assert_eq!(
+        batch_decapped.nat_frag_untranslated_dropped, 1,
+        "#10130: decapped reply-tail drop is observable"
     );
 
     let (_b1, dbg1) = txn_run_descriptor_checked(
@@ -1084,12 +1113,11 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     let tail_payload = [0xCCu8; 16];
     let reply_tail =
         ipv4_frag_frame_9950(internal, client, PROTO_TCP, reply_id, 0x0003, &tail_payload);
-    let meta_tail = {
-        let mut m = frag_meta_9950(24, PROTO_TCP, 0, internal, client, reply_tail.len() as u16);
-        m.flow_src_port = internal_port;
-        m.flow_dst_port = client_port;
-        m
-    };
+    let mut meta_tail =
+        frag_meta_9950(24, PROTO_TCP, 0, internal, client, reply_tail.len() as u16);
+    meta_tail.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    meta_tail.flow_src_port = internal_port;
+    meta_tail.flow_dst_port = client_port;
     // Clear prior forwards so index 0 is this packet's request.
     binding_lan.scratch.scratch_forwards.clear();
     let (_b2, dbg2) = txn_run_descriptor_checked(
@@ -1156,6 +1184,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         Ipv4Addr::new(203, 0, 113, 9),
         plain_tail.len() as u16,
     );
+    meta_plain.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
     meta_plain.flow_src_port = internal_port;
     meta_plain.flow_dst_port = 443;
     binding_lan.scratch.scratch_forwards.clear();
