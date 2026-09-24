@@ -14285,6 +14285,49 @@ fn worker_list_returns_matching_policy_with_identity_10512() {
     );
 }
 
+/// #10626 m5: the ListSessionsByPolicy glue passes the session's REAL
+/// decision (including DNAT inputs) into `policy_match_from_parts` — a
+/// regressed call passing `NatDecision::default()` would silently degrade
+/// every DNAT rematch to wire-dst verdicts. Install a DNAT forward session,
+/// drive the real worker scan, and assert the row carries translated inputs.
+#[test]
+fn worker_list_row_carries_live_dnat_rematch_inputs_10626() {
+    let now_ns = monotonic_nanos();
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let mut meta = test_metadata();
+    meta.policy_id = 5;
+    meta.ingress_zone = 7;
+    meta.egress_zone = 9;
+    let mut decision = test_decision();
+    decision.nat = crate::nat::NatDecision {
+        rewrite_dst: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 102))),
+        rewrite_dst_port: Some(8443),
+        ..Default::default()
+    };
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        meta,
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let (rows, errs, left) = run_list_scan10512(
+        &mut sessions,
+        list_req10512(vec![5], "prepublish", None, Vec::new(), Vec::new()),
+    );
+    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert_eq!(left, 0, "worker must ack the scan");
+    assert_eq!(rows.len(), 1, "only the requested policy is returned");
+    assert!(rows[0].dnat, "a translated dst is a DNAT row");
+    assert_eq!(rows[0].nat_dst_ip, "10.0.61.102");
+    assert_eq!(rows[0].nat_dst_port, 8443);
+    assert_eq!(rows[0].ingress_zone_id, 7);
+    assert_eq!(rows[0].egress_zone_id, 9);
+}
+
 /// Legacy cutoff: created after before_secs is fenced; zero is
 /// unbounded; None in legacy mode errors without scanning.
 #[test]

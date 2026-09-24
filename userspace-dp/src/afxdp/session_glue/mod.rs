@@ -1533,6 +1533,7 @@ pub(super) fn apply_worker_commands(
                             let Some(mut row) = crate::afxdp::ha::policy_match_from_parts(
                                 key,
                                 metadata,
+                                decision.nat,
                                 session_id,
                                 created_ns,
                             ) else {

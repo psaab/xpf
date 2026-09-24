@@ -1264,6 +1264,19 @@ pub(crate) struct SessionPolicyMatch {
     pub companion_policy_id: u32,
     #[serde(rename = "expected_companion_rt_flow_session_id", default)]
     pub expected_companion_rt_flow_session_id: u64,
+    // #10626: rename-rematch inputs, populated by the READ from the live
+    // session key/metadata/decision. All serde-defaulted: an older helper
+    // omits them and the Go rematch fails closed to the deleted bucket.
+    #[serde(rename = "ingress_zone_id", default)]
+    pub ingress_zone_id: u16,
+    #[serde(rename = "egress_zone_id", default)]
+    pub egress_zone_id: u16,
+    #[serde(rename = "dnat", default)]
+    pub dnat: bool,
+    #[serde(rename = "nat_dst_ip", default)]
+    pub nat_dst_ip: String,
+    #[serde(rename = "nat_dst_port", default)]
+    pub nat_dst_port: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
