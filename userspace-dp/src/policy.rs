@@ -1221,19 +1221,33 @@ impl CompiledApplications {
     }
 
     /// #4569: does this app set carry at least one term for `protocol` whose
-    /// match is GATED by L4 presence — i.e. a term that `matches(..)` fails
-    /// closed for a flowless / no-L4 packet (a non-first fragment, l4_present
-    /// == false)? These are: an exact destination-port term, a port-RANGE term
-    /// (non-empty src or dst ranges), or an ICMP/ICMPv6 type[,code] constraint.
+    /// match is GATED by information a flowless packet lacks — i.e. a term that
+    /// `matches(..)` fails closed for a flowless / no-L4 packet (a non-first
+    /// fragment, l4_present == false) but that COULD match once the missing
+    /// information arrives? These are: an exact destination-port term, a
+    /// port-RANGE term (non-empty src or dst ranges) — the ports are unknown
+    /// flowlessly — or, when the packet's ICMP type/code is UNKNOWN
+    /// (`packet_icmp == None`), an ICMP/ICMPv6 type[,code] constraint.
     /// A PROTOCOL-ONLY term (empty ranges) and `application any` are NOT gated
     /// (they still match a flowless packet on the known protocol), so they
     /// return `false`.
+    ///
+    /// #10673: the ICMP arm is gated on `packet_icmp`, NOT on `l4_present` —
+    /// `matches()` reads `packet_icmp` in exactly the `icmp_constraints` arm,
+    /// decisively. With a KNOWN type that arm is not ambiguous: a constraint
+    /// the type misses is "wrong type", a verdict that cannot change with L4,
+    /// so it must NOT count as L4-need (a deny-ping DENY skipped on a type-3
+    /// error is not shadowing that error). Only `None` — a truncated frame or
+    /// a true non-first fragment — leaves the constrained term genuinely
+    /// unclassifiable, i.e. L4-need.
     ///
     /// `try_match_rule` uses this to classify an L4 miss as
     /// `RuleMissReason::FragmentDenyOverlap` only when the same rule's L3
     /// check overlaps; `note_skipped_frag_deny` consumes that outcome without
     /// re-evaluating the application or address predicates. A DENY for a
-    /// different protocol genuinely does not apply and lets the fragment proceed.
+    /// different protocol — or (#10673) a type-constrained term the packet's
+    /// known ICMP type already misses — genuinely does not apply and lets the
+    /// fragment proceed.
     /// #8618: does this app set carry an ICMP/ICMPv6 TYPE-constrained term for
     /// `protocol` — i.e. a junos-ping-style term (#3020) whose match depends on
     /// the PACKET's icmp type/code rather than on the flow's 5-tuple?
@@ -1256,7 +1270,7 @@ impl CompiledApplications {
             .is_some_and(|terms| !terms.icmp_constraints.is_empty())
     }
 
-    fn has_l4_constrained_term(&self, protocol: u8) -> bool {
+    fn has_l4_constrained_term(&self, protocol: u8, packet_icmp: Option<(u8, u8)>) -> bool {
         if self.match_any {
             return false;
         }
@@ -1266,7 +1280,9 @@ impl CompiledApplications {
                     .range_terms
                     .iter()
                     .any(|(_, src, dst, _)| !(src.is_empty() && dst.is_empty()))
-                || !terms.icmp_constraints.is_empty()
+                // #10673: a type[,code] constraint is L4-need only while the
+                // type is unknown — see the doc block above.
+                || (packet_icmp.is_none() && !terms.icmp_constraints.is_empty())
         };
         if protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4 {
             // The native fragment sentinel has no protocol information, so any
@@ -3906,7 +3922,9 @@ fn try_match_rule(
         // matching or addresses for this rule.
         if track_frag_deny
             && matches!(rule.action, PolicyAction::Deny | PolicyAction::Reject)
-            && rule.compiled_apps.has_l4_constrained_term(protocol)
+            && rule
+                .compiled_apps
+                .has_l4_constrained_term(protocol, packet_icmp)
             && rule_l3_matches(rule, state, src_ip, dst_ip)
         {
             return RuleMatchOutcome::Miss(RuleMissReason::FragmentDenyOverlap);

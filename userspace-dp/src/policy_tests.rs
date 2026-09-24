@@ -4224,6 +4224,73 @@ fn eval_icmp(state: &PolicyState, protocol: u8, icmp_type: u8, icmp_code: u8) ->
 }
 
 #[test]
+fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
+    let mut deny_ping = icmp_app_rule("junos-ping", "icmp", Some(8));
+    deny_ping.action = "deny".to_string();
+    let permit_icmp_all = || icmp_app_rule("junos-icmp-all", "icmp", None);
+    let deny_ping_rule = || deny_ping.clone();
+    let src = "10.0.61.100".parse().expect("src");
+    let dst = "172.16.80.200".parse().expect("dst");
+
+    // RED on revert: a known type that misses junos-ping is not an L4-need;
+    // it must not poison the later junos-icmp-all permit.
+    for (label, icmp_type, icmp_code) in [
+        ("Frag-Needed", 3, 4),
+        ("Destination-Unreachable", 3, 1),
+        ("Time-Exceeded", 11, 0),
+    ] {
+        for (order, rules) in [
+            ("deny-ping first", vec![deny_ping_rule(), permit_icmp_all()]),
+            ("permit first", vec![permit_icmp_all(), deny_ping_rule()]),
+        ] {
+            let state = parse_policy_state("deny", &rules, &test_zone_name_to_id());
+            let result = evaluate_policy_result_l3_aware(
+                &state,
+                TEST_LAN_ZONE_ID,
+                TEST_WAN_ZONE_ID,
+                src,
+                dst,
+                PROTO_ICMP,
+                0,
+                0,
+                Some((icmp_type, icmp_code)),
+                64,
+                false,
+            );
+            assert_eq!(
+                result.action,
+                PolicyAction::Permit,
+                "{label} must be permitted when {order}",
+            );
+        }
+    }
+
+    let state = parse_policy_state(
+        "deny",
+        &[deny_ping_rule(), permit_icmp_all()],
+        &test_zone_name_to_id(),
+    );
+    assert_eq!(
+        evaluate_policy_result_l3_aware(
+            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_ICMP, 0, 0,
+            Some((8, 0)), 64, false,
+        )
+        .action,
+        PolicyAction::Deny,
+        "a known junos-ping type must still match the deny",
+    );
+    assert_eq!(
+        evaluate_policy_result_l3_aware(
+            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_ICMP, 0, 0,
+            None, 64, false,
+        )
+        .action,
+        PolicyAction::Deny,
+        "an unknown ICMP type remains a genuine L4-need",
+    );
+}
+
+#[test]
 fn junos_ping_matches_echo_request_only() {
     let state = parse_policy_state(
         "deny",
