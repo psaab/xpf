@@ -1145,6 +1145,45 @@ pub(super) fn txn_run_descriptor_checked(
     txn_run_descriptor(binding, sessions, forwarding, ha_state, frame, meta)
 }
 
+/// #10646: anti-vacuity precondition for the shared poll-driver family.
+/// Every `txn_run_descriptor*` entry pushes exactly one descriptor and runs one
+/// poll pass; a fixture that never arrives (bad magic/version, generation
+/// mismatch — the N1 non-arrival mutant) still recycles via the `recycle_now`
+/// fallthrough with `sessions == 0`, so a deny cell asserting only those two
+/// outcomes passes vacuously. Asserting arrival here (rather than in each cell)
+/// makes every current and future deny cell fail RED on non-arrival instead of
+/// passing on nothing.
+#[cfg(test)]
+fn assert_descriptor_arrived_10646(batch: &BatchCounters, dbg: &DebugPollCounters) {
+    assert_eq!(
+        dbg.rx, 1,
+        "#10646 anti-vacuity: the descriptor never reached the poll body (rx={}), \
+         so sessions==0 + recycle==1 would pass vacuously",
+        dbg.rx,
+    );
+    assert_packet_validated_10646(batch);
+}
+
+/// #10646 for the injected leg: an injected record has no RX descriptor
+/// (`record_rx_descriptor_telemetry` is skipped by design), so only the
+/// metadata/validation half applies — but it still applies, since an
+/// invalid injected meta would otherwise let deny cells pass on nothing.
+#[cfg(test)]
+fn assert_packet_validated_10646(batch: &BatchCounters) {
+    assert_eq!(
+        batch.metadata_packets, 1,
+        "#10646 anti-vacuity: metadata failed to parse (metadata_packets={}), \
+         so the packet never reached validation",
+        batch.metadata_packets,
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "#10646 anti-vacuity: the packet was never validated (validated_packets={}); \
+         a deny verdict on a non-arrival is vacuous",
+        batch.validated_packets,
+    );
+}
+
 
 /// `txn_run_descriptor` with a CALLER-PROVIDED `dynamic_neighbors` map, so a
 /// test can seed the shard MAC-change epochs BEFORE the poll takes its
@@ -1263,6 +1302,7 @@ pub(super) fn txn_run_descriptor_with_neighbors(
         &worker_ctx,
         &mut telemetry,
     );
+    assert_descriptor_arrived_10646(&batch, &dbg);
     (batch, dbg)
 }
 
@@ -1408,6 +1448,7 @@ pub(super) fn txn_run_descriptor_with_injected(
         &worker_ctx,
         &mut telemetry,
     );
+    assert_packet_validated_10646(&batch);
     (batch, dbg)
 }
 
@@ -1726,6 +1767,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         &worker_ctx,
         &mut telemetry,
     );
+    assert_descriptor_arrived_10646(&batch, &dbg);
     (batch, dbg)
 }
 
@@ -1849,6 +1891,7 @@ pub(super) fn txn_run_descriptor_capturing_events(
         &worker_ctx,
         &mut telemetry,
     );
+    assert_descriptor_arrived_10646(&batch, &dbg);
     (batch, dbg, event_handle, event_rx)
 }
 
@@ -3247,4 +3290,37 @@ pub(super) fn build_icmpv6_te_frame_pptp(
     icmp6[2..4].copy_from_slice(&csum.to_be_bytes());
     frame.extend_from_slice(&icmp6);
     frame
+}
+
+/// #10646: the N1 non-arrival mutant detector, pinned. A descriptor whose
+/// metadata cannot parse (corrupt magic here; bad version/generation behave
+/// the same) recycles with sessions==0 — exactly the outcomes a deny cell
+/// asserts — so without the precondition the cell passes on nothing. The
+/// shared drivers now panic instead; this cell proves the detector fires.
+#[cfg(test)]
+mod antivacuity_10646_tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    #[test]
+    #[should_panic(expected = "#10646")]
+    fn non_arrival_mutant_panics_instead_of_passing_vacuously_10646() {
+        let forwarding = build_forwarding_state(&nat_snapshot());
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(172, 16, 80, 200),
+            12345,
+            443,
+            crate::tcp_flags::TCP_SYN,
+            TEST_LAN_MAC,
+        );
+        let mut meta = txn_meta_v4(24, crate::tcp_flags::TCP_SYN, frame.len() as u16);
+        meta.magic = 0;
+        let _ = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    }
 }
