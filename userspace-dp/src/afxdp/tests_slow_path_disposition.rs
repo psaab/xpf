@@ -1734,6 +1734,7 @@ fn run_stage11_frame_poll_with_options_10516(
     crate::afxdp::forwarding::IpsecSaCounterSnapshot,
     usize,
     Vec<bool>,
+    u64,
 ) {
     run_stage11_frame_poll_on_snapshot_with_options_10516(
         &nat_snapshot(),
@@ -1757,6 +1758,7 @@ fn run_stage11_frame_poll_on_snapshot_with_options_10516(
     crate::afxdp::forwarding::IpsecSaCounterSnapshot,
     usize,
     Vec<bool>,
+    u64,
 ) {
     let mut forwarding = build_forwarding_state(snapshot);
     forwarding.ipsec_sa.publish_empty_dump_for_test();
@@ -1786,7 +1788,21 @@ fn run_stage11_frame_poll_on_snapshot_with_options_10516(
     let mut sessions = SessionTable::new();
     let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
-    txn_run_descriptor_inner_with_slow_path(
+    // #10648: MAC-gate witness (#10504 pattern). The NotClaimed pins below
+    // (q1==0, SA counters 0, recycled==1) are identical for a pre-L3 MAC
+    // recycle and a genuine Stage-11 fall-through, so without this the cell
+    // survives the always-reject mutant vacuously. Fail here instead.
+    assert!(
+        crate::afxdp::forwarding::ingress_destination_mac_accepted(
+            &forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            frame,
+        ),
+        "stage11 fixture dst MAC must be accepted on ingress {}",
+        meta.ingress_ifindex,
+    );
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -1798,12 +1814,21 @@ fn run_stage11_frame_poll_on_snapshot_with_options_10516(
         None,
         Some(&reinjector),
     );
+    assert_eq!(
+        batch.dst_mac_dropped, 0,
+        "stage11 frame must pass the MAC gate, not recycle pre-L3"
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "stage11 frame must pass descriptor validation"
+    );
     (
         reinjector.status(),
         reinjector.delegated_status(),
         forwarding.ipsec_sa.counters.snapshot(),
         binding.scratch.scratch_recycle.len(),
         reinjector.test_enqueued_delegated(),
+        dbg.tx,
     )
 }
 fn run_stage11_frame_poll_with_seeded_ike_10516(
@@ -1837,7 +1862,20 @@ fn run_stage11_frame_poll_with_seeded_ike_10516(
     let mut sessions = SessionTable::new();
     let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
-    txn_run_descriptor_inner_with_slow_path_and_ike(
+    // #10648: MAC-gate witness (#10504 pattern). See the sibling funnel above:
+    // without this, NotClaimed pins cannot distinguish a pre-L3 MAC recycle
+    // from a genuine Stage-11 verdict and survive the always-reject mutant.
+    assert!(
+        crate::afxdp::forwarding::ingress_destination_mac_accepted(
+            &forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            frame,
+        ),
+        "stage11 fixture dst MAC must be accepted on ingress {}",
+        meta.ingress_ifindex,
+    );
+    let (batch, _dbg) = txn_run_descriptor_inner_with_slow_path_and_ike(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -1849,6 +1887,14 @@ fn run_stage11_frame_poll_with_seeded_ike_10516(
         None,
         Some(&reinjector),
         &ike_exchanges,
+    );
+    assert_eq!(
+        batch.dst_mac_dropped, 0,
+        "stage11 frame must pass the MAC gate, not recycle pre-L3"
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "stage11 frame must pass descriptor validation"
     );
     (
         reinjector.status(),
@@ -1869,6 +1915,7 @@ fn run_stage11_frame_poll_10516(
     crate::afxdp::forwarding::IpsecSaCounterSnapshot,
     usize,
     Vec<bool>,
+    u64,
 ) {
     run_stage11_frame_poll_with_options_10516(frame, meta, sa_key, false, false)
 }
@@ -1883,6 +1930,7 @@ fn run_stage11_frame_poll_stale_10516(
     crate::afxdp::forwarding::IpsecSaCounterSnapshot,
     usize,
     Vec<bool>,
+    u64,
 ) {
     run_stage11_frame_poll_with_options_10516(frame, meta, Some(sa_key), true, false)
 }
@@ -1896,6 +1944,7 @@ fn run_stage11_frame_poll_removed_10516(
     crate::afxdp::forwarding::IpsecSaCounterSnapshot,
     usize,
     Vec<bool>,
+    u64,
 ) {
     run_stage11_frame_poll_with_options_10516(frame, meta, Some(sa_key), false, true)
 }
@@ -1906,6 +1955,7 @@ fn run_stage11_esp_udp_poll_10516(with_sa: bool) -> (
     crate::afxdp::forwarding::IpsecSaCounterSnapshot,
     usize,
     Vec<bool>,
+    u64,
 ) {
     let src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
@@ -2015,6 +2065,11 @@ fn raw_v6_meta_10516(frame: &[u8], protocol: u8) -> UserspaceDpMeta {
 
 fn raw_v4_non_first_meta_10516(frame: &[u8]) -> UserspaceDpMeta {
     let mut meta = frag_test_meta(14);
+    // #10648: frag_test_meta ingresses on ifindex 10, which has no row in
+    // nat_snapshot — the MAC gate fail-closes and this case recycles pre-L3,
+    // pinning nothing about Stage 11. Ingress on LAN ifindex 24 per arrival
+    // interface (#10504), matching the frame's LAN MAC and sibling cases.
+    meta.ingress_ifindex = 24;
     meta.protocol = 255;
     meta.l4_offset = 34;
     meta.pkt_len = frame.len() as u16;
@@ -2034,6 +2089,10 @@ fn build_stage11_raw_v4_non_first_frame_10516(protocol: u8) -> Vec<u8> {
 
 fn build_stage11_raw_v6_non_first_frame_10516(protocol: u8) -> Vec<u8> {
     let mut frame = eth_ipv6_frag_frame(0x0008, &[0x11, 0x22, 0x33, 0x44, 0, 0, 0, 1]);
+    // #10648: eth_ipv6_frag_frame stamps the WAN MAC, but this cell ingresses
+    // on LAN ifindex 24 — source the LAN MAC per arrival interface (#10504),
+    // else this case recycles at the MAC gate and pins nothing about Stage 11.
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_LAN_MAC);
     frame[14 + 40] = protocol;
     frame
 }
@@ -2060,10 +2119,20 @@ fn stage11_raw_protocol_arm_is_fail_closed_10516() {
 
 /// Raw ESP/AH and non-first fragments are flowless before Stage 11. Exercise
 /// those shapes through the real descriptor poll to pin the §6.1 cell-7
-/// NotClaimed verdict, no SA telemetry, and exactly one recycle. Flowless
-/// transit may still use an unrelated slow-path outlet after Stage 11 falls
-/// through; the SA counters are the observable proof that Stage 11 did not
-/// claim the packet.
+/// NotClaimed verdict and no SA telemetry. Whole packets recycle exactly
+/// once, as does the v6 non-first fragment (flowless default-deny); v4
+/// non-first fragments PARK in reassembly (recycled 0, forwarded 0) — held,
+/// not dropped and not forwarded. Flowless transit may still use an unrelated
+/// slow-path outlet after Stage 11 falls through; the SA counters are the
+/// observable proof that Stage 11 did not claim the packet.
+///
+/// #10648: the non-first cases used to ingress with unaccepted MACs and
+/// recycle pre-L3, pinning the MAC gate instead of Stage 11 (the vacuity
+/// #10504 closed, reopened). The funnels now witness MAC acceptance and
+/// validation, the fixtures ingress per arrival interface, and each
+/// disposal is pinned explicitly — a mutant that changes any disposal reds
+/// here. (The v4-park / v6-drop asymmetry is #10810; both arms below pin
+/// observed behavior, not a claim that the asymmetry is intended.)
 #[test]
 fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
     let v4_esp = build_stage11_raw_v4_frame_10516(PROTO_ESP);
@@ -2072,6 +2141,8 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
     let v4_esp_fragment = build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP);
     let v4_ah_fragment = build_stage11_raw_v4_non_first_frame_10516(PROTO_AH);
     let v6_esp_fragment = build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP);
+    // (label, frame, meta, parked): whole packets recycle on NotClaimed;
+    // non-first fragments park in reassembly instead.
     let cases = [
         (
             "v4 ESP",
@@ -2080,6 +2151,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v4_frame_10516(PROTO_ESP),
                 PROTO_ESP,
             ),
+            false,
         ),
         (
             "v4 AH",
@@ -2088,6 +2160,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v4_frame_10516(PROTO_AH),
                 PROTO_AH,
             ),
+            false,
         ),
         (
             "v6 ESP",
@@ -2096,6 +2169,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v6_frame_10516(PROTO_ESP),
                 PROTO_ESP,
             ),
+            false,
         ),
         (
             "v4 ESP non-first fragment",
@@ -2103,6 +2177,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v4_non_first_meta_10516(
                 &build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP),
             ),
+            true,
         ),
         (
             "v4 AH non-first fragment",
@@ -2110,6 +2185,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v4_non_first_meta_10516(
                 &build_stage11_raw_v4_non_first_frame_10516(PROTO_AH),
             ),
+            true,
         ),
         (
             "v6 ESP non-first fragment",
@@ -2117,19 +2193,34 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v6_non_first_meta_10516(
                 &build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP),
             ),
+            // NOT parked: v6 drops (see doc above; asymmetry is #10810).
+            false,
         ),
     ];
-    for (label, frame, meta) in cases {
+    for (label, frame, meta, parked) in cases {
         assert!(
             parse_session_flow_from_bytes(&frame, meta).is_none(),
             "{label}: raw IPsec must remain flowless"
         );
-        let (_trusted, delegated, counters, recycled, _queues) =
+        let (_trusted, delegated, counters, recycled, _queues, forwarded) =
             run_stage11_frame_poll_10516(&frame, meta, None);
         assert_eq!(delegated.queued_packets, 0, "{label}: raw packet minted q1");
         assert_eq!(counters.sa_miss_dropped_packets, 0, "{label}: SA gate consulted");
         assert_eq!(counters.sa_snapshot_stale_deny, 0, "{label}: stale gate consulted");
-        assert_eq!(recycled, 1, "{label}: descriptor was not recycled exactly once");
+        if parked {
+            assert_eq!(
+                recycled, 0,
+                "{label}: a parked non-first fragment holds its descriptor (a recycle here \
+                 means it was dropped instead of parked)"
+            );
+            assert_eq!(
+                forwarded, 0,
+                "{label}: a parked non-first fragment must not forward (a forward here \
+                 means it bypassed reassembly)"
+            );
+        } else {
+            assert_eq!(recycled, 1, "{label}: descriptor was not recycled exactly once");
+        }
     }
 }
 
@@ -2140,7 +2231,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
 /// delegated outlet. This is intentionally not a direct stage/helper call.
 #[test]
 fn stage11_esp_udp_sa_gate_runs_poll_loop_10516() {
-    let (trusted_miss, delegated_miss, miss_counters, miss_recycled, miss_queues) =
+    let (trusted_miss, delegated_miss, miss_counters, miss_recycled, miss_queues, _forwarded_miss) =
         run_stage11_esp_udp_poll_10516(false);
     assert_eq!(trusted_miss.queued_packets, 0);
     assert_eq!(delegated_miss.queued_packets, 0);
@@ -2149,7 +2240,7 @@ fn stage11_esp_udp_sa_gate_runs_poll_loop_10516() {
     assert_eq!(miss_counters.sa_miss_no_sa, 1);
     assert!(miss_queues.is_empty());
 
-    let (trusted_hit, delegated_hit, hit_counters, hit_recycled, hit_queues) =
+    let (trusted_hit, delegated_hit, hit_counters, hit_recycled, hit_queues, _forwarded_hit) =
         run_stage11_esp_udp_poll_10516(true);
     assert_eq!(trusted_hit.queued_packets, 0);
     assert_eq!(delegated_hit.queued_packets, 1);
@@ -2172,7 +2263,7 @@ fn stage11_ike_new_and_established_bypass_stale_sa_gate_10516() {
         0,
     );
     let new_meta = stage11_ipv4_udp_meta_10516(&new_frame, src, dst, 24, 40_000, 500);
-    let (_, new_delegated, new_counters, new_recycled, new_queues) =
+    let (_, new_delegated, new_counters, new_recycled, new_queues, _forwarded) =
         run_stage11_frame_poll_with_options_10516(&new_frame, new_meta, None, true, false);
     assert_eq!(new_delegated.queued_packets, 1, "admitted NEW-IKE must delegate");
     assert_eq!(new_counters.sa_miss_dropped_packets, 0);
@@ -2230,7 +2321,7 @@ fn stage11_unseeded_established_ike_is_denied_before_stale_sa_gate_10516() {
     for zone in &mut denied_snapshot.zones {
         zone.host_inbound_system_services.clear();
     }
-    let (trusted, delegated, counters, recycled, queues) =
+    let (trusted, delegated, counters, recycled, queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
             &denied_snapshot,
             &frame,
@@ -2261,7 +2352,7 @@ fn stage11_declared_end_rejects_v4_spi_slack_10516() {
     frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     let meta = stage11_esp_udp_meta_10516(&frame);
     let key = ipsec_sa_key(dst, spi, src).expect("same-family SA fixture");
-    let (trusted, delegated, counters, recycled, queues) =
+    let (trusted, delegated, counters, recycled, queues, _forwarded) =
         run_stage11_frame_poll_10516(&frame, meta, Some(key));
     assert_eq!(trusted.queued_packets, 0);
     assert_eq!(delegated.queued_packets, 0);
@@ -2292,7 +2383,7 @@ fn stage11_static_dnat_external_sa_miss_and_hit_10516() {
     let ownership = build_forwarding_state(&static_nat_snapshot());
     assert!(ownership.owns_configured_ip(IpAddr::V4(dst)));
     assert!(parse_session_flow_from_bytes(&frame, meta).is_some());
-    let (_, miss_delegated, miss_counters, miss_recycled, miss_queues) =
+    let (_, miss_delegated, miss_counters, miss_recycled, miss_queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
             &static_nat_snapshot(),
             &frame,
@@ -2309,7 +2400,7 @@ fn stage11_static_dnat_external_sa_miss_and_hit_10516() {
 
     let key = ipsec_sa_key(IpAddr::V4(dst), spi, IpAddr::V4(src))
         .expect("same-family external SA fixture");
-    let (_, hit_delegated, hit_counters, hit_recycled, hit_queues) =
+    let (_, hit_delegated, hit_counters, hit_recycled, hit_queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
             &static_nat_snapshot(),
             &frame,
@@ -2325,7 +2416,7 @@ fn stage11_static_dnat_external_sa_miss_and_hit_10516() {
 }
 #[test]
 fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
-    let (local_trusted, local_delegated, _, _, local_queues) =
+    let (local_trusted, local_delegated, _, _, local_queues, _forwarded) =
         run_stage11_esp_udp_poll_10516(true);
 
     let src = Ipv4Addr::new(10, 0, 61, 102);
@@ -2334,7 +2425,7 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
     let new_frame =
         build_stage11_ike_v4_frame_10516(src, dst, 40_000, 500, initiator_spi, 0);
     let new_meta = stage11_ipv4_udp_meta_10516(&new_frame, src, dst, 24, 40_000, 500);
-    let (new_trusted, new_delegated, _, _, new_queues) =
+    let (new_trusted, new_delegated, _, _, new_queues, _forwarded) =
         run_stage11_frame_poll_with_options_10516(&new_frame, new_meta, None, true, false);
 
     let established_frame = build_stage11_ike_v4_frame_10516(
@@ -2387,7 +2478,7 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
     let external_key =
         ipsec_sa_key(IpAddr::V4(external_dst), external_spi, IpAddr::V4(external_src))
             .expect("same-family external SA fixture");
-    let (external_trusted, external_delegated, _, _, external_queues) =
+    let (external_trusted, external_delegated, _, _, external_queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
             &static_nat_snapshot(),
             &external_frame,
@@ -2436,7 +2527,7 @@ fn stage11_declared_end_rejects_v6_spi_slack_10516() {
     frame[18..20].copy_from_slice(&8u16.to_be_bytes());
     let meta = stage11_esp_udp_v6_meta_10516(&frame);
     let key = ipsec_sa_key(dst, spi, src).expect("same-family SA fixture");
-    let (trusted, delegated, counters, recycled, queues) =
+    let (trusted, delegated, counters, recycled, queues, _forwarded) =
         run_stage11_frame_poll_10516(&frame, meta, Some(key));
     assert_eq!(trusted.queued_packets, 0);
     assert_eq!(delegated.queued_packets, 0);
@@ -2457,7 +2548,7 @@ fn stage11_keepalive_and_tiny_first_fragment_drop_10516() {
     let ip_csum = checksum16(&keepalive[14..34]);
     keepalive[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     let keepalive_meta = stage11_esp_udp_meta_10516(&keepalive);
-    let (_, keepalive_delegated, keepalive_counters, keepalive_recycled, queues) =
+    let (_, keepalive_delegated, keepalive_counters, keepalive_recycled, queues, _forwarded) =
         run_stage11_frame_poll_10516(&keepalive, keepalive_meta, None);
     assert_eq!(keepalive_delegated.queued_packets, 0);
     assert_eq!(keepalive_counters.sa_miss_dropped_packets, 1);
@@ -2475,7 +2566,7 @@ fn stage11_keepalive_and_tiny_first_fragment_drop_10516() {
     let ip_csum = checksum16(&tiny[14..34]);
     tiny[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     let tiny_meta = stage11_esp_udp_meta_10516(&tiny);
-    let (_, tiny_delegated, tiny_counters, tiny_recycled, tiny_queues) =
+    let (_, tiny_delegated, tiny_counters, tiny_recycled, tiny_queues, _forwarded) =
         run_stage11_frame_poll_10516(&tiny, tiny_meta, None);
     assert_eq!(tiny_delegated.queued_packets, 0);
     assert_eq!(tiny_counters.sa_miss_dropped_packets, 1);
@@ -2497,7 +2588,7 @@ fn stage11_observed_spi_wrong_source_drops_10516() {
     let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
     let observed_src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     let key = ipsec_sa_key(dst, spi, observed_src).expect("same-family SA fixture");
-    let (_, delegated, counters, recycled, queues) =
+    let (_, delegated, counters, recycled, queues, _forwarded) =
         run_stage11_frame_poll_10516(&frame, meta, Some(key));
     assert_eq!(delegated.queued_packets, 0);
     assert_eq!(counters.sa_miss_dropped_packets, 1);
@@ -2513,7 +2604,7 @@ fn stage11_delsa_removed_spi_drops_10516() {
     let frame = build_stage11_esp_udp_frame_10516(spi);
     let meta = stage11_esp_udp_meta_10516(&frame);
     let key = ipsec_sa_key(dst, spi, src).expect("same-family SA fixture");
-    let (_, delegated, counters, recycled, queues) =
+    let (_, delegated, counters, recycled, queues, _forwarded) =
         run_stage11_frame_poll_removed_10516(&frame, meta, key);
     assert_eq!(delegated.queued_packets, 0);
     assert_eq!(counters.sa_miss_dropped_packets, 1);
@@ -2530,7 +2621,7 @@ fn stage11_stale_spi_drops_10516() {
     let frame = build_stage11_esp_udp_frame_10516(spi);
     let meta = stage11_esp_udp_meta_10516(&frame);
     let key = ipsec_sa_key(dst, spi, src).expect("same-family SA fixture");
-    let (_, delegated, counters, recycled, queues) =
+    let (_, delegated, counters, recycled, queues, _forwarded) =
         run_stage11_frame_poll_stale_10516(&frame, meta, key);
     assert_eq!(delegated.queued_packets, 0);
     assert_eq!(counters.sa_miss_dropped_packets, 1);
@@ -3765,7 +3856,7 @@ fn t7_natt_4500_dnat_gre_and_esp_controls_10585() {
     assert_eq!(dbg.local, 0, "ESP-in-UDP must bypass junos-host IKE gating");
     assert_eq!(dbg.policy_deny, 0);
     assert_eq!(batch.host_inbound_denied_packets, 0);
-    let (_, delegated, sa_counters, recycled, queues) =
+    let (_, delegated, sa_counters, recycled, queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
             &esp_snapshot,
             &esp_frame,
