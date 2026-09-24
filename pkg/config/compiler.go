@@ -463,6 +463,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
+	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)
 	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
 	appendUserspaceMgmtZoneAdvisoryLocked(cfg, opts)
 	appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
@@ -758,6 +759,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
+	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)
 	if !opts.suppressFabricStampAdvisory {
 		cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
 	}

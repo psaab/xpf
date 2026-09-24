@@ -709,7 +709,27 @@ fn gre_ingress_routing_instance<'a>(
 /// candidate list so a duplicate outer tuple (a keyed and an unkeyed
 /// endpoint, or distinct logical ifindexes) is disambiguated by the GRE
 /// key here rather than resolved non-deterministically by a first-match
-/// scan over the entire table. Defense-in-depth: each candidate's
+/// scan over the entire table.
+/// #10816 (inherited-sibling attribution model): rows fanned out from ONE
+/// tunnel definition (an interface-level tunnel inherited by N units)
+/// share one decap identity — same outer pair, key, and transport VRF —
+/// so the key predicate matches them ALL and the FIRST in bucket order
+/// (snapshot order = ascending unit number) wins. The inner packet is
+/// then adjudicated as ingressing on that row's logical unit. This is
+/// the intended model, not a gap: per-unit rows are addressing/egress
+/// constructs with no outer demux signal, so per-unit attribution is
+/// unimplementable in principle. It is SAFE: same-zone siblings
+/// attribute identically; cross-zone inheriting siblings share the
+/// tunnel netdev, so #7509 leaves the parent UNZONED and denies the
+/// transit (with its own commit warning) instead of policing it under
+/// the wrong zone; same-identity per-unit clones are rejected at commit
+/// (#10654) or dropped at build. The one silent edge — inheriting
+/// siblings with DIFFERENT input filters, where the loser's filter
+/// never sees a packet — warns at commit (#10816 advisory). Inner-dst
+/// demux (Junos-style unit selection post-decap) is explicitly
+/// declined: it would need unit-subnet LPM in this matcher for counter
+/// cosmetics on traffic whose policy is already safe.
+/// Defense-in-depth: each candidate's
 /// `mode` is re-checked via `tunnel_mode_kind` so a future build-side
 /// indexing bug can never surface a non-GRE row on this path.
 /// #10653 (transport-domain segregation): a candidate must ALSO serve

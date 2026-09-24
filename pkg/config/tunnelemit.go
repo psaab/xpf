@@ -143,7 +143,10 @@ func EmitTunnelEndpointNames(cfg *Config) []TunnelEndpointName {
 				// collision gate see the unit's real endpoint instead of the
 				// interface-level defaults. A unit with no tunnel stanza
 				// (unit.Tunnel == nil) still inherits the interface-level
-				// tunnel unchanged.
+				// tunnel unchanged. #10816: every inherited row shares one
+				// decap identity, and Rust attributes all inbound frames to
+				// the first in this (ascending-unit) order — sibling units
+				// are addressing/egress constructs, never decap-attributed.
 				tunnel := iface.Tunnel
 				if unit := iface.Units[unitNum]; unit != nil && unit.Tunnel != nil {
 					tunnel = unit.Tunnel

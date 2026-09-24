@@ -1990,3 +1990,46 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
     );
 }
 
+/// #10816 model pin: two rows fanned out from ONE tunnel definition (same
+/// outer pair, key, transport VRF — the inheriting-units shape) share one
+/// decap bucket, and the FIRST in snapshot order (ascending unit number)
+/// wins. The inner packet is adjudicated as ingressing on the winning
+/// row's logical unit (here: gr-0/0/0.0, ifindex 77 — never the sibling's
+/// 78). Sibling units are addressing/egress constructs, never
+/// decap-attributed; cross-zone siblings are denied upstream by the #7509
+/// contested-parent unzoning, and shadowed sibling input filters warn at
+/// commit (#10816 advisory). If the matcher ever preferred a later row
+/// (or demuxed by inner), this cell reds.
+#[test]
+fn gre_decap_attributes_shared_identity_to_first_sibling_row_10816() {
+    let mut snap = gre_to_self_snapshot();
+    snap.interfaces.push(crate::InterfaceSnapshot {
+        name: "gr-0/0/0.1".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "gr-0-0-0".to_string(),
+        ifindex: 78,
+        tunnel: true,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.255.1.1/30".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    let mut sibling = snap.tunnel_endpoints[0].clone();
+    sibling.id = 825;
+    sibling.interface = "gr-0/0/0.1".to_string();
+    sibling.ifindex = 78;
+    snap.tunnel_endpoints.push(sibling);
+    let forwarding = build_forwarding_state(&snap);
+    let inner = build_gre_inner_icmp_packet_v4();
+    let frame = build_gre_to_self_outer_frame_v4(80, &inner);
+    let meta = gre_to_self_outer_meta(80, frame.len());
+    let decapped = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
+        .expect("the shared-identity frame must decap");
+    assert_eq!(
+        decapped.meta.ingress_ifindex, 77,
+        "decap must attribute to the first-sorting sibling row (gr-0/0/0.0)"
+    );
+}
+
