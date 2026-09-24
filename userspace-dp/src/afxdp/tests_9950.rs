@@ -128,14 +128,14 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
     let dst = Ipv4Addr::new(172, 16, 80, 200);
 
     for (label, first_off, second_off, expect_second_forward) in [
-        // Overlapping: first covers 0..16, second covers 8..24 -> overlap 8..16.
+        // Overlapping: the full TCP head covers 0..24, and the tail covers 8..24.
         ("overlap-first-then-tail", 0x2000u16, 0x0001u16, 0),
         // Same overlap, reverse arrival order: tail first, then head.
         ("overlap-tail-then-first", 0x0001u16, 0x2000u16, 0),
-        // Positive control: adjacent, no overlap (0..16 then 16..24).
-        ("benign-adjacent", 0x2000u16, 0x0002u16, 1),
-        // Benign out-of-order disjoint: tail (16..24) arrives before the head.
-        ("benign-adjacent-reversed", 0x0002u16, 0x2000u16, 1),
+        // Positive control: adjacent, no overlap (0..24 then 24..32).
+        ("benign-adjacent", 0x2000u16, 0x0003u16, 1),
+        // Benign out-of-order disjoint: tail (24..32) arrives before the head.
+        ("benign-adjacent-reversed", 0x0003u16, 0x2000u16, 1),
     ] {
         let mut snapshot = policy_deny_snapshot();
         snapshot.default_policy = "permit".to_string();
@@ -147,8 +147,12 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
         let mut sessions = SessionTable::new();
         let ha_state = BTreeMap::new();
 
-        // First fragment payload: 16 bytes (8B-aligned for MF=1 — wire-valid).
-        let payload_first = [0xAAu8; 16];
+        // Include a complete TCP header so the first fragment remains valid to
+        // the current flow parser; 24 bytes also align the positive tail at 24.
+        let tcp_head =
+            build_txn_tcp_syn_frame_v4(src, dst, 33333, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
+        let mut payload_first = tcp_head[34..].to_vec();
+        payload_first.extend_from_slice(&[0xAA; 4]);
         // Second fragment payload: 16 bytes for overlap cases, 8 for benign.
         let payload_second: Vec<u8> = if expect_second_forward == 1 {
             vec![0xBBu8; 8]
@@ -166,10 +170,15 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
             let tail = ipv4_frag_frame_9950(src, dst, PROTO_TCP, id, second_off, &payload_second);
             (head, tail)
         };
+        let (first_tcp_flags, second_tcp_flags) = if first_off == 0x2000 {
+            (TCP_FLAG_SYN, 0)
+        } else {
+            (0, TCP_FLAG_SYN)
+        };
         let meta_a = frag_meta_9950(
             24,
             PROTO_TCP,
-            0x10,
+            first_tcp_flags,
             src,
             dst,
             frame_first_arrival.len() as u16,
@@ -177,7 +186,7 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
         let meta_b = frag_meta_9950(
             24,
             PROTO_TCP,
-            0x10,
+            second_tcp_flags,
             src,
             dst,
             frame_second_arrival.len() as u16,
@@ -222,7 +231,177 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
             "{label}: overlap-drop counter delta"
         );
     }
+
 }
+
+/// A fragment parked on a cold neighbor must still participate in F-035's
+/// overlap invariant when its sibling reaches a live neighbor first.
+///
+/// Each ordering parks the first-arriving fragment, makes the neighbor
+/// available, forwards its overlapping sibling, then retries the parked frame.
+/// The late re-check must reject exactly that parked frame instead of sending
+/// both ranges to the receiver.
+#[test]
+fn f035_parked_fragment_overlap_is_rechecked_on_retry_10659() {
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(10, 0, 61, 50);
+
+    for (label, park_head) in [("parked-head", true), ("parked-tail", false)] {
+        let tcp_header = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            33333,
+            443,
+            TCP_FLAG_SYN,
+            TEST_LAN_MAC,
+        );
+        let head = ipv4_frag_frame_9950(
+            src,
+            dst,
+            PROTO_TCP,
+            0x1065,
+            0x2000,
+            &tcp_header[34..],
+        );
+        let tail = ipv4_frag_frame_9950(src, dst, PROTO_TCP, 0x1065, 0x0001, &[0xBB; 16]);
+        let head_meta = frag_meta_9950(
+            24,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+            src,
+            dst,
+            head.len() as u16,
+        );
+        let tail_meta = frag_meta_9950(24, PROTO_TCP, 0, src, dst, tail.len() as u16);
+        let (first_frame, first_meta, second_frame, second_meta) = if park_head {
+            (head, head_meta, tail, tail_meta)
+        } else {
+            (tail, tail_meta, head, head_meta)
+        };
+
+        // Use separate UMEMs: the parked descriptor must retain its original
+        // bytes while the sibling is injected through another binding.
+        let mut snapshot = gre_to_self_snapshot();
+        snapshot.default_policy = "permit".to_string();
+        snapshot.policies.clear();
+        snapshot.neighbors.clear();
+        let mut forwarding = build_forwarding_state(&snapshot);
+        let mut bindings = vec![
+            BindingWorker::new_for_mirror_test(0, 0, 24, 0),
+            BindingWorker::new_for_mirror_test(1, 0, 24, 0),
+        ];
+        bindings[0].interface = Arc::<str>::from("reth1.0");
+        bindings[1].interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        let ha_state = txn_ha_state();
+        assert_eq!(
+            crate::afxdp::forwarding::lookup_forwarding_for_ip(
+                &forwarding,
+                IpAddr::V4(dst),
+            ),
+            ForwardingDisposition::MissingNeighbor,
+            "{label}: the destination's connected route must be cold before injection"
+        );
+
+        let (_park_batch, parked_dbg) = txn_run_descriptor_checked(
+            &mut bindings[0],
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &first_frame,
+            first_meta,
+            true,
+        );
+        assert_eq!(
+            bindings[0].pending_neigh.len(),
+            1,
+            "{label}: first frame must be parked (missing_neigh={}, no_route={}, forward={}, policy_deny={}, ha_inactive={}, no_egress_binding={}, disposition_other={}, metadata_err={}, frame_build_none={})",
+            parked_dbg.missing_neigh,
+            parked_dbg.no_route,
+            parked_dbg.forward,
+            parked_dbg.policy_deny,
+            parked_dbg.ha_inactive,
+            parked_dbg.no_egress_binding,
+            parked_dbg.disposition_other,
+            parked_dbg.metadata_err,
+            parked_dbg.frame_build_none,
+        );
+        assert_eq!(
+            parked_dbg.missing_neigh, 1,
+            "{label}: parked packet must traverse the actual MissingNeighbor arm"
+        );
+
+        forwarding.neighbors.insert(
+            (24, IpAddr::V4(dst)),
+            NeighborEntry {
+                mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            },
+        );
+        let (_sibling_batch, sibling_dbg) = txn_run_descriptor_checked(
+            &mut bindings[1],
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &second_frame,
+            second_meta,
+            true,
+        );
+        assert_eq!(
+            sibling_dbg.forward, 1,
+            "{label}: the sibling must pass before the parked frame is retried"
+        );
+
+        let retry_output_before: usize = bindings
+            .iter()
+            .map(|b| {
+                b.tx_pipeline.pending_tx_prepared.len() + b.tx_pipeline.pending_tx_local.len()
+            })
+            .sum();
+        let lookup = WorkerBindingLookup::from_bindings(&bindings);
+        let mirror_targets = MirrorTargetMap::default();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let mut shared_recycles = Vec::new();
+        let area = bindings[0].umem.area() as *const MmapArea;
+        let (left, rest) = bindings.split_at_mut(0);
+        let (binding, right) = rest.split_first_mut().expect("parked ingress binding");
+        let mut retry_counters = BatchCounters::default();
+        retry_pending_neigh(
+            binding,
+            left,
+            0,
+            right,
+            &lookup,
+            &mirror_targets,
+            &forwarding,
+            &dynamic_neighbors,
+            None,
+            123_000_000_100,
+            // SAFETY: the pointer comes from bindings[0]'s Rc-backed UMEM;
+            // this test is single-threaded and the split borrows are disjoint.
+            unsafe { &*area },
+            &mut shared_recycles,
+            None,
+            &mut retry_counters,
+        );
+
+        assert!(bindings[0].pending_neigh.is_empty(), "{label}: retry consumes the parked entry");
+        assert_eq!(
+            retry_counters.frag_overlap_dropped, 1,
+            "{label}: retry must account one pre-translation overlap drop"
+        );
+        let retry_output_after: usize = bindings
+            .iter()
+            .map(|b| {
+                b.tx_pipeline.pending_tx_prepared.len() + b.tx_pipeline.pending_tx_local.len()
+            })
+            .sum();
+        assert_eq!(
+            retry_output_after, retry_output_before,
+            "{label}: a rejected parked frame must not enqueue a retry TX"
+        );
+    }
+}
+
 
 /// A queued fragment that fails the production TTL rewrite must fail its
 /// overlap admission. Otherwise the late overlap check can reclaim the
