@@ -68,6 +68,14 @@ pub(super) struct EmbeddedIcmpMatch {
     /// descriptor with the internal (pre-NAT) source on the wire and an
     /// unassociable quote. `false` on every inbound match.
     pub(super) outbound_snat: bool,
+    /// #10667: the F-077 gating key this match was charged against. The
+    /// poll arms refund it via
+    /// `SessionTable::refund_icmp_error_not_delivered` on every post-match
+    /// non-delivery terminal (TTL-expire, CoS drop, policy-refuse after
+    /// `Queued`) so refused errors cannot starve permitted ones.
+    /// `NotHandled` (unbuildable frame) keeps the charge: the error falls
+    /// through to flowless enforcement, which may still deliver it.
+    pub(super) budget_key: SessionKey,
 }
 
 /// Borrow bundle threaded through both v4/v6 NAT-match paths and the

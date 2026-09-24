@@ -138,6 +138,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             resolution,
             metadata: fwd.metadata,
             outbound_snat: false,
+            budget_key: fwd.key.clone(),
         });
     }
 
@@ -203,6 +204,10 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     {
         return EmbeddedMatchOutcome::BudgetDenied;
     }
+    // #10667: the F-077 gating key this match was charged against — carried
+    // on the match so the poll arms can refund it on every post-match
+    // non-delivery terminal (TTL-expire, CoS drop, policy-refuse).
+    let budget_key = resolved.key.as_ref(query_key).clone();
     let sl = resolved.lookup;
     let resolution = if sl.metadata.is_reverse {
         sl.decision.resolution
@@ -225,5 +230,6 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         resolution,
         metadata: sl.metadata,
         outbound_snat,
+        budget_key,
     })
 }

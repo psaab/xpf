@@ -5314,7 +5314,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_secs,
                             ingress_zone_override,
                         ) {
-                            EmbeddedIcmpReversal::Queued { related_untranslated } => {
+                            EmbeddedIcmpReversal::Queued { related_untranslated, budget_key } => {
                                 let policy_allowed = binding
                                     .scratch
                                     .scratch_forwards
@@ -5339,6 +5339,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // The queue helper has transferred ownership
                                     // to this last prebuilt; remove it before
                                     // recycling the original descriptor.
+                                    // #10667: refund the matcher's pre-policy
+                                    // budget charge — a policy-refused error is
+                                    // never delivered and must not starve the
+                                    // session's permitted errors.
+                                    sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                                     binding.scratch.scratch_forwards.pop();
                                     telemetry.counters.touched = true;
                                     telemetry.dbg.policy_deny += 1;
@@ -5398,7 +5403,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_secs,
                             ingress_zone_override,
                         ) {
-                            EmbeddedIcmpReversal::Queued { related_untranslated } => {
+                            EmbeddedIcmpReversal::Queued { related_untranslated, budget_key } => {
                                 // Reversed error queued as a prebuilt forward;
                                 // authorize the actual rewritten wire identity
                                 // before allowing the request to own the desc.
@@ -5423,6 +5428,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     })
                                     .unwrap_or(false);
                                 if !policy_allowed {
+                                    // #10667: refund the matcher's pre-policy
+                                    // budget charge — a policy-refused error is
+                                    // never delivered and must not starve the
+                                    // session's permitted errors.
+                                    sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                                     binding.scratch.scratch_forwards.pop();
                                     telemetry.counters.touched = true;
                                     telemetry.dbg.policy_deny += 1;

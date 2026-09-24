@@ -1094,6 +1094,21 @@ fn icmp_error_tat_take(tat: &mut u64, now_ns: u64) -> bool {
     *tat = (*tat).max(now_ns).saturating_add(ICMP_ERROR_INTERVAL_NS);
     true
 }
+/// Inverse of `icmp_error_tat_take` for a charge whose error was NOT
+/// delivered (policy-refused, TTL-expired, or CoS-dropped AFTER the matcher
+/// took its token — #10667). A take sets `tat = max(old, now) + interval`,
+/// so subtracting one interval restores `max(old, now)`: exact when the
+/// budget was live (`old > now`), and full-equivalent when it was idle
+/// (`old <= now` — `now` admits the same future takes as `0`, since time
+/// never runs backward). Pairing is single-take to single-refund: every
+/// matcher `Match` flows to exactly one terminal outcome, and only the
+/// non-delivery terminals refund. A double refund would mint credit — the
+/// call sites return/`continue` immediately after refunding so no `Match`
+/// can reach two of them. Never inserts: a missing slot means the take
+/// denied (no `Match`, nothing owed) — fail-closed, nothing to restore.
+fn icmp_error_tat_refund(tat: &mut u64) {
+    *tat = tat.saturating_sub(ICMP_ERROR_INTERVAL_NS);
+}
 
 /// #9856: why a removal is happening — gates tombstone capture.
 ///
@@ -1618,6 +1633,32 @@ impl SessionTable {
         let admitted = icmp_error_tat_take(&mut tat, now_ns);
         self.icmp_error_side_tats.insert(key.clone(), tat);
         admitted
+    }
+    /// #10667: refund a per-session error token taken by
+    /// `note_icmp_error_delivered` for an error that was then NOT delivered.
+    /// The matcher charges BEFORE the poll arm knows the outcome (build,
+    /// CoS, zone policy), so every post-match non-delivery terminal refunds:
+    /// policy-refuse after `Queued` (both flowless arms), TTL-expire drop,
+    /// and CoS drop. Without the refund, 64 policy-refused errors exhaust
+    /// the 64-burst and a genuine permitted error is `BudgetDenied` —
+    /// refused errors starve permitted ones.
+    ///
+    /// Mirrors the take's slot selection exactly (local entry with the
+    /// #7919 reused-slab guard, else the side table); never inserts.
+    /// `now_ns` is unused — the TAT inversion needs no clock — but kept so
+    /// the take/refund call shapes stay symmetric at the call sites.
+    pub(crate) fn refund_icmp_error_not_delivered(&mut self, key: &SessionKey, _now_ns: u64) {
+        if let Some(handle) = self.key_to_handle.get(key).copied() {
+            if let Some(record) = self.entries.get_mut(handle as usize) {
+                if record.key == *key {
+                    icmp_error_tat_refund(&mut record.entry.last_icmp_error_tat);
+                    return;
+                }
+            }
+        }
+        if let Some(tat) = self.icmp_error_side_tats.get_mut(key) {
+            icmp_error_tat_refund(tat);
+        }
     }
 
     /// #4915 + #6311: namespace this table's session ids so the STABLE session
