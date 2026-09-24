@@ -690,6 +690,7 @@ pub(crate) fn worker_loop(
         runtime: shared_runtime,
         ha_state,
         local_tunnel_deliveries,
+        wg_uncovered_queues,
         fabrics: shared_fabrics,
         mirror_targets: shared_mirror_targets,
         rg_epochs,
@@ -805,6 +806,8 @@ pub(crate) fn worker_loop(
     let ipsec_inner_transport = slow_path
         .as_ref()
         .map(|slow_path| slow_path.ipsec_inner_transport());
+    let mut wg_uncovered_batch =
+        crate::afxdp::wg_uncovered_forward::WgUncoveredInjectedBatch::new();
     const COS_STATUS_INTERVAL_NS: u64 = 100_000_000;
     let mut ipsec_inner_batch = IpsecInnerDoubleBatch::new();
     let mut ipsec_inner_queue_scratch =
@@ -2021,6 +2024,16 @@ pub(crate) fn worker_loop(
                 forwarding = Arc::new(updated);
             }
         }
+        // #10597: drain the control→worker WG queue independently of native
+        // RX availability. The batch stays live across binding calls/ticks;
+        // a worker with no AF_XDP traffic must still adjudicate uncovered
+        // host-inbound records.
+        if wg_uncovered_batch.is_empty() {
+            let live_wg_queues = wg_uncovered_queues.load();
+            if let Some(queue) = live_wg_queues.get(&worker_id) {
+                wg_uncovered_batch.drain_from(queue);
+            }
+        }
         // #7201: a command backlog IS work. `apply_worker_commands` drains at
         // most `WORKER_COMMAND_DRAIN_BUDGET` per pass so the AF_XDP rings get
         // serviced between slices; the remainder is only reachable if this loop
@@ -2042,6 +2055,25 @@ pub(crate) fn worker_loop(
                 0
             } else {
                 (poll_start + offset) % bindings.len()
+            };
+            let injected_packet = loop {
+                let Some(descriptor) = wg_uncovered_batch.next() else {
+                    break None;
+                };
+                let rx_queue_index = bindings
+                    .get(idx)
+                    .map(|binding| binding.queue_id)
+                    .unwrap_or(worker_id);
+                if let Some(packet) =
+                    crate::afxdp::wg_uncovered_forward::build_injected_packet(
+                        &descriptor,
+                        &forwarding,
+                        validation,
+                        rx_queue_index,
+                    )
+                {
+                    break Some(packet);
+                }
             };
             if poll_binding(
                 idx,
@@ -2080,6 +2112,7 @@ pub(crate) fn worker_loop(
                 &mut dbg_poll,
                 &rg_epochs,
                 cold_path_sample_mask,
+                injected_packet,
             ) {
                 did_work = true;
             }

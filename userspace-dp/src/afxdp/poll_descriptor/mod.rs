@@ -237,11 +237,12 @@ pub(super) fn dns_reply_fastpath_admit(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn poll_binding_process_descriptor(
+pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
     area: *const MmapArea,
     available: u32,
+    injected_packet: Option<(Vec<u8>, UserspaceDpMeta)>,
     sessions: &mut SessionTable,
     screen: &mut ScreenState,
     validation: ValidationState,
@@ -279,16 +280,59 @@ pub(super) fn poll_binding_process_descriptor(
     // Load the immutable SA payload once for this RX batch. Stage 11 performs
     // only plain map lookups against this guard, never another ArcSwap load.
     let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
+    let mut injected_desc = injected_packet.and_then(|(frame, meta)| {
+        if frame.len() > crate::afxdp::UMEM_FRAME_SIZE as usize {
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let Some(addr) = binding.tx_pipeline.free_tx_frames.pop_front() else {
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        // SAFETY: `addr` came from this binding's free-TX frame pool, so the
+        // offset belongs to this binding's UMEM and no other owner can access
+        // it until the injected packet reaches the origin-aware recycle arm.
+        let Some(dst) = (unsafe { (&*area).slice_mut_unchecked(addr as usize, frame.len()) }) else {
+            binding.tx_pipeline.free_tx_frames.push_back(addr);
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        dst.copy_from_slice(&frame);
+        Some((
+            XdpDesc {
+                addr,
+                len: frame.len() as u32,
+                options: 0,
+            },
+            meta,
+        ))
+    });
     let mut received = binding.xsk.rx.receive(available);
     binding.scratch.scratch_recycle.clear();
     binding.scratch.scratch_forwards.clear();
     binding.scratch.scratch_rst_teardowns.clear();
-    while let Some(desc) = received.read() {
-        record_rx_descriptor_telemetry(desc, area, telemetry, worker_ctx);
+    let injected_addr = injected_desc.as_ref().map(|(desc, _)| desc.addr);
+    loop {
+        let (desc, injected_meta) = if let Some((desc, meta)) = injected_desc.take() {
+            (desc, Some(meta))
+        } else if let Some(desc) = received.read() {
+            (desc, None)
+        } else {
+            break;
+        };
+        let is_injected = injected_meta.is_some();
+        if !is_injected {
+            record_rx_descriptor_telemetry(desc, area, telemetry, worker_ctx);
+        }
         let mut recycle_now = true;
         // SAFETY: per the `area` contract in this function's header
         // comment — pointee outlives the call, never aliased mutably.
-        if let Some(meta) = try_parse_metadata(unsafe { &*area }, desc) {
+        if let Some(meta) =
+            injected_meta.or_else(|| try_parse_metadata(unsafe { &*area }, desc))
+        {
             telemetry.counters.metadata_packets += 1;
             let disposition = classify_metadata(meta, validation);
             if disposition == PacketDisposition::Valid {
@@ -315,7 +359,10 @@ pub(super) fn poll_binding_process_descriptor(
                 // parent config name for from-interface diagnostics and scope
                 // matching, while forcing its zone empty. The packet itself
                 // never reaches that downstream path for an unknown VID.
+                // #10597: injected WG records arrive post-decap with logical
+                // ingress; the native link-layer guards below are bypassed.
                 if meta.ingress_vlan_present != 0
+                    && !is_injected
                     && crate::afxdp::forwarding::unknown_ingress_vlan(
                         worker_ctx.forwarding,
                         meta.ingress_ifindex as i32,
@@ -331,13 +378,14 @@ pub(super) fn poll_binding_process_descriptor(
                 // classification as well as before decap, source-neighbor
                 // learning, and all L3 resolution.
                 let fabric_link_ingress =
-                    ingress_is_fabric(worker_ctx.forwarding, meta.ingress_ifindex as i32);
+                    !is_injected && ingress_is_fabric(worker_ctx.forwarding, meta.ingress_ifindex as i32);
                 if !ingress_destination_mac_accepted(
                     worker_ctx.forwarding,
                     meta.ingress_ifindex as i32,
                     meta.ingress_vlan_id,
                     raw_frame,
-                ) {
+                ) && !is_injected
+                {
                     telemetry.counters.touched = true;
                     telemetry.counters.dst_mac_dropped += 1;
                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -346,13 +394,18 @@ pub(super) fn poll_binding_process_descriptor(
                 // #946 Phase 1 stage 5: ARP / NDP link-layer
                 // classification. ARP frames recycle without
                 // transiting; NDP NA learns and falls through.
-                if let StageOutcome::RecycleAndContinue = stage_link_layer_classify(
-                    raw_frame,
-                    meta,
-                    now_ns,
-                    &mut binding.neigh_program_limiter,
-                    worker_ctx,
-                ) {
+                if !is_injected
+                    && matches!(
+                        stage_link_layer_classify(
+                            raw_frame,
+                            meta,
+                            now_ns,
+                            &mut binding.neigh_program_limiter,
+                            worker_ctx,
+                        ),
+                        StageOutcome::RecycleAndContinue
+                    )
+                {
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
@@ -361,8 +414,13 @@ pub(super) fn poll_binding_process_descriptor(
                 // return the slice (would be self-referential).
                 // `owned_packet_frame` MUST be `mut` — deferred
                 // stage-12+ code at lines below calls `.take()`.
-                let (mut meta, mut owned_packet_frame) =
-                    stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding);
+                // #10597: injected WG plaintext arrives decapped; the
+                // synthetic frame becomes the owned packet directly.
+                let (mut meta, mut owned_packet_frame) = if is_injected {
+                    (meta, Some(raw_frame.to_vec()))
+                } else {
+                    stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding)
+                };
                 // #8274 step 3 — stage 6b: WireGuard transport-data decap.
                 //
                 // Runs only when GRE did not already claim the frame: a packet
@@ -376,7 +434,7 @@ pub(super) fn poll_binding_process_descriptor(
                 // plaintext is adjudicated under the tunnel's logical ingress
                 // zone instead of being written to the wgN TUN for the kernel
                 // to forward with no zone policy at all.
-                if owned_packet_frame.is_none() {
+                if !is_injected && owned_packet_frame.is_none() {
                     let (wg_meta, wg_frame) = stage_wg_decap(
                         raw_frame,
                         meta,
@@ -397,6 +455,7 @@ pub(super) fn poll_binding_process_descriptor(
                 // learning uses the live UMEM Ethernet frame so
                 // the source MAC is the outer host's, not the
                 // GRE tunnel egress).
+                // #10597: `!is_injected &&` — injected frames reuse the synthetic slice.
                 let mut flow = stage_parse_flow_and_learn(
                     // SAFETY: per the `area` contract in this
                     // function's header comment.
@@ -404,7 +463,7 @@ pub(super) fn poll_binding_process_descriptor(
                     desc,
                     packet_frame,
                     meta,
-                    owned_packet_frame.is_none(),
+                    !is_injected && owned_packet_frame.is_none(),
                     &mut binding.last_learned_neighbor,
                     worker_ctx,
                 );
@@ -1192,6 +1251,20 @@ pub(super) fn poll_binding_process_descriptor(
                         ha_startup_grace_until_secs,
                         worker_id,
                     ) {
+                        // #10597 G5: a queued WireGuard record may only enter
+                        // the worker's local-delivery path. Use the pipeline's
+                        // final FIB result here (not the ingress interface's
+                        // primary address helpers), so loopback/management
+                        // addresses on another interface remain reachable.
+                        if is_injected
+                            && resolved.decision.resolution.disposition
+                                != ForwardingDisposition::LocalDelivery
+                        {
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                                .fetch_add(1, Ordering::Relaxed);
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         telemetry.counters.session_hits += 1;
                         telemetry.dbg.session_hit += 1;
                         // #9519: may THIS packet act for the session it hit? A
@@ -2999,6 +3072,20 @@ pub(super) fn poll_binding_process_descriptor(
                             from_zone_id,
                             ha_startup_grace_until_secs,
                         );
+                        // #10597 G5: apply the local-only fence to the
+                        // pipeline's final FIB resolution. This intentionally
+                        // allows addresses owned by lo0/management/another
+                        // interface; the earlier ingress-interface helpers
+                        // were only advisory and are not sufficient here.
+                        if is_injected
+                            && decision.resolution.disposition
+                                != ForwardingDisposition::LocalDelivery
+                        {
+                            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                                .fetch_add(1, Ordering::Relaxed);
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         // #4400/#10270: fail closed on any non-SYN TCP
                         // session-MISS packet. A bare ACK/PSH/data tuple with
                         // no matching session is either a late segment for an
@@ -5033,6 +5120,20 @@ pub(super) fn poll_binding_process_descriptor(
                         now_secs,
                         hit.resolution,
                     );
+                    // #10597 G5: an injected record inheriting a fragment
+                    // association must still resolve local under the
+                    // authoritative FIB. The association may have been
+                    // installed by a native first fragment with matching L3
+                    // identity; inheriting its transit decision would bypass
+                    // the flow-backed gates above.
+                    if is_injected
+                        && hit.resolution.disposition != ForwardingDisposition::LocalDelivery
+                    {
+                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                            .fetch_add(1, Ordering::Relaxed);
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
                     hit
                 } else {
                     // #7359: build the L3 identity and run the INTERFACE INPUT
@@ -5390,6 +5491,19 @@ pub(super) fn poll_binding_process_descriptor(
                     } else {
                         base_resolution
                     };
+                    // #10597 G5: flowless injected records (non-first
+                    // fragments, ICMP errors) fence on the same final
+                    // resolution as the flow-backed arms. Placed before
+                    // policy so a non-local record drops as nonlocal
+                    // without adjudication it can never use.
+                    if is_injected
+                        && final_resolution.disposition != ForwardingDisposition::LocalDelivery
+                    {
+                        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                            .fetch_add(1, Ordering::Relaxed);
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
 
                     // #6458 V2: honor the zone-encoded fabric stamp for this
                     // flowless enforcement only when the resolution's owner RG
@@ -7898,8 +8012,60 @@ pub(super) fn poll_binding_process_descriptor(
             binding.scratch.scratch_recycle.push(desc.addr);
         }
     }
+    // #10597: the injected WG descriptor owns a TX-pipeline frame, not an RX
+    // UMEM frame. If the loop above recycled it into the RX recycle list,
+    // reroute it back to the TX free list so the lifecycle drain cannot hand
+    // a TX address to the RX fill ring. Native path (`None`) is untouched.
+    if let Some(addr) = injected_addr {
+        if let Some(pos) = binding
+            .scratch
+            .scratch_recycle
+            .iter()
+            .position(|a| *a == addr)
+        {
+            binding.scratch.scratch_recycle.swap_remove(pos);
+            binding.tx_pipeline.free_tx_frames.push_back(addr);
+        }
+    }
     received.release();
     drop(received);
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poll_binding_process_descriptor(
+    binding: &mut BindingWorker,
+    binding_index: usize,
+    area: *const MmapArea,
+    available: u32,
+    sessions: &mut SessionTable,
+    screen: &mut ScreenState,
+    validation: ValidationState,
+    now_ns: u64,
+    now_secs: u64,
+    ha_startup_grace_until_secs: u64,
+    worker_id: u32,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    worker_ctx: &WorkerContext,
+    telemetry: &mut TelemetryContext,
+) {
+    poll_binding_process_descriptor_with_injection(
+        binding,
+        binding_index,
+        area,
+        available,
+        None,
+        sessions,
+        screen,
+        validation,
+        now_ns,
+        now_secs,
+        ha_startup_grace_until_secs,
+        worker_id,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        worker_ctx,
+        telemetry,
+    );
 }
 #[cfg(test)]
 #[path = "named_pre_l3_10498_tests.rs"]

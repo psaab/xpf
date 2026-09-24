@@ -1545,10 +1545,177 @@ fn observe_one_record_9594(
         asked,
     }
 }
+struct ForwardObservation10597 {
+    forwarded: Vec<crate::afxdp::wg_uncovered_forward::WgUncoveredDescriptor>,
+    delivered: Option<Vec<u8>>,
+    degraded_drops: u64,
+    unsteered_drops: u64,
+    decap_packets: u64,
+    asked: Vec<Option<u32>>,
+}
+
+/// #10597 observer: the Half-B seam for `observe_one_record_9594`. Runs the
+/// real loop with a POPULATED worker queue table and an attached runtime
+/// (fixture endpoint 1 = wg0/400), sends ONE authenticated transport record
+/// over loopback, and reports what the control thread did with it: queued
+/// for worker adjudication (`forwarded`), refused as transit
+/// (`degraded_drops`), or — the bypass this seam removes — written straight
+/// to the TUN (`delivered`, always expected `None` now).
+fn observe_one_record_forwarded_10597(
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
+    ingress: super::kernel_path::WgKernelPathIngress,
+    inner_is_local: bool,
+    outer_v6: bool,
+    inner: &[u8],
+) -> ForwardObservation10597 {
+    use std::sync::atomic::Ordering;
+    let allowed: Vec<ipnet::IpNet> =
+        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let (init, resp, _init_pub, resp_pub) =
+        crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+    let resp = std::sync::Arc::new(resp);
+    let mut local = std::collections::HashSet::new();
+    if inner_is_local {
+        local.insert(super::kernel_path::inner_destination(inner).expect("parseable inner"));
+    }
+    let view = std::sync::Arc::new(FixedKernelPathView9594 {
+        ingress,
+        local,
+        asked: Mutex::new(Vec::new()),
+    });
+    // Attached runtime: the fixture endpoint row (id 1, wireguard, wg0/400)
+    // is what the control thread fences the enqueue against. A detached
+    // runtime would shed the record as stale before it reached the queue.
+    let forwarding = std::sync::Arc::new(build_forwarding_state(
+        &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+    ));
+    assert!(
+        super::tun_origin::wg_endpoint_attachment_valid(&forwarding, 1, 400, "wg0"),
+        "setup: the queue observer must run attached"
+    );
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    channel.publish(std::sync::Arc::new(crate::afxdp::types::RuntimeView::new(
+        crate::afxdp::types::ValidationState::default(),
+        forwarding,
+    )));
+    let tun_origin = TunOriginLoopTestHandles {
+        reader: channel.reader(),
+        ..TunOriginLoopTestHandles::detached()
+    };
+    // One live worker owns every flow (a single-entry table steers to id 0).
+    let worker_queue = std::sync::Arc::new(
+        crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue::new(),
+    );
+    let mut queue_map = std::collections::BTreeMap::new();
+    queue_map.insert(0u32, worker_queue.clone());
+    let forward_queues = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(queue_map));
+    let loopback = if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" };
+    let socket = UdpSocket::bind(loopback).expect("bind the control socket");
+    socket.set_nonblocking(true).unwrap();
+    let dst = socket.local_addr().unwrap();
+    let (tun, tun_test_end) = super::tun_standin_pair_9521();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let raw_fd = socket.as_raw_fd();
+    let (engine_t, stop_t, exc_t, view_t) = (resp.clone(), stop.clone(), exceptions.clone(), view.clone());
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop_with_kernel_path_and_forward(
+            "wg0",
+            &engine_t,
+            &socket,
+            outer_v6,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            kernel_transport,
+            &*view_t,
+            1,
+            400,
+            &tun_origin.reader,
+            &tun_origin.ha,
+            &tun_origin.neighbors,
+            &tun_origin.shared,
+            &tun_origin.nat,
+            &tun_origin.forward_wire,
+            &tun_origin.indexes,
+            None,
+            None,
+            Some(forward_queues),
+        );
+    });
+    // Same pktinfo-arm wait as `observe_one_record_9594`: a datagram queued
+    // before the loop sets the option carries no receiving interface, and
+    // the ingress assertion must observe the loop, not the race.
+    let (opt_level, opt_name) = if outer_v6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_PKTINFO)
+    };
+    let armed_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < armed_deadline {
+        let mut val: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                raw_fd,
+                opt_level,
+                opt_name,
+                &mut val as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc == 0 && val != 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&resp_pub, inner, &mut wire).expect("initiator encap");
+    let sender = UdpSocket::bind(loopback).unwrap();
+    sender.send_to(&wire[..enc.len], dst).unwrap();
+
+    let counted = |r: &crate::afxdp::wg::WgEngine| {
+        r.counters().rx_degraded_transit_drops.load(Ordering::Relaxed)
+            + r.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed)
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut forwarded = Vec::new();
+    while std::time::Instant::now() < deadline {
+        worker_queue.drain_into(&mut forwarded, 64);
+        if !forwarded.is_empty() || counted(&resp) > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Settle: a bypass TUN write racing the queue drain must still be caught.
+    std::thread::sleep(Duration::from_millis(50));
+    worker_queue.drain_into(&mut forwarded, 64);
+    let delivered = super::tun_standin_recv_9521(&tun_test_end);
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("control loop thread");
+    let asked = view.asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    ForwardObservation10597 {
+        forwarded,
+        delivered,
+        degraded_drops: resp.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+        unsteered_drops: resp.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+        decap_packets: resp.counters().decap_packets.load(Ordering::Relaxed),
+        asked,
+    }
+}
 
 /// #10527 cell 1: a steered-port transport record on a shim-uncovered
 /// configured ingress is authenticated, counted as transit refusal, and never
 /// written to the wgN TUN. Both outer families exercise the real pktinfo path.
+///
+/// #10597: migrated to the forwarded observer. Half-B routes uncovered decap
+/// through the worker queue for adjudication, so the cell additionally pins
+/// that transit is NOT queued — the legacy observer cannot see the queue and
+/// would pass while transit rode to a worker.
 #[test]
 fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
     use super::kernel_path::WgKernelPathIngress::Uncovered;
@@ -1560,7 +1727,7 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
         (true, super::inner_v6_9521()),
     ] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
-        let obs = observe_one_record_9594(Deliver, Uncovered, false, outer_v6, &inner);
+        let obs = observe_one_record_forwarded_10597(Deliver, Uncovered, false, outer_v6, &inner);
         assert_eq!(
             obs.decap_packets,
             1,
@@ -1575,6 +1742,10 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
             "{family}: uncovered transit was written to the wgN TUN: {:?}",
             obs.delivered
         );
+        assert!(
+            obs.forwarded.is_empty(),
+            "{family}: uncovered transit was queued for worker adjudication instead of refused"
+        );
         assert_eq!(
             obs.asked,
             vec![Some(lo)],
@@ -1583,11 +1754,13 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
     }
 }
 
-/// #10527 cell 2: the uncovered-ingress fix is not a blanket drop. A
-/// steered-port record addressed to the firewall still reaches the TUN handoff
-/// in both outer families; the test stand-in observes bytes before kernel input.
+/// #10597 successor of #10527 cell 2: the uncovered-ingress fix is not a
+/// blanket drop. A steered-port record addressed to the firewall is QUEUED
+/// for worker adjudication (Half-B) instead of written straight to the TUN
+/// (Half-A); the queued descriptor carries the exact inner bytes. Both outer
+/// families exercise the real pktinfo path.
 #[test]
-fn steered_port_uncovered_host_inbound_still_delivered_10527() {
+fn steered_port_uncovered_host_inbound_still_forwarded_10597() {
     use super::kernel_path::WgKernelPathIngress::Uncovered;
     use crate::afxdp::types::WgKernelTransport::Deliver;
     for (outer_v6, inner) in [
@@ -1595,11 +1768,20 @@ fn steered_port_uncovered_host_inbound_still_delivered_10527() {
         (true, super::inner_v6_9521()),
     ] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
-        let obs = observe_one_record_9594(Deliver, Uncovered, true, outer_v6, &inner);
+        let obs = observe_one_record_forwarded_10597(Deliver, Uncovered, true, outer_v6, &inner);
         assert_eq!(
-            obs.delivered.as_deref(),
-            Some(&inner[..]),
-            "{family}: uncovered host-inbound traffic was not delivered"
+            obs.forwarded.len(),
+            1,
+            "{family}: uncovered host-inbound traffic was not queued for adjudication"
+        );
+        assert_eq!(
+            obs.forwarded[0].inner, inner,
+            "{family}: the queued descriptor does not carry the inner bytes"
+        );
+        assert!(
+            obs.delivered.is_none(),
+            "{family}: uncovered host-inbound bypassed the queue with a direct TUN write: {:?}",
+            obs.delivered
         );
         assert_eq!(
             obs.degraded_drops, 0,
@@ -1620,13 +1802,17 @@ fn steered_port_uncovered_host_inbound_still_delivered_10527() {
 /// receiving interface — the loopback ifindex, from the kernel's pktinfo cmsg
 /// through `wg_recvmsg` — is what the posture was asked about, so the decision
 /// is not being made on a value the loop never learned.
+///
+/// #10597: migrated to the forwarded observer. Half-B queues covered
+/// host-inbound for worker adjudication instead of TUN-writing it, and the
+/// transit arms additionally pin that refused transit is NOT queued.
 #[test]
 fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594() {
     use super::kernel_path::WgKernelPathIngress::{Covered, Unknown};
     use crate::afxdp::types::WgKernelTransport::Deliver;
     for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
-        let transit = observe_one_record_9594(Deliver, Covered, false, outer_v6, &inner);
+        let transit = observe_one_record_forwarded_10597(Deliver, Covered, false, outer_v6, &inner);
         assert_eq!(
             transit.decap_packets, 1,
             "{family}: the covered-ingress record never authenticated, so this run observed nothing"
@@ -1641,20 +1827,37 @@ fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_95
              where the kernel forwards it with no zone policy (#9594): {:?}",
             transit.delivered
         );
+        assert!(
+            transit.forwarded.is_empty(),
+            "{family}: refused covered transit was queued for adjudication instead of dropped"
+        );
 
-        let host_inbound = observe_one_record_9594(Deliver, Covered, true, outer_v6, &inner);
+        let host_inbound = observe_one_record_forwarded_10597(Deliver, Covered, true, outer_v6, &inner);
         assert_eq!(
-            host_inbound.delivered.as_deref(),
-            Some(&inner[..]),
-            "{family}: a covered-ingress record addressed to the firewall must still be delivered — \
+            host_inbound.forwarded.len(),
+            1,
+            "{family}: a covered-ingress record addressed to the firewall must still be queued — \
              the shim's degraded posture passes local traffic, and a blanket drop would cut \
              management over the VPN during a failover"
         );
+        assert_eq!(
+            host_inbound.forwarded[0].inner, inner,
+            "{family}: the queued descriptor does not carry the inner bytes"
+        );
+        assert!(
+            host_inbound.delivered.is_none(),
+            "{family}: covered host-inbound bypassed the queue with a direct TUN write: {:?}",
+            host_inbound.delivered
+        );
         assert_eq!(host_inbound.degraded_drops, 0, "{family}: host-inbound counted a degraded drop");
 
-        let unknown = observe_one_record_9594(Deliver, Unknown, false, outer_v6, &inner);
+        let unknown = observe_one_record_forwarded_10597(Deliver, Unknown, false, outer_v6, &inner);
         assert_eq!(unknown.degraded_drops, 1, "{family}: an unplaceable ingress must fail closed for transit");
         assert!(unknown.delivered.is_none(), "{family}: unplaceable-ingress transit reached the TUN");
+        assert!(
+            unknown.forwarded.is_empty(),
+            "{family}: unplaceable-ingress transit was queued instead of refused"
+        );
     }
 }
 

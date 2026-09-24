@@ -145,6 +145,17 @@ pub(super) fn bring_up_workers(
     // sizing + the `Planned` stage) from the snapshot and the just-opened map
     // FDs, read by RAW descriptor — the `OwnedFd`s are still owned by `fds`.
     let workers = plan_workers(coord, snapshot, bindings, &fds, ring_entries);
+    // #10597: retire the previous generation before planning a replacement.
+    // Keep the published table empty until the readiness barrier proves that
+    // every worker has bound its full queue set; planned worker IDs are not
+    // valid consumers and must never strand control-thread records.
+    let old_wg_queues = coord.wg_uncovered_queues.load_full();
+    coord.wg_uncovered_queues.store(Arc::new(BTreeMap::new()));
+    for queue in old_wg_queues.values() {
+        let orphaned = queue.close_and_drain();
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL
+            .fetch_add(orphaned.len() as u64, Ordering::Relaxed);
+    }
     // Capture the values the later phases need BEFORE `fds` is moved into
     // `publish_runtime`: the session map's raw descriptor (replay) and the DNAT
     // table fds (Copy; the worker launch bundle). The replay writes as the
@@ -274,6 +285,25 @@ pub(super) fn bring_up_workers(
                 // worker set is live; partial binds remain unroutable.
                 slow_path.publish_ipsec_inner_workers(spawned_worker_ids.iter().copied());
             }
+            // #10597: only readiness-confirmed workers may receive WG
+            // plaintext. The queue table is intentionally empty during plan,
+            // spawn, and rollback windows.
+            let wg_queues: BTreeMap<
+                u32,
+                Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>,
+            > = spawned_worker_ids
+                .iter()
+                .copied()
+                .map(|worker_id| {
+                    (
+                        worker_id,
+                        Arc::new(
+                            crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue::new(),
+                        ),
+                    )
+                })
+                .collect();
+            coord.wg_uncovered_queues.store(Arc::new(wg_queues));
         }
     }
     coord.last_reconcile_stage = ReconcileStage::Spawned {

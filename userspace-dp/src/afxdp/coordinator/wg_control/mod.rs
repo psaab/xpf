@@ -179,6 +179,17 @@ pub(super) fn wg_control_loop(
     // persistent wgN TUN by this control thread.
     delivery_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     delivery_wake: Arc<TunnelWake>,
+    // #10597: live per-worker control→worker queues for uncovered WG
+    // decaps. The control thread owns no worker queue snapshot; it loads
+    // this ArcSwap on each authenticated record.
+    wg_uncovered_queues: Arc<
+        ArcSwap<
+            BTreeMap<
+                u32,
+                Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>,
+            >,
+        >,
+    >,
 ) {
     // Bind the UDP socket. v6 dual-stack ([::]:port) accepts both v4 and
     // v6 peers where the kernel allows it; fall back to v4 only for a
@@ -270,7 +281,7 @@ pub(super) fn wg_control_loop(
     // uses it.
     let kernel_path_view =
         kernel_path::ShimMapsKernelPathView::new(tunnel_name.clone(), shared_runtime.clone());
-    run_wg_control_loop_with_kernel_path(
+    run_wg_control_loop_with_kernel_path_and_forward(
         &tunnel_name,
         &engine,
         &socket,
@@ -294,6 +305,7 @@ pub(super) fn wg_control_loop(
         &shared_owner_rg_indexes,
         Some(delivery_rx),
         Some(delivery_wake),
+        Some(wg_uncovered_queues),
     );
     // #1866 D3: clean stop-flag exit (teardown) — rare, one line.
     eprintln!("xpf-userspace-dp: WG control thread stopped tun={tunnel_name}");
@@ -495,7 +507,7 @@ fn init_consumer_state(
 /// logic is unit-testable without a real TUN device (the production
 /// caller binds the socket and attaches the persistent wgN TUN above).
 #[allow(clippy::too_many_arguments)]
-fn run_wg_control_loop_with_kernel_path(
+fn run_wg_control_loop_with_kernel_path_and_forward(
     tunnel_name: &str,
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,
@@ -521,6 +533,18 @@ fn run_wg_control_loop_with_kernel_path(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     delivery_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
     delivery_wake: Option<Arc<TunnelWake>>,
+    // #10597: production receives a live queue table. The compatibility
+    // wrapper passes an explicitly empty table, selecting only G6a.
+    forward_queues: Option<
+        Arc<
+            ArcSwap<
+                BTreeMap<
+                    u32,
+                    Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>,
+                >,
+            >,
+        >,
+    >,
 ) {
     use std::collections::HashMap;
     // #9594: ask the kernel for each datagram's receiving interface. Set HERE,
@@ -598,15 +622,14 @@ fn run_wg_control_loop_with_kernel_path(
 
     while !stop.load(Ordering::Relaxed) {
         let mut did_work = false;
-        // #10038: ONE forwarding Arc + ONE HA snapshot per outer iteration,
-        // reused across the whole burst (the GRE loop's coherence shape).
-        // A validation-only publish rotates the view but not the inner
-        // forwarding Arc, so `load_forwarding_if_changed` correctly sees no
-        // change there; the attachment gate recomputes ONLY on rotation.
-        if let Some(new_forwarding) =
-            crate::afxdp::types::load_forwarding_if_changed(&forwarding, shared_runtime)
-        {
-            forwarding = new_forwarding;
+        // #10038/#10597: acquire one immutable runtime view for this outer
+        // iteration. Its forwarding Arc and validation generations are a
+        // paired snapshot; never load the validation half independently in
+        // the datagram loop.
+        let runtime_view = shared_runtime.load();
+        let validation = runtime_view.validation();
+        if !std::sync::Arc::ptr_eq(&forwarding, runtime_view.forwarding()) {
+            forwarding = runtime_view.forwarding().clone();
             tun_origin_attached = tun_origin::wg_endpoint_attachment_valid(
                 &forwarding,
                 tunnel_endpoint_id,
@@ -667,14 +690,14 @@ fn run_wg_control_loop_with_kernel_path(
                 }
             }
         }
-        // --- Inbound: kernel socket → engine → TUN ---
+        // --- Inbound: kernel socket → engine → worker/TUN ---
         for _ in 0..WG_RX_BURST {
             // #2317: recvmsg (not recv_from) so the outer IP TOS /
             // Traffic Class arrives as ancillary data — the only way to
             // see the outer ECN the kernel UDP stack stripped with the
             // outer IP header. `outer_ecn` is None when no TOS cmsg
-            // arrived (kernel ignored the sockopt); the decap combine is
-            // then skipped.
+            // arrived (kernel ignored the sockopt); the worker performs
+            // the decap combine for queued records.
             match wg_recvmsg(socket, &mut sock_buf) {
                 Ok(WgRecv {
                     len,
@@ -686,8 +709,7 @@ fn run_wg_control_loop_with_kernel_path(
                     // Learn / refresh the peer endpoint from `from` ONLY
                     // after the datagram cryptographically authenticates
                     // (Codex r3 MAJOR): updating on any inbound packet
-                    // would let a spoofed source redirect our encrypted
-                    // egress.
+                    // would let a spoofed source redirect our egress.
                     let outcome = dispatch_inbound(
                         engine,
                         socket,
@@ -703,6 +725,12 @@ fn run_wg_control_loop_with_kernel_path(
                         kernel_transport,
                         ingress_ifindex,
                         kernel_path_view,
+                        forward_queues.as_ref(),
+                        tunnel_endpoint_id,
+                        spawned_logical_ifindex,
+                        tun_origin_attached,
+                        validation.config_generation,
+                        validation.fib_generation,
                     );
                     // #1434: learn THIS peer's endpoint from `from` (WG
                     // endpoint roaming is per-peer). Only the
@@ -1027,6 +1055,71 @@ fn run_wg_control_loop_with_kernel_path(
             }
         }
     }
+}
+/// Test compatibility wrapper: uses an explicitly empty live worker set so
+/// the production G6a zero-worker fallback is exercised rather than a hidden
+/// pre-Half-B direct-TUN path. New traversal cells pass a populated map to
+/// `run_wg_control_loop_with_kernel_path_and_forward`.
+#[allow(clippy::too_many_arguments)]
+fn run_wg_control_loop_with_kernel_path(
+    tunnel_name: &str,
+    engine: &crate::afxdp::wg::WgEngine,
+    socket: &UdpSocket,
+    socket_is_v6: bool,
+    tun: std::fs::File,
+    outer_mtu: usize,
+    per_peer_outer_mtu: &std::collections::HashMap<[u8; 32], usize>,
+    endpoint_resolver: Option<&crate::afxdp::wg::endpoint_resolver::WgEndpointResolver>,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+    stop: &AtomicBool,
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
+    kernel_path_view: &dyn kernel_path::WgKernelPathView,
+    tunnel_endpoint_id: u16,
+    spawned_logical_ifindex: i32,
+    shared_runtime: &crate::afxdp::types::RuntimeViewReader,
+    ha_state: &Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    delivery_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    delivery_wake: Option<Arc<TunnelWake>>,
+) {
+    let empty_worker_queues: Arc<
+        ArcSwap<
+            BTreeMap<
+                u32,
+                Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>,
+            >,
+        >,
+    > = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    run_wg_control_loop_with_kernel_path_and_forward(
+        tunnel_name,
+        engine,
+        socket,
+        socket_is_v6,
+        tun,
+        outer_mtu,
+        per_peer_outer_mtu,
+        endpoint_resolver,
+        recent_exceptions,
+        stop,
+        kernel_transport,
+        kernel_path_view,
+        tunnel_endpoint_id,
+        spawned_logical_ifindex,
+        shared_runtime,
+        ha_state,
+        dynamic_neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        delivery_rx,
+        delivery_wake,
+        Some(empty_worker_queues),
+    );
 }
 
 /// #8274 step 3, extracted for #9644 testability: adopt the endpoint a
