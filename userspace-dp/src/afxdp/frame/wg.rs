@@ -592,9 +592,10 @@ pub(super) fn wg_encap_frame(
         // `wg::mss::wg_inner_mtu`, the inverse of `wg_encapped_size`),
         // `mtu_signalled` skips the encap build, and this site is never
         // reached for that case — so the PTB and this drop counter never
-        // both fire. This guard remains the backstop for a non-DF IPv4
-        // inner (`ForwardOversizeNoDf`: no PTB, and no fragmentation before
-        // encapsulation, #9758) whose padded encapsulation exceeds the MTU.
+        // both fire. Since #10705 the same pre-build decision converts a
+        // DF-clear oversize inner into a PTB as well, so this guard is the
+        // backstop for a suppressed/unbuildable PTB or an unknown inner
+        // MTU (fail-open forward), not the common case.
         crate::afxdp::wg::counters::WgCounters::bump(&engine.counters().encap_mtu_drops);
         return None;
     }
