@@ -69,6 +69,15 @@ type SessionPolicyMatch struct {
 	ExpectedRTFlowSessionID        uint64              `json:"expected_rt_flow_session_id,omitempty"`
 	CompanionPolicyID              uint32              `json:"companion_policy_id,omitempty"`
 	ExpectedCompanionRTFlowSessionID uint64            `json:"expected_companion_rt_flow_session_id,omitempty"`
+	// #10626: rename-rematch inputs, populated by the helper READ from the
+	// live session key/metadata/decision. All additive + omitempty: an older
+	// helper omits them (zero values) and the rematch fails closed to the
+	// deleted bucket rather than retaining on unknown zones.
+	IngressZoneID uint16 `json:"ingress_zone_id,omitempty"`
+	EgressZoneID  uint16 `json:"egress_zone_id,omitempty"`
+	DNAT          bool   `json:"dnat,omitempty"`
+	NATDstIP      string `json:"nat_dst_ip,omitempty"`
+	NATDstPort    uint16 `json:"nat_dst_port,omitempty"`
 }
 type SessionSyncRequest struct {
 	Operation   string `json:"operation,omitempty"`

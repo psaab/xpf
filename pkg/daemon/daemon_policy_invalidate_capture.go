@@ -251,16 +251,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	if lister, ok := rt.(interface {
 		ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error)
 	}); ok {
-		ids := make([]uint32, 0, len(deleted)+len(modified)+len(deflt))
-		for id := range deleted {
-			ids = append(ids, id)
-		}
-		for id := range modified {
-			ids = append(ids, id)
-		}
-		for id := range deflt {
-			ids = append(ids, id)
-		}
+		ids := captureRequestedPolicyIDs(deleted, modified, deflt, renameBindings)
 		resp, err := lister.ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest{
 			PolicyIDs: ids,
 			Mode:      "prepublish",
@@ -293,6 +284,28 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			// policies — an extraneous match would over-clear. Skip +
 			// loud (the scan is suspect, so the end check below marks
 			// the whole capture partial).
+			// #10626: rename first-check, before P6 — the helper twin of the
+			// legacy rename-before-classify below. A renamed session the new
+			// policy still permits is retained (rebound); a denied one joins
+			// `deleted.policy` with its entries, exactly once.
+			if binding, ok := renameBindings[match.PolicyID]; ok {
+				if record, permitted := rematchRenamedMatch(plan.oldCfg, plan.newCfg, binding, match); permitted {
+					capture.renamed = append(capture.renamed, record)
+				} else {
+					capture.deleted.policy = append(capture.deleted.policy, match)
+					entry4, entry6, err := policyMatchEntries(match)
+					if err != nil {
+						capture.readErr = errors.Join(capture.readErr, err)
+					}
+					if entry4 != nil {
+						capture.deleted.v4 = append(capture.deleted.v4, *entry4)
+					}
+					if entry6 != nil {
+						capture.deleted.v6 = append(capture.deleted.v6, *entry6)
+					}
+				}
+				continue
+			}
 			if !idInSet(deleted, match.PolicyID) && !idInSet(modified, match.PolicyID) && !idInSet(deflt, match.PolicyID) {
 				capture.readErr = errors.Join(capture.readErr, fmt.Errorf("policy session READ: extraneous policy %d", match.PolicyID))
 				continue
@@ -430,6 +443,41 @@ func (d *Daemon) captureAndStagePolicyRenameAncestry(cfg *config.Config) {
 	}); ok {
 		setter.SetPolicyRenameAncestry(ancestry, rebinds)
 	}
+}
+
+// #10626: the policy-ID set the helper READ is asked for: the three changed
+// classes plus the rename bindings' keys, deduplicated. The bindings union is
+// what keeps a renamed match from tripping the P6 extraneous-match guard —
+// binding-keyed IDs are explicitly requested, so they are never extraneous.
+// Identical output when no rename bindings exist (pure refactor).
+func captureRequestedPolicyIDs(deleted, modified, deflt map[uint32]struct{}, renameBindings map[uint32]policyRenameBinding) []uint32 {
+	ids := make([]uint32, 0, len(deleted)+len(modified)+len(deflt)+len(renameBindings))
+	seen := make(map[uint32]struct{}, len(deleted)+len(modified)+len(deflt)+len(renameBindings))
+	for id := range deleted {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	for id := range modified {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	for id := range deflt {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	for id := range renameBindings {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func idInSet(ids map[uint32]struct{}, id uint32) bool {

@@ -415,3 +415,85 @@ func rematchRenamedV6(oldCfg, newCfg *config.Config, binding policyRenameBinding
 	}
 	return record, permitted
 }
+
+// #10626: rename-rematch for a HELPER READ match — the helper-path twin of
+// rematchRenamedV4/V6, which consume legacy store keys+values. The match
+// carries the tuple as STRINGS plus the live zone IDs and DNAT inputs the
+// Rust scan stamped (SessionPolicyMatch.ingress_zone_id et al). Validity
+// mirrors policyTupleV4/V6 exactly (v4: To4() on both addrs; v6: To16() with
+// v4-mapped rejected), and zero/unknown zones fail CLOSED to the denied
+// bucket: an older helper omits the additive fields, and retaining on unknown
+// zones would keep a session the new policy may deny.
+func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBinding, match dpuserspace.SessionPolicyMatch) (dpuserspace.PolicySessionRebind, bool) {
+	if !capturedTunnelDiscriminatorValid(match.Tuple.Protocol, match.Tuple.TunnelDiscriminator) {
+		return dpuserspace.PolicySessionRebind{}, false
+	}
+	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, match.IngressZoneID, match.EgressZoneID)
+	if !ok {
+		return dpuserspace.PolicySessionRebind{}, false
+	}
+	family := match.AddrFamily
+	if family == 0 {
+		family = match.Tuple.AddrFamily
+	}
+	var src, dst net.IP
+	var srcFam, dstFam string
+	switch family {
+	case 4:
+		src, dst = net.ParseIP(match.Tuple.SrcIP).To4(), net.ParseIP(match.Tuple.DstIP).To4()
+		srcFam, dstFam = "v4", "v4"
+	case 6:
+		src, dst = net.ParseIP(match.Tuple.SrcIP).To16(), net.ParseIP(match.Tuple.DstIP).To16()
+		srcFam, dstFam = "v6", "v6"
+	default:
+		return dpuserspace.PolicySessionRebind{}, false
+	}
+	if src == nil || dst == nil {
+		return dpuserspace.PolicySessionRebind{}, false
+	}
+	if family == 6 && (net.ParseIP(match.Tuple.SrcIP).To4() != nil || net.ParseIP(match.Tuple.DstIP).To4() != nil) {
+		return dpuserspace.PolicySessionRebind{}, false
+	}
+	if match.DNAT && match.NATDstIP != "" {
+		translated := net.ParseIP(match.NATDstIP)
+		if family == 4 {
+			translated = translated.To4()
+		} else {
+			translated = translated.To16()
+			if translated == nil || translated.To4() != nil {
+				translated = nil
+			}
+		}
+		if translated == nil {
+			return dpuserspace.PolicySessionRebind{}, false
+		}
+		dst = translated
+	}
+	q := policymatch.Query{
+		FromZone: from, ToZone: to,
+		SrcIP: src, DstIP: dst,
+		Protocol: policyQueryProtocol(match.Tuple.Protocol),
+		SrcPort:  networkPort(match.Tuple.SrcPort), DstPort: networkPort(match.Tuple.DstPort),
+		SrcFamily: srcFam, DstFamily: dstFam,
+	}
+	if match.DNAT && match.NATDstPort != 0 {
+		q.DstPort = networkPort(match.NATDstPort)
+	}
+	record, permitted := permittedRenameResult(newCfg, binding, q)
+	if !permitted {
+		return dpuserspace.PolicySessionRebind{}, false
+	}
+	// The record keeps the ORIGINAL tuple (like the V4/V6 twins): the
+	// translated dst fed only the query. Ports share the key encoding, so
+	// they take the same networkPort() conversion.
+	record.SrcIP = match.Tuple.SrcIP
+	record.DstIP = match.Tuple.DstIP
+	record.SrcPort, record.DstPort = uint16(networkPort(match.Tuple.SrcPort)), uint16(networkPort(match.Tuple.DstPort))
+	record.IngressZone, record.EgressZone = newIngress, newEgress
+	record.RoutingDomain = match.RoutingDomain
+	if record.RoutingDomain == 0 {
+		record.RoutingDomain = match.Tuple.RoutingDomain
+	}
+	record.TunnelDiscriminator = match.Tuple.TunnelDiscriminator
+	return record, true
+}

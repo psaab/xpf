@@ -489,6 +489,7 @@ pub(crate) fn policy_tuple_from_key(
 pub(crate) fn policy_match_from_parts(
     key: &SessionKey,
     metadata: &SessionMetadata,
+    decision_nat: crate::nat::NatDecision,
     session_id: u64,
     created_ns: u64,
 ) -> Option<crate::protocol::SessionPolicyMatch> {
@@ -505,6 +506,18 @@ pub(crate) fn policy_match_from_parts(
         expected_rt_flow_session_id: session_id,
         companion_policy_id: 0,
         expected_companion_rt_flow_session_id: 0,
+        // #10626: rename-rematch inputs for the Go capture. Zones come from
+        // the live metadata; DNAT-ness is a translated dst (covers NPTv6 too,
+        // which rewrites dst with no port rewrite — same rule the legacy Go
+        // path applies to SessFlagDNAT + NATDstIP).
+        ingress_zone_id: metadata.ingress_zone,
+        egress_zone_id: metadata.egress_zone,
+        dnat: decision_nat.rewrite_dst.is_some(),
+        nat_dst_ip: decision_nat
+            .rewrite_dst
+            .map(|ip| ip.to_string())
+            .unwrap_or_default(),
+        nat_dst_port: decision_nat.rewrite_dst_port.unwrap_or(0),
     })
 }
 impl SessionDomain {

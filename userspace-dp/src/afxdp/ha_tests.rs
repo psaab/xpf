@@ -8152,8 +8152,59 @@ impl Fixture10512Lease {
             expected_rt_flow_session_id: self.forward.session_id,
             companion_policy_id: 7,
             expected_companion_rt_flow_session_id: self.reverse.session_id,
+            // #10626: delete-path test — zones/rematch inputs irrelevant here.
+            ingress_zone_id: 0,
+            egress_zone_id: 0,
+            dnat: false,
+            nat_dst_ip: String::new(),
+            nat_dst_port: 0,
         }]
     }
+}
+// #10626: the helper READ must carry the rename-rematch inputs — live zones
+// plus DNAT-ness — so the Go capture can rematch a renamed session.
+#[test]
+fn policy_match_carries_rename_rematch_inputs_10626() {
+    let key = test_key();
+    let metadata = SessionMetadata {
+        ingress_zone: 7,
+        egress_zone: 9,
+        ..test_metadata()
+    };
+    let nat = NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+        rewrite_dst_port: Some(8443),
+        ..NatDecision::default()
+    };
+    let matched =
+        crate::afxdp::ha::policy_match_from_parts(&key, &metadata, nat, 0xA11CE, 1_500_000_000)
+            .expect("v4 tuple encodes");
+    assert_eq!(
+        (matched.ingress_zone_id, matched.egress_zone_id),
+        (7, 9),
+        "zones must come from the live metadata"
+    );
+    assert!(matched.dnat, "a translated dst is a DNAT row");
+    assert_eq!(matched.nat_dst_ip, "10.0.61.102");
+    assert_eq!(matched.nat_dst_port, 8443);
+
+    let plain = crate::afxdp::ha::policy_match_from_parts(
+        &key,
+        &metadata,
+        NatDecision::default(),
+        0xB22CE,
+        1_500_000_000,
+    )
+    .expect("v4 tuple encodes");
+    assert!(
+        !plain.dnat && plain.nat_dst_ip.is_empty() && plain.nat_dst_port == 0,
+        "a non-NAT row must carry empty DNAT inputs"
+    );
+    assert_eq!(
+        (plain.ingress_zone_id, plain.egress_zone_id),
+        (7, 9),
+        "zones are stamped even without NAT"
+    );
 }
 
 #[test]
