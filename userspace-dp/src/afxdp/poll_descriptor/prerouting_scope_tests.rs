@@ -284,6 +284,25 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
         TEST_LAN_ZONE_ID,
         "known VID traffic must remain in its configured sibling zone"
     );
+    // XDP may be attached to the VLAN child itself. Its ingress ifindex is
+    // already logical, so only the child's configured VID is known.
+    let child_match = prerouting_ingress_scope(&forwarding, 13, 50, None);
+    assert_eq!(child_match.logical_ifindex, 13);
+    assert_eq!(child_match.zone_name, "lan");
+    assert_eq!(child_match.ifname, "reth0.50");
+    assert!(
+        !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 50),
+        "a VLAN child must admit its configured VID"
+    );
+    let child_wrong_vid = prerouting_ingress_scope(&forwarding, 13, 99, None);
+    assert_eq!(
+        child_wrong_vid.zone_name, "",
+        "a different VID on the child must not inherit its configured zone"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 99),
+        "a VLAN child must still reject a VID other than its configured VID"
+    );
 
     // Unknown VID regression: the scope keeps the physical parent identity
     // for interface matching, but no configured unit owns VID 99, so the
