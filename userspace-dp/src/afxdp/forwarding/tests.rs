@@ -1893,6 +1893,60 @@ fn interface_snat_addresses_are_local_delivered_on_session_miss() {
     assert_eq!(resolved_v6.local_ifindex, 12);
 }
 
+/// #10645 fail-on-revert: a non-/32 interface address must resolve its REAL
+/// local ifindex on the FIB miss path (the documented #3769 invariant).
+///
+/// The attribution used to compare the MASKED connected prefix
+/// (`PrefixV*::addr()` returns the network) against the host IP, which can
+/// only match for a /32 — every wider interface address fell through to
+/// `local_ifindex 0`, collapsing owner-RG attribution (0) and stripping
+/// #6458 fabric zone stamps. `nat_snapshot` carries 10.0.61.1/24 and
+/// 2001:559:8585:ef00::1/64 on reth1.0 (ifindex 24, RG 2); both are in
+/// `local_v*` (only the WAN SNAT addresses are NAT-excluded), so both must
+/// local-deliver with ifindex 24. Reverting `fib.rs` to `prefix.addr()`
+/// yields 0 and reds every assertion below.
+#[test]
+fn local_delivery_resolves_real_ifindex_for_non_slash32_interface_address_10645() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let resolved_v4 = lookup_forwarding_resolution(&state, "10.0.61.1".parse().expect("v4"));
+    assert_eq!(
+        resolved_v4.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "10.0.61.1/24 must local-deliver (it is in local_v4, not interface-NAT)"
+    );
+    assert_eq!(
+        resolved_v4.local_ifindex, 24,
+        "non-/32 v4 interface address must resolve its real local ifindex, not 0"
+    );
+    assert_eq!(
+        resolved_v4.egress_ifindex, 24,
+        "non-/32 v4 local delivery must attribute egress to the owning interface"
+    );
+    assert_eq!(
+        owner_rg_for_resolution(&state, resolved_v4),
+        2,
+        "non-/32 v4 local delivery must attribute owner RG 2 (reth1.0), not 0"
+    );
+    let resolved_v6 = lookup_forwarding_resolution(
+        &state,
+        "2001:559:8585:ef00::1".parse().expect("v6"),
+    );
+    assert_eq!(
+        resolved_v6.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "2001:559:8585:ef00::1/64 must local-deliver"
+    );
+    assert_eq!(
+        resolved_v6.local_ifindex, 24,
+        "non-/128 v6 interface address must resolve its real local ifindex, not 0"
+    );
+    assert_eq!(
+        owner_rg_for_resolution(&state, resolved_v6),
+        2,
+        "non-/128 v6 local delivery must attribute owner RG 2 (reth1.0), not 0"
+    );
+}
+
 #[test]
 fn icmp_session_miss_resolution_prefers_frame_destination_for_interface_nat_local_delivery() {
     let state = build_forwarding_state(&nat_snapshot());

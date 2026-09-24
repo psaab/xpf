@@ -236,6 +236,7 @@ fn test_forwarding_state_with_fabric() -> ForwardingState {
     let mut forwarding = ForwardingState::default();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(10, 0, 61, 0), 24).unwrap()),
+        host: Ipv4Addr::new(10, 0, 61, 0),
         ifindex: 6,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),

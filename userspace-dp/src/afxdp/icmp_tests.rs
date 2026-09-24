@@ -252,8 +252,10 @@ fn reject_suppressed_for_v4_limited_broadcast_dst() {
 /// to test the trigger destination against.
 fn forwarding_with_connected_v4(cidr: &str) -> ForwardingState {
     let mut state = forwarding_with_egress(0);
+    let net: ipnet::Ipv4Net = cidr.parse().expect("cidr");
     state.connected_v4.push(ConnectedRouteV4 {
-        prefix: crate::prefix::PrefixV4::from_net(cidr.parse().expect("cidr")),
+        prefix: crate::prefix::PrefixV4::from_net(net),
+        host: net.addr(),
         ifindex: ICMP_IFINDEX,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),

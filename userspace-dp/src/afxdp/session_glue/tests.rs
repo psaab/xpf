@@ -110,6 +110,7 @@ fn test_forwarding_state() -> ForwardingState {
     let mut forwarding = ForwardingState::default();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(10, 0, 61, 0), 24).unwrap()),
+        host: Ipv4Addr::new(10, 0, 61, 0),
         ifindex: 6,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -656,6 +657,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -2245,6 +2247,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -2343,6 +2346,7 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -2431,6 +2435,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -2538,6 +2543,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     .policy;
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -2667,6 +2673,7 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -6468,6 +6475,7 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -7748,6 +7756,7 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: candidate_egress_ifindex,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
@@ -8040,6 +8049,7 @@ fn resolve_shared_hit_no_incumbent_fixture_10613() -> (
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
         ifindex: 12,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),

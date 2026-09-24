@@ -60,9 +60,10 @@ pub(in crate::afxdp) struct ForwardingState {
     /// skipping the VRF-A FIB + zone/security-policy + HA-RG owner
     /// classification. #3151 table-scoped only the ifindex ATTRIBUTION, and
     /// only via the connected-route scan — which cannot recover a NAT/DNAT
-    /// external IP's owning routing-instance (no connected route) nor a
-    /// non-/32 interface host IP (`ConnectedRouteV*` stores the MASKED network
-    /// address, so `prefix.addr() == host` matches only a /32). These maps
+    /// external IP's owning routing-instance (no connected route). (A non-/32
+    /// interface host IP was likewise unrecoverable until #10645:
+    /// `ConnectedRouteV*` stored only the MASKED network address, so
+    /// `prefix.addr() == host` matched only a /32.) These maps
     /// record, for EVERY `local_v*` member (interface host address AND
     /// static-NAT/DNAT external IP), the set of canonical route tables that
     /// own it, so the shortcut is gated on the resolving table. Every
@@ -70,8 +71,9 @@ pub(in crate::afxdp) struct ForwardingState {
     /// insert: interface addresses in `populate_interfaces` (keyed by the host
     /// `.addr()`, not the connected prefix), NAT/DNAT externals in the
     /// `forwarding_build` late-stage NAT append. The connected scan is still
-    /// used for the ifindex ATTRIBUTION (the #3151 /32-HA case); the membership
-    /// DECISION now uses these maps.
+    /// used for the ifindex ATTRIBUTION — matching the row's unmasked host
+    /// address since #10645 (any width, not just the #3151 /32-HA case);
+    /// the membership DECISION now uses these maps.
     ///
     /// A named-routing-instance NAT/DNAT rule (or an interface) records the
     /// specific canonical table here — that is the correct cross-VRF
@@ -935,6 +937,13 @@ pub(in crate::afxdp) struct RouteNextHopV6 {
 #[derive(Clone, Debug)]
 pub(in crate::afxdp) struct ConnectedRouteV4 {
     pub(in crate::afxdp) prefix: PrefixV4,
+    /// #10645: this row's interface HOST address (unmasked). `prefix` is
+    /// the MASKED network, so `prefix.addr()` equals the host only for a
+    /// /32 — the local-delivery ifindex attribution compares against this
+    /// field so interface addresses of any width resolve their real
+    /// ifindex. Populated from the interface address's `.addr()` in
+    /// `populate_interfaces`, alongside the `local_tables_v*` key.
+    pub(in crate::afxdp) host: Ipv4Addr,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
     /// #2388: canonical routing-table name this connected route belongs to
@@ -949,6 +958,9 @@ pub(in crate::afxdp) struct ConnectedRouteV4 {
 #[derive(Clone, Debug)]
 pub(in crate::afxdp) struct ConnectedRouteV6 {
     pub(in crate::afxdp) prefix: PrefixV6,
+    /// #10645: this row's interface HOST address (unmasked); see
+    /// `ConnectedRouteV4::host`.
+    pub(in crate::afxdp) host: Ipv6Addr,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
     /// #2388: canonical routing-table name this connected route belongs to.
