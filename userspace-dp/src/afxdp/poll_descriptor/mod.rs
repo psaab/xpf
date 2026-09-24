@@ -148,7 +148,7 @@ use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply};
 use resolver_enqueue::try_enqueue_resolver;
 
-use policy_revalidation::{revalidate_zone_policy_on_session_hit, tun_origin_forward, tun_origin_reverse_exempt};
+use policy_revalidation::{revalidate_zone_policy_on_session_hit, tun_origin_forward, tun_origin_reverse, tun_origin_reverse_exempt};
 use filter::{
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit,
@@ -1326,12 +1326,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // that was never its admitting table. The #10605
                         // blanket tunneled exemption used to decline this by
                         // accident; the exemption is now explicit.
+                        // #10808: the TUN-origin REVERSE declines too. Its
+                        // stamp is deliberately (0,0) while the live native
+                        // derivation yields the tunnel's instance identity,
+                        // so every VRF reply-packet revalidation revoked the
+                        // pair it should have delivered (domain-0 pinned by
+                        // accident). Same philosophy: no admitting identity,
+                        // nothing to re-derive.
                         let stale_pbr_route = if foreign_arrival_zone.is_none()
                             && !tun_origin_forward(
                                 &resolved.decision,
                                 &resolved.metadata,
                                 resolved.origin,
                             )
+                            && !tun_origin_reverse(&resolved.metadata, resolved.origin)
                         {
                             revalidate_static_pbr_route_on_session_hit(
                                 worker_ctx.forwarding,
