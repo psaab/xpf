@@ -31,29 +31,30 @@ mod session_match;
 // through this re-export at the same visibility.
 pub(in crate::afxdp) use parse::EMBEDDED_QUOTE_SUBMINIMAL_REFUSED_TOTAL;
 
-/// Information returned from an embedded ICMP error session match
-/// that includes NAT reversal data needed to rewrite the ICMP error
-/// packet back to the original pre-NAT client.
+/// Information returned from an embedded ICMP error session match,
+/// including quoted-tuple NAT restoration and the forwarding resolution
+/// needed to deliver the error toward its quoted sender.
 #[derive(Clone, Debug)]
 pub(super) struct EmbeddedIcmpMatch {
-    /// The forward session's NAT decision (has rewrite_src for SNAT).
+    /// The NAT decision for the matched session; builders use it to restore
+    /// any translations in the quoted tuple.
     pub(super) nat: NatDecision,
-    /// The original (pre-NAT) source IP of the client.
+    /// The quoted tuple's source IP after reversal of any source translation.
+    /// For a forward quote this is usually the original client; for a reply
+    /// quote it is the server.
     pub(super) original_src: IpAddr,
-    /// The original source port (if port SNAT was applied).
+    /// The quoted tuple's source port after any source-port translation.
     pub(super) original_src_port: u16,
-    /// The original (pre-DNAT/static) destination IP the client used —
-    /// i.e. the public address before destination NAT. For a flow with
-    /// NO destination NAT this equals the embedded packet's destination,
-    /// so the destination rewrite in the builders is a no-op and
-    /// SNAT-only / no-NAT behaviour stays byte-identical (#3112).
+    /// The quoted tuple's destination IP after reversal of any destination
+    /// translation.
     pub(super) original_dst: IpAddr,
-    /// The original (pre-DNAT) destination port. Equals the embedded
-    /// destination port when no port DNAT was applied (no-op rewrite).
+    /// The quoted tuple's destination port after any destination-port
+    /// translation.
     pub(super) original_dst_port: u16,
     /// The embedded packet's L4 protocol.
     pub(super) embedded_proto: u8,
-    /// Forwarding resolution toward the original client.
+    /// Forwarding resolution toward the quoted sender: the client for an
+    /// error about a forward packet, or the server for an error about a reply.
     pub(super) resolution: ForwardingResolution,
     /// Session metadata (zones, RG).
     pub(super) metadata: SessionMetadata,

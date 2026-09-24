@@ -8144,3 +8144,647 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
 fn poll_descriptor_untranslated_ptb_v6_admitted_10286() {
     poll_descriptor_untranslated_ptb_v6_admitted_10286_impl();
 }
+
+/// #10672 (#10286 residual): an untranslated Fragmentation-Needed quoting the
+/// REPLY packet (server → client) of a live permitted inbound flow must egress
+/// toward the QUOTED SENDER (the server), not back out the client leg.
+///
+/// The session-fallback's historical rule (`is_reverse` → cached reverse
+/// resolution) assumes every error is about the forward packet. For a
+/// reply-quote the builder rewrites the outer destination to the quoted source
+/// (the server, RFC 792) while the frame egresses toward the client — a
+/// server-side PMTUD black hole for every un-NAT'd inbound flow.
+///
+/// Fail-on-revert: restore the `sl.metadata.is_reverse` arm in
+/// `nat_match_v4::match_outer_v4` to the unconditional cached-reverse rule and
+/// the error queues toward the client/WAN leg — `target_ifindex` reads 12
+/// instead of 24 and this goes RED.
+fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let client_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let server_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let client_port: u16 = 12345;
+
+    // Outer: router -> SERVER (the quoted sender); embedded quoted:
+    // server:80 -> client:client_port, i.e. the exact REPLY wire packet the
+    // server sent (no NAT to reverse).
+    let mut frame = build_icmp_te_frame_v4_with_mac(
+        router_ip,
+        server_ip,
+        client_ip,
+        80,
+        client_port,
+        PROTO_TCP,
+        TEST_WAN_MAC,
+    );
+    // Frag-Needed shape (type 3 / code 4, MTU 1400) — the v4 PMTUD signal.
+    n6472_patch_ptb(&mut frame, 34);
+
+    let mut snapshot = nat_snapshot();
+    snapshot.flow.allow_embedded_icmp = true;
+    // Default-deny reverse: NO WAN->LAN permit. The RELATED admission (#10286)
+    // must carry this error like any other untranslated live-session quote.
+    let forwarding = build_forwarding_state(&snapshot);
+
+    // The error ingresses on the WAN (reth0.80, ifindex 12); the quoted-reply
+    // return resolves egress toward the server on the LAN (reth1.0, ifindex
+    // 24), so learn the server neighbor.
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128;
+    let meta_offset = frame_offset - meta_len;
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: meta_len as u16,
+        ingress_ifindex: 12,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        tcp_flags: 0,
+        dscp: 0,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let meta_bytes = unsafe {
+        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    };
+    unsafe {
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(meta_offset, meta_len)
+            .expect("meta slice")
+            .copy_from_slice(meta_bytes);
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(frame_offset, frame.len())
+            .expect("frame slice")
+            .copy_from_slice(&frame);
+    }
+    binding.xsk.rx.push_for_test(XdpDesc {
+        addr: frame_offset as u64,
+        len: frame.len() as u32,
+        options: 0,
+    });
+
+    let ident = binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = txn_ha_state();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    learn_dynamic_neighbor(
+        &forwarding,
+        &dynamic_neighbors,
+        24,
+        0,
+        IpAddr::V4(server_ip),
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &__pptp_control_7699,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding: &forwarding,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+
+    let mut sessions = SessionTable::new();
+    // Live permitted UN-NAT'd INBOUND flow (WAN client -> LAN server), both
+    // halves installed as on any active flow that has seen reply traffic. The
+    // forward half's cached resolution points at the server (LAN, ifindex 24);
+    // the reverse half's points back at the client (WAN, ifindex 12).
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: client_port,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 24,
+                tx_ifindex: 24,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(server_ip)),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_WAN_ZONE_ID,
+            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(server_ip),
+            dst_ip: IpAddr::V4(client_ip),
+            src_port: 80,
+            dst_port: client_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_WAN_ZONE_ID,
+            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: true,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    let sessions_before = sessions.len();
+
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext {
+        dbg: &mut dbg,
+        counters: &mut batch,
+    };
+    let area_ptr = binding.umem.area() as *const MmapArea;
+
+    poll_binding_process_descriptor(
+        &mut binding,
+        0,
+        area_ptr,
+        1,
+        &mut sessions,
+        &mut screen,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        123_000_000_000,
+        123,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "reply-quoting Frag-Needed must queue exactly one RELATED forward"
+    );
+    let fwd = &binding.scratch.scratch_forwards[0];
+    // The load-bearing #10672 assertion: toward the quoted sender (the server,
+    // LAN ifindex 24) — NOT back out the client leg (WAN ifindex 12). RED on
+    // revert: the cached-reverse rule queues this on the client leg.
+    assert_eq!(
+        fwd.target_ifindex, 24,
+        "reply-quoting error must egress toward the quoted sender (server leg)"
+    );
+    let admitted = match &fwd.frame {
+        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        _ => panic!("RELATED ICMP error must queue a PREBUILT frame"),
+    };
+    assert_eq!(admitted[34], 3, "admitted frame stays ICMP Frag-Needed type");
+    assert_eq!(admitted[35], 4, "admitted frame stays Frag-Needed code 4");
+    let outer_dst = Ipv4Addr::new(admitted[30], admitted[31], admitted[32], admitted[33]);
+    assert_eq!(outer_dst, server_ip, "outer destination is the quoted sender");
+    // Pinned like every comparable builder test: the untranslated path depends
+    // on the builders' unconditional checksum refresh, so a regression must go RED here.
+    let ip = &admitted[14..];
+    assert_eq!(checksum16(&ip[..20]), 0, "outer IPv4 header checksum verifies");
+    let icmp = &ip[20..];
+    assert_eq!(checksum16(icmp), 0, "outer ICMP checksum verifies");
+    let emb = &icmp[8..];
+    assert_eq!(checksum16(&emb[..20]), 0, "embedded IPv4 header checksum verifies");
+    let embedded_src = Ipv4Addr::new(admitted[54], admitted[55], admitted[56], admitted[57]);
+    assert_eq!(embedded_src, server_ip, "embedded inner source stays the server");
+    let embedded_src_port = u16::from_be_bytes([admitted[62], admitted[63]]);
+    assert_eq!(embedded_src_port, 80, "embedded inner source port stays 80");
+    let embedded_dst = Ipv4Addr::new(admitted[58], admitted[59], admitted[60], admitted[61]);
+    assert_eq!(embedded_dst, client_ip, "embedded inner destination stays the client");
+    let embedded_dst_port = u16::from_be_bytes([admitted[64], admitted[65]]);
+    assert_eq!(embedded_dst_port, client_port, "embedded inner dst port untouched");
+    assert!(
+        fwd.flow_key.is_none(),
+        "RELATED ICMP error must carry flow_key=None (never seeds a session)"
+    );
+    assert_eq!(sessions.len(), sessions_before, "the error must not seed a session");
+    assert!(binding.scratch.scratch_recycle.is_empty());
+    assert_eq!(telemetry.dbg.policy_deny, 0);
+    assert!(event_rx.try_recv().is_err(), "RELATED admission emits no deny");
+}
+#[test]
+fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672() {
+    poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl();
+}
+
+/// #10672 IPv6 twin: an untranslated Packet-Too-Big quoting the REPLY packet
+/// of a live inbound flow must egress toward the quoted sender (server).
+/// Fail-on-revert: the old unconditional reverse-resolution arm targets the
+/// client-side WAN leg (ifindex 12), not the server-side LAN leg (24).
+#[test]
+fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
+    let router_ip: Ipv6Addr = "2001:559:8585:80::1".parse().expect("router v6");
+    let client_ip: Ipv6Addr = "2606:4700:4700::1111".parse().expect("client v6");
+    let server_ip: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("server v6");
+    let client_port: u16 = 12345;
+
+    // Outer: router -> SERVER; quoted reply: server:80 -> client:client_port.
+    let mut frame = build_icmpv6_te_frame_with_mac(
+        router_ip,
+        server_ip,
+        client_ip,
+        80,
+        client_port,
+        PROTO_TCP,
+        TEST_WAN_MAC,
+    );
+    // PTB shape: type 2 / code 0, MTU 1280. l4 = eth(14) + IPv6(40) = 54.
+    frame[54] = 2;
+    frame[55] = 0;
+    frame[58..62].copy_from_slice(&[0, 0, 0x05, 0x00]);
+    frame[56] = 0;
+    frame[57] = 0;
+    let csum = checksum16_ipv6(router_ip, server_ip, PROTO_ICMPV6, &frame[54..]);
+    frame[56..58].copy_from_slice(&csum.to_be_bytes());
+
+    let mut snapshot = nat_snapshot();
+    snapshot.flow.allow_embedded_icmp = true;
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128;
+    let meta_offset = frame_offset - meta_len;
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: meta_len as u16,
+        ingress_ifindex: 12,
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 62,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        tcp_flags: 0,
+        dscp: 0,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let meta_bytes = unsafe {
+        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    };
+    unsafe {
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(meta_offset, meta_len)
+            .expect("meta slice")
+            .copy_from_slice(meta_bytes);
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(frame_offset, frame.len())
+            .expect("frame slice")
+            .copy_from_slice(&frame);
+    }
+    binding.xsk.rx.push_for_test(XdpDesc {
+        addr: frame_offset as u64,
+        len: frame.len() as u32,
+        options: 0,
+    });
+
+    let ident = binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = txn_ha_state();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    learn_dynamic_neighbor(
+        &forwarding,
+        &dynamic_neighbors,
+        24,
+        0,
+        IpAddr::V6(server_ip),
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &__pptp_control_7699,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding: &forwarding,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V6(client_ip),
+            dst_ip: IpAddr::V6(server_ip),
+            src_port: client_port,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 24,
+                tx_ifindex: 24,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V6(server_ip)),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_WAN_ZONE_ID,
+            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V6(server_ip),
+            dst_ip: IpAddr::V6(client_ip),
+            src_port: 80,
+            dst_port: client_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V6(router_ip)),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_WAN_ZONE_ID,
+            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: true,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    let sessions_before = sessions.len();
+
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext {
+        dbg: &mut dbg,
+        counters: &mut batch,
+    };
+    let area_ptr = binding.umem.area() as *const MmapArea;
+
+    poll_binding_process_descriptor(
+        &mut binding,
+        0,
+        area_ptr,
+        1,
+        &mut sessions,
+        &mut screen,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        123_000_000_000,
+        123,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+
+    assert_eq!(binding.scratch.scratch_forwards.len(), 1);
+    let fwd = &binding.scratch.scratch_forwards[0];
+    assert_eq!(
+        fwd.target_ifindex, 24,
+        "reply-quoting PTB must egress toward the quoted server, not the client"
+    );
+    let admitted = match &fwd.frame {
+        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        _ => panic!("RELATED ICMPv6 error must queue a PREBUILT frame"),
+    };
+    assert_eq!(admitted[54], 2, "admitted frame stays PTB type 2");
+    assert_eq!(admitted[55], 0, "PTB code 0");
+    let ip = &admitted[14..];
+    let outer_src = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[8..24]).unwrap());
+    let outer_dst = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).unwrap());
+    assert_eq!(outer_dst, server_ip, "outer destination is the quoted sender");
+    let icmp = &ip[40..];
+    assert_eq!(
+        checksum16_ipv6(outer_src, outer_dst, PROTO_ICMPV6, icmp),
+        0,
+        "outer ICMPv6 checksum verifies",
+    );
+    let embedded = &icmp[8..];
+    assert_eq!(embedded[0] >> 4, 6, "embedded quoted packet stays IPv6");
+    let embedded_src = Ipv6Addr::from(<[u8; 16]>::try_from(&embedded[8..24]).unwrap());
+    let embedded_dst = Ipv6Addr::from(<[u8; 16]>::try_from(&embedded[24..40]).unwrap());
+    assert_eq!(embedded_src, server_ip, "embedded source stays the server");
+    assert_eq!(embedded_dst, client_ip, "embedded destination stays the client");
+    let embedded_src_port = u16::from_be_bytes([embedded[40], embedded[41]]);
+    let embedded_dst_port = u16::from_be_bytes([embedded[42], embedded[43]]);
+    assert_eq!(embedded_src_port, 80);
+    assert_eq!(embedded_dst_port, client_port);
+    assert!(fwd.flow_key.is_none());
+    assert_eq!(sessions.len(), sessions_before);
+    assert!(binding.scratch.scratch_recycle.is_empty());
+    assert_eq!(telemetry.dbg.policy_deny, 0);
+    assert!(event_rx.try_recv().is_err(), "RELATED admission emits no deny");
+}

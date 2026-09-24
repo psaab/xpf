@@ -1,7 +1,9 @@
 use super::*;
 use super::parse::{embedded_reply_key, parse_embedded_v6};
 use super::outer_error_atomic;
-use super::return_resolution::embedded_icmp_return_resolution;
+use super::return_resolution::{
+    embedded_icmp_quoted_reply_resolution, embedded_icmp_return_resolution,
+};
 
 /// IPv6-outer branch of `try_embedded_icmp_nat_match_from_frame`.
 /// Mirrors `icmp_embed.rs:333-455` literally. The NPTv6 inbound
@@ -198,14 +200,17 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     // #9901 (F-077) gate below can name the winning query key; it used to
     // live inside the `.or_else` closure, out of the gate's scope.
     //
-    // #6474: the two lookups are mapped SEPARATELY (the v4 twin of
-    // `nat_match_v4`): a reply-key hit with `is_reverse == false` on a pure
+    // #6474: a reply-key hit with `is_reverse == false` on a pure
     // source-NAT (SNAT66/NPTv6) flow is an OUTBOUND error from the internal
-    // host about the session's reply — marked `outbound_snat` so the
-    // caller re-NATs the outer source and the quote to the session's
-    // external identity (RFC 5508 §4) instead of leaking the internal
-    // source with an unassociable quote. Every other combination keeps the
-    // pre-#6474 behavior bit-for-bit.
+    // host about the session's reply — marked `outbound_snat` so the caller
+    // re-NATs the outer source and quote to the session's external identity
+    // (RFC 5508 §4) instead of leaking the internal source with an
+    // unassociable quote.
+    //
+    // #10672: an as-is hit on the reverse half quotes a REPLY packet, so its
+    // return resolution is toward that quote's source (the server), not the
+    // reverse half's cached client-side egress. Other match cases retain the
+    // pre-#6474 behavior.
     let shared_reverse_key = embedded_reply_key(
         libc::AF_INET6 as u8,
         hdr.proto,
@@ -263,7 +268,18 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     // non-delivery terminal (TTL-expire, CoS drop, policy-refuse).
     let budget_key = resolved.key.as_ref(query_key).clone();
     let sl = resolved.lookup;
-    let resolution = if sl.metadata.is_reverse {
+    // #10672: an as-is hit on the REVERSE half means the quote IS the reply
+    // wire packet (server → client) — the error is about the reply, so it is
+    // addressed to the reply's source (the server, RFC 792) and must egress
+    // toward the quoted sender, not back out the client leg. A reply-key hit
+    // on a reverse half instead quotes the forward packet, so it keeps the
+    // historical cached-reverse rule below. (v6 twin of `nat_match_v4`: the
+    // forward companion key is the TRANSLATED `shared_reverse_key` and the
+    // fallback route target is `emb_src_lookup`, matching the keys this arm
+    // probes and returns.)
+    let resolution = if sl.metadata.is_reverse && !via_reply_key {
+        embedded_icmp_quoted_reply_resolution(ctx, &shared_reverse_key, emb_src_lookup, now_ns)
+    } else if sl.metadata.is_reverse {
         sl.decision.resolution
     } else {
         embedded_icmp_return_resolution(
