@@ -20,10 +20,11 @@ import ()
 // session, NAT or screen. Who owns closing it: #9506 (route-based VPN
 // decrypted-ingress adjudication).
 //
-// Why a warning and not a rejection. Route-based (st0/XFRM) IPsec is the ONLY
-// IPsec model xpf supports — policy-based `then permit tunnel` is hard-rejected
-// at commit (#3114). Rejecting a route-based VPN would not be a guard, it would
-// be a feature removal, and it would leave an operator with a working tunnel
+// Why a warning and not a rejection. Route-based (st0/XFRM) IPsec is supported;
+// #3114 rejects only the unsupported `then permit tunnel` policy action, not an
+// IPsec VPN object. Separately, a VPN without bind-interface is rejected at
+// strict commit (#10638). Rejecting a valid route-based VPN would not be a guard,
+// it would be a feature removal, and it would leave an operator with a working tunnel
 // unable to commit an UNRELATED change. This is the #1960 no-brick posture:
 // strict enough to tell the truth, never strict enough to brick a config the
 // box already accepts and runs.

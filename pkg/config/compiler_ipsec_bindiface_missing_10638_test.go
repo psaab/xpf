@@ -16,13 +16,12 @@ import (
 // every apply (pkg/daemon); the divert guard exempts only iifname lo
 // (pkg/nftables/ipsec_divert.go, #10501).
 //
-// Route-based (st0/XFRM) IPsec is the ONLY IPsec model xpf supports
-// (policy-based `then permit tunnel` is hard-rejected at commit, #3114), so
-// every VPN requires a usable bind-interface. The fix REJECTS a
-// bind-interface-less VPN at strict commit (CompileConfig) and WARNS on the
-// tolerant load / peer-sync path (CompileConfigLenient), mirroring the #5297
-// invalid-name arm and the #1960 fail-closed-on-strict / lenient-on-load
-// doctrine.
+// Route-based (st0/XFRM) VPNs use a bind-interface. #3114 rejects only the
+// policy ACTION `then permit tunnel`, not a policy-based IPsec VPN object.
+// This separate #10638 gate REJECTS a bind-interface-less VPN at strict commit
+// (CompileConfig) and WARNS on the tolerant load / peer-sync path
+// (CompileConfigLenient), mirroring #5297's invalid-name arm and the #1960
+// fail-closed-on-strict / lenient-on-load doctrine.
 //
 // Flat-set syntax MUST be built with ParseSetCommand/SetPath
 // (buildBindIfaceTree), never NewParser (CLAUDE.md "Testing flat set syntax").
