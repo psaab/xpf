@@ -7093,7 +7093,7 @@ fn app_term_exact_listed_before_range_wins() {
 // ===========================================================================
 // #10649: port-range boundary cells — the range UPPER endpoint is load-bearing
 // (`port_ranges_match`: `port >= low && port <= high`), but the evaluator's
-// tests sampled interior points only (ports 80/85 of 80-90 above), so mutant
+// tests sampled lower edge + interior only (ports 80/85 of 80-90 above), so mutant
 // M9 (drop the `port <= high` conjunct) reddened nothing. These cells pin the
 // range endpoints so M9 reds.
 // ===========================================================================
