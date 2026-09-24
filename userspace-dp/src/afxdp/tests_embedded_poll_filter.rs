@@ -687,6 +687,22 @@ fn embedded_icmp_nat_match_ignores_non_error_echo() {
     );
 }
 
+fn add_untrusted_icmp_ingress(snapshot: &mut ConfigSnapshot) {
+    snapshot.zones.push(ZoneSnapshot {
+        name: "untrust".to_string(),
+        id: TEST_UNTRUST_ZONE_ID,
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "untrust".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 32,
+        hardware_addr: "02:bf:72:01:00:01".to_string(),
+        ..Default::default()
+    });
+}
+
 /// #5690 LITERAL fail-on-revert: drive an inbound NAT44 SNAT ICMP error
 /// (Time Exceeded, addressed to the firewall's SNAT address) through the REAL
 /// `poll_binding_process_descriptor` control flow — NOT the helper fn — and
@@ -712,6 +728,9 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     expect_denied: bool,
     expect_fabric_redirect: bool,
     outer_ttl: u8,
+    outer_pmtud: bool,
+    arrival_ifindex: u32,
+    expect_related_admit: bool,
 ) {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
@@ -722,6 +741,12 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
 
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
     let mut frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
+    if arrival_ifindex == 32 {
+        frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
+    }
+    if outer_pmtud {
+        n6472_patch_ptb(&mut frame, 34);
+    }
     frame[14 + 8] = outer_ttl;
     frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
     let outer_csum = checksum16(&frame[14..34]);
@@ -733,6 +758,9 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         nat_snapshot()
     };
     snapshot.flow.allow_embedded_icmp = true;
+    if arrival_ifindex == 32 {
+        add_untrusted_icmp_ingress(&mut snapshot);
+    }
     if allow_reverse_policy {
         snapshot.policies.push(PolicyRuleSnapshot {
             name: "permit-wan-to-lan-icmp-error".to_string(),
@@ -755,8 +783,15 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     // The error ingresses on the WAN (reth0.80, ifindex 12) since it is
     // addressed to the SNAT address; the reversal resolves egress toward the
     // client on the LAN (reth1.0, ifindex 24), so learn the client neighbor.
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
-    binding.interface = Arc::<str>::from("reth0.80");
+    // A changed arrival zone simulates a forged error arriving outside the
+    // quoted session's forward egress zone.
+    let ingress_ifindex = arrival_ifindex;
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, ingress_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from(match ingress_ifindex {
+        24 => "reth1.0",
+        32 => "reth2.0",
+        _ => "reth0.80",
+    });
 
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -765,7 +800,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
-        ingress_ifindex: 12,
+        ingress_ifindex,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -1039,7 +1074,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         );
         return;
     }
-    if expect_denied || !allow_reverse_policy {
+    if expect_denied || (!allow_reverse_policy && !expect_related_admit) {
         assert!(
             binding.scratch.scratch_forwards.is_empty(),
             "a reversed embedded-ICMP error must not queue before zone policy \
@@ -1063,9 +1098,12 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
             event.kind,
             crate::event_stream::codec::DataplaneEventKind::PolicyDeny
         );
-        assert_eq!(event.ingress_zone_id, TEST_WAN_ZONE_ID);
+        assert_eq!(
+            event.ingress_zone_id,
+            if ingress_ifindex == 32 { TEST_UNTRUST_ZONE_ID } else { TEST_WAN_ZONE_ID }
+        );
         assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
-        assert_eq!(event.ingress_ifindex, 12);
+        assert_eq!(event.ingress_ifindex, ingress_ifindex as i32);
         assert_eq!(event.src_ip, IpAddr::V4(router_ip));
         assert_eq!(event.dst_ip, IpAddr::V4(client_ip));
         assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
@@ -1110,7 +1148,16 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         PendingForwardFrame::Prebuilt(bytes) => bytes,
         _ => panic!("embedded-ICMP reversal must queue a PREBUILT reversed frame"),
     };
-    assert_eq!(reversed[34], 11, "reversed frame stays an ICMP Time Exceeded");
+    assert_eq!(
+        reversed[34],
+        if outer_pmtud { 3 } else { 11 },
+        "reversed frame preserves the ICMP error class"
+    );
+    assert_eq!(
+        reversed[35],
+        if outer_pmtud { 4 } else { 0 },
+        "reversed frame preserves the ICMP error code"
+    );
     let outer_dst = Ipv4Addr::new(reversed[30], reversed[31], reversed[32], reversed[33]);
     assert_eq!(
         outer_dst, client_ip,
@@ -1154,6 +1201,9 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
         false,
         false,
         64,
+        false,
+        12,
+        false,
     );
 }
 
@@ -1168,6 +1218,9 @@ fn poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948() {
         true,
         false,
         64,
+        false,
+        12,
+        false,
     );
 }
 
@@ -1181,6 +1234,9 @@ fn poll_descriptor_embedded_icmp_reversal_ha_inactive_denies_9948() {
         true,
         false,
         64,
+        false,
+        12,
+        false,
     );
 }
 
@@ -1195,8 +1251,12 @@ fn poll_descriptor_embedded_icmp_reversal_fabric_redirect_passthrough_9948() {
         false,
         true,
         64,
+        false,
+        12,
+        false,
     );
 }
+
 #[test]
 fn poll_descriptor_same_family_reversal_ttl_one_is_dropped_10320() {
     poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
@@ -1205,6 +1265,42 @@ fn poll_descriptor_same_family_reversal_ttl_one_is_dropped_10320() {
         false,
         false,
         1,
+        false,
+        12,
+        false,
+    );
+}
+
+/// #10666 fail-on-revert: translated PMTUD for a live SNAT session is RELATED
+/// from the quoted flow's egress zone and must pass under WAN-to-LAN default
+/// deny; a different ICMP error keeps the #9948 zone-policy gate above.
+#[test]
+fn poll_descriptor_snat_frag_needed_admitted_as_related_10666() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        false,
+        txn_ha_state(),
+        false,
+        false,
+        64,
+        true,
+        12,
+        true,
+    );
+}
+
+/// #10666 forged-error control: a matched translated PMTUD error from the
+/// wrong arrival zone is not RELATED and remains subject to default-deny.
+#[test]
+fn poll_descriptor_snat_frag_needed_from_wrong_zone_denied_10666() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        false,
+        txn_ha_state(),
+        true,
+        false,
+        64,
+        true,
+        32,
+        false,
     );
 }
 
@@ -1383,6 +1479,18 @@ fn n6472_patch_ptb(frame: &mut [u8], l4_offset: usize) {
     let csum = checksum16(&frame[l4_offset..]);
     frame[l4_offset + 2..l4_offset + 4].copy_from_slice(&csum.to_be_bytes());
 }
+/// Convert the shared ICMPv6 Time Exceeded fixture into Packet-Too-Big.
+fn n6472_patch_ptb_v6(frame: &mut [u8]) {
+    let l4 = 54;
+    frame[l4] = 2;
+    frame[l4 + 1] = 0;
+    frame[l4 + 4..l4 + 8].copy_from_slice(&1280u32.to_be_bytes());
+    frame[l4 + 2..l4 + 4].fill(0);
+    let src = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[22..38]).expect("outer IPv6 src"));
+    let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[38..54]).expect("outer IPv6 dst"));
+    let csum = checksum16_ipv6(src, dst, PROTO_ICMPV6, &frame[l4..]);
+    frame[l4 + 2..l4 + 4].copy_from_slice(&csum.to_be_bytes());
+}
 
 /// #6472 FAIL-ON-REVERT (v4→v6, RFC 7915 §4.2): an ICMPv4 PTB from a v4 hop
 /// addressed to the NAT64 pool address — quoting the session's FORWARD wire
@@ -1407,6 +1515,9 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     ha_state: BTreeMap<i32, HAGroupRuntime>,
     expect_denied: bool,
     expect_fabric_redirect: bool,
+    outer_pmtud: bool,
+    arrival_ifindex: u32,
+    expect_related_admit: bool,
 ) {
     let router_ip = Ipv4Addr::new(172, 16, 80, 1);
     let mut frame = build_icmp_te_frame_v4_with_mac(
@@ -1417,7 +1528,13 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         N6472_SERVER_PORT,
         PROTO_TCP, TEST_WAN_MAC
     );
-    n6472_patch_ptb(&mut frame, 34);
+    if arrival_ifindex == 32 {
+        frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
+    }
+    if outer_pmtud {
+        n6472_patch_ptb(&mut frame, 34);
+    }
+    
     // allow_embedded_icmp deliberately NOT set: the NAT64 arm is ungated.
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
     if expect_fabric_redirect {
@@ -1446,9 +1563,16 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     } else {
         snapshot.policies.clear();
     }
+    if arrival_ifindex == 32 {
+        add_untrusted_icmp_ingress(&mut snapshot);
+    }
     let forwarding = build_forwarding_state(&snapshot);
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
-    binding.interface = Arc::<str>::from("reth0.80");
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, arrival_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from(match arrival_ifindex {
+        24 => "reth1.0",
+        32 => "reth2.0",
+        _ => "reth0.80",
+    });
     let mut sessions = SessionTable::new();
     // Keep the poll's real monotonic clock immediately after installation so
     // a reverted mutating quote lookup is observably RED.
@@ -1473,7 +1597,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
-        ingress_ifindex: 12,
+        ingress_ifindex: arrival_ifindex,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -1566,7 +1690,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         assert!(event_rx.try_recv().is_err());
         return;
     }
-    if expect_denied || !allow_reverse_policy {
+    if expect_denied || (!allow_reverse_policy && !expect_related_admit) {
         assert!(
             binding.scratch.scratch_forwards.is_empty(),
             "a NAT64 translated ICMP error must not queue under WAN->LAN default deny"
@@ -1582,9 +1706,12 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
             event.kind,
             crate::event_stream::codec::DataplaneEventKind::PolicyDeny
         );
-        assert_eq!(event.ingress_zone_id, TEST_WAN_ZONE_ID);
+        assert_eq!(
+            event.ingress_zone_id,
+            if arrival_ifindex == 32 { TEST_UNTRUST_ZONE_ID } else { TEST_WAN_ZONE_ID }
+        );
         assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
-        assert_eq!(event.ingress_ifindex, 12);
+        assert_eq!(event.ingress_ifindex, arrival_ifindex as i32);
         assert_eq!(
             event.src_ip,
             "64:ff9b::ac10:5001".parse::<IpAddr>().expect("NAT64 event src")
@@ -1667,17 +1794,23 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() 
         txn_ha_state(),
         false,
         false,
+        true,
+        12,
+        false,
     );
 }
 
-/// #9948 fail-on-revert: the NAT64 queued prebuilt must be denied when the
-/// actual WAN-to-LAN zone pair has no permit, with a policy event and counter.
+/// #9948 fail-on-revert: a translated non-PMTUD error remains subject to the
+/// actual WAN-to-LAN zone policy even though a matched PMTUD error is RELATED.
 #[test]
 fn poll_descriptor_nat64_icmp_error_zone_policy_denies_9948() {
     poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
         false,
         txn_ha_state(),
         true,
+        false,
+        false,
+        12,
         false,
     );
 }
@@ -1691,6 +1824,9 @@ fn poll_descriptor_nat64_icmp_error_ha_inactive_denies_9948() {
         inactive_ha_state(),
         true,
         false,
+        true,
+        12,
+        false,
     );
 }
 
@@ -1703,6 +1839,39 @@ fn poll_descriptor_nat64_icmp_error_fabric_redirect_passthrough_9948() {
         fabric_redirect_local_ha_state(),
         false,
         true,
+        true,
+        12,
+        false,
+    );
+}
+
+/// #10666 fail-on-revert: NAT64 PMTUD from the session's forward egress zone
+/// passes with no WAN-to-LAN permit.
+#[test]
+fn poll_descriptor_nat64_pmtud_admitted_as_related_10666() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        false,
+        txn_ha_state(),
+        false,
+        false,
+        true,
+        12,
+        true,
+    );
+}
+
+/// #10666 forged-error control: a matched NAT64 PTB arriving from the wrong
+/// zone is adjudicated by policy and denied.
+#[test]
+fn poll_descriptor_nat64_pmtud_from_wrong_zone_denied_10666() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        false,
+        txn_ha_state(),
+        true,
+        false,
+        true,
+        32,
+        false,
     );
 }
 
@@ -1722,10 +1891,14 @@ fn poll_descriptor_nat64_icmp_error_fabric_redirect_passthrough_9948() {
 /// UNTRANSLATED toward the IPv6 default route (ethertype stays 0x86dd and
 /// the synthetic destination is on the wire) — every translated-content
 /// assertion below goes RED.
-#[test]
-fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() {
+fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
+    outer_pmtud: bool,
+    allow_reverse_policy: bool,
+    arrival_ifindex: u32,
+    expect_denied: bool,
+) {
     let lan_router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
-    let frame = build_icmpv6_te_frame_with_mac(
+    let mut frame = build_icmpv6_te_frame_with_mac(
         lan_router,
         n6472_pref64_server(),
         n6472_client_v6(),
@@ -1733,14 +1906,32 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
         N6472_CLIENT_PORT,
         PROTO_TCP, TEST_LAN_MAC
     );
+    if arrival_ifindex == 32 {
+        frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
+    }
+    if outer_pmtud {
+        n6472_patch_ptb_v6(&mut frame);
+    }
 
-    let forwarding = build_forwarding_state(&nat64_snapshot(lan_to_wan_permit(
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit(
         "8.8.8.8/32",
         "permit-nat64-v4",
-    )));
+    ));
+    if !allow_reverse_policy {
+        snapshot.policies.clear();
+    }
+    if arrival_ifindex == 32 {
+        add_untrusted_icmp_ingress(&mut snapshot);
+    }
+    let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
-    binding.interface = Arc::<str>::from("reth1.0");
+    let mut binding =
+        BindingWorker::new_for_mirror_test(0, 0, arrival_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from(if arrival_ifindex == 32 {
+        "reth2.0"
+    } else {
+        "reth1.0"
+    });
     let mut sessions = SessionTable::new();
     // Keep the poll's fixed clock one nanosecond after installation so a
     // reverted mutating quote lookup is observably RED.
@@ -1764,7 +1955,7 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
-        ingress_ifindex: 24,
+        ingress_ifindex: arrival_ifindex,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -1777,13 +1968,20 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    let (_batch, dbg) =
+        txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     assert_eq!(
         sessions.lifetime_state_for(&quote_key),
         Some(quote_lifetime_before),
         "#9990: NAT64 v6 quote lookup must not refresh or advance session lifetime",
     );
 
+    if expect_denied {
+        assert!(binding.scratch.scratch_forwards.is_empty());
+        assert_eq!(binding.scratch.scratch_recycle.len(), 1);
+        assert_eq!(dbg.policy_deny, 1);
+        return;
+    }
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
         1,
@@ -1808,8 +2006,8 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
     assert_eq!(checksum16(&ip[..20]), 0, "outer IPv4 header checksum verifies");
     // ICMPv4 Time-Exceeded: type 11, code 0.
     let icmp = &ip[20..];
-    assert_eq!(icmp[0], 11, "ICMPv4 Time Exceeded type");
-    assert_eq!(icmp[1], 0, "code 0");
+    assert_eq!(icmp[0], if outer_pmtud { 3 } else { 11 }, "ICMPv4 error type");
+    assert_eq!(icmp[1], if outer_pmtud { 4 } else { 0 }, "ICMPv4 error code");
     // Embedded quote: the v4 reply the server sent — 8.8.8.8:443 ->
     // pool:40000. The quote's DESTINATION port is RESTORED to the translated
     // value (the server never saw the client's original 12345).
@@ -1832,6 +2030,30 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
     assert_eq!(sessions.len(), sessions_before, "no new session minted");
     assert!(binding.scratch.scratch_recycle.is_empty());
 }
+#[test]
+fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() {
+    poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
+        false, true, 24, false,
+    );
+}
+
+/// #10666 fail-on-revert: v6 Packet-Too-Big toward the v4 server is translated
+/// and admitted as RELATED under default deny.
+#[test]
+
+fn poll_descriptor_nat64_v6_to_v4_pmtud_admitted_as_related_10666() {
+    poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
+        true, false, 24, false,
+    );
+}
+
+#[test]
+fn poll_descriptor_nat64_v6_to_v4_pmtud_from_wrong_zone_denied_10666() {
+    poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
+        true, false, 32, true,
+    );
+}
+
 
 // ---------------------------------------------------------------------------
 // #9162: the SAME two NAT64 ICMP-error translations, in a NON-DEFAULT routing

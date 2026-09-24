@@ -5314,7 +5314,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_secs,
                             ingress_zone_override,
                         ) {
-                            EmbeddedIcmpReversal::Queued { related_untranslated, budget_key } => {
+                            EmbeddedIcmpReversal::Queued { related_admit, budget_key } => {
                                 let policy_allowed = binding
                                     .scratch
                                     .scratch_forwards
@@ -5329,7 +5329,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx,
                                                 now_ns,
                                                 now_secs,
-                                                related_untranslated,
+                                                related_admit,
                                             ),
                                         ),
                                         _ => None,
@@ -5403,7 +5403,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_secs,
                             ingress_zone_override,
                         ) {
-                            EmbeddedIcmpReversal::Queued { related_untranslated, budget_key } => {
+                            EmbeddedIcmpReversal::Queued { related_admit, budget_key } => {
                                 // Reversed error queued as a prebuilt forward;
                                 // authorize the actual rewritten wire identity
                                 // before allowing the request to own the desc.
@@ -5421,7 +5421,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx,
                                                 now_ns,
                                                 now_secs,
-                                                related_untranslated,
+                                                related_admit,
                                             ),
                                         ),
                                         _ => None,

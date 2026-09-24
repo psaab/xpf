@@ -23,7 +23,8 @@
 // then normal flowless enforcement, both unchanged.
 
 use super::embedded_icmp::{
-    actual_embedded_icmp_ingress_zone, EmbeddedIcmpReversal, queue_prebuilt_embedded_icmp_error,
+    actual_embedded_icmp_ingress_zone, outer_is_pmtud_error, related_forward_zones,
+    EmbeddedIcmpReversal, queue_prebuilt_embedded_icmp_error,
 };
 use super::*;
 
@@ -74,7 +75,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             orig_dst_v6,
             orig_client_port,
             resolution,
-            metadata: _,
+            metadata,
             budget_key,
         } => {
             // SPARK-m6: verify L3 — a wrong stamp misreads the hop address.
@@ -97,17 +98,18 @@ pub(super) fn try_translate_nat64_icmp_error(
             src_v6_octets[12..].copy_from_slice(router_v4);
             let src_v6 = Ipv6Addr::from(src_v6_octets);
 
+            let arrival_zone = actual_embedded_icmp_ingress_zone(
+                worker_ctx.forwarding,
+                meta,
+                ingress_zone_override,
+            );
             let icmp_resolution = finalize_embedded_icmp_resolution_parts(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 now_secs,
                 meta.ingress_ifindex as i32,
                 resolution,
-                actual_embedded_icmp_ingress_zone(
-                    worker_ctx.forwarding,
-                    meta,
-                    ingress_zone_override,
-                ),
+                arrival_zone,
             );
             // The frame build needs the FINAL resolution's L2 addresses. A
             // FabricRedirect source MAC carries the actual ingress zone for
@@ -128,7 +130,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             ) else {
                 return EmbeddedIcmpReversal::NotHandled;
             };
-            queue_prebuilt_embedded_icmp_error(
+            let queued = queue_prebuilt_embedded_icmp_error(
                 desc,
                 meta,
                 binding_index,
@@ -141,27 +143,45 @@ pub(super) fn try_translate_nat64_icmp_error(
                 rewritten_frame,
                 #[cfg(feature = "debug-log")]
                 false,
-            )
+            );
+            // #10666: the v4 error arrives on the translator's v4 (egress)
+            // side — RELATED iff it is PMTUD from the session's forward
+            // egress zone. Anything else keeps `related_admit` false and
+            // the caller adjudicates the queued prebuilt against zone
+            // policy; a wrong-zone forgery still drops under default-deny.
+            let (_, fwd_egress_zone) = related_forward_zones(&metadata);
+            match queued {
+                EmbeddedIcmpReversal::Queued { budget_key, .. } => {
+                    EmbeddedIcmpReversal::Queued {
+                        related_admit: fwd_egress_zone != 0
+                            && arrival_zone == fwd_egress_zone
+                            && outer_is_pmtud_error(packet_frame, meta),
+                        budget_key,
+                    }
+                }
+                other => other,
+            }
         }
         Nat64IcmpErrorMatch::V6ToV4 {
             pool_v4,
             server_v4,
             translated_port,
             resolution,
-            metadata: _,
+            metadata,
             budget_key,
         } => {
+            let arrival_zone = actual_embedded_icmp_ingress_zone(
+                worker_ctx.forwarding,
+                meta,
+                ingress_zone_override,
+            );
             let icmp_resolution = finalize_embedded_icmp_resolution_parts(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 now_secs,
                 meta.ingress_ifindex as i32,
                 resolution,
-                actual_embedded_icmp_ingress_zone(
-                    worker_ctx.forwarding,
-                    meta,
-                    ingress_zone_override,
-                ),
+                arrival_zone,
             );
             let (Some(dst_mac), Some(src_mac)) =
                 (icmp_resolution.neighbor_mac, icmp_resolution.src_mac)
@@ -180,7 +200,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             ) else {
                 return EmbeddedIcmpReversal::NotHandled;
             };
-            queue_prebuilt_embedded_icmp_error(
+            let queued = queue_prebuilt_embedded_icmp_error(
                 desc,
                 meta,
                 binding_index,
@@ -193,7 +213,22 @@ pub(super) fn try_translate_nat64_icmp_error(
                 rewritten_frame,
                 #[cfg(feature = "debug-log")]
                 false,
-            )
+            );
+            // #10666: the v6 error arrives on the translator's v6 (ingress)
+            // side — RELATED iff it is PMTUD from the session's forward
+            // ingress zone (the mirror of the v4 arm above).
+            let (fwd_ingress_zone, _) = related_forward_zones(&metadata);
+            match queued {
+                EmbeddedIcmpReversal::Queued { budget_key, .. } => {
+                    EmbeddedIcmpReversal::Queued {
+                        related_admit: fwd_ingress_zone != 0
+                            && arrival_zone == fwd_ingress_zone
+                            && outer_is_pmtud_error(packet_frame, meta),
+                        budget_key,
+                    }
+                }
+                other => other,
+            }
         }
     }
 }
