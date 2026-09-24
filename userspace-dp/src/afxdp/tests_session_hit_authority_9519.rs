@@ -20,7 +20,8 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
-use crate::tcp_flags::TCP_ACK;
+use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
+use crate::session::{reverse_session_key, SessionDeltaKind};
 use crate::test_zone_ids::*;
 use crate::{
     FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
@@ -863,4 +864,168 @@ fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
             }
         }
     }
+}
+
+/// #10636: the table lookup that finds the entry used to apply TCP
+/// close-state with the packet's live flags during `resolve` — BEFORE the
+/// #9519 authority verdict. A FOREIGN RST was therefore dropped yet still
+/// stuck closing/reset state, demoted the expiry to the 2s RST window,
+/// propagated to the companion (#4109), and emitted an HA close Update
+/// (#9412), contradicting the documented contract ("a foreign packet can
+/// keep an idle session alive; it cannot change what the session does").
+///
+/// The close now applies only after an Owner verdict. All four effects are
+/// pinned through the REAL poll path: close class of both halves, the live
+/// inactivity window, and the HA delta stream. A reverted ordering (inline
+/// close in the lookup) reds every close assertion below while the drop
+/// assertions stay green.
+#[test]
+fn a_foreign_rst_is_dropped_without_driving_close_state_10636() {
+    let fw = forwarding(WAN_ONLY);
+    let mut sessions = admitted(&fw);
+    let _ = sessions.drain_deltas(16);
+    let mut fwd = None;
+    sessions.iter_with_origin(|k, d, m, _o| {
+        if !m.is_reverse {
+            fwd = Some((k.clone(), d.nat));
+        }
+    });
+    let (fwd_key, fwd_nat) = fwd.expect("admit must install a forward half");
+    let rev_key = reverse_session_key(&fwd_key, fwd_nat);
+    let window_before = sessions.timeout_secs_for(&fwd_key);
+    assert_eq!(
+        sessions.close_class_wire_for(&fwd_key),
+        0,
+        "precondition: the admitted session is open"
+    );
+
+    let foreign = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_RST, DMZ_IFINDEX));
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz RST must HIT the wan session, or this cell exercises the miss path"
+    );
+    assert_eq!(foreign.tx, 0, "the foreign RST is dropped");
+    assert_eq!(foreign.foreign_authority_drops, 1);
+    assert_eq!(session_count(&sessions), 2, "the pair survives the drop");
+    assert_eq!(
+        sessions.close_class_wire_for(&fwd_key),
+        0,
+        "a dropped foreign RST must not stick closing/reset state"
+    );
+    assert_eq!(
+        sessions.close_class_wire_for(&rev_key),
+        0,
+        "and it must not propagate a close to the companion (#4109)"
+    );
+    assert_eq!(
+        sessions.timeout_secs_for(&fwd_key),
+        window_before,
+        "and it must not demote the expiry to the 2s RST window"
+    );
+    assert!(
+        !sessions
+            .drain_deltas(16)
+            .iter()
+            .any(|d| matches!(d.kind, SessionDeltaKind::Update)),
+        "and it must not emit an HA close Update (#9412)"
+    );
+
+    // The FIN half of the same defect, on the still-open session.
+    let foreign_fin = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_FIN, DMZ_IFINDEX));
+    assert_eq!(foreign_fin.session_hit, 1);
+    assert_eq!(foreign_fin.tx, 0, "the foreign FIN is dropped");
+    assert_eq!(
+        sessions.close_class_wire_for(&fwd_key),
+        0,
+        "a dropped foreign FIN must not stick closing state either"
+    );
+    assert_eq!(
+        sessions.close_class_wire_for(&rev_key),
+        0,
+        "nor propagate one to the companion"
+    );
+
+    let owner = drive(&fw, &mut sessions, client_ack(WAN_IFINDEX));
+    assert_eq!(
+        owner.tx, 1,
+        "and the owner is still SERVED: the survival is functional, not a row count"
+    );
+}
+
+/// THE CONTROL for the cell above: an OWNER RST drives close state exactly
+/// as before — the deferral only withholds the close until the verdict, it
+/// never drops an owner's kill. Wire classes: 3 = Reset, 1 = Closing.
+#[test]
+fn an_owner_rst_still_drives_close_state_10636() {
+    let fw = forwarding(WAN_ONLY);
+    let mut sessions = admitted(&fw);
+    let _ = sessions.drain_deltas(16);
+    let mut fwd = None;
+    sessions.iter_with_origin(|k, d, m, _o| {
+        if !m.is_reverse {
+            fwd = Some((k.clone(), d.nat));
+        }
+    });
+    let (fwd_key, fwd_nat) = fwd.expect("admit must install a forward half");
+    let rev_key = reverse_session_key(&fwd_key, fwd_nat);
+
+    let owner = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_RST, WAN_IFINDEX));
+    assert_eq!(owner.session_hit, 1, "the owner RST must HIT the session");
+    assert_eq!(
+        sessions.close_class_wire_for(&fwd_key),
+        3,
+        "an owner RST still sticks the Reset class"
+    );
+    assert_eq!(
+        sessions.close_class_wire_for(&rev_key),
+        3,
+        "and still propagates it to the companion (#4109)"
+    );
+    assert_eq!(
+        sessions.timeout_secs_for(&fwd_key),
+        2,
+        "and still demotes the expiry to the 2s RST window"
+    );
+    let updates: Vec<_> = sessions
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|d| matches!(d.kind, SessionDeltaKind::Update))
+        .collect();
+    assert_eq!(
+        updates.len(),
+        1,
+        "and still emits exactly one HA close Update (#9412)"
+    );
+    assert_eq!(
+        updates[0].tcp_close_class, 3,
+        "carrying the Reset class"
+    );
+}
+
+/// THE GRACEFUL HALF of the control: an OWNER FIN still closes gracefully —
+/// Closing class, 30s window, no Reset. Guards a deferral that applied only
+/// the RST-shaped half of the stamp.
+#[test]
+fn an_owner_fin_still_closes_gracefully_10636() {
+    let fw = forwarding(WAN_ONLY);
+    let mut sessions = admitted(&fw);
+    let owner = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_FIN, WAN_IFINDEX));
+    assert_eq!(owner.session_hit, 1, "the owner FIN must HIT the session");
+    let mut fwd = None;
+    sessions.iter_with_origin(|k, _d, m, _o| {
+        if !m.is_reverse {
+            fwd = Some(k.clone());
+        }
+    });
+    let fwd_key = fwd.expect("admit must install a forward half");
+    assert_eq!(
+        sessions.close_class_wire_for(&fwd_key),
+        1,
+        "an owner FIN still sticks the Closing class (1), not Reset (3)"
+    );
+    assert_eq!(
+        sessions.timeout_secs_for(&fwd_key),
+        30,
+        "on the 30s graceful close window, not the 2s RST one"
+    );
 }

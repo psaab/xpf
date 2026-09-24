@@ -1214,6 +1214,25 @@ pub(super) fn poll_binding_process_descriptor(
                                 on_admitting_interface,
                             } => (Some(arrival_zone), on_admitting_interface),
                         };
+                        // #10636: the resolve above deferred TCP close-state
+                        // until THIS verdict. An owner applies it now — before
+                        // the revalidation below, exactly where the inline
+                        // close used to land — while a foreign arrival drops
+                        // it with the packet: no window demotion, no #4109
+                        // companion propagation, no #9412 HA close Update.
+                        // Owner-only, not merely past-Drop: a permitted
+                        // foreign Forward must not keep a kill primitive.
+                        if foreign_arrival_zone.is_none()
+                            && resolved.close_deferred
+                            && meta.protocol == crate::ip_proto::PROTO_TCP
+                            && crate::tcp_flags::is_closing(meta.tcp_flags)
+                        {
+                            sessions.apply_deferred_owner_close(
+                                &resolved.key,
+                                now_ns,
+                                meta.tcp_flags,
+                            );
+                        }
                         // The zone the filter and host-inbound consumers below
                         // judge by: the entry's for an owner, exactly as before
                         // #9519; the arrival zone for a foreign packet.

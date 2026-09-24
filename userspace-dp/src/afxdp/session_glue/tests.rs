@@ -7685,6 +7685,7 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
             tcp_close_class: 0,
         }),
         origin: SessionOrigin::SyncImport,
+        close_deferred: false,
     };
     let (_, install_failed) =
         super::materialize_shared_session_hit(&mut sessions, &mut resolved, &forwarding, 2_000_000, TCP_FLAG_ACK);
@@ -8223,6 +8224,7 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
             tcp_close_class: 0,
         }),
         origin: SessionOrigin::SyncImport,
+        close_deferred: false,
     };
     let (_, install_failed) = super::materialize_shared_session_hit(
         &mut sessions,
@@ -15070,6 +15072,7 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
             tcp_close_class: 0,
         }),
         origin: SessionOrigin::SyncImport,
+        close_deferred: false,
     };
     let drops_before =
         crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
