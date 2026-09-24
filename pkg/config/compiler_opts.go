@@ -1493,6 +1493,20 @@ type compileOpts struct {
 	// non-WG row (fail-closed with a loud eprintln), so a leniently-loaded
 	// bad tunnel is inert. Same doctrine as lenientWireguardPeers.
 	lenientTunnelOuterFamily bool
+	// lenientGreDuplicateOuter (#10654) downgrades the duplicate-GRE-outer
+	// gate (validateGreDuplicateOuterStrict) from a hard compile error to
+	// a cfg.Warnings entry. Two GRE tunnels sharing an identical outer
+	// (source, destination, key) triple are ambiguous at decap — the Rust
+	// lookup returns the first key-matching endpoint in snapshot order, so
+	// every inbound frame is attributed to whichever endpoint sorts first.
+	// The strict commit / commit-check path hard-rejects the duplicate; the
+	// tolerant load / peer-sync paths warn so an already-persisted or
+	// peer-synced config still BOOTS (#1960 no-brick) — the Go snapshot
+	// builder drops the later-sorting duplicate loudly, so the snapshot
+	// carries one row per triple and the leniently-loaded tunnel is inert
+	// rather than ambiguously attributed. Same doctrine as
+	// lenientTunnelOuterFamily.
+	lenientGreDuplicateOuter bool
 
 	// lenientIpipTunnelMode (#4785 half 1) downgrades the IPIP-unimplemented
 	// gate (validateIpipTunnelUnimplementedStrict) from a hard compile error to
@@ -3004,6 +3018,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDHCPPoolSubnets:                 true,
 		lenientWireguardPeers:                  true,
 		lenientTunnelOuterFamily:               true,
+		lenientGreDuplicateOuter:               true,
 		lenientIpipTunnelMode:                  true,
 		lenientPolicyZoneRefs:                  true,
 		lenientZoneCount:                       true,
