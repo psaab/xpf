@@ -8,9 +8,9 @@
 // behavior. Each test names the pre-#6435 arm it pins. These tests FAIL
 // on a unification that (a) stops recording the first Fragment sighting,
 // (b) starts rejecting a declared-but-truncated Fragment header in
-// `ipv6_is_any_fragment`, (c) judges a double-Fragment chain by the
-// second header, or (d) folds `Truncated`/`NoNextHeader` to anything
-// other than the pre-#6435 fail-closed value.
+// `ipv6_is_any_fragment`, or (c) folds `Truncated`/`NoNextHeader` to anything
+// other than the pre-#6435 fail-closed value. #10661 separately pins the new
+// every-sighting fragment-status verdict for repeated Fragment headers.
 //
 // Sibling `#[path]` test module loaded from afxdp/frame/mod.rs, next to
 // tests_fragment_term_extra.rs (which pins the TermMatchExtra fail-closed
@@ -191,37 +191,6 @@ fn ext_walk_first_fragment_then_ext_still_resolves_l4() {
     ));
 }
 
-#[test]
-fn ext_walk_double_fragment_chain_judges_by_first_sighting() {
-    // Hostile double-Fragment chain. The pre-#6435 fragment predicates
-    // STOPPED at the first Fragment header; the unified walk records only
-    // the FIRST sighting, so the verdicts must match that stop.
-    let mut body = frag8(44, 0x0000).to_vec(); // first: atomic (offset 0)
-    body.extend_from_slice(&frag8(PROTO_TCP, 0x0008)); // second: non-first bits
-    body.extend_from_slice(&[0u8; 20]);
-    let pkt = v6_pkt(44, &body);
-    assert!(ipv6_is_any_fragment(&pkt));
-    assert!(
-        !ipv6_is_non_first_fragment(&pkt),
-        "first sighting is atomic (offset 0) — the second header's bits must not flip the verdict"
-    );
-
-    let mut body = frag8(44, 0x0008).to_vec(); // first: non-first bits
-    body.extend_from_slice(&frag8(PROTO_TCP, 0x0000)); // second: atomic
-    body.extend_from_slice(&[0u8; 20]);
-    let pkt = v6_pkt(44, &body);
-    assert!(
-        ipv6_is_non_first_fragment(&pkt),
-        "first sighting is non-first — the second (atomic) header must not clear the verdict"
-    );
-
-    // The L4 resolvers walked past BOTH Fragment headers before #6435
-    // (their 44 arm advanced unconditionally) — same verdict today.
-    assert_eq!(
-        packet_rel_l4_offset_and_protocol(&pkt, libc::AF_INET6 as u8),
-        Some((56, PROTO_TCP))
-    );
-}
 
 #[test]
 fn ext_walk_over_limit_records_fragment_and_fails_l4_closed() {
@@ -249,6 +218,47 @@ fn ext_walk_over_limit_records_fragment_and_fails_l4_closed() {
     assert_eq!(frame_l4_offset(&frame_of(&pkt), libc::AF_INET6 as u8), None);
     assert!(ipv6_is_any_fragment(&pkt));
     assert!(ipv6_is_non_first_fragment(&pkt));
+}
+
+#[test]
+fn ext_walk_bound_fragment_sightings_preserve_status_fields() {
+    // The 8th header is over-limit before its body is walked. A declared
+    // Fragment header at that bound still feeds every fragment-status field.
+    let mut prefix = Vec::new();
+    for i in 0..MAX_IPV6_EXT_HEADERS - 1 {
+        let next = if i + 1 == MAX_IPV6_EXT_HEADERS - 1 {
+            44
+        } else {
+            60
+        };
+        prefix.extend_from_slice(&ext8(next));
+    }
+    let fragment_offset = 40 + prefix.len();
+
+    let fragment = frag8(PROTO_TCP, 0x0008);
+    let mut complete_body = prefix.clone();
+    complete_body.extend_from_slice(&fragment);
+    let complete = v6_pkt(60, &complete_body);
+    let walk = walk_ipv6_ext_chain(&complete, 0);
+    assert_eq!(walk.outcome, ExtChainOutcome::OverLimit);
+    let declared = walk.fragment.expect("fragment declaration at the bound");
+    assert_eq!(declared.bytes, Some(fragment));
+    assert_eq!(declared.header_offset, fragment_offset);
+    assert_eq!(walk.first_non_atomic_fragment, walk.fragment);
+    assert!(walk.non_first_fragment_offset_seen);
+    assert!(!walk.fragment_truncated);
+
+    // A declared but unreadable 8th Fragment header is still OverLimit, and
+    // its missing bytes are recorded for consumers that inspect fragment bits.
+    let truncated = v6_pkt(60, &prefix);
+    let walk = walk_ipv6_ext_chain(&truncated, 0);
+    assert_eq!(walk.outcome, ExtChainOutcome::OverLimit);
+    let declared = walk.fragment.expect("truncated declaration at the bound");
+    assert_eq!(declared.bytes, None);
+    assert_eq!(declared.header_offset, fragment_offset);
+    assert_eq!(walk.first_non_atomic_fragment, None);
+    assert!(!walk.non_first_fragment_offset_seen);
+    assert!(walk.fragment_truncated);
 }
 
 #[test]

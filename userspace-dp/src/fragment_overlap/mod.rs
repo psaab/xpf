@@ -887,16 +887,16 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                 return OverlapParse::Unreadable;
             }
             let walk = crate::afxdp::frame::walk_ipv6_ext_chain(l3_packet, 0);
-            let Some(frag) = walk.fragment else {
+            if walk.fragment_truncated {
+                return OverlapParse::Unreadable;
+            }
+            let Some(frag) = walk.first_non_atomic_fragment else {
                 return OverlapParse::NonFragment;
             };
             let Some(bytes) = frag.bytes else {
                 return OverlapParse::Unreadable;
             };
             let frag_off = u16::from_be_bytes([bytes[2], bytes[3]]);
-            if (frag_off & 0xFFF9) == 0 {
-                return OverlapParse::NonFragment;
-            }
             // Byte offset, not units: the 13-bit unit count occupies bits 15..3, so
             // masking the low 3 (Res+M) yields units*8 directly. (v4 shifts because its
             // units sit in the LOW 13 bits; do not "fix" this into a >>3 — that is the
