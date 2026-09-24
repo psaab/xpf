@@ -51,6 +51,11 @@ fn dns_query_from_port_53_requires_session_tracking_10321() {
     };
     let nat = NatDecision::default();
     let mut query = vec![0u8; 54];
+    // #10664: the discriminator is bounded by the IP-DECLARED datagram end,
+    // so the fixture must carry a valid L3 header: version/IHL nibble plus a
+    // total_len covering the 20-byte IP header and the 20-byte UDP/DNS extent.
+    query[14] = 0x45;
+    query[14 + 2..14 + 4].copy_from_slice(&40u16.to_be_bytes());
     query[34 + 4..34 + 6].copy_from_slice(&20u16.to_be_bytes());
     query[14 + 20 + 8 + 2] = 0;
     assert!(
@@ -67,6 +72,149 @@ fn dns_query_from_port_53_requires_session_tracking_10321() {
     assert!(
         dns_reply_fastpath_admit(&forwarding, &flow, &nat, &query, meta),
         "DNS QR=1 replies retain the unsolicited-reply fast path"
+    );
+}
+
+/// #10664 FAIL-ON-REVERT (v4): the `allow-dns-reply` QR discriminator is
+/// bounded by the IP-DECLARED datagram end, not the UDP length and the
+/// capture. Each negative leg below is a frame the pre-fix capture bound
+/// (`udp_end > packet_frame.len()`) ADMITTED — QR=1, UDP extent inside the
+/// capture — while the declared end (IPv4 `total_len`) puts the QR byte or
+/// the UDP extent out of the datagram. Admit means "skip session install"
+/// (`track_in_userspace = .. && !dns_fastpath_admit`), so every `!admit`
+/// below is the install decision refusing to follow out-of-datagram bytes.
+///
+/// Fail-on-revert: restore the `udp_end > packet_frame.len()` bound and all
+/// three negative legs go RED (admitted).
+#[test]
+fn dns_reply_qr_bounded_by_ipv4_declared_end_10664() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot());
+    forwarding.allow_dns_reply = true;
+    let flow = SessionFlow {
+        src_ip: "172.16.80.53".parse().expect("src"),
+        dst_ip: "10.0.61.102".parse().expect("dst"),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            src_ip: "172.16.80.53".parse().expect("src"),
+            dst_ip: "10.0.61.102".parse().expect("dst"),
+            src_port: 53,
+            dst_port: 5353,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        ..UserspaceDpMeta::default()
+    };
+    let nat = NatDecision::default();
+    // Control: 14 eth + 20 IP (total_len 40) + 8 UDP (len 20) + 12 DNS with
+    // QR=1. Declared end (54) == capture end: the fast path is retained.
+    let mut frame = vec![0u8; 54];
+    frame[14] = 0x45;
+    frame[14 + 2..14 + 4].copy_from_slice(&40u16.to_be_bytes());
+    frame[34 + 4..34 + 6].copy_from_slice(&20u16.to_be_bytes());
+    frame[34 + 8 + 2] = 0x80;
+    assert!(
+        dns_reply_fastpath_admit(&forwarding, &flow, &nat, &frame, meta),
+        "in-datagram QR=1 reply keeps the fast path (control)"
+    );
+    // Short total_len: the datagram ends at 14+30=44, so the QR byte at 44
+    // is out-of-datagram slack. UDP len (20) and capture (54) still cover
+    // it — the pre-#10664 capture bound admitted this frame.
+    frame[14 + 2..14 + 4].copy_from_slice(&30u16.to_be_bytes());
+    assert!(
+        !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &frame, meta),
+        "QR byte past the IPv4 total_len must fail closed into session tracking"
+    );
+    // UDP length overrunning the datagram with trailing capture slack: the
+    // datagram still ends at 54, but UDP claims 28 bytes (end 62) inside a
+    // 70-byte capture. The capture bound admits; the declared bound rejects.
+    let mut slack = vec![0u8; 70];
+    slack[14] = 0x45;
+    slack[14 + 2..14 + 4].copy_from_slice(&40u16.to_be_bytes());
+    slack[34 + 4..34 + 6].copy_from_slice(&28u16.to_be_bytes());
+    slack[34 + 8 + 2] = 0x80;
+    assert!(
+        !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &slack, meta),
+        "UDP extent past the IPv4 total_len must fail closed despite capture slack"
+    );
+    // Malformed L3 (zero version/IHL) has no declared end: fail closed like
+    // every other `declared_l3_end` consumer.
+    let mut malformed = vec![0u8; 54];
+    malformed[34 + 4..34 + 6].copy_from_slice(&20u16.to_be_bytes());
+    malformed[34 + 8 + 2] = 0x80;
+    assert!(
+        !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &malformed, meta),
+        "unparseable L3 header must fail closed (no declared end)"
+    );
+}
+
+/// #10664 FAIL-ON-REVERT (v6 twin): the same declared-end bound via the
+/// IPv6 fixed-header `payload_len` (`l3 + 40 + payload_len`). A v4-only cell
+/// leaves `ipv6_declared_l3_end` free to be unwired with the suite green.
+///
+/// Fail-on-revert: restore the capture bound and both negative legs go RED.
+#[test]
+fn dns_reply_qr_bounded_by_ipv6_declared_end_10664() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot());
+    forwarding.allow_dns_reply = true;
+    let flow = SessionFlow {
+        src_ip: "2001:db8::53".parse().expect("src"),
+        dst_ip: "2001:db8::102".parse().expect("dst"),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_UDP,
+            src_ip: "2001:db8::53".parse().expect("src"),
+            dst_ip: "2001:db8::102".parse().expect("dst"),
+            src_port: 53,
+            dst_port: 5353,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        ..UserspaceDpMeta::default()
+    };
+    let nat = NatDecision::default();
+    // Control: 14 eth + 40 IPv6 (payload_len 20) + 8 UDP (len 20) + 12 DNS
+    // with QR=1. Declared end (74) == capture end: admitted.
+    let mut frame = vec![0u8; 74];
+    frame[14] = 0x60;
+    frame[14 + 4..14 + 6].copy_from_slice(&20u16.to_be_bytes());
+    frame[54 + 4..54 + 6].copy_from_slice(&20u16.to_be_bytes());
+    frame[54 + 8 + 2] = 0x80;
+    assert!(
+        dns_reply_fastpath_admit(&forwarding, &flow, &nat, &frame, meta),
+        "in-datagram QR=1 v6 reply keeps the fast path (control)"
+    );
+    // Short payload_len: the datagram ends at 14+40+10=64, so the QR byte
+    // at 64 is out-of-datagram. UDP len (20) and capture (74) still cover
+    // it — the pre-#10664 capture bound admitted this frame.
+    frame[14 + 4..14 + 6].copy_from_slice(&10u16.to_be_bytes());
+    assert!(
+        !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &frame, meta),
+        "QR byte past the IPv6 payload_len must fail closed into session tracking"
+    );
+    // UDP length overrunning the v6 datagram with trailing capture slack:
+    // the datagram ends at 74, UDP claims 28 bytes (end 82) inside a 90-byte
+    // capture. The capture bound admits; the declared bound rejects.
+    let mut slack = vec![0u8; 90];
+    slack[14] = 0x60;
+    slack[14 + 4..14 + 6].copy_from_slice(&20u16.to_be_bytes());
+    slack[54 + 4..54 + 6].copy_from_slice(&28u16.to_be_bytes());
+    slack[54 + 8 + 2] = 0x80;
+    assert!(
+        !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &slack, meta),
+        "UDP extent past the IPv6 payload_len must fail closed despite capture slack"
     );
 }
 

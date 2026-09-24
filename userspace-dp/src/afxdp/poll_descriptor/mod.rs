@@ -190,17 +190,6 @@ fn dns_reply_qr_set(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {
     if meta.protocol != PROTO_UDP {
         return false;
     }
-    // #10664: bound the discriminator by the IP-DECLARED datagram end, not
-    // the capture length. A short total_len/payload_len with trailing slack
-    // (or a UDP length overrunning the datagram) must fail closed — a QR byte
-    // past the declared end is out-of-datagram, never a reply signal. `None`
-    // (truncated/malformed L3, unknown family) fails closed like every other
-    // `declared_l3_end` consumer (#2361 ports, #5150 flex, #5141 segments).
-    let Some(declared_end) =
-        declared_l3_end(packet_frame, meta.l3_offset as usize, meta.addr_family)
-    else {
-        return false;
-    };
     let l4 = meta.l4_offset as usize;
     let Some(udp_header) = packet_frame.get(l4..l4.checked_add(8).unwrap_or(usize::MAX)) else {
         return false;
@@ -215,10 +204,7 @@ fn dns_reply_qr_set(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {
     let Some(dns_end) = l4.checked_add(8 + 12) else {
         return false;
     };
-    // `declared_end` is slice-clamped (`<= packet_frame.len()`), so this
-    // subsumes the old capture bound while also rejecting UDP/DNS extents
-    // past the IP-declared datagram end.
-    if dns_end > udp_end || udp_end > declared_end {
+    if dns_end > udp_end || udp_end > packet_frame.len() {
         return false;
     }
     packet_frame
