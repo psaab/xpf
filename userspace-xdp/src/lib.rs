@@ -570,6 +570,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         return Ok(cpumap_or_pass(ctrl));
     }
 
+    // The separate S-tag RX-strip offload is tracked in #10915; this check sees only in-frame tags.
     // #10655: a single outer S-tag carrying IP is an explicit DROP, never
     // steered to the helper. Deliberately BELOW the #8279 ingress gate:
     // an ifindex this shim does not adjudicate still takes cpumap_or_pass

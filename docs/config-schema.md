@@ -11289,9 +11289,10 @@ reserved for whole-dataplane selection where a rewrite shim
   never steered as the 802.1Q unit with the same VID. The userspace metadata
   and worker identity carry only physical ifindex + VID, not TPID, so S-tag
   identity cannot safely alias a C-tag unit. Double-tagged frames retain the
-  separate `qinq_drop` disposition (#9888). VLAN-parent RX tag stripping is
-  disabled (#5268/#9946), so the S-tag remains visible to this software drop;
-  no S-tag hardware filter state is assumed.
+  separate `qinq_drop` disposition (#9888). This disposition applies only
+  when the S-tag reaches XDP: a separate S-tag RX-strip offload can remove
+  the 0x88a8 header before XDP and remains a hardening follow-up (#10915).
+  The existing C-tag RX stripping fence remains in force (#5268/#9946).
 - **#6178 (input-vlan-map / output-vlan-map reject):** Junos
   `input-vlan-map` / `output-vlan-map` under a logical unit request a VLAN
   tag rewrite on ingress / egress — push a tag, pop a tag, or swap the tag

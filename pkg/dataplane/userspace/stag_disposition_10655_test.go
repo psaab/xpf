@@ -35,21 +35,15 @@ import (
 // site is the shared loadUserspaceXDPTestCollection helper, already
 // registered; the census scans call sites, not callers.
 //
-// RED-ON-BASE. Against the pre-fix object every drop cell below fails at the
-// action check: single-S-tag ARP returns XDP_PASS(2) and single-S-tag IP
-// steers to the helper (redirect_err + transit_drop) — the C-tag verdicts,
-// which is the defect. The C-tag separation controls pass on BOTH objects:
-// they read the head-only stag_drop slot tolerantly.
+// RED-ON-BASE. Against the pre-fix object, S-tagged ARP returns XDP_PASS(2)
+// instead of DROP; IP cells steer to the helper and fail the `stag_drop`
+// counter assertion (the fixture's empty XSK map turns that steer into
+// redirect_err + transit_drop). The C-tag separation controls pass on BOTH
+// objects: they read the head-only stag_drop slot tolerantly.
 //
-// NIC FENCE (the issue's "queried/set or fenced" arm). The verdict for an
-// in-frame S-tag is now DROP in software, so every hardware posture is
-// fail-closed: a NIC S-tag filter that drops the frame agrees with the
-// verdict, and one that passes it delivers it to this drop. Hardware
-// STRIPPING cannot alias either: the rx-vlan-offload precondition (#5268,
-// re-asserted post-link-cycle by #9946) disables tag stripping on VLAN
-// parents, so an S-tag always arrives in-frame where this drop sees it.
-// No new ethtool surface is needed; the fence is this paragraph plus the
-// drop.
+// STRIPPING RESIDUAL (#10915). These cells cover an S-tag present in packet
+// bytes. A separate S-tag RX-strip offload can remove the 0x88a8 header before
+// XDP; the C-tag `rx-vlan-offload` fence (#5268/#9946) does not control it.
 
 // singleTagIPv6UDP builds a single-tagged IPv6/UDP frame that parses clean
 // through parse_ipv6/parse_l4, mirroring singleTagIPv4UDP (which lives in
