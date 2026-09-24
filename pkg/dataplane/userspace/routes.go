@@ -482,8 +482,10 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// contributes (the AD-200 default and its RFC 3442 classless routes) is
 	// invisible to the helper FIB while the kernel routes it happily. A
 	// transit packet toward such a destination either resolves NoRoute and is
-	// REINJECTED to the kernel unadjudicated — no zone policy, no session, no
-	// NAT, no screen, and no nftables `hook forward` chain behind it — or, if
+	// REINJECTED to the kernel with no zone verdict — no zone policy, no
+	// session, no NAT, no screen — through the marked-TUN pinhole of the
+	// armed forward fence (#10302; pre-fence this read "and no nftables
+	// `hook forward` chain behind it") — or, if
 	// a config default happens to cover it, is forwarded to the STATIC
 	// default's next-hop instead of the learned one. Import closes both.
 	//

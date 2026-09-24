@@ -346,24 +346,40 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 // interface set while m.lastSnapshot — the authority the fail-closed comments
 // promise is "retained" — was still the OLD one.
 //
-// That divergence is a policy BYPASS, not just an outage. Both pre-publish
+// That divergence is a policy BYPASS, not just an outage — bounded, not
+// open-ended, under the armed forward fence (#10302). Both pre-publish
 // failure modes drive the shim to ctrl.Enabled=0 (programBootstrapMapsLocked
 // programs it disabled; publishSnapshotFailClosedLocked disables it on the
 // same-plan path), and a disabled ctrl makes the shim DROP transit —
 // degraded_ctrl_disabled_action runs before the ingress-map test in
 // userspace-xdp/src/lib.rs, so an interface that still carries the shim is
-// still fail-closed. An interface that has been DETACHED is not: it has no XDP
-// program at all, so with ip_forward=1 its traffic goes straight into the Linux
-// stack, unadjudicated by xpf, while the daemon reports the previous-good
-// snapshot as retained.
+// still fail-closed. An interface that has been DETACHED is not: it has no
+// XDP program at all, so its traffic goes straight into the Linux stack
+// while the daemon reports the previous-good snapshot as retained — and
+// until the fence reassert (XDP-link event, 1s tick backstop) drops the
+// now-untracked link from the pinhole, that traffic still forwards. (This
+// paragraph used to end "with ip_forward=1 its traffic goes straight into
+// the Linux stack, unadjudicated by xpf": the fence closes the unbounded
+// tail, leaving a stale-pinhole window measured in reassert lag.)
 //
 // Deferring the detach to the acceptance points creates the mirror-image
-// transient — attached shim, interface already gone from the applied snapshot —
-// and that one is harmless in BOTH ctrl states: an ifindex absent from
-// userspace_ingress_ifaces takes cpumap_or_pass (the kernel path, identical to
-// having no program), and a still-disabled ctrl drops transit, which is the
-// fail-closed direction. So the window this ordering opens can only be as
-// permissive as the detach it replaces, never more.
+// transient — attached shim, interface already gone from the applied snapshot.
+// The OLD argument that followed ("harmless in BOTH ctrl states ... identical
+// to having no program ... can only be as permissive as the detach it
+// replaces, never more") is INVERTED under the fence, and this paragraph is
+// its re-derivation (#10642). The shim behavior is unchanged: an ifindex
+// absent from userspace_ingress_ifaces still takes cpumap_or_pass, and a
+// still-disabled ctrl still drops transit. What changed is the COMPARISON.
+// The attached link is still a tracked XDP link, so it is still in the
+// fence pinhole and the passed traffic still forwards; a fully detached
+// link is untracked, so after reassert its traffic is fence-DROPPED. The
+// mirror transient is therefore strictly MORE permissive than the detach
+// it replaces — the reverse of the old claim. The ordering stands anyway,
+// on narrower grounds: it keeps the retained authority truthful through
+// the window (the kernel never runs a NEW interface set under an OLD
+// snapshot), it avoids flapping the pinhole on applies that then fail,
+// and it bounds the unadjudicated-forward window to the intra-apply
+// transient plus one pinhole reassert lag instead of leaving it open.
 //
 // #8279: the first half of that sentence WAS NOT TRUE when it was written, and
 // this note stays because the claim is load-bearing and its failure was not
@@ -389,8 +405,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 // (netdevCarriesEthernetFraming, pkg/dataplane/netdev_framing_8279.go), so the
 // shim is never attached to one and neither path can be reached. The refusal is
 // recorded as an UnarmedSurface with StillForwarding set — the netdev is UP,
-// zoned and unadjudicated, and that gap is reported rather than traded away
-// silently.
+// zoned and unshimmed, a blackholed zone member under the armed fence (the
+// fence drops transit from never-pinholed links), and that gap is reported
+// rather than traded away silently.
 //
 // The ATTACH half stays before the publish deliberately: the helper cannot bind
 // an AF_XDP socket to an interface with no shim, so staging it later is not

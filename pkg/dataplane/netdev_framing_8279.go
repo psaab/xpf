@@ -97,12 +97,16 @@ func netdevCarriesEthernetFraming(encapType string) bool {
 //   - attaching to a netdev whose framing we could not read risks a misparse,
 //     and only on the rare device class that is actually raw L3;
 //   - REFUSING one guarantees the netdev is UP, zoned and carries no XDP at
-//     all, so with ip_forward=1 its traffic is forwarded unadjudicated. That
-//     is a certain security gap on what is almost always a healthy Ethernet
-//     NIC whose netlink lookup failed transiently.
+//     all, so its traffic enters the Linux stack with no xpf adjudication
+//     point. (Pre-#10302 this read "forwarded unadjudicated": with
+//     ip_forward=1 the kernel was a policy-free router for it. Under the
+//     armed forward fence the netdev is never a pinhole — no XDP link, no
+//     allowlist entry — so its transit is fence-DROPPED: the gap is now a
+//     certain blackholed zone member on what is almost always a healthy
+//     Ethernet NIC whose netlink lookup failed transiently.)
 //
 // So refusing on "could not determine" trades a POSSIBLE misparse on a rare
-// device for a CERTAIN adjudication hole on a common one — the wrong way
+// device for a CERTAIN coverage hole on a common one — the wrong way
 // round. The gate therefore refuses only what it affirmatively knows is not
 // Ethernet, and an unresolvable link keeps its pre-existing behaviour.
 //
@@ -116,16 +120,18 @@ func netdevFramingKnown(link netlink.Link, linkErr error) (string, bool) {
 	return link.Attrs().EncapType, true
 }
 
-// nonEthernetSurfaceRecord classifies a zoned netdev the compiler declined to
-// arm because its frames carry no Ethernet header.
-//
 // StillForwarding is TRUE and that is the point of the record. The netdev is
-// UP and in a zone, and it now has no XDP program, so with ip_forward=1 its
-// traffic goes into the Linux stack unadjudicated — the #5275 policy-free-
-// router state. That is a REAL gap, deliberately chosen over the alternative
-// (adjudicating a misparsed header, where the 5-tuple the policy engine sees
-// is selected by the attacker's inner source address), and the operator is
-// entitled to see it rather than have it traded silently.
+// UP and in a zone, and it now has no XDP program, so its traffic enters the
+// Linux stack with no xpf adjudication point. (Pre-#10302 this read "with
+// ip_forward=1 its traffic goes into the Linux stack unadjudicated — the
+// #5275 policy-free-router state". Under the armed forward fence a link with
+// no XDP program is never a pinhole, so its transit is fence-dropped: the
+// gap is a blackholed zone member — outage plus uncovered zone — not a
+// policy bypass. The record stays UNCOVERED because the zone has neither
+// enforcement nor service.) That is a REAL gap, deliberately chosen over the
+// alternative (adjudicating a misparsed header, where the 5-tuple the policy
+// engine sees is selected by the attacker's inner source address), and the
+// operator is entitled to see it rather than have it traded silently.
 func nonEthernetSurfaceRecord(name string, ifindex int, encapType string) UnarmedSurface {
 	shown := encapType
 	if shown == "" {
@@ -137,7 +143,7 @@ func nonEthernetSurfaceRecord(name string, ifindex int, encapType string) Unarme
 		Reason: "link-layer type " + shown + " is not Ethernet — the XDP shim parses a " +
 			"14-byte Ethernet header unconditionally, so attaching it here would read the " +
 			"IP source octets as an ethertype (#8279); netdev is UP and zoned but has no " +
-			"XDP, so its traffic is not adjudicated",
+			"XDP, so it has no xpf enforcement point and its transit is fence-dropped",
 		StillForwarding: true,
 		Unshimmable:     isProvablyUnshimmableEncap(encapType),
 	}

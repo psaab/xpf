@@ -1494,10 +1494,12 @@ struct ParsedPacket {
 /// double-tagged QinQ), and 0x9100 here is a legacy outer tag or a legacy
 /// inner one. Either shape is unadjudicable — #5879 refuses QinQ configs, so
 /// the dataplane has no stacked-VLAN identity to steer it by — and must drop
-/// rather than take a non-IP XDP_PASS arm, which would hand it to the kernel
-/// forward path that is deliberately open while armed
-/// (pkg/nftables/transit_barrier.go). Complete L2 headers only: this
-/// predicate runs on a successful `parse_l2`, never on its `None` path.
+/// rather than take a non-IP XDP_PASS arm: this interface is XDP-bound, so a
+/// passed frame matches the armed forward fence's allowlist (#10302,
+/// pkg/nftables/transit_barrier.go) and forwards — by MAC on bridged ports —
+/// with no zone verdict. (Pre-fence this read "the kernel forward path that
+/// is deliberately open while armed" — #10642.) Complete L2 headers only:
+/// this predicate runs on a successful `parse_l2`, never on its `None` path.
 ///
 /// NOTE the single-0x9100-outer cost, stated plainly: the shim never
 /// unwraps 0x9100, so that outer may hide ARP/LLDP this drop now denies

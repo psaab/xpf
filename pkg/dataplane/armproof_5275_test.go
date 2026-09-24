@@ -19,6 +19,12 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// NOTE (#10642 vocabulary): these tests call the UP-zoned-unshimmed surface a
+// "blackholed zone member". Pre-#10302 the same surface was "the policy-free
+// router": the armed forward fence drops transit from never-pinholed links,
+// so the gap is outage-plus-uncovered-zone, not a bypass. The StillForwarding
+// FIELD keeps its name (churn); every use below means UP-zoned-unshimmed.
+
 // #5275 PR1 — the observe-only arm-coverage proof.
 //
 // These tests pin the proof's DEFINITION, which is the part that must not
@@ -293,8 +299,8 @@ func TestArmProofDelegatedVlanChildResolvesToParent(t *testing.T) {
 //
 // If the parent carries no instance, the child is NOT covered — nothing is
 // enforcing its traffic. A proof that skipped VLAN children unconditionally
-// would pass this box, which is precisely the policy-free-router state #5275
-// exists to prevent.
+// would pass this box, which is precisely the blackholed-zone-member state #5275
+// exists to surface (pre-#10302: "the policy-free-router state").
 func TestArmProofDelegationIsResolvedNotAssumed(t *testing.T) {
 	r := newProofResult([]int{10, 20})
 	vlanChild(r, 20, 10)
@@ -310,7 +316,7 @@ func TestArmProofDelegationIsResolvedNotAssumed(t *testing.T) {
 	}
 	if !rep.WouldGate {
 		t.Fatal("a fully unattached dataplane must be reported as WOULD-GATE — " +
-			"this is the policy-free kernel #5275 is about")
+			"this is the uncovered dataplane #5275 is about (pre-#10302: \"the policy-free kernel\")")
 	}
 }
 
@@ -413,9 +419,9 @@ func TestArmProofVLANChildOfProvenDownParentIsSkipped(t *testing.T) {
 //
 // Same operator action, but netlink.LinkSetDown FAILED. The disable branch logs
 // that at WARN and continues, address reconciliation runs regardless, and the
-// parent is left possibly UP, still in a zone, still forwarded through by the
-// kernel with no XDP — the policy-free-router condition #5275 exists to
-// prevent. The VLAN child rides that same netdev, so it must NOT inherit the
+// parent is left possibly UP, still in a zone, with no XDP — a blackholed
+// zone member (pre-#10302: "the policy-free-router condition"), its transit
+// fence-dropped for want of a pinhole. The VLAN child rides that same netdev, so it must NOT inherit the
 // benign reading.
 func TestArmProofVLANChildOfUnprovenParentStaysUncovered(t *testing.T) {
 	r := newProofResult([]int{20})
@@ -425,7 +431,7 @@ func TestArmProofVLANChildOfUnprovenParentStaysUncovered(t *testing.T) {
 	rep := classifyArmCoverage(r, lookupFrom(nil, nil))
 
 	if rep.Uncovered != 2 {
-		t.Fatalf("a parent whose link-down FAILED is the policy-free-router condition and the child "+
+		t.Fatalf("a parent whose link-down FAILED is a blackholed zone member and the child "+
 			"rides the same netdev — BOTH must read uncovered; got %+v (%s)", rep, rep.SurfaceSummary())
 	}
 	if rep.Skipped != 0 {
@@ -440,7 +446,7 @@ func TestArmProofVLANChildOfUnprovenParentStaysUncovered(t *testing.T) {
 // TestArmProofProvenDownRecordCoversOnlyItsOwnChild is the second OVER-REACH
 // GUARD: a proven-down record answers for the VLAN children delegating to THAT
 // ifindex and for nothing else. An ordinary direct surface with no instance is
-// still the policy-free-router condition no matter what else on the box was
+// still a blackholed zone member no matter what else on the box was
 // cleanly disabled.
 func TestArmProofProvenDownRecordCoversOnlyItsOwnChild(t *testing.T) {
 	// 20 is a VLAN child of the proven-down 10; 30 is an unrelated direct
@@ -554,7 +560,7 @@ func delegatedChild(r *CompileResult, ifidx, parent int, kind func(int, int) net
 // lives; the ifindex is then recorded as a delegated VLAN child, the userspace
 // attach loop skips it so it never gets a shim, and the unmanaged sweep will
 // not remove it because the name's prefix before '.' is a managed interface.
-// The device stays UP and forwarding with no XDP.
+// The device stays UP with no XDP (its transit is fence-dropped for want of a pinhole).
 func TestArmProofNonVLANChildNeverInheritsItsParentIndex(t *testing.T) {
 	// The two arms are the two ways a child can end up counted as covered.
 	// Both must be closed: closing one leaves the other as a live under-count.
@@ -638,7 +644,7 @@ func TestArmProofNonVLANChildNeverInheritsItsParentIndex(t *testing.T) {
 						"got via=%d", child.Via, child.Via)
 				}
 				if !rep.WouldGate {
-					t.Fatalf("a live, XDP-less forwarding surface is exactly the policy-free-router "+
+					t.Fatalf("a live, XDP-less UP-zoned surface is exactly the blackholed-zone-member "+
 						"condition #5275 measures and MUST drive would-gate; got %+v (%s)",
 						rep, rep.SurfaceSummary())
 				}
@@ -717,7 +723,7 @@ func TestArmProofVLANKindIsTheDiscriminator(t *testing.T) {
 // declined surface is the benign branch, and its dominant member is a clean
 // `disable`, which this file deliberately excludes from would_gate. Emitting it
 // at WARN puts a routine commit's expected output at the same level as the
-// policy-free-router condition, which trains operators to ignore both.
+// blackholed-zone-member condition, which trains operators to ignore both.
 func TestArmProofDeclinedSurfaceLogsAtInfo(t *testing.T) {
 	buf := captureLogs(t)
 
@@ -735,7 +741,7 @@ func TestArmProofDeclinedSurfaceLogsAtInfo(t *testing.T) {
 		case strings.Contains(line, "WOULD fail a gating proof"):
 			if !strings.Contains(line, "level=WARN") {
 				t.Fatalf("a would-gate surface must stay at WARN — demoting it hides the "+
-					"policy-free-router condition this PR exists to measure; got %q", line)
+					"blackholed-zone-member condition this PR exists to measure; got %q", line)
 			}
 		}
 	}
@@ -852,7 +858,7 @@ func TestArmProofSoftSkippedSurfaceIsDistinguishable(t *testing.T) {
 		t.Fatalf("a declined surface must be its own branch, not folded into covered or uncovered; got %+v", rep)
 	}
 	if rep.WouldGate {
-		t.Fatal("a netdev that does not exist forwards nothing — declining it is not a policy-free router")
+		t.Fatal("a netdev that does not exist forwards nothing — declining it is not a blackholed zone member")
 	}
 	if got := rep.SurfaceSummary(); !strings.Contains(got, "ge-0-0-9:skipped") {
 		t.Fatalf("the summary must name the declined surface; got %q", got)
@@ -1241,7 +1247,7 @@ func TestArmProofNilZoneSlotIsRecorded(t *testing.T) {
 // slog.Warn and nothing else: the netdev stays UP, address reconciliation still
 // runs, it is still in a security zone, the kernel still forwards through it —
 // and no XDP is attached, because the disabled branch skipped the attach. That
-// is the policy-free router #5275 exists to prevent, and it must not read as a
+// is the blackholed zone member #5275 exists to surface, and it must not read as a
 // benign operator action.
 func TestArmProofSkippedButStillForwardingIsUncovered(t *testing.T) {
 	r := newProofResult(nil)
@@ -1259,8 +1265,8 @@ func TestArmProofSkippedButStillForwardingIsUncovered(t *testing.T) {
 			"not as a benign decline; got %+v", rep)
 	}
 	if !rep.WouldGate {
-		t.Fatal("an UP, zoned, forwarded-through netdev carrying no XDP is exactly the " +
-			"policy-free router #5275 is about — it must be reported as WOULD-GATE")
+		t.Fatal("an UP, zoned netdev carrying no XDP is exactly the blackholed zone member " +
+			"#5275 is about — it must be reported as WOULD-GATE")
 	}
 }
 
@@ -1692,8 +1698,8 @@ func TestArmProofDisabledSiteThreadsBothErrors(t *testing.T) {
 		if name == "" || name == "nil" {
 			t.Fatalf("%s is not threaded into disabledSurfaceRecord (arg %d is %q) — every "+
 				"administratively disabled interface would then read as proven-down and benign, "+
-				"including one whose netdev is still UP, zoned, forwarded through and carrying "+
-				"no XDP, which is the policy-free router this PR exists to measure", what, i, name)
+				"including one whose netdev is still UP, zoned and carrying "+
+				"no XDP, which is the blackholed zone member this PR exists to measure", what, i, name)
 		}
 	}
 }

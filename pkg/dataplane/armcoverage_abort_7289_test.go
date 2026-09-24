@@ -87,7 +87,7 @@ func TestAbortAfterHostMutationRepublishesCoverage7289(t *testing.T) {
 	if uncovered != 1 || total != 1 {
 		t.Fatalf("the published verdict still describes the PREVIOUS apply: uncovered=%d "+
 			"total=%d. The daemon gate reads this as armCoverageComplete and leaves "+
-			"ip_forward=1 over an interface carrying no XDP shim — the policy-free-router "+
+			"an interface carrying no XDP shim read as covered — the blackholed-zone-member "+
 			"state #7191 exists to prevent", uncovered, total)
 	}
 }

@@ -706,9 +706,10 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 			// coverage: zone.Interfaces is precisely the deref the guard above
 			// exists to prevent, so the surfaces are unknowable here. It is
 			// therefore reported as SKIPPED, not uncovered — an enumeration
-			// gap the measurement can now see rather than a proven policy-free
-			// router. The gating PR has to decide whether an unenumerable zone
-			// fails closed; this phase only has to stop hiding it.
+			// gap the measurement can now see rather than a proven blackholed
+			// member (pre-#10302: "a proven policy-free router"). The gating
+			// PR has to decide whether an unenumerable zone fails closed;
+			// this phase only has to stop hiding it.
 			result.recordUnarmedSurface(UnarmedSurface{
 				Name: "zone:" + name,
 				Reason: "nil zone slot — every interface in this zone was dropped from the " +
@@ -1065,7 +1066,8 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			// #5275: record the declined surface. Both errors are threaded
 			// through so disabledSurfaceRecord can promote it from "skipped" to
 			// "uncovered" when the netdev was not proven down — an UP, zoned,
-			// XDP-less netdev is the policy-free-router state.
+			// XDP-less netdev is a blackholed zone member (pre-#10302: "the
+			// policy-free-router state"; the fence drops its transit).
 			result.recordUnarmedSurface(
 				disabledSurfaceRecord(physName, physIface.Index, nlErr, downErr))
 		} else if encap, known := netdevFramingKnown(nl, nlErr); known && !netdevCarriesEthernetFraming(encap) {

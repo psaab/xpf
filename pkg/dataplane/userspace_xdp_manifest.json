@@ -52,7 +52,7 @@
     },
     {
       "path": "userspace-xdp/src/lib.rs",
-      "sha256": "30c07ffee8672b408a8dafb927dfd63da609f73b2a3303441bdc3b2fb17eebf0"
+      "sha256": "1268136e53247fccbd96f37179291ea9eac0b4fa8b8735f5577293bed56a76ac"
     },
     {
       "path": "userspace-xdp/src/wg_classify.rs",

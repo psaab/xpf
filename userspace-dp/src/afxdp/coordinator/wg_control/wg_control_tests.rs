@@ -1825,8 +1825,7 @@ fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_95
         );
         assert!(
             transit.delivered.is_none(),
-            "{family}: the steered port wrote degraded-window TRANSIT plaintext to the wgN TUN \
-             instead of dropping it as degraded transit (#9594): {:?}",
+            "{family}: refused covered transit reached the TUN bypassing the worker queue (#9594/#10597)"
         );
         assert!(
             transit.forwarded.is_empty(),

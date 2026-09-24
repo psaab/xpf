@@ -2,8 +2,10 @@
 // for #9506 Phase-0 measurement.
 //
 // Route-based IPsec plaintext surfaces on an xfrmi excluded from AF_XDP
-// adjudication while the armed forward hook stays open, so decrypted ingress
-// is kernel-forwarded with no zone policy (#9506). Both r4 reviewers retain
+// adjudication, arriving on an ingress the armed forward fence allowlists
+// (#10302 pinhole — pre-fence this read "while the armed forward hook stays
+// open"), so decrypted ingress is kernel-forwarded with no zone policy
+// (#9506). Both r4 reviewers retain
 // NFQUEUE as the research transport (GLM PLAN-READY vs Codex NEEDS-MAJOR,
 // converging via measured Phase 0 per the owner). This package is the Phase-0
 // transport: it binds a queue, receives held packets, and disposes each by
