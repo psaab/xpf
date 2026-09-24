@@ -1863,21 +1863,279 @@ fn a_pbr_term_that_rejects_keeps_its_reject_action_8114() {
     assert_eq!(hit.revoked_key.as_ref(), Some(&flow.forward_key));
 }
 
-/// #10605: a TUNNELED decision is endpoint-pinned and table-free — the miss
-/// path stamps it (0,0) by rule (`install_table_stamp_for_miss`), not by
-/// absence of a PBR term. Hit revalidation must want (0,0) too: re-deriving
-/// the PBR term's nonzero identity mismatches the installed (0,0) on every
-/// first hit (install stamps UNVALIDATED) and revokes every PBR-steered
-/// tunnel flow on its second packet. Direct pin for the exemption predicate
-/// (6075 covers it end-to-end).
+/// #10630: GRE underlay on the shared LAN/WAN topology: endpoint id 824 on
+/// gr-0/0/0.0 (logical ifindex 77), v4 outer 172.16.80.8 -> 203.0.113.9
+/// resolving via reth0.80 in inet.0 (mirrors
+/// `tests_support::gre_to_self_snapshot`, which composes onto `nat_snapshot`
+/// instead of `policy_deny_snapshot`).
+fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnapshot) {
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "gr-0/0/0.0".into(),
+        zone: "wan".into(),
+        linux_name: "gr-0-0-0".into(),
+        ifindex: 77,
+        tunnel: true,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.255.0.1/30".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot
+        .tunnel_endpoints
+        .push(crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: 824,
+            interface: "gr-0/0/0.0".into(),
+            linux_name: "gr-0-0-0".into(),
+            ifindex: 77,
+            zone: "wan".into(),
+            mode: "gre".into(),
+            outer_family: "inet".into(),
+            source: "172.16.80.8".into(),
+            destination: "203.0.113.9".into(),
+            transport_table: "inet.0".into(),
+            ttl: 64,
+            ..Default::default()
+        });
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "203.0.113.0/24".into(),
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: 12,
+        family: "inet".into(),
+        ip: "172.16.80.1".into(),
+        mac: "00:11:22:33:44:55".into(),
+        state: "reachable".into(),
+        router: true,
+        link_local: false,
+    });
+}
+
+/// #10630: a SECOND GRE endpoint (id 825) on gr-0/0/0.1 (logical ifindex
+/// 78) sharing endpoint 824's outer transport, so a retarget can move a
+/// flow from one tunnel to another without touching the underlay.
+fn push_second_gre_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnapshot) {
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "gr-0/0/0.1".into(),
+        zone: "wan".into(),
+        linux_name: "gr-0-0-1".into(),
+        ifindex: 78,
+        tunnel: true,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.255.0.5/30".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot
+        .tunnel_endpoints
+        .push(crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: 825,
+            interface: "gr-0/0/0.1".into(),
+            linux_name: "gr-0-0-1".into(),
+            ifindex: 78,
+            zone: "wan".into(),
+            mode: "gre".into(),
+            outer_family: "inet".into(),
+            source: "172.16.80.8".into(),
+            destination: "203.0.113.9".into(),
+            key: 1,
+            transport_table: "inet.0".into(),
+            ttl: 64,
+            ..Default::default()
+        });
+}
+
+/// #10630 steady state: live PBR steers tcp/5201 into blue, and blue.inet.0
+/// routes the flow destination via tunnel 824 — a state the miss path could
+/// have installed (unlike the empty-blue fixture, whose table cannot
+/// reproduce its tunneled decision).
+fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![pbr_term("pbr-route", "5201", "accept")],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "blue0".into(),
+        zone: "lan".into(),
+        routing_instance: "blue".into(),
+        linux_name: "blue0".into(),
+        ifindex: 101,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.250.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    push_gre_underlay_10630(&mut snapshot);
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "blue.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hops: vec!["@gr-0/0/0.0".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+/// #10630 retarget target: live PBR steers tcp/5201 into green, and
+/// green.inet.0 routes the flow destination NATIVELY via the WAN gateway —
+/// the Accept->Accept move a stale tunneled blue decision must follow.
+fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
+    let mut term = pbr_term("pbr-route", "5201", "accept");
+    term.routing_instance = "green".into();
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![term],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "green0".into(),
+        zone: "lan".into(),
+        routing_instance: "green".into(),
+        linux_name: "green0".into(),
+        ifindex: 102,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.251.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: 12,
+        family: "inet".into(),
+        ip: "172.16.80.1".into(),
+        mac: "00:11:22:33:44:55".into(),
+        state: "reachable".into(),
+        router: true,
+        link_local: false,
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+/// #10630 tunnel-to-tunnel retarget target: live PBR steers tcp/5201 into
+/// green, and green.inet.0 routes the flow destination via tunnel 825.
+fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
+    let mut term = pbr_term("pbr-route", "5201", "accept");
+    term.routing_instance = "green".into();
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![term],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "green0".into(),
+        zone: "lan".into(),
+        routing_instance: "green".into(),
+        linux_name: "green0".into(),
+        ifindex: 102,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.251.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    push_gre_underlay_10630(&mut snapshot);
+    push_second_gre_10630(&mut snapshot);
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hops: vec!["@gr-0/0/0.1".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+/// #10630 (migrated #10605 pin): a STEADY-STATE tunneled PBR steer stays
+/// pinned — the live table still resolves the destination via the stored
+/// tunnel endpoint, so the hit produces no route-transition result.
+///
+/// Migration note: the #10605 pin used the empty-blue fixture, whose table
+/// CANNOT reproduce its tunneled decision — under #10630 semantics that
+/// state is a route deletion and MUST revoke (pinned by
+/// `a_tunneled_pbr_steer_whose_table_lost_its_route_revokes_10630`), so the
+/// pin moved to this truthful steady-state fixture. Green on both sides of
+/// the fix by design: it guards the #10605 second-packet blackhole, not the
+/// #10630 retarget.
 #[test]
-fn a_tunneled_pbr_steer_wants_zero_identity_on_hit_10605() {
-    let forwarding = forwarding_with_empty_blue_pbr();
+fn a_steady_state_tunneled_pbr_steer_stays_pinned_10630() {
+    let forwarding = forwarding_with_blue_pbr_tunnel_10630();
     let flow = v4_flow(5201);
     let sessions = table_with_session(&flow, 7, None);
     let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    // Fixture liveness: the blue table really resolves this destination via
+    // tunnel 824 as a ForwardCandidate — without this the None below could
+    // pass on a dead-underlay NoRoute that merely carries the same id.
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        &forwarding,
+        &neighbors,
+        flow.dst_ip,
+        Some("blue.inet.0"),
+    );
+    assert_eq!(
+        fresh.tunnel_endpoint_id, 824,
+        "fixture liveness: blue.inet.0 must resolve the flow via tunnel 824"
+    );
+    assert_eq!(
+        fresh.disposition,
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        "fixture liveness: the steady-state tunnel resolution must be live"
+    );
     let mut tunneled = decision();
-    tunneled.resolution.tunnel_endpoint_id = 1;
+    tunneled.resolution.tunnel_endpoint_id = 824;
+    // #10793: the stored miss-time egress is the tunnel netdev (gr-0/0/0.0 = 77),
+    // not the native WAN ifindex — the egress-identity check needs truth here.
+    tunneled.resolution.egress_ifindex = 77;
 
     assert!(
         revalidate_static_pbr_route_on_session_hit(
@@ -1892,9 +2150,365 @@ fn a_tunneled_pbr_steer_wants_zero_identity_on_hit_10605() {
             tunneled,
         )
         .is_none(),
-        "a tunneled decision must produce NO route-transition result: the PBR \
-         term's identity is not its table identity (the miss stamped (0,0))"
+        "a tunneled decision whose live table still resolves the same tunnel \
+         endpoint must produce NO route-transition result"
     );
+}
+/// #10630: a tunneled PBR steer whose table LOST its route revokes — the
+/// live blue table no longer resolves the destination at all, so the stored
+/// tunnel-824 decision is stale and the hit must produce a route-transition
+/// result carrying the fresh NoRoute.
+///
+/// Fail-on-revert: the #10605 exemption forces desired=(0,0)==installed for
+/// tunneled decisions, so this `.expect` reds without the fix.
+#[test]
+fn a_tunneled_pbr_steer_whose_table_lost_its_route_revokes_10630() {
+    let forwarding = forwarding_with_empty_blue_pbr();
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    // Fixture liveness: blue.inet.0 really has no route to the destination —
+    // without this the revoke below could pass on a misbuilt fixture.
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        &forwarding,
+        &neighbors,
+        flow.dst_ip,
+        Some("blue.inet.0"),
+    );
+    assert_eq!(
+        fresh.disposition,
+        ForwardingDisposition::NoRoute,
+        "fixture liveness: blue.inet.0 must have no route to the flow destination"
+    );
+    let mut tunneled = decision();
+    tunneled.resolution.tunnel_endpoint_id = 824;
+    // #10793: the stored miss-time egress is the tunnel netdev (gr-0/0/0.0 = 77),
+    // not the native WAN ifindex — the egress-identity check needs truth here.
+    tunneled.resolution.egress_ifindex = 77;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        tunneled,
+    )
+    .expect("a tunneled steer whose table lost its route must revoke");
+    assert_eq!(route.canonical_key, flow.forward_key);
+    assert_eq!(route.revoked_key.as_ref(), Some(&flow.forward_key));
+    assert_eq!(
+        route.resolution.disposition,
+        ForwardingDisposition::NoRoute,
+        "the revocation must carry the fresh NoRoute, not the stale tunnel"
+    );
+}
+
+/// #10630: the core Accept->Accept retarget — live PBR now steers tcp/5201
+/// into green, and green.inet.0 routes the destination NATIVELY, so the
+/// stored tunnel-824 blue decision must revoke onto the native resolution.
+///
+/// Fail-on-revert: both steers are Accept, so the ordinary evaluator offers
+/// no backstop and the #10605 (0,0) exemption pins the stale tunnel.
+#[test]
+fn a_tunneled_pbr_steer_retargeted_to_native_revokes_10630() {
+    let forwarding = forwarding_with_green_pbr_native_10630();
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    // Fixture liveness: green.inet.0 really resolves this destination
+    // natively as a ForwardCandidate — without this the id-0 assert below
+    // could pass on a dead fixture rather than a genuine retarget.
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        &forwarding,
+        &neighbors,
+        flow.dst_ip,
+        Some("green.inet.0"),
+    );
+    assert_eq!(
+        fresh.tunnel_endpoint_id, 0,
+        "fixture liveness: green.inet.0 must resolve the flow natively"
+    );
+    assert_eq!(
+        fresh.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "fixture liveness: the retargeted native resolution must be live"
+    );
+    let mut tunneled = decision();
+    tunneled.resolution.tunnel_endpoint_id = 824;
+    // #10793: the stored miss-time egress is the tunnel netdev (gr-0/0/0.0 = 77),
+    // not the native WAN ifindex — the egress-identity check needs truth here.
+    tunneled.resolution.egress_ifindex = 77;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        tunneled,
+    )
+    .expect("a tunnel->native Accept->Accept retarget must revoke");
+    assert_eq!(route.canonical_key, flow.forward_key);
+    assert_eq!(route.revoked_key.as_ref(), Some(&flow.forward_key));
+    assert_eq!(
+        route.resolution.tunnel_endpoint_id, 0,
+        "the revocation must carry the fresh native resolution, not tunnel 824"
+    );
+    assert_eq!(
+        route.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the revocation must carry the live native disposition"
+    );
+}
+
+/// #10630: tunnel-to-tunnel Accept->Accept retarget — live PBR steers
+/// tcp/5201 into green and green.inet.0 routes via tunnel 825, so the
+/// stored tunnel-824 decision must revoke onto endpoint 825.
+///
+/// Fail-on-revert: same (0,0)==(0,0) pin as the native retarget — the
+/// exemption cannot tell same-tunnel from different-tunnel.
+#[test]
+fn a_tunneled_pbr_steer_retargeted_to_a_different_tunnel_revokes_10630() {
+    let forwarding = forwarding_with_green_pbr_tunnel_10630();
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    // Fixture liveness: green.inet.0 really resolves this destination via
+    // tunnel 825 as a ForwardCandidate.
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        &forwarding,
+        &neighbors,
+        flow.dst_ip,
+        Some("green.inet.0"),
+    );
+    assert_eq!(
+        fresh.tunnel_endpoint_id, 825,
+        "fixture liveness: green.inet.0 must resolve the flow via tunnel 825"
+    );
+    assert_eq!(
+        fresh.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "fixture liveness: the retargeted tunnel resolution must be live"
+    );
+    let mut tunneled = decision();
+    tunneled.resolution.tunnel_endpoint_id = 824;
+    // #10793: the stored miss-time egress is the tunnel netdev (gr-0/0/0.0 = 77),
+    // not the native WAN ifindex — the egress-identity check needs truth here.
+    tunneled.resolution.egress_ifindex = 77;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        tunneled,
+    )
+    .expect("a tunnel-824->tunnel-825 retarget must revoke");
+    assert_eq!(route.canonical_key, flow.forward_key);
+    assert_eq!(route.revoked_key.as_ref(), Some(&flow.forward_key));
+    assert_eq!(
+        route.resolution.tunnel_endpoint_id, 825,
+        "the revocation must carry tunnel 825, not the stale 824"
+    );
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        "carrying the live 825 disposition (mirrors the native cell)"
+    );
+}
+
+/// #10630: PBR-term removal under a tunneled flow revokes — with no PBR
+/// term the hit falls back to the native (MAIN) table, which resolves
+/// nothing like the stored tunnel-824 decision. There is deliberately no
+/// identity fast-path for this: installed (0,0) equals desired (0,0), and
+/// pinning on that equality is exactly the #10605-exemption staleness.
+///
+/// Fail-on-revert: (0,0)==(0,0)->None under the exemption.
+#[test]
+fn a_tunneled_pbr_steer_whose_pbr_term_was_removed_revokes_10630() {
+    let mut snap = policy_deny_snapshot();
+    // Resolve the egress neighbor so MAIN yields a live ForwardCandidate —
+    // a MissingNeighbor would still revoke, but for a less exact reason.
+    snap.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: 12,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snap);
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    // Fixture liveness: MAIN really resolves this destination natively (id
+    // 0) — without this the revoke below could pass on a MAIN NoRoute that
+    // merely differs from 824 for the wrong reason.
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        &forwarding,
+        &neighbors,
+        flow.dst_ip,
+        None,
+    );
+    assert_eq!(
+        fresh.tunnel_endpoint_id, 0,
+        "fixture liveness: MAIN must resolve the flow natively, not via a tunnel"
+    );
+    assert_eq!(
+        fresh.disposition,
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        "fixture liveness: MAIN must resolve FORWARDABLE — an id-0 NoRoute \
+         would revoke for the wrong reason (route loss, not term removal)"
+    );
+    let mut tunneled = decision();
+    tunneled.resolution.tunnel_endpoint_id = 824;
+    // #10793: the stored miss-time egress is the tunnel netdev (gr-0/0/0.0 = 77),
+    // not the native WAN ifindex — the egress-identity check needs truth here.
+    tunneled.resolution.egress_ifindex = 77;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        tunneled,
+    )
+    .expect("removing the PBR term under a tunneled flow must revoke");
+    assert_eq!(route.canonical_key, flow.forward_key);
+    assert_eq!(route.revoked_key.as_ref(), Some(&flow.forward_key));
+    assert_eq!(
+        route.resolution.tunnel_endpoint_id, 0,
+        "the revocation must carry the fresh MAIN-native resolution"
+    );
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        "carrying the forwardable MAIN disposition, not a NoRoute"
+    );
+}
+
+/// #10630: a tunneled flow whose native fallback is UNRESOLVABLE revokes
+/// fail-closed. No PBR term matches (native fallback), and the flow's
+/// routing domain names no install table — the terminal state, not MAIN —
+/// so the hit carries a NoRoute without consulting the tunnel table at
+/// all. The #10312 native-RI comment demands this parity with the miss
+/// path; this cell pins the tunneled half of it.
+#[test]
+fn a_tunneled_steer_with_unresolvable_native_fallback_revokes_10630() {
+    let forwarding = build_forwarding_state(&policy_deny_snapshot());
+    let mut flow = v4_flow(5201);
+    // Domain 99 names no install table row: the native fallback is
+    // unresolvable by construction, not by accident of fixture routes.
+    flow.forward_key.routing_domain = 99;
+    assert!(
+        !forwarding.install_tables.contains_key(&99),
+        "fixture premise: domain 99 must have no install table"
+    );
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let mut tunneled = decision();
+    tunneled.resolution.tunnel_endpoint_id = 824;
+    tunneled.resolution.egress_ifindex = 77;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        tunneled,
+    )
+    .expect("an unresolvable native fallback under a tunneled flow must revoke");
+    assert_eq!(route.canonical_key, flow.forward_key);
+    assert_eq!(route.revoked_key.as_ref(), Some(&flow.forward_key));
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute,
+        "the revocation must carry the terminal NoRoute, never a tunnel pin"
+    );
+    assert_eq!(
+        route.resolution.tunnel_endpoint_id, 0,
+        "with no tunnel identity surviving the terminal fallback"
+    );
+}
+
+/// #10630: the `tunneled_hit_stays_pinned` truth table, pinned directly —
+/// the endpoint id is the egress identity, and the fresh disposition must
+/// be forwardable (a dead-underlay NoRoute still carries the endpoint id,
+/// so the id alone cannot pin).
+#[test]
+fn tunneled_hit_stays_pinned_truth_table_10630() {
+    use ForwardingDisposition::*;
+    let res = |id: u16, disposition: ForwardingDisposition, egress: i32| ForwardingResolution {
+        disposition,
+        local_ifindex: 0,
+        egress_ifindex: egress,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: id,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    };
+    // Steady egress is the tunnel netdev on both sides (77); rows that vary
+    // it pin the #10793 egress-identity arm.
+    let cases = [
+        // (stored, fresh, pinned, why)
+        (res(824, ForwardCandidate, 77), res(824, ForwardCandidate, 77), true, "steady state pins"),
+        (res(824, ForwardCandidate, 77), res(824, MissingNeighbor, 77), true, "transient outer ARP/NDP pins"),
+        (res(824, MissingNeighbor, 77), res(824, ForwardCandidate, 77), true, "ARP resolution heals without teardown"),
+        (res(824, MissingNeighbor, 77), res(824, MissingNeighbor, 77), true, "unresolved outer still pins"),
+        (res(824, LocalDelivery, 77), res(824, LocalDelivery, 77), true, "symmetric served-local pins"),
+        // The REAL served-local shape: fresh local arms hard-stamp id 0, so
+        // a same-id-only row would be green-but-vacuous. Local pins local
+        // regardless of id — the id is meaningless on a LocalDelivery.
+        (res(824, LocalDelivery, 77), res(0, LocalDelivery, 12), true, "served-local pins across the id-0 fresh stamp"),
+        (res(824, ForwardCandidate, 77), res(824, LocalDelivery, 77), false, "asymmetric local must not pin"),
+        (res(824, LocalDelivery, 77), res(824, ForwardCandidate, 77), false, "asymmetric local must not pin"),
+        (res(824, ForwardCandidate, 77), res(824, NoRoute, 77), false, "dead underlay carries the id but must revoke"),
+        // Healing is the one stored-NoRoute shape that pins: the underlay is
+        // live again and the hit path re-resolves the outer per packet, so
+        // tearing down would churn for no behavior gain (native parity).
+        (res(824, NoRoute, 77), res(824, ForwardCandidate, 77), true, "dead-underlay healing pins without teardown"),
+        (res(824, NoRoute, 77), res(824, NoRoute, 77), false, "a still-dead underlay keeps revoking"),
+        (res(824, ForwardCandidate, 77), res(825, ForwardCandidate, 78), false, "tunnel retarget revokes"),
+        (res(824, ForwardCandidate, 77), res(0, ForwardCandidate, 12), false, "tunnel->native revokes"),
+        (res(824, ForwardCandidate, 77), res(0, NoRoute, 0), false, "route loss revokes"),
+        // #10793: same id, re-homed egress — a temporally re-owned id, not a
+        // steady state. Either side unnamed (0) skips the check (#1873 arm).
+        (res(824, ForwardCandidate, 77), res(824, ForwardCandidate, 79), false, "same-id re-homing revokes"),
+        (res(824, ForwardCandidate, 77), res(824, ForwardCandidate, 0), true, "unnamed fresh egress skips the check"),
+        (res(824, ForwardCandidate, 0), res(824, ForwardCandidate, 77), true, "unnamed stored egress skips the check"),
+        // Default-revoke: unlisted fresh dispositions fail closed.
+        (res(824, ForwardCandidate, 77), res(0, DiscardRoute, 0), false, "fresh DiscardRoute revokes"),
+        (res(824, ForwardCandidate, 77), res(0, HAInactive, 0), false, "fresh HAInactive revokes"),
+        (res(824, ForwardCandidate, 77), res(0, TableUnavailable, 0), false, "fresh TableUnavailable revokes"),
+        (res(824, ForwardCandidate, 77), res(0, FabricRedirect, 0), false, "fresh FabricRedirect revokes"),
+    ];
+    for (stored, fresh, pinned, why) in cases {
+        assert_eq!(tunneled_hit_stays_pinned(stored, fresh), pinned, "{why}");
+    }
 }
 
 /// #10605 control: the SAME stale PBR steer with an UNTUNNELED decision still
