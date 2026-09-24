@@ -117,7 +117,9 @@ func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlRes
 // PolicyDeleteResult records helper outcomes for one policy READ capture.
 // Stale rows are successful conditional no-ops; partial companion outcomes
 // remove the forward row but retain a replacement companion and therefore
-// remain visible to the caller.
+// remain visible to the caller. Refused-identity outcomes remove nothing
+// while the revoked forward is still live, so they surface as a gap error
+// instead of a count (#10650).
 type PolicyDeleteResult struct {
 	Applied int
 	Stale   int
@@ -162,6 +164,7 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 	m.mu.Unlock()
 	deadline := time.Now().Add(policyDeleteDeadline)
 	var firstErr error
+	refused := 0
 	confirmed := 0
 	consecutiveSemantic := 0
 	for start := 0; start < len(matches); {
@@ -266,12 +269,18 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 			switch outcome {
 			case "applied":
 				result.Applied++
-			case "stale_forward", "refused_identity":
-				// Nothing removed; the live state differs from the capture.
-				// Refused (capture stale about the companion) and stale
-				// (forward gone or replaced) both mean "no-op, session live
-				// under a different incarnation".
+			case "stale_forward":
+				// Forward gone or replaced: benign conditional no-op.
 				result.Stale++
+			case "refused_identity":
+				// Same-incarnation refusal (#10650): the captured forward IS
+				// the live entry, but an unnamed companion exists (reply
+				// installed between the capture READ and the delete batch),
+				// so the helper removed NOTHING. The revoked forward
+				// survived — a surfaced persistent gap (#5578), never silent
+				// success. Unlike stale ("already gone"), refused means
+				// "still forwarding": counted separately, gapped loud below.
+				refused++
 			case "partial_companion":
 				result.Applied++
 				result.Partial++
@@ -288,6 +297,11 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 	}
 	if firstErr != nil {
 		return result, policyDeleteGapError(firstErr, result, confirmed, len(matches))
+	}
+	if refused != 0 {
+		return result, policyDeleteGapError(
+			fmt.Errorf("%d refused identity outcome(s): revoked forward survived (companion mismatch)", refused),
+			result, confirmed, len(matches))
 	}
 	if result.Partial != 0 {
 		return result, fmt.Errorf(

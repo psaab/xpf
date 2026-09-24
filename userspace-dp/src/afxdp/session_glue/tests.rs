@@ -13916,6 +13916,103 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
     }
 }
 
+/// #10650: an unexpected LIVE companion refuses BEFORE any removal — the
+/// captured forward is the live same-incarnation entry but the capture named
+/// no companion (reply installed between the capture READ and the delete
+/// batch), so the revoked forward SURVIVES and the item reports refused, not
+/// applied or partial. Worker half of the envelope; Go must surface the
+/// resulting `refused_identity` outcome as a gap error, never stale success
+/// (pinned in `policy_delete_refused_10650_test.go`).
+#[test]
+fn policy_remove_unexpected_live_companion_refuses_before_removal_10650() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let forward_id = sessions.session_id_for(&key);
+    assert_ne!(forward_id, 0, "fixture must mint a live identity");
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut companion_metadata = test_metadata();
+    companion_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        companion_metadata,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let live_companion_id = sessions.session_id_for(&companion);
+    assert_ne!(live_companion_id, 0, "fixture must mint a live companion");
+    // The capture named no companion (None, 0) — the reply landed after READ.
+    let item = crate::afxdp::PolicyDeleteItem {
+        key: key.clone(),
+        session_id: forward_id,
+        forward_only: false,
+        companion_session_id: 0,
+        captured_companion: None,
+    };
+    let mut report = crate::afxdp::PolicyDeleteBatchReport {
+        cancelled: false,
+        partial: vec![false],
+        refused: vec![false],
+    };
+    let map = SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD);
+    let mut deleted_keys = Vec::new();
+    let mut deferred = Vec::new();
+    clear_session_map_writes();
+    let removed = super::commands::handle_remove_policy_item(
+        &mut sessions,
+        map,
+        &ForwardingState::default(),
+        &BTreeMap::new(),
+        &item,
+        &mut report,
+        0,
+        now_ns,
+        now_ns / 1_000_000_000,
+        &mut deleted_keys,
+        0,
+        &mut deferred,
+    );
+    assert!(
+        session_map_writes().is_empty(),
+        "a refused item must issue no BPF"
+    );
+    assert!(!removed, "unexpected live companion must refuse, not remove");
+    assert!(report.refused[0], "refusal must set the refused flag");
+    assert!(
+        !report.partial[0],
+        "refusal is not partial: nothing was removed"
+    );
+    assert!(
+        deferred.is_empty(),
+        "a refused item must collect no intents, got {deferred:?}"
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        forward_id,
+        "revoked forward must SURVIVE the refusal"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        live_companion_id,
+        "unexpected companion must survive untouched"
+    );
+}
+
 /// #10512 advisory-25: the batch arm stashes redirect-delete intents into
 /// the shared handoff INSIDE the abort fence and issues NO BPF itself —
 /// phase 2 is coordinator-owned. What this pins through the real
