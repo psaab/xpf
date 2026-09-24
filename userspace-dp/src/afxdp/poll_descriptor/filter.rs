@@ -435,6 +435,37 @@ pub(super) struct SessionHitPbrRouteRevalidation {
     pub(super) resolution: ForwardingResolution,
 }
 
+/// #10630: the steady-state pin predicate for a TUNNELED stored decision.
+///
+/// The miss path stamps every tunnel-egress outcome `(0,0)` by rule
+/// (`install_table_stamp_for_miss`), so the install stamp carries no PBR
+/// identity and the `(domain, check)` comparison cannot tell "same steer"
+/// from "retargeted steer". The tunnel endpoint is the egress identity
+/// instead: the hit stays pinned iff the live table still delivers the SAME
+/// endpoint through a LIVE outer. A dead-underlay `NoRoute` still carries
+/// the endpoint id (the tunnel resolver maps the outer disposition onto the
+/// endpoint), so the id alone cannot pin — the fresh disposition must be
+/// forwardable. `MissingNeighbor` pins (transient outer ARP/NDP; the
+/// non-tunneled path likewise never revokes on neighbor state), as does a
+/// symmetric served-local outcome (the `LocalDelivery`+tunnel-id shape the
+/// miss stamp matrix pins). Either direction of a local<->forward transition
+/// revokes (different egress behavior, not a steady state). Pure so the matrix
+/// is unit-testable.
+fn tunneled_hit_stays_pinned(
+    stored: ForwardingResolution,
+    fresh: ForwardingResolution,
+) -> bool {
+    fresh.tunnel_endpoint_id == stored.tunnel_endpoint_id
+        && ((matches!(
+            fresh.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        ) && matches!(
+            stored.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        )) || (fresh.disposition == ForwardingDisposition::LocalDelivery
+            && stored.disposition == ForwardingDisposition::LocalDelivery))
+}
+
 pub(super) fn revalidate_static_pbr_route_on_session_hit(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -573,23 +604,46 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                 }
             }
         };
-    // #10605: tunnel-egress decisions are endpoint-pinned and table-free — the
-    // miss path stamps them (0,0) by rule (`install_table_stamp_for_miss`),
-    // not by absence of a PBR term. Re-deriving the PBR term's identity here
-    // would mismatch the installed (0,0) on EVERY first hit (install leaves
-    // the stamp UNVALIDATED, so the second packet always revalidates) and
-    // revoke every PBR-steered tunnel flow on its second packet. Mirror the
-    // miss rule: a tunneled decision wants (0,0), unresolvable or not (the
-    // tunnel never consulted the table, so there is no table identity to go
-    // stale — exactly the miss arm's `else (0,0)`). #10630: this also suppresses
-    // revocation on genuine post-commit PBR retargets for tunnels — accepted
-    // staleness until the PBR identity is stamped alongside the table stamp.
-    let (desired_identity, table, native_unresolvable) =
-        if decision.resolution.tunnel_endpoint_id != 0 {
-            ((0, 0), None, false)
-        } else {
-            (desired_identity, table, native_unresolvable)
-        };
+    // #10630: a TUNNELED stored decision is endpoint-pinned and table-free —
+    // the miss path stamped it (0,0) by rule (`install_table_stamp_for_miss`),
+    // so the install stamp carries no PBR identity to compare. Re-deriving
+    // the PBR term's identity would mismatch that (0,0) on EVERY first hit
+    // (install leaves the stamp UNVALIDATED, so the second packet always
+    // revalidates) and revoke every PBR-steered tunnel flow on its second
+    // packet — the #10605 blackhole. But forcing desired=(0,0) (the #10605
+    // exemption this replaces) suppresses revocation on genuine post-commit
+    // PBR retargets too: (0,0)==(0,0)->None, and the ordinary evaluator
+    // returns None for PBR Accept, so the stale tunnel persists until session
+    // churn. Compare the FRESH tunnel resolution instead: re-resolve the
+    // target in the desired table and revoke unless the live table still
+    // delivers the same endpoint. There is deliberately NO identity fast-path
+    // here — desired (0,0) (PBR removed) equaling installed (0,0) must NOT
+    // pin, because MAIN may resolve nothing like the stored tunnel.
+    if decision.resolution.tunnel_endpoint_id != 0 {
+        let target = crate::afxdp::session_glue::resolution_target_for_session(flow, decision);
+        if native_unresolvable {
+            return Some(SessionHitPbrRouteRevalidation {
+                revoked_key: (!no_local_entry).then_some(canonical_key.clone()),
+                canonical_key,
+                resolution: crate::afxdp::forwarding::no_route_resolution(Some(target)),
+            });
+        }
+        let fresh =
+            crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target,
+                table.as_deref(),
+            );
+        if tunneled_hit_stays_pinned(decision.resolution, fresh) {
+            return None;
+        }
+        return Some(SessionHitPbrRouteRevalidation {
+            revoked_key: (!no_local_entry).then_some(canonical_key.clone()),
+            canonical_key,
+            resolution: fresh,
+        });
+    }
     let target = crate::afxdp::session_glue::resolution_target_for_session(flow, decision);
     if native_unresolvable {
         return Some(SessionHitPbrRouteRevalidation {
