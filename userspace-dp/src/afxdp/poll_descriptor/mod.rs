@@ -1644,25 +1644,44 @@ pub(super) fn poll_binding_process_descriptor(
                         // and revokes only from the session's own admitting
                         // interface (#9384). Either way the revocation takes the
                         // one teardown below.
-                        // #9949: SessionKey deliberately remains typeless for
+                        // #9949/#10637: SessionKey deliberately remains typeless for
                         // ICMP, so an OWNER hit can carry a cached PERMIT from
                         // one type to another. Recheck the packet type only
-                        // when the policy says that type can affect a PERMIT.
-                        // FOREIGN and fabric paths keep their existing
-                        // authority/revalidation semantics below.
-                        if foreign_arrival_zone.is_none()
-                            && matches!(
-                                owner_hit_icmp_verdict(
-                                    worker_ctx.forwarding,
-                                    &resolved.metadata,
-                                    resolved.decision,
-                                    flow,
-                                    meta,
-                                    packet_frame,
-                                    packet_fabric_ingress,
-                                ),
-                                Some(OwnerHitIcmpVerdict::Drop)
+                        // when the policy says that type can affect a PERMIT:
+                        // forward packets face forward policy, reverse answers
+                        // coast as return traffic, and reverse non-answers face
+                        // reverse policy. FOREIGN and fabric paths keep their
+                        // existing authority/revalidation semantics below.
+                        // #10637/#10507: a FORWARD denial drops here, exactly as
+                        // #9949 did — but a REVERSE denial must NOT skip the
+                        // re-derivation below. A stale reverse hit carries a
+                        // pair-fail-closed duty (recorded forward + type-armed,
+                        // #10507): dropping before revalidation would leave a
+                        // condemned pair alive, converting a teardown into a
+                        // per-packet drop. The reverse denial is therefore
+                        // recorded and enforced AFTER the revocation block, so
+                        // a due revocation still takes the one teardown.
+                        let owner_icmp_verdict = if foreign_arrival_zone.is_none() {
+                            owner_hit_icmp_verdict(
+                                worker_ctx.forwarding,
+                                &resolved.metadata,
+                                resolved.decision,
+                                flow,
+                                meta,
+                                packet_frame,
+                                packet_fabric_ingress,
                             )
+                        } else {
+                            None
+                        };
+                        // `is_reverse` disambiguates the arm: the verdict is
+                        // only `Some` for a forward hit or a reverse
+                        // non-answer hit, never both at once.
+                        let reverse_icmp_denied =
+                            matches!(owner_icmp_verdict, Some(OwnerHitIcmpVerdict::Drop))
+                                && resolved.metadata.is_reverse;
+                        if matches!(owner_icmp_verdict, Some(OwnerHitIcmpVerdict::Drop))
+                            && !reverse_icmp_denied
                         {
                             telemetry.dbg.policy_deny += 1;
                             binding.scratch.scratch_recycle.push(desc.addr);
@@ -1774,6 +1793,16 @@ pub(super) fn poll_binding_process_descriptor(
                                 .live
                                 .policy_revoked_sessions
                                 .fetch_add(1, Ordering::Relaxed);
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        // #10637: the deferred reverse type-denial. Reaching here
+                        // proves no revocation was due (a due one continued
+                        // above), so the condemned-pair duty and the per-packet
+                        // denial never double-count: exactly one terminal
+                        // reason per packet.
+                        if reverse_icmp_denied {
+                            telemetry.dbg.policy_deny += 1;
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
