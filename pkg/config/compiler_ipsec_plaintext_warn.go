@@ -17,7 +17,8 @@ import ()
 // nft/NFQUEUE divert captures INPUT+FORWARD ahead of policy and terminally
 // drops them (#10517). Only a divert-absent window without the quarantine
 // guard can expose INPUT to the local input path without tunnel-zone policy,
-// session, NAT or screen.
+// session, NAT or screen. Who owns closing it: #9506 (route-based VPN
+// decrypted-ingress adjudication).
 //
 // Why a warning and not a rejection. Route-based (st0/XFRM) IPsec is the ONLY
 // IPsec model xpf supports — policy-based `then permit tunnel` is hard-rejected

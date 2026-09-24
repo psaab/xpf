@@ -2085,6 +2085,14 @@ fn apply_path_persistent_snat_key(
 
 #[test]
 fn apply_snapshot_same_plan_preserves_persistent_snat_lease_state() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     // #7413: this test brings a coordinator up and therefore spawns a
     // `neigh-monitor` thread, which the #6637 leak gates count PROCESS-WIDE.
     // It is the one spawner outside `coordinator/tests.rs`, which is why the

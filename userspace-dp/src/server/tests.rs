@@ -2457,6 +2457,14 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
 /// gen 2. Every assertion below flips.
 #[test]
 fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
 
     // Prior snapshot deferred workers -> previous_defer_workers=true makes
@@ -2627,6 +2635,14 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
 /// all flip as ASSERTION failures.
 #[test]
 fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
 
     // Prior snapshot: one binding interface (ge-0/0/1, ifindex 11). NOT
@@ -2792,6 +2808,14 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
 /// Assertions (a)/(b)/(c)/(d) all flip as ASSERTION failures.
 #[test]
 fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
 
     // Prior snapshot: one binding interface (ge-0/0/1, ifindex 11). Its only

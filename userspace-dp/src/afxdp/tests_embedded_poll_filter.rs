@@ -1770,7 +1770,20 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         domain,
     );
     permit_wan_to_lan_flowless_icmp(&mut snapshot);
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    // #10668: the routing instance needs an install-table row, or the flow
+    // drops as Unresolvable before either ICMP arm runs (dark guards).
+    // MAIN tables: resolution behaves as the default instance, domain-stamped.
+    if domain != 0 {
+        forwarding.install_tables.insert(
+            domain,
+            crate::afxdp::types::InstallTables {
+                v4: Some("inet.0".to_string()),
+                v6: Some("inet6.0".to_string()),
+                h2: 1,
+            },
+        );
+    }
     assert_eq!(
         crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 12, 0, None),
         domain,
@@ -1819,10 +1832,21 @@ fn n9162_run_v6_to_v4(domain: u32) -> N9162Outcome {
         PROTO_TCP, TEST_LAN_MAC
     );
 
-    let forwarding = build_forwarding_state(&n9162_nat64_snapshot_in_domain(
+    let mut forwarding = build_forwarding_state(&n9162_nat64_snapshot_in_domain(
         lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"),
         domain,
     ));
+    // #10668: install-table row for the instance (see the v4_to_v6 driver).
+    if domain != 0 {
+        forwarding.install_tables.insert(
+            domain,
+            crate::afxdp::types::InstallTables {
+                v4: Some("inet.0".to_string()),
+                v6: Some("inet6.0".to_string()),
+                h2: 1,
+            },
+        );
+    }
     assert_eq!(
         crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 24, 0, None),
         domain,
@@ -2595,7 +2619,16 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_in_routing_instance_9162() 
     let icmp_csum = checksum16(&frame[34..]);
     frame[36..38].copy_from_slice(&icmp_csum.to_be_bytes());
 
-    let forwarding = build_forwarding_state(&n9162_snat_snapshot_in_domain(7));
+    let mut forwarding = build_forwarding_state(&n9162_snat_snapshot_in_domain(7));
+    // #10668: install-table row for instance 7 (see the nat64 drivers).
+    forwarding.install_tables.insert(
+        7,
+        crate::afxdp::types::InstallTables {
+            v4: Some("inet.0".to_string()),
+            v6: Some("inet6.0".to_string()),
+            h2: 1,
+        },
+    );
     assert_eq!(
         crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 24, 0, None),
         7,
@@ -2673,7 +2706,16 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     let icmp6_csum = checksum16_ipv6(client_v6, server_v6, PROTO_ICMPV6, &frame[l4..]);
     frame[l4 + 2..l4 + 4].copy_from_slice(&icmp6_csum.to_be_bytes());
 
-    let forwarding = build_forwarding_state(&n9162_snat_snapshot_in_domain(7));
+    let mut forwarding = build_forwarding_state(&n9162_snat_snapshot_in_domain(7));
+    // #10668: install-table row for instance 7 (see the nat64 drivers).
+    forwarding.install_tables.insert(
+        7,
+        crate::afxdp::types::InstallTables {
+            v4: Some("inet.0".to_string()),
+            v6: Some("inet6.0".to_string()),
+            h2: 1,
+        },
+    );
     assert_eq!(
         crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 24, 0, None),
         7,

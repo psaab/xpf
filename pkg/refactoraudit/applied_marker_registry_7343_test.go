@@ -101,10 +101,12 @@ var markerFiles7343 = map[string]markerFile{
 	},
 	"pkg/dataplane/userspace/manager_overlay.go": {
 		Driver: "statusLoop", DriverPkg: "pkg/dataplane/userspace",
-		Why: "early return: the publish error returns above the stamp",
+		Why: "early return at both publish sites: the route-overlay publish and #10485's " +
+			"RepublishCurrentCaptureAuthority rollback-heal return the publish error above " +
+			"the stamp",
 		Stmts: []markerStmt{
-			{`m.publishedPlanKey = snapshotBindingPlanKey(&next)`, 1},
-			{`m.publishedSnapshot = next.Generation`, 1},
+			{`m.publishedPlanKey = snapshotBindingPlanKey(&next)`, 2},
+			{`m.publishedSnapshot = next.Generation`, 2},
 		},
 	},
 	"pkg/dataplane/userspace/manager_worker_arm_5134.go": {

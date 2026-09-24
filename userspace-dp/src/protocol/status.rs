@@ -20,6 +20,9 @@ use super::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ProcessStatus {
+    // #10647: every field carries `default` so a legacy `{}` payload decodes
+    // (additive wire evolution). `pid` never had one; the roundtrip cell pins it.
+    #[serde(default)]
     pub pid: i32,
     #[serde(rename = "config_snapshot_protocol_version", default)]
     pub config_snapshot_protocol_version: i32,
@@ -64,18 +67,19 @@ pub(crate) struct ProcessStatus {
     pub linked_zstd_version: String,
     #[serde(rename = "build_host_libbpf_version", default)]
     pub build_host_libbpf_version: String,
-    #[serde(rename = "started_at")]
+    #[serde(rename = "started_at", default)]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "control_socket")]
+    #[serde(rename = "control_socket", default)]
     pub control_socket: String,
-    #[serde(rename = "state_file")]
+    #[serde(rename = "state_file", default)]
     pub state_file: String,
+    #[serde(default)]
     pub workers: usize,
-    #[serde(rename = "ring_entries")]
+    #[serde(rename = "ring_entries", default)]
     pub ring_entries: usize,
-    #[serde(rename = "helper_mode")]
+    #[serde(rename = "helper_mode", default)]
     pub helper_mode: String,
-    #[serde(rename = "io_uring_planned")]
+    #[serde(rename = "io_uring_planned", default)]
     pub io_uring_planned: bool,
     #[serde(rename = "io_uring_active", default)]
     pub io_uring_active: bool,
@@ -96,7 +100,7 @@ pub(crate) struct ProcessStatus {
     /// same value both sides → unsound).
     #[serde(rename = "ha_session_refresh_supported", default)]
     pub ha_session_refresh_supported: bool,
-    #[serde(rename = "last_snapshot_generation")]
+    #[serde(rename = "last_snapshot_generation", default)]
     pub last_snapshot_generation: u64,
     #[serde(rename = "last_fib_generation", default)]
     pub last_fib_generation: u32,

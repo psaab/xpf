@@ -84,7 +84,7 @@ mod event_emit;
 #[path = "flow_cache.rs"]
 mod flow_cache;
 #[path = "forwarding/mod.rs"]
-mod forwarding;
+pub(crate) mod forwarding;
 mod forwarding_build;
 #[path = "frame/mod.rs"]
 pub(crate) mod frame;
