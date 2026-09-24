@@ -901,6 +901,28 @@ fn open_xfrm_socket() -> Option<libc::c_int> {
     Some(fd)
 }
 
+/// #10647: can this test process drive the IPsec SA monitor baseline?
+/// Worker bring-up waits up to 5s for the monitor's first GETSA dump, and
+/// the monitor needs a privileged NETLINK_XFRM bind (groups SA|EXPIRE).
+/// Unprivileged, bring-up aborts with `IpsecSaNotReady` before the test's
+/// subject — so XFRM-dependent lifecycle tests gate on this probe and
+/// return early with an explicit SKIP instead of failing on sandbox
+/// privilege. This probes the CAPABILITY (bind it, close it), never the
+/// uid: root in a restricted net namespace still fails, and a
+/// capability-granted non-root still passes.
+#[cfg(test)]
+pub(crate) fn xfrm_monitor_usable() -> bool {
+    match open_xfrm_socket() {
+        Some(fd) => {
+            unsafe {
+                libc::close(fd);
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
     let mut request = [0u8; NLMSG_HDR_LEN + XFRM_MSG_ID_LEN];
     let request_len = request.len() as u32;

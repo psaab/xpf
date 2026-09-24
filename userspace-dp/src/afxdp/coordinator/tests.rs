@@ -5348,6 +5348,14 @@ fn reconcile_missing_pin_returns_map_setup_err_3789() {
 /// flip (`reconcile` returns `Ok`, stage becomes `spawned:workers=..`).
 #[test]
 fn reconcile_post_teardown_worker_spawn_failure_fails_closed_4952() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     // One registered binding => exactly one planned worker to spawn.
     let mut bindings: Vec<BindingStatus> = vec![BindingStatus {
@@ -5436,6 +5444,14 @@ fn reconcile_post_teardown_worker_spawn_failure_fails_closed_4952() {
 /// stage becomes `spawned:workers=..`).
 #[test]
 fn post_spawn_inthread_bind_failure_fails_closed_5143() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     // One registered binding => exactly one planned worker to bring up.
     let mut bindings: Vec<BindingStatus> = vec![BindingStatus {
@@ -5552,6 +5568,14 @@ fn six242_three_worker_bindings() -> Vec<BindingStatus> {
 /// can run, so it is respelled rather than left as archaeology.
 #[test]
 fn reconcile_partial_spawn_failure_preserves_launched_records_6242() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     let mut bindings = six242_three_worker_bindings();
     // Fail the spawn of the THIRD worker (skip the first two), routing the first
@@ -5633,6 +5657,14 @@ fn reconcile_partial_spawn_failure_preserves_launched_records_6242() {
 /// stubs) to prove the clear is fleet-wide, not just the one failing worker.
 #[test]
 fn reconcile_bind_incomplete_clears_all_records_6242() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     let mut bindings = six242_three_worker_bindings();
     // Worker 0 reports an INCOMPLETE bound set; workers 1 and 2 spawn as healthy
@@ -5738,6 +5770,14 @@ fn wedge8388_three_worker_bindings() -> Vec<BindingStatus> {
 /// being `[2, 3]` instead of empty.
 #[test]
 fn bind_incomplete_leaves_no_bound_sibling_8388() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     let mut bindings = wedge8388_three_worker_bindings();
     // Worker 0 reports an INCOMPLETE bound set; workers 1 and 2 spawn healthy
@@ -5818,6 +5858,14 @@ fn bind_incomplete_leaves_no_bound_sibling_8388() {
 /// sibling cell above would then be green for the wrong reason).
 #[test]
 fn spawn_failure_does_leave_bound_siblings_8388() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     let mut bindings = wedge8388_three_worker_bindings();
     // Workers 0 and 1 launch as healthy stubs (full bound set published);
@@ -5908,6 +5956,14 @@ fn spawn_failure_does_leave_bound_siblings_8388() {
 ///   reaches `BindingStatus` at all and the same assertion reds.
 #[test]
 fn bind_failure_cause_survives_the_failclosed_teardown_8558() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     let mut bindings = wedge8388_three_worker_bindings();
     coordinator.force_worker_bind_incomplete = 1;
@@ -6000,6 +6056,14 @@ fn bind_failure_cause_survives_the_failclosed_teardown_8558() {
 /// which is exactly why the mechanism is asserted alongside the observable.
 #[test]
 fn a_recovered_reconcile_leaves_no_stale_bind_failure_cause_8558() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     let mut bindings = wedge8388_three_worker_bindings();
     coordinator.force_worker_bind_incomplete = 1;
@@ -6070,6 +6134,14 @@ fn a_recovered_reconcile_leaves_no_stale_bind_failure_cause_8558() {
 /// generation's bind error.
 #[test]
 fn a_legitimate_teardown_does_not_inherit_the_bind_failure_cause_8558() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     let mut bindings = wedge8388_three_worker_bindings();
     coordinator.force_worker_bind_incomplete = 1;
@@ -6183,6 +6255,14 @@ fn stop_inner_drops_worker_record_owners_exactly_once_6242() {
 /// explicit cause, not its formatting.
 #[test]
 fn worker_bind_incomplete_report_carries_explicit_failure_6245() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let mut coordinator = Coordinator::new();
     // One registered binding at slot 1 => exactly one planned worker (id 0),
     // one planned slot (1). The stub drops the smallest planned slot (1).
@@ -6574,6 +6654,14 @@ fn zone_counter_binding() -> Vec<BindingStatus> {
 
 #[test]
 fn rejected_apply_does_not_prune_live_zone_counters_6832() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     // The NEGATIVE direction. A build that succeeded but whose workers failed
     // to spawn is a rejected apply: zone 200's totals must survive it, ready
     // for the retry or the operator's revert.
@@ -6728,6 +6816,14 @@ fn rule_counter_state(coord: &Coordinator) -> (Vec<String>, Vec<u32>) {
 /// origin/master, both arms.
 #[test]
 fn rejected_spawn_apply_does_not_prune_live_rule_counters_7010() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let _neigh_serial = crate::afxdp::neigh_monitor_test_serial();
     // `StoppedCoordinator`, not a trailing `coordinator.stop()`: a cell that
     // PANICS skips the trailing call and leaks its neigh-monitor thread into the
@@ -6808,6 +6904,14 @@ fn rejected_bind_apply_does_not_prune_live_rule_counters_7010() {
 /// DELETE it: a COMMITTED apply must still drop the removed rules.
 #[test]
 fn committed_reconcile_prunes_rule_counters_for_removed_rules_7010() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     let _neigh_serial = crate::afxdp::neigh_monitor_test_serial();
     let mut coordinator = StoppedCoordinator::new();
     rule_counter_live_coordinator(&mut coordinator);
@@ -6889,6 +6993,14 @@ fn committed_refresh_prunes_rule_counters_for_removed_rules_7010() {
 
 #[test]
 fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     // #7413: this test spawns a `neigh-monitor` thread, and the #6637 leak
     // gates read the PROCESS-WIDE count of those. Held for the whole body so a
     // parallel sibling cannot move that count inside their window.
@@ -8560,6 +8672,14 @@ fn stopped_coordinator_guard_joins_the_neigh_monitor_on_drop_0_lingering_monitor
 /// Preventing the spawn reds the first.
 #[test]
 fn coordinator_bringup_does_not_leak_a_neigh_monitor_thread_6637() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     // #7413: this test spawns a `neigh-monitor` thread, and the #6637 leak
     // gates read the PROCESS-WIDE count of those. Held for the whole body so a
     // parallel sibling cannot move that count inside their window.
@@ -8624,6 +8744,14 @@ fn coordinator_bringup_does_not_leak_a_neigh_monitor_thread_6637() {
 /// Deleting the `Drop` impl reds this.
 #[test]
 fn stopped_coordinator_guard_joins_the_neigh_monitor_on_drop_6637() {
+    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
+    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
+    // IpsecSaNotReady before this test's subject — skip explicitly (visible
+    // with --nocapture) instead of failing on sandbox privilege.
+    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
+        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+        return;
+    }
     // #7413: this test spawns a `neigh-monitor` thread, and the #6637 leak
     // gates read the PROCESS-WIDE count of those. Held for the whole body so a
     // parallel sibling cannot move that count inside their window.
