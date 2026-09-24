@@ -731,6 +731,11 @@ pub(super) struct ResolvedSessionLookup {
     pub(super) lookup: SessionLookup,
     pub(super) shared_entry: Option<SyncedSessionEntry>,
     pub(super) origin: SessionOrigin,
+    /// #10636: this lookup went through the close-deferring variant, so a
+    /// TCP close the packet carries is NOT yet applied. The poll site applies
+    /// it after an Owner authority verdict and drops it with a foreign
+    /// arrival. True only for local hits; shared entries never defer.
+    pub(super) close_deferred: bool,
 }
 
 impl ResolvedSessionLookup {
@@ -740,6 +745,7 @@ impl ResolvedSessionLookup {
             lookup,
             shared_entry: None,
             origin,
+            close_deferred: true,
         }
     }
 
@@ -749,6 +755,7 @@ impl ResolvedSessionLookup {
             lookup,
             shared_entry: None,
             origin,
+            close_deferred: true,
         }
     }
 
@@ -762,6 +769,7 @@ impl ResolvedSessionLookup {
             },
             shared_entry: Some(entry),
             origin,
+            close_deferred: false,
         }
     }
 }
@@ -781,6 +789,10 @@ pub(super) struct ResolvedFlowSessionDecision {
     /// per-packet reply repair until cache invalidation; Codex #1861
     /// r1 C1).
     pub(super) install_failed: bool,
+    /// #10636: carried through from [`ResolvedSessionLookup::close_deferred`].
+    /// The poll site applies the deferred TCP close after an Owner authority
+    /// verdict (`apply_deferred_owner_close`).
+    pub(super) close_deferred: bool,
 }
 
 // Fabric-ingress SNAT-only forward entries are standby-side wire placeholders
@@ -911,7 +923,10 @@ pub(super) fn lookup_session_across_scopes_with_shared(
         );
         return None;
     }
-    if let Some((lookup, origin)) = sessions.lookup_with_origin(key, now_ns, tcp_flags) {
+    // #10636: defer TCP close-state until the #9519 authority verdict names
+    // the owner (applied by `apply_deferred_owner_close` after an Owner
+    // verdict). A foreign RST/FIN must not drive close state it is dropped for.
+    if let Some((lookup, origin)) = sessions.lookup_with_origin_deferring_close(key, now_ns, tcp_flags) {
         if is_fabric_wire_placeholder(
             lookup.metadata.fabric_ingress,
             lookup.metadata.is_reverse,

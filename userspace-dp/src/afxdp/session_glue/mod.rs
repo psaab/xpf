@@ -3005,6 +3005,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             origin: hit_origin,
             created: false,
             install_failed: shared_was_present && materialize_install_failed,
+            close_deferred: hit.close_deferred,
         });
     }
 
@@ -3149,6 +3150,9 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         // max_sessions.
         created: reverse_installed,
         install_failed: !reverse_installed,
+        // #10636: reverse-synthesized from a forward match (close, if any,
+        // was stamped at install); never a deferred local hit.
+        close_deferred: false,
     })
 }
 
