@@ -1335,8 +1335,12 @@ schema layer — the `bind-interface` leaf is `ValueSecureTunnelIf` with the
 `ValidateSecureTunnelBindInterface` validator (`xfrmi.go`) — so commit-check and
 `?`-completion reject it early; the compiled-config gate stays as the belt for
 group-expanded / packed forms the schema layer can miss (#1960 layered defense).
-The pkg/routing "invalid bind-interface name" log is the runtime backstop for a
-tolerated invalid config.
+The pkg/routing "invalid bind-interface name" log is the runtime backstop.
+On the tolerant load / peer-sync path, the IPsec renderer also skips the VPN
+and its secret (#10681): otherwise swanctl would load an if_id-less live SA
+under the #5297 "carries no traffic" warning, while the #5619 advisory's
+if_id-zero filter would suppress its warning on the same false premise.
+Healthy VPNs still render.
 
 **The decrypted plaintext is NOT zone-adjudicated, and the operator is told so
 at commit (#5619):** a route-based VPN's `bind-interface st<N>[.unit]` is
