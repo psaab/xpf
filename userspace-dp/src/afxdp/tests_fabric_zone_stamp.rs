@@ -1541,6 +1541,8 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 21,
         ingress_vlan_id: 0,
         owner_rg_id: 1,
@@ -1852,6 +1854,8 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
         // keeps the session-hit authority path on the HA resolution arm.
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         // Model a session whose observed ingress was the fabric parent. The
         // current packet is another frame on that same parent, but unstamped.
         ingress_ifindex: 21,

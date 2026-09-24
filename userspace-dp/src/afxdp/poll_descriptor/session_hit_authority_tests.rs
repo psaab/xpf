@@ -76,6 +76,8 @@ fn session(zone: u16, ingress_ifindex: i32, vlan: u16, is_reverse: bool) -> Sess
         } else {
             TEST_WAN_ZONE_ID
         },
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: ingress_ifindex as u32,
         ingress_vlan_id: vlan,
         owner_rg_id: 0,

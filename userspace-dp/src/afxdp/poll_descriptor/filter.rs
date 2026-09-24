@@ -2449,6 +2449,8 @@ mod filter_log_egress_zone_tests {
                 ingress_ifindex: LAN_IFINDEX_6722 as u32,
                 ingress_vlan_id: 0,
                 egress_zone: 0,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
                 owner_rg_id: 0,
                 fabric_ingress: false,
                 is_reverse: false,

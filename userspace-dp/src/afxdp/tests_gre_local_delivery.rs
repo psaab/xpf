@@ -770,6 +770,8 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
     let local_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 0,

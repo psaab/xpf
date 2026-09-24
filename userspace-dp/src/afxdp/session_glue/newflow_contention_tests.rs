@@ -70,6 +70,8 @@ fn metadata() -> SessionMetadata {
     SessionMetadata {
         ingress_zone: 1,
         egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         // #4983: a SYNCED entry carries no ingress identity. An ifindex is
         // node-local, so the originating node's number names a different NIC
         // here; it is deliberately not put on the cluster wire. 0 is the

@@ -63,6 +63,8 @@ fn test_metadata() -> SessionMetadata {
     SessionMetadata {
         ingress_zone: 1,
         egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
         owner_rg_id: 1,
@@ -4900,6 +4902,8 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,
@@ -4983,6 +4987,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,
@@ -5071,6 +5077,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 1,
@@ -5162,6 +5170,8 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,
@@ -5253,6 +5263,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,
@@ -5339,6 +5351,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
         SessionMetadata {
             ingress_zone: 2,
             egress_zone: 1,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 2,
@@ -6004,6 +6018,8 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 5,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id: 2,
@@ -6336,6 +6352,8 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 2,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
                 owner_rg_id: 1,

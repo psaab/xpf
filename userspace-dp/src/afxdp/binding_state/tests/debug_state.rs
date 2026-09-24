@@ -308,6 +308,8 @@ fn active_flow_debug_test_entry(
         metadata: SessionMetadata {
             ingress_zone: TEST_TRUST_ZONE_ID,
             egress_zone: TEST_UNTRUST_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
             owner_rg_id: 0,

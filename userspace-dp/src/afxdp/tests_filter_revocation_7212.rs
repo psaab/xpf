@@ -54,6 +54,8 @@ fn revocation_metadata() -> SessionMetadata {
     SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
         ingress_ifindex: LAN_IFINDEX as u32,
         ingress_vlan_id: 0,
         owner_rg_id: 0,
