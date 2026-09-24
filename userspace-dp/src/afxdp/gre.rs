@@ -641,6 +641,25 @@ fn gre_inner_family_and_proto(proto: u16) -> Option<(u8, u16)> {
     }
 }
 
+/// #10652: does the inner packet's IP version nibble agree with the family
+/// the GRE Protocol Type claimed? The PT is the sender's CLAIM about the
+/// inner family; the nibble is the inner packet's own statement, and
+/// downstream consumers split on them: policy/session/adjudication key on
+/// the PT-derived `inner_family` stamped into `meta.addr_family`
+/// (`logical_ingress.rs`), while the kernel TUN (`IFF_NO_PI`) parses the
+/// delivered bytes by nibble. A PT/nibble mismatch would be adjudicated as
+/// one family and delivered as another — fail closed (`false`) instead.
+/// An empty inner has no nibble to agree with, so it fails closed too.
+#[inline]
+fn gre_inner_nibble_matches(inner_packet: &[u8], inner_family: u8) -> bool {
+    let expected = match inner_family as i32 {
+        libc::AF_INET => 4u8,
+        libc::AF_INET6 => 6u8,
+        _ => return false,
+    };
+    matches!(inner_packet.first(), Some(b) if b >> 4 == expected)
+}
+
 /// Match a received GRE (proto-47) outer tuple to a GRE-mode tunnel
 /// endpoint.
 ///
@@ -900,6 +919,17 @@ pub(super) fn try_native_gre_decap_from_frame(
         inner_offset += 4;
     }
     let inner_packet = outer.get(inner_offset..)?;
+    // #10652: the GRE Protocol Type is the sender's CLAIM about the inner
+    // family; the inner packet's own version nibble is what the kernel TUN
+    // (`IFF_NO_PI`) parses by. Everything below — the family-keyed trim,
+    // the inner parse, and the `inner_family` stamped into
+    // `meta.addr_family` — keys on the PT-derived family, so a PT/nibble
+    // mismatch would be adjudicated as one family and delivered as another.
+    // Fail closed before any of it.
+    if !gre_inner_nibble_matches(inner_packet, inner_family) {
+        return None;
+    }
+
     let inner_len = packet_trimmed_len(inner_packet, inner_family)?;
     let inner_packet = &inner_packet[..inner_len];
 
