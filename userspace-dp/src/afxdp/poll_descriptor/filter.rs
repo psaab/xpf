@@ -481,7 +481,8 @@ fn tunneled_hit_stays_pinned(
     // DIFFERENT netdev is a temporally re-owned id, not a steady state —
     // revoke so the flow re-misses onto the new tunnel instead of pinning a
     // session `session_glue` gates to `NoRoute`. Either side unnamed (0)
-    // skips the check, matching the `#1873` guard's own `<= 0` arm.
+    // skips the check — the #1873 guard likewise only gates a positively
+    // named stored egress.
     if fresh.egress_ifindex > 0
         && stored.egress_ifindex > 0
         && fresh.egress_ifindex != stored.egress_ifindex
