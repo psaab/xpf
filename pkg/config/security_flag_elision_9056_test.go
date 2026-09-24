@@ -130,8 +130,8 @@ func securityFlagElisionCases9056() []securityFlagElisionCase {
 				return g != nil && g.NoNATTraversal
 			}},
 		{"vpn-monitor optimized",
-			`security { ipsec { vpn v1 { vpn-monitor { optimized; } } } }`,
-			`security { ipsec { vpn v1 { vpn-monitor optimized; } } }`,
+			`security { ipsec { vpn v1 { bind-interface st0; vpn-monitor { optimized; } } } }`,
+			`security { ipsec { vpn v1 { bind-interface st0; vpn-monitor optimized; } } }`,
 			func(c *Config) bool {
 				v := c.Security.IPsec.VPNs["v1"]
 				return v != nil && v.VPNMonitorOptimized

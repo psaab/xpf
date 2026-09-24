@@ -370,6 +370,7 @@ func TestClosedWorldSecurity10078_DirectIPsecVPNLeaves(t *testing.T) {
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec policy esp-pol proposal-set standard",
 		"set security ipsec vpn tun1 gateway gw1 ipsec-policy esp-pol",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	if err := SchemaValidate(valid, nil); err != nil {
 		t.Fatalf("direct gateway/ipsec-policy leaves must survive the security arm: %v", err)
@@ -393,6 +394,7 @@ func TestClosedWorldSecurity10078_DirectIPsecVPNLeaves(t *testing.T) {
         }
         policy esp-pol { proposals esp-p1; }
         vpn tun1 gateway gw1 ipsec-policy esp-pol;
+        vpn tun1 bind-interface st0;
     }
 }`).Parse()
 	if len(perrs) > 0 {

@@ -117,6 +117,7 @@ func TestIPsecPolicyProposalsDanglingSecondRejected(t *testing.T) {
 		"set security ike gateway gw1 address 172.16.0.1",
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-pol",
 	})
 	_, err := CompileConfig(tree)
@@ -141,6 +142,7 @@ func TestIKEPolicyProposalsDanglingSecondRejected(t *testing.T) {
 		"set security ipsec proposal esp-a encryption-algorithm aes-256-cbc",
 		"set security ipsec policy esp-pol proposals esp-a",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-pol",
 	})
 	_, err := CompileConfig(tree)

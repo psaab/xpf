@@ -25,7 +25,7 @@ func setTree9624(t *testing.T, lines ...string) *ConfigTree {
 }
 
 func vpn9624(name string, selectors ...string) []string {
-	lines := []string{"set security ipsec vpn " + name + " ike gateway gw1"}
+	lines := []string{"set security ipsec vpn " + name + " ike gateway gw1", "set security ipsec vpn " + name + " bind-interface st0"}
 	for i, sel := range selectors {
 		lines = append(lines,
 			"set security ipsec vpn "+name+" traffic-selector "+sel+" local-ip 10.0."+string(rune('1'+i))+".0/24",

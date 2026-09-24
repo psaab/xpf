@@ -99,8 +99,8 @@ func TestEveryNotConservedContainerIsReported8704(t *testing.T) {
 // swanctl.conf, so a dropped local-ip negotiates an SA against a selector the
 // operator did not write.
 func TestReopenedTrafficSelectorIsRejectedAndReported8704(t *testing.T) {
-	const dup = `security { ipsec { vpn v1 { traffic-selector ts1 { local-ip 10.0.0.0/24; } traffic-selector ts1 { remote-ip 10.1.0.0/24; } } } }`
-	const merged = `security { ipsec { vpn v1 { traffic-selector ts1 { local-ip 10.0.0.0/24; remote-ip 10.1.0.0/24; } } } }`
+	const dup = `security { ipsec { vpn v1 { bind-interface st0; traffic-selector ts1 { local-ip 10.0.0.0/24; } traffic-selector ts1 { remote-ip 10.1.0.0/24; } } } }`
+	const merged = `security { ipsec { vpn v1 { bind-interface st0; traffic-selector ts1 { local-ip 10.0.0.0/24; remote-ip 10.1.0.0/24; } } } }`
 
 	// POSITIVE HALF: the merged spelling must carry both halves, or the loss
 	// asserted below is not attributable to the re-opening.
@@ -156,7 +156,7 @@ func TestReopenedTrafficSelectorIsRejectedAndReported8704(t *testing.T) {
 // working configuration. This is why the walk scopes `seen` to the immediate
 // holder rather than to the rule.
 func TestSameSelectorNameInTwoVPNsIsNotADuplicate8704(t *testing.T) {
-	const twoVPN = `security { ipsec { vpn v1 { traffic-selector ts1 { local-ip 10.0.0.0/24; remote-ip 10.1.0.0/24; } } vpn v2 { traffic-selector ts1 { local-ip 10.2.0.0/24; remote-ip 10.3.0.0/24; } } } }`
+	const twoVPN = `security { ipsec { vpn v1 { bind-interface st0; traffic-selector ts1 { local-ip 10.0.0.0/24; remote-ip 10.1.0.0/24; } } vpn v2 { bind-interface st0; traffic-selector ts1 { local-ip 10.2.0.0/24; remote-ip 10.3.0.0/24; } } } }`
 	tree, errs := NewParser(twoVPN).Parse()
 	if len(errs) > 0 {
 		t.Fatalf("parse: %v", errs)

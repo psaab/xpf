@@ -45,6 +45,7 @@ func buildTree4098(t *testing.T, cmds []string) *ConfigTree {
 // control-char gate does NOT catch (whitespace, malformed shape).
 func TestTrafficSelectorNewlineRejectedStrict(t *testing.T) {
 	tree := buildTree4098(t, []string{
+		`set security ipsec vpn v1 bind-interface st0`,
 		`set security ipsec vpn v1 traffic-selector ts1 local-ip "10.0.0.0/24\n        updown = /tmp/pwn.sh"`,
 	})
 	_, err := CompileConfig(tree)
@@ -64,6 +65,7 @@ func TestTrafficSelectorNewlineRejectedStrict(t *testing.T) {
 // mis-scoped swanctl selector, so rejecting it is correct.
 func TestTrafficSelectorWhitespaceRejectedStrict(t *testing.T) {
 	tree := buildTree4098(t, []string{
+		`set security ipsec vpn v1 bind-interface st0`,
 		`set security ipsec vpn v1 traffic-selector ts1 local-ip "10.0.0.0/24 updown=/tmp/pwn.sh"`,
 	})
 	_, err := CompileConfig(tree)
@@ -81,6 +83,7 @@ func TestTrafficSelectorWhitespaceRejectedStrict(t *testing.T) {
 // a value that clears the control-char gate but is not a CIDR / host / range.
 func TestTrafficSelectorNonCIDRRejectedStrict(t *testing.T) {
 	tree := buildTree4098(t, []string{
+		`set security ipsec vpn v1 bind-interface st0`,
 		`set security ipsec vpn v1 traffic-selector ts1 local-ip not.an.address`,
 	})
 	_, err := CompileConfig(tree)
@@ -99,6 +102,7 @@ func TestTrafficSelectorNonCIDRRejectedStrict(t *testing.T) {
 // #4098 warning. The render belt keeps the value inert.
 func TestTrafficSelectorLenientWarns(t *testing.T) {
 	tree := buildTree4098(t, []string{
+		`set security ipsec vpn v1 bind-interface st0`,
 		`set security ipsec vpn v1 traffic-selector ts1 local-ip "10.0.0.0/24 updown=/tmp/pwn.sh"`,
 	})
 	cfg, err := CompileConfigLenient(tree)
@@ -122,6 +126,7 @@ func TestTrafficSelectorLenientWarns(t *testing.T) {
 // path.
 func TestTrafficSelectorValidCIDRAccepted(t *testing.T) {
 	tree := buildTree4098(t, []string{
+		`set security ipsec vpn v1 bind-interface st0`,
 		`set security ipsec vpn v1 traffic-selector ts1 local-ip 10.0.0.0/24`,
 		`set security ipsec vpn v1 traffic-selector ts1 remote-ip 2001:db8::/48`,
 	})
@@ -141,6 +146,7 @@ func TestTrafficSelectorValidCIDRAccepted(t *testing.T) {
 // configs).
 func TestTrafficSelectorRangeAndHostAccepted(t *testing.T) {
 	tree := buildTree4098(t, []string{
+		`set security ipsec vpn v1 bind-interface st0`,
 		`set security ipsec vpn v1 traffic-selector ts1 local-ip 10.0.0.5`,
 		`set security ipsec vpn v1 traffic-selector ts1 remote-ip 10.0.1.10-10.0.1.20`,
 	})

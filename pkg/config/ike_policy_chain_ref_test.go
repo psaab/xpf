@@ -20,6 +20,7 @@ func TestIKEGatewayDanglingPolicyRejected(t *testing.T) {
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ike gateway gw1 ike-policy does-not-exist",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	_, err := CompileConfig(tree)
 	if err == nil {
@@ -41,6 +42,7 @@ func TestIKEPolicyDanglingProposalRejected(t *testing.T) {
 		"set security ike policy ike-pol mode main",
 		"set security ike policy ike-pol proposals no-such-proposal",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	_, err := CompileConfig(tree)
 	if err == nil {
@@ -64,6 +66,7 @@ func TestIKEPolicyMissingProposalsLeafRejected(t *testing.T) {
 		// ike-pol is defined (mode set) but carries no `proposals` leaf.
 		"set security ike policy ike-pol mode main",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	_, err := CompileConfig(tree)
 	if err == nil {
@@ -90,6 +93,7 @@ func TestIKEGatewayDanglingPolicyMessageStanzaAgnostic(t *testing.T) {
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ike gateway gw1 ike-policy does-not-exist",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	_, err := CompileConfig(tree)
 	if err == nil {
@@ -117,6 +121,7 @@ func TestIKEPolicyResolvableChainAccepted(t *testing.T) {
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -137,6 +142,7 @@ func TestIKEGatewayNoPolicyAccepted(t *testing.T) {
 	tree := buildTreeFromSet(t, []string{
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("CompileConfig rejected a gateway with no ike-policy: %v", err)
@@ -154,6 +160,7 @@ func TestIKEGatewayLegacyDirectProposalAccepted(t *testing.T) {
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ike gateway gw1 ike-policy direct-prop",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("CompileConfig rejected the legacy direct-proposal ike-policy fallback: %v", err)
@@ -172,6 +179,7 @@ func TestIKEOrphanGatewayDanglingPolicyAccepted(t *testing.T) {
 		"set security ike gateway gw-good address 192.0.2.1",
 		"set security ike gateway gw-good ike-policy ike-pol",
 		"set security ipsec vpn tun1 ike gateway gw-good",
+		"set security ipsec vpn tun1 bind-interface st0",
 		// Orphan gateway with a dangling policy, referenced by nothing.
 		"set security ike gateway gw-orphan address 192.0.2.2",
 		"set security ike gateway gw-orphan ike-policy nonexistent",

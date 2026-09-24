@@ -46,6 +46,7 @@ func TestValidateIPsecEndpoints_Reject(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address 10.0.0.999",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 			wantSub: "10.0.0.999",
 		},
@@ -54,6 +55,7 @@ func TestValidateIPsecEndpoints_Reject(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address 1.2.3.4.5",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 			wantSub: "1.2.3.4.5",
 		},
@@ -62,6 +64,7 @@ func TestValidateIPsecEndpoints_Reject(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address bad..host",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 			wantSub: "bad..host",
 		},
@@ -70,6 +73,7 @@ func TestValidateIPsecEndpoints_Reject(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw dynamic hostname -bad.example.com",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 			wantSub: "-bad.example.com",
 		},
@@ -79,6 +83,7 @@ func TestValidateIPsecEndpoints_Reject(t *testing.T) {
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ike gateway gw local-address 10.0.0.999",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 			wantSub: "local-address",
 		},
@@ -87,6 +92,7 @@ func TestValidateIPsecEndpoints_Reject(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 				"set security ipsec vpn tun local-address 10.0.0.999",
 			},
 			wantSub: "local-address",
@@ -122,6 +128,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 		},
 		{
@@ -129,6 +136,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address 2001:db8::1",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 		},
 		{
@@ -136,6 +144,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address peer.example.com",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 		},
 		{
@@ -143,6 +152,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw dynamic hostname vpn.example.com",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 		},
 		{
@@ -151,6 +161,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ike gateway gw local-address 198.51.100.7",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 				"set security ipsec vpn tun local-address 198.51.100.8",
 			},
 		},
@@ -160,6 +171,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 				"set security ike gateway gw address 2001:db8::1",
 				"set security ike gateway gw local-address 2001:db8::2",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 		},
 		{
@@ -167,6 +179,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 			cmds: []string{
 				"set security ike gateway gw address peer.example.com.",
 				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
 			},
 		},
 	}

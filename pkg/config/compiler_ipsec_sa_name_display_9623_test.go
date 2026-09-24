@@ -16,6 +16,7 @@ func setTree9623(t *testing.T, vpnName string) *ConfigTree {
 	for _, cmd := range []string{
 		"set security ike gateway gw1 address 198.51.100.1",
 		`set security ipsec vpn "` + vpnName + `" ike gateway gw1`,
+		`set security ipsec vpn "` + vpnName + `" bind-interface st0`,
 	} {
 		path, err := ParseSetCommand(cmd)
 		if err != nil {

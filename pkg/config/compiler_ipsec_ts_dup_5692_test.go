@@ -31,6 +31,7 @@ func TestTrafficSelectorDuplicateLocalIPRejectedStrict_5692(t *testing.T) {
 	tree := hierTree(t, `security {
     ipsec {
         vpn v1 {
+            bind-interface st0;
             traffic-selector ts1 {
                 local-ip 10.0.0.0/24;
                 local-ip 10.0.1.0/24;
@@ -54,6 +55,7 @@ func TestTrafficSelectorDuplicateRemoteIPRejectedStrict_5692(t *testing.T) {
 	tree := hierTree(t, `security {
     ipsec {
         vpn v1 {
+            bind-interface st0;
             traffic-selector ts1 {
                 local-ip 10.0.0.0/24;
                 remote-ip 192.0.2.0/24;
@@ -114,6 +116,7 @@ func TestTrafficSelectorDuplicateLenientWarns_5692(t *testing.T) {
 func TestTrafficSelectorMultipleNamedSelectorsCompile_5692(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set security ipsec vpn v1 traffic-selector ts1 local-ip 10.0.0.0/24",
+		"set security ipsec vpn v1 bind-interface st0",
 		"set security ipsec vpn v1 traffic-selector ts1 remote-ip 192.0.2.0/24",
 		"set security ipsec vpn v1 traffic-selector ts2 local-ip 10.0.1.0/24",
 		"set security ipsec vpn v1 traffic-selector ts2 remote-ip 198.51.100.0/24",
@@ -138,6 +141,7 @@ func TestTrafficSelectorMultipleNamedSelectorsCompile_5692(t *testing.T) {
 func TestTrafficSelectorFlatSetLastWinsCompiles_5692(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set security ipsec vpn v1 traffic-selector ts1 local-ip 10.0.0.0/24",
+		"set security ipsec vpn v1 bind-interface st0",
 		"set security ipsec vpn v1 traffic-selector ts1 local-ip 10.0.1.0/24",
 		"set security ipsec vpn v1 traffic-selector ts1 remote-ip 192.0.2.0/24",
 	)
