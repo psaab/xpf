@@ -2254,6 +2254,10 @@ mod tests_shim_gre_classify_10651;
 #[cfg(test)]
 #[path = "tests_9782_copy.rs"]
 mod tests_9782_copy;
+// #10661: ATOMIC+real Fragment chain consistency cells (tracker/shim/screens).
+#[cfg(test)]
+#[path = "tests_10661_atomic_chain.rs"]
+mod tests_10661_atomic_chain;
 
 // #1824: proptest property harness (parse no-panic/bounds, NAT
 // round-trip + descriptor-vs-generic differential, TSO reassembly).
