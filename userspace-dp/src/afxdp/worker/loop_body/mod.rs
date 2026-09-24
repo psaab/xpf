@@ -2034,9 +2034,21 @@ pub(crate) fn worker_loop(
                 wg_uncovered_batch.drain_from(queue);
             }
         }
-        // #7201: a command backlog IS work.
+        // #7201: a command backlog IS work. `apply_worker_commands` drains at
+        // most `WORKER_COMMAND_DRAIN_BUDGET` per pass so the AF_XDP rings get
+        // serviced between slices; the remainder is only reachable if this loop
+        // comes straight back. Left out of `did_work` — which `poll_binding`
+        // alone would set — a promoted standby with no traffic yet runs
+        // `idle_iters` past `IDLE_SPIN_ITERS` and puts every remaining slice
+        // behind a 1 ms `poll(2)`, so the budget would trade a bounded 3.85 ms
+        // stall for ~16 ms of drain. Seeded here rather than OR-ed after the
+        // sweep so there is one assignment to reason about.
         let mut did_work = commands_backlogged;
         let mut dbg_poll = DebugPollCounters::default();
+        // #1620: read the cold-path sample mask from forwarding state once
+        // per poll cycle (rather than per-binding) — it's a daemon-wide
+        // setting and rarely changes. Workers load the ArcSwap-protected
+        // forwarding state above so this is L1-hot.
         let cold_path_sample_mask = forwarding.cold_path_sample_mask;
         for offset in 0..bindings.len() {
             let idx = if bindings.is_empty() {

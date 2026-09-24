@@ -15,9 +15,10 @@
 //!
 //! - One [`WgUncoveredIngressQueue`] per worker, published by the
 //!   coordinator in a live `ArcSwap<BTreeMap<u32, _>>` table (the
-//!   `local_tunnel_deliveries` topology). Queues are STABLE across
-//!   reconciles: a respawned worker_id re-adopts its queue, so only a
-//!   worker_id removed from the set orphans its backlog.
+//!   `local_tunnel_deliveries` topology). Bring-up publishes a FRESH table
+//!   once the readiness barrier proves every worker bound: the previous
+//!   generation is closed + drained first and its backlog orphan-counted,
+//!   so a respawn never inherits records fenced against a dead view.
 //! - The producer (WG control thread) NEVER blocks: `try_enqueue` fails
 //!   on full/closed and the caller drops + counts. No retry, no rehash
 //!   loop — a rehash would reorder the flow across workers.
