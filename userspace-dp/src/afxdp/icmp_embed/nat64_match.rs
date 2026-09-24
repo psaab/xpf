@@ -71,6 +71,9 @@ pub(in crate::afxdp) enum Nat64IcmpErrorMatch {
         resolution: ForwardingResolution,
         /// Reverse companion metadata (zones for the HA/fabric finalizer).
         metadata: SessionMetadata,
+        /// #10667: the F-077 gating key this match was charged against
+        /// (`reply_key`) — refunded on post-match non-delivery terminals.
+        budget_key: SessionKey,
     },
     /// ICMPv6 error → ICMPv4 toward the v4 server (RFC 7915 §5.2).
     V6ToV4 {
@@ -88,6 +91,9 @@ pub(in crate::afxdp) enum Nat64IcmpErrorMatch {
         resolution: ForwardingResolution,
         /// Forward session metadata (zones for the HA/fabric finalizer).
         metadata: SessionMetadata,
+        /// #10667: the F-077 gating key this match was charged against
+        /// (`forward_key`) — refunded on post-match non-delivery terminals.
+        budget_key: SessionKey,
     },
 }
 
@@ -236,6 +242,7 @@ fn match_v4_error(
         orig_client_port,
         resolution: sl.decision.resolution,
         metadata: sl.metadata,
+        budget_key: reply_key,
     })
 }
 
@@ -353,5 +360,6 @@ fn match_v6_error(
         translated_port,
         resolution: sl.decision.resolution,
         metadata: sl.metadata,
+        budget_key: forward_key,
     })
 }

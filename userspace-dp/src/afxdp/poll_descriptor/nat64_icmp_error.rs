@@ -75,6 +75,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             orig_client_port,
             resolution,
             metadata: _,
+            budget_key,
         } => {
             // SPARK-m6: verify L3 — a wrong stamp misreads the hop address.
             let l3 = crate::afxdp::frame::verified_l3_or_stamp(
@@ -134,6 +135,8 @@ pub(super) fn try_translate_nat64_icmp_error(
                 worker_ctx,
                 scratch_forwards,
                 now_ns,
+                sessions,
+                &budget_key,
                 icmp_resolution,
                 rewritten_frame,
                 #[cfg(feature = "debug-log")]
@@ -146,6 +149,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             translated_port,
             resolution,
             metadata: _,
+            budget_key,
         } => {
             let icmp_resolution = finalize_embedded_icmp_resolution_parts(
                 worker_ctx.forwarding,
@@ -183,6 +187,8 @@ pub(super) fn try_translate_nat64_icmp_error(
                 worker_ctx,
                 scratch_forwards,
                 now_ns,
+                sessions,
+                &budget_key,
                 icmp_resolution,
                 rewritten_frame,
                 #[cfg(feature = "debug-log")]

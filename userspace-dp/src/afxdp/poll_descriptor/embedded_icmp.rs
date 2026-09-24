@@ -34,7 +34,13 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// MUST stop processing this descriptor. `related_untranslated` is true
     /// only for the untranslated admission; NAT and NAT64 callers keep it
     /// false.
-    Queued { related_untranslated: bool },
+    Queued {
+        related_untranslated: bool,
+        /// #10667: the F-077 gating key the matcher charged — the caller
+        /// refunds it via `SessionTable::refund_icmp_error_not_delivered`
+        /// when the queued prebuilt is policy-refused.
+        budget_key: SessionKey,
+    },
     /// A NAT'd flow matched and a reversed frame was built, but the egress
     /// CoS / output classification dropped it. The caller MUST recycle the
     /// descriptor and stop processing it (fail-closed: never generate an ICMP
@@ -149,6 +155,10 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     // building the prebuilt frame.
     icmp_match.resolution = icmp_resolution;
     if matches!(packet_ttl_would_expire(packet_frame, meta), Some(true)) {
+        // #10667: the match was charged pre-policy; a TTL-expired error is
+        // never delivered, so refund — refused errors must not starve
+        // permitted ones.
+        sessions.refund_icmp_error_not_delivered(&icmp_match.budget_key, now_ns);
         return EmbeddedIcmpReversal::Dropped;
     }
     let rewritten = match meta.addr_family as i32 {
@@ -186,14 +196,17 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         worker_ctx,
         scratch_forwards,
         now_ns,
+        sessions,
+        &icmp_match.budget_key,
         icmp_resolution,
         rewritten_frame,
         #[cfg(feature = "debug-log")]
         icmpv6_trace,
     );
     match queued {
-        EmbeddedIcmpReversal::Queued { .. } => EmbeddedIcmpReversal::Queued {
+        EmbeddedIcmpReversal::Queued { budget_key, .. } => EmbeddedIcmpReversal::Queued {
             related_untranslated: untranslated_related,
+            budget_key,
         },
         other => other,
     }
@@ -214,6 +227,8 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     worker_ctx: &WorkerContext,
     scratch_forwards: &mut Vec<PendingForwardRequest>,
     now_ns: u64,
+    sessions: &mut SessionTable,
+    budget_key: &SessionKey,
     icmp_resolution: ForwardingResolution,
     rewritten_frame: Vec<u8>,
     #[cfg(feature = "debug-log")] icmpv6_trace: bool,
@@ -254,6 +269,9 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
                 icmp_decision.resolution.egress_ifindex,
             );
         }
+        // #10667: refund the pre-policy charge — a CoS-dropped error is
+        // never delivered.
+        sessions.refund_icmp_error_not_delivered(budget_key, now_ns);
         return EmbeddedIcmpReversal::Dropped;
     }
     let target_binding_index = worker_ctx.binding_lookup.target_index(
@@ -294,6 +312,7 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     });
     EmbeddedIcmpReversal::Queued {
         related_untranslated: false,
+        budget_key: budget_key.clone(),
     }
 }
 
