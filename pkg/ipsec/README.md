@@ -321,6 +321,14 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `xfrmiIfID()`. The same name → same numeric ID across reboots — don't
   rename a bind interface without expecting a reset of the SAs that ride
   it.
+- **Invalid route-based bind-interface (#10681).** A non-empty
+  `bind-interface` that resolves to if_id 0 is warned about by the lenient
+  config gate (#5297), but the renderer skips that VPN and its secret. Without
+  the render belt, swanctl would load the emitted connection/CHILD SA without
+  `if_id_in` / `if_id_out` — a live if_id-less SA under the false
+  "carries no traffic" diagnostic. An empty bind-interface remains distinct
+  (#10638); policy-based connections with no bind-interface do not trigger this
+  bind-interface skip.
 - **IPsec (Phase 2) reference chain (#2073, #4117, #9919 F-090).** The
   vpn→policy→proposal chain (`vpn.IPsecPolicy` naming a policy or, legacy
   form, a proposal directly; the policy's `proposals` reference or, when

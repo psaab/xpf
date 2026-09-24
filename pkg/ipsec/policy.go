@@ -32,7 +32,8 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
 // (#9919 F-161), a `protocol ah` proposal with no ESP render path (#4298),
 // a section-breaking VPN name (#9495), an unresolved ipsec-policy chain
-// (#9919 F-090), or an unusable ESP/PFS DH group (#9919 F-161) — is NOT in
+// (#9919 F-090), an unusable ESP/PFS DH group (#9919 F-161), or a non-empty
+// bind-interface that resolves to no XFRM if_id (#10681) — is NOT in
 // the returned set even though renderConfig still returns success. Apply
 // diffs THIS rendered set (not the raw VPN map keys) so a previously-loaded
 // connection that dropped out of the render is treated as a removal and its
@@ -153,6 +154,32 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 				"written into (whitespace, a brace, '#', '=', ',', a quote, '.', '%', ':' "+
 				"or non-ASCII); rename the VPN to letters, digits, '-' and '_' (#9495)",
 				"vpn", name)
+			continue
+		}
+
+		// #10681: a NON-EMPTY bind-interface that resolves to no XFRM if_id
+		// (anything but st<N> / st<N>.<unit>, e.g. secure0 or ge-0/0/0) is
+		// the #5297 invalid-name arm's subject: the strict commit gate rejects
+		// it, and the lenient load / peer-sync path warns that the VPN
+		// "carries no traffic (silent tunnel down)". The render must agree
+		// with that diagnostic: without this skip the connection and its
+		// children are still emitted — only the if_id_in/out lines are gated
+		// on if_id > 0 below — so strongSwan loads a live if_id-less SA
+		// (explicit traffic-selectors, or the identity fallback, or the
+		// strongSwan dynamic default) under a "carries no traffic" claim,
+		// and the #5619 plaintext advisory skips the VPN on the same false
+		// premise. SKIP it: no connection, no children, and (via skipped)
+		// no orphan secret. An EMPTY bind-interface is NOT skipped here —
+		// that is the #10638 missing arm (quarantine backstop), and the
+		// policy-based rows in policy_10427_test.go pin that it renders.
+		if vpn.BindInterface != "" && xfrmiIfID(vpn.BindInterface) == 0 {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: bind-interface is not a secure-tunnel "+
+				"interface (must be st<N> or st<N>.<unit>); without an XFRM if_id "+
+				"the tunnel cannot come up route-based — fix the bind-interface "+
+				"(emitting the connection would load a live SA the #5297 "+
+				"diagnostic describes as carrying no traffic)",
+				"vpn", name, "bind_interface", vpn.BindInterface)
 			continue
 		}
 
@@ -687,9 +714,9 @@ type SANameIndex map[string][]string
 //
 //   - the renderer SKIPS it (an unrenderable gateway, an unresolved
 //     ike-policy chain, an unusable DH group, an AH proposal, a
-//     section-breaking name, an unresolved ipsec-policy chain): it loads
-//     nothing and contributes no name, so it cannot make a loaded VPN's
-//     name look ambiguous;
+//     section-breaking name, an unresolved ipsec-policy chain, an
+//     invalid bind-interface): it loads nothing and contributes no
+//     name, so it cannot make a loaded VPN's name look ambiguous;
 //   - it renders: its connection name and every child the renderer emits for it
 //     (effectiveTrafficSelectors + sanitizeSwanctlValue, the render's own
 //     expansion) are indexed;
