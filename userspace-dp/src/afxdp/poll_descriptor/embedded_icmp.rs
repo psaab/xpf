@@ -31,11 +31,13 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// matches are reverse-translated; untranslated matches preserve the wire
     /// tuple. The original descriptor is now owned by that
     /// `PendingForwardRequest`; the caller MUST then pop + recycle on deny and
-    /// MUST stop processing this descriptor. `related_untranslated` is true
-    /// only for the untranslated admission; NAT and NAT64 callers keep it
-    /// false.
+    /// MUST stop processing this descriptor. `related_admit` is the RELATED
+    /// admission: true for the untranslated contract (#10286) and for a
+    /// NAT'd/NAT64 error whose arrival the match arm validated against the
+    /// quoted session's direction (#10666); anything else keeps it false and
+    /// the caller adjudicates the queued prebuilt against zone policy.
     Queued {
-        related_untranslated: bool,
+        related_admit: bool,
         /// #10667: the F-077 gating key the matcher charged — the caller
         /// refunds it via `SessionTable::refund_icmp_error_not_delivered`
         /// when the queued prebuilt is policy-refused.
@@ -138,18 +140,38 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         && icmp_match.nat.rewrite_dst.is_none()
         && icmp_match.nat.rewrite_src_port.is_none()
         && icmp_match.nat.rewrite_dst_port.is_none();
+    let arrival_zone = actual_embedded_icmp_ingress_zone(
+        worker_ctx.forwarding,
+        meta,
+        ingress_zone_override,
+    );
     let icmp_resolution = finalize_embedded_icmp_resolution_parts(
         worker_ctx.forwarding,
         worker_ctx.ha_state,
         now_secs,
         meta.ingress_ifindex as i32,
         icmp_match.resolution,
-        actual_embedded_icmp_ingress_zone(
-            worker_ctx.forwarding,
-            meta,
-            ingress_zone_override,
-        ),
+        arrival_zone,
     );
+    // #10666: a NAT'd PMTUD error (v4 Frag-Needed / v6 Packet-Too-Big)
+    // quoting a live session rides the RELATED bypass iff it arrives from
+    // the side the quoted flow travels toward (inbound) or from (outbound
+    // re-NAT) — the #7169 arrival rule applied as an admission check, not
+    // a match constraint. The match stays Unconstrained on purpose: an
+    // intermediate router's error still ingresses on the egress link, so
+    // the zone check keeps PMTUD working while a wrong-zone forgery falls
+    // to the gate below. Non-PMTUD NAT'd errors retain the gate
+    // unconditionally, so the #9948 Time-Exceeded cell keeps proving it.
+    let (fwd_ingress_zone, fwd_egress_zone) = related_forward_zones(&icmp_match.metadata);
+    let expected_arrival_zone = if icmp_match.outbound_snat {
+        fwd_ingress_zone
+    } else {
+        fwd_egress_zone
+    };
+    let related_admit = untranslated_related
+        || (expected_arrival_zone != 0
+            && arrival_zone == expected_arrival_zone
+            && outer_is_pmtud_error(packet_frame, meta));
     // Builders consume the match's resolution for L2 construction. Replace it
     // with the finalized (possibly zone-stamped FabricRedirect) decision before
     // building the prebuilt frame.
@@ -205,7 +227,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     );
     match queued {
         EmbeddedIcmpReversal::Queued { budget_key, .. } => EmbeddedIcmpReversal::Queued {
-            related_untranslated: untranslated_related,
+            related_admit,
             budget_key,
         },
         other => other,
@@ -311,7 +333,7 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
         cos_tx_selection_resolved: true,
     });
     EmbeddedIcmpReversal::Queued {
-        related_untranslated: false,
+        related_admit: false,
         budget_key: budget_key.clone(),
     }
 }
@@ -324,8 +346,9 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
 /// The policy direction is the packet's actual arrival zone to the queued
 /// resolution's egress zone, not the quoted session's original direction.
 /// That keeps a forged error arriving from an untrusted zone subject to the
-/// same `wan -> lan` policy as any other flowless transit packet while still
-/// allowing an explicitly permitted PMTUD error through (#7169).
+/// same `wan -> lan` policy as any other flowless transit packet, while a
+/// genuine PMTUD error arriving from the quoted session's far side rides the
+/// RELATED bypass (#10666) and an explicitly permitted error still passes (#7169).
 pub(super) fn enforce_queued_embedded_icmp_policy(
     queued_frame: &[u8],
     ingress_meta: UserspaceDpMeta,
@@ -334,7 +357,7 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
     worker_ctx: &WorkerContext,
     now_ns: u64,
     now_secs: u64,
-    related_untranslated: bool,
+    related_admit: bool,
 ) -> bool {
     // A queued prebuilt never reaches the later flowless disposition arms:
     // both callers continue after this adjudicator and TX dispatch sends a
@@ -345,11 +368,14 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
         return true;
     }
     // An untranslated error quoting a live session is admitted by the
-    // allow-embedded-icmp RELATED contract. Keep HA/route dispositions
-    // authoritative, but do not re-run the reverse flowless zone pair: that
-    // pair describes the error's arrival direction, not the permitted flow
-    // it quotes. NAT-translated errors retain the policy gate below.
-    if related_untranslated && resolution.disposition == ForwardingDisposition::ForwardCandidate {
+    // allow-embedded-icmp RELATED contract (#10286); a NAT'd/NAT64 PMTUD
+    // error whose arrival the match arm validated against the quoted
+    // session's forward direction rides the same bypass (#10666). Keep
+    // HA/route dispositions authoritative, but do not re-run the reverse
+    // flowless zone pair for either: that pair describes the error's
+    // arrival direction, not the permitted flow it quotes. Anything else
+    // retains the policy gate below.
+    if related_admit && resolution.disposition == ForwardingDisposition::ForwardCandidate {
         return true;
     }
     // Every terminal/non-sendable disposition must fail closed here rather
@@ -428,6 +454,37 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
         now_ns,
     );
     false
+}
+
+/// #10666: whether the OUTER error is the PMTUD signal — v4
+/// Fragmentation-Needed (type 3 / code 4, RFC 1191) or v6 Packet-Too-Big
+/// (type 2 / code 0, RFC 4443). Only PMTUD rides the NAT'd RELATED
+/// bypass; every other NAT'd error type retains the #9948 arrival-zone
+/// gate. Translated delivery rewrites attacker-influenced bytes, so its
+/// policy-less admission stays narrower than the untranslated #10286
+/// passthrough, which preserves the wire tuple.
+pub(super) fn outer_is_pmtud_error(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {
+    let l4 = meta.l4_offset as usize;
+    match (
+        meta.protocol,
+        packet_frame.get(l4).copied(),
+        packet_frame.get(l4 + 1).copied(),
+    ) {
+        (PROTO_ICMP, Some(3), Some(4)) => true,
+        (PROTO_ICMPV6, Some(2), Some(0)) => true,
+        _ => false,
+    }
+}
+
+/// #10666: the quoted session's FORWARD-direction zones (ingress side →
+/// egress side), normalizing a reverse-half match back to the forward
+/// flow so the RELATED arrival check reads one way for every match arm.
+pub(super) fn related_forward_zones(metadata: &SessionMetadata) -> (u16, u16) {
+    if metadata.is_reverse {
+        (metadata.egress_zone, metadata.ingress_zone)
+    } else {
+        (metadata.ingress_zone, metadata.egress_zone)
+    }
 }
 
 /// Resolve the zone identity that a peer-owned embedded error must carry.

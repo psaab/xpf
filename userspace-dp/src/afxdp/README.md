@@ -736,6 +736,18 @@ sync.
     extracted `queue_prebuilt_embedded_icmp_error` tail with the #5690 arm
     (HA/fabric finalizer, CoS classify with `flow_key = None`, prebuilt
     forward, never seeds a session).
+
+  - **#10666 — NAT/NAT64 PMTUD is RELATED only on the quoted session's
+    actual arrival side:** the flowless error builders mark IPv4
+    Fragmentation-Needed and IPv6 Packet-Too-Big errors as RELATED only when
+    the resolved ingress zone matches the forward session's egress zone
+    (same-family inbound / NAT64 v4→v6) or ingress zone (outbound SNAT /
+    NAT64 v6→v4). The queued policy gate skips reverse-zone policy only for
+    that validated PMTUD disposition and only when resolution is
+    `ForwardCandidate`; route, HA, and fabric dispositions remain
+    authoritative. Matching NAT'd Time-Exceeded and other non-PMTUD errors
+    still use the #9948 policy gate, and a wrong-zone PTB still follows zone
+    policy. The un-NAT'd #10286 path is unchanged.
   - **#9528 — both ICMP-error arms run AFTER the interface input filter and
     the PBR verdict:** each arm `continue`s with the descriptor consumed, and
     each used to run ahead of a gate below it. The #6472 arm ran before the
