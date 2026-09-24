@@ -68,19 +68,26 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 	usedIDs := make(map[uint16]string)
 	// #10654: outer-identity belt-and-braces behind the commit-time
 	// duplicate gate (validateGreDuplicateOuterStrict). A snapshot must
-	// never carry two GRE rows with one outer (source, destination, key)
-	// triple — Rust decap returns the first key-matching endpoint in
-	// snapshot order, so the duplicate would attribute every inbound frame
-	// to whichever endpoint sorts first. The later-sorting collider is
-	// dropped loudly. Iteration is the emitter's sorted order, so the drop
-	// is deterministic. Key 0 (unkeyed) still participates: two unkeyed
-	// tunnels on one outer pair match the same frames.
+	// never carry two GRE rows from DIFFERENT tunnel definitions with
+	// one outer identity — Rust decap returns the first key-matching
+	// endpoint in snapshot order, so the duplicate would attribute
+	// every inbound frame to whichever endpoint sorts first. The
+	// later-sorting collider is dropped loudly. Iteration is the
+	// emitter's sorted order, so the drop is deterministic. Key 0
+	// (unkeyed) still participates: two unkeyed tunnels on one outer
+	// pair match the same frames. Transport instance participates too
+	// (#10653 selects by ingress VRF, so same-triple different-VRF
+	// rows are unambiguous and must NOT drop here). Pure inheritance
+	// (one *TunnelConfig fanning out to N unit rows) is exempt — the
+	// multi-unit logical model, not a duplicate.
 	type greOuterKey struct {
 		source      string
 		destination string
 		key         uint32
+		transportRI string
 	}
 	usedGreOuter := make(map[greOuterKey]string)
+	seenGreTunnelObject := make(map[*config.TunnelConfig]struct{})
 	addEndpoint := func(ifName string, tunnel *config.TunnelConfig) {
 		if tunnel == nil {
 			return
@@ -173,22 +180,31 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 				"kept", owner, "dropped", ifName, "id", id)
 			return
 		}
-		// #10654: drop a GRE endpoint whose outer triple is already
+		// #10654: drop a GRE endpoint whose outer identity is already
 		// claimed. Mirrors the commit gate's normalization
 		// (net.ParseIP + String) so IPv6 respellings of one address
 		// collide here as they do in the Rust decap bucket key. An
 		// unparseable endpoint is left for the Rust row-skip (it never
-		// installs, so it cannot collide there either).
+		// installs, so it cannot collide there either). Pure
+		// inheritance (the same *TunnelConfig object fanning out to N
+		// unit endpoints) is ONE definition, not a duplicate: the row
+		// is still built (it carries the unit's zone/addresses) and
+		// only the duplicate check is skipped, mirroring the commit
+		// gate's byObject dedupe. Without this the multi-unit logical
+		// model would log a false ERROR on every snapshot build.
 		if tunnel.Mode == "gre" || tunnel.Mode == "ip6gre" {
-			if src, dst := net.ParseIP(tunnel.Source), net.ParseIP(tunnel.Destination); src != nil && dst != nil {
-				greKey := greOuterKey{source: src.String(), destination: dst.String(), key: tunnel.Key}
-				if owner, taken := usedGreOuter[greKey]; taken {
-					slog.Error("duplicate GRE outer tuple — dropping later-sorting tunnel (#10654)",
-						"kept", owner, "dropped", ifName,
-						"source", greKey.source, "destination", greKey.destination, "key", greKey.key)
-					return
+			if _, inherited := seenGreTunnelObject[tunnel]; !inherited {
+				seenGreTunnelObject[tunnel] = struct{}{}
+				if src, dst := net.ParseIP(tunnel.Source), net.ParseIP(tunnel.Destination); src != nil && dst != nil {
+					greKey := greOuterKey{source: src.String(), destination: dst.String(), key: tunnel.Key, transportRI: tunnel.RoutingInstance}
+					if owner, taken := usedGreOuter[greKey]; taken {
+						slog.Error("duplicate GRE outer tuple — dropping later-sorting tunnel (#10654)",
+							"kept", owner, "dropped", ifName,
+							"source", greKey.source, "destination", greKey.destination, "key", greKey.key)
+						return
+					}
+					usedGreOuter[greKey] = ifName
 				}
-				usedGreOuter[greKey] = ifName
 			}
 		}
 		snap := TunnelEndpointSnapshot{
