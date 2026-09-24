@@ -129,9 +129,9 @@ func TestCompileZonesRefusesShimOnNonEthernetNetdev8279(t *testing.T) {
 			}
 
 			// The refusal owes an operator-visible reason, not a silent skip:
-			// the netdev is UP and zoned with no XDP, which is #5275's
-			// policy-free-router state and must show up in the arm-coverage
-			// proof.
+			// the netdev is UP and zoned with no XDP — a blackholed zone member
+			// (pre-#10302: "#5275's policy-free-router state") — and must show
+			// up in the arm-coverage proof.
 			var found *UnarmedSurface
 			for i := range result.unarmedSurfaces {
 				if result.unarmedSurfaces[i].Ifindex == idx {

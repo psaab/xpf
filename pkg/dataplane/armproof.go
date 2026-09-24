@@ -16,11 +16,16 @@ import (
 // #5275 PR1 — OBSERVE-ONLY dataplane arm-coverage proof.
 //
 // A config that COMPILES but whose dataplane fails to ARM degrades a cold-booted
-// firewall to a policy-free router: ownership, forwarding and route/VIP
-// advertisement are all published in initManagers BEFORE the arm
-// (daemon_run_bringup.go:47 vs :414), and an attach failure surfaces through
-// d.dp.ApplyConfig as an ORDINARY #5679 deferred error — compileErrorMustAbortApply
-// only matches the required-protocol gate — so the apply tail still publishes.
+// firewall to an UNCOVERED one: ownership and route/VIP advertisement are
+// published in initManagers BEFORE the arm (daemon_run_bringup.go:47 vs :414),
+// and an attach failure surfaces through d.dp.ApplyConfig as an ORDINARY #5679
+// deferred error — compileErrorMustAbortApply only matches the required-protocol
+// gate — so the apply tail still publishes. (Pre-#10302 this read "to a
+// policy-free router" with forwarding among the published powers. Under the
+// armed forward fence an unproven arm holds the forward hook at policy-DROP —
+// the fence installs before the transit sysctls are raised, and without
+// kernel-proven XDP links the gate refuses to open — so the degraded box
+// advertises but cannot forward: outage plus uncovered zone, not a bypass.)
 //
 // The eventual fix gates release on a positive arm proof. THIS FILE DOES NOT
 // GATE ANYTHING. It computes the proof and reports what a gating build would
@@ -291,12 +296,18 @@ type UnarmedSurface struct {
 	// Reason is the compiler's own reason for declining.
 	Reason string
 	// StillForwarding marks the sharp variant: the surface was skipped but the
-	// netdev is (or may still be) UP, in a security zone, and forwarded through
-	// by the kernel with NO XDP attached. `set interfaces <if> disable` whose
-	// netlink.LinkSetDown then fails is exactly that — the disable branch logs
-	// the failure at WARN and continues, and address reconciliation runs
-	// regardless. That is the policy-free-router condition #5275 exists to
-	// prevent, so it reads as UNCOVERED rather than merely skipped.
+	// netdev is (or may still be) UP, in a security zone, with NO XDP
+	// attached. `set interfaces <if> disable` whose netlink.LinkSetDown then
+	// fails is exactly that — the disable branch logs the failure at WARN and
+	// continues, and address reconciliation runs regardless. (Pre-#10302 this
+	// read "forwarded through by the kernel": with ip_forward=1 that was the
+	// #5275 policy-free-router state. Under the armed forward fence a link
+	// with no XDP program is never a pinhole, so its transit is
+	// fence-dropped: the gap is a blackholed zone member — outage plus
+	// uncovered zone — not a bypass. It still reads as UNCOVERED rather
+	// than merely skipped, because the zone has neither enforcement nor
+	// service. The FIELD NAME is now a misnomer kept for churn reasons:
+	// what it marks is UP-zoned-unshimmed, not actual forwarding.)
 	StillForwarding bool
 	// Unshimmable marks a surface refused because its resolved link framing is
 	// one of the closed, provably raw-L3 kinds in
@@ -311,27 +322,28 @@ type UnarmedSurface struct {
 //
 // Split out of mapZoneInterface deliberately. The only judgement in it is
 // StillForwarding, which is the whole difference between a benign operator
-// action and a policy-free router — and producing the condition in a test
-// (a real netdev whose LinkSetDown fails) needs CAP_NET_ADMIN, while deciding
-// what such a failure MEANS does not. In the caller it was unbindable; here it
-// is four table rows.
+// action and an UP-zoned-unshimmed netdev (pre-#10302: "a policy-free
+// router") — and producing the condition in a test (a real netdev whose
+// LinkSetDown fails) needs CAP_NET_ADMIN, while deciding what such a
+// failure MEANS does not. In the caller it was unbindable; here it is four
+// table rows.
 //
 // linkErr is the netlink link-resolution error: non-nil means no handle was
 // ever obtained, so LinkSetDown was never even attempted. downErr is
 // LinkSetDown's own error. The netdev is proven down only when BOTH are nil.
 // Anything else leaves it possibly UP, still address-reconciled (that call sits
-// outside the disable guard), still in a zone, still forwarded through by the
-// kernel, and carrying no XDP.
+// outside the disable guard), still in a zone, and carrying no XDP — with no
+// xpf enforcement point and its transit fence-dropped (never a pinhole).
 func disabledSurfaceRecord(name string, ifindex int, linkErr, downErr error) UnarmedSurface {
 	s := UnarmedSurface{Name: name, Ifindex: ifindex}
 	switch {
 	case linkErr != nil:
 		s.Reason = fmt.Sprintf("administratively disabled but the link never resolved (%v) — "+
-			"never brought down, may still be UP and forwarding with no XDP", linkErr)
+			"never brought down, may still be UP and zoned with no XDP (no enforcement point; transit fence-dropped)", linkErr)
 		s.StillForwarding = true
 	case downErr != nil:
 		s.Reason = fmt.Sprintf("administratively disabled but link-down FAILED (%v) — "+
-			"netdev may still be UP and forwarding with no XDP", downErr)
+			"netdev may still be UP and zoned with no XDP (no enforcement point; transit fence-dropped)", downErr)
 		s.StillForwarding = true
 	default:
 		s.Reason = "administratively disabled (netdev brought down)"
@@ -382,7 +394,7 @@ func missingInterfaceRecord(physName string, vlanID int, zone string, err error)
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		s.Reason = fmt.Sprintf("%s lookup FAILED in zone %s (%v) — "+
-			"the netdev enumeration errored, so absence is unproven and it may be UP and forwarding", subject, zone, err)
+			"the netdev enumeration errored, so absence is unproven and it may be UP and zoned with no XDP (no enforcement point; transit fence-dropped)", subject, zone, err)
 		s.StillForwarding = true
 	}
 	return s
@@ -707,8 +719,9 @@ func coverDelegated(
 		// StillForwarding is the whole condition. A disable whose LinkSetDown
 		// FAILED (or whose link never resolved, so it was never attempted)
 		// leaves the parent possibly UP, zoned and carrying no XDP, and the
-		// child rides that same netdev — so it stays UNCOVERED, which is the
-		// policy-free-router reading both records should have.
+		// child rides that same netdev — so it stays UNCOVERED (blackholed
+		// zone member under the armed fence, pre-#10302: "the
+		// policy-free-router reading both records should have").
 		if u, ok := unarmed[parent]; ok && !u.StillForwarding {
 			s.Kind = CoverageSkipped
 			s.Detail = fmt.Sprintf(
@@ -965,7 +978,10 @@ func (rep ArmCoverageReport) LogArmCoverage(stage string, seq uint64) {
 	// member is a clean `disable`, which is a legitimate operator action and is
 	// excluded from would_gate for exactly that reason — so it is INFO. Logging
 	// it at WARN would put a routine commit's expected output at the same level
-	// as the policy-free-router condition and train operators to ignore both.
+	// as an UNCOVERED surface and train operators to ignore both. (Pre-#10302
+	// this read "the policy-free-router condition": the fence now drops the
+	// unshimmed transit, so UNCOVERED means a blackholed zone member rather
+	// than a bypass — but it still outranks a benign skip.)
 	for _, s := range rep.Surfaces {
 		switch s.Kind {
 		case CoverageUncovered:

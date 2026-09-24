@@ -20,7 +20,13 @@
 //! delivered (it then meets the nftables `hook input` chains, as native
 //! host-inbound does in these windows), and inner transit is dropped and counted
 //! (`rx_degraded_transit_drops`). A blanket drop would cut management over the VPN
-//! during failovers for no security gain; delivering everything is the bypass.
+//! during failovers for no security gain. The transit refusal is defense-in-depth
+//! with the armed forward fence (#10302), not a bypass closure: the wgN TUN is
+//! never a fence pinhole — only tracked XDP links and the marked xpf-usp1 queue
+//! are — so TUN-written transit would die at the forward hook anyway. Refusing it
+//! here attributes and counts the drop to the tunnel instead of leaving it to the
+//! fence. (#9594's "delivering everything is the bypass" predates the fence;
+//! #10527 was graded against that open-hook wording — #10642.)
 //!
 //! Both questions are answered from the shim's own pinned maps rather than a
 //! second derivation in the helper: `userspace_ingress_ifaces` (the set

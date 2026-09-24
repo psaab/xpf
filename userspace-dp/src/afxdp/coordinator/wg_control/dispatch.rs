@@ -190,11 +190,14 @@ pub(super) fn dispatch_inbound(
                     // shim claims transport data for the steered listen-port
                     // SET (#9587), so a record for any port outside the set
                     // reaches this socket on every path, and writing its
-                    // plaintext to the TUN hands it to the kernel's forwarding path with no zone
-                    // policy, no session and no counters. `try_decap` has
+                    // plaintext to the TUN hands it to the kernel, where the
+                    // armed forward fence (#10302) drops it as unallowlisted
+                    // wgN transit — with no zone verdict, no session and no
+                    // tunnel counters. `try_decap` has
                     // already authenticated it, so key confirmation, the replay
                     // window and endpoint roaming behave as for a keepalive; the
-                    // plaintext is dropped and counted instead of written.
+                    // plaintext is dropped and counted instead of written,
+                    // attributing the refusal to the port.
                     if kernel_transport == crate::afxdp::types::WgKernelTransport::DropUnsteered {
                         WgCounters::bump(&engine.counters().rx_unsteered_transport_drops);
                         return InboundOutcome::Authenticated(outcome.peer_pubkey);
@@ -204,8 +207,9 @@ pub(super) fn dispatch_inbound(
                     // it adjudicates, so reaching this socket there means the
                     // shim took a degraded arm. An ingress it does not
                     // adjudicate is the #8274 residual; Half A applies the
-                    // same local-vs-transit posture to it instead of allowing
-                    // transit through the kernel's open forward hook.
+                    // same local-vs-transit posture to it instead of leaving
+                    // the TUN-written transit for the armed forward fence
+                    // (#10302) to drop without tunnel attribution.
                     // Traffic addressed to the firewall is delivered (it meets
                     // the nftables input chains); transit is dropped and
                     // counted. See `kernel_path.rs`.
