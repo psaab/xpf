@@ -362,17 +362,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 };
-                // #10313: reject an unknown tagged VID at the common ingress
-                // boundary. This must run before destination classification,
-                // ARP/NDP learning, tunnel decapsulation, flow-cache lookup,
-                // session lookup, screen evaluation, and policy/NAT consumers:
-                // none of those stages may observe the parent's inherited
-                // sibling zone for an identity the snapshot does not own.
+                // #10313/#10656: reject an unknown tagged VID at the common
+                // ingress boundary. This must run before destination
+                // classification, ARP/NDP learning, tunnel decapsulation,
+                // flow-cache lookup, session lookup, screen evaluation, and
+                // policy/NAT consumers: none may observe a fallback zone for
+                // an identity the snapshot does not own, whether the fallback
+                // is an inherited sibling zone or the port's own zone.
                 //
                 // The pre-routing scope helper independently preserves the
-                // parent config name for from-interface diagnostics and scope
-                // matching, while forcing its zone empty. The packet itself
-                // never reaches that downstream path for an unknown VID.
+                // physical config name for from-interface diagnostics and
+                // scope matching, while forcing its zone empty. The packet
+                // itself never reaches that downstream path for an unknown
+                // VID.
                 // #10597: injected WG records arrive post-decap with logical
                 // ingress; the native link-layer guards below are bypassed.
                 if meta.ingress_vlan_present != 0
