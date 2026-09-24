@@ -75,6 +75,7 @@ mod early_filter;
 mod gre_classify;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
+mod ipv6_len_gate;
 mod wg_classify;
 use binding_index::{
     BINDING_QUEUES_PER_IFACE, BINDING_SLOT_MAP_MAX_ENTRIES, RawRxQueue, binding_slot,
@@ -85,6 +86,7 @@ use ipv6_ext_walk::{
     EH_CLASS_TERMINAL, FragHdr, MAX_EXT_HDRS, PROTO_FRAGMENT_NO_L4, eh_class, eh_class_table,
     read_bytes,
 };
+use ipv6_len_gate::ipv6_declared_end;
 use wg_classify::{
     WG_STEERED_PORT_SET_MAX, wg_port_is_steered, wg_record_is_transport_data,
     wg_steer_to_kernel_on_port_match, wg_worker_claims_record,
@@ -1817,8 +1819,20 @@ fn parse_ipv6(
 
     let flow_lbl0 = ip6[1];
     let dscp = ((version_priority & 0x0f) << 2) | (flow_lbl0 >> 6);
+    let payload_len = u16::from_be_bytes([ip6[4], ip6[5]]);
     let (payload_offset, tcp_flags, flow_src_port, flow_dst_port, icmp_type, udp_wg_transport_data) =
         parse_l4(data, data_end, offset, protocol, data_end)?;
+    // #10662: keep the capture-bound L4 parse EXACTLY as before. Passing a
+    // declared bound through parse_l4 multiplied verifier states: both prior
+    // designs hit 1,000,001 instructions against the 1,000,000 cap (baseline
+    // master: 635,813). This single post-check compares only the consumed
+    // packet-relative L4 end; the scalar truncation verdict never becomes a
+    // new packet bound or enters the heavy parse.
+    let declared_end = ipv6_declared_end(l3_offset as usize, payload_len);
+    let l4_truncated = payload_offset as usize > declared_end;
+    if l4_truncated {
+        return None;
+    }
     // #8249 EXPERIMENT: reuse the already-validated 40-byte header slice
     // instead of re-reading the addresses from the packet. `ip6` covers
     // [l3_offset, l3_offset+40) and the addresses live at +8 and +24 within it.

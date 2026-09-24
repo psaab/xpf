@@ -1589,3 +1589,6 @@ mod tests_9901_walker_parity;
 #[cfg(test)]
 #[path = "tests_9901_len_gate.rs"]
 mod tests_9901_len_gate;
+#[cfg(test)]
+#[path = "tests_10662_len_gate.rs"]
+mod tests_10662_len_gate;

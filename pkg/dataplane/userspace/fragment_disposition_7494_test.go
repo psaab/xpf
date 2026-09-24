@@ -386,6 +386,48 @@ func fragSessionKeyV6(srcPort, dstPort uint16) fragSessionKey {
 		SrcPort: srcPort, DstPort: dstPort, SrcAddr: src, DstAddr: dst,
 	}
 }
+// ipv6TCPFrame10662 builds an IPv6 datagram with a complete captured TCP
+// header but a caller-selected declared payload length. The addresses match
+// fragSessionKeyV6 so an out-of-declared-range SYN can be tested against a
+// planted session.
+func ipv6TCPFrame10662(payloadLen uint16) []byte {
+	p := make([]byte, 14+40+20)
+	p[12], p[13] = 0x86, 0xdd
+	ip := p[14:]
+	ip[0] = 0x60
+	binary.BigEndian.PutUint16(ip[4:], payloadLen)
+	ip[6] = unix.IPPROTO_TCP
+	ip[7] = 64
+	copy(ip[8:24], []byte{0x20, 0x01, 5, 0x59, 0x85, 0x85, 0xbf, 1, 0, 0, 0, 0, 0, 0, 0, 50})
+	copy(ip[24:40], []byte{0x20, 0x01, 5, 0x59, 0x85, 0x85, 0xbf, 2, 0, 0, 0, 0, 0, 0, 0, 60})
+	tcp := ip[40:]
+	binary.BigEndian.PutUint16(tcp[0:], 12345)
+	binary.BigEndian.PutUint16(tcp[2:], 443)
+	tcp[12] = 0x50 // 20-byte TCP header
+	tcp[13] = 0x02 // SYN lies beyond payload_len=13
+	return p
+}
+
+func TestV6TCPFlagsPastDeclaredEndCannotHitSession_10662(t *testing.T) {
+	coll := fragLoad(t)
+	key := fragSessionKeyV6(12345, 443)
+	if err := coll.Maps["userspace_sessions"].Put(&key, uint8(2)); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+
+	_, control := fragRun(t, coll, ipv6TCPFrame10662(20))
+	if control["PASS_TO_KERNEL"] == 0 {
+		t.Fatalf("declared 20-byte TCP header did not match the planted session "+
+			"(reasons=%v); session fixture is not observable", control)
+	}
+
+	ret, d := fragRun(t, coll, ipv6TCPFrame10662(13))
+	t.Logf("IPv6 payload_len=13 with captured SYN flag at offset+13 -> ret=%d reasons=%v", ret, d)
+	if d["PASS_TO_KERNEL"] != 0 || d["PARSE_FAIL"] == 0 {
+		t.Fatalf("IPv6 TCP flags outside payload_len reached session admission: "+
+			"expected PARSE_FAIL without PASS_TO_KERNEL, got %v", d)
+	}
+}
 
 // TestV6FixtureReachesTheWalk is the fixture control, and it is the cell that
 // makes the v6 cells below mean anything. A v6 frame that does not actually
