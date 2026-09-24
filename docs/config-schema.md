@@ -11284,6 +11284,14 @@ reserved for whole-dataplane selection where a rewrite shim
   Because rejection is a compile error, the candidate is never promoted — no
   partial outer/inner state survives. Regression coverage:
   `pkg/config/qinq_canonical_vlan_5879_test.go`.
+- **#10655 (802.1ad S-tag unsupported):** on an XDP-adjudicated ingress,
+  a single outer 0x88a8 S-tag is dropped and counted as `stag_drop`; it is
+  never steered as the 802.1Q unit with the same VID. The userspace metadata
+  and worker identity carry only physical ifindex + VID, not TPID, so S-tag
+  identity cannot safely alias a C-tag unit. Double-tagged frames retain the
+  separate `qinq_drop` disposition (#9888). VLAN-parent RX tag stripping is
+  disabled (#5268/#9946), so the S-tag remains visible to this software drop;
+  no S-tag hardware filter state is assumed.
 - **#6178 (input-vlan-map / output-vlan-map reject):** Junos
   `input-vlan-map` / `output-vlan-map` under a logical unit request a VLAN
   tag rewrite on ingress / egress — push a tag, pop a tag, or swap the tag

@@ -700,7 +700,7 @@ func (m *Manager) clearAllBindingRowsLocked() {
 
 // degradedPathReasonNames maps BPF array index to a human-readable name.
 // Must stay in sync with USERSPACE_FALLBACK_REASON_* in userspace-xdp/src/lib.rs.
-var degradedPathReasonNames = [17]string{
+var degradedPathReasonNames = [18]string{
 	0:  "ctrl_disabled",
 	1:  "parse_fail",
 	2:  "binding_missing",
@@ -718,6 +718,7 @@ var degradedPathReasonNames = [17]string{
 	14: "pass_to_kernel",
 	15: "transit_drop",
 	16: "qinq_drop",
+	17: "stag_drop",
 }
 
 // readDegradedPathStatsLocked reads retained-shim degraded-path counters and
