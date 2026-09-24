@@ -462,6 +462,25 @@ pub(in crate::afxdp) fn is_pptp_control_flow(flow: &SessionFlow) -> bool {
             || flow.forward_key.src_port == crate::session::pptp_control::PPTP_CONTROL_PORT)
 }
 
+/// The frame-relative end of the IP datagram `packet_frame` declares,
+/// clamped to the backing slice (#10663).
+///
+/// `None` when the L3 header itself is truncated or the version is unknown —
+/// every caller fails closed on `None`. The family comes from the version
+/// nibble in the frame, mirroring
+/// [`crate::afxdp::frame::tcp_payload_offset`], so a caller cannot pass one
+/// that disagrees with the packet.
+fn declared_datagram_end(packet_frame: &[u8]) -> Option<usize> {
+    let l3 = crate::afxdp::frame::frame_l3_offset(packet_frame)?;
+    let version = packet_frame.get(l3)? >> 4;
+    let family = match version {
+        4 => libc::AF_INET as u8,
+        6 => libc::AF_INET6 as u8,
+        _ => return None,
+    };
+    crate::afxdp::frame::declared_l3_end(packet_frame, l3, family)
+}
+
 /// Copy a recognised control segment into the inbox. Returns whether it landed.
 ///
 /// `#[cold]`: PPTP control traffic is a handful of small messages per call, so
@@ -480,6 +499,15 @@ pub(in crate::afxdp) fn is_pptp_control_flow(flow: &SessionFlow) -> bool {
 /// It does NOT parse. Parsing, installing and broadcasting happen on the
 /// worker's periodic drain, so nothing here waits on control-channel work and
 /// the association is never needed for the segment that taught it.
+///
+/// #10663: the copy is bounded by the IP-DECLARED datagram end, not the
+/// backing frame. `packet_frame` may carry trailing slack (NIC zero-pad on a
+/// sub-60-byte frame, or attacker-supplied bytes) past what the L3 header
+/// declares; copying to the frame end handed the drain bytes the datagram
+/// never covered, and the drain learned a call association OUT OF them. This
+/// is the same #2361 rule every other L4 reader in this tree enforces. A
+/// truncated L3, or a TCP header ending past the declared end, fails closed:
+/// nothing is buffered and the call takes the unassociated path.
 #[cold]
 #[inline(never)]
 pub(in crate::afxdp) fn capture_pptp_control_segment(
@@ -490,7 +518,12 @@ pub(in crate::afxdp) fn capture_pptp_control_segment(
     let Some(offset) = crate::afxdp::frame::tcp_payload_offset(packet_frame) else {
         return false;
     };
-    let Some(payload) = packet_frame.get(offset..) else {
+    let Some(declared_end) = declared_datagram_end(packet_frame) else {
+        return false;
+    };
+    // `offset > declared_end` (a TCP header past the declared datagram) is an
+    // invalid range, so `get` returns `None` — fail closed, no panic.
+    let Some(payload) = packet_frame.get(offset..declared_end) else {
         return false;
     };
     // A pure ACK / handshake segment has no payload and cannot be a control

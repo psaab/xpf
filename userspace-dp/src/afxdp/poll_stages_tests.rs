@@ -4008,6 +4008,9 @@ mod pptp_dispatch_join_tests_7699 {
 
     const PAC: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
     const PNS: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 9);
+
+    const PAC6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7);
+    const PNS6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 9);
     const PAC_CALL_ID: u16 = 0xAAAA;
     const PNS_CALL_ID: u16 = 0xBBBB;
     const EPHEMERAL: u16 = 49152;
@@ -4033,6 +4036,63 @@ mod pptp_dispatch_join_tests_7699 {
         recompute_l4_checksum_ipv4(&mut frame[14..], 20, PROTO_TCP, false)
             .expect("tcp checksum");
         frame
+    }
+
+    /// IPv6 sibling of `tcp_v4_frame_with_payload`.
+    fn tcp_v6_frame_with_payload(
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut frame = Vec::new();
+        write_eth_header(
+            &mut frame,
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+            0,
+            0x86dd,
+        );
+        let ipv6_payload_len = (20 + payload.len()) as u16;
+        frame.extend_from_slice(&[
+            0x60,
+            0,
+            0,
+            0,
+            (ipv6_payload_len >> 8) as u8,
+            ipv6_payload_len as u8,
+            PROTO_TCP,
+            64,
+        ]);
+        frame.extend_from_slice(&src.octets());
+        frame.extend_from_slice(&dst.octets());
+        frame.extend_from_slice(&src_port.to_be_bytes());
+        frame.extend_from_slice(&dst_port.to_be_bytes());
+        frame.extend_from_slice(&1u32.to_be_bytes());
+        frame.extend_from_slice(&1u32.to_be_bytes());
+        frame.extend_from_slice(&[0x50, 0x18, 0x20, 0, 0, 0, 0, 0]);
+        frame.extend_from_slice(payload);
+        crate::afxdp::frame::recompute_l4_checksum_ipv6(&mut frame[14..], 40, PROTO_TCP)
+            .expect("TCP checksum");
+        frame
+    }
+
+    fn tcp_v6_meta(frame: &[u8]) -> UserspaceDpMeta {
+        UserspaceDpMeta {
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+            ingress_ifindex: 24,
+            l3_offset: 14,
+            l4_offset: 54,
+            payload_offset: 74,
+            pkt_len: frame.len() as u16,
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x18,
+            ..UserspaceDpMeta::default()
+        }
     }
 
     /// The Outgoing-Call-Reply as it travels on the wire: from the PAC (which
@@ -4062,6 +4122,14 @@ mod pptp_dispatch_join_tests_7699 {
     /// capture is NOT gated on that flag — adding `learn_from_live_frame &&` to
     /// the capture condition reds every cell in this module.
     fn run_stage(ctx: &WorkerContext<'_>, frame: &[u8]) {
+        run_stage_with_meta(ctx, frame, tcp_v4_meta(frame, 0x18));
+    }
+
+    fn run_stage_with_meta(
+        ctx: &WorkerContext<'_>,
+        frame: &[u8],
+        meta: UserspaceDpMeta,
+    ) {
         let area = MmapArea::new(4096).expect("mmap");
         let desc = crate::xsk_ffi::XdpDesc {
             addr: 0,
@@ -4073,7 +4141,7 @@ mod pptp_dispatch_join_tests_7699 {
             &area,
             desc,
             frame,
-            tcp_v4_meta(frame, 0x18),
+            meta,
             false,
             &mut last_learned,
             ctx,
@@ -4305,6 +4373,130 @@ mod pptp_dispatch_join_tests_7699 {
              to allocate without bound by a control-port flood"
         );
         assert_eq!(inbox.dropped_count(), 1, "the drop was not counted");
+    }
+
+    /// Capture slack must not complete a control reply that the IPv4 datagram
+    /// itself does not contain (#10663). The old `offset..` copy buffered the
+    /// out-of-datagram suffix, letting the drain learn a call from those bytes.
+    #[test]
+    fn trailing_capture_slack_cannot_complete_pptp_call_reply_10663() {
+        let ctx = stage_ctx();
+        let inbox: &PptpControlInbox = ctx.pptp_control;
+        let mut frame = call_reply_frame();
+        let captured_payload_len = 16; // includes both call IDs, not the full 32-byte reply
+        let declared_ip_len = 20 + 20 + captured_payload_len;
+        frame[16..18].copy_from_slice(&(declared_ip_len as u16).to_be_bytes());
+        frame[24..26].fill(0);
+        let ip_checksum = checksum16(&frame[14..34]);
+        frame[24..26].copy_from_slice(&ip_checksum.to_be_bytes());
+        crate::afxdp::frame::recompute_l4_checksum_ipv4(
+            &mut frame[14..14 + declared_ip_len],
+            20,
+            PROTO_TCP,
+            false,
+        )
+        .expect("checksum over declared TCP segment");
+        let payload_offset = 14 + 20 + 20;
+        let declared_end = 14 + declared_ip_len;
+        assert!(
+            frame.len() > declared_end,
+            "fixture must carry capture slack"
+        );
+        assert_eq!(
+            declared_end - payload_offset,
+            captured_payload_len,
+            "fixture must declare only a reply prefix"
+        );
+
+        run_stage(ctx, &frame);
+        assert_eq!(
+            inbox.pending_len(),
+            1,
+            "the in-datagram prefix was not captured"
+        );
+
+        let mut sessions = crate::session::SessionTable::new();
+        let queues = peer_queues(1);
+        assert_eq!(
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(
+                inbox,
+                &mut sessions,
+                &queues,
+                T0,
+            ),
+            0,
+            "bytes beyond the IPv4 datagram completed an Outgoing-Call-Reply"
+        );
+        assert_eq!(
+            inbox.pending_len(),
+            0,
+            "the truncated segment was not consumed"
+        );
+        assert_eq!(
+            sessions.pptp().resolve(IpAddr::V4(PAC), PAC_CALL_ID),
+            None,
+            "the association must not be learned from capture slack"
+        );
+    }
+
+    /// The IPv6 payload-length field, not capture length, bounds PPTP capture.
+    #[test]
+    fn ipv6_capture_slack_cannot_complete_pptp_call_reply_10663() {
+        let ctx = stage_ctx();
+        let inbox: &PptpControlInbox = ctx.pptp_control;
+        let mut frame = tcp_v6_frame_with_payload(
+            PAC6,
+            PNS6,
+            PPTP_CONTROL_PORT,
+            EPHEMERAL,
+            &outgoing_call_reply(PAC_CALL_ID, PNS_CALL_ID, 1),
+        );
+        let captured_payload_len = 16;
+        let declared_ipv6_payload_len = 20 + captured_payload_len;
+        frame[18..20]
+            .copy_from_slice(&(declared_ipv6_payload_len as u16).to_be_bytes());
+        let declared_end = 14 + 40 + declared_ipv6_payload_len;
+        crate::afxdp::frame::recompute_l4_checksum_ipv6(
+            &mut frame[14..declared_end],
+            40,
+            PROTO_TCP,
+        )
+        .expect("checksum over declared TCP segment");
+        assert!(
+            frame.len() > declared_end,
+            "fixture must carry capture slack"
+        );
+
+        let meta = tcp_v6_meta(&frame);
+        run_stage_with_meta(ctx, &frame, meta);
+        assert_eq!(
+            inbox.pending_len(),
+            1,
+            "the in-datagram IPv6 prefix was not captured"
+        );
+
+        let mut sessions = crate::session::SessionTable::new();
+        let queues = peer_queues(1);
+        assert_eq!(
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(
+                inbox,
+                &mut sessions,
+                &queues,
+                T0,
+            ),
+            0,
+            "bytes beyond IPv6 payload_len completed an Outgoing-Call-Reply"
+        );
+        assert_eq!(
+            inbox.pending_len(),
+            0,
+            "the truncated IPv6 segment was not consumed"
+        );
+        assert_eq!(
+            sessions.pptp().resolve(IpAddr::V6(PAC6), PAC_CALL_ID),
+            None,
+            "the IPv6 association must not be learned from capture slack"
+        );
     }
 }
 
