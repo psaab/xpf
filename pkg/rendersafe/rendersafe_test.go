@@ -178,3 +178,20 @@ func TestSafeInterfaceNameRefusesWhitespaceAndControls(t *testing.T) {
 		}
 	}
 }
+
+// TestSafeUnitTokenRejectsLineContinuationBackslash_10718 pins systemd.syntax
+// semantics: a generated value ending in `\` continues into the following
+// directive even though it is one ASCII-whitespace-free, control-free token.
+func TestSafeUnitTokenRejectsLineContinuationBackslash_10718(t *testing.T) {
+	for _, value := range []string{"vrf-mgmt\\", "br0\\\\", "ge-0-0-0\\"} {
+		if SafeUnitToken(value) {
+			t.Errorf("SafeUnitToken(%q) = true, want false for systemd line continuation", value)
+		}
+	}
+	if SafeUnitToken("vrf-mgmt") != true {
+		t.Fatal("SafeUnitToken rejected an ordinary single token")
+	}
+	if SafeInterfaceName("ge-0-0-0\\") {
+		t.Fatal("SafeInterfaceName accepted a trailing systemd line continuation")
+	}
+}

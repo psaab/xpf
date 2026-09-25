@@ -244,6 +244,7 @@ func TestApplyRefusesUnsafeOriginalName_9886(t *testing.T) {
 	err := m.Apply([]InterfaceConfig{
 		{Name: "ge-0-0-0", OriginalName: "enp 0s0", MACAddress: "52:54:00:aa:bb:cc"},
 		{Name: "ge-0-0-1", OriginalName: "enp\x010s0"},
+		{Name: "ge-0-0-3", OriginalName: "enp0s3\\", MACAddress: "52:54:00:aa:bb:ce"},
 		{Name: "ge-0-0-2", OriginalName: "enp0s2", MACAddress: "52:54:00:aa:bb:cd"},
 	})
 	if err == nil {
@@ -254,10 +255,10 @@ func TestApplyRefusesUnsafeOriginalName_9886(t *testing.T) {
 			t.Errorf("#9886: Apply error must mention %q, got %v", want, err)
 		}
 	}
-	for _, name := range []string{"ge-0-0-0", "ge-0-0-1"} {
+	for _, name := range []string{"ge-0-0-0", "ge-0-0-1", "ge-0-0-3"} {
 		for _, suf := range []string{".link", ".network"} {
 			if p := filepath.Join(dir, filePrefix+name+suf); fileExists9886(p) {
-				t.Errorf("#9886: refused row %q must write no file, but %s exists", name, p)
+				t.Errorf("#9886/#10718: refused row %q must write no file, but %s exists", name, p)
 			}
 		}
 	}
@@ -270,7 +271,231 @@ func TestApplyRefusesUnsafeOriginalName_9886(t *testing.T) {
 	}
 }
 
+// TestApplyRefusesAndSweepsLineContinuationInterfaceName_10718 covers the
+// existing Name= belt's systemd.syntax(7) continuation boundary. The seeded
+// file models a pre-belt apply; refusal must sweep it before it remains loaded.
+func TestApplyRefusesAndSweepsLineContinuationInterfaceName_10718(t *testing.T) {
+	stubNetworkctl9886(t)
+	dir := t.TempDir()
+	name := "ge-0-0-0\\"
+	poisonPath := filepath.Join(dir, filePrefix+name+".network")
+	if err := os.WriteFile(poisonPath, []byte("[Match]\nName="+name+"\n[Network]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := NewInDir(dir).Apply([]InterfaceConfig{{Name: name}})
+	if err == nil || !strings.Contains(err.Error(), "#10718") || !strings.Contains(err.Error(), "line continuation") {
+		t.Fatalf("Apply must refuse a Name= line continuation, got %v", err)
+	}
+	if fileExists9886(poisonPath) {
+		t.Fatalf("refused trailing-backslash interface kept its poisoned unit: %s", poisonPath)
+	}
+}
+
 func fileExists9886(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// TestApplyRefusesUnsafeUnitFieldsAndSweeps_10718 drives every generated
+// single-token field through Apply, the renderer boundary tolerant load,
+// peer-sync and rollback paths share. Each row first writes a clean unit, then
+// presents one poisoned field; refusal must fail Apply and sweep every prior
+// unit for that interface while leaving an unrelated managed interface intact.
+//
+// FAIL-ON-REVERT: remove the #10718 field check and its row is accepted, the
+// poisoned field is written, and its previous unit is not swept.
+func TestApplyRefusesUnsafeUnitFieldsAndSweeps_10718(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		field      string
+		base       InterfaceConfig
+		poison     func(*InterfaceConfig)
+		beforeWant string
+	}{
+		{
+			name: "VRF", field: "VRF",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}, VRFName: "vrf-mgmt"},
+			poison: func(ifc *InterfaceConfig) { ifc.VRFName = "vrf-mgmt\nDHCP=yes" },
+		},
+		{
+			name: "Bond", field: "Bond",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}, BondMaster: "ae0"},
+			poison: func(ifc *InterfaceConfig) { ifc.BondMaster = "ae0 member" },
+		},
+		{
+			name: "Bridge", field: "Bridge",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}, BridgeMaster: "br0"},
+			poison: func(ifc *InterfaceConfig) { ifc.BridgeMaster = "br0\x01" },
+		},
+		{
+			name: "BridgeBackslashContinuation", field: "Bridge",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}, BridgeMaster: "br0", DADDisable: true},
+			poison:     func(ifc *InterfaceConfig) { ifc.BridgeMaster = "br0\\" },
+			beforeWant: "Bridge=br0\nIPv6DuplicateAddressDetection=0\n",
+		},
+		{
+			name: "Duplex", field: "Duplex",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}, Duplex: "full"},
+			poison: func(ifc *InterfaceConfig) { ifc.Duplex = "full\nDHCP=yes" },
+		},
+		{
+			name: "MACAddress", field: "MACAddress",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}},
+			poison: func(ifc *InterfaceConfig) { ifc.MACAddress = "52:54:00:aa:bb:cc forged" },
+		},
+		{
+			name: "Address", field: "Address",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}},
+			poison: func(ifc *InterfaceConfig) { ifc.Addresses = []string{"10.0.0.1/24\nDHCP=yes"} },
+		},
+		{
+			name: "VLANParentAddress", field: "Address",
+			base: InterfaceConfig{Name: "ge-0-0-0", IsVLANParent: true,
+				VLANParentAddresses: []string{"169.254.1.1/32"}},
+			poison: func(ifc *InterfaceConfig) { ifc.VLANParentAddresses = []string{"169.254.1.1/32\nDHCP=yes"} },
+		},
+		{
+			name: "Mode", field: "Mode",
+			base: InterfaceConfig{Name: "bond0", IsBond: true, BondMode: "active-backup"},
+			poison: func(ifc *InterfaceConfig) { ifc.BondMode = "active-backup\nDHCP=yes" },
+		},
+		{
+			name: "ModeOnDisabledBond", field: "Mode",
+			base: InterfaceConfig{Name: "bond0", IsBond: true, Disable: true, BondMode: "active-backup"},
+			poison: func(ifc *InterfaceConfig) { ifc.BondMode = "active-backup\nDHCP=yes" },
+		},
+		{
+			name: "LACPTransmitRate", field: "LACPTransmitRate",
+			base: InterfaceConfig{Name: "bond0", IsBond: true, BondMode: "802.3ad", LACPRate: "fast"},
+			poison: func(ifc *InterfaceConfig) { ifc.LACPRate = "fast\nDHCP=yes" },
+		},
+		{
+			name: "BitsPerSecond", field: "BitsPerSecond",
+			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
+				Addresses: []string{"10.0.0.1/24"}, Speed: "1g"},
+			poison: func(ifc *InterfaceConfig) { ifc.Speed = "1g 999999999999" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubNetworkctl9886(t)
+			dir := t.TempDir()
+			m := NewInDir(dir)
+			good := InterfaceConfig{Name: "good0", Addresses: []string{"192.0.2.1/24"}}
+			if err := m.Apply([]InterfaceConfig{tc.base, good}); err != nil {
+				t.Fatalf("clean control Apply failed: %v", err)
+			}
+
+			suffixes := []string{".network"}
+			if tc.base.MACAddress != "" && !tc.base.Unmanaged {
+				suffixes = append(suffixes, ".link")
+			}
+			if tc.base.IsBond || tc.base.IsBridge {
+				suffixes = append(suffixes, ".netdev")
+			}
+			for _, suffix := range suffixes {
+				path := filepath.Join(dir, filePrefix+tc.base.Name+suffix)
+				if !fileExists9886(path) {
+					t.Fatalf("clean control %s is missing; refusal assertion would be vacuous", path)
+				}
+			}
+			if tc.beforeWant != "" {
+				raw, err := os.ReadFile(filepath.Join(dir, filePrefix+tc.base.Name+".network"))
+				if err != nil {
+					t.Fatalf("clean control .network is missing: %v", err)
+				}
+				if !strings.Contains(string(raw), tc.beforeWant) {
+					t.Fatalf("clean control lacks continuation target %q:\n%s", tc.beforeWant, raw)
+				}
+			}
+
+			poisoned := tc.base
+			tc.poison(&poisoned)
+			err := m.Apply([]InterfaceConfig{poisoned, good})
+			if err == nil || !strings.Contains(err.Error(), "#10718") || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("Apply must refuse poisoned %s= and name the field, got %v", tc.field, err)
+			}
+			for _, suffix := range suffixes {
+				path := filepath.Join(dir, filePrefix+tc.base.Name+suffix)
+				if fileExists9886(path) {
+					t.Errorf("refused %s= left its previous unit on disk: %s", tc.field, path)
+				}
+			}
+			goodPath := filepath.Join(dir, filePrefix+"good0.network")
+			if !fileExists9886(goodPath) {
+				t.Errorf("refusing %s= swept unrelated good interface unit %s", tc.field, goodPath)
+			}
+			if raw, err := os.ReadFile(goodPath); err != nil || !strings.Contains(string(raw), "Address=192.0.2.1/24\n") {
+				t.Errorf("unrelated good interface was not preserved: read err=%v content=%q", err, raw)
+			}
+		})
+	}
+}
+
+// TestApplySkipsDHCPOwnedUnsafeAddress_10718 pins the generator/token-guard
+// agreement: an address owned by that family's DHCP client is not emitted and
+// must not cause a refusal, while the opposite family's static address remains.
+//
+// FAIL-ON-REVERT: removing the per-family skip from renderedUnitTokenError
+// refuses the poisoned DHCP-owned address and sweeps the still-valid unit.
+func TestApplySkipsDHCPOwnedUnsafeAddress_10718(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		seed       InterfaceConfig
+		poisoned   InterfaceConfig
+		staticWant string
+	}{
+		{
+			name: "DHCPv4",
+			seed: InterfaceConfig{Name: "dhcp4", DHCPv4: true, Addresses: []string{"2001:db8::1/64"}},
+			poisoned: InterfaceConfig{Name: "dhcp4", DHCPv4: true,
+				Addresses: []string{"10.0.0.1/24\nDHCP=yes", "2001:db8::1/64"}},
+			staticWant: "Address=2001:db8::1/64\n",
+		},
+		{
+			name: "DHCPv6",
+			seed: InterfaceConfig{Name: "dhcp6", DHCPv6: true, Addresses: []string{"192.0.2.1/24"}},
+			poisoned: InterfaceConfig{Name: "dhcp6", DHCPv6: true,
+				Addresses: []string{"192.0.2.1/24", "2001:db8::1/64\nDHCP=yes"}},
+			staticWant: "Address=192.0.2.1/24\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubNetworkctl9886(t)
+			dir := t.TempDir()
+			m := NewInDir(dir)
+			path := filepath.Join(dir, filePrefix+tc.seed.Name+".network")
+			if err := m.Apply([]InterfaceConfig{tc.seed}); err != nil {
+				t.Fatalf("clean seed Apply failed: %v", err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("clean seed unit missing: %v", err)
+			}
+
+			if err := m.Apply([]InterfaceConfig{tc.poisoned}); err != nil {
+				t.Fatalf("Apply refused an address suppressed by its DHCP family: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("DHCP-owned address caused the valid unit to be swept: %v", err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("a DHCP-owned address changed the rendered unit:\n before:\n%s\n after:\n%s", before, after)
+			}
+			if !strings.Contains(string(after), tc.staticWant) {
+				t.Fatalf("opposite-family static address was lost:\n%s", after)
+			}
+			if strings.Contains(string(after), "DHCP=yes") {
+				t.Fatalf("poisoned DHCP-owned address reached the unit:\n%s", after)
+			}
+		})
+	}
 }

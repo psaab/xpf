@@ -397,7 +397,7 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		// until renamed. Loud beats writing unanalyzed bytes into a
 		// root-owned unit file.
 		if !rendersafe.SafeInterfaceName(ifc.Name) {
-			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing interface name %q: it is not exactly one [Match] Name= pattern or it carries control bytes — systemd would read it as a whitespace-separated list claiming other interfaces, and raw control bytes in a unit file are version-dependent and unanalyzed (#9886)", ifc.Name))
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing interface name %q: it must be exactly one [Match] Name= pattern and may not contain control bytes or end in a backslash (systemd line continuation) (#9886/#10718)", ifc.Name))
 			continue
 		}
 		if glob := rendersafe.FirstGlobMetacharacter(ifc.Name); glob != "" {
@@ -405,13 +405,22 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 			continue
 		}
 		if ifc.OriginalName != "" && !rendersafe.SafeInterfaceName(ifc.OriginalName) {
-			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: it is not exactly one [Match] OriginalName= pattern or it carries control bytes — systemd would read it as a whitespace-separated list claiming other interfaces (#9886)", ifc.OriginalName, ifc.Name))
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: it must be exactly one [Match] OriginalName= pattern and may not contain control bytes or end in a backslash (systemd line continuation) (#9886/#10718)", ifc.OriginalName, ifc.Name))
 			continue
 		}
 		if glob := rendersafe.FirstGlobMetacharacter(ifc.OriginalName); ifc.OriginalName != "" && glob != "" {
 			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: glob metacharacter %q in [Match] OriginalName= would be interpreted as a shell-style glob and claim every matching interface (#10089)", ifc.OriginalName, ifc.Name, glob))
 			continue
 		}
+		// #10718: every other string sink must remain one systemd token without
+		// controls or a trailing line-continuation backslash. Refuse the entire
+		// interface before it joins `filtered`, so poisoned files from an earlier
+		// apply are swept below instead of preserved in the expected-file set.
+		if err := renderedUnitTokenError(ifc); err != nil {
+			writeErrs = append(writeErrs, err)
+			continue
+		}
+
 		filtered = append(filtered, ifc)
 	}
 	interfaces = filtered
@@ -792,36 +801,129 @@ func (m *Manager) findExternallyManaged() map[string]bool {
 	return FindExternallyManaged(m.networkDir)
 }
 
-// sanitizeUnitValue replaces every ASCII control byte (C0, 0x00-0x1F, which
-// includes newline, plus DEL 0x7F) with a SPACE before the value is interpolated
-// into a generated systemd unit line. Render-side belt for #1798: a description
-// like "lan\nDHCP=ipv4" must not be able to inject extra directives into a
-// .network/.netdev/.link unit even if the commit-time validation layer were
-// bypassed (e.g. an old persisted value reaching the renderer ahead of the
-// load-time sanitizer).
+// sanitizeUnitValue replaces every ASCII control byte (C0 and DEL) with a
+// SPACE and neutralizes a trailing backslash before a value is interpolated
+// into a generated systemd unit line. Render-side belt for #1798/#10718: a
+// description like "lan\nDHCP=ipv4" must not inject a directive, and a value
+// ending in `\` must not continue its line into the next unit directive even
+// if the commit-time validation layer were bypassed (e.g. a persisted value
+// reaching the renderer ahead of the load-time sanitizer).
 //
 // # The consuming grammar, and why a space is the right substitute here (#6833)
 //
-// A systemd unit file is `Key=Value` one per line. The load-bearing byte for an
-// interpolated value is therefore the NEWLINE, which ends the directive and lets
-// the remainder be read as a new one. That is the byte #1798 named and it is
-// genuinely the live one here.
+// systemd.syntax(7) concatenates every line ending in a backslash with the
+// following line, replacing the backslash and newline with a SPACE. That
+// continuation is the other load-bearing byte besides NEWLINE: it can merge
+// the next directive into this value.
 //
-// A space is safe because this belt is applied to `Description=` and ONLY to
-// `Description=`, which systemd treats as free text. That is not incidental — it
-// is what makes the substitution correct, and it is pinned by
-// TestUnitValueSanitizerIsAppliedOnlyToDescription_6833.
-//
-// It would NOT be safe on several `[Match]` keys, which are WHITESPACE-SEPARATED
-// LISTS: `OriginalName=` accepts a list of patterns, so a space inside one value
-// would make a single .link file match several kernel interfaces — the
-// substitution manufacturing the very delimiter the belt exists to prevent (the
-// #6829 shape, where the space and not the newline was the live byte). Any future
-// call site on such a key must re-derive the substitute rather than reuse this
-// function; the inventory test above is what forces that.
+// Replacing controls and a trailing backslash with a space is safe because this
+// belt is applied only to free-text `Description=` fields, which systemd treats
+// as text. Every structured unit field instead uses a single-token/no-control/
+// no-continuation refusal before Apply builds its expected-file set; changing
+// a name, address, enum or match value could bind different network state. The
+// inventory test records all interpolation sinks, and behavioral #10718 cells
+// pin refusal plus stale-file sweeping.
 func sanitizeUnitValue(s string) string {
-	return rendersafe.ReplaceControlBytes(s, ' ')
+	s = rendersafe.ReplaceControlBytes(s, ' ')
+	if strings.HasSuffix(s, "\\") {
+		s = strings.TrimRight(s, "\\") + " "
+	}
+	return s
 }
+// unitTokenError reports a render-side refusal for systemd fields whose value
+// must occupy exactly one whitespace-free token. Unlike descriptions, these
+// fields have no safe replacement byte: changing a name, address or enum can
+// silently bind different network state. The caller must refuse the interface
+// before expected filenames are built so any old poisoned units are swept.
+func unitTokenError(field, value string) error {
+	if rendersafe.SafeUnitToken(value) {
+		return nil
+	}
+	return fmt.Errorf("networkd: refusing %s=%q: value is not one systemd token, has control bytes, or ends in a line-continuation backslash (#10718)", field, value)
+}
+
+// renderedUnitTokenError returns the first unsafe single-token field actually
+// emitted for ifc. It mirrors generator conditions: link fields are checked
+// only when a .link file will be generated; bond .netdev fields are checked
+// even on disabled/unmanaged rows; VRF, reference and address fields are checked
+// only when the .network generator reaches them.
+func renderedUnitTokenError(ifc InterfaceConfig) error {
+	if ifc.MACAddress != "" && !ifc.Unmanaged {
+		if ifc.OriginalName == "" {
+			if err := unitTokenError("MACAddress", ifc.MACAddress); err != nil {
+				return err
+			}
+		}
+		if ifc.Speed != "" {
+			if err := unitTokenError("BitsPerSecond", junosSpeedToNetworkd(ifc.Speed)); err != nil {
+				return err
+			}
+		}
+		if ifc.Duplex != "" {
+			if err := unitTokenError("Duplex", ifc.Duplex); err != nil {
+				return err
+			}
+		}
+	}
+
+	if ifc.IsBond {
+		mode := ifc.BondMode
+		if mode == "" {
+			mode = "802.3ad"
+		}
+		if err := unitTokenError("Mode", mode); err != nil {
+			return err
+		}
+		if mode != "active-backup" {
+			rate := ifc.LACPRate
+			if rate == "" {
+				rate = "fast"
+			}
+			if err := unitTokenError("LACPTransmitRate", rate); err != nil {
+				return err
+			}
+		}
+	}
+
+	if ifc.Unmanaged || ifc.Disable {
+		return nil
+	}
+	if ifc.VRFName != "" {
+		if err := unitTokenError("VRF", ifc.VRFName); err != nil {
+			return err
+		}
+	}
+	if ifc.BondMaster != "" {
+		if err := unitTokenError("Bond", ifc.BondMaster); err != nil {
+			return err
+		}
+	}
+	if ifc.BridgeMaster != "" {
+		if err := unitTokenError("Bridge", ifc.BridgeMaster); err != nil {
+			return err
+		}
+	}
+
+	if ifc.IsVLANParent {
+		for _, addr := range ifc.VLANParentAddresses {
+			if err := unitTokenError("Address", addr); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, addr := range ifc.Addresses {
+		isIPv6 := addressIsIPv6(addr)
+		if (isIPv6 && ifc.DHCPv6) || (!isIPv6 && ifc.DHCPv4) {
+			continue
+		}
+		if err := unitTokenError("Address", addr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 
 func (m *Manager) generateNetdev(ifc InterfaceConfig) string {
 	var b strings.Builder

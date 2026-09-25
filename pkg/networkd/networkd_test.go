@@ -621,6 +621,33 @@ func TestGenerateUnits_NewlineDescriptionDoesNotInject(t *testing.T) {
 	}
 }
 
+// TestGenerateUnits_TrailingDescriptionBackslashDoesNotContinue_10718 pins
+// systemd.syntax(7)'s line-continuation byte on all Description= renderers.
+func TestGenerateUnits_TrailingDescriptionBackslashDoesNotContinue_10718(t *testing.T) {
+	m := New()
+	desc := "lan\\"
+	cases := map[string]string{
+		"netdev": m.generateNetdev(InterfaceConfig{Name: "reth0", Description: desc, MTU: 9000}),
+		"bridge": m.generateBridgeNetdev(InterfaceConfig{Name: "br0", Description: desc, MTU: 9000}),
+		"link": m.generateLink(InterfaceConfig{
+			Name: "trust0", MACAddress: "52:54:00:aa:bb:cc", Description: desc, MTU: 9000,
+		}),
+	}
+	for name, got := range cases {
+		for _, line := range strings.Split(got, "\n") {
+			if strings.HasPrefix(line, "Description=") && strings.HasSuffix(line, "\\") {
+				t.Errorf("%s: Description retains systemd's line-continuation backslash:\n%s", name, got)
+			}
+		}
+		if !strings.Contains(got, "Description=lan \n") {
+			t.Errorf("%s: trailing description backslash was not neutralized:\n%s", name, got)
+		}
+		if !strings.Contains(got, "MTUBytes=9000\n") {
+			t.Errorf("%s: following unit directives were lost:\n%s", name, got)
+		}
+	}
+}
+
 func TestSanitizeUnitValue(t *testing.T) {
 	if got := sanitizeUnitValue("plain"); got != "plain" {
 		t.Errorf("clean value altered: %q", got)
