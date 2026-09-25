@@ -160,6 +160,7 @@ type Daemon struct {
 	ipsecCapture                         *ipsecCaptureRuntime
 	ipsecCaptureStaged                   *ipsecCaptureRuntime
 	ipsecCaptureStagePending             bool
+	ipsecCaptureRemovalPending           atomic.Bool
 	ipsecCaptureGeneration               atomic.Uint64
 	ipsecCaptureAuthorityRevision        atomic.Uint64
 	ipsecCaptureStageGeneration          uint64

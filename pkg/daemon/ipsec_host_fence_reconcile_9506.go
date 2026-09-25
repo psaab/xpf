@@ -112,7 +112,110 @@ func (d *Daemon) tryOpenIpsecPermitAfterFenceAck(permit *permitRecord) {
 		d.HostInputFenceConntrackRevocationOwed() {
 		return
 	}
+	if d.ipsecCaptureRemovalPending.Load() {
+		return
+	}
+	d.ipsecCaptureMu.Lock()
+	divertActive := d.ipsecCapture != nil
+	d.ipsecCaptureMu.Unlock()
+	if !divertActive {
+		return
+	}
 	_ = d.ipsecS4.tryOpenPermit(permit, permit.closeRequestKey, permit.watchGeneration)
+}
+
+// ipsecDivertSpecMasters9506 collects the xfrmi ifnames from a divert spec's
+// four hook classes. The fence hold unions these with the live census so a
+// census lag cannot leave a configured tunnel unfenced across a transition.
+func ipsecDivertSpecMasters9506(spec xnft.IpsecDivertSpec) []string {
+	var out []string
+	for _, rules := range [][]xnft.IpsecDivertRule{spec.InetForward, spec.InetInput, spec.BridgeForward, spec.BridgeInput} {
+		for _, r := range rules {
+			if r.Ifname != "" {
+				out = append(out, r.Ifname)
+			}
+		}
+	}
+	return out
+}
+
+// holdIpsecHostInputFenceForDivertTransition installs and acknowledges a DROP
+// covering the live xfrmi plus every ifname in the divert being removed.
+// Removing the divert while its permit is OPEN and the overlay has retired
+// leaves neither authority. The hold revokes to CLOSING before any nft mutation
+// and publishes the overlay only after host-inbound install/readback succeeds.
+//
+// Callers serialize against the reconciler: commit paths hold applySem and
+// shutdown runs after the supervisor loop joins. This helper does not acquire
+// applySem itself.
+func (d *Daemon) holdIpsecHostInputFenceForDivertTransition(extraMasters []string) error {
+	if d == nil || nftInstaller == nil {
+		return fmt.Errorf("host-input fence hold requires daemon and nftables installer")
+	}
+	if d.ipsecS4 == nil {
+		if len(extraMasters) == 0 {
+			return nil
+		}
+		return fmt.Errorf("host-input fence hold requires IPsec supervisor")
+	}
+	permit := d.ipsecS4.loadPermit()
+	if permit == nil {
+		if len(extraMasters) == 0 {
+			return nil
+		}
+		return fmt.Errorf("host-input fence hold requires permit authority")
+	}
+	if permit.state == ipsecPermitOpen {
+		// Retain the current census and SAFE readiness while revoking. This
+		// permits only the fence ACK—not an OPEN transition—to use this key.
+		revoked, _ := d.ipsecS4.revokeTransitPermitNonblocking(ipsecTopologyEvent{
+			Key: permit.closeRequestKey,
+		})
+		permit = revoked
+	}
+	if permit == nil || permit.state != ipsecPermitClosing {
+		state := ipsecPermitClosed
+		if permit != nil {
+			state = permit.state
+		}
+		return fmt.Errorf("host-input fence hold requires CLOSING permit, got %v", state)
+	}
+	desired, err := d.ipsecHostInputFenceOverlayForPermit(permit)
+	if err != nil {
+		return fmt.Errorf("derive host-input fence overlay: %w", err)
+	}
+	if desired == nil {
+		return nil
+	}
+	if len(extraMasters) > 0 {
+		desired.MasterSet = append(append([]string(nil), desired.MasterSet...), extraMasters...)
+		canon := xnft.CanonicalHostInputFenceOverlay(*desired)
+		desired = &canon
+	}
+	if len(desired.MasterSet) == 0 {
+		return nil
+	}
+	if sameHostInputFenceOverlay(d.activeHostInputFenceOverlay(), desired) &&
+		hostInputFenceOverlayAuthorityMatches(d.ipsecOverlayAcked.Load(), permit) {
+		return nil
+	}
+	if d.store == nil {
+		return fmt.Errorf("host-input fence hold requires config store")
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return fmt.Errorf("host-input fence hold requires active config")
+	}
+	d.ipsecS4.drainCommitLeases()
+	if err := d.applyHostInboundFilterWithOverlay(cfg, desired); err != nil {
+		return fmt.Errorf("install host-input fence before divert transition: %w", err)
+	}
+	d.ipsecOverlay.Store(desired)
+	d.ipsecOverlayAcked.Store(desired)
+	d.ipsecOverlayRetryGeneration.Store(0)
+	d.ipsecOverlayRetrySequence.Store(0)
+	d.ipsecOverlayRetryUntil.Store(0)
+	return nil
 }
 
 // reconcileIpsecHostInputFence is the production owner that turns permit

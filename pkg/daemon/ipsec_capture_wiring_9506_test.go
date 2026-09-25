@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -17,7 +18,9 @@ import (
 	"github.com/psaab/xpf/pkg/nfqueue"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sync/semaphore"
 )
+
 
 func TestDaemonD11ArmGateFrozenAtConstruction10484(t *testing.T) {
 	const envName = "XPF_ATTEST_10484_ARM"
@@ -966,5 +969,192 @@ func TestIpsecCaptureWitnessUsesD11JoinKey10484(t *testing.T) {
 		witness.D11PermitEpoch != 17 || witness.RunID == runID {
 		t.Fatalf("witness D11 key = available=%v run=%q epoch=%d actor=%q, want true/%q/17/process",
 			witness.D11Available, witness.D11RunID, witness.D11PermitEpoch, witness.RunID, runID)
+	}
+}
+func newF1CaptureFenceTestEnv(t *testing.T, withCapture bool, removeErr error) (*Daemon, *fakeNftInstaller, *[]string) {
+	t.Helper()
+	origInstaller := nftInstaller
+	origDelete := conntrackDeleteFilters
+	origOverlayDelete := hostInputFenceConntrackDeleteFilters
+	origCensus := hostInputFenceAllLocalAddrs
+	t.Cleanup(func() {
+		nftInstaller = origInstaller
+		conntrackDeleteFilters = origDelete
+		hostInputFenceConntrackDeleteFilters = origOverlayDelete
+		hostInputFenceAllLocalAddrs = origCensus
+	})
+	hostInputFenceAllLocalAddrs = func() ([]string, error) { return nil, nil }
+	conntrackDeleteFilters = func(netlink.InetFamily, ...netlink.CustomConntrackFilter) (uint, error) {
+		return 0, nil
+	}
+	hostInputFenceConntrackDeleteFilters = func(netlink.InetFamily, ...netlink.CustomConntrackFilter) (uint, error) {
+		return 0, nil
+	}
+
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadOverride("system { host-name f1-capture-test; }"); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	tuple := ipsecTopologyTuple{Kind: "xfrmi", Ifindex: 11, Name: "st0", Owner: "kernel"}
+	key := testKey(ipsecReadySafe, 4, tuple)
+	supervisor := newIpsecSupervisor()
+	permit := testClosingRecord(8, 12, key, 4)
+	if withCapture {
+		permit = testOpenRecord(8, 12, key, 4)
+	}
+	supervisor.permit.Store(permit)
+	supervisor.watch.Store(&TransitWatchSnapshot{Generation: 4, Ready: ipsecReadySafe, Tuples: key.Tuples})
+	d := &Daemon{store: store, ipsecS4: supervisor, applySem: semaphore.NewWeighted(1)}
+	events := new([]string)
+	fake := &fakeNftInstaller{}
+	fake.hostInbound = func(spec xnft.HostInboundSpec) error {
+		if spec.Overlay == nil || spec.Overlay.State != "CLOSING" ||
+			len(spec.Overlay.MasterSet) != 1 || spec.Overlay.MasterSet[0] != "st0" {
+			return errors.New("host-input DROP overlay missing st0/CLOSING authority")
+		}
+		*events = append(*events, "install")
+		return nil
+	}
+	fake.overlayReadback = func(overlay xnft.HostInputFenceOverlay) error {
+		if overlay.State != "CLOSING" || len(overlay.MasterSet) != 1 || overlay.MasterSet[0] != "st0" {
+			return errors.New("host-input DROP overlay readback did not cover st0")
+		}
+		*events = append(*events, "readback")
+		return nil
+	}
+	fake.divertRemove = func() error {
+		*events = append(*events, "remove")
+		current := supervisor.loadPermit()
+		if current == nil || current.state != ipsecPermitClosing {
+			return errors.New("divert removal crossed an OPEN permit")
+		}
+		acked := d.ipsecOverlayAcked.Load()
+		if acked == nil || !hostInputFenceOverlayAuthorityMatches(acked, current) ||
+			!d.ipsecCaptureRemovalPending.Load() {
+			return errors.New("divert removal began before acknowledged host-input DROP hold")
+		}
+		return removeErr
+	}
+	nftInstaller = fake
+	if withCapture {
+		d.ipsecCapture = &ipsecCaptureRuntime{
+			supervisor: supervisor,
+			spec:       xnft.IpsecDivertSpec{InetInput: []xnft.IpsecDivertRule{{Ifname: "st0", Queue: 1002}}},
+		}
+		d.ipsecCaptureStagePending = true
+	}
+	return d, fake, events
+}
+
+func commitIpsecCaptureStageF1(t *testing.T, d *Daemon, old *ipsecCaptureRuntime) error {
+	t.Helper()
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("acquire apply semaphore: %v", err)
+	}
+	defer d.applySem.Release(1)
+	return d.commitIpsecCaptureStage(old, nil)
+}
+
+func TestIpsecCaptureRemovalAcknowledgesFenceBeforeDivertAndKeepsIt9506(t *testing.T) {
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, nil)
+	old := d.ipsecCapture
+	if err := commitIpsecCaptureStageF1(t, d, old); err != nil {
+		t.Fatalf("remove capture: %v", err)
+	}
+	if got := strings.Join(*events, ","); got != "install,readback,remove" {
+		t.Fatalf("transition order = %s, want install/readback before remove", got)
+	}
+	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "remove" {
+		t.Fatalf("divert calls = %v, want one removal", fake.divertCalls)
+	}
+	if d.ipsecCapture != nil || d.ipsecCaptureStagePending {
+		t.Fatalf("capture state after removal = active %p pending %v", d.ipsecCapture, d.ipsecCaptureStagePending)
+	}
+	permit := d.ipsecS4.loadPermit()
+	if permit == nil || permit.state != ipsecPermitClosing {
+		t.Fatalf("permit after removal = %+v, want CLOSING while divert absent", permit)
+	}
+	overlay := d.activeHostInputFenceOverlay()
+	if overlay == nil || overlay.State != "CLOSING" || len(overlay.MasterSet) != 1 || overlay.MasterSet[0] != "st0" {
+		t.Fatalf("fence after removal = %+v, want acknowledged st0 DROP", overlay)
+	}
+	d.tryOpenIpsecPermitAfterFenceAck(permit)
+	if got := d.ipsecS4.loadPermit(); got != permit || got.state != ipsecPermitClosing {
+		t.Fatalf("fence ACK reopened permit without a committed divert: %+v", got)
+	}
+}
+
+func TestIpsecCaptureRemovalFailureRestoresDivertBehindFence9506(t *testing.T) {
+	injected := errors.New("remove failed")
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, injected)
+	old := d.ipsecCapture
+	if err := commitIpsecCaptureStageF1(t, d, old); !errors.Is(err, injected) {
+		t.Fatalf("remove error = %v, want injected failure", err)
+	}
+	if got := strings.Join(*events, ","); got != "install,readback,remove" {
+		t.Fatalf("transition order = %s, want install/readback before failed remove", got)
+	}
+	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "remove" {
+		t.Fatalf("divert calls = %v, want one removal attempt", fake.divertCalls)
+	}
+	if d.ipsecCapture != old || d.ipsecCaptureStagePending || d.ipsecCaptureRemovalPending.Load() {
+		t.Fatalf("failed removal did not restore old capture: active %p pending-stage %v pending-remove %v",
+			d.ipsecCapture, d.ipsecCaptureStagePending, d.ipsecCaptureRemovalPending.Load())
+	}
+	permit := d.ipsecS4.loadPermit()
+	if permit == nil || permit.state != ipsecPermitClosing ||
+		!hostInputFenceOverlayAuthorityMatches(d.ipsecOverlayAcked.Load(), permit) {
+		t.Fatalf("failed removal lost fence hold authority: permit=%+v acked=%+v", permit, d.ipsecOverlayAcked.Load())
+	}
+}
+
+func TestIpsecCaptureRemovalReadbackFailureKeepsDivert9506(t *testing.T) {
+	injected := errors.New("host-input overlay readback mismatch")
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, nil)
+	fake.overlayReadback = func(xnft.HostInputFenceOverlay) error {
+		*events = append(*events, "readback")
+		return injected
+	}
+	old := d.ipsecCapture
+	if err := commitIpsecCaptureStageF1(t, d, old); !errors.Is(err, injected) {
+		t.Fatalf("fence readback error = %v, want injected mismatch", err)
+	}
+	if got := strings.Join(*events, ","); got != "install,readback" {
+		t.Fatalf("transition after readback failure = %s, want no divert removal", got)
+	}
+	if len(fake.divertCalls) != 0 || d.ipsecCapture != old || d.ipsecCaptureStagePending {
+		t.Fatalf("unverified fence did not retain divert: calls=%v active=%p pending=%v",
+			fake.divertCalls, d.ipsecCapture, d.ipsecCaptureStagePending)
+	}
+	if d.ipsecOverlayAcked.Load() != nil {
+		t.Fatalf("failed fence readback published ACK: %+v", d.ipsecOverlayAcked.Load())
+	}
+}
+
+func TestIpsecFenceRemainsClosedBeforeFirstCaptureAndAtBoot9506(t *testing.T) {
+	d, _, events := newF1CaptureFenceTestEnv(t, false, nil)
+	d.reconcileIpsecHostInputFence(context.Background())
+	if got := strings.Join(*events, ","); got != "install,readback" {
+		t.Fatalf("boot fence order = %s, want acknowledged host-input DROP", got)
+	}
+	permit := d.ipsecS4.loadPermit()
+	if permit == nil || permit.state != ipsecPermitClosing {
+		t.Fatalf("pre-first-install permit = %+v, want CLOSING", permit)
+	}
+	overlay := d.activeHostInputFenceOverlay()
+	if overlay == nil || !hostInputFenceOverlayAuthorityMatches(d.ipsecOverlayAcked.Load(), permit) ||
+		len(overlay.MasterSet) != 1 || overlay.MasterSet[0] != "st0" {
+		t.Fatalf("boot host-input fence = %+v acked=%+v, want read-back st0 DROP", overlay, d.ipsecOverlayAcked.Load())
+	}
+	d.tryOpenIpsecPermitAfterFenceAck(permit)
+	if got := d.ipsecS4.loadPermit(); got != permit || got.state != ipsecPermitClosing {
+		t.Fatalf("pre-first-install fence ACK opened permit without a divert: %+v", got)
 	}
 }

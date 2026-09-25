@@ -1494,12 +1494,20 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 		var owner *xnft.IpsecDivertSpec
 		if old != nil {
 			owner = &old.spec
+			d.ipsecCaptureRemovalPending.Store(true)
+			if err := d.holdIpsecHostInputFenceForDivertTransition(ipsecDivertSpecMasters9506(old.spec)); err != nil {
+				d.ipsecCaptureRemovalPending.Store(false)
+				d.restoreIpsecCaptureRuntime(old)
+				return fmt.Errorf("ipsec capture: hold host-input fence before divert removal: %w", err)
+			}
 		}
 		if err := removeIpsecDivert9506(owner); err != nil {
+			d.ipsecCaptureRemovalPending.Store(false)
 			d.restoreIpsecCaptureRuntime(old)
 			return fmt.Errorf("ipsec capture: remove divert: %w", err)
 		}
 		d.publishIpsecCaptureCommitted(nil)
+		d.ipsecCaptureRemovalPending.Store(false)
 		if old != nil {
 			if err := old.close(); err != nil {
 				return fmt.Errorf("ipsec capture: retire old generation: %w", err)
@@ -1579,6 +1587,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 		}
 	}
 	d.publishIpsecCaptureCommitted(staged)
+	d.ipsecCaptureRemovalPending.Store(false)
 	if old != nil && !oldRetired {
 		if err := old.close(); err != nil {
 			return fmt.Errorf("ipsec capture: retire old generation: %w", err)
@@ -1629,11 +1638,19 @@ func (d *Daemon) shutdownIpsecCapture() {
 	}
 	if nftInstaller != nil {
 		var owner *xnft.IpsecDivertSpec
+		remove := true
 		if active != nil {
 			owner = &active.spec
+			d.ipsecCaptureRemovalPending.Store(true)
+			if err := d.holdIpsecHostInputFenceForDivertTransition(ipsecDivertSpecMasters9506(active.spec)); err != nil {
+				slog.Warn("ipsec capture shutdown: retaining divert because host-input fence was not acknowledged", "err", err)
+				remove = false
+			}
 		}
-		if err := removeIpsecDivert9506(owner); err != nil {
-			slog.Warn("ipsec capture shutdown: remove divert failed", "err", err)
+		if remove {
+			if err := removeIpsecDivert9506(owner); err != nil {
+				slog.Warn("ipsec capture shutdown: remove divert failed", "err", err)
+			}
 		}
 	}
 	d.restoreIpsecCaptureRuntime(nil)
