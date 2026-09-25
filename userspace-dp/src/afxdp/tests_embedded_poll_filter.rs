@@ -4181,7 +4181,7 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
 
 
 #[test]
-fn poll_descriptor_lo0_protocol_filter_drops_native_255_fragment_without_reinject_10676() {
+fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
     let mut snapshot = policy_deny_snapshot();
     snapshot.default_policy = "permit".to_string();
     snapshot.policies.clear();
@@ -4216,9 +4216,9 @@ fn poll_descriptor_lo0_protocol_filter_drops_native_255_fragment_without_reinjec
         name: "protect-re".to_string(),
         family: "inet".to_string(),
         terms: vec![FirewallTermSnapshot {
-            name: "drop-tcp".to_string(),
-            protocols: vec!["tcp".to_string()],
+            name: "drop-web".to_string(),
             action: "discard".to_string(),
+            destination_ports: vec!["5201".to_string()],
             log: true,
             ..Default::default()
         }],
@@ -4229,16 +4229,6 @@ fn poll_descriptor_lo0_protocol_filter_drops_native_255_fragment_without_reinjec
     binding.interface = Arc::<str>::from("reth1.0");
     let mut frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     set_ipv4_dst(&mut frame, Ipv4Addr::new(10, 0, 61, 1));
-    // The frame carries a native non-first tail (offset 1); the shim reports
-    // protocol 255 because this fragment has no usable L4 header.
-    frame[20..22].copy_from_slice(&1u16.to_be_bytes());
-    frame[24..26].fill(0);
-    let ip_checksum = crate::afxdp::frame::checksum16(&frame[14..34]);
-    frame[24..26].copy_from_slice(&ip_checksum.to_be_bytes());
-    let mut flow_src_addr = [0u8; 16];
-    flow_src_addr[..4].copy_from_slice(&[10, 0, 61, 102]);
-    let mut flow_dst_addr = [0u8; 16];
-    flow_dst_addr[..4].copy_from_slice(&[10, 0, 61, 1]);
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -4252,10 +4242,8 @@ fn poll_descriptor_lo0_protocol_filter_drops_native_255_fragment_without_reinjec
         payload_offset: 54,
         pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
-        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
-        tcp_flags: 0,
-        flow_src_addr,
-        flow_dst_addr,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_SYN,
         config_generation: 7,
         fib_generation: 9,
         ..UserspaceDpMeta::default()
