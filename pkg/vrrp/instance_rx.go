@@ -15,8 +15,12 @@ import (
 // sync-hold preempt gate (#2082). Priority-0 (resignation) adverts are NOT
 // recorded — leaving a stale lastMasterPriority is safe because post-resign
 // takeover flows through the ungated masterDownTimer path, not the gated
-// preemptNowCh shortcut. Called from handleBackupRx/handleMasterRx, which run
-// in the run-loop goroutine; mu only guards external readers.
+// preemptNowCh shortcut. A nonzero source address is retained per family for
+// the #10719 unknown-source detector. An unexpected priority-255 source does
+// not replace an already-learned identity; a priority-255 first advert can
+// seed a cold-start identity only after the detector has reported it. Called
+// from handleBackupRx/handleMasterRx, which run in the run-loop goroutine; mu
+// also makes its state race-clean for external readers.
 func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
 	if pkt.Priority == 0 {
 		return
@@ -24,6 +28,22 @@ func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
 	vi.mu.Lock()
 	vi.lastMasterPriority = int(pkt.Priority)
 	vi.lastMasterSeen = time.Now()
+	if src4 := pkt.SrcIP.To4(); src4 != nil {
+		// Priority 255 changes mastership unconditionally. Do not let an
+		// unexpected owner advert replace the source against which the next
+		// owner/resignation advert is checked.
+		if pkt.Priority != addressOwnerPriority || !vi.lastMasterIPv4Known ||
+			net.IP(vi.lastMasterIPv4[:]).Equal(src4) {
+			copy(vi.lastMasterIPv4[:], src4)
+			vi.lastMasterIPv4Known = true
+		}
+	} else if src16 := pkt.SrcIP.To16(); src16 != nil {
+		if pkt.Priority != addressOwnerPriority || !vi.lastMasterIPv6Known ||
+			net.IP(vi.lastMasterIPv6[:]).Equal(src16) {
+			copy(vi.lastMasterIPv6[:], src16)
+			vi.lastMasterIPv6Known = true
+		}
+	}
 	// Adopt the master's advertised interval (RFC 5798 §6.1/§6.4.2
 	// Master_Adver_Interval). Max Adver Int is centiseconds on the wire (10 ms
 	// units); convert to a Duration. A zero/absent field is ignored so
@@ -48,6 +68,57 @@ func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
 		vi.masterAdverInterval = learned
 	}
 	vi.mu.Unlock()
+}
+
+// warnUnknownMasterAdvert counts and rate-limits a warning for a priority-0
+// resignation or priority-255 owner advert whose source is not the last
+// nonzero-priority source learned for that address family (#10719). This is
+// detection only: the caller still applies RFC priority/state-machine
+// behavior, and a cold-start instance has no peer identity to compare against.
+func (vi *vrrpInstance) warnUnknownMasterAdvert(pkt *VRRPPacket) {
+	if pkt.Priority != 0 && pkt.Priority != addressOwnerPriority {
+		return
+	}
+
+	var knownMasterIP net.IP
+	var known bool
+	vi.mu.RLock()
+	if src4 := pkt.SrcIP.To4(); src4 != nil {
+		known = vi.lastMasterIPv4Known
+		if known {
+			var snapshot [4]byte
+			copy(snapshot[:], vi.lastMasterIPv4[:])
+			knownMasterIP = snapshot[:]
+		}
+	} else if pkt.SrcIP.To16() != nil {
+		known = vi.lastMasterIPv6Known
+		if known {
+			var snapshot [16]byte
+			copy(snapshot[:], vi.lastMasterIPv6[:])
+			knownMasterIP = snapshot[:]
+		}
+	} else {
+		vi.mu.RUnlock()
+		return
+	}
+	vi.mu.RUnlock()
+
+	if known && knownMasterIP.Equal(pkt.SrcIP) {
+		return
+	}
+
+	total := vi.unrecognizedMasterAdverts.Add(1)
+	now := time.Now().UnixNano()
+	last := vi.lastUnknownMasterWarn.Load()
+	if elapsed := now - last; elapsed >= 0 && elapsed < int64(10*time.Second) {
+		return
+	}
+	if !vi.lastUnknownMasterWarn.CompareAndSwap(last, now) {
+		return
+	}
+	slog.Warn("vrrp: priority-0/255 advert from source other than the learned master",
+		"key", vi.key(), "priority", pkt.Priority, "source_ip", pkt.SrcIP,
+		"known_master_ip", knownMasterIP, "total_unrecognized_master_adverts", total)
 }
 
 // masterAdverFloor is the minimum interval a learned Master_Adver_Interval may
@@ -78,6 +149,7 @@ func (vi *vrrpInstance) masterAdverFloor() time.Duration {
 // held master as alive; if the adverts stop, the watchdog observes the staleness
 // and takes over.
 func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preemptHoldTimer *time.Timer) {
+	vi.warnUnknownMasterAdvert(pkt)
 	vi.recordMasterAdvert(pkt)
 	pri := vi.getPriority()
 	if pkt.Priority == 0 {
@@ -130,6 +202,7 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 // Per RFC 5798 §6.4.3: if priority is higher, step down. If equal,
 // the node with the higher source IP stays Master (tie-breaking).
 func (vi *vrrpInstance) handleMasterRx(pkt *VRRPPacket, masterDownTimer, advertTimer *time.Timer) {
+	vi.warnUnknownMasterAdvert(pkt)
 	vi.recordMasterAdvert(pkt)
 	pri := vi.getPriority()
 	if pkt.Priority == 0 {
