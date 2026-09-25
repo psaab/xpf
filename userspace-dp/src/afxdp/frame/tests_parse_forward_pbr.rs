@@ -570,6 +570,34 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
     assert_eq!(resolved.tunnel_endpoint_id, 1);
 }
 
+#[test]
+fn pbr_protocol_filter_matches_native_255_and_decapped_udp_fragments_10676() {
+    let mut snapshot = native_gre_pbr_action_snapshot("discard");
+    snapshot.filters[0].terms[0].protocols = vec!["udp".to_string()];
+    let state = build_forwarding_state(&snapshot);
+    let flow = pbr_v4_flow();
+
+    for (label, protocol, should_drop) in [
+        (
+            "native-255",
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            true,
+        ),
+        ("decapped-udp", crate::ip_proto::PROTO_UDP, true),
+        ("decapped-tcp", crate::ip_proto::PROTO_TCP, false),
+    ] {
+        let mut meta = pbr_v4_meta();
+        meta.protocol = protocol;
+        let result = ingress_route_table_override(&state, &[], meta, &flow, None, None, 0, None);
+        assert_eq!(
+            matches!(result, RouteOverride::Drop),
+            should_drop,
+            "#10676 {label}: PBR protocol term must apply to this fragment"
+        );
+    }
+}
+
+
 // #4392: a PBR `from { ... } then { routing-instance X; reject | discard; }`
 // term is a DENY, not a forward. Before the fix the routing-instance override
 // was applied unconditionally and the packet was FORWARDED into VRF X (a VRF

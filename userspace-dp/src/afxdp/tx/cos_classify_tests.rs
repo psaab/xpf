@@ -2321,6 +2321,68 @@ fn resolve_cos_tx_selection_flowless_enforces_output_discard() {
 }
 
 #[test]
+fn flowless_output_protocol_filter_matches_native_255_and_keeps_decapped_proto_exact_10676() {
+    let dst = [172, 16, 80, 200];
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "reth0.0".into(),
+            ifindex: 202,
+            hardware_addr: "02:bf:72:00:80:08".into(),
+            filter_output_v4: "wan-drop-tcp".into(),
+            ..Default::default()
+        }],
+        filters: vec![FirewallFilterSnapshot {
+            name: "wan-drop-tcp".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "drop-tcp".into(),
+                destination_addresses: vec!["172.16.80.200/32".into()],
+                destination_constrained: true,
+                protocols: vec!["tcp".into()],
+                action: "discard".into(),
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    };
+    let forwarding = build_forwarding_state(&snapshot);
+
+    for (label, protocol, should_drop) in [
+        (
+            "native-255",
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            true,
+        ),
+        ("decapped-tcp", PROTO_TCP, true),
+        ("decapped-udp", PROTO_UDP, false),
+    ] {
+        let mut meta = flowless_v4_meta(dst);
+        meta.protocol = protocol;
+        let runtime = resolve_cos_tx_selection(
+            &forwarding,
+            202,
+            meta,
+            None,
+            flowless_extra(),
+        );
+        assert_eq!(
+            runtime.drop, should_drop,
+            "#10676 runtime output filter: {label} protocol result"
+        );
+
+        let mut wire_key = flowless_v4_wire_key(dst);
+        wire_key.protocol = protocol;
+        let cached =
+            resolve_cached_cos_tx_selection_flowless(&forwarding, 202, meta, &wire_key);
+        assert_eq!(
+            cached.drop, should_drop,
+            "#10676 cached output filter: {label} protocol result"
+        );
+    }
+}
+
+
+#[test]
 fn resolve_cos_tx_selection_flowless_enforces_output_reject() {
     // #5467 RED-on-revert: a flowless packet matching an output `then reject`
     // term must set drop:true AND reject:true (the caller keeps the reject
