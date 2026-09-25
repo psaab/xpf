@@ -2211,10 +2211,10 @@ never lock an operator out of a remote box it manages.
     leave-alone interface, an unrelated host XDP program, and an xfrm
     interface itself are not pinholes and remain dropped. The fence is
     installed before the sysctls are raised; if nftables cannot install the
-    inet fence, the sysctls stay at zero. A kernel with bridge nf_tables
-    unavailable is a documented degraded exception: the inet fence remains
-    active and the armed gate may raise the sysctls, while bridged transit
-    remains outside nftables enforcement on that kernel.
+    inet fence, the sysctls stay at zero. The armed gate also stays closed
+    when the bridge-family barrier leg is unsupported: an inet-only fence
+    cannot constrain bridged frames, and no degraded open or operator-ack
+    override is available.
 
     Plan §6's third leg, a flowtable disable, is a deliberate no-op: xpf creates
     no flowtable, so there is nothing to flush.

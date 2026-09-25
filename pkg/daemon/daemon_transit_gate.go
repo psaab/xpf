@@ -392,11 +392,15 @@ func (d *Daemon) openTransitGateLocked() error {
 			}
 			if err := nftInstaller.InstallArmedTransitFence(spec); err != nil {
 				if xnft.IsTransitBarrierBridgeUnsupportedOnly(err) {
-					slog.Warn("armed transit inet fence installed; bridge forward fence unsupported by kernel",
+					// #10725 A7-F4: no degraded open. ip_forward does not govern
+					// bridged frames at all, so a missing bridge leg behind an
+					// open gate is transit under zero policy, not a loss of
+					// defence-in-depth. Keep the gate closed until the kernel
+					// provides the bridge family.
+					slog.Error("armed transit fence missing bridge leg; keeping kernel transit forwarding disabled",
 						"err", err)
-				} else {
-					return err
 				}
+				return err
 			}
 			writeTransitForwardSysctls(true)
 			return nil
@@ -427,9 +431,14 @@ func (d *Daemon) applyTransitBarrier(armed bool) error {
 		}
 		if err := nftInstaller.InstallArmedTransitFence(spec); err != nil {
 			if xnft.IsTransitBarrierBridgeUnsupportedOnly(err) {
-				slog.Warn("armed transit inet fence installed; bridge forward fence unsupported by kernel",
+				// #10725 A7-F4: no degraded open. ip_forward does not govern
+				// bridged frames at all, so a missing bridge leg behind an
+				// open gate is transit under zero policy, not a loss of
+				// defence-in-depth. Keep the gate closed until the kernel
+				// provides the bridge family.
+				slog.Error("armed transit fence missing bridge leg; keeping kernel transit forwarding disabled",
 					"err", err)
-				return nil
+				return err
 			}
 			slog.Error("failed to install the armed transit forward fence; "+
 				"kernel transit will remain closed", "err", err)
