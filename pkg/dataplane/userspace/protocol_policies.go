@@ -344,9 +344,9 @@ type PolicyRuleSnapshot struct {
 	ToZone        string `json:"to_zone,omitempty"`
 	SchedulerName string `json:"scheduler_name,omitempty"`
 	Inactive      bool   `json:"inactive,omitempty"`
-	// Legacy field (carries full expansion: literals ∪ book CIDRs).
-	// Used by old-Rust binaries reading new-Go snapshots. New-Rust
-	// IGNORES this field when the rule is v3-shaped.
+	// Legacy expanded lists are emitted only for non-v3-shaped sides. When a
+	// side references books, its payload lives in the shared AddressBooks table;
+	// the exact-equality protocol gate rejects helpers that cannot read v3.
 	SourceAddresses      []string `json:"source_addresses,omitempty"`
 	DestinationAddresses []string `json:"destination_addresses,omitempty"`
 	// #1606: dense u32 IDs of named address books cited by the

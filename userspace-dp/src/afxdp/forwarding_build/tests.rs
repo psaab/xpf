@@ -8581,7 +8581,7 @@ fn rejected_build_leaves_the_zone_store_clean_against_live_sibling_stores() {
              must be LIVE before the rejected build"
         );
         let inner_err =
-            build_fallible_forwarding_state(&snapshot, &inner_policy, &inner_nat, Some(&prev))
+            build_fallible_forwarding_state(&snapshot, &inner_policy, &inner_nat, Some(&prev), None)
                 .err()
                 .unwrap_or_else(|| panic!("{label}: the inner builder must reject this snapshot"));
         assert!(

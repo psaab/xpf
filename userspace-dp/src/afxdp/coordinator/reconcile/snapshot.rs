@@ -319,12 +319,14 @@ pub(super) fn preflight_map_fds(
 pub(super) fn build_reconcile_forwarding(
     coord: &mut Coordinator,
     snapshot: &ConfigSnapshot,
+    policy_state: &mut crate::policy::PreparedPolicyState,
 ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    match build_forwarding_state_with_policy_counters_and_previous(
+    match crate::afxdp::forwarding_build::build_forwarding_state_with_preparsed_policy_and_previous(
         snapshot,
         &coord.policy_counters,
         &coord.nat_counters,
         Some(&coord.forwarding),
+        policy_state.take_state(),
     ) {
         Ok(fwd) => Ok(fwd),
         Err(err) => {
@@ -333,45 +335,11 @@ pub(super) fn build_reconcile_forwarding(
                 "xpf-userspace-dp: snapshot integrity error during reconcile preflight: {} — keeping previous forwarding state + workers",
                 err
             );
-            // #3789: return the concrete integrity error (was `()`) so the
-            // orchestrator can surface it to the control-plane handler,
-            // which fails closed instead of persisting the rejected
-            // snapshot.
             Err(err)
         }
     }
 }
 
-/// #5171: the #1606/#3402 policy-state preflight, factored out so BOTH
-/// `Coordinator::reconcile`'s pre-teardown leg AND the
-/// `Coordinator::validate_snapshot_buildable` deferred-apply gate parse the
-/// policy state through the identical path — the two can never drift on
-/// which snapshots pass the policy check.
-///
-/// Resolves policy zones against the INCOMING snapshot's own zones
-/// (`zone_name_to_id_from_snapshot`), NOT `self.forwarding.zone_name_to_id`
-/// (the live table is empty on a fresh boot / HA standby first sync and
-/// stale on a new-zone apply; `populate_zones(snapshot)` runs only later in
-/// `build_forwarding_state`). Validating against the live table would flag
-/// every concrete-zone policy as `UnresolvableZoneReference` and reject the
-/// whole snapshot. Parses into a SCRATCH counter store (#1606 Codex r1 F2)
-/// so a rejected snapshot leaks no `Arc<PolicyRuleCounter>` handles into any
-/// live store. The parsed state is discarded — this is a preflight, the real
-/// parse happens later inside `build_forwarding_state`.
-pub(super) fn preflight_policy_state(
-    snapshot: &ConfigSnapshot,
-) -> Result<(), crate::policy::SnapshotIntegrityError> {
-    let preflight_counters = crate::policy::PolicyCounterStore::default();
-    let preflight_zones = crate::policy::zone_name_to_id_from_snapshot(&snapshot.zones);
-    crate::policy::parse_policy_state_with_counters(
-        &snapshot.default_policy,
-        &snapshot.policies,
-        &preflight_zones,
-        &snapshot.address_books,
-        &preflight_counters,
-    )
-    .map(|_| ())
-}
 
 /// #5171/#6243: side-effect-free validation that every MANDATORY BPF map pin
 /// (xsk/heartbeat/sessions) is present and openable, and every PRESENT optional
@@ -405,15 +373,16 @@ pub(super) fn validate_map_pins(snapshot: &ConfigSnapshot) -> Result<(), super::
 }
 
 /// #5171: side-effect-free forwarding-build integrity validation. Runs the
-/// SAME `build_forwarding_state_with_policy_counters_and_previous` build
-/// that `build_reconcile_forwarding` runs — so the two paths reject the
-/// identical non-buildable snapshots (invalid interface address, CoS queue,
-/// NPTv6 rule, ...) with no drift — but with SCRATCH policy + NAT counter
-/// stores so a rejected snapshot leaks no per-rule counter handles into the
-/// LIVE stores. The built state is discarded; only its Ok/Err verdict is
-/// returned. `WgEngine::new` (invoked inside the build for a WG endpoint) is
-/// a pure constructor — no socket bind, no thread spawn — so the discarded
-/// build has no observable side effect.
+/// SAME prepared-policy forwarding build that `build_reconcile_forwarding`
+/// runs, so both paths reject identical non-buildable snapshots (invalid
+/// interface address, CoS queue, NPTv6 rule, ...) with no drift. The parsed
+/// policy state carries handles from the coordinator's policy-counter store;
+/// its RAII guard removes candidate-only rule IDs when the deferred validation
+/// returns. NAT counters and the zone-counter stores are scratch, so the
+/// discarded build leaves those live stores untouched. The built state is
+/// discarded; only its Ok/Err verdict is returned. `WgEngine::new` (invoked
+/// inside the build for a WG endpoint) is a pure constructor — no socket bind,
+/// no thread spawn — so the discarded build has no observable side effect.
 ///
 /// `previous = None` is DELIBERATE (rev-5605 review fold): the real
 /// `build_reconcile_forwarding` passes `Some(&coord.forwarding)` for
@@ -459,12 +428,14 @@ pub(super) fn validate_map_pins(snapshot: &ConfigSnapshot) -> Result<(), super::
 /// carry-over exclusively, which is irrelevant for a discarded build.
 pub(super) fn validate_forwarding_buildable(
     snapshot: &ConfigSnapshot,
+    policy_state: &mut crate::policy::PreparedPolicyState,
 ) -> Result<(), super::ReconcileError> {
-    build_forwarding_state_with_policy_counters_and_previous(
+    crate::afxdp::forwarding_build::build_forwarding_state_with_preparsed_policy_and_previous(
         snapshot,
         &crate::policy::PolicyCounterStore::default(),
         &crate::nat::NatCounterStore::default(),
         None,
+        policy_state.take_state(),
     )
     .map(|_| ())
     .map_err(super::ReconcileError::Integrity)

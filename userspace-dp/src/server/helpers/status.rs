@@ -649,6 +649,13 @@ pub(crate) fn forwarding_unsupported_error(cap: &UserspaceCapabilities) -> Strin
 pub(crate) fn reconcile_status_bindings(
     state: &mut ServerState,
 ) -> Result<(), afxdp::ReconcileError> {
+    reconcile_status_bindings_with_policy_state(state, None)
+}
+
+pub(crate) fn reconcile_status_bindings_with_policy_state(
+    state: &mut ServerState,
+    policy_state: Option<crate::policy::PreparedPolicyState>,
+) -> Result<(), afxdp::ReconcileError> {
     if !should_run_afxdp(&state.status) {
         state.afxdp.stop();
         // #2794: route the disarmed-forwarding teardown through
@@ -680,9 +687,12 @@ pub(crate) fn reconcile_status_bindings(
     // (integrity / mandatory-map failure) leaves the prior workers +
     // forwarding + generation live (#2440/#2484); the caller uses the
     // Err to fail closed instead of persisting a rejected snapshot.
-    let result = state
-        .afxdp
-        .reconcile(snapshot.as_ref(), &mut bindings, ring_entries);
+    let result = state.afxdp.reconcile_with_policy_state(
+        snapshot.as_ref(),
+        &mut bindings,
+        ring_entries,
+        policy_state,
+    );
     state.status.bindings = bindings;
     result
 }

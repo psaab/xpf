@@ -75,11 +75,11 @@ func TestUserspaceSupportsAddressBookPolicyMatches(t *testing.T) {
 	if len(snap.Policies) != 1 {
 		t.Fatalf("len(Policies) = %d, want 1", len(snap.Policies))
 	}
-	if got := snap.Policies[0].SourceAddresses; len(got) != 1 || got[0] != "10.0.61.0/24" {
-		t.Fatalf("SourceAddresses = %+v, want expanded address-book prefix", got)
+	if got := policySnapshotAddrs(t, snap, "lan", "wan", "allow-address-book", true); len(got) != 1 || got[0] != "10.0.61.0/24" {
+		t.Fatalf("v3 source book reference resolves to %v, want [10.0.61.0/24]", got)
 	}
-	if got := snap.Policies[0].DestinationAddresses; len(got) != 1 || got[0] != "172.16.80.200/32" {
-		t.Fatalf("DestinationAddresses = %+v, want expanded address-set prefix", got)
+	if got := policySnapshotAddrs(t, snap, "lan", "wan", "allow-address-book", false); len(got) != 1 || got[0] != "172.16.80.200/32" {
+		t.Fatalf("v3 destination book reference resolves to %v, want [172.16.80.200/32]", got)
 	}
 }
 

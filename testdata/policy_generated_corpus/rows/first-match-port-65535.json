@@ -49,68 +49,56 @@
     "default_policy": "deny",
     "rules": [
       {
-        "action": "deny",
-        "application_terms": [
-          {
-            "destination_port": "22",
-            "name": "app-ssh",
-            "protocol": "tcp"
-          }
+        "rule_id": "trust-\u003euntrust/p-deny-ssh",
+        "name": "p-deny-ssh",
+        "from_zone": "trust",
+        "to_zone": "untrust",
+        "source_literals": [
+          "any"
+        ],
+        "destination_literals": [
+          "any"
         ],
         "applications": [
           "app-ssh"
         ],
-        "destination_addresses": [
+        "application_terms": [
+          {
+            "name": "app-ssh",
+            "protocol": "tcp",
+            "destination_port": "22"
+          }
+        ],
+        "action": "deny"
+      },
+      {
+        "rule_id": "trust-\u003euntrust/p-allow",
+        "policy_id": 1,
+        "name": "p-allow",
+        "from_zone": "trust",
+        "to_zone": "untrust",
+        "source_literals": [
           "any"
         ],
         "destination_literals": [
           "any"
         ],
-        "from_zone": "trust",
-        "name": "p-deny-ssh",
-        "rule_id": "trust->untrust/p-deny-ssh",
-        "source_addresses": [
-          "any"
-        ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "untrust"
-      },
-      {
-        "action": "permit",
         "applications": [
           "any"
         ],
-        "destination_addresses": [
-          "any"
-        ],
-        "destination_literals": [
-          "any"
-        ],
-        "from_zone": "trust",
-        "name": "p-allow",
-        "policy_id": 1,
-        "rule_id": "trust->untrust/p-allow",
-        "source_addresses": [
-          "any"
-        ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "untrust"
+        "action": "permit"
       }
     ],
     "zones": [
       {
-        "host_inbound_configured": true,
+        "name": "trust",
         "id": 50675,
-        "name": "trust"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "untrust",
         "id": 20665,
-        "name": "untrust"
+        "host_inbound_configured": true
       }
     ]
   },

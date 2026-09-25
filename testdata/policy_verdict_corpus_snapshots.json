@@ -24,12 +24,6 @@
           "name": "deny-v4-source",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "10.0.0.0/8"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "10.0.0.0/8"
           ],
@@ -47,12 +41,6 @@
           "name": "permit-any",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -86,12 +74,6 @@
           "name": "zp-allow",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -109,12 +91,6 @@
           "name": "g-deny",
           "from_zone": "junos-global",
           "to_zone": "junos-global",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -156,12 +132,6 @@
           "name": "p-allow",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -195,12 +165,6 @@
           "name": "p-nonlab",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "10.0.1.100/32"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_book_ids": [
             3495241515
           ],
@@ -244,12 +208,6 @@
           "name": "p-deny-ssh",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -274,12 +232,6 @@
           "name": "p-allow",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -313,12 +265,6 @@
           "name": "p-permit-ssh",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -343,12 +289,6 @@
           "name": "p-deny-rest",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -382,12 +322,6 @@
           "name": "p-icmp",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -427,12 +361,6 @@
           "name": "block-host-ssh",
           "from_zone": "trust",
           "to_zone": "junos-host",
-          "source_addresses": [
-            "10.0.0.0/8"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_book_ids": [
             488896378
           ],
@@ -457,12 +385,6 @@
           "name": "permit-host-all",
           "from_zone": "trust",
           "to_zone": "junos-host",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -505,12 +427,6 @@
           "name": "p-reject",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -544,12 +460,6 @@
           "name": "g-deny",
           "from_zone": "junos-global",
           "to_zone": "junos-global",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -592,12 +502,6 @@
           "name": "from-any-deny",
           "from_zone": "any",
           "to_zone": "trust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -615,12 +519,6 @@
           "name": "to-any-permit",
           "from_zone": "untrust",
           "to_zone": "any",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -659,12 +557,6 @@
           "name": "to-any-permit",
           "from_zone": "untrust",
           "to_zone": "any",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -682,12 +574,6 @@
           "name": "from-any-deny",
           "from_zone": "any",
           "to_zone": "trust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -726,12 +612,6 @@
           "name": "p-lab",
           "from_zone": "trust",
           "to_zone": "untrust",
-          "source_addresses": [
-            "10.0.1.100/32"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_book_ids": [
             3495241515
           ],
@@ -774,12 +654,6 @@
           "name": "g-deny-all",
           "from_zone": "junos-global",
           "to_zone": "junos-global",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],
@@ -818,12 +692,6 @@
           "name": "any-to-untrust-deny",
           "from_zone": "any",
           "to_zone": "untrust",
-          "source_addresses": [
-            "any"
-          ],
-          "destination_addresses": [
-            "any"
-          ],
           "source_literals": [
             "any"
           ],

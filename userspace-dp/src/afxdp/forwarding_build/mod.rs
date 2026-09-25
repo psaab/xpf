@@ -304,29 +304,52 @@ pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
     nat_counters: &crate::nat::NatCounterStore,
     previous: Option<&ForwardingState>,
 ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+    build_forwarding_state_with_policy_state_and_previous(
+        snapshot,
+        policy_counters,
+        nat_counters,
+        previous,
+        None,
+    )
+}
+
+pub(super) fn build_forwarding_state_with_preparsed_policy_and_previous(
+    snapshot: &ConfigSnapshot,
+    policy_counters: &PolicyCounterStore,
+    nat_counters: &crate::nat::NatCounterStore,
+    previous: Option<&ForwardingState>,
+    policy_state: crate::policy::PolicyState,
+) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+    build_forwarding_state_with_policy_state_and_previous(
+        snapshot,
+        policy_counters,
+        nat_counters,
+        previous,
+        Some(policy_state),
+    )
+}
+
+fn build_forwarding_state_with_policy_state_and_previous(
+    snapshot: &ConfigSnapshot,
+    policy_counters: &PolicyCounterStore,
+    nat_counters: &crate::nat::NatCounterStore,
+    previous: Option<&ForwardingState>,
+    policy_state: Option<crate::policy::PolicyState>,
+) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
     // #6995: capture both live counter registries BEFORE the fallible build.
     //
-    // `build_fallible_forwarding_state` resolves per-rule counter handles out of
-    // these two `Arc`-shared stores — `PolicyCounterStore::rule_hit_counter`
-    // get-or-creates, `NatCounterStore::rule_counter` get-or-inserts — and it
-    // does so AHEAD of its last three belts (NPTv6, filter, CoS). A build those
-    // belts reject therefore left a block per candidate-only rule behind in the
-    // LIVE stores, keyed by the rejected snapshot's own ids.
+    // NAT rule handles are registered while building the NAT tables. In the
+    // unprepared policy path, policy handles are registered by parsing inside
+    // the same build. On error, this snapshot restores any IDs created during
+    // those inner operations.
     //
-    // The NAT half was operator-visible: `NatCounterStore::snapshots()` emits a
-    // row per stored id regardless of value, and that feeds
-    // `ProcessStatus.nat_rule_counters`, so a refused commit put phantom NAT
-    // rule rows on the status surface until the next successful commit evicted
-    // them. The policy half is memory-only (`Coordinator::policy_rule_counters`
-    // reads the PUBLISHED state, not the store) but grows the registry by one
-    // block per rejected commit.
-    //
-    // Rolled back rather than deferred. Deferring the binding the way #6832
-    // deferred the ZONE binding is not available here: the handles are embedded
-    // in `PolicyState`/the NAT tables at construction, so moving them would mean
-    // a second pass over already-built structures. A retain to the pre-build set
-    // is exact, restores the property completely rather than narrowing a window,
-    // and cannot destroy a live row — it evicts only ids this build created.
+    // Prepared-policy callers parse against the live policy store before
+    // entering this builder, preserving existing counter Arcs. Their
+    // `PreparedPolicyState` RAII guard retains its own pre-parse ID set and
+    // rolls back candidate-only rule IDs if this build fails (or validation
+    // discards it); the guard commits after a successful build. The inner
+    // rollback remains useful for direct callers where policy parsing runs
+    // inside the fallible region.
     let policy_ids_before = policy_counters.tracked_rule_ids();
     let nat_ids_before = nat_counters.tracked_ids();
     let mut state = match build_fallible_forwarding_state(
@@ -334,6 +357,7 @@ pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
         policy_counters,
         nat_counters,
         previous,
+        policy_state,
     ) {
         Ok(state) => state,
         Err(err) => {
@@ -543,28 +567,29 @@ pub(in crate::afxdp) fn commit_rule_counter_prune(
 /// integrity violation, having touched no live ZONE-COUNTER state — see the
 /// caller for why the per-zone counter binding is deliberately not done here.
 ///
-/// That scope is exact, and it is narrower than "no live shared state". Two
-/// OTHER `Arc`-shared stores are mutated inside this function, above the last
-/// three belts: `PolicyCounterStore::rule_hit_counter` GET-OR-CREATES a block
-/// per policy rule plus one for the reserved default-policy id (store at
-/// `policy.rs`, callers in `parse_policy_state_with_counters` below), and
-/// `NatCounterStore::rule_counter` GET-OR-INSERTS one per NAT rule (the
-/// source / static / destination NAT calls below). Both run ahead of the
-/// NPTv6, filter and CoS `?`s.
+/// That scope is exact, and it is narrower than "no live shared state". NAT
+/// counters are mutated inside this function, above the last three belts:
+/// `NatCounterStore::rule_counter` GET-OR-INSERTS one per NAT rule (the source /
+/// static / destination NAT calls below). Policy handles are registered here
+/// only when `policy_state` is `None`; prepared-policy callers have already
+/// parsed against the live store before entering the forwarding build. Both
+/// cases reach the NPTv6, filter and CoS `?`s.
 ///
-/// #6995: those mutations still happen, but they no longer SURVIVE a rejection.
-/// The CALLER
-/// ([`build_forwarding_state_with_policy_counters_and_previous`]) captures both
-/// registries before invoking this function and retains them back to the
-/// captured sets on the `Err` path, so a rejected build leaves neither store
-/// changed. Read this function's contract as "may mutate the policy and NAT
-/// counter stores; its caller undoes that on `Err`" — NOT as "touches no live
-/// shared state", which is the absolute that hid the defect for two releases.
+/// #6995: the shared builder captures both registries before invoking this
+/// function and restores mutations made inside it on the `Err` path. A
+/// prepared-policy caller also retains the pre-parse rule IDs in its
+/// `PreparedPolicyState` guard, rolling back candidate-only IDs if this build
+/// fails or validation discards the result; it commits that guard after a
+/// successful build. Read this function's contract as "may mutate live NAT
+/// counters and, without a prepared policy state, live policy counters; its
+/// callers undo those mutations on `Err`" — NOT as "touches no live shared
+/// state", which is the absolute that hid the defect for two releases.
 fn build_fallible_forwarding_state(
     snapshot: &ConfigSnapshot,
     policy_counters: &PolicyCounterStore,
     nat_counters: &crate::nat::NatCounterStore,
     previous: Option<&ForwardingState>,
+    policy_state: Option<crate::policy::PolicyState>,
 ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
     let mut state = ForwardingState::default();
     state.bindless_ipsec_selector_fence =
@@ -617,13 +642,16 @@ fn build_fallible_forwarding_state(
     fib::populate_neighbors(snapshot, &mut state)?;
     fib::populate_fabrics(snapshot, &mut state, &iface_ctx);
 
-    state.policy = parse_policy_state_with_counters(
-        &snapshot.default_policy,
-        &snapshot.policies,
-        &state.zone_name_to_id,
-        &snapshot.address_books,
-        policy_counters,
-    )?;
+    state.policy = match policy_state {
+        Some(policy_state) => policy_state,
+        None => parse_policy_state_with_counters(
+            &snapshot.default_policy,
+            &snapshot.policies,
+            &state.zone_name_to_id,
+            &snapshot.address_books,
+            policy_counters,
+        )?,
+    };
     state.policy_rematch_extensive = snapshot.policy_rematch_extensive;
     state.policy_rename_ancestry = snapshot.policy_rename_ancestry.clone();
     state.policy_session_rebinds = snapshot.policy_session_rebinds.clone();

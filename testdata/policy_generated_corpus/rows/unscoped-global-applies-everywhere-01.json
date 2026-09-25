@@ -45,43 +45,37 @@
     "default_policy": "permit",
     "rules": [
       {
-        "action": "deny",
-        "applications": [
-          "any"
-        ],
-        "destination_addresses": [
+        "rule_id": "junos-global-\u003ejunos-global/g-deny-all",
+        "name": "g-deny-all",
+        "from_zone": "junos-global",
+        "to_zone": "junos-global",
+        "source_literals": [
           "any"
         ],
         "destination_literals": [
           "any"
         ],
-        "from_zone": "junos-global",
-        "name": "g-deny-all",
-        "rule_id": "junos-global->junos-global/g-deny-all",
-        "source_addresses": [
+        "applications": [
           "any"
         ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "junos-global"
+        "action": "deny"
       }
     ],
     "zones": [
       {
-        "host_inbound_configured": true,
+        "name": "dmz",
         "id": 56918,
-        "name": "dmz"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "trust",
         "id": 50675,
-        "name": "trust"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "untrust",
         "id": 20665,
-        "name": "untrust"
+        "host_inbound_configured": true
       }
     ]
   },

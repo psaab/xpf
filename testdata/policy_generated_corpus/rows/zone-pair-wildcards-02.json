@@ -45,43 +45,37 @@
     "default_policy": "permit",
     "rules": [
       {
-        "action": "deny",
-        "applications": [
-          "any"
-        ],
-        "destination_addresses": [
+        "rule_id": "any-\u003euntrust/any-to-untrust-deny",
+        "name": "any-to-untrust-deny",
+        "from_zone": "any",
+        "to_zone": "untrust",
+        "source_literals": [
           "any"
         ],
         "destination_literals": [
           "any"
         ],
-        "from_zone": "any",
-        "name": "any-to-untrust-deny",
-        "rule_id": "any->untrust/any-to-untrust-deny",
-        "source_addresses": [
+        "applications": [
           "any"
         ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "untrust"
+        "action": "deny"
       }
     ],
     "zones": [
       {
-        "host_inbound_configured": true,
+        "name": "dmz",
         "id": 56918,
-        "name": "dmz"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "trust",
         "id": 50675,
-        "name": "trust"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "untrust",
         "id": 20665,
-        "name": "untrust"
+        "host_inbound_configured": true
       }
     ]
   },

@@ -48,12 +48,6 @@
         "name": "p-lab",
         "from_zone": "trust",
         "to_zone": "untrust",
-        "source_addresses": [
-          "10.0.1.100/32"
-        ],
-        "destination_addresses": [
-          "any"
-        ],
         "source_book_ids": [
           3495241515
         ],

@@ -4,12 +4,6 @@
     "name": "p1",
     "from_zone": "trust",
     "to_zone": "untrust",
-    "source_addresses": [
-      "any"
-    ],
-    "destination_addresses": [
-      "any"
-    ],
     "source_literals": [
       "any"
     ],
@@ -27,12 +21,6 @@
     "name": "p1",
     "from_zone": "trust",
     "to_zone": "untrust",
-    "source_addresses": [
-      "any"
-    ],
-    "destination_addresses": [
-      "any"
-    ],
     "source_literals": [
       "any"
     ],

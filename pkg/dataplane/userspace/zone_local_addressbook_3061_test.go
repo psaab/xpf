@@ -28,28 +28,48 @@ func compileSet(t *testing.T, cmds []string) *config.Config {
 	return cfg
 }
 
-func policySourceAddrs(t *testing.T, snap *ConfigSnapshot, fromZone, toZone, name string) []string {
+func policySnapshotAddrs(t *testing.T, snap *ConfigSnapshot, fromZone, toZone, name string, source bool) []string {
 	t.Helper()
 	for i := range snap.Policies {
 		p := &snap.Policies[i]
-		if p.FromZone == fromZone && p.ToZone == toZone && p.Name == name {
-			return p.SourceAddresses
+		if p.FromZone != fromZone || p.ToZone != toZone || p.Name != name {
+			continue
 		}
+		legacy, literals, ids := p.DestinationAddresses, p.DestinationLiterals, p.DestinationBookIDs
+		if source {
+			legacy, literals, ids = p.SourceAddresses, p.SourceLiterals, p.SourceBookIDs
+		}
+		if len(literals) == 0 && len(ids) == 0 {
+			return legacy
+		}
+		out := append([]string(nil), literals...)
+		for _, id := range ids {
+			found := false
+			for _, book := range snap.AddressBooks {
+				if book.ID == id {
+					out = append(out, book.PrefixesV4...)
+					out = append(out, book.PrefixesV6...)
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("policy %s->%s %q references missing address-book ID %d", fromZone, toZone, name, id)
+			}
+		}
+		slices.Sort(out)
+		return out
 	}
 	t.Fatalf("policy %s->%s %q not found in snapshot", fromZone, toZone, name)
 	return nil
 }
 
+func policySourceAddrs(t *testing.T, snap *ConfigSnapshot, fromZone, toZone, name string) []string {
+	return policySnapshotAddrs(t, snap, fromZone, toZone, name, true)
+}
+
 func policyDestAddrs(t *testing.T, snap *ConfigSnapshot, fromZone, toZone, name string) []string {
-	t.Helper()
-	for i := range snap.Policies {
-		p := &snap.Policies[i]
-		if p.FromZone == fromZone && p.ToZone == toZone && p.Name == name {
-			return p.DestinationAddresses
-		}
-	}
-	t.Fatalf("policy %s->%s %q not found in snapshot", fromZone, toZone, name)
-	return nil
+	return policySnapshotAddrs(t, snap, fromZone, toZone, name, false)
 }
 
 // TestZoneLocalAddressBookResolves is the #3061 resolution guard. A policy

@@ -22,16 +22,14 @@ import (
 // the policy says `source-address trusted-hosts` before and after.
 //
 // WHY THE RULE SNAPSHOT IS SUFFICIENT ON ITS OWN, which is not obvious and was
-// MEASURED rather than assumed. An earlier draft of this function also hashed
-// the address-book table, on the reasoning that a rule carries book IDs and "an
-// ID is stable while its contents change". That reasoning is FALSE here, and a
-// mutation test caught it: removing the book-table contribution changed no
-// result. Two independent properties make the rule snapshot complete:
+// MEASURED rather than assumed. An earlier draft also hashed the address-book
+// table separately, but the policy rule already commits to its resolved content:
 //
-//   - SourceAddresses/DestinationAddresses in the snapshot are the RESOLVED
-//     prefixes, not the names. Tightening a set changes them directly.
-//   - Book IDs are CONTENT hashes (addressBookContentHash64 over the bucket's
-//     canonical bytes), so a redefinition moves the ID too.
+//   - V3 sides carry content-addressed book IDs plus literals. Legacy-only
+//     sides carry their expanded addresses.
+//   - Book IDs are CONTENT hashes (addressBookContentHash64 over canonical
+//     bucket bytes), so changing a referenced address-set definition changes
+//     the ID carried by every referencing policy.
 //
 // Application definitions need no special handling either: buildOneRuleSnapshot
 // lowers them into ApplicationTerms, so an application whose definition changed
@@ -48,7 +46,11 @@ func PolicyResolvedFingerprints(cfg *config.Config) map[string]string {
 	if cfg == nil {
 		return nil
 	}
-	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+	_, nameToID, err := buildAddressBookTableWithFeeds(cfg, nil)
+	if err != nil {
+		return nil
+	}
+	rules, err := buildPolicySnapshotsWithAddressBook(cfg, nil, nil, nameToID)
 	if err != nil {
 		// A config whose snapshot does not build is one the commit path
 		// rejects anyway. Returning nil makes the caller fall back to the
@@ -83,7 +85,11 @@ func PolicyResolvedIdentityStrippedFingerprints(cfg *config.Config) map[string]s
 	if cfg == nil {
 		return nil
 	}
-	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+	_, nameToID, err := buildAddressBookTableWithFeeds(cfg, nil)
+	if err != nil {
+		return nil
+	}
+	rules, err := buildPolicySnapshotsWithAddressBook(cfg, nil, nil, nameToID)
 	if err != nil {
 		return nil
 	}

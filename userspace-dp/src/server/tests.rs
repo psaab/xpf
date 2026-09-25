@@ -2111,6 +2111,68 @@ fn apply_snapshot_integrity_preflight_rejects_without_mutating_state() {
     );
 }
 
+#[test]
+fn apply_snapshot_reuses_policy_preflight_on_same_plan_refresh_11005() {
+    use crate::{
+        ConfigSnapshot, PolicyRuleSnapshot, ZoneSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+    };
+
+    let snapshot = |generation| ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation,
+        fib_generation: generation as u32,
+        generated_at: chrono::Utc::now(),
+        zones: vec![
+            ZoneSnapshot {
+                name: "trust".to_string(),
+                id: 100,
+                ..ZoneSnapshot::default()
+            },
+            ZoneSnapshot {
+                name: "untrust".to_string(),
+                id: 200,
+                ..ZoneSnapshot::default()
+            },
+        ],
+        policies: vec![PolicyRuleSnapshot {
+            rule_id: "trust->untrust/p1".to_string(),
+            policy_id: 1,
+            name: "p1".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "untrust".to_string(),
+            source_addresses: vec!["10.0.0.0/8".to_string()],
+            destination_addresses: vec!["192.0.2.0/24".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..PolicyRuleSnapshot::default()
+        }],
+        ..ConfigSnapshot::default()
+    };
+
+    let state = new_state(ProcessStatus::default());
+    let mut first = req("apply_snapshot");
+    first.snapshot = Some(snapshot(1));
+    let response = run_request(state.clone(), first);
+    assert!(response.ok, "initial apply: {}", response.error);
+
+    state
+        .lock()
+        .expect("state")
+        .afxdp
+        .reset_policy_parse_calls_for_test();
+    let mut second = req("apply_snapshot");
+    second.snapshot = Some(snapshot(2));
+    let response = run_request(state.clone(), second);
+    assert!(response.ok, "same-plan refresh: {}", response.error);
+
+    let guard = state.lock().expect("state");
+    assert_eq!(
+        guard.afxdp.policy_parse_calls_for_test(),
+        1,
+        "successful handler apply must pass its preflight PolicyState into the refresh build"
+    );
+}
+
 /// #3766 fail-closed same-plan refresh at the handler boundary: a
 /// same-plan apply_snapshot that PASSES the policy preflight but whose full
 /// forwarding build FAILS (here an unparseable interface address) must

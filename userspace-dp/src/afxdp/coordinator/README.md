@@ -221,14 +221,15 @@ Differences that matter (#1881):
   teardown with no integrity build; when armed it would spawn workers,
   violating the defer contract). `Coordinator::validate_snapshot_buildable`
   (`reconcile/mod.rs`) factors out the SAME three pre-teardown legs
-  `reconcile` runs — policy preflight (`preflight_policy_state`, shared
-  verbatim), mandatory + present-optional map-pin openability
+  `reconcile` runs — one prepared policy-state parse carried into the
+  forwarding build, mandatory + present-optional map-pin openability
   (`validate_map_pins`), and the full forwarding build
   (`validate_forwarding_buildable`) — as a side-effect-free `&self` check
-  (map FDs opened then dropped; scratch policy/NAT counter stores so a
-  rejected snapshot leaks no handles; no teardown, no spawn, no binding
-  mutation, no `last_reconcile_stage` write). The defer `apply_snapshot`
-  handler runs it BEFORE the tunnel/WG prunes and the `guard.snapshot`
+  (map FDs opened then dropped; candidate-only policy counter IDs rolled
+  back by the prepared-state guard, scratch NAT counters; no teardown, no
+  spawn, no binding mutation, no `last_reconcile_stage` write). The defer
+  `apply_snapshot` handler runs it BEFORE the tunnel/WG prunes and the
+  `guard.snapshot`
   swap and fails closed on error (restore the bumped status generation,
   `ok=false`, no persist). A parity test locks that validate and reconcile
   reject the identical non-buildable snapshot (no drift). Pre-#5171 the

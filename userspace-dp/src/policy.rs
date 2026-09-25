@@ -1,8 +1,8 @@
 use crate::prefix::{PrefixV4, PrefixV6};
 use crate::prefix_set::{PrefixSetV4, PrefixSetV6};
 use crate::{
-    AddressBookSnapshot, PolicyApplicationSnapshot, PolicyRuleCounterStatus, PolicyRuleSnapshot,
-    ZoneSnapshot,
+    AddressBookSnapshot, ConfigSnapshot, PolicyApplicationSnapshot, PolicyRuleCounterStatus,
+    PolicyRuleSnapshot, ZoneSnapshot,
 };
 use ipnet::IpNet;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -10,7 +10,10 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
+
 
 #[path = "policy_snapshot_error.rs"]
 mod snapshot_error;
@@ -778,6 +781,8 @@ type PolicyCounterRegistry = FxHashMap<String, Arc<PolicyRuleCounter>>;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PolicyCounterStore {
     counters: Arc<Mutex<PolicyCounterRegistry>>,
+    #[cfg(test)]
+    parse_calls: Arc<AtomicUsize>,
 }
 
 impl PolicyCounterStore {
@@ -862,6 +867,71 @@ impl PolicyCounterStore {
         // copies could drift and the older tests would silently stop covering
         // what their names claim.
         self.tracked_rule_ids()
+    }
+    #[cfg(test)]
+    pub(crate) fn parse_calls_for_test(&self) -> usize {
+        self.parse_calls.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_parse_calls_for_test(&self) {
+        self.parse_calls.store(0, Ordering::Relaxed);
+    }
+
+}
+
+/// A validated policy state whose counter handles belong to a live counter
+/// store. Dropping an uncommitted preparation restores the original ID set,
+/// covering every reject between policy preflight and forwarding publish.
+pub(crate) struct PreparedPolicyState {
+    state: Option<PolicyState>,
+    counter_store: PolicyCounterStore,
+    tracked_ids_before: Vec<String>,
+    committed: bool,
+}
+
+impl PreparedPolicyState {
+    pub(crate) fn parse_snapshot(
+        snapshot: &ConfigSnapshot,
+        counter_store: &PolicyCounterStore,
+    ) -> Result<Self, SnapshotIntegrityError> {
+        let tracked_ids_before = counter_store.tracked_rule_ids();
+        let zones = zone_name_to_id_from_snapshot(&snapshot.zones);
+        match parse_policy_state_with_counters(
+            &snapshot.default_policy,
+            &snapshot.policies,
+            &zones,
+            &snapshot.address_books,
+            counter_store,
+        ) {
+            Ok(state) => Ok(Self {
+                state: Some(state),
+                counter_store: counter_store.clone(),
+                tracked_ids_before,
+                committed: false,
+            }),
+            Err(err) => {
+                counter_store.retain_rule_ids(&tracked_ids_before);
+                Err(err)
+            }
+        }
+    }
+
+    pub(crate) fn take_state(&mut self) -> PolicyState {
+        self.state.take().expect("prepared policy state is consumed once")
+    }
+
+    pub(crate) fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PreparedPolicyState {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.counter_store
+                .retain_rule_ids(&self.tracked_ids_before);
+        }
     }
 }
 
@@ -1653,7 +1723,9 @@ impl Default for PolicyState {
     }
 }
 
+
 impl PolicyState {
+
     /// #8618: may an ICMP-family zone-policy verdict for `protocol` depend on
     /// the PACKET's icmp type/code, rather than on the flow alone?
     ///
@@ -2024,6 +2096,8 @@ pub(crate) fn parse_policy_state_with_counters(
     address_books: &[AddressBookSnapshot],
     counter_store: &PolicyCounterStore,
 ) -> Result<PolicyState, SnapshotIntegrityError> {
+    #[cfg(test)]
+    counter_store.parse_calls.fetch_add(1, Ordering::Relaxed);
     // #3365: an EMPTY default_policy is the legitimate `omitempty`/unspecified
     // wire state and decodes to the default-deny posture. A NON-EMPTY string
     // that is not permit/reject/deny is rejected (fail closed) rather than
