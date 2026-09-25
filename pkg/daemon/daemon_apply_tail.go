@@ -422,12 +422,10 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 		// duplicate that state and could miss the edge that matters — a commit
 		// that lands while the connection is mid-reconnect.
 		if ss := d.getSessionSync(); ss != nil {
-			// #7441: publish the operator-declared strict session-auth posture
-			// BEFORE reconciling, so this pass's reconcile — which also
-			// evaluates the eviction — sees the value just committed rather
-			// than the previous one. The value is read from the COMPILED local
-			// config, which is the copy preserveNodeLocalChassis pinned, not
-			// whatever a peer last pushed.
+			// #7441: publish the legacy node-local config value before
+			// reconciliation. Keyed-node eviction is default (#10717), so the
+			// value is retained for configuration/status compatibility but no
+			// longer gates the grace enforcement.
 			ss.SetStrictSessionAuth(strictSessionAuthEnabled(cfg))
 			ss.ReconcileConnectionAuth("config-apply")
 		}
@@ -752,9 +750,9 @@ func (d *Daemon) publishInitialPolicySchedulerStateLocked(cfg *config.Config, ac
 	d.recordSchedulerRepublishResult(d.updatePolicyScheduleStateLocked(cfg, activeState))
 }
 
-// strictSessionAuthEnabled reads the #7441 node-local posture off a compiled
-// config, nil-safe at every level so a config with no chassis-cluster stanza
-// reports the pre-#7441 default (off).
+// strictSessionAuthEnabled reads the legacy #7441 node-local setting from a
+// compiled config. It is retained for configuration compatibility; keyed-node
+// pre-key connection eviction no longer depends on its value.
 func strictSessionAuthEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.Chassis.Cluster != nil && cfg.Chassis.Cluster.StrictSessionAuth
 }

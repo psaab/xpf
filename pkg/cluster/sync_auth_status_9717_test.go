@@ -7,17 +7,12 @@ import (
 	"time"
 )
 
-// #9717: a session-sync connection established BEFORE the control-link key was committed, whose peer
-// never answered the #6628 in-place upgrade, stays unauthenticated for its lifetime unless the
-// opt-in strict-session-auth (#7441) evicts it. Its frames are accepted without HMAC.
-//
-// The status line must describe the local heartbeat enforcement posture: a
-// configured key rejects unsigned heartbeat frames even before the peer has
-// authenticated. A session-sync connection that predates keying remains a
-// separate residual and must be named until strict-session-auth evicts it.
+// #9717 status coverage: a keyed session-sync connection that has not yet
+// authenticated is named during its bounded upgrade grace, then disappears
+// from the status after default #10717 enforcement evicts it.
 // These cells reuse the #6628/#7441 fixtures:
 //   - newUpgEnd installs an ESTABLISHED, never-authenticated authConn on a keyed SessionSync;
-//   - strictEnd additionally sets the posture and back-dates the grace anchor.
+//   - strictEnd can back-date the grace anchor without sleeping.
 
 const key9717 = "control-link-psk"
 
@@ -58,29 +53,11 @@ func TestAuthStatusNamesAnUnauthenticatedSessionSyncConnection_9717(t *testing.T
 	}
 }
 
-// With strict-session-auth set, the connection is evicted after the grace, and the status stops naming
-// it.
-func TestAuthStatusStopsNamingAnEvictedConnection_9717(t *testing.T) {
-	e := strictEnd(t, key9717, true, true)
-	m := keyedManagerWithAuthenticatedHeartbeat9717(t, e.s)
-	if got := m.controlLinkAuthStatus(); got == engagedLine9717 {
-		t.Fatalf("FIXTURE: before the eviction the status must name the unauthenticated connection, got %q", got)
-	}
-
-	if n := e.s.enforceStrictSessionAuth(); n != 1 {
-		t.Fatalf("FIXTURE: strict-session-auth must evict the connection after the grace, evicted %d", n)
-	}
-	if got := m.controlLinkAuthStatus(); got != engagedLine9717 {
-		t.Errorf("after the eviction no unauthenticated session-sync connection remains, so the status must "+
-			"be the engaged line again, got %q", got)
-	}
-}
-
-// Controls: nothing is listed on an unkeyed node or for an authenticated connection, and then the
-// engaged line is accurate and unchanged.
+// An unkeyed node has no authentication posture to report, and authenticated
+// connections do not appear in the unauthenticated session-sync list.
 func TestNoConnectionIsListedWhenUnkeyedOrAuthenticated_9717(t *testing.T) {
 	if got := newUpgEnd(t, "", 0).s.UnauthenticatedSessionConns(); got != nil {
-		t.Errorf("an unkeyed node authenticates nothing by the operator's choice; it must list nothing, got %v", got)
+		t.Errorf("an unkeyed node must list nothing, got %v", got)
 	}
 
 	e := newUpgEnd(t, key9717, 0)
@@ -92,63 +69,42 @@ func TestNoConnectionIsListedWhenUnkeyedOrAuthenticated_9717(t *testing.T) {
 	}
 	m := keyedManagerWithAuthenticatedHeartbeat9717(t, e.s)
 	if got := m.controlLinkAuthStatus(); got != engagedLine9717 {
-		t.Errorf("with every connection authenticated the engaged line is accurate and must be unchanged, got %q", got)
+		t.Errorf("with every connection authenticated, status must be the engaged line, got %q", got)
 	}
 }
 
-// With the posture off, the residual is warned about once per connection after the grace.
-func TestResidualWarningFiresOnceAfterTheGraceWithThePostureOff_9717(t *testing.T) {
+// With the default posture off, the periodic enforcement loop closes a
+// never-authenticated connection after its grace.
+func TestPreKeyConnectionEvictedByPeriodicLoop10717(t *testing.T) {
 	e := strictEnd(t, key9717, false, true)
-
-	if n := e.s.warnUnauthenticatedResidual(); n != 1 {
-		t.Fatalf("keyed, posture off, never authenticated, grace elapsed: the residual must be warned about, "+
-			"warned %d (#9717)", n)
+	m := keyedManagerWithAuthenticatedHeartbeat9717(t, e.s)
+	if e.s.StrictSessionAuth() {
+		t.Fatal("fixture must leave the legacy strict-session-auth setting unset")
 	}
-	if n := e.s.warnUnauthenticatedResidual(); n != 0 {
-		t.Errorf("the next tick warned again (%d): the notice must be ONE line per connection", n)
-	}
-	if got := e.s.stats.StrictAuthResidualWarnings.Load(); got != 1 {
-		t.Errorf("StrictAuthResidualWarnings = %d, want 1", got)
-	}
-}
-
-// It stays quiet inside the grace, where a legitimate peer's upgrade may still be in flight, and when
-// the posture is on, where the eviction handles the connection.
-func TestResidualWarningStaysQuietInsideTheGraceAndWithThePostureOn_9717(t *testing.T) {
-	inGrace := newUpgEnd(t, key9717, 0)
-	inGrace.s.writeMu.Lock()
-	inGrace.ac.strictGraceStart = MonotonicNanos()
-	inGrace.s.writeMu.Unlock()
-	if n := inGrace.s.warnUnauthenticatedResidual(); n != 0 {
-		t.Errorf("inside the grace a legitimate peer's in-place upgrade may still be in flight; warned %d", n)
-	}
-
-	strict := strictEnd(t, key9717, true, true)
-	if n := strict.s.warnUnauthenticatedResidual(); n != 0 {
-		t.Errorf("with strict-session-auth set the eviction handles the connection; warned %d", n)
-	}
-}
-
-// The periodic strict-auth loop is what delivers the warning; nothing else calls it. Bound the call
-// site, not just the method.
-func TestTheStrictAuthLoopDeliversTheResidualWarning_9717(t *testing.T) {
-	e := strictEnd(t, key9717, false, true)
-	prev := strictSessionAuthTick
+	previousTick := strictSessionAuthTick
 	strictSessionAuthTick = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); e.s.strictSessionAuthLoop(ctx) }()
+	go func() {
+		defer close(done)
+		e.s.strictSessionAuthLoop(ctx)
+	}()
 
 	deadline := time.Now().Add(3 * time.Second)
-	for e.s.stats.StrictAuthResidualWarnings.Load() == 0 && time.Now().Before(deadline) {
+	for connStillInstalled(e) && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
 	<-done
-	strictSessionAuthTick = prev
+	strictSessionAuthTick = previousTick
 
-	if got := e.s.stats.StrictAuthResidualWarnings.Load(); got != 1 {
-		t.Errorf("the periodic strict-auth loop did not deliver the residual warning exactly once (count %d); "+
-			"nothing else calls it (#9717)", got)
+	if connStillInstalled(e) {
+		t.Fatal("periodic enforcement left the pre-key connection installed past its grace")
+	}
+	if got := e.s.stats.PreKeyAuthEvictions.Load(); got != 1 {
+		t.Fatalf("PreKeyAuthEvictions = %d, want 1", got)
+	}
+	if got := m.controlLinkAuthStatus(); got != engagedLine9717 {
+		t.Fatalf("after default eviction, the status must stop naming the pre-key connection, got %q", got)
 	}
 }

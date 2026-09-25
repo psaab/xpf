@@ -353,11 +353,13 @@ func (s *SessionSync) fabricIndexOf(conn net.Conn) (int, bool) {
 // starts an in-place upgrade on any whose posture is stale (#6628).
 //
 // Level-triggered: it re-reads the live key and the live connections on every
-// call, so a call with nothing to do is a cheap no-op (two pointer reads and a
-// bytes.Equal) and a missed trigger heals on the next one. The daemon calls it
-// after a config apply.
+// call, so a call with nothing to do is a cheap no-op and a missed trigger
+// heals on the next one. The daemon calls it after a config apply.
 //
-// It never closes a connection.
+// A keyed node also anchors the bounded pre-key eviction grace on each
+// never-authenticated connection. This call enforces an already-expired grace
+// immediately; the periodic enforcement loop handles a grace that expires
+// between config applies.
 func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 	key := s.authKey()
 	if len(key) == 0 {
@@ -375,13 +377,11 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 		if c == nil {
 			continue
 		}
-		// #7441: anchor the eviction grace BEFORE attempting the upgrade, and
-		// for BOTH roles — the initiator emits a Hello here, the responder a
-		// Request, and a hostile peer answers neither. Anchoring here rather
-		// than at connection setup is what makes the rule bound a connection's
-		// LIFETIME: a stream established long before the key was committed
-		// starts its grace when the key arrives. noteStrictAuthGraceStartLocked
-		// is set-once, so a later reconcile cannot push the deadline forward.
+		// Anchor the default #10717 eviction grace BEFORE attempting the
+		// upgrade, and for BOTH roles — the initiator emits a Hello here, the
+		// responder a Request, and a peer that cannot upgrade answers neither.
+		// Anchoring at key arrival bounds the connection after keying, while
+		// set-once prevents later commits from extending its lifetime.
 		if ac, ok := c.(*authConn); ok && len(ac.authPSK) == 0 {
 			s.writeMu.Lock()
 			s.noteStrictAuthGraceStartLocked(ac)
@@ -394,11 +394,10 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 				"remote", connRemoteAddrString(c))
 		}
 	}
-	// #7441: evaluate the posture on this pass too. The periodic tick is what
-	// normally fires (the grace elapses after the commit that armed it), but a
-	// commit arriving when the grace has ALREADY elapsed — a second commit, or
-	// the posture being declared on a long-established unauthenticated stream —
-	// must act now instead of waiting up to a tick.
+	// Enforce the default #10717 pre-key connection lifetime on this pass too.
+	// The periodic tick normally observes grace expiry, but a commit arriving
+	// after expiry must close the connection now rather than leave it alive
+	// until the next tick.
 	s.enforceStrictSessionAuth()
 }
 

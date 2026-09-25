@@ -1052,10 +1052,9 @@ func encodeIPsecSAPayload(names []string) []byte {
 // so the cost lands exactly when the cluster is least able to absorb it.
 //
 // The listener binds the fabric address and HMAC verification runs before this,
-// so in a keyed cluster the sender is authenticated. It is not always keyed:
-// sync_auth_strict_7441.go records that an unkeyed connection is a pass-through
-// and that a stream admitted while unkeyed keeps injecting frames after a key is
-// committed unless `chassis cluster strict-session-auth` is set.
+// so a keyed cluster requires authentication on new connections. A stream
+// admitted before keying remains a pass-through only during its bounded
+// #10717 in-place-upgrade grace; a stream that never authenticates is closed.
 const (
 	// maxIPsecSANames bounds the element count. A chassis carrying more than
 	// four thousand IPsec connections is far outside what this product targets,

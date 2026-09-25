@@ -1,78 +1,30 @@
-// Strict session-auth posture: evicting a session-sync connection that was
-// admitted before the control-link key was committed and never authenticated
-// (#7441, the security residual of #6628).
+// Pre-key session-sync connections are bounded by the #10717 default policy.
+// Once this node has a control-link key, a connection that has never
+// authenticated gets one grace period to complete the #6628 in-place upgrade.
+// If it does not, enforcement closes it whether or not the legacy
+// strict-session-auth config leaf is set. This retains compatibility with
+// #6628 rolling upgrades while preventing an unresponsive pre-key stream from
+// remaining a pass-through connection for the lifetime of the process.
 //
-// THE DEFECT. #6628 promotes an established unkeyed connection to
-// authenticated in place, without a reconnect. But it only ever PROMOTES a
-// connection whose peer ANSWERS, and a hostile peer declines by staying
-// silent. So a stream admitted while this node was unkeyed keeps injecting
-// frames after the key is committed, and restarting xpfd was the only thing
-// that evicted it.
+// The grace is anchored when ReconcileConnectionAuth first observes the key,
+// not at connection setup: this bounds a connection's lifetime after keying
+// and gives a live upgrade one round trip. It is set once, so commits cannot
+// re-arm it, and uses monotonic time so wall-clock steps cannot extend it.
 //
-// THE PROBLEM IS AN INDISTINGUISHABILITY, NOT A MISSING TIMER. A peer that
-// does not answer an AuthUpgradeHello is indistinguishable, on the wire, from
-// a legitimate peer that is not keyed yet — which is exactly the rolling
-// upgrade this must not break. Three signals look like the discriminator and
-// each fails:
+// Only connections that have NEVER authenticated (len(authPSK) == 0) are
+// eligible. A connection authenticated under a retired key during rotation
+// has already proved it holds a key and is re-derived in place by the
+// reconciler.
 //
-//   - Manager.HeartbeatPeerAuthSeen() proves the LEGITIMATE peer holds the key
-//     on a channel that reads it live. Necessary, but NOT sufficient: a keyed
-//     legitimate peer on an OLDER, pre-#6628 build also cannot answer the
-//     upgrade, so dropping on this signal alone breaks a rolling upgrade.
-//   - The peer's syncMsgPeerCapabilities advertisement (#6650) would say
-//     whether the peer is new enough to answer — except a hostile peer simply
-//     WITHHOLDS it, and withholding then buys immunity. Using a peer-supplied
-//     value as the arming input hands the attacker the switch, which is
-//     #5078's "re-arming" constraint wearing a different costume.
-//   - Time alone is what #5078 shipped and removed; see below.
-//
-// What is left is the operator, who knows the one thing neither node can
-// observe: whether the cluster is homogeneous. Hence a DECLARED posture
-// (`chassis cluster strict-session-auth`) rather than an inference.
-//
-// WHY THIS IS NOT #5078'S WINDOW COMING BACK. #5078 shipped a bounded
-// dual-accept window and removed it for three reasons, and all three bite on a
-// TIMER. None bites on a static, operator-declared posture:
-//
-//  1. "It had to bound a connection's LIFETIME rather than just its
-//     admission." Satisfied by construction: the rule below is evaluated on
-//     ESTABLISHED connections, on every commit and on a periodic tick, not at
-//     admission.
-//  2. "It had to stop an admitted peer re-arming it through config-sync."
-//     This is the sharp edge and it decides where the posture lives. An
-//     unauthenticated stream's frames DO reach handleConfigPayload —
-//     readAuthed() (sync_conn_read.go) gates trailer VERIFICATION only, so an
-//     unauthenticated connection is a pass-through — and handleConfigSync
-//     (pkg/daemon/daemon_ha_sync.go) refuses a push only on the RG0 primary,
-//     so a STANDBY accepts. A posture flag in ordinary synced config would
-//     therefore be clearable by the connection it exists to evict. It is
-//     node-local and pinned across every peer-sync apply by
-//     preserveNodeLocalChassis (pkg/daemon), sharing the chassisPreserve hook
-//     with #6629's eventual node-local posture.
-//  3. "It could not survive a crash loop without persisting its deadline."
-//     #5078's window FAILED OPEN on lapse: a lost deadline left the connection
-//     admitted, so the deadline had to be durable — a security deadline in the
-//     config DB, with its own rollback and clock questions. Inverting the
-//     failure direction dissolves the constraint. Nothing here is persisted,
-//     because there is no deadline to persist: the decision is recomputed from
-//     committed config on every evaluation. A crash loop re-applies the same
-//     static rule, and after restart the hostile peer faces
-//     performSyncHandshake, where the Noise exchange rejects a peer that cannot
-//     prove possession of the control-link PSK.
-//
-// THE GRACE IS NOT A SECURITY DEADLINE. The in-place upgrade takes a round
-// trip, and dropping inside it would kill a connection that was about to
-// succeed. Losing the grace costs one avoidable reconnect — never an
-// admission — which is the whole difference from #5078. It is anchored in
-// MONOTONIC time so a wall-clock step cannot extend it, and it is SET ONCE per
-// connection: re-anchoring on each reconcile would let a peer that can induce
-// commits keep pushing its own deadline forward, which is constraint (2) again.
-//
-// SCOPE. Eviction is for a connection that has NEVER authenticated
-// (len(authPSK) == 0) — the "admitted while unkeyed" population this issue is
-// about. A connection authenticated under a RETIRED key during a #6630
-// rotation has proven it holds a key and is deliberately left alone; the
-// reconciler re-derives its frame key in place.
+// HISTORY (#7441 -> #10717): eviction was operator-declared because no live
+// signal distinguishes a hostile silent peer from a legitimate keyed peer on
+// a pre-#6628 build that cannot answer the upgrade (dropping on inference
+// breaks that rolling upgrade; see the pre-#10717 header in git history for
+// the full analysis). #10717 flips the default per the residual finding: a
+// pre-#6628 peer that cannot complete the upgrade is now evicted after grace.
+// The #6628 rolling-upgrade cells are the binding constraint — they must stay
+// green — and the strict-session-auth leaf is retained (compat) but no longer
+// gates enforcement.
 package cluster
 
 import (
@@ -83,45 +35,37 @@ import (
 	"time"
 )
 
-// strictSessionAuthGrace is how long an established, keyed-node connection may
-// remain unauthenticated before it is closed.
-//
-// It bounds ONE in-place upgrade round trip on the fabric link, which is a
-// directly-attached control segment (sub-millisecond RTT), plus the reconcile
-// tick that starts it. 10s is far above any healthy exchange and well below
-// the point at which an operator would be waiting on it.
+// strictSessionAuthGrace bounds the #6628 in-place-upgrade round trip for a
+// pre-key connection on a keyed node. After 10s without authentication, the
+// connection is closed by default.
 //
 // A var, not a const, so tests can shrink it. Lengthening it costs only a
-// longer window in which a hostile stream survives AFTER the operator declared
-// the posture; shortening it below one round trip costs a reconnect loop
-// against a legitimate slow peer.
+// longer window in which a hostile stream survives after keying; shortening it
+// below one round trip risks a reconnect loop against a legitimate slow peer.
 var strictSessionAuthGrace = 10 * time.Second
 
 // strictSessionAuthTick is how often established connections are re-evaluated.
-//
-// The check is a couple of atomic loads per connection when the posture is off,
-// which it is by default, so this is cheap. It logs nothing per tick — an
-// eviction is a rare state transition and warns once, per the project rule
-// against Info/Warn inside a periodic loop.
+// The commit-driven reconciler also enforces immediately when it observes an
+// already-expired grace period.
 var strictSessionAuthTick = 1 * time.Second
 
-// SetStrictSessionAuth publishes the operator-declared posture (#7441).
+// SetStrictSessionAuth publishes the legacy #7441 node-local config leaf.
 //
-// Called from the config-apply path with the COMPILED, node-local value. It is
-// deliberately a push from the daemon rather than a read of config here: this
-// package has no view of the config store, and the value must be the one that
-// survived preserveNodeLocalChassis rather than whatever a peer last pushed.
+// The setting is retained for configuration compatibility; #10717 made
+// eviction default whenever this node is keyed, so this value no longer gates
+// enforcement. The value remains available through StrictSessionAuth for
+// callers that report the configured posture.
 func (s *SessionSync) SetStrictSessionAuth(on bool) {
 	prev := s.strictSessionAuth.Swap(on)
 	if prev != on {
-		slog.Info("cluster sync: strict session-auth posture changed (#7441)",
+		slog.Info("cluster sync: strict session-auth config changed (#7441)",
 			"enabled", on)
 	}
 }
 
-// StrictSessionAuth reports the currently published posture.
+// StrictSessionAuth reports the legacy configured posture. It does not gate
+// the default pre-key connection eviction.
 func (s *SessionSync) StrictSessionAuth() bool { return s.strictSessionAuth.Load() }
-
 // noteStrictAuthGraceStart anchors the eviction grace for conn, once.
 //
 // Called from ReconcileConnectionAuth for every established connection at the
@@ -144,13 +88,14 @@ func (s *SessionSync) noteStrictAuthGraceStartLocked(ac *authConn) {
 }
 
 // enforceStrictSessionAuth closes every established session-sync connection
-// that the declared posture says must not survive, and returns how many it
-// closed.
+// that must not survive on a keyed node, and returns how many it closed.
 //
-// The predicate, in full: the posture is declared AND this node holds a
-// control-link key AND the connection has never authenticated AND its grace
-// anchor is set and has elapsed. Any one of those false leaves the connection
-// alone.
+// #10717 made eviction the DEFAULT when a key is configured: the predicate is
+// this node holds a control-link key AND the connection has never authenticated
+// AND its grace anchor is set and has elapsed. The #7441 operator posture
+// (`chassis cluster strict-session-auth`) is retained for compatibility but no
+// longer gates enforcement; a pre-key stream that declines the in-place upgrade
+// is evicted whether or not the leaf is set.
 //
 // authPSK and strictGraceStart are both written under s.writeMu (authPSK by
 // the upgrade exchange, the anchor by the reconciler), so they are read here
@@ -160,13 +105,8 @@ func (s *SessionSync) noteStrictAuthGraceStartLocked(ac *authConn) {
 // this loop would be a data race. authPSK carries the same fact — it is set
 // only by a completed exchange, which requires the PSK — and is race-safe.
 func (s *SessionSync) enforceStrictSessionAuth() int {
-	if !s.strictSessionAuth.Load() {
-		return 0
-	}
 	if len(s.authKey()) == 0 {
-		// Posture declared but this node is unkeyed: the rule is inert by
-		// design, and a strict commit rejects the combination
-		// (validateStrictSessionAuthNeedsKeyStrict). Evicting here would drop
+		// Unkeyed: the rule is inert by design. Evicting here would drop
 		// session sync on a cluster that never asked for authentication.
 		return 0
 	}
@@ -196,12 +136,11 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 	s.writeMu.Unlock()
 
 	for _, c := range doomed {
-		slog.Warn("cluster sync: closing a session-sync connection that never authenticated "+
-			"while this node is keyed and strict-session-auth is set (#7441) — it was "+
-			"admitted before the control-link key was committed and declined the in-place "+
-			"upgrade; a legitimate keyed peer reconnects and authenticates immediately",
+		slog.Warn("cluster sync: closing a pre-key session-sync connection that never authenticated "+
+			"within the upgrade grace (#10717); a keyed peer reconnects and authenticates "+
+			"at connection setup",
 			"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
-		s.stats.StrictAuthEvictions.Add(1)
+		s.stats.PreKeyAuthEvictions.Add(1)
 		s.handleDisconnect(c)
 	}
 	return len(doomed)
@@ -239,64 +178,12 @@ func (s *SessionSync) UnauthenticatedSessionConns() []string {
 	return out
 }
 
-// warnUnauthenticatedResidual warns once per connection about the residual that
-// strict-session-auth exists to close, when that posture is OFF (#9717).
-//
-// It fires when all of these hold:
-//   - this node holds a control-link key;
-//   - strict-session-auth is off (with it on, enforceStrictSessionAuth evicts
-//     the connection instead);
-//   - an established session-sync connection has never authenticated;
-//   - the grace since its anchor has elapsed.
-//
-// Such a connection's frames are accepted without HMAC for as long as it lives,
-// and with the posture off nothing evicts it. The grace gate keeps a legitimate
-// live keying quiet while the peer's in-place upgrade is still in flight. The
-// once flag keeps the periodic tick from repeating the line, per the project rule
-// against Warn inside a periodic loop. It returns how many connections it warned
-// about.
-func (s *SessionSync) warnUnauthenticatedResidual() int {
-	if s.strictSessionAuth.Load() || len(s.authKey()) == 0 {
-		return 0
-	}
-	now := MonotonicNanos()
-	s.mu.Lock()
-	conns := []net.Conn{s.conn0, s.conn1}
-	s.mu.Unlock()
 
-	var warn []net.Conn
-	s.writeMu.Lock()
-	for _, c := range conns {
-		ac, ok := c.(*authConn)
-		if !ok || ac == nil || len(ac.authPSK) > 0 || ac.authResidualWarned {
-			continue
-		}
-		if ac.strictGraceStart == 0 || now-ac.strictGraceStart < strictSessionAuthGrace.Nanoseconds() {
-			continue
-		}
-		ac.authResidualWarned = true
-		warn = append(warn, c)
-	}
-	s.writeMu.Unlock()
-
-	for _, c := range warn {
-		slog.Warn("cluster sync: a session-sync connection established before the control-link key "+
-			"has not authenticated, and strict-session-auth is off (#9717). Its frames are still "+
-			"accepted without HMAC until it authenticates. Set `chassis cluster strict-session-auth` "+
-			"on both nodes to evict it, or restart xpfd",
-			"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
-		s.stats.StrictAuthResidualWarnings.Add(1)
-	}
-	return len(warn)
-}
-
-// strictSessionAuthLoop re-evaluates the posture on established connections.
+// strictSessionAuthLoop periodically re-evaluates established connections.
 //
-// A periodic tick is required, not merely convenient: the grace elapses
-// strictly AFTER the commit that armed the posture, so a commit-time
-// evaluation alone can never fire. ReconcileConnectionAuth also calls the
-// enforcement directly so a commit that arrives after the grace has already
-// elapsed acts immediately instead of waiting for the next tick.
+// The grace elapses strictly AFTER the commit that armed it, so a commit-time
+// evaluation alone cannot enforce it. ReconcileConnectionAuth also enforces
+// directly when a commit arrives after the grace has already elapsed.
 func (s *SessionSync) strictSessionAuthLoop(ctx context.Context) {
 	ticker := time.NewTicker(strictSessionAuthTick)
 	defer ticker.Stop()
@@ -306,11 +193,10 @@ func (s *SessionSync) strictSessionAuthLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.enforceStrictSessionAuth()
-			s.warnUnauthenticatedResidual() // #9717: the posture-off half
 		}
 	}
 }
 
-// strictSessionAuthState is the published posture. Zero value (false) is the
-// pre-#7441 behaviour exactly: nothing is ever evicted.
+// strictSessionAuthState records the legacy configured posture, retained for
+// compatibility. Zero value false no longer disables keyed-node eviction.
 type strictSessionAuthState = atomic.Bool

@@ -5,11 +5,9 @@ import (
 	"time"
 )
 
-// #7441 — the strict session-auth posture, which closes the #6628 security
-// residual: a hostile session-sync stream admitted BEFORE the control-link key
-// was committed keeps injecting frames, because the in-place upgrade only ever
-// PROMOTES a connection whose peer answers and a hostile peer declines by
-// staying silent.
+// #7441 introduced the operator-declared eviction posture; #10717 makes
+// eviction of a keyed node's never-authenticated session-sync connection the
+// default after a bounded in-place-upgrade grace.
 //
 // The fixtures below reuse the #6628 harness: newUpgEnd installs an
 // ESTABLISHED, unauthenticated authConn on a SessionSync, which is exactly the
@@ -40,93 +38,66 @@ func connStillInstalled(e *upgEnd) bool {
 	return e.s.conn0 != nil
 }
 
-// TestStrictSessionAuthEvictsAnUnauthenticatedStream7441 is the security half
-// of the issue's gate: a stream admitted while unkeyed, which then declines the
-// upgrade by staying silent, is evicted.
+// TestStrictSessionAuthEvictsAnUnauthenticatedStream7441 covers the keyed,
+// never-authenticated connection once its grace has elapsed.
 func TestStrictSessionAuthEvictsAnUnauthenticatedStream7441(t *testing.T) {
 	e := strictEnd(t, "control-link-psk", true, true)
 
-	// Ground truth: the connection really is in the population under test —
-	// installed, and never authenticated. Without this pin a fixture that
-	// stopped installing a connection would make the assertion below pass over
-	// an empty set.
-	if !connStillInstalled(e) {
-		t.Fatal("fixture did not install a connection")
+	if !connStillInstalled(e) || len(e.ac.authPSK) != 0 {
+		t.Fatal("fixture must install an established, never-authenticated connection")
 	}
-	if len(e.ac.authPSK) != 0 {
-		t.Fatal("fixture connection is already authenticated; it is not the population this rule is about")
-	}
-
 	if n := e.s.enforceStrictSessionAuth(); n != 1 {
-		t.Fatalf("evicted %d connections, want 1 — a stream admitted before the key "+
-			"was committed is still injecting frames after it, which is the whole "+
-			"of #7441", n)
+		t.Fatalf("evicted %d connections, want 1", n)
 	}
 	if connStillInstalled(e) {
 		t.Fatal("the connection slot was not cleared; the stream survives the eviction")
 	}
-	if got := e.s.stats.StrictAuthEvictions.Load(); got != 1 {
-		t.Errorf("StrictAuthEvictions = %d, want 1 — an eviction the operator cannot see "+
-			"is indistinguishable from a peer that went away on its own", got)
+	if got := e.s.stats.PreKeyAuthEvictions.Load(); got != 1 {
+		t.Errorf("PreKeyAuthEvictions = %d, want 1", got)
 	}
 }
 
-// TestPostureOffLeavesARollingUpgradePeerAlone7441 is the OTHER half of the
-// gate, and it is the half that makes this shippable.
-//
-// A legitimate peer that is keyed but running an older, pre-#6628 build cannot
-// answer the upgrade either — it is indistinguishable on the wire from the
-// hostile decliner above. Nothing in this package can separate them, so the
-// separation is the OPERATOR's declaration. With the posture undeclared (the
-// default) the identical connection must survive indefinitely, or every
-// rolling upgrade becomes an outage.
-//
-// This is the cell that fails if anyone "simplifies" the design by inferring
-// the posture from HeartbeatPeerAuthSeen() or from the peer's #6650 capability
-// advertisement.
-func TestPostureOffLeavesARollingUpgradePeerAlone7441(t *testing.T) {
+// FAIL-ON-REVERT: keyed pre-key connections expire after the same grace even
+// with the default (strict-session-auth unset) configuration. Restoring the
+// old strict-session-auth gate leaves this connection installed and fails.
+func TestDefaultEvictsAnUnauthenticatedStreamAfterGrace10717(t *testing.T) {
 	e := strictEnd(t, "control-link-psk", false, true)
-
-	if n := e.s.enforceStrictSessionAuth(); n != 0 {
-		t.Fatalf("evicted %d connections with the posture UNDECLARED. A keyed peer on "+
-			"an older build cannot answer the in-place upgrade, so dropping it by "+
-			"default turns every rolling upgrade into a session-sync outage", n)
+	if e.s.StrictSessionAuth() {
+		t.Fatal("fixture must exercise the default, posture-off configuration")
 	}
-	if !connStillInstalled(e) {
-		t.Fatal("the connection was closed with the posture undeclared")
+	if n := e.s.enforceStrictSessionAuth(); n != 1 {
+		t.Fatalf("default keyed-node enforcement evicted %d connections, want 1", n)
+	}
+	if connStillInstalled(e) {
+		t.Fatal("the pre-key connection survived beyond its grace with strict-session-auth unset")
 	}
 }
 
-// TestUnkeyedNodeEvictsNothing7441: the posture is inert without a key. The
-// runtime rule is "declared AND this node holds a key"; an unkeyed node has no
-// authentication to demand, and evicting there would drop session sync on a
-// cluster that never asked for it.
+// An unkeyed node has no authentication to demand; evicting there would drop
+// session sync on a cluster that never asked for authentication.
 func TestUnkeyedNodeEvictsNothing7441(t *testing.T) {
 	e := strictEnd(t, "", true, true)
 	if n := e.s.enforceStrictSessionAuth(); n != 0 {
-		t.Fatalf("evicted %d connections on an UNKEYED node; the posture is inert "+
-			"without a key and a strict commit rejects the combination", n)
+		t.Fatalf("evicted %d connections on an unkeyed node, want none", n)
 	}
 }
 
-// TestGraceHoldsInsideTheWindow7441 is the middle row.
-//
-// A rule that only ever evicts, and one that only ever evicts after the grace,
-// both satisfy the eviction cell above. This is the one that separates them:
-// inside the window the connection must survive, because the in-place upgrade
-// takes a round trip and dropping inside it would kill a connection that was
-// about to succeed.
+// Within the bounded grace, the #6628 in-place upgrade may still complete;
+// this protection applies by default, not only when the legacy leaf is set.
 func TestGraceHoldsInsideTheWindow7441(t *testing.T) {
-	e := strictEnd(t, "control-link-psk", true, false)
+	e := strictEnd(t, "control-link-psk", false, false)
 	e.s.writeMu.Lock()
-	e.ac.strictGraceStart = MonotonicNanos() // anchored now: grace has not elapsed
+	e.ac.strictGraceStart = MonotonicNanos()
 	e.s.writeMu.Unlock()
 
 	if n := e.s.enforceStrictSessionAuth(); n != 0 {
-		t.Fatalf("evicted %d connections INSIDE the grace; the in-place upgrade takes a "+
-			"round trip and this drops a connection that was about to authenticate", n)
+		t.Fatalf("evicted %d connections inside the grace, want none", n)
+	}
+	if !connStillInstalled(e) {
+		t.Fatal("the connection was closed inside the in-place-upgrade grace")
 	}
 }
+
 
 // TestUnanchoredConnectionIsNotEvicted7441: a connection no reconcile has
 // reached yet has no anchor, and must not be evicted on a zero timestamp.

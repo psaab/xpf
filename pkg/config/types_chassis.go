@@ -115,22 +115,14 @@ type ClusterConfig struct {
 	Fabric1PeerAddress  string // peer's secondary fabric IP
 	ConfigSync          bool   // enable config synchronization to peer on commit
 	ControlLinkRecovery bool   // enable control-link-recovery
-	// StrictSessionAuth is the #7441 operator-declared posture: when set AND
-	// this node holds a control-link PSK, an established session-sync
-	// connection that has not authenticated within the in-place-upgrade grace
-	// is closed.
-	//
-	// It closes the #6628 residual — a hostile stream admitted BEFORE the key
-	// was committed keeps injecting frames, because the in-place upgrade only
-	// ever PROMOTES a connection whose peer answers and a hostile peer declines
-	// by staying silent. Nothing on the wire separates a decliner from a
-	// legitimate peer that cannot answer yet, so the discriminator has to come
-	// from the operator, who knows whether the cluster is homogeneous.
+	// StrictSessionAuth is the legacy #7441 node-local config leaf, retained
+	// for configuration compatibility. Since #10717, keyed-node eviction of
+	// established connections that never authenticate is the default and no
+	// longer depends on this setting.
 	//
 	// NODE-LOCAL: never overwritten by config-sync (preserveNodeLocalChassis in
-	// pkg/daemon). A flag carried in synced config would be clearable by the
-	// admitted connection it is meant to evict — #5078's "re-arming through
-	// config-sync" constraint, which is why it is not stored that way.
+	// pkg/daemon). The flag is still pinned locally so existing configurations
+	// continue to compile and round-trip without being cleared by peer sync.
 	StrictSessionAuth bool
 	// ControlLinkAuthKey is the #4107 shared PSK that authenticates cluster
 	// control-channel messages. When set, the heartbeat/election channel is
