@@ -5,7 +5,7 @@
 // substitution described in docs/pr/1345-server-handlers-split/plan.md.
 
 use super::super::helpers::{
-    reconcile_status_bindings, refresh_status, replan_queues,
+    reconcile_status_bindings_with_policy_state, refresh_status, replan_queues,
     same_plan_apply_needs_binding_reconcile, should_run_afxdp, snapshot_binding_plan_key,
 };
 use super::super::ServerState;
@@ -161,30 +161,12 @@ pub(super) fn apply(
             }
         }
     }
-    // #1606 (AGY r2 finding 4.1): preflight policy-state validation
-    // BEFORE any guard.status mutation. If the snapshot has
-    // duplicate / zero / unknown book IDs, reject WITHOUT touching
-    // any guard fields. The existing snapshot + workers stay
-    // running on the previous good config.
-    //
-    // Uses a scratch counter store so we don't leak Arc entries on
-    // rejected snapshots.
-    {
-        let preflight_counters = crate::policy::PolicyCounterStore::default();
-        // #3402: resolve policy zones against the INCOMING snapshot's own zones,
-        // NOT the live forwarding table (empty on a fresh boot, stale on a
-        // new-zone apply) — populate_zones(snapshot) runs only later inside
-        // build_forwarding_state. Using the live table here would flag every
-        // concrete-zone policy as UnresolvableZoneReference and reject the whole
-        // boot snapshot.
-        let preflight_zones = crate::policy::zone_name_to_id_from_snapshot(&snapshot.zones);
-        if let Err(err) = crate::policy::parse_policy_state_with_counters(
-            &snapshot.default_policy,
-            &snapshot.policies,
-            &preflight_zones,
-            &snapshot.address_books,
-            &preflight_counters,
-        ) {
+    // Prepare the policy state before mutating status or forwarding state. The
+    // preparation carries the parsed state into the selected apply path and
+    // rolls back candidate counters unless that path publishes successfully.
+    let prepared_policy_state = match guard.afxdp.prepare_snapshot_policy_state(&snapshot) {
+        Ok(policy_state) => policy_state,
+        Err(err) => {
             response.ok = false;
             response.error = format!("snapshot integrity error: {}", err);
             eprintln!(
@@ -193,7 +175,8 @@ pub(super) fn apply(
             );
             return;
         }
-    }
+    };
+    let mut policy_state = Some(prepared_policy_state);
     eprintln!(
         "CTRL_REQ: apply_snapshot generation={} fib_generation={} forwarding_armed_before={}",
         snapshot.generation, snapshot.fib_generation, guard.status.forwarding_armed
@@ -256,22 +239,15 @@ pub(super) fn apply(
             // rejected snapshot must never become the boot baseline nor be
             // acked ok=true.
             let prev_snapshot = std::mem::replace(&mut guard.snapshot, Some(snapshot));
-            if let Err(err) = reconcile_status_bindings(guard) {
+            if let Err(err) =
+                reconcile_status_bindings_with_policy_state(guard, policy_state.take())
+            {
                 guard.snapshot = prev_snapshot;
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
                 guard.status.capabilities = prev_capabilities;
                 response.ok = false;
-                // #4952 / #5143: distinguish the POST-TEARDOWN worker-bringup
-                // failures (old workers gone, dataplane down — refresh status
-                // to the real per-binding state) from the pre-teardown
-                // integrity faults (prior workers still live). Both
-                // post-teardown classes — a worker that failed to SPAWN
-                // (#4952) and a worker that spawned but bound an INCOMPLETE
-                // queue set / never reported readiness (#5143) — fail closed
-                // the SAME way: refresh status, do NOT persist. Only the
-                // message differs from the pre-teardown integrity faults.
                 if let crate::afxdp::ReconcileError::WorkerSpawn(stage)
                 | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage)
                 | crate::afxdp::ReconcileError::IpsecSaNotReady(stage) = &err
@@ -321,9 +297,19 @@ pub(super) fn apply(
             // generation / persisted state here would report a
             // rejected snapshot as the running config.
             let refresh_result = if should_run_afxdp(&guard.status) {
-                guard.afxdp.refresh_runtime_snapshot(&snapshot)
+                guard
+                    .afxdp
+                    .refresh_runtime_snapshot_with_policy_state(
+                        &snapshot,
+                        policy_state.take().expect("prepared policy state"),
+                    )
             } else {
-                guard.afxdp.refresh_runtime_snapshot_disarmed(&snapshot)
+                guard
+                    .afxdp
+                    .refresh_runtime_snapshot_disarmed_with_policy_state(
+                        &snapshot,
+                        policy_state.take().expect("prepared policy state"),
+                    )
             };
             if let Err(err) = refresh_result {
                 // Restore the status reporting fields bumped at the top
@@ -369,7 +355,13 @@ pub(super) fn apply(
             // side-effecting tunnel/WG prunes and the guard.snapshot swap,
             // and fail CLOSED on error. This adds integrity VALIDATION, not
             // activation — the worker spawn stays deferred below.
-            if let Err(err) = guard.afxdp.validate_snapshot_buildable(Some(&snapshot)) {
+            if let Err(err) = guard
+                .afxdp
+                .validate_snapshot_buildable_with_policy_state(
+                    &snapshot,
+                    policy_state.take().expect("prepared policy state"),
+                )
+            {
                 // Mirror the #3766/#3789 same-plan capture-restore legs:
                 // restore the status-reporting fields bumped at the top of
                 // `apply`, report ok=false, and do NOT persist. Validation
@@ -441,7 +433,9 @@ pub(super) fn apply(
             eprintln!(
                 "CTRL_REQ: apply_snapshot defer_workers=true — skipping worker spawn (RETH MAC pending)"
             );
-        } else if let Err(err) = reconcile_status_bindings(guard) {
+        } else if let Err(err) =
+            reconcile_status_bindings_with_policy_state(guard, policy_state.take())
+        {
             if let crate::afxdp::ReconcileError::WorkerSpawn(stage)
             | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage)
             | crate::afxdp::ReconcileError::IpsecSaNotReady(stage) = &err

@@ -52,8 +52,8 @@ func TestAnyIPv4KeywordReachesTheWireAsCIDR9574(t *testing.T) {
 	if !reflect.DeepEqual(r.SourceLiterals, []string{"0.0.0.0/0"}) || !reflect.DeepEqual(r.DestinationLiterals, []string{"::/0"}) {
 		t.Errorf("v3 literals = %v / %v, want [0.0.0.0/0] / [::/0]", r.SourceLiterals, r.DestinationLiterals)
 	}
-	if !reflect.DeepEqual(r.SourceAddresses, []string{"0.0.0.0/0"}) || !reflect.DeepEqual(r.DestinationAddresses, []string{"::/0"}) {
-		t.Errorf("legacy addresses = %v / %v, want [0.0.0.0/0] / [::/0]", r.SourceAddresses, r.DestinationAddresses)
+	if len(r.SourceAddresses) != 0 || len(r.DestinationAddresses) != 0 {
+		t.Errorf("v3 literal sides duplicated legacy addresses: %v / %v", r.SourceAddresses, r.DestinationAddresses)
 	}
 	if len(r.SourceBookIDs) != 0 || len(r.DestinationBookIDs) != 0 {
 		t.Errorf("a keyword must not become a book reference: %v / %v", r.SourceBookIDs, r.DestinationBookIDs)

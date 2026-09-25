@@ -1022,9 +1022,13 @@ func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg
 			"scrubbing against it could drop a live-zone policy and ship a fail-open snapshot (#6480)")
 	}
 	feedOverlay := cloneFeedOverlay(m.feedOverlay)
-	// #2514: an unresolvable address-book content-ID collision must not panic the
-	// daemon — surface it as an error so the caller retains the prior snapshot.
-	policies, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, activeState, feedOverlay)
+	// #2514 / #1606: build the rows and IDs once, then share the IDs with
+	// scheduled-policy lowering. Errors retain the prior snapshot.
+	books, nameToID, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
+	if err != nil {
+		return fmt.Errorf("policy snapshot rebuild for scheduler republish (address-book): %w", err)
+	}
+	policies, err := buildPolicySnapshotsWithAddressBook(cfg, activeState, feedOverlay, nameToID)
 	if err != nil {
 		return fmt.Errorf("policy snapshot rebuild for scheduler republish: %w", err)
 	}
@@ -1046,12 +1050,6 @@ func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg
 	// as the full build does after quarantine (builder.go): Summary.PolicyCount
 	// must equal len(next.Policies).
 	next.Summary.PolicyCount = len(policies)
-	// #1606: refresh the address-book table alongside the policies so book IDs
-	// cited by the rebuilt rules always resolve dataplane-side.
-	books, _, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
-	if err != nil {
-		return fmt.Errorf("address-book rebuild for scheduler republish: %w", err)
-	}
 	next.AddressBooks = books
 	next.Capabilities.PolicyContentRejected = append(collectPolicyContentRejections(policies),
 		collectAddressBookFamilyRejections(books)...)

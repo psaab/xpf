@@ -5,6 +5,11 @@
 package userspace
 
 import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -246,7 +251,14 @@ func TestPolicyBuildEmitsBookIDsAndLiterals(t *testing.T) {
 			},
 		},
 	}
-	snaps, _ := buildPolicySnapshots(cfg)
+	books, nameToID, err := buildAddressBookTable(cfg)
+	if err != nil {
+		t.Fatalf("buildAddressBookTable: %v", err)
+	}
+	snaps, err := buildPolicySnapshotsWithAddressBook(cfg, nil, nil, nameToID)
+	if err != nil {
+		t.Fatalf("buildPolicySnapshotsWithAddressBook: %v", err)
+	}
 	if len(snaps) != 1 {
 		t.Fatalf("expected 1 rule, got %d", len(snaps))
 	}
@@ -262,9 +274,258 @@ func TestPolicyBuildEmitsBookIDsAndLiterals(t *testing.T) {
 	if len(snaps[0].DestinationLiterals) != 1 || snaps[0].DestinationLiterals[0] != "192.168.1.0/24" {
 		t.Fatalf("expected destination literal=[192.168.1.0/24], got %v", snaps[0].DestinationLiterals)
 	}
-	// Legacy back-compat field MUST still be populated for
-	// old-Rust readers.
-	if len(snaps[0].SourceAddresses) == 0 {
-		t.Fatalf("legacy SourceAddresses must still be populated (full expansion)")
+	// A v3 rule carries the book reference; the shared table owns the resolved
+	// prefix payload instead of repeating it on every rule.
+	if len(snaps[0].SourceAddresses) != 0 {
+		t.Fatalf("book-backed v3 rule duplicated its legacy prefix payload: %v", snaps[0].SourceAddresses)
+	}
+	bookID := snaps[0].SourceBookIDs[0]
+	if nameToID["corp-net"] != bookID {
+		t.Fatalf("source book ID = %d, table ID = %d", bookID, nameToID["corp-net"])
+	}
+	for _, book := range books {
+		if book.ID == bookID {
+			if !slices.Contains(book.PrefixesV4, "10.0.0.0/8") {
+				t.Fatalf("book row %d lost 10.0.0.0/8: %+v", bookID, book)
+			}
+			return
+		}
+	}
+	t.Fatalf("source book ID %d has no address-book row", bookID)
+}
+func TestSnapshotBuildHashesEachAddressBookBucketOnce11005(t *testing.T) {
+	cases := []struct {
+		name        string
+		addresses   map[string]string
+		feedOverlay map[string][]string
+		policyName  string
+	}{
+		{
+			name: "static",
+			addresses: map[string]string{
+				"shared-a": "10.0.0.1/24",
+				"shared-b": "10.0.0.0/24",
+				"other":    "192.0.2.0/24",
+			},
+			policyName: "shared-a",
+		},
+		{
+			name: "feed-backed",
+			addresses: map[string]string{
+				"static": "192.0.2.0/24",
+			},
+			feedOverlay: map[string][]string{
+				"feed-book": {"198.51.100.0/24"},
+			},
+			policyName: "feed-book",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newBookCfg(tc.addresses)
+			cfg.Security.Policies = []*config.ZonePairPolicies{{
+				FromZone: "trust",
+				ToZone:   "untrust",
+				Policies: []*config.Policy{{
+					Name:   "rule",
+					Match:  config.PolicyMatch{SourceAddresses: []string{tc.policyName}},
+					Action: config.PolicyPermit,
+				}},
+			}}
+			originalHash := addressBookContentHash64
+			hashCalls := 0
+			addressBookContentHash64 = func(canonical []byte) uint64 {
+				hashCalls++
+				return originalHash(canonical)
+			}
+			defer func() { addressBookContentHash64 = originalHash }()
+
+			snapshot, err := buildSnapshotWithSchedulerStateAndNATCounters(
+				cfg, config.UserspaceConfig{}, 1, 0, nil, nil, tc.feedOverlay, nil,
+			)
+			if err != nil {
+				t.Fatalf("build snapshot: %v", err)
+			}
+			if hashCalls != len(snapshot.AddressBooks) {
+				t.Fatalf("hashed %d canonical buckets for %d snapshot rows; want exactly one hash per row",
+					hashCalls, len(snapshot.AddressBooks))
+			}
+			if len(snapshot.Policies) != 1 || len(snapshot.Policies[0].SourceBookIDs) != 1 {
+				t.Fatalf("policy did not retain one v3 book reference: %+v", snapshot.Policies)
+			}
+		})
+	}
+}
+
+func TestAddressBookTableParsesEachRawPrefixOnce11006(t *testing.T) {
+	cfg := newBookCfg(map[string]string{
+		"base": "10.0.0.1/24",
+		"v6":   "2001:db8::1",
+	})
+	cfg.Security.AddressBook.AddressSets = map[string]*config.AddressSet{
+		"nested": {
+			Name:        "nested",
+			Addresses:   []string{"base", "base", "v6"},
+			AddressSets: []string{"leaf"},
+		},
+		"outer": {Name: "outer", AddressSets: []string{"nested"}},
+		"leaf":  {Name: "leaf", Addresses: []string{"base"}},
+	}
+	overlay := map[string][]string{
+		"nested": {"192.0.2.7/24", "192.0.2.7/24", "198.51.100.8/24"},
+	}
+	wantRaw := []string{
+		"10.0.0.1/24",
+		"2001:db8::1/128",
+		"192.0.2.7/24",
+		"198.51.100.8/24",
+	}
+	originalParser := parseAddressBookCIDR
+	parseCalls := make(map[string]int)
+	parseAddressBookCIDR = func(value string) (net.IP, *net.IPNet, error) {
+		parseCalls[value]++
+		return originalParser(value)
+	}
+	defer func() { parseAddressBookCIDR = originalParser }()
+
+	build := func() ([]AddressBookSnapshot, map[string]uint32) {
+		t.Helper()
+		clear(parseCalls)
+		books, nameToID, err := buildAddressBookTableWithFeeds(cfg, overlay)
+		if err != nil {
+			t.Fatalf("build address-book table: %v", err)
+		}
+		for _, raw := range wantRaw {
+			if parseCalls[raw] != 1 {
+				t.Errorf("CIDR %q parsed %d times in one table build; want once", raw, parseCalls[raw])
+			}
+		}
+		return books, nameToID
+	}
+	first, firstIDs := build()
+	firstJSON, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal first table: %v", err)
+	}
+	second, secondIDs := build()
+	secondJSON, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal second table: %v", err)
+	}
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("canonical address-book output changed between builds:\nfirst:  %s\nsecond: %s",
+			firstJSON, secondJSON)
+	}
+	if firstIDs["nested"] != firstIDs["outer"] || secondIDs["nested"] != secondIDs["outer"] {
+		t.Fatalf("nested and outer sets with identical resolved content received different IDs: first=%v second=%v",
+			firstIDs, secondIDs)
+	}
+
+}
+
+func TestSharedFeedBookSnapshotStoresPrefixesOnce11007(t *testing.T) {
+	const ruleCount = 24
+	const prefixCount = 512
+	prefixes := make([]string, prefixCount)
+	for i := range prefixes {
+		prefixes[i] = fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)
+	}
+	cfg := newBookCfg(nil)
+	policies := make([]*config.Policy, ruleCount)
+	for i := range policies {
+		policies[i] = &config.Policy{
+			Name:   fmt.Sprintf("rule-%02d", i),
+			Match:  config.PolicyMatch{SourceAddresses: []string{"shared-feed"}},
+			Action: config.PolicyPermit,
+		}
+	}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: policies,
+	}}
+	feedOverlay := map[string][]string{"shared-feed": prefixes}
+	snapshot, err := buildSnapshotWithSchedulerStateAndNATCounters(
+		cfg, config.UserspaceConfig{}, 1, 0, nil, nil, feedOverlay, nil,
+	)
+	if err != nil {
+		t.Fatalf("build shared-feed snapshot: %v", err)
+	}
+	if len(snapshot.Policies) != ruleCount {
+		t.Fatalf("snapshot contains %d policy rows; want %d", len(snapshot.Policies), ruleCount)
+	}
+	if len(snapshot.AddressBooks) != 1 {
+		t.Fatalf("shared feed content produced %d address-book rows; want one", len(snapshot.AddressBooks))
+	}
+	if len(snapshot.AddressBooks[0].PrefixesV4) != prefixCount {
+		t.Fatalf("shared feed book has %d prefixes; want %d", len(snapshot.AddressBooks[0].PrefixesV4), prefixCount)
+	}
+	bookID := snapshot.AddressBooks[0].ID
+	for i, rule := range snapshot.Policies {
+		if len(rule.SourceBookIDs) != 1 || rule.SourceBookIDs[0] != bookID {
+			t.Errorf("rule %d lost shared book ID %d: %v", i, bookID, rule.SourceBookIDs)
+		}
+		if len(rule.SourceAddresses) != 0 {
+			t.Errorf("v3 rule %d repeated %d legacy prefixes", i, len(rule.SourceAddresses))
+		}
+	}
+
+	wire, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal shared-feed snapshot: %v", err)
+	}
+	encoded := string(wire)
+	if strings.Contains(encoded, `"source_addresses"`) {
+		t.Fatal("v3 shared-book rules serialized legacy source address payloads")
+	}
+	for _, prefix := range prefixes {
+		if count := strings.Count(encoded, prefix); count != 1 {
+			t.Fatalf("snapshot contains shared feed prefix %q %d times; want once", prefix, count)
+		}
+	}
+
+	smallOverlay := map[string][]string{"shared-feed": prefixes[:1]}
+	nameToID := map[string]uint32{"shared-feed": bookID}
+	measureAllocs := func(overlay map[string][]string) float64 {
+		t.Helper()
+		return testing.AllocsPerRun(5, func() {
+			if _, err := buildPolicySnapshotsWithAddressBook(cfg, nil, overlay, nameToID); err != nil {
+				panic(err)
+			}
+		})
+	}
+	smallAllocs := measureAllocs(smallOverlay)
+	largeAllocs := measureAllocs(feedOverlay)
+	if largeAllocs > smallAllocs+1 {
+		t.Fatalf("policy lowering allocations grew with shared feed size: 1-prefix=%.1f, %d-prefix=%.1f",
+			smallAllocs, prefixCount, largeAllocs)
+	}
+}
+func TestPolicyResolvedFingerprintTracksAddressBookDefinition11007(t *testing.T) {
+	cfg := newBookCfg(map[string]string{"host": "10.0.0.1/32"})
+	cfg.Security.AddressBook.AddressSets = map[string]*config.AddressSet{
+		"shared": {Name: "shared", Addresses: []string{"host"}},
+	}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{{
+			Name:   "address-set-policy",
+			Match:  config.PolicyMatch{SourceAddresses: []string{"shared"}},
+			Action: config.PolicyPermit,
+		}},
+	}}
+	before := PolicyResolvedFingerprints(cfg)
+	if len(before) != 1 {
+		t.Fatalf("fingerprints = %v, want one stable policy fingerprint", before)
+	}
+	var key string
+	for key = range before {
+	}
+	cfg.Security.AddressBook.Addresses["host"].Value = "10.0.0.2/32"
+	after := PolicyResolvedFingerprints(cfg)
+	if after[key] == "" || after[key] == before[key] {
+		t.Fatalf("changing a referenced address-set definition did not change fingerprint: before=%v after=%v",
+			before, after)
 	}
 }

@@ -130,19 +130,14 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	// no reason but sampling.
 	liveXfrm := sampleLiveXfrmNetdevs()
 	interfaces := buildInterfaceSnapshotsFrom(cfg, liveXfrm)
-	// #2514: the address-book content-ID assignment and the policy
-	// snapshot builder (which consumes the same nameToID map) can return
-	// an AddressBookIDCollisionError on an unresolvable folded-hash
-	// collision. Surface it as a build error so the apply path rejects the
-	// config and retains the prior dataplane state (fail-closed) — a
-	// config-shaped input must never panic the daemon.
-	policies, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, activeState, feedOverlay)
+	// #2514 / #1606: build the address-book IDs and rows once, then share the
+	// IDs with policy lowering. A collision remains a build error so the apply
+	// path retains the prior dataplane state (fail-closed).
+	addressBooks, nameToID, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
 	if err != nil {
 		return nil, err
 	}
-	// #1606: build the same address-book rows that will be published before
-	// computing the family-integrity diagnostic below.
-	addressBooks, _, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
+	policies, err := buildPolicySnapshotsWithAddressBook(cfg, activeState, feedOverlay, nameToID)
 	if err != nil {
 		return nil, err
 	}
@@ -171,17 +166,17 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	bindlessSelectorRows := buildBindlessSelectorRows(cfg)
 	snap := &ConfigSnapshot{
-		Version:                          ProtocolVersion,
-		Generation:                       generation,
-		FIBGeneration:                    fibGeneration,
-		GeneratedAt:                      time.Now().UTC(),
-		BindlessSelectorFenceEnabled:     len(bindlessSelectorRows) > 0,
-		BindlessSelectorRows:             bindlessSelectorRows,
-		Capabilities:            caps,
-		MapPins:                 userspaceMapPins(),
-		Userspace:               ucfg,
-		schedulerActiveState:    copyPolicySchedulerActiveState(activeState),
-		schedulerActiveStateSet: true,
+		Version:                      ProtocolVersion,
+		Generation:                   generation,
+		FIBGeneration:                fibGeneration,
+		GeneratedAt:                  time.Now().UTC(),
+		BindlessSelectorFenceEnabled: len(bindlessSelectorRows) > 0,
+		BindlessSelectorRows:         bindlessSelectorRows,
+		Capabilities:                 caps,
+		MapPins:                      userspaceMapPins(),
+		Userspace:                    ucfg,
+		schedulerActiveState:         copyPolicySchedulerActiveState(activeState),
+		schedulerActiveStateSet:      true,
 		// #6311: the chassis-cluster node id becomes the high bit of every
 		// worker's session-id namespace on the helper. Read from the compiled
 		// config's cluster stanza; absent/standalone leaves it 0, which is the

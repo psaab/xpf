@@ -52,12 +52,6 @@
         "name": "block-host-ssh",
         "from_zone": "trust",
         "to_zone": "junos-host",
-        "source_addresses": [
-          "10.0.0.0/8"
-        ],
-        "destination_addresses": [
-          "any"
-        ],
         "source_book_ids": [
           488896378
         ],
@@ -82,12 +76,6 @@
         "name": "permit-host-all",
         "from_zone": "trust",
         "to_zone": "junos-host",
-        "source_addresses": [
-          "any"
-        ],
-        "destination_addresses": [
-          "any"
-        ],
         "source_literals": [
           "any"
         ],

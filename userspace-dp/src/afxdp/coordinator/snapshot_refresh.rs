@@ -71,6 +71,7 @@
 //! so it has no live readers — it uses the choke point for uniformity, so that
 //! no site in the tree contradicts this section.
 use super::*;
+use crate::afxdp::forwarding_build::build_forwarding_state_with_preparsed_policy_and_previous;
 
 impl super::Coordinator {
     /// Refresh fabric link info from updated snapshots. Called when the
@@ -167,7 +168,16 @@ impl super::Coordinator {
         &mut self,
         snapshot: &crate::ConfigSnapshot,
     ) -> Result<(), crate::policy::SnapshotIntegrityError> {
-        self.refresh_runtime_snapshot_inner(snapshot, true)
+        let policy_state = self.prepare_snapshot_policy_state(snapshot)?;
+        self.refresh_runtime_snapshot_with_policy_state(snapshot, policy_state)
+    }
+
+    pub(crate) fn refresh_runtime_snapshot_with_policy_state(
+        &mut self,
+        snapshot: &crate::ConfigSnapshot,
+        policy_state: crate::policy::PreparedPolicyState,
+    ) -> Result<(), crate::policy::SnapshotIntegrityError> {
+        self.refresh_runtime_snapshot_inner(snapshot, true, policy_state)
     }
 
     /// #1866 (PR-review Codex r2): runtime-snapshot refresh for a
@@ -182,8 +192,34 @@ impl super::Coordinator {
         &mut self,
         snapshot: &crate::ConfigSnapshot,
     ) -> Result<(), crate::policy::SnapshotIntegrityError> {
-        self.refresh_runtime_snapshot_inner(snapshot, false)
+        let policy_state = self.prepare_snapshot_policy_state(snapshot)?;
+        self.refresh_runtime_snapshot_disarmed_with_policy_state(snapshot, policy_state)
     }
+
+    pub(crate) fn refresh_runtime_snapshot_disarmed_with_policy_state(
+        &mut self,
+        snapshot: &crate::ConfigSnapshot,
+        policy_state: crate::policy::PreparedPolicyState,
+    ) -> Result<(), crate::policy::SnapshotIntegrityError> {
+        self.refresh_runtime_snapshot_inner(snapshot, false, policy_state)
+    }
+
+    pub(crate) fn prepare_snapshot_policy_state(
+        &self,
+        snapshot: &crate::ConfigSnapshot,
+    ) -> Result<crate::policy::PreparedPolicyState, crate::policy::SnapshotIntegrityError> {
+        crate::policy::PreparedPolicyState::parse_snapshot(snapshot, &self.policy_counters)
+    }
+    #[cfg(test)]
+    pub(crate) fn policy_parse_calls_for_test(&self) -> usize {
+        self.policy_counters.parse_calls_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_policy_parse_calls_for_test(&self) {
+        self.policy_counters.reset_parse_calls_for_test();
+    }
+
 
     /// #3766: same-plan runtime-snapshot refresh, now a FALLIBLE ATOMIC
     /// SWAP. The previous implementation mutated `self.validation` (H2)
@@ -203,10 +239,11 @@ impl super::Coordinator {
     /// rotate the neighbor-manager keys, swap the forwarding table, and
     /// publish to the worker-visible Arcs. On ANY integrity error no
     /// forwarding / validation / worker-visible state is mutated (a LATE
-    /// build failure — NAT64/NPTv6/filter — may leave orphaned
-    /// policy/nat-counter registrations, identical to the full-reconcile
-    /// path: benign, the live policy still references the old counters and
-    /// they self-heal on the next successful apply) and the error is
+    /// build failure — NAT64/NPTv6/filter — may leave orphaned NAT-counter
+    /// registrations; the prepared-policy guard rolls back candidate-only
+    /// rule IDs, while the live policy continues to reference its old counters.
+    /// NAT residue is benign and self-heals on the next successful apply) and
+    /// the error is
     /// returned to the control-plane handler, which reports `ok=false` and
     /// does NOT persist the snapshot — the prior good state stays live and
     /// consistent (no split-brain, no neighbor blackhole).
@@ -214,35 +251,8 @@ impl super::Coordinator {
         &mut self,
         snapshot: &crate::ConfigSnapshot,
         spawn_wg: bool,
+        mut policy_state: crate::policy::PreparedPolicyState,
     ) -> Result<(), crate::policy::SnapshotIntegrityError> {
-        // #1606: preflight policy validation BEFORE any
-        // side-effecting mutation (neighbor manager keys,
-        // validation, policy_counters). If integrity errors fire,
-        // keep ALL existing state.
-        //
-        // CRITICAL (Codex code-review F2): use a SCRATCH counter
-        // store for the preflight so we don't leak counter
-        // registry entries on rejected snapshots.
-        let preflight_counters = crate::policy::PolicyCounterStore::default();
-        // #3402: resolve policy zones against the INCOMING snapshot's own zones,
-        // NOT self.forwarding.zone_name_to_id (empty/stale until
-        // populate_zones(snapshot) runs later in build_forwarding_state). The
-        // live table would flag every concrete-zone policy as
-        // UnresolvableZoneReference and falsely reject the snapshot.
-        let preflight_zones = crate::policy::zone_name_to_id_from_snapshot(&snapshot.zones);
-        if let Err(err) = crate::policy::parse_policy_state_with_counters(
-            &snapshot.default_policy,
-            &snapshot.policies,
-            &preflight_zones,
-            &snapshot.address_books,
-            &preflight_counters,
-        ) {
-            eprintln!(
-                "xpf-userspace-dp: snapshot integrity error during refresh_runtime_snapshot preflight: {} — keeping previous state",
-                err
-            );
-            return Err(err);
-        }
 
         // Preserve existing fabric links — they are resolved separately
         // via refresh_fabric_links (SyncFabricState) and the snapshot
@@ -270,21 +280,16 @@ impl super::Coordinator {
         // #3773 (M13): capture the prior fabric-skip set so the post-merge
         // transition log fires only when the named skip set actually changes.
         let old_fabric_skips = self.forwarding.fabric_skips.clone();
-        // #3766: build the new forwarding state FIRST, before ANY
-        // self-mutation. The policy preflight above only validates
-        // POLICY state; a non-policy integrity fault surfaces only here.
-        // Building first means such a fault aborts the refresh with the
-        // previous validation generation, neighbor-manager keys, dynamic
-        // neighbor cache, and forwarding table all still live and
-        // consistent — no split-brain (H2), no neighbor blackhole (H3),
-        // no ok=true on a rejected snapshot (M1). It reads
-        // `Some(&self.forwarding)` (the still-live prior state) for WG
-        // engine reuse / NAT counter carry-over.
-        let new_forwarding = match build_forwarding_state_with_policy_counters_and_previous(
+        // The prepared policy state came through the failure-atomic policy
+        // preflight above. Passing it into the full forwarding build reuses
+        // that parse while keeping all other build checks in their original
+        // order.
+        let new_forwarding = match build_forwarding_state_with_preparsed_policy_and_previous(
             snapshot,
             &self.policy_counters,
             &self.nat_counters,
             Some(&self.forwarding),
+            policy_state.take_state(),
         ) {
             Ok(fwd) => fwd,
             Err(err) => {
@@ -295,6 +300,7 @@ impl super::Coordinator {
                 return Err(err);
             }
         };
+        policy_state.commit();
 
         // #3766: the build succeeded. From here on every step is
         // infallible; this is the atomic commit to the new generation.

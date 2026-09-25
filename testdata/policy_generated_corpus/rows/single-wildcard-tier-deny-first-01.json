@@ -49,66 +49,54 @@
     "default_policy": "deny",
     "rules": [
       {
-        "action": "deny",
-        "applications": [
-          "any"
-        ],
-        "destination_addresses": [
+        "rule_id": "any-\u003etrust/from-any-deny",
+        "name": "from-any-deny",
+        "from_zone": "any",
+        "to_zone": "trust",
+        "source_literals": [
           "any"
         ],
         "destination_literals": [
           "any"
         ],
-        "from_zone": "any",
-        "name": "from-any-deny",
-        "rule_id": "any->trust/from-any-deny",
-        "source_addresses": [
+        "applications": [
           "any"
         ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "trust"
+        "action": "deny"
       },
       {
-        "action": "permit",
-        "applications": [
-          "any"
-        ],
-        "destination_addresses": [
+        "rule_id": "untrust-\u003eany/to-any-permit",
+        "policy_id": 256,
+        "name": "to-any-permit",
+        "from_zone": "untrust",
+        "to_zone": "any",
+        "source_literals": [
           "any"
         ],
         "destination_literals": [
           "any"
         ],
-        "from_zone": "untrust",
-        "name": "to-any-permit",
-        "policy_id": 256,
-        "rule_id": "untrust->any/to-any-permit",
-        "source_addresses": [
+        "applications": [
           "any"
         ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "any"
+        "action": "permit"
       }
     ],
     "zones": [
       {
-        "host_inbound_configured": true,
+        "name": "dmz",
         "id": 56918,
-        "name": "dmz"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "trust",
         "id": 50675,
-        "name": "trust"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "untrust",
         "id": 20665,
-        "name": "untrust"
+        "host_inbound_configured": true
       }
     ]
   },

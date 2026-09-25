@@ -29,6 +29,13 @@ func buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg *config.Config, activeSt
 	if err != nil {
 		return nil, err
 	}
+	return buildPolicySnapshotsWithAddressBook(cfg, activeState, feedOverlay, nameToID)
+}
+
+func buildPolicySnapshotsWithAddressBook(cfg *config.Config, activeState map[string]bool, feedOverlay map[string][]string, nameToID map[string]uint32) ([]PolicyRuleSnapshot, error) {
+	if cfg == nil || (len(cfg.Security.Policies) == 0 && len(cfg.Security.GlobalPolicies) == 0) {
+		return nil, nil
+	}
 	// addrRepresentable reports whether the userspace matcher can represent a
 	// single policy address token. A token is representable iff it is match-any,
 	// a valid literal CIDR/IP, a feed-bound name (in the overlay — an empty feed
@@ -52,51 +59,33 @@ func buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg *config.Config, activeSt
 	// #3294 (A′) now merges that member's live feed prefixes INTO the set's row,
 	// so a `deny <set-with-a-feed>` enforces the feed portion instead of
 	// under-denying it.
-	addrRepresentable := func(tok string) bool {
+	representabilityCache := make(map[string]bool)
+	resolveRepresentability := func(tok string) bool {
 		switch tok {
 		case "":
 			return true
 		}
-		// Every match-all keyword is representable. Since #9574 the compiled config
-		// keeps `any-ipv4` / `any-ipv6` raw (the CIDR rewrite moved out of
-		// compilePolicy into the snapshot builder), so this is the common path, not
-		// only a lenient or hand-built one. The Rust matcher reads every keyword as a
-		// wildcard (policy.rs parse_v3_literal_set); a false __unsupported_address__
-		// sentinel here would be a spurious whole-snapshot fail-close and a false
-		// ContentRejected in the #4394 simulator.
-		if config.IsPolicyAddressWildcardKeyword(tok) {
-			return true
-		}
-		if isUserspaceLiteralAddress(tok) {
+		if config.IsPolicyAddressWildcardKeyword(tok) || isUserspaceLiteralAddress(tok) {
 			return true
 		}
 		if _, feedBound := feedOverlay[tok]; feedBound {
 			return true
 		}
-		// #5645 residual (codex-182): a DECLARED dynamic-address binding that is
-		// ABSENT from the resolved overlay is UNRESOLVED — at least one of its feed
-		// constituents has no installed snapshot yet (SnapshotForBindings publishes
-		// a binding only when ALL feeds are ready). It must fail CLOSED even when a
-		// STATIC address-book entry of the SAME name exists: otherwise a
-		// `deny <name>` would enforce only the partial static subset and the unready
-		// feed's prefixes would be silently unmatched (a deny fail-OPEN). Returning
-		// false here (before the static nameToID branch) taints the side so
-		// buildOneRuleSnapshot emits the __unsupported_address__ sentinel and the
-		// Rust preflight rejects the whole snapshot (previous-good retained /
-		// fresh-boot default-deny) — the static-alias analogue of the all-unready
-		// omission the daemon's feed overlay already fails closed. Indexing a nil
-		// AddressBindings map is safe (zero value nil).
-		if b := cfg.Security.DynamicAddress.AddressBindings[tok]; b != nil {
+		if cfg.Security.DynamicAddress.AddressBindings[tok] != nil {
 			return false
 		}
 		if _, known := nameToID[tok]; known {
-			// #5753: thread the declared dynamic-address bindings into the walk so
-			// a binding buried inside a nested address-set with an UNREADY feed
-			// fails closed even when a static alias of the same name exists — the
-			// nested-set analogue of the top-level guard above.
 			return nameRepresentable(cfg.Security.AddressBook, feedOverlay, cfg.Security.DynamicAddress.AddressBindings, tok, make(map[string]bool))
 		}
 		return false
+	}
+	addrRepresentable := func(tok string) bool {
+		if cached, ok := representabilityCache[tok]; ok {
+			return cached
+		}
+		result := resolveRepresentability(tok)
+		representabilityCache[tok] = result
+		return result
 	}
 	out := make([]PolicyRuleSnapshot, 0)
 	// walkPolicyRuleSlots is the single source of truth for the runtime
@@ -132,37 +121,33 @@ func buildOneRuleSnapshot(
 	policyID uint32,
 	activeState map[string]bool,
 ) PolicyRuleSnapshot {
-	// Legacy back-compat field: full expansion. Same as today's
-	// behaviour for old-Rust readers.
-	sourceAddresses, okSrc := expandUserspacePolicyAddresses(cfg, pol.Match.SourceAddresses)
-	if !okSrc {
-		sourceAddresses = append([]string(nil), pol.Match.SourceAddresses...)
-	}
-	destinationAddresses, okDst := expandUserspacePolicyAddresses(cfg, pol.Match.DestinationAddresses)
-	if !okDst {
-		destinationAddresses = append([]string(nil), pol.Match.DestinationAddresses...)
-	}
-	// #3261: a side that names an address the matcher cannot represent (an
-	// undefined book name, or a static book that resolves to no prefix — but
-	// NOT a feed-bound name, whose empty content is MatchNone by design) must
-	// reject the WHOLE snapshot rather than silently collapse to MatchNone. The
-	// raw address strings otherwise fall through to the Rust matcher, which
-	// drops an unparseable literal / empties a non-literal book; a
-	// `deny <unrepresentable-address>` rule would then match nothing and fall
-	// through to a later permit / default-permit (deny fail-OPEN). The sentinel
-	// is the address analog of the application sentinel below.
+	// #1606 v3 fields reference address-book content once on the snapshot and
+	// carry only IDs on each rule. Legacy expanded lists remain for non-v3
+	// sides; v3 readers use the book IDs/literals and the exact protocol gate
+	// prevents older readers from observing snapshots that omit book payloads.
+	srcBookIDs, srcLiterals := classifyPolicyAddresses(cfg, nameToID, pol.Match.SourceAddresses)
+	dstBookIDs, dstLiterals := classifyPolicyAddresses(cfg, nameToID, pol.Match.DestinationAddresses)
 	srcUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.SourceAddresses)
 	dstUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.DestinationAddresses)
+	var sourceAddresses, destinationAddresses []string
+	if srcUnrepresentable {
+		sourceAddresses = []string{unsupportedAddressSentinel}
+	} else if len(srcBookIDs) == 0 && len(srcLiterals) == 0 {
+		sourceAddresses, _ = expandUserspacePolicyAddresses(cfg, pol.Match.SourceAddresses)
+	}
+	if dstUnrepresentable {
+		destinationAddresses = []string{unsupportedAddressSentinel}
+	} else if len(dstBookIDs) == 0 && len(dstLiterals) == 0 {
+		destinationAddresses, _ = expandUserspacePolicyAddresses(cfg, pol.Match.DestinationAddresses)
+	}
 	// #3376: capture the exact offending tokens BEFORE the side collapses to
 	// the sentinel so collectPolicyContentRejections can name them per side.
 	var rejectedSrc, rejectedDst, rejectedApps []string
 	if srcUnrepresentable {
 		rejectedSrc = offendingAddressTokens(addrRepresentable, pol.Match.SourceAddresses)
-		sourceAddresses = []string{unsupportedAddressSentinel}
 	}
 	if dstUnrepresentable {
 		rejectedDst = offendingAddressTokens(addrRepresentable, pol.Match.DestinationAddresses)
-		destinationAddresses = []string{unsupportedAddressSentinel}
 	}
 	applicationTerms, ok := expandUserspacePolicyApplications(cfg, pol.Match.Applications)
 	if !ok {
@@ -201,10 +186,8 @@ func buildOneRuleSnapshot(
 			Protocol: unsupportedApplicationSentinel,
 		}}
 	}
-	// #1606 v3 fields: classify each address token as "named book
-	// reference" vs "free-form literal".
-	srcBookIDs, srcLiterals := classifyPolicyAddresses(cfg, nameToID, pol.Match.SourceAddresses)
-	dstBookIDs, dstLiterals := classifyPolicyAddresses(cfg, nameToID, pol.Match.DestinationAddresses)
+	// #1606 v3 fields classify each address token as a named book reference or
+	// a free-form literal.
 	// #3261: force the unrepresentable-address sentinel onto BOTH the v3
 	// (book-ids + literals) and the legacy (sourceAddresses, set above) address
 	// shapes, clearing the book IDs, so the Rust preflight raises

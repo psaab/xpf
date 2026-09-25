@@ -211,31 +211,17 @@ func buildAddressBookTableWithFeeds(cfg *config.Config, feedOverlay map[string][
 		v4        []string
 		v6        []string
 	}
+	expansions := newAddressBookExpansionResolver(cfg.Security.AddressBook, feedOverlay)
 	contentToBucket := make(map[string]*bucket)
 	for _, name := range allNames {
-		// #2049 / #3294: expandBookNameToCIDRs is feed-aware — it merges the
-		// live feed prefixes bound to this name AND to any feed-bound MEMBER
-		// nested inside an address-set (so a `deny <set-containing-a-feed>`
-		// enforces the feed portion, closing the #3294 under-deny). The feed
-		// CIDRs join the same dedup/sort/canonicalize path as static members,
-		// so a feed-backed name with content identical to a static book still
-		// shares an ID by the existing content-equality invariant.
-		v4, v6 := expandBookNameToCIDRs(cfg, feedOverlay, name)
-		// Normalise "any" → 0.0.0.0/0 + ::/0 (Codex r6 refinement).
-		v4, v6 = normalizeAnyInCIDRs(v4, v6)
-		// Canonical sort + dedup within each family. Without
-		// dedup, two books that differ only by repeated members
-		// would canonicalize to different bytes and not share an
-		// ID (Codex code-review F3).
-		sortV4CIDRs(v4)
-		sortV6CIDRs(v6)
-		v4 = dedupSortedStrings(v4)
-		v6 = dedupSortedStrings(v6)
-		canon := canonicalizeAddressBookContent(v4, v6)
+		parsedV4, parsedV6 := expandBookNameToParsedCIDRsWithResolver(expansions, name)
+		sortedV4 := addressBookCIDRStrings(parsedV4)
+		sortedV6 := addressBookCIDRStrings(parsedV6)
+		canon := canonicalizeParsedAddressBookContent(parsedV4, parsedV6)
 		key := string(canon)
 		b, exists := contentToBucket[key]
 		if !exists {
-			b = &bucket{canonical: canon, hash64: addressBookContentHash64(canon), v4: v4, v6: v6}
+			b = &bucket{canonical: canon, hash64: addressBookContentHash64(canon), v4: sortedV4, v6: sortedV6}
 			contentToBucket[key] = b
 		}
 		b.names = append(b.names, name) // already in sorted-name order
@@ -327,69 +313,128 @@ func buildAddressBookTableWithFeeds(cfg *config.Config, feedOverlay map[string][
 // row carries concrete prefixes.
 //
 // #3294: the walk is feed-aware. A dynamic-address feed binding name (whether
-// it IS the top-level name or appears as a MEMBER nested inside an
-// address-set) contributes its live overlay prefixes to the row. Feed CIDRs
-// are already canonical (masked) strings; the classifier below normalises a
-// bare IP and drops an unparseable value, exactly as the old
-// splitFeedPrefixesByFamily did. ab may be nil while feedOverlay carries the
-// name (a pure feed binding with no static book), so this does NOT early-return
-// on nil ab — expandBookNameRecursive handles a nil book.
+// top-level or nested inside an address-set) contributes its live overlay
+// prefixes. Bare hosts and CIDRs are parsed and normalized once per distinct
+// value by the resolver below.
 func expandBookNameToCIDRs(cfg *config.Config, feedOverlay map[string][]string, name string) ([]string, []string) {
-	ab := cfg.Security.AddressBook
-	visited := make(map[string]bool)
-	values := expandBookNameRecursive(ab, feedOverlay, name, visited, 0)
-	var v4, v6 []string
-	for _, value := range values {
-		if value == "" {
-			// #3261: an entry with no compiled prefix (a Junos dns-name /
-			// wildcard-address / range-address sub-stanza, or a genuinely empty
-			// entry) contributes NOTHING. It must NOT widen to 0.0.0.0/0 + ::/0
-			// (the pre-#3261 fail-open: an overbroad deny-all / a permit-any).
-			// The referencing policy is rejected upstream via nameRepresentable
-			// (the address sentinel -> whole-snapshot reject); this keeps the
-			// book row itself honest (match-nothing, per the Junos #2229 intent).
-			continue
-		}
-		if value == "any" {
-			v4 = append(v4, "0.0.0.0/0")
-			v6 = append(v6, "::/0")
-			continue
-		}
-		if isV4CIDR(value) {
-			v4 = append(v4, value)
-			continue
-		}
-		if isV6CIDR(value) {
-			v6 = append(v6, value)
-			continue
-		}
-		// Bare IP: normalize to /32 (v4) or /128 (v6).
-		if ip := net.ParseIP(value); ip != nil {
-			if ip.To4() != nil {
-				v4 = append(v4, ip.String()+"/32")
-			} else {
-				v6 = append(v6, ip.String()+"/128")
+	if cfg == nil {
+		return nil, nil
+	}
+	resolver := newAddressBookExpansionResolver(cfg.Security.AddressBook, feedOverlay)
+	v4, v6 := expandBookNameToParsedCIDRsWithResolver(resolver, name)
+	return addressBookCIDRStrings(v4), addressBookCIDRStrings(v6)
+}
+
+func expandBookNameToParsedCIDRsWithResolver(resolver *addressBookExpansionResolver, name string) ([]parsedAddressBookCIDR, []parsedAddressBookCIDR) {
+	values, _ := resolver.expand(name, make(map[string]bool))
+	return values.v4, values.v6
+}
+
+type addressBookParsedExpansion struct {
+	v4 []parsedAddressBookCIDR
+	v6 []parsedAddressBookCIDR
+}
+
+type addressBookExpansionResolver struct {
+	book           *config.AddressBook
+	feeds          map[string][]string
+	cache          map[string]addressBookParsedExpansion
+	parsedPrefixes map[string]parsedAddressBookCIDR
+}
+
+func newAddressBookExpansionResolver(book *config.AddressBook, feeds map[string][]string) *addressBookExpansionResolver {
+	return &addressBookExpansionResolver{
+		book: book, feeds: feeds, cache: make(map[string]addressBookParsedExpansion),
+		parsedPrefixes: make(map[string]parsedAddressBookCIDR),
+	}
+}
+
+func (r *addressBookExpansionResolver) expand(name string, visiting map[string]bool) (addressBookParsedExpansion, bool) {
+	if visiting[name] {
+		return addressBookParsedExpansion{}, true
+	}
+	if cached, ok := r.cache[name]; ok {
+		return cached, false
+	}
+	visiting[name] = true
+	defer delete(visiting, name)
+	var out addressBookParsedExpansion
+	for _, value := range r.feeds[name] {
+		r.appendValue(&out, value)
+	}
+	var cycle bool
+	if r.book != nil {
+		if addr, ok := r.book.Addresses[name]; ok {
+			if addr != nil {
+				r.appendValue(&out, addr.Value)
+			}
+		} else if set, ok := r.book.AddressSets[name]; ok {
+			for _, member := range set.Addresses {
+				values, childCycle := r.expand(member, visiting)
+				out.v4 = append(out.v4, values.v4...)
+				out.v6 = append(out.v6, values.v6...)
+				cycle = cycle || childCycle
+			}
+			for _, nested := range set.AddressSets {
+				values, childCycle := r.expand(nested, visiting)
+				out.v4 = append(out.v4, values.v4...)
+				out.v6 = append(out.v6, values.v6...)
+				cycle = cycle || childCycle
 			}
 		}
 	}
-	return v4, v6
+	sortParsedAddressBookCIDRs(out.v4)
+	sortParsedAddressBookCIDRs(out.v6)
+	out.v4 = dedupParsedAddressBookCIDRs(out.v4)
+	out.v6 = dedupParsedAddressBookCIDRs(out.v6)
+
+	if !cycle {
+		r.cache[name] = out
+	}
+	return out, cycle
 }
 
-// expandBookNameRecursive resolves named book references via
-// path-based cycle detection. No depth cap (matches the legacy
-// `resolveUserspaceAddressBookEntry` semantics — Copilot review C2).
-// `visited` is mutated on entry and unwound on exit so siblings
-// can share parents without false cycles.
-//
-// #3294 (A′): the walk is feed-aware. A dynamic-address feed binding name
-// contributes its live overlay prefixes — at the top level AND when it appears
-// as a MEMBER nested inside an address-set. Before this, feed prefixes were
-// merged only for the top-level overlay name (in buildAddressBookTableWithFeeds),
-// so a `deny <set-containing-a-feed>` enforced only the concrete members and
-// silently under-denied the feed portion. Resolving the feed here, in the
-// recursive walk, closes that under-deny. A name that is BOTH a feed binding
-// and a static address accumulates both. ab may be nil (a pure feed binding
-// with no static book), in which case only the overlay prefixes contribute.
+func (r *addressBookExpansionResolver) appendValue(out *addressBookParsedExpansion, value string) {
+	if value == "" {
+		return
+	}
+	if value == "any" {
+		r.appendCIDR(out, "0.0.0.0/0")
+		r.appendCIDR(out, "::/0")
+		return
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		if ip.To4() != nil {
+			r.appendCIDR(out, ip.String()+"/32")
+		} else {
+			r.appendCIDR(out, ip.String()+"/128")
+		}
+		return
+	}
+	r.appendCIDR(out, value)
+}
+
+func (r *addressBookExpansionResolver) appendCIDR(out *addressBookParsedExpansion, value string) {
+	prefix, ok := r.parsedPrefixes[value]
+	if !ok {
+		_, network, err := parseAddressBookCIDR(value)
+		if err == nil {
+			prefix = parsedAddressBookCIDR{value: value, network: network, valid: true}
+		}
+		r.parsedPrefixes[value] = prefix
+	}
+	if !prefix.valid {
+		return
+	}
+	if prefix.network.IP.To4() != nil {
+		out.v4 = append(out.v4, prefix)
+	} else if len(prefix.network.IP) == net.IPv6len {
+		out.v6 = append(out.v6, prefix)
+	}
+}
+
+// expandBookNameRecursive resolves static and feed-backed names while treating
+// only path-local revisits as cycles. NAT lowering shares this traversal.
 func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]string, name string, visited map[string]bool, _depth int) []string {
 	if visited[name] {
 		return nil
@@ -397,116 +442,92 @@ func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]st
 	visited[name] = true
 	defer func() { delete(visited, name) }()
 	var out []string
-	if feeds := feedOverlay[name]; len(feeds) > 0 {
-		out = append(out, feeds...)
-	}
+	out = append(out, feedOverlay[name]...)
 	if ab == nil {
 		return out
 	}
 	if addr, ok := ab.Addresses[name]; ok {
-		out = append(out, addr.Value)
+		if addr != nil {
+			out = append(out, addr.Value)
+		}
 		return out
 	}
-	if as, ok := ab.AddressSets[name]; ok {
-		for _, member := range as.Addresses {
+	if set, ok := ab.AddressSets[name]; ok {
+		for _, member := range set.Addresses {
 			out = append(out, expandBookNameRecursive(ab, feedOverlay, member, visited, 0)...)
 		}
-		for _, nested := range as.AddressSets {
+		for _, nested := range set.AddressSets {
 			out = append(out, expandBookNameRecursive(ab, feedOverlay, nested, visited, 0)...)
 		}
-		return out
 	}
 	return out
 }
 
-func normalizeAnyInCIDRs(v4, v6 []string) ([]string, []string) {
-	hasAny4 := false
-	hasAny6 := false
-	cleanV4 := v4[:0]
-	for _, s := range v4 {
-		if s == "0.0.0.0/0" {
-			hasAny4 = true
-		}
-		cleanV4 = append(cleanV4, s)
-	}
-	cleanV6 := v6[:0]
-	for _, s := range v6 {
-		if s == "::/0" {
-			hasAny6 = true
-		}
-		cleanV6 = append(cleanV6, s)
-	}
-	_ = hasAny4
-	_ = hasAny6
-	return cleanV4, cleanV6
+type parsedAddressBookCIDR struct {
+	value   string
+	network *net.IPNet
+	valid   bool
 }
 
-func sortV4CIDRs(s []string) {
-	sort.Slice(s, func(i, j int) bool {
-		_, a, errA := net.ParseCIDR(s[i])
-		_, b, errB := net.ParseCIDR(s[j])
-		if errA != nil || errB != nil {
-			return s[i] < s[j]
+var parseAddressBookCIDR = net.ParseCIDR
+
+func sortParsedAddressBookCIDRs(parsed []parsedAddressBookCIDR) {
+	sort.Slice(parsed, func(i, j int) bool {
+		a, b := parsed[i], parsed[j]
+		if !a.valid || !b.valid {
+			return a.value < b.value
 		}
-		if c := bytes.Compare(a.IP, b.IP); c != 0 {
+		if c := bytes.Compare(a.network.IP, b.network.IP); c != 0 {
 			return c < 0
 		}
-		ma, _ := a.Mask.Size()
-		mb, _ := b.Mask.Size()
+		ma, _ := a.network.Mask.Size()
+		mb, _ := b.network.Mask.Size()
 		return ma < mb
 	})
 }
 
-func sortV6CIDRs(s []string) {
-	sortV4CIDRs(s) // same logic; works on any net.IP
+func addressBookCIDRStrings(parsed []parsedAddressBookCIDR) []string {
+	out := make([]string, len(parsed))
+	for i, prefix := range parsed {
+		out[i] = prefix.value
+	}
+	return out
 }
 
-// canonicalizeAddressBookContent serializes the v4 + v6 CIDR
-// lists into a fixed byte stream with explicit family + count
-// framing (Codex r3 F4 fix).
-//
-// Layout:
-//
-//	"V4" || u32_be(len(v4)) || (for each: u8(prefix_len) || u32_be(addr_bytes))
-//	"V6" || u32_be(len(v6)) || (for each: u8(prefix_len) || u128_be(addr_bytes))
-//
-// CIDR strings that fail to parse are skipped (defensive).
-func canonicalizeAddressBookContent(v4, v6 []string) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("V4")
-	binary.Write(&buf, binary.BigEndian, uint32(len(v4)))
-	for _, s := range v4 {
-		_, ipnet, err := net.ParseCIDR(s)
-		if err != nil {
-			continue
-		}
-		ones, _ := ipnet.Mask.Size()
-		buf.WriteByte(byte(ones))
-		buf.Write(ipnet.IP.To4())
+func dedupParsedAddressBookCIDRs(values []parsedAddressBookCIDR) []parsedAddressBookCIDR {
+	if len(values) <= 1 {
+		return values
 	}
-	buf.WriteString("V6")
-	binary.Write(&buf, binary.BigEndian, uint32(len(v6)))
-	for _, s := range v6 {
-		_, ipnet, err := net.ParseCIDR(s)
-		if err != nil {
-			continue
-		}
-		ones, _ := ipnet.Mask.Size()
-		buf.WriteByte(byte(ones))
-		buf.Write(ipnet.IP.To16())
-	}
-	return buf.Bytes()
-}
-
-func dedupSortedStrings(s []string) []string {
-	if len(s) <= 1 {
-		return s
-	}
-	out := s[:1]
-	for i := 1; i < len(s); i++ {
-		if s[i] != out[len(out)-1] {
-			out = append(out, s[i])
+	out := values[:1]
+	for i := 1; i < len(values); i++ {
+		if values[i].value != out[len(out)-1].value {
+			out = append(out, values[i])
 		}
 	}
 	return out
+}
+
+func canonicalizeParsedAddressBookContent(v4, v6 []parsedAddressBookCIDR) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("V4")
+	binary.Write(&buf, binary.BigEndian, uint32(len(v4)))
+	for _, prefix := range v4 {
+		if !prefix.valid {
+			continue
+		}
+		ones, _ := prefix.network.Mask.Size()
+		buf.WriteByte(byte(ones))
+		buf.Write(prefix.network.IP.To4())
+	}
+	buf.WriteString("V6")
+	binary.Write(&buf, binary.BigEndian, uint32(len(v6)))
+	for _, prefix := range v6 {
+		if !prefix.valid {
+			continue
+		}
+		ones, _ := prefix.network.Mask.Size()
+		buf.WriteByte(byte(ones))
+		buf.Write(prefix.network.IP.To16())
+	}
+	return buf.Bytes()
 }

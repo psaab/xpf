@@ -45,32 +45,30 @@ func TestPolicySlashNameResolvesToPrefix(t *testing.T) {
 		},
 	}
 
-	snaps, err := buildPolicySnapshots(cfg)
+	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 1)
 	if err != nil {
-		t.Fatalf("buildPolicySnapshots: %v", err)
+		t.Fatalf("buildSnapshot: %v", err)
 	}
-	if len(snaps) != 1 {
-		t.Fatalf("expected 1 rule, got %d", len(snaps))
+	if len(snap.Policies) != 1 {
+		t.Fatalf("expected 1 policy rule, got %d", len(snap.Policies))
 	}
-	s := snaps[0]
+	s := snap.Policies[0]
 
-	// The single slash-named source object resolved to a book ID (not dropped
-	// to a free-form literal), and its full-expansion prefix is 10.0.0.0/8.
 	if len(s.SourceBookIDs) != 1 {
 		t.Fatalf("source slash-named object did not resolve to a book id: bookIDs=%v literals=%v", s.SourceBookIDs, s.SourceLiterals)
 	}
-	if !slices.Contains(s.SourceAddresses, "10.0.0.0/8") {
-		t.Fatalf("source did not expand to the object prefix 10.0.0.0/8: %v", s.SourceAddresses)
+	source := policySnapshotAddrs(t, snap, "trust", "untrust", "p1", true)
+	if !slices.Contains(source, "10.0.0.0/8") {
+		t.Fatalf("source v3 book reference did not resolve to 10.0.0.0/8: %v", source)
 	}
 
-	// The destination address-set expands both slash-named members to their
-	// prefixes.
 	if len(s.DestinationBookIDs) != 1 {
 		t.Fatalf("destination address-set did not resolve to a book id: %v", s.DestinationBookIDs)
 	}
+	destination := policySnapshotAddrs(t, snap, "trust", "untrust", "p1", false)
 	for _, want := range []string{"10.0.0.0/8", "2001:559:8585:200::/64"} {
-		if !slices.Contains(s.DestinationAddresses, want) {
-			t.Fatalf("destination did not expand to %q: %v", want, s.DestinationAddresses)
+		if !slices.Contains(destination, want) {
+			t.Fatalf("destination v3 book reference did not resolve to %q: %v", want, destination)
 		}
 	}
 }

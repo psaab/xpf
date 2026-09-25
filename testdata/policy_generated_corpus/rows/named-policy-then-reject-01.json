@@ -43,38 +43,32 @@
     "default_policy": "permit",
     "rules": [
       {
-        "action": "reject",
-        "applications": [
-          "any"
-        ],
-        "destination_addresses": [
+        "rule_id": "trust-\u003euntrust/p-reject",
+        "name": "p-reject",
+        "from_zone": "trust",
+        "to_zone": "untrust",
+        "source_literals": [
           "any"
         ],
         "destination_literals": [
           "any"
         ],
-        "from_zone": "trust",
-        "name": "p-reject",
-        "rule_id": "trust->untrust/p-reject",
-        "source_addresses": [
+        "applications": [
           "any"
         ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "untrust"
+        "action": "reject"
       }
     ],
     "zones": [
       {
-        "host_inbound_configured": true,
+        "name": "trust",
         "id": 50675,
-        "name": "trust"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "untrust",
         "id": 20665,
-        "name": "untrust"
+        "host_inbound_configured": true
       }
     ]
   },

@@ -152,15 +152,15 @@ impl Coordinator {
     /// binding mutation, FD retention, or `last_reconcile_stage` write.
     ///
     /// These are the SAME integrity checks `reconcile` runs before it
-    /// touches any live state (its policy preflight, `preflight_map_fds`,
-    /// and `build_reconcile_forwarding` legs): the policy leg shares
-    /// `snapshot::preflight_policy_state` verbatim, the map leg opens the
-    /// same pins through the same `OwnedFd::open_bpf_map`, and the build leg
-    /// invokes the same `build_forwarding_state_with_policy_counters_and_previous`.
-    /// So a snapshot this method rejects is exactly one `reconcile` would
-    /// reject (a parity test locks it). The three legs run in `reconcile`'s
-    /// order, so a snapshot failing multiple legs reports the same first
-    /// error either path.
+    /// touches any live state (one prepared policy-state parse,
+    /// `preflight_map_fds`, and `build_reconcile_forwarding`): the policy
+    /// state is carried into the forwarding build instead of being parsed a
+    /// second time, the map leg opens the same pins through the same
+    /// `OwnedFd::open_bpf_map`, and the build leg uses the same prepared-policy
+    /// builder. So a snapshot this method rejects is exactly one `reconcile`
+    /// would reject (a parity test locks it). The three legs run in
+    /// `reconcile`'s order, so a snapshot failing multiple legs reports the
+    /// same first error either path.
     ///
     /// This exists for the DEFERRED-activation apply path (RETH MAC
     /// pending), which SKIPS worker bring-up entirely and therefore never
@@ -176,13 +176,14 @@ impl Coordinator {
     /// workers (the defer semantics — skip the spawn — are preserved).
     ///
     /// Side-effect-free by construction: the map-pin leg opens each pin then
-    /// drops the FD; the build leg uses SCRATCH policy + NAT counter stores
-    /// (no `Arc` handle leak into the live stores on a rejected snapshot) AND
-    /// passes `previous = None` so it never carries over — hence never mutates
-    /// — the live `self.forwarding` zone-counter store (a `Clone`-shares-Arc
+    /// drops the FD; the forwarding build uses scratch NAT counters and
+    /// `previous = None`, so it never carries over — hence never mutates —
+    /// the live `self.forwarding` zone-counter store (a `Clone`-shares-Arc
     /// store whose carry-over `reconcile(retain)` would otherwise prune the
     /// published per-zone totals; see `validate_forwarding_buildable`, rev-5605
-    /// fold); `WgEngine::new` (invoked inside the build) is a pure constructor.
+    /// fold). Its prepared policy state uses the live counter store, but its
+    /// RAII guard removes candidate-only rule IDs when validation returns;
+    /// `WgEngine::new` (invoked inside the build) is a pure constructor.
     /// Verdict parity with `reconcile` is preserved: no fallible integrity leg
     /// reads `previous` for its accept/reject decision. A `None` snapshot
     /// (config-cleared / shutdown) is trivially buildable — an intentional
@@ -194,16 +195,23 @@ impl Coordinator {
         let Some(snapshot) = snapshot else {
             return Ok(());
         };
-        // Leg 1: policy-state preflight (#1606/#3402) — shared with reconcile.
-        snapshot::preflight_policy_state(snapshot).map_err(ReconcileError::Integrity)?;
+        let policy_state = self
+            .prepare_snapshot_policy_state(snapshot)
+            .map_err(ReconcileError::Integrity)?;
+        self.validate_snapshot_buildable_with_policy_state(snapshot, policy_state)
+    }
+
+    pub(crate) fn validate_snapshot_buildable_with_policy_state(
+        &self,
+        snapshot: &ConfigSnapshot,
+        mut policy_state: crate::policy::PreparedPolicyState,
+    ) -> Result<(), ReconcileError> {
+        // Leg 1: policy-state integrity was parsed once before this method.
         // Leg 2: mandatory + present-optional BPF map-pin openability (#2440).
         snapshot::validate_map_pins(snapshot)?;
-        // Leg 3: full forwarding-build integrity (#2484) — the non-policy
-        // faults (invalid interface address, CoS queue, NPTv6 rule, ...)
-        // reachable only inside the full build. `previous = None` inside
-        // (rev-5605 fold) so the discarded build never prunes the live
-        // zone-counter store; verdict parity with reconcile is preserved.
-        snapshot::validate_forwarding_buildable(snapshot)
+        // Leg 3: full forwarding-build integrity (#2484), reusing that same
+        // parsed state. The discarded build carries no live zone-counter store.
+        snapshot::validate_forwarding_buildable(snapshot, &mut policy_state)
     }
 
     /// Reconcile the coordinator state against an optional config
@@ -238,34 +246,33 @@ impl Coordinator {
         bindings: &mut [BindingStatus],
         ring_entries: usize,
     ) -> Result<(), ReconcileError> {
+        self.reconcile_with_policy_state(snapshot, bindings, ring_entries, None)
+    }
+
+    pub(crate) fn reconcile_with_policy_state(
+        &mut self,
+        snapshot: Option<&ConfigSnapshot>,
+        bindings: &mut [BindingStatus],
+        ring_entries: usize,
+        mut policy_state: Option<crate::policy::PreparedPolicyState>,
+    ) -> Result<(), ReconcileError> {
         self.reconcile_calls += 1;
         self.last_reconcile_stage = ReconcileStage::Start;
-        // #1606 (AGY r2 finding 4.2): policy-integrity preflight
-        // BEFORE tear_down. If the snapshot has duplicate / zero /
-        // unknown book IDs, reject WITHOUT tearing down the
-        // existing workers. Workers keep running on the previous
-        // good config until a valid snapshot arrives.
-        //
-        // Uses a scratch counter store (Codex r1 F2) so we don't
-        // leak Arc<PolicyRuleCounter> entries on rejected snapshots.
-        if let Some(snap) = snapshot {
-            // #5171: the policy-state preflight is now shared verbatim with
-            // the `validate_snapshot_buildable` deferred-apply gate
-            // (`snapshot::preflight_policy_state`) so the deferred-activation
-            // apply and this full reconcile can never drift on which
-            // snapshots pass the policy check. Same #1606 scratch counter
-            // store + #3402 snapshot-zone resolution as before.
-            if let Err(err) = snapshot::preflight_policy_state(snap) {
-                eprintln!(
-                    "xpf-userspace-dp: snapshot integrity error during reconcile preflight: {} — keeping previous workers + forwarding state",
-                    err
-                );
-                self.last_reconcile_stage =
-                    ReconcileStage::SnapshotIntegrityErrorDetail(err.to_string());
-                // #3789: surface the reject so the control handler fails
-                // closed instead of persisting the rejected snapshot.
-                return Err(ReconcileError::Integrity(err));
-            }
+        if let Some(snap) = snapshot
+            && policy_state.is_none()
+        {
+            policy_state = match self.prepare_snapshot_policy_state(snap) {
+                Ok(policy_state) => Some(policy_state),
+                Err(err) => {
+                    eprintln!(
+                        "xpf-userspace-dp: snapshot integrity error during reconcile preflight: {} — keeping previous workers + forwarding state",
+                        err
+                    );
+                    self.last_reconcile_stage =
+                        ReconcileStage::SnapshotIntegrityErrorDetail(err.to_string());
+                    return Err(ReconcileError::Integrity(err));
+                }
+            };
         }
         // #2440 fail-open partial-apply fix: open the mandatory BPF map
         // FDs (xsk/heartbeat/sessions) — the real correctness boundary —
@@ -314,8 +321,20 @@ impl Coordinator {
             // reads `Some(&self.forwarding)` as its "previous" arg, which
             // `tear_down` defaults to empty — another reason it MUST run
             // before teardown.
-            match snapshot::build_reconcile_forwarding(self, snap) {
-                Ok(forwarding) => fds.forwarding = forwarding,
+            match snapshot::build_reconcile_forwarding(
+                self,
+                snap,
+                policy_state
+                    .as_mut()
+                    .expect("snapshot reconcile has prepared policy state"),
+            ) {
+                Ok(forwarding) => {
+                    policy_state
+                        .as_mut()
+                        .expect("snapshot reconcile has prepared policy state")
+                        .commit();
+                    fds.forwarding = forwarding;
+                }
                 Err(err) => {
                     // last_reconcile_stage = "snapshot_integrity_error" set
                     // inside build_reconcile_forwarding. No teardown, no

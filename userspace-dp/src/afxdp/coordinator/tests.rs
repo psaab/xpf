@@ -6397,11 +6397,10 @@ fn ensure_resolver_attempts_before_launch_best_effort_6240() {
 /// buildable snapshot passes both; a `None` snapshot (teardown) is trivially
 /// buildable.
 ///
-/// Fail-on-revert: `validate_snapshot_buildable` calls the SAME
-/// `preflight_policy_state` / `validate_map_pins` (open the same pins) /
-/// `build_forwarding_state_..` primitives `reconcile` runs; a drift in
-/// either path (e.g. skipping the map-pin or forwarding leg) makes one of
-/// the paired assertions below diverge.
+/// Fail-on-revert: validation prepares policy state once and uses its
+/// prepared-policy forwarding build; reconcile carries prepared policy state
+/// into its build too. The map-pin gates use separate keep-vs-drop adapters,
+/// so these paired assertions lock their accept/reject and error parity.
 #[test]
 fn validate_snapshot_buildable_matches_reconcile_5171() {
     // --- Class 1: a MISSING mandatory map pin -----------------------------

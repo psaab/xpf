@@ -49,69 +49,57 @@
     "default_policy": "deny",
     "rules": [
       {
-        "action": "permit",
-        "applications": [
-          "any"
-        ],
-        "destination_addresses": [
-          "any"
-        ],
-        "destination_literals": [
-          "any"
-        ],
-        "from_zone": "trust",
+        "rule_id": "trust-\u003euntrust/zp-allow",
         "name": "zp-allow",
-        "rule_id": "trust->untrust/zp-allow",
-        "source_addresses": [
-          "any"
-        ],
+        "from_zone": "trust",
+        "to_zone": "untrust",
         "source_literals": [
           "any"
         ],
-        "to_zone": "untrust"
-      },
-      {
-        "action": "deny",
+        "destination_literals": [
+          "any"
+        ],
         "applications": [
           "any"
         ],
-        "destination_addresses": [
+        "action": "permit"
+      },
+      {
+        "rule_id": "junos-global-\u003ejunos-global/g-deny",
+        "policy_id": 256,
+        "name": "g-deny",
+        "from_zone": "junos-global",
+        "to_zone": "junos-global",
+        "source_literals": [
           "any"
         ],
         "destination_literals": [
           "any"
         ],
-        "from_zone": "junos-global",
+        "applications": [
+          "any"
+        ],
+        "action": "deny",
         "match_from_zone": "trust",
+        "match_to_zone": "untrust",
         "match_from_zones": [
           "trust"
         ],
-        "match_to_zone": "untrust",
         "match_to_zones": [
           "untrust"
-        ],
-        "name": "g-deny",
-        "policy_id": 256,
-        "rule_id": "junos-global->junos-global/g-deny",
-        "source_addresses": [
-          "any"
-        ],
-        "source_literals": [
-          "any"
-        ],
-        "to_zone": "junos-global"
+        ]
       }
     ],
     "zones": [
       {
-        "host_inbound_configured": true,
+        "name": "trust",
         "id": 50675,
-        "name": "trust"
+        "host_inbound_configured": true
       },
       {
-        "host_inbound_configured": true,
+        "name": "untrust",
         "id": 20665,
-        "name": "untrust"
+        "host_inbound_configured": true
       }
     ]
   },

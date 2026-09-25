@@ -152,13 +152,15 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	if cfg == nil {
 		return nil
 	}
-	policies, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, feedOverlay)
+	books, nameToID, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
 	if err != nil {
-		// A policy-snapshot build error (e.g. the #2514 address-book content-ID
-		// collision, or a MaxRulesPerPolicy overflow) is itself a fail-closed
-		// condition: buildSnapshot returns the error, the apply path rejects the
-		// config, and the helper retains the prior dataplane state. Report it so
-		// the simulator does not fabricate a verdict the dataplane never enforces.
+		return []string{fmt.Sprintf("policy snapshot cannot be built (fail-closed): %v", err)}
+	}
+	policies, err := buildPolicySnapshotsWithAddressBook(cfg, nil, feedOverlay, nameToID)
+	if err != nil {
+		// A policy-snapshot build error (e.g. a MaxRulesPerPolicy overflow)
+		// is itself fail-closed: buildSnapshot returns the error, the apply path
+		// rejects the config, and the helper retains its previous state.
 		return []string{fmt.Sprintf("policy snapshot cannot be built (fail-closed): %v", err)}
 	}
 	reasons := collectPolicyContentRejections(policies)
@@ -185,13 +187,7 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	// v4, while Rust parses their colon-bearing spelling as v6; the helper
 	// rejects the entire snapshot. Inspect the built rows so this arm follows
 	// the same feed-aware expansion and family split as publication.
-	books, _, bookErr := buildAddressBookTableWithFeeds(cfg, feedOverlay)
-	if bookErr != nil {
-		reasons = append(reasons,
-			fmt.Sprintf("address-book snapshot cannot be built (fail-closed): %v", bookErr))
-	} else {
-		reasons = append(reasons, collectAddressBookFamilyRejections(books)...)
-	}
+	reasons = append(reasons, collectAddressBookFamilyRejections(books)...)
 	if len(reasons) == 0 {
 		if _, cerr := buildAppCatalogSnapshot(cfg); cerr != nil {
 			reasons = append(reasons, fmt.Sprintf(
