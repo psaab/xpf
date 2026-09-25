@@ -68,11 +68,10 @@ pub(in crate::afxdp) use embedded_icmp::{
 use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
 use flow_cache_seed::stage_flow_cache_seed;
 use frag_assoc::{
-    flowless_fragment_requires_nat_translation, frag_ingress_authority,
-    flowless_fragment_missing_neighbor_requires_nat_translation,
-    nat64_consult_forward_fragment_assoc,
-    nat64_install_forward_fragment_assoc, nat_consult_forward_fragment_assoc,
-    nat_install_forward_fragment_assoc,
+    flowless_nat_rule_possible, flowless_no_route_requires_nat_translation,
+    flowless_requires_nat_translation, frag_ingress_authority,
+    nat64_consult_forward_fragment_assoc, nat64_install_forward_fragment_assoc,
+    nat_consult_forward_fragment_assoc, nat_install_forward_fragment_assoc,
     session_gated_reverse_fragment_requires_nat_translation,
 };
 use flowless_verdict::{
@@ -124,6 +123,36 @@ fn transit_source_class_drop(
 #[inline]
 pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
     protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
+}
+#[inline]
+fn record_untranslated_pref64_drop(
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+    counters: &mut crate::afxdp::BatchCounters,
+) -> bool {
+    let Some(IpAddr::V6(dst_v6)) =
+        crate::afxdp::frame::parse_packet_destination_from_frame(packet_frame, meta)
+    else {
+        return false;
+    };
+    if forwarding.nat64.match_ipv6_dest(dst_v6).is_none() {
+        return false;
+    }
+    if crate::nat64::frame_is_nat64_exthdr_ineligible(
+        packet_frame,
+        meta.addr_family as i32,
+    ) {
+        counters.record_nat64_exthdr_ineligible();
+    } else if crate::nat64::frame_is_nat64_fragment_drop(
+        packet_frame,
+        meta.addr_family as i32,
+    ) {
+        counters.record_nat64_frag_dropped();
+    } else {
+        counters.record_nat64_ineligible_protocol();
+    }
+    true
 }
 #[inline]
 fn stage11_declared_frame(packet_frame: &[u8], meta: UserspaceDpMeta) -> &[u8] {
@@ -5780,28 +5809,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        // #6122: fail-closed NAT'd non-first-fragment MISS. The
-                        // fragment passed policy and would be FORWARDED, but it
-                        // reached this flowless arm on a fragment-association
-                        // MISS (reorder / eviction / TTL straddle / config-
-                        // generation bump / a first fragment that never
-                        // forwarded). If its flow WOULD be same-family NAT-
-                        // translated (SNAT / static-NAT / DNAT / NPTv6 — matched
-                        // on the fragment's L3 identity), forwarding it with the
-                        // default (no-NAT) decision below would leak the internal
-                        // source (SNAT / NPTv6) or the pre-NAT destination
-                        // (DNAT). Drop it fail-closed: the sender retransmits, a
-                        // rare reordered fragment ahead of its first is
-                        // recoverable, but the leak is not. Scoped to a GENUINE
-                        // non-first fragment (a first fragment / full-L4 packet
-                        // is NAT-translated on the flow-backed arm and installs
-                        // the association, so it never reaches here); a plain
-                        // (no-NAT) fragment matches no rule and forwards normally,
-                        // preserving ordinary fragmented forwarding.
+                        // #8670: Pref64 belongs to the NAT64 gate below, which
+                        // owns protocol/extension/fragment drop attribution.
+                        // Do not let a matching same-family source-NAT rule
+                        // steal that verdict.
+                        let is_pref64_destination = matches!(
+                            crate::afxdp::frame::parse_packet_destination_from_frame(
+                                packet_frame,
+                                meta,
+                            ),
+                            Some(IpAddr::V6(dst_v6))
+                                if worker_ctx.forwarding.nat64.match_ipv6_dest(dst_v6).is_some()
+                        );
                         let is_non_first =
                             crate::afxdp::frame::frame_is_non_first_fragment(packet_frame, meta);
-                        if is_non_first
-                            && flowless_fragment_requires_nat_translation(
+                        // #6122/#10679: a flowless packet with a matching
+                        // same-family NAT rule must not leave with the default
+                        // no-NAT decision. Pref64 is handled by the NAT64 gate
+                        // below and keeps that counter attribution.
+                        if !is_pref64_destination
+                            && flowless_requires_nat_translation(
                                 worker_ctx.forwarding,
                                 l3_flow,
                                 meta,
@@ -5812,10 +5839,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_ns,
                             )
                         {
-                            // Dedicated fail-closed observability (sets `touched`
-                            // + bumps `nat_frag_untranslated_dropped`); NOT a
-                            // policy deny, so `dbg.policy_deny` is left untouched.
-                            telemetry.counters.record_nat_frag_untranslated_dropped();
+                            if is_non_first {
+                                // #6122: a real fragment miss keeps its own
+                                // fragmentation-specific attribution.
+                                telemetry.counters.record_nat_frag_untranslated_dropped();
+                            } else {
+                                // #10679: a whole flowless packet is not a
+                                // fragment; keep the tunnel/NAT fence visible
+                                // without accusing PMTU or fragmentation.
+                                telemetry.counters.record_nat_flowless_untranslated_dropped();
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -6892,6 +6925,46 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     decision.resolution.disposition =
                                         ForwardingDisposition::PolicyDenied;
                                 }
+                                // #10679: permitted flowless NoRoute packets
+                                // may still reach the kernel FIB. Attribute
+                                // Pref64 failures to NAT64 first; only then
+                                // probe same-family translation candidates.
+                                if !l4_present
+                                    && decision.resolution.disposition
+                                        == ForwardingDisposition::NoRoute
+                                {
+                                    if record_untranslated_pref64_drop(
+                                        packet_frame,
+                                        meta,
+                                        worker_ctx.forwarding,
+                                        telemetry.counters,
+                                    ) {
+                                        suppress_slow_path_reinject = true;
+                                    } else if flowless_no_route_requires_nat_translation(
+                                        worker_ctx.forwarding,
+                                        adj_flow,
+                                        meta,
+                                        ingress_zone_override,
+                                        from_zone_id,
+                                        now_ns,
+                                    ) {
+                                        let is_non_first =
+                                            crate::afxdp::frame::frame_is_non_first_fragment(
+                                                packet_frame,
+                                                meta,
+                                            );
+                                        if is_non_first {
+                                            telemetry
+                                                .counters
+                                                .record_nat_frag_untranslated_dropped();
+                                        } else {
+                                            telemetry
+                                                .counters
+                                                .record_nat_flowless_untranslated_dropped();
+                                        }
+                                        suppress_slow_path_reinject = true;
+                                    }
+                                }
                             }
                         }
                         ForwardingDisposition::MissingNeighbor => {
@@ -7299,44 +7372,96 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             );
                                             break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                         }
-                                        // #10660: the #6122 NAT-miss gate above
-                                        // covers only ForwardCandidate. Before a
-                                        // permitted association-miss tail is parked
-                                        // on this MissingNeighbor path, require a
-                                        // live reverse-NAT session or a matching
-                                        // L4-scoped source-NAT rule. A blanket rule
-                                        // with no session is ambiguous with raw
-                                        // IPsec/passthrough and is not sufficient;
-                                        // that residual is tracked as #10957.
+                                        // #6122/#10679: a flowless MissingNeighbor
+                                        // packet has no translation decision for
+                                        // retry. Keep policy precedence, then
+                                        // preserve Pref64 attribution before the
+                                        // same-family fence.
+                                        // A blanket-only masquerade is not proof
+                                        // that this tail can be translated
+                                        // without a session (#10957); preserve
+                                        // its no-session reassembly park path.
                                         let is_non_first =
                                             crate::afxdp::frame::frame_is_non_first_fragment(
                                                 packet_frame,
                                                 meta,
                                             );
-                                        if is_non_first
-                                            && flowless_fragment_missing_neighbor_requires_nat_translation(
+                                        if record_untranslated_pref64_drop(
+                                            packet_frame,
+                                            meta,
+                                            worker_ctx.forwarding,
+                                            telemetry.counters,
+                                        ) {
+                                            record_forwarding_disposition(
+                                                &worker_ctx.ident,
+                                                DispositionCounters::Hot(telemetry.counters),
+                                                decision.resolution,
+                                                desc.len as u32,
+                                                Some(meta),
+                                                debug.as_ref(),
+                                                worker_ctx.recent_exceptions,
+                                                worker_ctx.last_resolution,
                                                 worker_ctx.forwarding,
-                                                sessions,
+                                            );
+                                            break 'missing_neighbor
+                                                StageOutcome::RecycleAndContinue;
+                                        }
+                                        let nat_translation_required = if is_non_first {
+                                            session_gated_reverse_fragment_requires_nat_translation(
+                                                &*sessions,
                                                 &l3_flow,
                                                 meta,
+                                                now_ns,
+                                            ) || flowless_nat_rule_possible(
+                                                worker_ctx.forwarding,
+                                                &l3_flow,
+                                                meta,
+                                                ingress_zone_override,
+                                                from_zone_id,
+                                                to_zone_id,
+                                                decision.resolution.egress_ifindex,
+                                                true,
+                                            )
+                                        } else {
+                                            flowless_requires_nat_translation(
+                                                worker_ctx.forwarding,
+                                                &l3_flow,
+                                                meta,
+                                                ingress_zone_override,
                                                 from_zone_id,
                                                 to_zone_id,
                                                 decision.resolution.egress_ifindex,
                                                 now_ns,
                                             )
-                                        {
-                                            telemetry.counters
-                                                .record_nat_frag_untranslated_dropped();
+                                        };
+                                        if nat_translation_required {
+                                            if is_non_first {
+                                                telemetry.counters
+                                                    .record_nat_frag_untranslated_dropped();
+                                            } else {
+                                                telemetry.counters
+                                                    .record_nat_flowless_untranslated_dropped();
+                                            }
+                                            record_forwarding_disposition(
+                                                &worker_ctx.ident,
+                                                DispositionCounters::Hot(telemetry.counters),
+                                                decision.resolution,
+                                                desc.len as u32,
+                                                Some(meta),
+                                                debug.as_ref(),
+                                                worker_ctx.recent_exceptions,
+                                                worker_ctx.last_resolution,
+                                                worker_ctx.forwarding,
+                                            );
                                             break 'missing_neighbor
                                                 StageOutcome::RecycleAndContinue;
                                         }
                                     }
-                                    // Flowless permit (or no derivable L3 tuple):
-                                    // fall through to the negative-cache / probe /
-                                    // reinject path. A permitted flowless fragment is
-                                    // legitimately forwarded once the neighbor
-                                    // resolves — `MissingNeighbor` stays slow-path-
-                                    // eligible for it.
+                                    // Flowless permit with no matching NAT fence
+                                    // (or no derivable L3 tuple) still falls
+                                    // through to neighbor resolution / reinject;
+                                    // ordinary no-NAT flowless traffic remains
+                                    // forwardable.
                                 }
                                 // #1651 B3: dead-host fast-fail gate. Runs at
                                 // the very top of the MissingNeighbor arm,

@@ -102,6 +102,7 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 				SNATPackets: 30, DNATPackets: 20,
 				Nat64Translations: 12, Nat64NoSourcePool: 3, Nat64PoolExhausted: 5, Nat64FragDropped: 2, Nat64IneligibleSource: 4, Nat64IneligibleDest: 6, Nat64ExthdrIneligible: 7, Nat64IneligibleProtocol: 11, Nat64TunnelEncapUnsupported: 13,
 				NatFragUntranslatedDropped: 9,
+				NatFlowlessUntranslatedDropped: 10,
 				FragOverlapDropped:         14, FragOverlapOverflowDropped: 15, FragOverlapShardFullDropped: 16, FragOverlapPostNATDropped: 17, FragOverlapMaxLifetimeEvictions: 18,
 				TXPackets: 70, TXBytes: 9000, TXErrors: 100, DbgCoSQueueOverflow: 40,
 				TXSharedRecycleUnknownSlotDrops: 1, TXCompletions: 65,

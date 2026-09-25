@@ -177,15 +177,21 @@ inspect or rewrite a packet sitting in a UMEM frame.
   distinct flow between one endpoint pair onto one key, one policy
   decision, one NAT state and one timeout.
 
-  **Flowless is not a drop and not a bypass.** The packet still forwards
-  (measured: an unchanged `tx=1` across the change), and since #3291 the
-  flowless transit arm applies zone policy, interface input filters and
-  PBR through the *same* helpers the flow-backed arm uses
-  (`evaluate_non_pbr_input_filter`, `ingress_route_table_override`,
-  `evaluate_policy_result_l3_aware`). The flowless arm is additionally
-  stricter in one respect that matters here: it evaluates with
-  `l4_present = false`, so port-bearing policy terms fail closed instead
-  of being compared against fabricated port 0.
+  **Flowless is not inherently a drop or bypass.** With no NAT rule requiring
+  a flow-bound translation, the packet still forwards (measured: unchanged
+  `tx=1` across the change), and since #3291 the flowless transit arm applies
+  zone policy, interface input filters and PBR through the *same* helpers the
+  flow-backed arm uses (`evaluate_non_pbr_input_filter`,
+  `ingress_route_table_override`, `evaluate_policy_result_l3_aware`). The
+  flowless arm evaluates with `l4_present = false`, so port-bearing policy
+  terms fail closed instead of being compared against fabricated port 0.
+  #10679 adds a different fail-closed boundary: when ordinary same-family
+  NAT requires a flowless packet's source or destination to be translated,
+  the packet is dropped before TX, missing-neighbor buffering, or a permitted
+  NoRoute kernel-FIB reinjection. NoRoute probes configured egresses because
+  its actual egress is unknown. Pref64 retains NAT64 attribution, and raw
+  ESP/AH non-first fragments retain the Stage-11/reassembly park path. The
+  whole-flowless drop counter remains distinct from real fragment NAT misses.
 
   What IS given up is **stateful return admission** for these protocols,
   and their appearance in `show security flow session` — an observable

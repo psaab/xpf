@@ -1,13 +1,11 @@
 // #6386 leaf extraction: the NAT / NAT64 forward fragment-association
-// install & consult helpers (#2562/#5146/#5624/#5689) plus the #6122
-// fail-closed same-family fragment discriminator, lifted verbatim out
-// of poll_descriptor/mod.rs. Attr-verbatim: the four association
-// helpers keep their #[inline]; flowless_fragment_requires_nat_translation
-// keeps its deliberate #[cold] #[inline(never)]. No non-motion change;
-// bodies byte-identical to their prior location.
+// install & consult helpers (#2562/#5146/#5624/#5689) plus the #6122/#10679
+// fail-closed flowless NAT discriminator, lifted out of poll_descriptor/mod.rs.
+// The four association helpers keep their #[inline]; flowless_requires_nat_translation
+// keeps its deliberate #[cold] #[inline(never)].
 
 use super::*;
-use super::nat_exception::source_nat_would_translate_fragment;
+use super::nat_exception::source_nat_would_translate_flowless;
 use super::prerouting_scope::prerouting_ingress_scope;
 
 use crate::nat64::Nat64ReverseInfo;
@@ -265,7 +263,7 @@ pub(super) fn nat_install_forward_fragment_assoc(
 /// first-fragment flood, a config-generation bump between first and non-first, or
 /// a first fragment that never forwarded (MissingNeighbor/NoRoute → no install) —
 /// the caller does NOT blindly forward the fragment untranslated. Instead the
-/// flowless arm runs [`flowless_fragment_requires_nat_translation`], a read-only
+/// flowless arm runs [`flowless_requires_nat_translation`], a read-only
 /// NAT'd-miss vs no-NAT-miss discriminator: if a SNAT / static-NAT / DNAT /
 /// NPTv6 rule WOULD translate the fragment's L3 identity, the
 /// permitted-but-untranslatable fragment is DROPPED fail-closed (counted as
@@ -311,42 +309,29 @@ pub(super) fn nat_consult_forward_fragment_assoc(
     Some(decision)
 }
 
-/// #6122: fail-closed discriminator for the flowless non-first-fragment MISS
-/// path. Answers "would this fragment's flow have been translated by an
-/// ordinary same-family NAT rule (SNAT / static-NAT / DNAT / NPTv6)?" using
-/// ONLY the fragment's L3 identity — source / destination / protocol / ingress
-/// + egress zones / interface + routing-instance scope — every part of which a
-/// non-first fragment carries in its IP header. When it returns `true` the
-/// caller DROPS the fragment (fail-closed) instead of forwarding it
-/// UNTRANSLATED (the #6122 leak): a permitted-but-untranslatable NAT'd fragment
-/// with no association leaks the internal source (SNAT / NPTv6) or the pre-NAT
-/// destination (DNAT). A plain (no-NAT) fragment matches NO rule here and keeps
-/// forwarding, so ordinary fragmented forwarding is preserved.
+/// #6122/#10679: fail-closed discriminator for a flowless packet whose
+/// ordinary same-family NAT / NPTv6 decision is unavailable. Answers "would this
+/// flow have been translated?" using ONLY its L3 identity — source / destination
+/// / protocol / ingress + egress zones / interface + routing-instance scope.
+/// A flowless non-first fragment that missed the association, or an unfragmented
+/// flowless packet such as ESP/GRE/AH, has no flow/session carrying the
+/// translation decision. When this returns `true` the caller DROPS rather than
+/// forwarding with the default no-NAT decision, which would leak the internal
+/// source (SNAT / NPTv6) or the pre-NAT destination (DNAT). A plain (no-NAT)
+/// flowless packet matches no rule and keeps forwarding.
 ///
-/// This is the SAME-FAMILY analog of the NAT64 sibling's fail-closed
-/// no-association drop (#4617, `nat64_frag_dropped`); NAT64 (cross-family) is
-/// out of scope here. #6835: that used to read "its own consult already drops
-/// fail-closed on a miss", which was not true of any code — the consult returns
-/// `None`, and `None` only means "no association". The cross-family drop is now
-/// a real gate: the Pref64-destination check on the flowless arm in
-/// `poll_descriptor/mod.rs`, sitting immediately after this one's call site.
+/// This is READ-ONLY / side-effect-free: source NAT is consulted through
+/// `source_nat_would_translate_flowless`, which reports pool-mode matches before
+/// allocating a mapping. DNAT / static-DNAT lookups and NPTv6 probes (on scratch
+/// address copies) allocate no session, BIB, or pool state.
 ///
-/// READ-ONLY / side-effect-free — safe on the miss path: source NAT is
-/// consulted with `non_first_fragment = true`, which returns BEFORE minting any
-/// pool mapping (a pool-mode match reports `Unavailable`, an
-/// interface/static-SNAT match reports an address-only `Matched`); the DNAT /
-/// static-DNAT lookups and the NPTv6 boolean probes (run on a scratch copy of
-/// the address) allocate no session, BIB, or pool state.
-///
-/// A non-first fragment carries no L4 ports, so this deliberately matches only
-/// ADDRESS/zone-scoped NAT rules: a strictly PORT-scoped DNAT rule does not
-/// match `dst_port == 0` and is intentionally NOT flagged (that residual is
-/// documented in the `nat64.rs` FEATURES.md row — its common in-order case is
-/// covered by the association HIT path, and forwarding such a fragment reaches
-/// the pre-DNAT public destination, not an internal source).
-#[cold]
+/// A flowless packet has no L4 ports. Address-only NAT is checked by the
+/// ordinary read-only probes; L4-scoped rules are separately treated as
+/// possible when their known scope/address/protocol attributes allow a match.
+/// Protocol 255 is the non-first-fragment unknown sentinel, not a reason to
+/// inspect packet bytes.
 #[inline(never)]
-pub(super) fn flowless_fragment_requires_nat_translation(
+pub(super) fn flowless_requires_nat_translation(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
@@ -357,7 +342,7 @@ pub(super) fn flowless_fragment_requires_nat_translation(
     now_ns: u64,
 ) -> bool {
     // Fast-out when NO same-family NAT is configured at all — the common case,
-    // and it keeps a NAT-free box's fragment path byte-identical to pre-#6122.
+    // and it keeps a NAT-free box's flowless path byte-identical to pre-#6122.
     if forwarding.source_nat_rules.is_empty()
         && forwarding.static_nat.is_empty()
         && forwarding.dnat_table.is_empty()
@@ -380,8 +365,8 @@ pub(super) fn flowless_fragment_requires_nat_translation(
     //     interface-SNAT / pool-SNAT / static-SNAT). Matched on the source
     //     address + ingress/egress zones + egress scope, all L3-only. ---
     if let IpAddr::V6(src_v6) = l3_flow.src_ip {
-        // An Untranslatable NPTv6 result is NAT-relevant too: a non-first
-        // fragment must not fall through and forward the address unchanged.
+        // An Untranslatable NPTv6 result is NAT-relevant too: a flowless
+        // packet must not fall through and forward the address unchanged.
         let mut probe = src_v6;
         match forwarding
             .nptv6
@@ -393,16 +378,13 @@ pub(super) fn flowless_fragment_requires_nat_translation(
         }
     }
     // Interface / pool / static SNAT — the read-only probe reports a match
-    // (including a pool-mode match a fragment can't port-map) without minting
-    // any pool mapping or recording a source-NAT allocation failure.
-    if source_nat_would_translate_fragment(
+    // (including a pool-mode match a flowless packet cannot port-map) without
+    // minting any pool mapping or recording a source-NAT allocation failure.
+    if source_nat_would_translate_flowless(
         forwarding,
         meta.ingress_ifindex as i32,
-        // #9956 F-052: the fragment's OWN vlan. This probe runs on the
-        // association-MISS path where the first fragment's vlan is unknowable
-        // (no assoc exists); scoping on this fragment's own ingress is
-        // best-effort under ECMP (fragments can split across ingress links),
-        // and the admitting identity for this per-packet decision.
+        // #9956 F-052: the packet's OWN VLAN, used to resolve logical ingress
+        // scope for this per-packet NAT decision.
         meta.ingress_vlan_id,
         from_zone,
         to_zone,
@@ -412,11 +394,23 @@ pub(super) fn flowless_fragment_requires_nat_translation(
     ) {
         return true;
     }
+    if flowless_nat_rule_possible(
+        forwarding,
+        l3_flow,
+        meta,
+        ingress_zone_override,
+        from_zone_id,
+        to_zone_id,
+        egress_ifindex,
+        false,
+    ) {
+        return true;
+    }
 
-    // --- Destination-based translation (pre-NAT dst leak: DNAT / static-DNAT /
-    //     NPTv6 inbound). Matched on the destination address + ingress scope.
-    //     Strictly port-scoped DNAT rules do not match `dst_port == 0` and are
-    //     intentionally not flagged (documented residual). ---
+
+    // --- Destination-based address-only translation (pre-NAT dst leak:
+    // DNAT / static-DNAT / NPTv6 inbound). Port-/protocol-scoped NAT candidates
+    // were checked above without inventing an L4 tuple. ---
     let scope = prerouting_ingress_scope(
         forwarding,
         meta.ingress_ifindex as i32,
@@ -490,6 +484,149 @@ pub(super) fn flowless_fragment_requires_nat_translation(
     }
     false
 }
+/// #10679: a `NoRoute` disposition has no resolved egress, but a permitted
+/// flowless frame can still be reinjected to the kernel FIB. Probe every
+/// configured egress, since the kernel may resolve the destination to any of
+/// them after reinjection; using egress index 0 would make source-NAT matching
+/// return `NoMatch` before the rule is examined.
+#[cold]
+#[inline(never)]
+pub(super) fn flowless_no_route_requires_nat_translation(
+    forwarding: &ForwardingState,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    from_zone_id: u16,
+    now_ns: u64,
+) -> bool {
+    let mut has_egress_identity = false;
+    for &egress_ifindex in forwarding
+        .ifindex_to_config_name
+        .keys()
+        .chain(forwarding.ifindex_to_routing_instance.keys())
+        .chain(forwarding.ifindex_to_zone_id.keys())
+        .chain(forwarding.ifindex_unambiguous_zone_id.keys())
+        .chain(forwarding.egress.keys())
+    {
+        has_egress_identity = true;
+        if flowless_requires_nat_translation(
+            forwarding,
+            l3_flow,
+            meta,
+            ingress_zone_override,
+            from_zone_id,
+            forwarding.egress_zone_id(egress_ifindex),
+            egress_ifindex,
+            now_ns,
+        ) {
+            return true;
+        }
+    }
+    if !has_egress_identity || forwarding.egress.is_empty() {
+        // Without an egress row, the kernel may resolve a reinjected packet to
+        // an interface NAT cannot match here. Preserve the fail-closed fallback
+        // even after probing the configured interface-index maps.
+        return flowless_requires_nat_translation(
+            forwarding,
+            l3_flow,
+            meta,
+            ingress_zone_override,
+            from_zone_id,
+            0,
+            0,
+            now_ns,
+        ) || !forwarding.source_nat_rules.is_empty()
+            || !forwarding.static_nat.is_empty()
+            || !forwarding.nptv6.is_empty();
+    }
+    false
+}
+
+/// #10679: Identify same-family NAT rules that could match using only the
+/// known L3/scope fields. Protocol 255 is the unknown sentinel, so rule matches
+/// are treated as possible and no packet-header protocol recovery is needed.
+#[cold]
+#[inline(never)]
+pub(super) fn flowless_nat_rule_possible(
+    forwarding: &ForwardingState,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+    require_l4_selector: bool,
+) -> bool {
+    let from_zone = forwarding
+        .zone_id_to_name
+        .get(&from_zone_id)
+        .map_or("", String::as_str);
+    let to_zone = forwarding
+        .zone_id_to_name
+        .get(&to_zone_id)
+        .map_or("", String::as_str);
+    let nat_scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        egress_ifindex,
+        l3_flow.forward_key.routing_domain,
+    );
+    let source_nat_possible = if require_l4_selector {
+        forwarding.source_nat_rules.iter().any(|rule| {
+            rule.matches_scoped_l4_non_first_fragment(
+                &nat_scope,
+                from_zone,
+                to_zone,
+                l3_flow.src_ip,
+                l3_flow.dst_ip,
+                meta.protocol,
+            )
+        })
+    } else {
+        crate::nat::flowless_source_nat_rule_possible(
+            &forwarding.source_nat_rules,
+            &nat_scope,
+            from_zone,
+            to_zone,
+            l3_flow.src_ip,
+            l3_flow.dst_ip,
+            meta.protocol,
+            false,
+        )
+    };
+    if source_nat_possible {
+        return true;
+    }
+
+    let ingress = prerouting_ingress_scope(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        ingress_zone_override,
+    );
+    if forwarding.dnat_table.flowless_l4_translation_possible(
+        meta.protocol,
+        l3_flow.src_ip,
+        l3_flow.dst_ip,
+        ingress.zone_name,
+        ingress.ifname,
+        ingress.routing_instance,
+    ) {
+        return true;
+    }
+    forwarding.static_nat.flowless_l4_translation_possible(
+        meta.protocol,
+        l3_flow.src_ip,
+        l3_flow.dst_ip,
+        ingress.zone_name,
+        ingress.ifname,
+        ingress.routing_instance,
+        to_zone,
+        nat_scope.egress_ifname,
+        nat_scope.egress_routing_instance,
+    )
+}
 
 /// #10130/#10674: session-gated reverse discriminator for a same-family reply
 /// tail that missed its fragment association. Unlike a rules-only reverse arm,
@@ -518,52 +655,3 @@ pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
     )
 }
 
-/// #10660: before parking a permitted non-first fragment on a neighbor miss,
-/// check the two reliable signs that the untranslated decision cannot be used:
-/// an existing forward NAT session whose reverse identity is this tail, or a
-/// matching source-NAT rule with L4 selectors whose known fragment attributes
-/// pass. Blanket rules without a session are intentionally not sufficient;
-/// their ambiguous IPsec/passthrough case remains tracked as #10957.
-#[cold]
-#[inline(never)]
-pub(super) fn flowless_fragment_missing_neighbor_requires_nat_translation(
-    forwarding: &ForwardingState,
-    sessions: &crate::session::SessionTable,
-    l3_flow: &SessionFlow,
-    meta: UserspaceDpMeta,
-    from_zone_id: u16,
-    to_zone_id: u16,
-    egress_ifindex: i32,
-    now_ns: u64,
-) -> bool {
-    if session_gated_reverse_fragment_requires_nat_translation(sessions, l3_flow, meta, now_ns) {
-        return true;
-    }
-    let from_zone = forwarding
-        .zone_id_to_name
-        .get(&from_zone_id)
-        .map(String::as_str)
-        .unwrap_or("");
-    let to_zone = forwarding
-        .zone_id_to_name
-        .get(&to_zone_id)
-        .map(String::as_str)
-        .unwrap_or("");
-    let scope = super::super::forwarding::nat_scope_ctx_for_flow(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        egress_ifindex,
-        l3_flow.forward_key.routing_domain,
-    );
-    forwarding.source_nat_rules.iter().any(|rule| {
-        rule.matches_scoped_l4_non_first_fragment(
-            &scope,
-            from_zone,
-            to_zone,
-            l3_flow.src_ip,
-            l3_flow.dst_ip,
-            meta.protocol,
-        )
-    })
-}

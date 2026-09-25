@@ -1568,6 +1568,10 @@ pub(crate) struct BindingLiveSnapshot {
     /// (SNAT / static-NAT / DNAT / NPTv6), snapshotted from BindingLiveState.
     /// The same-family sibling of `nat64_frag_dropped`.
     pub(crate) nat_frag_untranslated_dropped: u64,
+    /// #10679: unfragmented flowless packets dropped by the same-family
+    /// NAT-transparency fence, snapshotted from BindingLiveState. Separate from
+    /// real non-first-fragment association misses (`nat_frag_untranslated_dropped`).
+    pub(crate) nat_flowless_untranslated_dropped: u64,
     /// #10131: binding-local fragment-overlap attribution, copied from
     /// BindingLiveState after each worker batch flush.
     pub(crate) frag_overlap_dropped: u64,

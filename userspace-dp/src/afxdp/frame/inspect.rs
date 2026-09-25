@@ -1274,9 +1274,11 @@ pub(in crate::afxdp) fn metadata_tuple_complete(meta: UserspaceDpMeta, flow: &Se
         //
         // Declining here makes the metadata arm agree with the frame arm, so
         // the packet stays flowless and takes the route-based, session-less
-        // forward path (`frame/README.md`). Flowless is NOT a drop and NOT a
-        // bypass: it still FORWARDS (measured), and since #3291 the flowless
+        // forward path (`frame/README.md`). Flowless is not inherently a drop
+        // or bypass: no-NAT traffic still FORWARDS, and since #3291 the
         // transit arm applies zone policy, interface input filters and PBR.
+        // #10679 adds a fail-closed fence when ordinary NAT requires a
+        // flowless packet's address to change but no decision can be carried.
         //
         // What is genuinely given up is STATEFUL RETURN ADMISSION for these
         // protocols, and their appearance in `show security flow session`.

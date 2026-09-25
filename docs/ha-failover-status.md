@@ -431,7 +431,20 @@ separate functions:
 | path | selected by | reserve | fixed in |
 |---|---|---|---|
 | port-translating (PAT) | a translated port on the wire | `reserve_flow_maybe_persistent` | #7360 |
-| address-only | `port no-translation`, or a port-less protocol (GRE/ESP/…) | `reserve_address_only_maybe_persistent` | #8132 |
+| address-only | `port no-translation` in a session path; also available to port-less protocols when they have a session decision | `reserve_address_only_maybe_persistent` | #8132 |
+
+**Flowless transit caveat (#10679).** The address-only lease path is a
+per-session allocator, not a guarantee that every port-less packet gets a
+translation decision. Raw ESP/GRE and other no-L4 transit packets take the
+flowless path from #6837 and do not have a session decision to carry that
+lease. If a same-family NAT rule requires their source or destination to be
+translated, the dataplane drops them before TX, missing-neighbor buffering, or
+permitted NoRoute kernel-FIB reinjection rather than leaking the untranslated
+source. NoRoute probes configured egresses because its actual egress is
+unknown. Pref64 retains NAT64 attribution, and raw ESP/AH non-first fragments
+retain the Stage-11/reassembly park path. The separate flowless-NAT-drop counter
+records the fence; the allocator behavior above continues to describe sessions
+that actually reach address-only reservation.
 
 **The two paths pin different things, and that changes what can fail.** Under
 PAT the lease pins a `(address, port)` and the PORT is the fragile half — with

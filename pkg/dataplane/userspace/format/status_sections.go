@@ -99,6 +99,9 @@ type statusSummaryAggregates struct {
 	// drops (SNAT / static-NAT / DNAT / NPTv6). Same-family sibling of
 	// nat64FragDropped.
 	natFragUntranslatedDropped uint64
+	// #10679: same-family NAT fence drops for unfragmented flowless packets,
+	// separate from actual fragment-association misses.
+	natFlowlessUntranslatedDropped uint64
 	// #10131: binding-attributed fragment-overlap reasons.
 	fragOverlapDropped              uint64
 	fragOverlapOverflowDropped      uint64
@@ -260,6 +263,7 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.nat64TunnelEncapUnsupported += binding.Nat64TunnelEncapUnsupported
 		agg.nat64IneligibleProtocol += binding.Nat64IneligibleProtocol
 		agg.natFragUntranslatedDropped += binding.NatFragUntranslatedDropped
+		agg.natFlowlessUntranslatedDropped += binding.NatFlowlessUntranslatedDropped
 		agg.txPackets += binding.TXPackets
 		agg.txBytes += binding.TXBytes
 		agg.txErrors += binding.TXErrors
@@ -573,6 +577,7 @@ func writeNATCountersSection(b *strings.Builder, agg statusSummaryAggregates) {
 	fmt.Fprintf(b, "  NAT64 tunnel encap unsupported drops:%d\n", agg.nat64TunnelEncapUnsupported)
 	fmt.Fprintf(b, "  NAT64 ineligible-protocol drops:%d\n", agg.nat64IneligibleProtocol)
 	fmt.Fprintf(b, "  NAT frag untranslated drops:%d\n", agg.natFragUntranslatedDropped)
+	fmt.Fprintf(b, "  NAT flowless untranslated drops:%d\n", agg.natFlowlessUntranslatedDropped)
 	fmt.Fprintf(b, "  Fragment overlap drops:    %d\n", agg.fragOverlapDropped)
 	fmt.Fprintf(b, "  Fragment overlap overflow drops:%d\n", agg.fragOverlapOverflowDropped)
 	fmt.Fprintf(b, "  Fragment overlap shard-full drops:%d\n", agg.fragOverlapShardFullDropped)

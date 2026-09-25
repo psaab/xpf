@@ -135,6 +135,7 @@
     "nat64_translations": 0,
     "nat64_tunnel_encap_unsupported": 0,
     "nat_alloc_fail": 0,
+    "nat_flowless_untranslated_dropped": 0,
     "nat_frag_untranslated_dropped": 0,
     "neighbor_miss_packets": 0,
     "next_table_packets": 0,

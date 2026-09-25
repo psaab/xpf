@@ -2305,24 +2305,23 @@ fn missing_neighbor_recycle_exactly_once_pin() {
 
 
 // ---------------------------------------------------------------------
-// #6837: a portless protocol takes the FLOWLESS arm, still FORWARDS, and
-// installs no degenerate session.
+// #6837: a portless protocol takes the FLOWLESS arm and installs no degenerate
+// session. This pins reachability only on a NO-NAT snapshot: #10679 deliberately
+// drops flowless packets when their L3 identity requires ordinary same-family
+// NAT, because they have no translation decision to carry to TX.
 //
-// PAIRED, and the pairing is what makes it mean anything. Protocol is the only
-// variable: same snapshot, same worker, same descriptor harness. The TCP leg is
-// the control that proves this fixture reaches session install at all — a GRE
-// leg reporting 0 sessions proves nothing on its own, because a harness that
-// installs nothing for ANY protocol reports 0 just as happily.
-//
-// This is also the measurement #6923 never took. Its comment justified keeping
-// the portless tuple complete because refusing it "would strand ESP, GRE and
-// ICMPv6". `tx` is that claim's test, and it comes back 1 on both sides of the
-// change: flowless FORWARDS. What it actually costs is stateful return
-// admission (sessions 2 -> 0) and the flow's appearance in
-// `show security flow session`, not reachability.
+// PAIRED: the TCP leg proves this fixture reaches session install at all — a
+// GRE/ESP leg reporting 0 sessions proves nothing by itself. The new #10679
+// cells pair the NAT'd drop with this plain-forward case.
 // ---------------------------------------------------------------------
-fn run_6837_descriptor(protocol: u8, sport: u16, dport: u16, flags: u8) -> (u64, usize, bool) {
-    let forwarding = build_forwarding_state(&nat_snapshot());
+fn run_6837_descriptor(
+    snapshot: &ConfigSnapshot,
+    protocol: u8,
+    sport: u16,
+    dport: u16,
+    flags: u8,
+) -> (BatchCounters, DebugPollCounters, usize, bool, usize, usize, usize) {
+    let forwarding = build_forwarding_state(snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
@@ -2332,7 +2331,16 @@ fn run_6837_descriptor(protocol: u8, sport: u16, dport: u16, flags: u8) -> (u64,
     let src = Ipv4Addr::new(10, 0, 61, 102);
     let dst = Ipv4Addr::new(8, 8, 8, 8);
     let frame = if protocol == PROTO_TCP {
-        build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags, crate::afxdp::tests_support::TEST_LAN_MAC)
+        build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            sport,
+            dport,
+            flags,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        )
+    } else if protocol == PROTO_UDP {
+        build_udp_frame_v4_full(crate::afxdp::tests_support::TEST_LAN_MAC, src, dst, 64)
     } else {
         let mut frame = Vec::new();
         write_eth_header(
@@ -2372,50 +2380,378 @@ fn run_6837_descriptor(protocol: u8, sport: u16, dport: u16, flags: u8) -> (u64,
     meta.flow_src_port = sport;
     meta.flow_dst_port = dport;
 
+    assert!(
+        crate::afxdp::forwarding::ingress_destination_mac_accepted(
+            &forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            &frame,
+        ),
+        "fixture destination MAC must be accepted on ingress {}",
+        meta.ingress_ifindex,
+    );
     let flow_backed = crate::afxdp::frame::parse_session_flow_from_bytes(&frame, meta).is_some();
-    let (_batch, dbg) = txn_run_descriptor_checked(
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
-        true,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
     );
-    (dbg.tx, sessions.len(), flow_backed)
+    (
+        batch,
+        dbg,
+        sessions.len(),
+        flow_backed,
+        binding.pending_neigh.len(),
+        txn_flow_cache_entries(&binding),
+        reinjector.test_enqueued_delegated().len(),
+    )
+}
+
+fn run_10679_fragment_descriptor(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (BatchCounters, DebugPollCounters, usize, bool, usize, usize, usize) {
+    let forwarding = build_forwarding_state(snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(64);
+    assert!(
+        crate::afxdp::forwarding::ingress_destination_mac_accepted(
+            &forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            frame,
+        ),
+        "fragment fixture destination MAC must be accepted on ingress {}",
+        meta.ingress_ifindex,
+    );
+    let flow_backed = crate::afxdp::frame::parse_session_flow_from_bytes(frame, meta).is_some();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+    );
+    (
+        batch,
+        dbg,
+        sessions.len(),
+        flow_backed,
+        binding.pending_neigh.len(),
+        txn_flow_cache_entries(&binding),
+        reinjector.test_enqueued_delegated().len(),
+    )
 }
 
 #[test]
 fn portless_transit_is_flowless_and_still_forwards_6837() {
+    let mut no_nat_snapshot = nat_snapshot();
+    no_nat_snapshot.source_nat_rules.clear();
+
     // CONTROL: TCP resolves an L4 identity, stays flow-backed, and seeds the
-    // forward + reverse pair. If this row ever reports 0 sessions the GRE/ESP
-    // rows below are measuring a broken fixture, not the fix.
-    let (tcp_tx, tcp_sessions, tcp_flow_backed) =
-        run_6837_descriptor(PROTO_TCP, 12345, 443, TCP_FLAG_SYN);
+    // forward + reverse pair. This proves the fixture reaches session install.
+    let (_, tcp_dbg, tcp_sessions, tcp_flow_backed, _, _, _) =
+        run_6837_descriptor(&no_nat_snapshot, PROTO_TCP, 12345, 443, TCP_FLAG_SYN);
     assert!(tcp_flow_backed, "control: TCP must stay flow-backed");
-    assert_eq!(tcp_tx, 1, "control: TCP must forward");
+    assert_eq!(tcp_dbg.tx, 1, "control: TCP must forward");
     assert_eq!(
         tcp_sessions, 2,
-        "control: a permitted TCP flow seeds the forward entry and its reverse companion — \
-         this fixture DOES reach session install"
+        "control: a permitted TCP flow seeds the forward entry and its reverse companion"
     );
 
     for (protocol, name) in [(47u8, "GRE"), (50u8, "ESP"), (89u8, "OSPF")] {
-        let (tx, sessions, flow_backed) = run_6837_descriptor(protocol, 0, 0, 0);
+        let (_, dbg, sessions, flow_backed, _, cache_entries, _) =
+            run_6837_descriptor(&no_nat_snapshot, protocol, 0, 0, 0);
         assert!(
             !flow_backed,
             "#6837: {name} carries no shim-resolved L4 identity, so it must take the FLOWLESS arm"
         );
-        assert_eq!(
-            tx, 1,
-            "#6837: {name} must still FORWARD when flowless — this is the measurement #6923's \
-             \"would strand ESP, GRE and ICMPv6\" rationale asserted without taking"
-        );
+        assert_eq!(dbg.tx, 1, "#6837: no-NAT {name} must still forward when flowless");
         assert_eq!(
             sessions, 0,
-            "#6837: {name} must install NO session — the pre-fix path installed a degenerate \
-             `SessionKey {{ src_port: 0, dst_port: 0 }}` plus its reverse companion, aliasing \
-             every distinct {name} flow between one endpoint pair onto one key"
+            "#6837: {name} must install no degenerate src_port=0/dst_port=0 session pair"
         );
+        assert_eq!(cache_entries, 0, "#6837: flowless {name} must not seed the flow cache");
     }
+}
+
+#[test]
+fn same_family_interface_snat_fences_unfragmented_flowless_protocols_10679() {
+    let snapshot = nat_snapshot();
+    for (protocol, name) in [
+        (crate::ip_proto::PROTO_ESP, "ESP"),
+        (crate::ip_proto::PROTO_GRE, "GRE"),
+        (crate::ip_proto::PROTO_AH, "AH"),
+        (crate::ip_proto::PROTO_OSPF, "OSPF"),
+        (crate::ip_proto::PROTO_IPIP, "IPIP"),
+        (crate::ip_proto::PROTO_PIM, "PIM"),
+        (crate::ip_proto::PROTO_SCTP, "SCTP"),
+    ] {
+        let (batch, dbg, sessions, flow_backed, pending, cache_entries, _) =
+            run_6837_descriptor(&snapshot, protocol, 0, 0, 0);
+        assert_eq!(dbg.rx, 1, "{name}: descriptor must reach the poll body");
+        assert!(
+            !flow_backed,
+            "{name}: protocol must remain flowless rather than inventing an L4 tuple"
+        );
+        assert_eq!(
+            dbg.tx, 0,
+            "{name}: interface-SNAT match must be fenced before any untranslated source leaves"
+        );
+        assert_eq!(
+            dbg.nat_applied_none, 0,
+            "{name}: no packet may leave on the no-NAT TX path"
+        );
+        assert_eq!(
+            batch.nat_flowless_untranslated_dropped, 1,
+            "{name}: whole flowless datagram drop must be attributed outside fragment/PMTU counts"
+        );
+        assert_eq!(
+            batch.nat_frag_untranslated_dropped, 0,
+            "{name}: unfragmented {name} is not a NAT fragment miss"
+        );
+        assert_eq!(sessions, 0, "{name}: flowless fence must not install a session");
+        assert_eq!(pending, 0, "{name}: a resolved-neighbor packet must not be deferred");
+        assert_eq!(cache_entries, 0, "{name}: flowless fence must not seed the flow cache");
+    }
+}
+
+#[test]
+fn interface_snat_still_translates_flowful_udp_10679() {
+    let snapshot = nat_snapshot();
+    let (batch, dbg, sessions, flow_backed, _, _, _) =
+        run_6837_descriptor(&snapshot, PROTO_UDP, 0xc000, 53, 0);
+    assert!(flow_backed, "UDP with a complete header must remain flow-backed");
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(dbg.tx, 1, "flowful UDP must still transmit");
+    assert_eq!(
+        dbg.nat_applied_snat, 1,
+        "the existing interface-SNAT decision must reach packet rewrite/TX"
+    );
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(sessions, 2, "UDP SNAT must retain its forward/reverse session pair");
+}
+
+#[test]
+fn missing_neighbor_flowless_snat_is_dropped_before_buffering_10679() {
+    let mut snapshot = nat_snapshot();
+    snapshot.neighbors.clear();
+    let (batch, dbg, sessions, flow_backed, pending, cache_entries, _) =
+        run_6837_descriptor(&snapshot, crate::ip_proto::PROTO_ESP, 0, 0, 0);
+    assert_eq!(dbg.rx, 1, "ESP descriptor must reach the missing-neighbor path");
+    assert!(!flow_backed, "raw ESP must remain flowless");
+    assert_eq!(
+        batch.nat_flowless_untranslated_dropped, 1,
+        "MissingNeighbor must apply the same fail-closed interface-SNAT fence"
+    );
+    assert_eq!(
+        pending, 0,
+        "a buffered default-NAT retry would leak the private source after resolution"
+    );
+    assert_eq!(sessions, 0, "the fenced packet must not seed a MissingNeighbor session");
+    assert_eq!(cache_entries, 0, "the fenced packet must not seed the flow cache");
+    assert_eq!(dbg.tx, 0, "the fenced packet must not reach the no-NAT TX path");
+}
+#[test]
+fn permitted_flowless_no_route_with_interface_snat_is_not_reinjected_10679() {
+    let mut snapshot = nat_snapshot();
+    snapshot.routes.clear();
+    snapshot.default_policy = "permit".to_string();
+
+    let (batch, dbg, sessions, flow_backed, pending, cache_entries, reinjected) =
+        run_6837_descriptor(&snapshot, crate::ip_proto::PROTO_ESP, 0, 0, 0);
+    assert_eq!(dbg.rx, 1, "the descriptor must reach the poll body");
+    assert_eq!(dbg.no_route, 1, "the fixture must take the NoRoute disposition");
+    assert!(!flow_backed, "raw ESP must stay flowless");
+    assert_eq!(dbg.tx, 0, "a NoRoute packet must not transmit in userspace");
+    assert_eq!(
+        batch.nat_flowless_untranslated_dropped, 1,
+        "a permitted flowless NoRoute packet with an interface-SNAT candidate must be fenced"
+    );
+    assert_eq!(reinjected, 0, "the untranslated packet must not reach the kernel FIB");
+    assert_eq!(sessions, 0, "the fenced packet must not seed a session");
+    assert_eq!(pending, 0, "the fenced packet must not enter neighbor retry");
+    assert_eq!(cache_entries, 0, "the fenced packet must not seed the flow cache");
+
+    // CONTROL: the same permitted NoRoute flowless packet with no SNAT rule
+    // still delegates, proving the reinjection observation is live.
+    snapshot.source_nat_rules.clear();
+    let (_, control_dbg, _, control_flow_backed, _, _, control_reinjected) =
+        run_6837_descriptor(&snapshot, crate::ip_proto::PROTO_ESP, 0, 0, 0);
+    assert_eq!(control_dbg.no_route, 1);
+    assert!(!control_flow_backed);
+    assert_eq!(control_reinjected, 1, "the no-NAT control must reach the kernel FIB");
+}
+#[test]
+fn missing_neighbor_flowless_without_nat_still_buffers_10679() {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules.clear();
+    snapshot.neighbors.clear();
+
+    let (batch, dbg, sessions, flow_backed, pending, cache_entries, reinjected) =
+        run_6837_descriptor(&snapshot, crate::ip_proto::PROTO_ESP, 0, 0, 0);
+    assert_eq!(dbg.rx, 1);
+    assert!(!flow_backed, "raw ESP remains flowless");
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(batch.nat_frag_untranslated_dropped, 0);
+    assert_eq!(dbg.tx, 0, "missing-neighbor control must not transmit");
+    assert_eq!(pending, 1, "ordinary no-NAT traffic must retain neighbor buffering");
+    assert_eq!(sessions, 0);
+    assert_eq!(cache_entries, 0);
+    assert_eq!(reinjected, 0);
+}
+
+#[test]
+fn scoped_l4_snat_candidate_fences_unknown_protocol_fragment_10679() {
+    let mut snapshot = nat_snapshot();
+    snapshot.neighbors.clear();
+    snapshot.source_nat_rules[0].match_destination_ports =
+        vec![crate::protocol::NatPortRangeWire {
+            low: 443,
+            high: 443,
+        }];
+    let mut frame = eth_ipv4_frag_frame(
+        0x0001,
+        &[0x11, 0x22, 0x33, 0x44, 0, 0, 0, 1],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    frame[23] = crate::ip_proto::PROTO_ESP;
+    let mut meta = txn_meta_v4(24, 0, (frame.len() - 14) as u16);
+    meta.protocol = u8::MAX;
+    meta.l4_offset = 34;
+    meta.payload_offset = 34;
+    meta.flow_src_addr[..4].copy_from_slice(&[10, 0, 61, 100]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+
+    assert!(
+        crate::afxdp::frame::frame_is_non_first_fragment(&frame, meta),
+        "fixture must be a non-first fragment"
+    );
+    assert_eq!(meta.protocol, u8::MAX, "unknown protocol sentinel is authoritative");
+    assert!(
+        crate::afxdp::frame::parse_session_flow_from_bytes(&frame, meta).is_none(),
+        "the fragment must remain flowless"
+    );
+    let (batch, dbg, sessions, flow_backed, pending, cache_entries, reinjected) =
+        run_10679_fragment_descriptor(&snapshot, &frame, meta);
+    assert_eq!(dbg.rx, 1);
+    assert!(!flow_backed);
+    assert_eq!(batch.nat_frag_untranslated_dropped, 1);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(pending, 0, "an untranslated fragment must not enter neighbor retry");
+    assert_eq!(sessions, 0);
+    assert_eq!(cache_entries, 0);
+    assert_eq!(reinjected, 0);
+}
+
+#[test]
+fn no_route_snat_candidate_on_macless_xfrmi_is_considered_10679() {
+    let mut snapshot = nat_snapshot();
+    snapshot.routes.clear();
+    snapshot.default_policy = "permit".to_string();
+    if let Some(wan) = snapshot.interfaces.iter_mut().find(|iface| iface.ifindex == 12) {
+        wan.egress_zone = "wan".to_string();
+    }
+    snapshot.interfaces.push(crate::protocol::InterfaceSnapshot {
+        name: "st0.1".to_string(),
+        zone: "wan".to_string(),
+        egress_zone: "wan".to_string(),
+        linux_name: "st0-1".to_string(),
+        ifindex: 42,
+        hardware_addr: String::new(),
+        ..Default::default()
+    });
+    snapshot.source_nat_rules = vec![crate::protocol::SourceNATRuleSnapshot {
+        name: "xfrmi-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        to_interface: "st0.1".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.ifindex_to_config_name.contains_key(&42));
+    assert!(
+        !forwarding.egress.contains_key(&42),
+        "the MAC-less xfrmi must have no egress row"
+    );
+    assert!(
+        !forwarding.egress.is_empty(),
+        "the ordinary WAN row prevents the no-egress fallback from masking this case"
+    );
+
+    let (batch, dbg, sessions, flow_backed, pending, cache_entries, reinjected) =
+        run_6837_descriptor(&snapshot, crate::ip_proto::PROTO_ESP, 0, 0, 0);
+    assert_eq!(dbg.no_route, 1);
+    assert!(!flow_backed);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 1);
+    assert_eq!(reinjected, 0, "the kernel FIB must not receive a candidate xfrmi-SNAT packet");
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+    assert_eq!(pending, 0);
+    assert_eq!(cache_entries, 0);
+}
+
+#[test]
+fn permitted_flowless_no_route_fragment_uses_fragment_nat_counter_10679() {
+    let mut snapshot = nat_snapshot();
+    snapshot.routes.clear();
+    snapshot.default_policy = "permit".to_string();
+
+    let mut frame = eth_ipv4_frag_frame(
+        0x0001,
+        &[0x11, 0x22, 0x33, 0x44, 0, 0, 0, 1],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    frame[23] = crate::ip_proto::PROTO_ESP;
+    frame[30..34].copy_from_slice(&[8, 8, 8, 8]);
+    let mut meta = txn_meta_v4(24, 0, (frame.len() - 14) as u16);
+    meta.protocol = u8::MAX;
+    meta.l4_offset = 34;
+    meta.payload_offset = 34;
+    meta.flow_src_addr[..4].copy_from_slice(&[10, 0, 61, 100]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[8, 8, 8, 8]);
+
+    assert!(
+        crate::afxdp::frame::frame_is_non_first_fragment(&frame, meta),
+        "fixture must be a real non-first fragment"
+    );
+    assert_eq!(meta.protocol, u8::MAX, "unknown protocol sentinel is authoritative");
+    let (batch, dbg, sessions, flow_backed, pending, cache_entries, reinjected) =
+        run_10679_fragment_descriptor(&snapshot, &frame, meta);
+
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(dbg.no_route, 1);
+    assert!(!flow_backed);
+    assert_eq!(batch.nat_frag_untranslated_dropped, 1);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(reinjected, 0, "a NAT candidate fragment must not reach the kernel FIB");
+    assert_eq!(sessions, 0);
+    assert_eq!(pending, 0);
+    assert_eq!(cache_entries, 0);
 }

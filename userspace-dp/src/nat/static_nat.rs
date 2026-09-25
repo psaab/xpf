@@ -388,6 +388,53 @@ pub(super) fn parse_nat_prefix_accepts_for_test(s: &str) -> bool {
 }
 
 impl StaticNatTable {
+    /// Whether a flowless packet could match a port-specific static-NAT
+    /// translation. Protocol 255 is the non-first-fragment unknown sentinel;
+    /// it is treated as possible rather than classified from packet bytes.
+    pub(crate) fn flowless_l4_translation_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        egress_zone: &str,
+        egress_ifname: &str,
+        egress_routing_instance: &str,
+    ) -> bool {
+        if protocol != u8::MAX && !crate::ip_proto::has_l4_ports(protocol) {
+            return false;
+        }
+        self.dnat.iter().any(|((external_ip, port), entries)| {
+            *external_ip == dst_ip
+                && port.is_some()
+                && entries.iter().any(|entry| {
+                    static_scope_ok(
+                        &entry.from_zone,
+                        &entry.from_interface,
+                        &entry.from_routing_instance,
+                        ingress_zone,
+                        ingress_ifname,
+                        ingress_routing_instance,
+                    ) && source_ok(&entry.source, Some(src_ip))
+                })
+        }) || self.snat.iter().any(|((internal_ip, port), entries)| {
+            *internal_ip == src_ip
+                && port.is_some()
+                && entries.iter().any(|entry| {
+                    static_scope_ok(
+                        &entry.from_zone,
+                        &entry.from_interface,
+                        &entry.from_routing_instance,
+                        egress_zone,
+                        egress_ifname,
+                        egress_routing_instance,
+                    ) && source_ok(&entry.source, Some(dst_ip))
+                })
+        })
+    }
+
     pub(crate) fn from_snapshots(
         snaps: &[StaticNATRuleSnapshot],
         nat_counters: &NatCounterStore,

@@ -685,6 +685,13 @@ pub(crate) struct BindingStatus {
     /// and Go/Rust read 0).
     #[serde(rename = "nat_frag_untranslated_dropped", default)]
     pub nat_frag_untranslated_dropped: u64,
+    /// #10679: fail-closed drops of an unfragmented flowless packet whose
+    /// L3 identity matches ordinary same-family NAT (SNAT / static-NAT /
+    /// DNAT / NPTv6). Unlike `nat_frag_untranslated_dropped` these are not real
+    /// non-first fragments and must not be reported as a fragmentation/PMTU
+    /// problem. `default` keeps the Rust/Go wire version compatible.
+    #[serde(rename = "nat_flowless_untranslated_dropped", default)]
+    pub nat_flowless_untranslated_dropped: u64,
     /// #10131: binding-local fragment-overlap attribution. The matching global
     /// atomics remain process-wide alert sources; these fields identify the
     /// worker/binding that observed each event.

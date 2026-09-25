@@ -297,6 +297,81 @@ impl DnatTable {
         self.entries.values().map(|v| v.len()).sum::<usize>()
             + self.prefix_entries.values().map(|v| v.len()).sum::<usize>()
     }
+    /// Does an L4-scoped DNAT translation remain possible for a flowless
+    /// packet? Protocol 255 is the non-first-fragment unknown sentinel; it is
+    /// treated as possible without recovering protocol or ports from bytes.
+    pub(crate) fn flowless_l4_translation_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> bool {
+        let protocol_unknown = protocol == u8::MAX;
+        let carries_ports = protocol_unknown || crate::ip_proto::has_l4_ports(protocol);
+        let entry_possible = |entry: &DnatEntry, entry_protocol: u16, entry_port: u16| {
+            if entry.off
+                || (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != zone)
+                || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                || !entry.source_matches(src_ip)
+                || (entry_protocol != PROTO_ANY
+                    && !protocol_unknown
+                    && entry_protocol != u16::from(protocol))
+            {
+                return false;
+            }
+            let has_l4_selector = entry_protocol != PROTO_ANY
+                || entry_port != 0
+                || !entry.match_src_ports.is_empty()
+                || !entry.match_dst_ports.is_empty()
+                || entry.match_icmp_type.is_some()
+                || entry.match_icmp_code.is_some();
+            if !has_l4_selector {
+                return false;
+            }
+            if (!entry.match_src_ports.is_empty()
+                || !entry.match_dst_ports.is_empty()
+                || entry_port != 0)
+                && !carries_ports
+            {
+                return false;
+            }
+            if (entry.match_icmp_type.is_some() || entry.match_icmp_code.is_some())
+                && !protocol_unknown
+                && !matches!(
+                    protocol,
+                    crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+                )
+            {
+                return false;
+            }
+            if (!entry.match_src_ports.is_empty()
+                && !entry.match_src_ports.iter().any(|(low, high)| low <= high))
+                || (!entry.match_dst_ports.is_empty()
+                    && !entry.match_dst_ports.iter().any(|(low, high)| low <= high))
+            {
+                return false;
+            }
+            entry.match_dst_ports.is_empty()
+                || entry_port == 0
+                || entry.match_dst_ports.iter().any(|(low, high)| {
+                    low <= high && *low <= entry_port && entry_port <= *high
+                })
+        };
+
+        self.entries.iter().any(|(key, entries)| {
+            key.dst_ip == dst_ip
+                && entries
+                    .iter()
+                    .any(|entry| entry_possible(entry, key.protocol, key.dst_port))
+        }) || self.prefix_entries.iter().any(|(key, slots)| {
+            slots.iter().any(|slot| {
+                slot.contains(dst_ip) && entry_possible(&slot.entry, key.protocol, key.dst_port)
+            })
+        })
+    }
 
     pub(crate) fn from_snapshots(
         snaps: &[DestinationNATRuleSnapshot],

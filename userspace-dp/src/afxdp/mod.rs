@@ -944,6 +944,19 @@ pub(in crate::afxdp) struct BatchCounters {
     // Bumped at the flowless miss path (`record_nat_frag_untranslated_dropped`)
     // and flushed to BindingLiveState.nat_frag_untranslated_dropped.
     nat_frag_untranslated_dropped: u64,
+    // #10679: fail-closed drops of an UNFRAGMENTED flowless packet (ESP/GRE/AH/
+    // sibling port-less protocols, or any other flowless shape that is not a
+    // non-first fragment) whose L3 identity matches an ordinary same-family NAT
+    // rule (SNAT / static-NAT / DNAT / NPTv6). The flowless arm applies no NAT
+    // (`NatDecision::default()`), so forwarding it would leak the internal
+    // source (SNAT / NPTv6) or the pre-NAT destination (DNAT) — the permitted-
+    // but-untranslatable packet is DROPPED instead. Split from
+    // `nat_frag_untranslated_dropped` (a REAL non-first fragment) per the #8670
+    // lesson: the two populations need opposite next actions, and counting a
+    // whole ESP datagram as a fragment drop would send the operator to PMTU.
+    // Bumped at the flowless fence (`record_nat_flowless_untranslated_dropped`)
+    // and flushed to BindingLiveState.nat_flowless_untranslated_dropped.
+    nat_flowless_untranslated_dropped: u64,
     // #10131: fragment-overlap drops, split by the same reasons as the global
     // alerting atomics. These are owner-local batch slots; the global atomics
     // remain authoritative for process-wide alerts.
@@ -1124,17 +1137,34 @@ impl BatchCounters {
     }
 
     /// #6122: record a fail-closed drop of an ordinary same-family NAT'd
-    /// non-first fragment that missed the fragment-association cache. Bumped on
-    /// the flowless miss path when `flowless_fragment_requires_nat_translation`
-    /// confirms a matching SNAT / static-NAT / DNAT / NPTv6 rule for the
-    /// fragment's L3 identity but no association is present, so forwarding it
-    /// untranslated would leak the internal source / pre-NAT destination.
-    /// Batched like the sibling NAT drop counters and flushed to
+    /// non-first fragment that missed the fragment-association cache. The
+    /// flowless miss path uses `flowless_requires_nat_translation` to confirm a
+    /// matching SNAT / static-NAT / DNAT / NPTv6 rule for the fragment's L3
+    /// identity but no association is present, so forwarding untranslated
+    /// would leak the internal source / pre-NAT destination. Batched like the
+    /// sibling NAT drop counters and flushed to
     /// `BindingLiveState.nat_frag_untranslated_dropped`.
     #[inline]
     pub(in crate::afxdp) fn record_nat_frag_untranslated_dropped(&mut self) {
         self.touched = true;
         self.nat_frag_untranslated_dropped += 1;
+    }
+
+    /// #10679: record a fail-closed drop of an UNFRAGMENTED flowless packet
+    /// (ESP/GRE/AH/sibling port-less protocols) whose L3 identity matches an
+    /// ordinary same-family NAT rule. Bumped on the flowless fence when
+    /// `flowless_requires_nat_translation` confirms a matching SNAT /
+    /// static-NAT / DNAT / NPTv6 rule but the flowless arm carries no
+    /// translation, so forwarding it untranslated would leak the internal
+    /// source / pre-NAT destination. Batched like the sibling NAT drop
+    /// counters and flushed to
+    /// `BindingLiveState.nat_flowless_untranslated_dropped`. Never bumped for
+    /// a real non-first fragment — that population keeps
+    /// `record_nat_frag_untranslated_dropped` (#6122).
+    #[inline]
+    pub(in crate::afxdp) fn record_nat_flowless_untranslated_dropped(&mut self) {
+        self.touched = true;
+        self.nat_flowless_untranslated_dropped += 1;
     }
 
     /// #10131: batch one fragment-overlap result while preserving the global
@@ -1410,6 +1440,13 @@ impl BatchCounters {
             live.nat_frag_untranslated_dropped
                 .fetch_add(self.nat_frag_untranslated_dropped, Ordering::Relaxed);
             self.nat_frag_untranslated_dropped = 0;
+        }
+        // #10679: fail-closed unfragmented-flowless NAT-fence tally, batched
+        // like the sibling NAT drop counters above.
+        if self.nat_flowless_untranslated_dropped != 0 {
+            live.nat_flowless_untranslated_dropped
+                .fetch_add(self.nat_flowless_untranslated_dropped, Ordering::Relaxed);
+            self.nat_flowless_untranslated_dropped = 0;
         }
         // #1187 disposition-path counters
         if self.screen_drops != 0 {

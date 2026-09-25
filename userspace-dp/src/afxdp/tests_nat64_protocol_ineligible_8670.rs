@@ -77,6 +77,8 @@ fn v6_plain_meta_8670(
 
 fn snapshot_8670() -> ConfigSnapshot {
     let mut snapshot = nat_snapshot();
+    // Keep the interface-SNAT rules present: the Pref64 attribution gate must
+    // still own these packets even when ordinary same-family SNAT also matches.
     snapshot.nat64_rules = vec![crate::protocol::NAT64RuleSnapshot {
         name: "nat64".to_string(),
         prefix: "64:ff9b::/96".to_string(),
@@ -90,7 +92,15 @@ fn snapshot_8670() -> ConfigSnapshot {
 /// Drive one plain v6 datagram of `proto` to `dst` through the real poll path.
 /// Returns `(tx, frag_dropped, ineligible_protocol, exthdr_ineligible)`.
 fn drive_8670(proto: u8, dst: Ipv6Addr) -> (u64, u64, u64, u64) {
-    let forwarding = build_forwarding_state(&snapshot_8670());
+    drive_8670_with_snapshot(&snapshot_8670(), proto, dst)
+}
+
+fn drive_8670_with_snapshot(
+    snapshot: &ConfigSnapshot,
+    proto: u8,
+    dst: Ipv6Addr,
+) -> (u64, u64, u64, u64) {
+    let forwarding = build_forwarding_state(snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
@@ -162,8 +172,11 @@ fn pref64_untranslatable_protocol_is_not_counted_as_a_fragment_8670() {
 // the Pref64 destination, and varying it is what located the real gate.
 #[test]
 fn untranslatable_protocol_forwards_to_an_ordinary_destination_8670() {
+    let mut no_nat_snapshot = snapshot_8670();
+    no_nat_snapshot.source_nat_rules.clear();
     for (proto, name) in [(GRE, "GRE"), (ESP, "ESP")] {
-        let (tx, frag, proto_inelig, exthdr) = drive_8670(proto, ordinary_dst());
+        let (tx, frag, proto_inelig, exthdr) =
+            drive_8670_with_snapshot(&no_nat_snapshot, proto, ordinary_dst());
         assert_eq!(
             tx, 1,
             "CONTROL: {name} to an ORDINARY v6 destination must FORWARD. If this is 0 the \
@@ -267,4 +280,102 @@ fn pref64_nonfirst_fragment_is_still_attributed_to_the_fragment_counter_8670() {
         batch.nat64_ineligible_protocol, 0,
         "#8670: a fragment is not a protocol-ineligibility drop"
     );
+}
+
+#[test]
+fn permitted_pref64_no_route_keeps_nat64_attribution_before_snat_fence_10679() {
+    let mut snapshot = snapshot_8670();
+    snapshot.routes.clear();
+    snapshot.default_policy = "permit".to_string();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+    let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
+    let dst = pref64_dst();
+    let frame = v6_plain_frame_8670(src, dst, GRE);
+    let meta = v6_plain_meta_8670(frame.len(), src, dst, GRE);
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+    );
+
+    assert_eq!(dbg.no_route, 1, "fixture must take the permitted NoRoute path");
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(
+        batch.nat64_ineligible_protocol, 1,
+        "Pref64 failure must retain NAT64 protocol attribution"
+    );
+    assert_eq!(batch.nat64_frag_dropped, 0);
+    assert_eq!(
+        batch.nat_flowless_untranslated_dropped, 0,
+        "the same-family source-NAT fence must not steal the Pref64 verdict"
+    );
+    assert_eq!(
+        reinjector.test_enqueued_delegated().len(),
+        0,
+        "the untranslated Pref64 packet must not reach the kernel FIB"
+    );
+    assert_eq!(sessions.len(), 0);
+    assert_eq!(binding.pending_neigh.len(), 0);
+}
+
+#[test]
+fn missing_neighbor_pref64_keeps_nat64_attribution_before_snat_fence_10679() {
+    let mut snapshot = snapshot_8670();
+    snapshot.neighbors.clear();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+    let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
+    let dst = pref64_dst();
+    let frame = v6_plain_frame_8670(src, dst, GRE);
+    let meta = v6_plain_meta_8670(frame.len(), src, dst, GRE);
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+    );
+
+    assert_eq!(dbg.missing_neigh, 1, "fixture must take MissingNeighbor");
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(batch.nat64_ineligible_protocol, 1);
+    assert_eq!(batch.nat64_frag_dropped, 0);
+    assert_eq!(
+        batch.nat_flowless_untranslated_dropped, 0,
+        "the same-family source-NAT fence must not steal the Pref64 verdict"
+    );
+    assert_eq!(
+        reinjector.test_enqueued_delegated().len(),
+        0,
+        "the untranslated Pref64 packet must not be delegated"
+    );
+    assert_eq!(sessions.len(), 0);
+    assert_eq!(binding.pending_neigh.len(), 0);
 }
