@@ -88,24 +88,26 @@ install: build build-ctl
 	install -m 0755 cli $(PREFIX)/bin/cli
 
 # The single pre-commit gate. `test` runs BOTH the Go suite AND the Rust
-# userspace-dp cargo suite (#4006). The Rust AF_XDP dataplane is the only
-# runtime forwarding path after the #1373/#1476 eBPF retirement, so a
-# forwarding / CoS / NAT / session-correctness regression there must fail
-# `make test`. Before #4006 this target ran only `go test ./...`, giving a
-# false all-clear for the most critical code (a broken Rust dataplane test
-# passed `make test` green).
+# userspace-dp cargo suite (#4006), then runs the shell-harness and Go-skip
+# censuses. The Rust AF_XDP dataplane is the only runtime forwarding path after
+# the #1373/#1476 eBPF retirement, so a forwarding / CoS / NAT / session-
+# correctness regression there must fail `make test`. The censuses are
+# separate file-scan gates: they make harness reachability and skipped Go cells
+# visible in the same default run as the code suites.
 #
-# Aggregate semantics (#10496): both legs run unconditionally in one serial
-# recipe, and the target fails if either leg failed. A serial prerequisite
-# list would stop at the first failure and never reach the second leg —
-# exactly when the aggregate signal matters most — so the legs are invoked
-# via $(MAKE) with their failure statuses captured, and a trailing exit
-# replays any nonzero status. Under `make -j` this serializes (prereqs would
-# parallelize); GNU make may normalize a failed submake to exit status 2.
+# Aggregate semantics (#10496): all four legs run unconditionally in one serial
+# recipe, and the target fails if any leg failed. A serial prerequisite list
+# would stop at the first failure and never reach the remaining legs — exactly
+# when the aggregate signal matters most — so the legs are invoked via
+# $(MAKE) with their failure statuses captured, and a trailing exit replays any
+# nonzero status. Under `make -j` this serializes (prereqs would parallelize);
+# GNU make may normalize a failed submake to exit status 2.
 test:
 	@status=0; \
 	$(MAKE) test-go || status=$$?; \
 	$(MAKE) test-rust || status=$$?; \
+	$(MAKE) harness-census || status=$$?; \
+	$(MAKE) go-skip-census || status=$$?; \
 	echo ""; \
 	echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"; \
 	echo "  coverage (pkg/dataplane/userspace/fragment_disposition_7494_test.go)"; \
@@ -1284,6 +1286,20 @@ test-dhcp-lease-failover:
 		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-dhcp-lease-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/dhcp-lease-failover.sh
+
+# #9506 S5 — live T12/G2 IPsec capture cells on the loss userspace cluster.
+# The harness attests the running xpfd on BOTH firewalls, builds the
+# route-based xfrmi fixture via ipsec-9506-fixture.sh (SOURCED by the harness,
+# so reached transitively once this recipe exists), and emits one ledger row
+# per cell. A cluster without real fixtures/SAs is VOID, never PASS, so a
+# VOID-only run exits 2 by design. Blessed invocation from docs/log/9506-s5.md.
+.PHONY: test-t12-g2-9506 test-t12-g2-9506-lib
+test-t12-g2-9506:
+	./test/incus/with-cluster.sh '9506 S5 T12/G2' -- ./test/incus/t12-g2-9506.sh
+
+# Hermetic selftest for the T12/G2 harness (parser/observer units, no cluster).
+test-t12-g2-9506-lib:
+	./test/incus/t12-g2-9506.sh --selftest
 
 # Chained hard-reset failover test (fw0 crash → fw1 crash → both rejoin — requires cluster + iperf3 server)
 test-chained-crash:

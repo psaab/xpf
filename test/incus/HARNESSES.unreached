@@ -23,8 +23,23 @@
 #   COMPOSED      — only ever run as a step of another harness in this list;
 #                   it becomes reached for free when its caller does.
 #
-# 28 entries on the day this landed (23 under test/incus/, 5 under scripts/).
-# 15 of them are GATE.
+# 60 runnable harnesses on 2026-09-24: 29 reached and 31 declared unreached.
+# Of the declared set, 11 are GATE, 17 DIAGNOSTIC, and 3 COMPOSED.
+# #10716 deferral roster: every unrun GATE has a named owner and due date.
+# The shared loss cluster's live traffic/configuration gates are deferred to
+# @psaab by 2026-10-08; this does not convert a VOID measurement to PASS.
+#   test/incus/newflow-ceiling-harness.sh — pool source/range and sink instance
+#     are blocked by committed shared-cluster configuration (see its doc).
+#   test/incus/test-mouse-latency-matrix.sh — 12-cell live latency matrix.
+#   test/incus/test-mouse-latency.sh — single live latency measurement.
+#   test/incus/test-mouse-latency-same-class.sh — same-class live control.
+#   test/incus/test-fbf-steering.sh — two-upstream live steering smoke.
+#   test/incus/reverse-key-collision-probe.sh — live SNAT collision injection.
+#   test/incus/cos-simul-load-smoke.sh — all-11-class live CoS acceptance.
+#   test/incus/cos-gate1-small-four-alone.sh — live Gate 1 shape check.
+#   test/incus/cos-be-contention-harness.sh — live exact-vs-best-effort load.
+#   test/incus/fairness-cos-throughput-headroom.sh — live strict/surplus A/B.
+#   test/incus/fairness-cos-class-sweep.sh — per-class live fairness sweep.
 
 # ── GATE — built, tested, documented, invoked by nothing ──
 test/incus/newflow-ceiling-harness.sh        GATE: #4800 connection-rate ceiling; docs/userspace-newflow-ceiling.md opens "the code ships; the measurement is OWED". Makefile names it only under `bash -n` — lint-reachable, run-unreachable. #9053 ATTEMPTED it and found the block is NOT the wiring: the committed pool rule matches 10.0.61.240/28 while the LAN host is 10.0.61.102 and newflow-gen has no client source-address option, and the pool holds 1000 ports against a 5000-80000 sweep. Both need a change to the SHARED cluster config. See the "Attempted and BLOCKED" section of that doc before re-attempting.

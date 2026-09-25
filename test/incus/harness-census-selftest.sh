@@ -466,6 +466,48 @@ else
 	bad "a stale library declaration was accepted (rc=$rc)"
 fi
 
+# ── #10716: the #9506 fixture and attestation harness are both reachable ──
+#
+# The fixture is sourced by the live T12/G2 harness, and both scripts must
+# become reachable from its Makefile recipe. This positive control also
+# reproduces the pre-fix state: dropping the recipe must make the census fail
+# and name both scripts rather than pass with an undeclared pair.
+FX_9506="$(new_fixture issue-9506)"
+add_harness "$FX_9506" ctl.sh 'echo control'
+add_harness "$FX_9506" ipsec-9506-fixture.sh 'echo fixture'
+add_harness "$FX_9506" t12-g2-9506.sh \
+	'SCRIPT_DIR=$(dirname "$0")' \
+	'source "${SCRIPT_DIR}/ipsec-9506-fixture.sh"'
+cat >"$FX_9506/Makefile" <<'MK'
+control:
+	./test/incus/ctl.sh
+test-t12-g2-9506:
+	./test/incus/t12-g2-9506.sh
+MK
+out="$(run_census "$FX_9506")" && rc=0 || rc=$?
+if [[ $rc -eq 0 && "$out" == *"3 runnable harnesses -- 3 reached, 0 declared unreached"* ]]; then
+	ok "#9506 live recipe reaches both T12/G2 and its sourced fixture"
+else
+	bad "#9506 recipe did not reach both harnesses (rc=$rc)"
+	printf '%s\n' "$out" | sed 's/^/         /' >&2
+fi
+
+# Fail-on-revert RED cell: the census must reject the pre-fix recipe-less tree.
+cat >"$FX_9506/Makefile" <<'MK'
+control:
+	./test/incus/ctl.sh
+MK
+out="$(run_census "$FX_9506")" && rc=0 || rc=$?
+if [[ $rc -ne 0 &&
+	"$out" == *"UNREACHED and undeclared"* &&
+	"$out" == *"test/incus/ipsec-9506-fixture.sh"* &&
+	"$out" == *"test/incus/t12-g2-9506.sh"* ]]; then
+	ok "#9506 recipe removal reds the census with both missing paths"
+else
+	bad "#9506 recipe removal did not expose the undeclared pair (rc=$rc)"
+	printf '%s\n' "$out" | sed 's/^/         /' >&2
+fi
+
 # ── cell L — the real tree must be GREEN ──────────────────────────────────
 # This is what `make harness-census` runs. Kept here so the self-test and the
 # gate cannot drift into testing different things.
