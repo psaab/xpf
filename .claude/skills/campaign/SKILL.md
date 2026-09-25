@@ -130,10 +130,10 @@ Run as many concurrently as the box allows.
   concurrent `cargo --release` against one target dir thundering-herds and
   starves them all. Cap concurrency to ~cores.
 - Each agent: fresh worktree off CURRENT master
-  (`git worktree add -b fix/<n>-<slug> .claude/worktrees/<n> origin/master`),
+  (`git worktree add -b fix/<n>-<slug> /var/tmp/worktrees/<n> origin/master`),
   implement + fail-on-revert tests + build green + open PR ("Closes #<n>")
   + STOP (do not merge, do not dispatch reviewers).
-- **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief; parent bounces non-conforming branches before review (`git log` shape check at PR intake).
+- **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR…
   - Subject: `<area>: <imperative summary> (#NNNN)`, ≤72 cols. Area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`, `userspace-dp:`, `afxdp:`, `policy:`, `nat:`, `firewall:`, `grpcapi:`, `snmp:`, `ipsec:`, `xdp:`, `shim:`, `ci:`, `build:`, `metrics:` (new areas allowed when none fits, never bare). Summary names the BEHAVIOR change in imperative mood (`gate`, `drop`, `reject`, `refund`, `sync`, `bound`, `fence`), not the file (`update foo.rs`). Parent process commits without an issue cite the ruling (`(user-directive 2026-09-22)`).
   - Body (required, via `git commit -F -` heredoc, wrapped ~72 cols) has four sections:
     1. `Why:` the defect mechanism + consequence — what breaks, who/what is affected, under what config/traffic. 2–5 lines. Cite the path (`poll → session → TX`), not just "fixes bug".
@@ -144,7 +144,7 @@ Run as many concurrently as the box allows.
   - PROHIBITED: `Issue #NNNN:` prefix form, ref-less subjects (`Fold review hardening`), title-only commits, `wip`/`fix`/`misc` checkpoint messages on pushed branches, backticks in `git commit -m` (heredoc always — messages contain backticked identifiers).
   - Good: `userspace-dp: refund ICMP budget on policy refusal (#10667)` + Why (refused errors exhaust the 64-burst, starving permitted ones) / What (carry budget_key through reversal arms; refund at TTL/CoS/policy terminals) / Validation (3 cells RED pre-fix; full --bins 6952+1 #9894@<sha>) / Risk (post-queue TX drops still unrefunded — rare, pre-existing).
   - Bad: `fix icmp bug`, `Issue #10667: update embedded_icmp.rs`, `Fold review hardening` (no ref, no behavior, no validation).
-- **Worktree hygiene is absolute**: agents point at `.claude/worktrees/<x>`,
+- **Worktree hygiene is absolute**: agents point at `/var/tmp/worktrees/<x>` (OUTSIDE the repo — never `.claude/worktrees/`, which an in-repo wipe can destroy),
   NEVER the main checkout. Read other branches via `git show <ref>:<path>`,
   never `git checkout` in the main checkout.
 
@@ -172,10 +172,10 @@ manufacture merge conflicts.
 
 For each PR an agent opens:
 
-1. **Re-verify the FINAL head** — `gh pr view <n> --json headRefOid`.
-   Authors iterate then go quiet; heads MOVE (a review-fold lands after you
+1. **Message-shape gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'` and `gh pr view <n> --json title -q .title`. EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard); the PR TITLE must match the same subject format (it becomes the merge-commit message). Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
+2. **Re-verify the FINAL head** — `gh pr view <n> --json headRefOid`.
    started). Always review/merge the current head, not the one you saw.
-2. **Dispatch an independent hostile Claude reviewer** (background
+3. **Dispatch an independent hostile Claude reviewer** (background
    `general-purpose`, worktree-scoped, read-only, verdict-first). Bar by
    risk:
    - pure code-motion → reviewer + SMR + tests
@@ -183,9 +183,9 @@ For each PR an agent opens:
      full review + loss-cluster smoke (`test-failover` for failover,
      iperf for dataplane)
    - upgrade / correctness / security → thorough review
-3. **Read + evaluate Copilot inline on the final head** as a SEPARATE step
+4. **Read + evaluate Copilot inline on the final head** as a SEPARATE step
    before merge. Fold real findings.
-4. **Fold review findings** by resuming the engineer agent
+5. **Fold review findings** by resuming the engineer agent
    (`SendMessage({to: "<agentId>", ...})` — resumes a COMPLETED agent with
    its context intact) OR inline if the agent's worktree is at a stale
    pre-rebase head that would overwrite your rebase.
@@ -210,7 +210,7 @@ Per PR, in order:
    `gh issue close <n>` with a comment citing the merge SHA + smoke result.
 5. Fetch master; the NEXT PR now needs its own `_Log` rebase vs the new
    master — repeat.
-**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing except known `.claude/worktrees/` untracked entries: zero M/A/D/R lines AND zero unexpected `??` lines. If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`: worktrees live under untracked dirs); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually (`mv` aside per-file for inspection, NEVER `git clean -fd`). NEVER blanket-checkout a dirty control tree and NEVER `merge --ff-only` into one. Restate worktree discipline to all lanes after any incident.
+**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind; 2026-09-24: scratch trees moved out of the repo to `/var/tmp/worktrees/` so no in-repo wipe can take them):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing at all: zero M/A/D/R lines AND zero `??` lines (worktrees no longer live under the repo, so any untracked entry is unexpected). If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually (`mv` aside per-file …
 
 **NEVER backticks in `git commit -m`** — use `git commit -F -` heredoc (PR
 bodies + commit messages contain backticked identifiers).
