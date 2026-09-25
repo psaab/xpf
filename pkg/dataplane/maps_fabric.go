@@ -2,8 +2,10 @@ package dataplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 
 	"github.com/cilium/ebpf"
 )
@@ -70,6 +72,46 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	return zm.Update(uint32(rgID), timestamp, ebpf.UpdateAny)
 }
 
+// nextFIBGeneration returns the FIB generation following cur, saturating at
+// math.MaxUint32 instead of wrapping to 0 (#10724 DR-26:A6-F5). A wrap would
+// make entries still stamped at generation 0 compare fresh again, silently
+// skipping the re-resolution the bump exists to force.
+func nextFIBGeneration(cur uint32) uint32 {
+	if cur == math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return cur + 1
+}
+
+type fibGenerationMap interface {
+	Lookup(key, valueOut interface{}) error
+	Update(key, value interface{}, flags ebpf.MapUpdateFlags) error
+}
+
+var errFIBGenerationExhausted = errors.New("FIB generation exhausted")
+
+// bumpFIBGenerationMap advances fib_gen_map, returning its old value if the map
+// update fails. At MaxUint32, another change cannot advance cached-FIB stamps;
+// report exhaustion rather than claiming a successful no-op invalidation.
+func bumpFIBGenerationMap(zm fibGenerationMap) (uint32, error) {
+	var key uint32
+	var gen uint32
+	if err := zm.Lookup(key, &gen); err != nil {
+		gen = 0
+	}
+	prev := gen
+	gen = nextFIBGeneration(gen)
+	if gen == prev {
+		return prev, fmt.Errorf("bump fib generation: %w", errFIBGenerationExhausted)
+	}
+	if err := zm.Update(key, gen, ebpf.UpdateAny); err != nil {
+		slog.Warn("failed to bump FIB generation", "err", err)
+		return prev, fmt.Errorf("bump fib generation: %w", err)
+	}
+	slog.Info("bumped FIB generation counter", "generation", gen)
+	return gen, nil
+}
+
 // BumpFIBGeneration increments the global FIB generation counter, causing
 // all cached FIB entries in sessions to miss on the next packet. BPF programs
 // compare session.fib_gen against fib_gen_map[0] and re-run bpf_fib_lookup
@@ -96,16 +138,5 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		slog.Warn("fib_gen_map not found, cannot bump FIB generation")
 		return 0, fmt.Errorf("fib_gen_map not found")
 	}
-	var key uint32
-	var gen uint32
-	if err := zm.Lookup(key, &gen); err != nil {
-		gen = 0
-	}
-	gen++
-	if err := zm.Update(key, gen, ebpf.UpdateAny); err != nil {
-		slog.Warn("failed to bump FIB generation", "err", err)
-		return gen - 1, fmt.Errorf("bump fib generation: %w", err)
-	}
-	slog.Info("bumped FIB generation counter", "generation", gen)
-	return gen, nil
+	return bumpFIBGenerationMap(zm)
 }
