@@ -308,7 +308,11 @@ func TestFabricAuthChainStopsDestructiveUnauth(t *testing.T) {
 	}
 	// Authenticated but destructive: auth passes, allowlist rejects zeroize.
 	probe = &unaryCallProbe{}
-	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now(), info.FullMethod)
+	digest, err := fabricRequestDigest(req)
+	if err != nil {
+		t.Fatalf("digest SystemAction request: %v", err)
+	}
+	token := fabricAuthTokenHexForDigest([]byte(fabricTestKey), time.Now(), info.FullMethod, digest)
 	_, err = chained(ctxWithToken(token), req, info, probe.handler)
 	if status.Code(err) != codes.PermissionDenied {
 		t.Errorf("authed zeroize: expected PermissionDenied from allowlist, got %v", err)

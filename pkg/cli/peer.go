@@ -68,8 +68,9 @@ func (c *CLI) dialPeer() *grpc.ClientConn {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		// #5324: authenticate every RPC we dial on the peer's fabric listener
 		// with the #4107 control-link PSK, mirroring the daemon-side dialer.
-		// The client interceptors carry each full method to the credential so
-		// captured tokens cannot be replayed across RPC methods.
+		// The client interceptors carry the full method and, for unary RPCs,
+		// the request digest to the credential: captured tokens cannot be replayed
+		// across methods or changed unary arguments.
 		grpc.WithPerRPCCredentials(grpcapi.NewFabricAuthCreds(c.fabricAuthKey)),
 		grpc.WithUnaryInterceptor(grpcapi.FabricAuthUnaryClientInterceptor),
 		grpc.WithStreamInterceptor(grpcapi.FabricAuthStreamClientInterceptor),
