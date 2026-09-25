@@ -781,16 +781,11 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // trailer, including the peer's first contact; no process-lifetime auth flag
 // is needed to arm heartbeat enforcement.
 //
-// It does NOT track the session-sync channel. Session-sync admission is
-// connection-scoped: performSyncHandshake requires the keyed peer to complete
-// the Noise exchange, while the residual below covers an established
-// connection that predates keying.
-//
-// #9717: the line used to stop there. It read "unauthenticated frames rejected"
-// while a session-sync connection established BEFORE the key could still be
-// accepted without HMAC; with strict-session-auth off, nothing evicts it. The
-// line now asks the session-sync provider for exactly those connections, and
-// when there are any it names them instead of claiming rejection.
+// It also tracks the session-sync channel. A connection established before
+// keying remains unauthenticated while the #6628 in-place upgrade is pending;
+// #10717 closes it after the bounded grace if authentication never completes.
+// During that grace the status names the connection rather than claiming all
+// control-channel frames are authenticated.
 //
 // It only inspects len(key) and never renders the secret.
 func (m *Manager) controlLinkAuthStatus() string {

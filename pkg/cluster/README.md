@@ -2259,10 +2259,10 @@ connection is authenticated, then seals every subsequent frame.
   unreachable, and it executed that frame BEFORE the connection was admitted.
   A new connection is authenticated only after BOTH nodes complete the Noise
   exchange. An ALREADY-ESTABLISHED connection can be promoted in place when
-  its peer answers the #6628 upgrade; a silent peer remains the
-  strict-session-auth residual. Committing a key does not restart cluster comms
-  (#6628, pinned by `TestAuthKeyChangeDoesNotRestartClusterComms_5078`; see
-  "Operating the control-link PSK" below).
+  its peer answers the #6628 upgrade; one that never authenticates is closed
+  after the bounded default grace (#10717). Committing a key does not restart
+  cluster comms (#6628, pinned by `TestAuthKeyChangeDoesNotRestartClusterComms_5078`;
+  see "Operating the control-link PSK" below).
 - **No sync-side downgrade-guard (removed in #5078).** There used to be one
   here: once the peer had authenticated on the sync channel (sticky
   `syncAuthedEver`) or the heartbeat channel, a later UNAUTHENTICATED
@@ -2609,82 +2609,33 @@ hint rather than an instruction — one for a round still outstanding under the
 same key re-sends that round's Hello byte for byte instead of minting a new
 round, which is what keeps a forged Request from discarding one.
 
-**The residual, and how to close it (#7441).** A HOSTILE stream admitted before
-the commit declines the upgrade by staying silent, and a decliner is
-indistinguishable from a legitimate peer that is not keyed yet — which is the
-rolling-upgrade case the mechanism must not break. The upgrade alone therefore
-cannot evict it.
+**Default pre-key connection eviction (#10717).** When this node has a control-link
+key, an established session-sync connection that has never authenticated gets
+one grace period (`strictSessionAuthGrace`, 10s) to complete the #6628 in-place
+upgrade. If the upgrade does not complete, the connection is closed, whether or
+not the legacy `strict-session-auth` config leaf is set. The grace starts when
+the key is first observed, is not re-armed by later commits, and uses monotonic
+time. A connection that authenticated under a retired rotation key is not part
+of this population; it is re-keyed in place by the reconciler.
 
-`set chassis cluster strict-session-auth` closes it. While it is set AND this
-node holds a control-link key, an established session-sync connection that has
-not authenticated within a short grace (`strictSessionAuthGrace`, 10s) is
-CLOSED. A legitimate keyed peer reconnects immediately and authenticates
-through `performSyncHandshake`; a hostile stream cannot, because the Noise
-exchange rejects a peer that cannot prove possession of the PSK.
+This grace preserves the in-place-upgrade path for a peer that can authenticate,
+while bounding how long a silent or incompatible pre-key stream can continue
+to pass frames without HMAC. A peer that cannot complete the upgrade loses this
+session-sync connection after the grace; a later connection must complete
+`performSyncHandshake` with the configured PSK. The legacy node-local
+`strict-session-auth` leaf remains accepted for configuration compatibility,
+but no longer enables or disables eviction.
 
-**With the posture off (the default), the residual stays open, but it is not
-silent (#9717).**
-- Once the grace has passed, a one-time `slog.Warn` names each established
-  session-sync connection that still has not authenticated. These warnings are
-  counted in `StrictAuthResidualWarnings`.
-- The `Authentication:` status line below names such a connection instead of
-  claiming rejection.
-- For a NEW deployment, key both nodes before they first join. A connection
-  established after the key authenticates at its handshake, so the residual
-  never arises.
+For a NEW deployment, key both nodes before they first join. A connection
+established after the key authenticates at its handshake, so the pre-key grace
+does not arise.
 
-**It is a DECLARATION, not an inference, and that is the whole design.** Three
-signals look like the missing discriminator and each fails:
-
-- `HeartbeatPeerAuthSeen()` proves the LEGITIMATE peer holds the key on a
-  channel that reads it live — necessary, but not sufficient. A keyed
-  legitimate peer on an OLDER, pre-#6628 build also cannot answer the upgrade,
-  so dropping on this signal alone breaks a rolling upgrade.
-- The peer's `syncMsgPeerCapabilities` advertisement (#6650) would say whether
-  the peer is new enough to answer — except a hostile peer simply WITHHOLDS
-  it, and withholding then buys immunity. Using a peer-supplied value as the
-  arming input hands the attacker the switch.
-- Time alone is what #5078 shipped and removed.
-
-What is left is the operator, who knows the one thing neither node can observe:
-whether the cluster is homogeneous.
-
-**Operator contract.** Set it on each node, once BOTH nodes are keyed and BOTH
-are on a #6628-capable build. It is **node-local**: config-sync never carries
-it, in either direction, so you must set it on both nodes yourself. That is not
-a convenience gap — an unauthenticated stream's frames reach
-`handleConfigPayload` (`readAuthed()` gates trailer VERIFICATION only) and
-`handleConfigSync` refuses a push only on the RG0 primary, so a synced flag
-would be clearable by the very connection it exists to evict.
-
-**If you set it while the peer cannot answer**, that peer's session sync is
-dropped and re-established in a loop. The symptom is a rising
-`StrictAuthEvictions` counter with sessions not converging; the fix is to
-delete the leaf on this node, or finish upgrading the peer. Nothing else
-breaks — VRRP, heartbeat and failover are on a different channel.
-
-**Crash-loop behaviour: nothing is persisted, by design.** There is no deadline
-to persist, because the decision is recomputed from committed config on every
-evaluation, and lapsing anything fails SAFE (the connection is dropped, and a
-legitimate peer is re-admitted on reconnect). This is what #5078's window could
-not do: it failed OPEN on lapse, so its deadline had to be durable.
-
-If you have reason to believe the control segment was hostile before you keyed
-it and you have NOT set `strict-session-auth`, restarting `xpfd` still evicts
-the stream.
-
-Confirm the posture with `show chassis cluster statistics`, whose
-`Authentication:` line (`controlLinkAuthStatus`) reads as follows:
-- `engaged (local key configured; unauthenticated heartbeat frames rejected)`
-  whenever this node has a control-link key and no pre-key session-sync
-  connection survives;
-- `dual-accept (no control-link key configured)` means the heartbeat channel
-  cannot verify frames locally;
-- since #9717 the line also covers the session-sync channel. While an
-  established session-sync connection has not authenticated, it reads
-  `heartbeat engaged (local key); N session-sync connection(s) NOT
-  authenticated, frames still accepted without HMAC: <remote>, ...` and names
-  each such connection.
+Confirm the state with `show chassis cluster statistics`, whose
+`Authentication:` line (`controlLinkAuthStatus`) covers both heartbeat and
+session-sync authentication. While a pre-key session-sync connection remains
+inside its upgrade grace, the line names it and reports that its frames are
+still accepted without HMAC; after authentication or eviction, it returns to
+the normal `engaged` line.
 
 **Rolling BACK is not symmetric.** A keyed node rejects unsigned heartbeats
 from the first datagram, regardless of whether this process has previously
@@ -4082,12 +4033,13 @@ outside the monitor loop:
   - Not done here: authenticating the reading. On the default dual-accept
     posture, an unauthenticated connection can still send a false but plausible
     offset for the sessions it carries itself, and it could inject those
-    sessions directly anyway; `strict-session-auth` is the control for that
-    reach. ClockSync on an unauthenticated connection is deliberately NOT refused
-    when a key is configured: during a key rollout the peer's connection stays
-    unauthenticated until the in-place upgrade, and ClockSync is sent once per
-    connection, so the offset would stay unset and synced sessions would age by
-    the difference between the two nodes' uptimes.
+    sessions directly anyway. The default pre-key auth grace (#10717) bounds
+    this exposure after keying. ClockSync on an unauthenticated connection is
+    deliberately NOT refused when a key is configured: during a key rollout
+    the peer's connection stays unauthenticated until the in-place upgrade,
+    and ClockSync is sent once per connection, so the offset would stay unset
+    and synced sessions would age by the difference between the two nodes'
+    uptimes.
 
   Cells: `sync_clocksync_bound_9653_test.go`.
 

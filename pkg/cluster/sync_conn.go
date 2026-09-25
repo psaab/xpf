@@ -1252,10 +1252,10 @@ func (s *SessionSync) Start(ctx context.Context) error {
 		defer s.wg.Done()
 		s.configApplyLoop(ctx)
 	}()
-	// #7441: re-evaluate the strict session-auth posture on established
-	// connections. A tick is required rather than convenient — the eviction
-	// grace elapses strictly AFTER the commit that armed the posture, so a
-	// commit-time evaluation alone could never fire.
+	// #10717: periodically enforce the default lifetime for pre-key
+	// connections. A tick is required because the grace expires strictly
+	// AFTER the commit that armed it, so a commit-time evaluation alone cannot
+	// close a connection whose grace expires later.
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()

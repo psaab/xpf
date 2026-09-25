@@ -258,11 +258,6 @@ type authConn struct {
 	bootIncarnation    bootIncarnation
 	unincarnatedWarned bool
 
-	// authResidualWarned makes the #9717 notice ONE line per connection. The
-	// notice fires when this node is keyed, strict-session-auth is off, and the
-	// connection has still not authenticated after the grace. Written and read
-	// under SessionSync.writeMu, like authPSK.
-	authResidualWarned bool
 
 	// authPSK is the control-link PSK this connection's authentication was
 	// established under — the staleness test the #6628 reconciler uses. Nil on
@@ -278,15 +273,13 @@ type authConn struct {
 	// section as the frame that is the peer's read boundary.
 	upgrade *authUpgradeState
 
-	// strictGraceStart anchors the #7441 eviction grace: the MONOTONIC instant
-	// of the first reconcile at which this node was keyed and this connection
-	// was not authenticated. Zero until then, which is why an unkeyed node
-	// evicts nothing.
+	// strictGraceStart anchors the #10717 default eviction grace: the
+	// MONOTONIC instant of the first reconcile at which this node was keyed
+	// and this connection was not authenticated. Zero until then, which is
+	// why an unkeyed node evicts nothing.
 	//
-	// SET ONCE, and that is a security property rather than an optimisation: a
-	// later reconcile must not push it forward, or a peer able to induce
-	// commits could hold its own window open indefinitely — #5078's "re-arming"
-	// constraint. Monotonic so a wall-clock step cannot extend it.
+	// SET ONCE, so later commits cannot extend the connection's lifetime.
+	// Monotonic time prevents wall-clock steps from extending the grace.
 	//
 	// Written and read under SessionSync.writeMu, like authPSK above.
 	strictGraceStart int64

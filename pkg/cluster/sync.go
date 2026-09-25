@@ -423,18 +423,9 @@ type SyncStats struct {
 	FenceAcksReceived atomic.Uint64
 	FenceAcksTimedOut atomic.Uint64
 	Errors            atomic.Uint64
-	// StrictAuthEvictions counts session-sync connections closed by the #7441
-	// strict session-auth posture: admitted before the control-link key was
-	// committed, never authenticated, and past the in-place-upgrade grace.
-	// A non-zero value on a healthy cluster means the posture was declared
-	// while the peer could not answer — check the peer's build.
-	StrictAuthEvictions atomic.Uint64
-	// StrictAuthResidualWarnings counts #9717 notices. Each is one per connection:
-	// this node is keyed, strict-session-auth is OFF, and an established
-	// session-sync connection has still not authenticated after the grace, so its
-	// frames are accepted without HMAC. With the posture off nothing evicts such a
-	// connection; this counter makes it visible.
-	StrictAuthResidualWarnings atomic.Uint64
+	// PreKeyAuthEvictions counts keyed-node session-sync connections closed
+	// after they failed to authenticate within the #10717 upgrade grace.
+	PreKeyAuthEvictions atomic.Uint64
 	DeletesDropped             atomic.Uint64
 	// DeletesSuppressedPeerIncapable counts outgoing session deletes WITHHELD
 	// because the peer advertised its capabilities and did NOT claim #9714
@@ -686,13 +677,9 @@ func (s TransferReadinessSnapshot) Reason() string {
 // SessionSync manages TCP-based session state replication between cluster
 // peers for stateful failover.
 type SessionSync struct {
-	// strictSessionAuth is the #7441 operator-declared posture, published from
-	// the config-apply path. Atomic because the enforcement tick, the
-	// commit-driven reconciler and the status readers all touch it from
-	// different goroutines, and it must never be read under a lock this
-	// package's connection paths already hold.
-	//
-	// Zero value false = pre-#7441 behaviour exactly: nothing is ever evicted.
+	// strictSessionAuth records the legacy #7441 node-local config leaf. The
+	// value is retained for compatibility and reporting, but keyed-node
+	// unauthenticated connection eviction no longer depends on it.
 	strictSessionAuth strictSessionAuthState
 
 	// configureConn is the PER-INSTANCE seam for the #5303 buffer deferral,
