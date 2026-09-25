@@ -90,6 +90,9 @@ pub(super) fn stage_flow_cache_hit(
     // separate from the validated stamp/overlay flag above because an
     // unstamped parent frame must not serve a cached FabricRedirect.
     fabric_link_ingress: bool,
+    // #10691: pre-classified on the raw native Ethernet frame; false for
+    // injected or decapsulated packets so outer pkt_type never leaks inward.
+    l2_group_unicast_ip: bool,
     validation: ValidationState,
     sessions: &mut SessionTable,
     now_ns: u64,
@@ -207,6 +210,18 @@ pub(super) fn stage_flow_cache_hit(
             cached_decision.resolution.disposition,
             flow.src_ip,
         ) {
+            scratch.scratch_recycle.push(desc.addr);
+            telemetry.counters.touched = true;
+            return FlowCacheOutcome::Consumed;
+        }
+        // #10691: a Consumed flow-cache hit bypasses every poll-loop
+        // slow-path pkt_type gate, so enforce the same transit invariant
+        // here before liveness, TTL, filters, accounting or TX side effects.
+        if matches!(
+            cached_decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+        ) && l2_group_unicast_ip
+        {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.counters.touched = true;
             return FlowCacheOutcome::Consumed;

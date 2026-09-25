@@ -471,3 +471,7 @@ mod tests_snat_scope_9956;
 #[cfg(test)]
 #[path = "tests_ri_native_10312.rs"]
 mod tests_ri_native_10312;
+// #10691: L2 group-received unicast-IP transit is not PACKET_HOST.
+#[cfg(test)]
+#[path = "tests_pkt_type_10691.rs"]
+mod tests_pkt_type_10691;

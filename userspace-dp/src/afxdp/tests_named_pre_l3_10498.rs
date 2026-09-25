@@ -143,20 +143,40 @@ fn poll_head_counts_destination_mac_drop_and_recycles_10498() {
 }
 
 #[test]
-fn poll_head_accepts_group_and_local_destination_macs_10498() {
+fn poll_head_accepts_group_l3_and_local_unicast_macs_10498() {
     let forwarding = build_forwarding_state(&agreed_zone_trunk_snapshot_10313());
     let ha_state = BTreeMap::new();
 
-    for (label, dst_mac) in [
-        ("broadcast", [0xff; 6]),
-        ("multicast", [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]),
+    // Group L2 destinations remain accepted for corresponding IP multicast /
+    // broadcast traffic. Group MACs carrying unicast-IP transit are separately
+    // checked after routing by #10691; the configured local MAC remains a
+    // unicast-IP control.
+    for (label, dst_mac, dst_ip) in [
+        ("broadcast", [0xff; 6], Ipv4Addr::BROADCAST),
+        (
+            "multicast",
+            [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01],
+            Ipv4Addr::new(224, 0, 0, 1),
+        ),
         // `reth0.50` is the configured logical ingress unit in the fixture.
-        ("configured-local", [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        (
+            "configured-local",
+            [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08],
+            Ipv4Addr::new(198, 51, 100, 20),
+        ),
     ] {
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
         let mut sessions = SessionTable::new();
-        let (mut frame, mut meta) = frame_and_meta();
-        frame[..6].copy_from_slice(&dst_mac);
+        let frame = build_udp_frame_v4_full(
+            dst_mac,
+            Ipv4Addr::new(192, 0, 2, 10),
+            dst_ip,
+            64,
+        );
+        let mut meta = txn_meta_v4(11, 0, frame.len() as u16);
+        meta.protocol = crate::ip_proto::PROTO_UDP;
+        meta.l4_offset = 34;
+        meta.payload_offset = 42;
         meta.ingress_vlan_present = 1;
         meta.ingress_vlan_id = 50;
 

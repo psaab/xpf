@@ -1352,3 +1352,26 @@ This is an operator guardrail, not behavior-changing enforcement; disabling
 stamps on a declared-shared fabric would be forwarding logic and is out of
 scope. The existing control-link PSK mandate remains separately enforceable
 (#6611).
+
+## Native L2 group/unicast transit gate (#10691)
+
+Accepting broadcast and multicast destination MACs at the pre-L3 gate permits
+ARP/NDP handling and IP multicast/broadcast or local delivery; it does not make
+a group-addressed Ethernet frame eligible for unicast-IP transit. The AF_XDP
+poll path classifies the original native Ethernet frame, preserves the policy
+decision, then drops permitted L2-group/unicast-IP traffic before NAT, session
+installation, forwarding, or fabric redirection. Established-flow cache hits
+and post-HA session/flowless dispositions receive the same gate. A punt seed is
+not installed for such a packet. Multicast and limited/directed IPv4 broadcast,
+IPv6 multicast, and configured local-MAC/unicast controls remain eligible.
+
+The native packet type is not inherited by an injected or decapsulated GRE/WG
+frame: classification is made from the original frame, but the gate is applied
+only while the packet still has its native, unowned frame.
+
+FAIL-ON-REVERT coverage is in
+`userspace-dp/src/afxdp/forwarding/tests_pkt_type_10691.rs` (IPv4, IPv6, peer
+fabric redirect, cached hit, session hit, and classifier boundaries). The
+pre-L3 MAC acceptance control in
+`userspace-dp/src/afxdp/tests_named_pre_l3_10498.rs` pairs group Ethernet MACs
+with actual IP multicast/broadcast UDP instead of unicast IP.

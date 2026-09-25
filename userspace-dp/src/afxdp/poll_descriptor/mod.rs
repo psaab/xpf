@@ -445,6 +445,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
+                // Preserve the original native-frame packet type across
+                // tunnel parsing; gates below apply only while the packet
+                // still has its native, non-owned frame.
+                let l2_group_unicast_ip = !is_injected
+                    && crate::afxdp::forwarding::ingress_l2_group_unicast_ip(
+                        worker_ctx.forwarding,
+                        raw_frame,
+                        meta,
+                    );
                 // #946 Phase 1 stage 6: native GRE decap. Caller
                 // binds the active slice locally; helper does NOT
                 // return the slice (would be self-referential).
@@ -1174,6 +1183,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     && FlowCacheEntry::packet_eligible(meta)
                     && let Some(flow) = flow.as_ref()
                 {
+                    let non_host_unicast_ip =
+                        l2_group_unicast_ip && owned_packet_frame.is_none();
                     match stage_flow_cache_hit(
                         &mut binding.flow,
                         &mut binding.tx_pipeline,
@@ -1192,6 +1203,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         packet_fabric_ingress,
                         fabric_arrival_zone,
                         fabric_link_ingress,
+                        non_host_unicast_ip,
                         validation,
                         sessions,
                         now_ns,
@@ -3735,6 +3747,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                             }
                             if let PolicyAction::Permit = policy_result.action {
+                                // #10691: Linux does not forward an IP-unicast
+                                // frame received as an Ethernet group delivery.
+                                // Keep zone policy evaluation, then drop before
+                                // NAT, session installation, or egress effects.
+                                if l2_group_unicast_ip && owned_packet_frame.is_none() {
+                                    telemetry.counters.touched = true;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 // NAT64: cross-family translation takes
                                 // priority over same-family SNAT.
                                 let mut source_nat_release_key = None;
@@ -5019,22 +5040,28 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 policy_packet_icmp(packet_frame, meta),
                                 desc.len as u64,
                             ) {
-                                install_helper_local_session_on_miss(
-                                    sessions,
-                                    binding.bpf_maps.session_map.handle(),
-                                    worker_ctx.shared_sessions,
-                                    worker_ctx.shared_nat_sessions,
-                                    worker_ctx.shared_forward_wire_sessions,
-                                    &worker_ctx.shared_owner_rg_indexes,
-                                    &flow.forward_key,
-                                    decision,
-                                    seed_metadata,
-                                    SessionOrigin::FabricPuntSeed,
-                                    now_ns,
-                                    meta.protocol,
-                                    meta.tcp_flags,
-                                    worker_ctx.forwarding.has_routing_domains,
-                                );
+                                // `fabric_punt_seed_metadata` has already
+                                // adjudicated policy. Do not create a local
+                                // session for a non-host native delivery; the
+                                // common post-HA gate below recycles it.
+                                if owned_packet_frame.is_some() || !l2_group_unicast_ip {
+                                    install_helper_local_session_on_miss(
+                                        sessions,
+                                        binding.bpf_maps.session_map.handle(),
+                                        worker_ctx.shared_sessions,
+                                        worker_ctx.shared_nat_sessions,
+                                        worker_ctx.shared_forward_wire_sessions,
+                                        &worker_ctx.shared_owner_rg_indexes,
+                                        &flow.forward_key,
+                                        decision,
+                                        seed_metadata,
+                                        SessionOrigin::FabricPuntSeed,
+                                        now_ns,
+                                        meta.protocol,
+                                        meta.tcp_flags,
+                                        worker_ctx.forwarding.has_routing_domains,
+                                    );
+                                }
                             }
                         }
                         decision
@@ -6098,6 +6125,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         source,
                     )
                 }) {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
+                // #10691: after the final HA redirect resolution, refuse
+                // native L2-group unicast-IP transit on both session hits and
+                // flowless paths, before accounting, pending-neighbor work or TX.
+                if matches!(
+                    decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::FabricRedirect
+                ) && l2_group_unicast_ip
+                    && owned_packet_frame.is_none()
+                {
                     telemetry.counters.touched = true;
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
