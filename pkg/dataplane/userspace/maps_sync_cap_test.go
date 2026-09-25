@@ -130,7 +130,7 @@ func TestApplyHelperStatusDisablesLiveCtrlOnPublicationFailure(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	}, ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_ctrl: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	}, ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_ctrl: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestBlindFailClosedUserspaceCtrlAfterLookupFailure(t *testing.T) {
 				MetadataVersion:    userspaceMetadataVersion,
 				Workers:            8,
 				QueueCount:         8,
-				HeartbeatTimeoutMS: 30000,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			}, ebpf.UpdateAny); err != nil {
 				t.Fatalf("seed userspace_ctrl: %v", err)
 			}

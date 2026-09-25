@@ -95,7 +95,7 @@ func TestUserspaceXDPDegradedCtrlDisabledDropsTransit(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 
 	ret := runUserspaceXDPTestPacket(t, coll, udpIPv4TestPacket(
@@ -117,7 +117,7 @@ func TestUserspaceXDPDegradedCtrlDisabledPassesLocalControl(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	updateUserspaceXDPTestLocalV4(t, coll, local)
 
@@ -162,7 +162,7 @@ func TestUserspaceXDPBindingNotReadyDropsTransitButPassesLocalControl(t *testing
 				MetadataVersion:    userspaceMetadataVersion,
 				Workers:            1,
 				QueueCount:         1,
-				HeartbeatTimeoutMS: 30000,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
 			// #9337: the ingress ifindex and binding index must be the ones
 			// BPF_PROG_TEST_RUN actually presents (see
@@ -201,7 +201,7 @@ func TestUserspaceXDPIPLocalControlUsesCPUMapWhenAvailable(t *testing.T) {
 		Workers:            1,
 		QueueCount:         1,
 		Flags:              userspaceCtrlFlagCPUMap,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	updateUserspaceXDPTestLocalV4(t, coll, local)
 
@@ -226,7 +226,7 @@ func TestUserspaceXDPNDPUsesCPUMapWhenAvailable(t *testing.T) {
 		Workers:            1,
 		QueueCount:         1,
 		Flags:              userspaceCtrlFlagCPUMap,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	// #9337: see userspaceXDPTestRunIfindex — seeded at 0 these two lines
 	// described an interface the run never arrives on.
@@ -257,7 +257,7 @@ func TestUserspaceXDPDegradedESPToInterfaceNATPassesLocalControl(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	updateUserspaceXDPTestInterfaceNATV4(t, coll, natLocal)
 
@@ -281,7 +281,7 @@ func TestUserspaceXDPDegradedNonIPL2PassesDirect(t *testing.T) {
 		Workers:            1,
 		QueueCount:         1,
 		Flags:              userspaceCtrlFlagCPUMap,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 
 	ret := runUserspaceXDPTestPacket(t, coll, arpTestPacket())

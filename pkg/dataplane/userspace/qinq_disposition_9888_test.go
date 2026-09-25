@@ -182,7 +182,7 @@ func TestUserspaceXDPQinQDoubleTagDropsAndCounts_9888(t *testing.T) {
 				MetadataVersion:    userspaceMetadataVersion,
 				Workers:            1,
 				QueueCount:         1,
-				HeartbeatTimeoutMS: 30000,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
 			// Bound-port premise: the arrival interface IS in the ingress
 			// set. The non-IP arm sits above the gate, so the gate cannot
@@ -219,7 +219,7 @@ func TestUserspaceXDPQinQSingleTagBehaviorUnchanged_9888(t *testing.T) {
 			MetadataVersion:    userspaceMetadataVersion,
 			Workers:            1,
 			QueueCount:         1,
-			HeartbeatTimeoutMS: 30000,
+			HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 		})
 		updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 
@@ -247,7 +247,7 @@ func TestUserspaceXDPQinQSingleTagBehaviorUnchanged_9888(t *testing.T) {
 			MetadataVersion:    userspaceMetadataVersion,
 			Workers:            1,
 			QueueCount:         1,
-			HeartbeatTimeoutMS: 30000,
+			HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 		})
 		updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 		updateUserspaceXDPTestBinding(t, coll, userspaceXDPTestRunBindingIndex(t, 0), userspaceBindingValue{
@@ -300,7 +300,7 @@ func TestUserspaceXDPQinQDegradedPathDrops_9888(t *testing.T) {
 			updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
 				Enabled:            0,
 				QueueCount:         1,
-				HeartbeatTimeoutMS: 30000,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
 
 			var pkt []byte

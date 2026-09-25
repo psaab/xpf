@@ -127,7 +127,7 @@ func TestUserspaceXDPSTagSingleTagDropsAndCounts_10655(t *testing.T) {
 			MetadataVersion:    userspaceMetadataVersion,
 			Workers:            1,
 			QueueCount:         1,
-			HeartbeatTimeoutMS: 30000,
+			HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 		})
 		updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 
@@ -152,7 +152,7 @@ func TestUserspaceXDPSTagSingleTagDropsAndCounts_10655(t *testing.T) {
 			MetadataVersion:    userspaceMetadataVersion,
 			Workers:            1,
 			QueueCount:         1,
-			HeartbeatTimeoutMS: 30000,
+			HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 		})
 		updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 		updateUserspaceXDPTestBinding(t, coll, userspaceXDPTestRunBindingIndex(t, 0), userspaceBindingValue{
@@ -182,7 +182,7 @@ func TestUserspaceXDPSTagSingleTagDropsAndCounts_10655(t *testing.T) {
 			MetadataVersion:    userspaceMetadataVersion,
 			Workers:            1,
 			QueueCount:         1,
-			HeartbeatTimeoutMS: 30000,
+			HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 		})
 		updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 		updateUserspaceXDPTestBinding(t, coll, userspaceXDPTestRunBindingIndex(t, 0), userspaceBindingValue{
@@ -217,7 +217,7 @@ func TestUserspaceXDPSTagCTagSeparation_10655(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 
@@ -234,7 +234,7 @@ func TestUserspaceXDPSTagCTagSeparation_10655(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 	updateUserspaceXDPTestBinding(t, coll, userspaceXDPTestRunBindingIndex(t, 0), userspaceBindingValue{
@@ -277,7 +277,7 @@ func TestUserspaceXDPSTagDegradedPathDrops_10655(t *testing.T) {
 				MetadataVersion:    userspaceMetadataVersion,
 				Workers:            1,
 				QueueCount:         1,
-				HeartbeatTimeoutMS: 30000,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
 
 			ret := runUserspaceXDPTestPacket(t, coll, tc.pkt())
@@ -302,7 +302,7 @@ func TestUserspaceXDPSTagOuterDoubleTagStaysQinQ_10655(t *testing.T) {
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 

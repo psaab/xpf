@@ -533,7 +533,7 @@ func TestUpdateRGActiveCannotReEnableCtrlDuringLinkCycle_6871(t *testing.T) {
 			seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 				Enabled:            0,
 				MetadataVersion:    userspaceMetadataVersion,
-				HeartbeatTimeoutMS: 30000,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
 			// A helper that is up, armed and ready — i.e. every readiness gate
 			// in applyHelperStatusLocked passes and ctrl WOULD be enabled.
@@ -575,7 +575,7 @@ func TestUpdateRGActiveCannotReEnableCtrlDuringLinkCycle_6871(t *testing.T) {
 			seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 				Enabled:            0,
 				MetadataVersion:    userspaceMetadataVersion,
-				HeartbeatTimeoutMS: 30000,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
 
 			// THE DISCRIMINATOR: same call, one link cycle in flight.
@@ -612,7 +612,7 @@ func TestNotifyLinkCycleReleasesLeaseBeforeItsOwnCtrlApply_6871(t *testing.T) {
 	seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 		Enabled:            1,
 		MetadataVersion:    userspaceMetadataVersion,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	startLeaseControlServer(t, sock, ProcessStatus{
 		PID:                9002,
