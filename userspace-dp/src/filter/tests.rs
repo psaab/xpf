@@ -636,6 +636,138 @@ fn protocol_matching() {
 }
 
 #[test]
+fn protocol_bitmap_native_fragment_matches_unknown_protocol_v4_and_v6() {
+    let state = make_filter_state(
+        &[
+            FirewallFilterSnapshot {
+                name: "proto-v4".into(),
+                family: "inet".into(),
+                terms: vec![FirewallTermSnapshot {
+                    name: "deny-tcp".into(),
+                    protocols: vec!["tcp".into()],
+                    action: "discard".into(),
+                    ..Default::default()
+                }],
+            },
+            FirewallFilterSnapshot {
+                name: "proto-v6".into(),
+                family: "inet6".into(),
+                terms: vec![FirewallTermSnapshot {
+                    name: "deny-tcp".into(),
+                    protocols: vec!["tcp".into()],
+                    action: "discard".into(),
+                    ..Default::default()
+                }],
+            },
+        ],
+        &[],
+    );
+    let fragment_extra = || TermMatchExtra {
+        is_fragment: true,
+        l4_present: false,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet:proto-v4",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        )
+        .action,
+        FilterAction::Discard,
+        "native-255 fragment must match the TCP protocol bitmap"
+    );
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet:proto-v4",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            crate::ip_proto::PROTO_TCP,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        )
+        .action,
+        FilterAction::Discard,
+        "decapsulated TCP fragment must match exactly"
+    );
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet:proto-v4",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            crate::ip_proto::PROTO_UDP,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        )
+        .action,
+        FilterAction::Accept,
+        "decapsulated UDP fragment must not match a TCP term"
+    );
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet6:proto-v6",
+            IpAddr::V6("2001:db8::1".parse().expect("v6 src")),
+            IpAddr::V6("2001:db8::2".parse().expect("v6 dst")),
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        )
+        .action,
+        FilterAction::Discard,
+        "native-255 IPv6 fragment must match the TCP protocol bitmap"
+    );
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet6:proto-v6",
+            IpAddr::V6("2001:db8::1".parse().expect("v6 src")),
+            IpAddr::V6("2001:db8::2".parse().expect("v6 dst")),
+            crate::ip_proto::PROTO_TCP,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        )
+        .action,
+        FilterAction::Discard,
+        "decapsulated IPv6 TCP fragment must match exactly"
+    );
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet6:proto-v6",
+            IpAddr::V6("2001:db8::1".parse().expect("v6 src")),
+            IpAddr::V6("2001:db8::2".parse().expect("v6 dst")),
+            crate::ip_proto::PROTO_UDP,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        )
+        .action,
+        FilterAction::Accept,
+        "decapsulated IPv6 UDP fragment must not match a TCP term"
+    );
+}
+
+
+#[test]
 fn dscp_rewrite_action() {
     let state = make_filter_state(
         &[FirewallFilterSnapshot {

@@ -1186,6 +1186,51 @@ fn flowless_non_first_fragment_dropped_by_is_fragment_input_filter_3291() {
     );
 }
 
+#[test]
+fn flowless_protocol_filter_matches_native_255_and_decapped_udp_fragments_10676() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.interfaces[0].filter_input_v4 = "drop-udp".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "drop-udp".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "deny-udp".to_string(),
+            protocols: vec!["udp".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    for (id, label, meta) in [
+        (0x1067, "native-255", udp_native_frag_meta_5689()),
+        (0x1068, "decapped-udp", udp_decapped_frag_meta_5689()),
+    ] {
+        let frame = udp_frag_frame_5689(0x0001, id);
+        let (_batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
+        );
+        assert_eq!(
+            dbg.forward, 0,
+            "#10676 {label}: protocol UDP input discard must drop the fragment"
+        );
+    }
+}
+
+
 
 #[test]
 fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
