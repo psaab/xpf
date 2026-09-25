@@ -894,8 +894,14 @@ pub(super) fn populate_interfaces(
                             .or_default()
                             .insert(connected_table_v4.clone());
                     }
+                    let prefix = PrefixV4::from_net(v4);
+                    if prefix.prefix_len() < 31 {
+                        state
+                            .connected_v4_directed_broadcasts
+                            .insert(prefix.directed_broadcast());
+                    }
                     state.connected_v4.push(ConnectedRouteV4 {
-                        prefix: PrefixV4::from_net(v4),
+                        prefix,
                         host: v4.addr(),
                         ifindex: iface.ifindex,
                         tunnel_endpoint_id,

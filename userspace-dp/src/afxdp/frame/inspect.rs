@@ -1204,7 +1204,7 @@ pub(in crate::afxdp) fn term_match_extra_from_meta(
 pub(in crate::afxdp) use super::addr_class::{
     dest_is_directed_broadcast, dest_is_multicast_or_broadcast, l2_dst_is_group_or_broadcast,
     neighbor_ip_is_learnable, neighbor_mac_is_learnable, source_is_invalid_for_icmp_error,
-    src_is_directed_broadcast,
+    src_is_directed_broadcast, transit_src_is_martian,
 };
 
 /// Is the shim-stamped metadata tuple a RESOLVED flow identity, or only the
@@ -2140,64 +2140,35 @@ pub(in crate::afxdp) fn parse_session_flow_from_meta(meta: UserspaceDpMeta) -> O
 ///     packet whose parse fails never receives metadata at all. A non-zero value
 ///     here means that invariant broke — a metadata-layout or shim change — and
 ///     is a bug report, not a traffic observation.
-///   - `L3_CTX_NONE_UNSPECIFIED_ADDR` is REACHABLE with ordinary (if unusual)
-///     packets: the shim stamps `flow_{src,dst}_addr` faithfully, so an IP
-///     header carrying `0.0.0.0`/`::` produces `None` from a fully parsed
-///     packet. A dst-unspecified packet dies at NoRoute, but a SRC-unspecified
-///     one with a valid destination routes normally. A non-zero value here is a
-///     traffic observation, and on the fragment-association arms it means an
-///     operator-configured control (`from is-fragment then discard`, the PBR
-///     `then { routing-instance X; discard; }` term) was not evaluated.
+///   - `L3_CTX_NONE_UNSPECIFIED_ADDR` is REACHABLE: the shim stamps
+///     `flow_{src,dst}_addr` faithfully, so an IP header carrying `0.0.0.0`/`::`
+///     produces `None` from a fully parsed packet. A destination-unspecified
+///     packet dies at NoRoute. A source-unspecified packet may resolve to a
+///     transit route, but #10689 drops that martian after FIB resolution and
+///     before policy/session handling; the NoRoute policy control remains.
 ///
 /// Cumulative and process-global, like `INTERFACE_SNAT_PAT_COLLISIONS`, so tests
 /// read them as a delta.
 ///
-/// **`L3_CTX_NONE_UNKNOWN_FAMILY` counts without changing disposition.** An
-/// unparseable family has no addresses to enforce against, so every site still
-/// refuses and falls through. It is unreachable in production anyway.
+/// **Address extraction and transit disposition are separate questions.**
+/// `l3_enforcement_flow_from_meta` preserves parsed unspecified addresses for
+/// enforcement; it does not authorize forwarding. #10689 adds a post-FIB gate
+/// that drops martian sources for transit dispositions before policy, session,
+/// neighbor or egress side effects. NoRoute is outside that gate and keeps its
+/// existing policy adjudication.
 ///
-/// **`L3_CTX_NONE_UNSPECIFIED_ADDR` no longer describes a bypass (#7890).**
-/// This paragraph used to say the callers "still forward, and deliberately so",
-/// because the same `if let Some(l3_flow)` gate sat on the association-HIT arm,
-/// the session-MISS arm, the MissingNeighbor policy arm and — since #7480 — the
-/// NoRoute policy arm, and diverging on one would have broken the hit/miss
-/// parity invariant. #7890 changed all of them together, which is what that
-/// invariant actually required: the four arms and the two flowless filter-log
-/// sites now resolve through `l3_enforcement_flow_from_meta`, which answers the
-/// ADDRESS question rather than the identity one and does not refuse an
-/// unspecified address. The operator's configured verdict decides the packet.
+/// The counter means "an unspecified address was SEEN here", not "a lookup was
+/// refused". It remains a witness for reachable address-level paths.
 ///
-/// The counter is kept, with its meaning restated on that function: "an
-/// unspecified address was SEEN here", not "a lookup was refused". A test
-/// asserts it MOVED before asserting what enforcement did, so a fixture that
-/// misses a conjunct cannot pass proving nothing.
+/// Regression coverage:
+///   - #10689 source-class misses, flowless packets, cached hits and ordinary
+///     unicast controls: `tests_martian_source_10689` and
+///     `poll_descriptor::flow_cache_hit_tests`.
+///   - #7890 NoRoute policy adjudication:
+///     `unspecified_source_noroute_fragment_still_policy_denied_7890`.
 ///
-/// Each site is bound by a named cell, and the binding was measured by
-/// site-local mutation against the full suite rather than assumed:
-///
-///   - `poll_descriptor` association-HIT arm —
-///     `unspecified_source_association_hit_still_runs_the_input_filter_7890`
-///   - `poll_descriptor` session-MISS arm —
-///     `unspecified_source_still_runs_the_is_fragment_input_filter_7890`
-///     (paired with `..._honours_a_non_discard_filter_verdict_7890`, which is
-///     what distinguishes evaluating the filter from dropping on `None`)
-///   - `poll_descriptor` NoRoute arm —
-///     `unspecified_source_noroute_fragment_still_policy_denied_7890`
-///   - `poll_descriptor` MissingNeighbor arm —
-///     `unspecified_source_missing_neighbor_fragment_still_policy_denied_7890`
-///   - the two `forward_request` flowless filter-log sites —
-///     `unspecified_source_flowless_egress_filter_log_is_still_emitted_7890`,
-///     which binds them as a PAIR: they form a fallback chain, so reverting
-///     either alone leaves the suite green while reverting both reds that cell.
-///
-/// Two of those bindings are not the obvious ones, and both were found by
-/// mutation rather than by reading:
-///
-///   - On the NoRoute arm, `forward == 0` does NOT bind anything — a NoRoute
-///     packet does not forward either way. `policy_deny == 1` does.
-///   - On the filter-log sites the failure is a MISSING LOG on a packet that
-///     forwards correctly, so no packet-side observable can see it; the cell
-///     has to read the event stream and assert the record's addresses.
+/// The NoRoute test asserts `policy_deny`, not merely `forward == 0`: a NoRoute
+/// packet never forwards, so that counter alone would not bind policy execution.
 ///
 /// The counters stay so the seam cannot be silently reopened by a future
 /// metadata or resolver change.
@@ -2233,11 +2204,10 @@ pub(in crate::afxdp) fn l3_session_flow_from_meta(meta: UserspaceDpMeta) -> Opti
         //
         // #7890: refusing here is CORRECT for session identity — a session keyed
         // on `0.0.0.0` aliases every other unspecified-source flow — and it is
-        // why this function keeps the refusal. It is NOT correct for the
-        // enforcement sites, which need the packet's ADDRESSES rather than a
-        // session; they use `l3_enforcement_flow_from_meta` below. One resolver
-        // was answering both questions, and six call sites read a refusal of the
-        // first as "nothing to enforce" for the second.
+        // why this function keeps the refusal. Enforcement sites need the packet
+        // addresses instead; the separate address-level accessor remains valid,
+        // while #10689's post-FIB gate rejects martian sources on transit before
+        // policy/session handling.
         L3_CTX_NONE_UNSPECIFIED_ADDR.fetch_add(1, Ordering::Relaxed);
         return None;
     }
@@ -2271,9 +2241,10 @@ pub(in crate::afxdp) fn l3_session_flow_from_meta(meta: UserspaceDpMeta) -> Opti
 /// header carried `0.0.0.0`, which is a perfectly well-defined value to evaluate
 /// a `from`-clause against.
 ///
-/// So the enforcement sites get their own accessor and the operator's configured
-/// verdict decides the packet's fate — rather than a session-identity refusal
-/// silently substituting "forward" for whatever was configured.
+/// This accessor supplies addresses to enforcement; it does not authorize
+/// forwarding. The #10689 source-class gate drops martian transit sources after
+/// FIB resolution and before policy/session/egress side effects. NoRoute remains
+/// outside that gate and can still receive its configured policy verdict.
 ///
 /// **Still refuses an unparseable family**, which is the genuinely unusable case
 /// (and unreachable in production: the shim only ever writes `AF_INET`/

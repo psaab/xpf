@@ -709,6 +709,9 @@ mod tests_nat64_protocol_ineligible_8670;
 #[path = "tests_nat64_local_10685.rs"]
 mod tests_nat64_local_10685;
 #[cfg(test)]
+#[path = "tests_martian_source_10689.rs"]
+mod tests_martian_source_10689;
+#[cfg(test)]
 #[path = "tests_gre_local_delivery.rs"]
 mod tests_gre_local_delivery;
 #[cfg(test)]

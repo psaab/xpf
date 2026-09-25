@@ -198,6 +198,19 @@ pub(super) fn stage_flow_cache_hit(
             telemetry.counters.touched = true;
             return FlowCacheOutcome::Consumed;
         }
+
+        // #10689: a Consumed flow-cache hit bypasses every poll-loop
+        // slow-path source-class gate, so enforce the same transit invariant
+        // here before liveness, TTL, filters, accounting or TX side effects.
+        if transit_source_class_drop(
+            worker_ctx.forwarding,
+            cached_decision.resolution.disposition,
+            flow.src_ip,
+        ) {
+            scratch.scratch_recycle.push(desc.addr);
+            telemetry.counters.touched = true;
+            return FlowCacheOutcome::Consumed;
+        }
         // #9991/#10670: a cached descriptor requires a live backing session.
         // The stamped-fabric preflight above checked liveness and zone together;
         // other arrivals check the idle deadline here before TTL, filters,

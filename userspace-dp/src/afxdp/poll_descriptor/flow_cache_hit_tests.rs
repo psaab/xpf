@@ -3595,3 +3595,43 @@ fn fabric_arrival_invalidates_cached_fabric_redirect_10314() {
         "cache invalidation must not enqueue the cached fabric redirect"
     );
 }
+
+#[test]
+fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let source = Ipv4Addr::LOCALHOST;
+    let mut frame = tcp_v4_ack_frame();
+    frame[30..34].copy_from_slice(&source.octets());
+    let mut meta = test_meta(&frame);
+    meta.flow_src_addr[..4].copy_from_slice(&source.octets());
+
+    let mut key = test_key();
+    key.src_ip = IpAddr::V4(source);
+    let mut entry = cached_entry();
+    entry.key = key.clone();
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(source),
+        dst_ip: key.dst_ip,
+        forward_key: key,
+    };
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            flow: Some(flow),
+            ..StageSeed::default()
+        },
+    );
+
+    assert_eq!(run.flow_cache_tallies, (1, 0, 0), "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(run.scratch.scratch_recycle.len(), 1);
+    assert!(run.scratch.scratch_forwards.is_empty());
+    assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
+    assert_eq!(run.dbg_forward, 0);
+    assert_eq!(run.dbg_tx, 0);
+    assert_eq!(run.sessions.len(), 1, "the gate must preserve the live session");
+}

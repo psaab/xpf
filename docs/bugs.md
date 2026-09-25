@@ -161,6 +161,24 @@
   NAT64 transit continues to translate and forward.
 
 
+### Transit forwards martian and non-unicast sources (#10689)
+- Transit under an `application any` permit forwarded packets and installed
+  forward/reverse sessions when the source was IPv6 multicast, loopback,
+  unspecified or link-local, or an IPv4 martian.
+- **Fix:** Apply a source-class gate after route resolution and before transit
+  policy/session installation, and recheck established-session and FlowCache
+  hits before their remaining side effects. IPv4 rejects this-network (`0/8`),
+  loopback, link-local, multicast, reserved/broadcast (`240/4`), and connected
+  subnet-directed broadcast sources. IPv6 rejects multicast, loopback,
+  unspecified and link-local sources. The gate is transit-only: DHCP, NDP and
+  DAD packets addressed to the firewall retain their LocalDelivery handling.
+- **Regression test:** `userspace-dp/src/afxdp/tests_martian_source_10689.rs`
+  exercises the poll path for every listed class under the `nat_snapshot()`
+  permit-any policy, including flowless unspecified and fragment traffic, and
+  controls that ordinary IPv4/IPv6 unicast sources still forward and install
+  sessions. `poll_descriptor/flow_cache_hit_tests.rs` verifies a consumed
+  FlowCache hit is dropped before forwarding side effects.
+
 ### NAT64 reverse path copies Ethernet padding into IPv6 payload (#1641)
 - **Severity:** MAJOR — reverse-path packet corruption / L4 checksum failure
 - **Symptom:** Every TCP/UDP/ICMPv6 NAT64 reply whose original IPv4
