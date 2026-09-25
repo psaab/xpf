@@ -1036,7 +1036,7 @@ func (r Result) RouteDropNote() string {
 // that connected egress for this destination, including an otherwise usable
 // stale/permanent entry, so the note does not rely on the dynamic-event NOARP
 // gate (#10690). The address-based classifier scans static interface-unit
-// query has no selected FIB table or egress and cannot account for a more-
+// prefixes; the simulator query has no selected FIB table or egress and cannot account for a more-
 // specific static route or distinguish routing-instance tables. It mirrors the Rust
 // v4_addr_is_directed_broadcast guards: IPv4-only, prefix length 1..30 (/31 has
 // no broadcast per RFC 3021; /32's all-ones host is the host itself). A nil cfg
