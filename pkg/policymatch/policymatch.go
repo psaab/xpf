@@ -919,14 +919,13 @@ type Result struct {
 	// RouteDropBeforePolicy is true when a transit Result carries the
 	// route-drop / neighbor-delivery advisory. For #4373 classes, forwarding
 	// drops at route lookup before policy: multicast, limited broadcast,
-	// unspecified, and loopback. Directed-broadcast (#11004) is different: when
-	// its connected route wins, policy is evaluated on that egress before
-	// neighbor resolution fails. This flag alone therefore does not say that
-	// policy was bypassed; RouteDropClass and RouteDropNote describe the exact
-	// stage. A directed-broadcast DENY remains the policy result, while a permit
-	// cannot forward without the not-yet-implemented targeted-broadcast support
-	// (#4308). This is ADVISORY context only; it does NOT change Matched / Action
-	// / DefaultUsed. Every surface must render RouteDropNote. Host-bound
+	// unspecified, and loopback. Directed-broadcast (#11004/#11033) is
+	// different: when its connected route wins, policy is evaluated on that
+	// egress before neighbor resolution. The dataplane now refuses to resolve
+	// this connected broadcast destination even if snapshot or runtime neighbor
+	// state contains a usable-looking entry, so a permit is not forwarded.
+	// This flag is advisory only; it does not change Matched / Action /
+	// DefaultUsed. Every surface must render RouteDropNote. Host-bound
 	// (junos-host) queries take the local-delivery gate and are never stamped.
 	// The route / neighbor behavior is enforced in userspace-dp; a route-drop
 	// counter remains the deferred Rust half of #4373.
@@ -993,10 +992,11 @@ const RouteDropNotePrefix = "route-drop advisory:"
 // carrying a route-drop or neighbor-delivery caveat, or "" when it carries no
 // such advisory. For the #4373 classes it preserves the existing pre-policy
 // route-drop wording. For "directed-broadcast", it states that the connected
-// egress policy is evaluated before neighbor resolution fails; that class is
-// not a pre-policy route drop. The advisory does not alter the verdict and
-// mirrors the HostInboundShowLine / ContentRejectedShowLine SSOT pattern so
-// surfaces stay in lock-step.
+// egress policy is evaluated before neighbor resolution, and that the
+// dataplane refuses to use any neighbor entry for the connected broadcast
+// destination. The advisory does not alter the verdict and mirrors the
+// HostInboundShowLine / ContentRejectedShowLine SSOT pattern so surfaces stay
+// in lock-step.
 func (r Result) RouteDropNote() string {
 	if !r.RouteDropBeforePolicy {
 		return ""
@@ -1008,9 +1008,10 @@ func (r Result) RouteDropNote() string {
 	if class == "directed-broadcast" {
 		return fmt.Sprintf("%s destination is %s — when the connected prefix wins, "+
 			"policy is evaluated on its egress before neighbor resolution; the "+
-			"directed-broadcast NOARP neighbor is rejected, so no usable neighbor "+
-			"resolves (#10690). A policy DENY remains effective, but a permit cannot "+
-			"be forwarded without the not-yet-implemented `family inet "+
+			"dataplane refuses to resolve this destination even if snapshot or runtime "+
+			"neighbor state contains a usable-looking entry, so the packet is not "+
+			"forwarded. A policy DENY remains effective, and permitted traffic still "+
+			"cannot be forwarded without the not-yet-implemented `family inet "+
 			"targeted-broadcast` (#4308). This is a neighbor-resolution drop, not a "+
 			"pre-policy route drop.", RouteDropNotePrefix, class)
 	}
@@ -1028,15 +1029,15 @@ func (r Result) RouteDropNote() string {
 // dst (the "unspecified destination" simulator wildcard) is NOT classified: it
 // means the operator did not pin a destination, not that it is 0.0.0.0.
 //
-// #11004 adds IPv4 subnet-directed broadcasts of connected prefixes (for
-// example 10.2.0.255 on 10.2.0.0/24). When the connected route wins, its cold
+// #11004/#11033 classify IPv4 subnet-directed broadcasts of connected prefixes
+// (for example 10.2.0.255 on 10.2.0.0/24). When the connected route wins, its
 // MissingNeighbor path evaluates policy on the selected egress before neighbor
-// resolution. A directed-broadcast NOARP neighbor is rejected (#10690), so a
-// permit does not establish delivery and the note describes a neighbor-
-// resolution drop, not a pre-policy route drop. This address-based classifier
-// scans static interface-unit prefixes; the simulator query has no selected
-// FIB table or egress and cannot account for a more-specific static route or
-// distinguish routing-instance tables. It mirrors the Rust
+// resolution. Snapshot import and runtime lookup both reject a neighbor on
+// that connected egress for this destination, including an otherwise usable
+// stale/permanent entry, so the note does not rely on the dynamic-event NOARP
+// gate (#10690). The address-based classifier scans static interface-unit
+// query has no selected FIB table or egress and cannot account for a more-
+// specific static route or distinguish routing-instance tables. It mirrors the Rust
 // v4_addr_is_directed_broadcast guards: IPv4-only, prefix length 1..30 (/31 has
 // no broadcast per RFC 3021; /32's all-ones host is the host itself). A nil cfg
 // carries no connected prefixes and therefore never classifies this advisory.

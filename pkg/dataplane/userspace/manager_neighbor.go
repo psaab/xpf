@@ -16,8 +16,9 @@ type neighborIndexKey struct {
 	ip      string
 }
 
-// filterPublishableNeighbors returns only the entries
-// userspace-dp will accept (per neighborSnapshotPublishable).
+// filterPublishableNeighbors returns entries accepted by Go's generic
+// snapshot shape/state gate. Rust additionally rejects connected
+// directed-broadcast IPs using the forwarding snapshot (#11033).
 func filterPublishableNeighbors(neighbors []NeighborSnapshot) []NeighborSnapshot {
 	out := make([]NeighborSnapshot, 0, len(neighbors))
 	for _, n := range neighbors {

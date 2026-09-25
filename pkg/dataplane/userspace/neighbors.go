@@ -60,26 +60,16 @@ func neighborsEqualForwarding(a, b []NeighborSnapshot) bool {
 	return true
 }
 
-// neighborSnapshotPublishable returns true if a snapshot entry
-// should be pushed to userspace-dp. Must mirror userspace-dp's
-// accept rules at userspace-dp/src/afxdp/forwarding/mod.rs:45:
+// neighborSnapshotPublishable returns true for a structurally valid kernel
+// neighbor row whose state is not known-unusable, so the Go manager can avoid
+// publishing malformed or failed entries. This context-free gate cannot decide
+// whether an IP is the directed broadcast of a configured connected prefix.
+// Rust applies its state allowlist and the config-aware, egress-specific #11033
+// broadcast gate when importing or resolving neighbors; a Go-publishable row is not
+// necessarily usable for forwarding.
 //
-//	pub(super) fn neighbor_state_usable(state: &str) -> bool {
-//	    let normalized = state.to_ascii_lowercase();
-//	    !(normalized.contains("failed") || normalized.contains("incomplete")
-//	      || normalized.contains("noarp"))
-//	}
-//
-// Codex code-review #3: Rust uses SUBSTRING match after
-// lowercasing; previous Go did EXACT match — drift. Fixed to
-// match Rust's substring semantics.
-//
-// "none" is rejected here even though Rust classifies it as unknown,
-// because state-0 entries have no learned MAC info — rejecting here
-// prevents a useless publish round-trip.
-//
-// Drift here is a silent forwarding bug — keep in sync if
-// userspace-dp changes its acceptance criteria.
+// Keep the generic shape/state checks aligned with Rust's
+// `neighbor_state_usable` contract when either side changes.
 func neighborSnapshotPublishable(n NeighborSnapshot) bool {
 	if n.Ifindex <= 0 {
 		return false

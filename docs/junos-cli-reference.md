@@ -1240,11 +1240,12 @@ regardless of the matching policy / filter-accept log)
 A connected-prefix subnet-directed broadcast has a different failure stage.
 When the connected route wins, the FIB resolves it as `MissingNeighbor` and the
 cold path evaluates policy on that connected egress before neighbor resolution.
-The directed-broadcast NOARP neighbor is rejected (#10690), so no usable
-neighbor resolves: a policy DENY remains the actual policy result, but a permit
-is dropped at neighbor resolution. The directed-broadcast note explicitly says
-this is **not** a pre-policy route drop. The packet cannot be forwarded without
-the not-yet-implemented `family inet targeted-broadcast` support (#4308).
+The snapshot importer and runtime lookup reject the destination's neighbor on
+that connected egress even if a stale, permanent, or dynamic entry exists, and a
+pending packet cannot be resumed by such an entry. A policy DENY remains the
+actual policy result; a permit is not forwarded. The advisory says this is
+**not** a pre-policy route drop. `family inet targeted-broadcast` support (#4308)
+remains unimplemented.
 
 The simulator recognizes directed broadcasts from static IPv4 interface-unit
 prefixes; `/31` and `/32` do not have a directed-broadcast host. This

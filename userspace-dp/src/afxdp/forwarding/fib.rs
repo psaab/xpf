@@ -5,8 +5,22 @@
 //! `forwarding/mod.rs`, preserving instruction-level behavior and `#[inline]`
 //! attributes exactly.
 
-use super::*;
 use std::borrow::Cow;
+
+use super::*;
+
+pub(in crate::afxdp) fn is_connected_v4_directed_broadcast(
+    state: &ForwardingState,
+    ifindex: i32,
+    destination: IpAddr,
+) -> bool {
+    match destination {
+        IpAddr::V4(ip) => state
+            .connected_v4_directed_broadcast_neighbor_keys
+            .contains(&(ifindex, ip)),
+        IpAddr::V6(_) => false,
+    }
+}
 
 pub(in crate::afxdp) const DEFAULT_V4_TABLE: &str = "inet.0";
 

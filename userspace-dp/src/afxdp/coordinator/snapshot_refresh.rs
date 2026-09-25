@@ -313,11 +313,15 @@ impl super::Coordinator {
                 {
                     return None;
                 }
-                neigh
-                    .ip
-                    .parse::<IpAddr>()
-                    .ok()
-                    .map(|ip| (neigh.ifindex, ip))
+                let ip = neigh.ip.parse::<IpAddr>().ok()?;
+                if crate::afxdp::forwarding::is_connected_v4_directed_broadcast(
+                    &new_forwarding,
+                    neigh.ifindex,
+                    ip,
+                ) {
+                    return None;
+                }
+                Some((neigh.ifindex, ip))
             })
             .collect::<FastSet<_>>();
         let old_manager_keys = if let Ok(mut manager_keys) = self.neighbors.manager_keys.lock() {
