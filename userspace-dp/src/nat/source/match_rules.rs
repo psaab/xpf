@@ -352,7 +352,7 @@ fn match_source_nat_result_for_tuple_inner(
     // Precedence therefore lives in the snapshot ORDER, not in this loop — do
     // not re-sort or assume raw config order.
     for rule in rules {
-        if !rule.matches(
+        let rule_match = rule.matches(
             scope,
             from_zone,
             to_zone,
@@ -362,7 +362,9 @@ fn match_source_nat_result_for_tuple_inner(
             protocol,
             src_port,
             dst_port,
-        ) {
+            non_first_fragment,
+        );
+        if rule_match == L4Match::NoMatch {
             continue;
         }
         // #9874: a rule whose authored `match` constrains nothing claims the
@@ -383,6 +385,12 @@ fn match_source_nat_result_for_tuple_inner(
             ));
         }
         if rule.off {
+            if rule_match == L4Match::Possible {
+                // A fragment's missing L4 fields cannot prove that a scoped
+                // `off` exemption wins. Keep looking so a later possible NAT
+                // match still fails closed instead of forwarding untranslated.
+                continue;
+            }
             // An `off` rule applies no translation — leave matched_counter
             // unset so no hit is counted for a no-op match.
             return SourceNatLookup::Matched(NatDecision::default());

@@ -163,6 +163,62 @@ fn source_nat_match_destination_port_constrains_off_exemption_3429() {
 }
 
 #[test]
+fn source_nat_fragment_sentinel_does_not_bypass_later_rule_for_scoped_off_10675() {
+    let rules = parse_source_nat_rules(&[
+        SourceNATRuleSnapshot {
+            name: "off-udp-53".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            off: true,
+            match_applications: vec![NatAppTermWire {
+                protocol: PROTO_UDP as u16,
+                ports: vec![NatPortRangeWire { low: 53, high: 53 }],
+                src_ports: vec![],
+            }],
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "snat-tcp-443".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            interface_mode: true,
+            match_applications: vec![NatAppTermWire {
+                protocol: PROTO_TCP as u16,
+                ports: vec![NatPortRangeWire { low: 443, high: 443 }],
+                src_ports: vec![],
+            }],
+            ..SourceNATRuleSnapshot::default()
+        },
+    ]);
+    let mut counter = None;
+    let lookup = match_source_nat_result_for_tuple(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &NatScopeCtx::default(),
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        Some(crate::session::SHIM_PROTO_FRAGMENT_NO_L4),
+        0,
+        0,
+        Some("172.16.80.8".parse().unwrap()),
+        None,
+        0,
+        true,
+        false,
+        NatHolder::Untracked,
+        &mut counter,
+    );
+    assert!(
+        matches!(lookup, SourceNatLookup::Matched(decision) if decision.rewrite_src.is_some()),
+        "an ambiguous L4-scoped off rule must not hide a later possible SNAT rule: {lookup:?}"
+    );
+}
+
+#[test]
 fn source_nat_match_application_constrains_protocol_and_port_3429() {
     // `match application` pre-expanded to (proto=TCP, ports=[443]).
     let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
