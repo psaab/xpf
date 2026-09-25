@@ -2251,6 +2251,10 @@ mod tests_shim_early_filter_10640;
 #[cfg(test)]
 #[path = "tests_shim_gre_classify_10651.rs"]
 mod tests_shim_gre_classify_10651;
+// #10677: interface-NAT tunnel-fragment disposition at the shim boundary.
+#[cfg(test)]
+#[path = "tests_shim_tunnel_frag_10677.rs"]
+mod tests_shim_tunnel_frag_10677;
 #[cfg(test)]
 #[path = "tests_9782_copy.rs"]
 mod tests_9782_copy;
