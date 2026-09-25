@@ -2,6 +2,7 @@ use super::*;
 
 mod mmap;
 pub(in crate::afxdp) use mmap::MmapArea;
+pub(in crate::afxdp) use mmap::umem_fallback_bytes_total;
 
 /// F-069 (#9904): UMEM creation flags — `0` selects AF_XDP aligned-chunk
 /// mode, the load-bearing precondition of the fill-alignment contract

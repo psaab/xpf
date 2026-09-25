@@ -27,6 +27,11 @@ type statusSummaryAggregates struct {
 	xskBindings        int
 	zeroCopyBindings   int
 	sharedUMEMBindings int
+	hugepageBackedBindings int
+	// umemFallbackBytesMax is the process-wide fallback total. It arrives
+	// identical on every bound row, so the aggregate takes the max, never
+	// the sum.
+	umemFallbackBytesMax uint64
 
 	// Per-binding packet/session/flow counters (summed).
 	rxPackets         uint64
@@ -192,6 +197,12 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		}
 		if binding.XSKRegistered {
 			agg.xskBindings++
+		}
+		if binding.HugepageBacked {
+			agg.hugepageBackedBindings++
+		}
+		if binding.UMEMFallbackBytesTotal > agg.umemFallbackBytesMax {
+			agg.umemFallbackBytesMax = binding.UMEMFallbackBytesTotal
 		}
 		if binding.ZeroCopy {
 			agg.zeroCopyBindings++
@@ -444,6 +455,10 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  Bound bindings:            %d/%d\n", agg.boundBindings, len(status.Bindings))
 	fmt.Fprintf(b, "  XSK-registered bindings:   %d/%d\n", agg.xskBindings, len(status.Bindings))
 	fmt.Fprintf(b, "  Zerocopy bindings:         %d/%d\n", agg.zeroCopyBindings, len(status.Bindings))
+	fmt.Fprintf(b, "  Hugepage-backed bindings:  %d/%d\n", agg.hugepageBackedBindings, len(status.Bindings))
+	if agg.umemFallbackBytesMax > 0 {
+		fmt.Fprintf(b, "  UMEM fallback bytes:       %d\n", agg.umemFallbackBytesMax)
+	}
 	fmt.Fprintf(b, "  Shared UMEM bindings:      %d/%d\n", agg.sharedUMEMBindings, len(status.Bindings))
 	fmt.Fprintf(b, "  Armed queues:              %d/%d\n", agg.armedQueues, len(status.Queues))
 	fmt.Fprintf(b, "  Ready queues:              %d/%d\n", agg.readyQueues, len(status.Queues))

@@ -93,6 +93,8 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.xsk_registered = snap.xsk_registered;
     binding.xsk_bind_mode = snap.xsk_bind_mode;
     binding.zero_copy = snap.zero_copy;
+    binding.hugepage_backed = snap.hugepage_backed;
+    binding.umem_fallback_bytes_total = snap.umem_fallback_bytes_total;
     binding.socket_fd = snap.socket_fd;
     binding.socket_ifindex = snap.socket_ifindex;
     binding.socket_queue_id = snap.socket_queue_id;
@@ -328,6 +330,8 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.xsk_registered = false;
     binding.xsk_bind_mode.clear();
     binding.zero_copy = false;
+    binding.hugepage_backed = false;
+    binding.umem_fallback_bytes_total = 0;
     binding.socket_fd = 0;
     binding.socket_ifindex = 0;
     binding.socket_queue_id = 0;

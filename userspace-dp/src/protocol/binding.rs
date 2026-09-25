@@ -366,6 +366,16 @@ pub(crate) struct BindingStatus {
     pub xsk_bind_mode: String,
     #[serde(rename = "zero_copy", default)]
     pub zero_copy: bool,
+    /// Whether this binding's UMEM region is backed by explicit 2 MB
+    /// hugepages (#10729 X1-09). False means standard-pages fallback with
+    /// the documented throughput cliff. Additive + `default`: old readers
+    /// see absent→false.
+    #[serde(rename = "hugepage_backed", default)]
+    pub hugepage_backed: bool,
+    /// Process-wide UMEM bytes that fell back to standard pages (#10729
+    /// X1-09). Identical on every bound row — take max, not sum. Additive.
+    #[serde(rename = "umem_fallback_bytes_total", default)]
+    pub umem_fallback_bytes_total: u64,
     #[serde(rename = "socket_fd", default)]
     pub socket_fd: i32,
     #[serde(rename = "rx_packets", default)]

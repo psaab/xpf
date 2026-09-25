@@ -98,6 +98,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) xsk_registered: AtomicBool,
     pub(super) bind_mode: AtomicU8,
     pub(super) socket_fd: AtomicI32,
+    /// Whether this binding's UMEM region is backed by explicit 2 MB
+    /// hugepages (#10729 X1-09). Set once at bind from the mapped region;
+    /// read by the status snapshot so the fallback throughput cliff is
+    /// operator-visible instead of log-only.
+    pub(super) hugepage_backed: AtomicBool,
     pub(super) socket_ifindex: AtomicI32,
     pub(super) socket_queue_id: AtomicU32,
     pub(super) socket_bind_flags: AtomicU32,
@@ -1010,15 +1015,18 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #10679 adds one unconditional u64 flowless-NAT-fence counter before both
 // sentinels; offsets advance by 8 bytes while the 2496-byte alignment unit
 // remains unchanged.
+// #10729 adds one AtomicBool hugepage-backing flag; padding absorbs it before
+// the first sentinel, so only the second pinned offset moves (+1).
 const _: [(); 2496] = [(); std::mem::size_of::<BindingLiveState>()];
 const _: [(); 2328] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2456] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2457] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
         Self {
             bound: AtomicBool::new(false),
             xsk_registered: AtomicBool::new(false),
+            hugepage_backed: AtomicBool::new(false),
             bind_mode: AtomicU8::new(XskBindMode::Unknown.as_u8()),
             socket_fd: AtomicI32::new(0),
             socket_ifindex: AtomicI32::new(0),
@@ -1231,6 +1239,10 @@ impl BindingLiveState {
     pub(super) fn set_bound(&self, socket_fd: c_int) {
         self.bound.store(true, Ordering::Relaxed);
         self.socket_fd.store(socket_fd, Ordering::Relaxed);
+    }
+
+    pub(super) fn set_hugepage_backed(&self, backed: bool) {
+        self.hugepage_backed.store(backed, Ordering::Relaxed);
     }
 
     pub(super) fn set_socket_binding(&self, ifindex: i32, queue_id: u32, flags: u32) {

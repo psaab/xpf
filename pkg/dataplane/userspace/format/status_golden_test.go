@@ -83,6 +83,7 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 		Bindings: []userspace.BindingStatus{
 			{
 				Slot: 0, Armed: true, Ready: true, Bound: true, XSKRegistered: true, ZeroCopy: true,
+				HugepageBacked: true,
 				SharedUMEMMode: "cross-nic", SharedUMEMSocketRole: "owner",
 				RXPackets: 100, ValidatedPackets: 90, ForwardCandidatePkts: 80,
 				FlowlessForwardPkts: 7, FlowlessForwardBytes: 700,
