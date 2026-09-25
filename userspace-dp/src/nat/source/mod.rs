@@ -1011,6 +1011,54 @@ fn resolve_pool_allocators(
     wire_overlap_peers(out);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum L4Match {
+    NoMatch,
+    Possible,
+    Definite,
+}
+
+impl L4Match {
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::NoMatch, _) | (_, Self::NoMatch) => Self::NoMatch,
+            (Self::Definite, Self::Definite) => Self::Definite,
+            _ => Self::Possible,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Definite, _) | (_, Self::Definite) => Self::Definite,
+            (Self::Possible, _) | (_, Self::Possible) => Self::Possible,
+            _ => Self::NoMatch,
+        }
+    }
+}
+
+fn port_range_match(port: u16, ranges: &[(u16, u16)], unknown: bool) -> L4Match {
+    if ranges.is_empty() {
+        return L4Match::Definite;
+    }
+    if !unknown {
+        return if port_in_ranges(port, ranges) {
+            L4Match::Definite
+        } else {
+            L4Match::NoMatch
+        };
+    }
+    if ranges
+        .iter()
+        .any(|&(low, high)| low == 0 && high == u16::MAX)
+    {
+        L4Match::Definite
+    } else if ranges.iter().any(|&(low, high)| low <= high) {
+        L4Match::Possible
+    } else {
+        L4Match::NoMatch
+    }
+}
+
 impl SourceNatRule {
     /// #3096: does the flow satisfy every non-empty interface /
     /// routing-instance scope on this rule? Empty scope fields are wildcards.
@@ -1037,52 +1085,68 @@ impl SourceNatRule {
         true
     }
 
-    /// #3429: does the flow satisfy this rule's L4 `match destination-port` /
-    /// `match application` constraints? An empty constraint set is a wildcard
-    /// (unchanged match-any behavior). A non-empty set is AND-ed across the two
-    /// kinds (destination-port AND application), mirroring Junos.
+    /// #3429: classify whether a known tuple, or a fragment with missing L4
+    /// fields, can satisfy this rule's L4 constraints. Empty constraints are a
+    /// definite wildcard; destination-port and application clauses are AND-ed.
     ///
-    /// #5687: `tuple_unknown` is the OUT-OF-BAND "L4 tuple unknown" signal (the
-    /// address-only `match_source_nat` wrapper, `protocol == None`) — NOT the
-    /// numeric value 0. A rule that carries ANY L4 constraint cannot be
-    /// satisfied by an unknown tuple, so it fails closed (an L4-scoped rule must
-    /// never fire on traffic whose port/protocol the caller could not supply).
-    /// A genuine HOPOPT packet (`Some(0)`, `tuple_unknown == false`) is NOT
-    /// short-circuited here: it falls through to the normal port/protocol
-    /// checks, which reject an L4-port-scoped rule anyway (its ports are 0) — so
-    /// the fail-closed behavior is preserved without conflating it with the
-    /// unknown sentinel. An unconstrained rule is unaffected.
+    /// #5687: `tuple_unknown` is the OUT-OF-BAND address-only caller, which has
+    /// no tuple and still fails closed on every L4-constrained rule. A
+    /// non-first fragment is different: decapsulation can preserve its real
+    /// protocol, while native fragments carry the shim's 255 unknown-protocol
+    /// sentinel. Its ports are absent in either shape. Preserve a known
+    /// protocol, treat 255 as any real protocol, and classify missing ports as
+    /// possible matches; the fragment probe then drops if translation could
+    /// apply. It must not recover a protocol from fragment payload bytes.
     ///
-    /// #3491: a `match application` term may also constrain the SOURCE port (an
-    /// application defined with `source-port`). It is AND-ed with the protocol
-    /// and destination-port checks INSIDE the same term: the flow satisfies the
-    /// term only when its protocol, destination port, AND source port all match.
-    /// Before #3491 the source-port axis was dropped, so an app-scoped rule fired
-    /// regardless of source port — the fail-open this fix closes.
-    fn l4_matches(&self, tuple_unknown: bool, protocol: u8, src_port: u16, dst_port: u16) -> bool {
+    /// #3491: application source-port constraints are AND-ed with protocol and
+    /// destination-port constraints within each application term.
+    fn l4_matches(
+        &self,
+        tuple_unknown: bool,
+        protocol: u8,
+        src_port: u16,
+        dst_port: u16,
+        non_first_fragment: bool,
+    ) -> L4Match {
         if self.match_dst_ports.is_empty() && self.match_apps.is_empty() {
-            return true;
+            return L4Match::Definite;
         }
-        // #5687: fail closed on the OUT-OF-BAND unknown tuple, not `protocol == 0`
-        // (a real HOPOPT flows through to the normal checks below).
         if tuple_unknown {
-            return false;
+            return L4Match::NoMatch;
         }
-        if !self.match_dst_ports.is_empty() && !port_in_ranges(dst_port, &self.match_dst_ports) {
-            return false;
+
+        let protocol_unknown = protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+        let ports_unknown = non_first_fragment;
+        let destination_port_match =
+            port_range_match(dst_port, &self.match_dst_ports, ports_unknown);
+        if destination_port_match == L4Match::NoMatch {
+            return L4Match::NoMatch;
         }
-        if !self.match_apps.is_empty() {
-            let proto16 = protocol as u16;
-            let ok = self.match_apps.iter().any(|t| {
-                (t.protocol == SOURCE_NAT_PROTO_ANY || t.protocol == proto16)
-                    && (t.ports.is_empty() || port_in_ranges(dst_port, &t.ports))
-                    && (t.src_ports.is_empty() || port_in_ranges(src_port, &t.src_ports))
-            });
-            if !ok {
-                return false;
-            }
+        if self.match_apps.is_empty() {
+            return destination_port_match;
         }
-        true
+
+        let proto16 = protocol as u16;
+        let application_match = self.match_apps.iter().fold(L4Match::NoMatch, |best, term| {
+            let protocol_match = if term.protocol == SOURCE_NAT_PROTO_ANY {
+                L4Match::Definite
+            } else if protocol_unknown {
+                if term.protocol < crate::session::SHIM_PROTO_FRAGMENT_NO_L4 as u16 {
+                    L4Match::Possible
+                } else {
+                    L4Match::NoMatch
+                }
+            } else if term.protocol == proto16 {
+                L4Match::Definite
+            } else {
+                L4Match::NoMatch
+            };
+            let term_match = protocol_match
+                .and(port_range_match(dst_port, &term.ports, ports_unknown))
+                .and(port_range_match(src_port, &term.src_ports, ports_unknown));
+            best.or(term_match)
+        });
+        destination_port_match.and(application_match)
     }
 
     /// Does the flow satisfy this rule's `from zone` / `to zone` clause? An
@@ -1120,11 +1184,23 @@ impl SourceNatRule {
         protocol: u8,
         src_port: u16,
         dst_port: u16,
-    ) -> bool {
-        self.zone_matches(from_zone, to_zone)
-            && self.scope_matches(scope)
-            && self.l4_matches(tuple_unknown, protocol, src_port, dst_port)
-            && self.address_matches(src_ip, dst_ip)
+        non_first_fragment: bool,
+    ) -> L4Match {
+        if !self.zone_matches(from_zone, to_zone) || !self.scope_matches(scope) {
+            return L4Match::NoMatch;
+        }
+        let l4_match = self.l4_matches(
+            tuple_unknown,
+            protocol,
+            src_port,
+            dst_port,
+            non_first_fragment,
+        );
+        if l4_match == L4Match::NoMatch || !self.address_matches(src_ip, dst_ip) {
+            L4Match::NoMatch
+        } else {
+            l4_match
+        }
     }
 
     /// #6211: [`matches`] minus the #3096 interface / routing-instance
@@ -1160,7 +1236,8 @@ impl SourceNatRule {
         dst_port: u16,
     ) -> bool {
         self.zone_matches(from_zone, to_zone)
-            && self.l4_matches(tuple_unknown, protocol, src_port, dst_port)
+            && self.l4_matches(tuple_unknown, protocol, src_port, dst_port, false)
+                != L4Match::NoMatch
             && self.address_matches(src_ip, dst_ip)
     }
 }

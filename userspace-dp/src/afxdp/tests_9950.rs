@@ -1038,8 +1038,8 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         reordered_tail.len() as u16,
     );
     meta_reordered.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
-    meta_reordered.flow_src_port = internal_port;
-    meta_reordered.flow_dst_port = client_port;
+    meta_reordered.flow_src_port = 0;
+    meta_reordered.flow_dst_port = 0;
     let (batch_reordered, dbg_reordered) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
@@ -1116,8 +1116,8 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     let mut meta_tail =
         frag_meta_9950(24, PROTO_TCP, 0, internal, client, reply_tail.len() as u16);
     meta_tail.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
-    meta_tail.flow_src_port = internal_port;
-    meta_tail.flow_dst_port = client_port;
+    meta_tail.flow_src_port = 0;
+    meta_tail.flow_dst_port = 0;
     // Clear prior forwards so index 0 is this packet's request.
     binding_lan.scratch.scratch_forwards.clear();
     let (_b2, dbg2) = txn_run_descriptor_checked(
@@ -1185,8 +1185,8 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         plain_tail.len() as u16,
     );
     meta_plain.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
-    meta_plain.flow_src_port = internal_port;
-    meta_plain.flow_dst_port = 443;
+    meta_plain.flow_src_port = 0;
+    meta_plain.flow_dst_port = 0;
     binding_lan.scratch.scratch_forwards.clear();
     let (batch_plain, dbg_plain) = txn_run_descriptor_checked(
         &mut binding_lan,

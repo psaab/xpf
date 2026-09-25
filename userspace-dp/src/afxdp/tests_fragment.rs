@@ -18,6 +18,7 @@ use crate::{
     InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
+use crate::{NatAppTermWire, NatPortRangeWire};
 use super::tests_support::*;
 
 #[test]
@@ -462,6 +463,21 @@ fn udp_frag_meta_5689() -> UserspaceDpMeta {
     }
 }
 
+fn udp_native_frag_meta_5689() -> UserspaceDpMeta {
+    let mut meta = udp_frag_meta_5689();
+    meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    meta.flow_src_port = 0;
+    meta.flow_dst_port = 0;
+    meta
+}
+
+fn udp_decapped_frag_meta_5689() -> UserspaceDpMeta {
+    let mut meta = udp_frag_meta_5689();
+    meta.flow_src_port = 0;
+    meta.flow_dst_port = 0;
+    meta
+}
+
 /// #10130: reply-side interface-SNAT fragment with no L4 header. The
 /// destination is the public address assigned to the WAN interface, so the
 /// flowless resolver selects LocalDelivery rather than ForwardCandidate.
@@ -615,8 +631,8 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
     let reply_tail = udp_reply_frag_frame_10130(0x0001, 0xcafe);
     let mut reply_meta = UserspaceDpMeta {
         ingress_ifindex: 12,
-        flow_src_port: 443,
-        flow_dst_port: 33333,
+        flow_src_port: 0,
+        flow_dst_port: 0,
         flow_src_addr: [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         flow_dst_addr: [172, 16, 80, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ..udp_frag_meta_5689()
@@ -885,7 +901,7 @@ fn nat_nonfirst_fragment_assoc_miss_fails_closed_6122() {
         &forwarding,
         &ha_state,
         &non_first,
-        udp_frag_meta_5689(),
+        udp_native_frag_meta_5689(),
         true,
     );
     assert_eq!(
@@ -901,6 +917,70 @@ fn nat_nonfirst_fragment_assoc_miss_fails_closed_6122() {
         "#6122: the fail-closed drop must be counted (RED on revert)"
     );
 }
+
+#[test]
+fn app_scoped_snat_nonfirst_fragment_assoc_miss_fails_closed_10675() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-udp-443".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        match_applications: vec![NatAppTermWire {
+            protocol: PROTO_UDP as u16,
+            ports: vec![NatPortRangeWire {
+                low: 443,
+                high: 443,
+            }],
+            src_ports: vec![],
+        }],
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        0,
+        "#10675 precondition: no fragment association installed (a pure miss)"
+    );
+    for (id, label, meta) in [
+        (0xbeef, "native-255", udp_native_frag_meta_5689()),
+        (0xcafe, "decapped-real-protocol", udp_decapped_frag_meta_5689()),
+    ] {
+        let non_first = udp_frag_frame_5689(0x0001, id);
+        let (batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &non_first,
+            meta,
+            true,
+        );
+        assert_eq!(
+            dbg.forward, 0,
+            "#10675 {label}: an app-scoped NAT fragment miss must NOT forward"
+        );
+        assert_eq!(
+            dbg.nat_applied_none, 0,
+            "#10675 {label}: the fragment must NOT be forwarded untranslated"
+        );
+        assert_eq!(
+            batch.nat_frag_untranslated_dropped, 1,
+            "#10675 {label}: the fail-closed drop must be counted"
+        );
+    }
+}
+
 
 
 #[test]
@@ -935,7 +1015,7 @@ fn nonnat_nonfirst_fragment_assoc_miss_still_forwards_6122() {
         &forwarding,
         &ha_state,
         &non_first,
-        udp_frag_meta_5689(),
+        udp_native_frag_meta_5689(),
         true,
     );
     assert_eq!(
