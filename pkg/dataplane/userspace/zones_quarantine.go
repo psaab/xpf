@@ -96,6 +96,13 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 	for i := range snap.Interfaces {
 		if _, drop := quarantined[snap.Interfaces[i].Zone]; drop {
 			snap.Interfaces[i].Zone = ""
+			// The per-interface host-inbound stamp takes precedence over the
+			// empty-zone fail-closed sentinel in userspace-dp. Keeping it would
+			// enforce the quarantined zone's raw-config admission set on an
+			// interface the quarantine deliberately unzoned.
+			snap.Interfaces[i].HostInboundConfigured = false
+			snap.Interfaces[i].HostInboundSystemServices = nil
+			snap.Interfaces[i].HostInboundProtocols = nil
 		}
 		// #6722: the EGRESS answer (InterfaceSnapshot.EgressZone) is NOT blanked
 		// here, deliberately. stampEgressZones already excludes a quarantined

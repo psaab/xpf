@@ -1396,6 +1396,22 @@ enforce the owner predicate `zoneByIface[ref] == zn`:
   predicate, same skip), so a unit's effective tokens come only from its
   authoritative owner. Single-owner (non-conflict) configs are unchanged.
 
+**StableZoneID collision quarantine (#11011).** A tolerant load can carry two
+zone names whose stable IDs collide; the dataplane keeps the earlier-sorting
+zone and quarantines the later one. The full snapshot pass runs after interface
+host-inbound stamps are built, so it also clears the quarantined rows'
+`HostInboundConfigured` and token fields. Otherwise the Rust per-interface
+admission table would take precedence over the empty-zone deny sentinel and
+retain the losing zone's override.
+
+The kernel-nft builders use the same `quarantinedZoneNames(cfg)` exclusion set:
+the losing zone contributes no `ZoneHostInboundView`, including through its
+config-derived VRRP VIP or stable RETH address. Its addressed interfaces,
+quarantined VRRP VIPs, and stable RETH link-locals instead join the unzoned
+catch-all drop set (subject to the existing lifeline and duplicate-address
+exclusions). Strict commits still reject the collision; non-colliding configs
+keep their existing host-inbound views, stamps, and unzoned scopes.
+
 **Presentation parity (#3720 H05).** `ZoneConfig.InterfaceHostInboundEffective`
 (`pkg/config/host_inbound_view.go`) — used by `show interfaces <unit>`, `show
 security zones`, and the gRPC interface diagnostic — folds the physical-parent
