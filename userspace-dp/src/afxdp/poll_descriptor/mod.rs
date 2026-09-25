@@ -69,6 +69,7 @@ use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
 use flow_cache_seed::stage_flow_cache_seed;
 use frag_assoc::{
     flowless_fragment_requires_nat_translation, frag_ingress_authority,
+    flowless_fragment_missing_neighbor_requires_nat_translation,
     nat64_consult_forward_fragment_assoc,
     nat64_install_forward_fragment_assoc, nat_consult_forward_fragment_assoc,
     nat_install_forward_fragment_assoc,
@@ -7255,6 +7256,37 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx.forwarding,
                                             );
                                             break 'missing_neighbor StageOutcome::RecycleAndContinue;
+                                        }
+                                        // #10660: the #6122 NAT-miss gate above
+                                        // covers only ForwardCandidate. Before a
+                                        // permitted association-miss tail is parked
+                                        // on this MissingNeighbor path, require a
+                                        // live reverse-NAT session or a matching
+                                        // L4-scoped source-NAT rule. A blanket rule
+                                        // with no session is ambiguous with raw
+                                        // IPsec/passthrough and is not sufficient;
+                                        // that residual is tracked as #10957.
+                                        let is_non_first =
+                                            crate::afxdp::frame::frame_is_non_first_fragment(
+                                                packet_frame,
+                                                meta,
+                                            );
+                                        if is_non_first
+                                            && flowless_fragment_missing_neighbor_requires_nat_translation(
+                                                worker_ctx.forwarding,
+                                                sessions,
+                                                &l3_flow,
+                                                meta,
+                                                from_zone_id,
+                                                to_zone_id,
+                                                decision.resolution.egress_ifindex,
+                                                now_ns,
+                                            )
+                                        {
+                                            telemetry.counters
+                                                .record_nat_frag_untranslated_dropped();
+                                            break 'missing_neighbor
+                                                StageOutcome::RecycleAndContinue;
                                         }
                                     }
                                     // Flowless permit (or no derivable L3 tuple):

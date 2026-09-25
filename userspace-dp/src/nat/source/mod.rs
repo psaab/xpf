@@ -1085,6 +1085,35 @@ impl SourceNatRule {
         true
     }
 
+    /// Whether this L4-scoped source-NAT rule can match a non-first fragment
+    /// whose ports are absent. `Possible` protocol/port matches count as
+    /// translation intent; the sentinel-aware matcher handles native protocol
+    /// 255 without recovering the datagram's protocol.
+    pub(crate) fn matches_scoped_l4_non_first_fragment(
+        &self,
+        scope: &NatScopeCtx<'_>,
+        from_zone: &str,
+        to_zone: &str,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        protocol: u8,
+    ) -> bool {
+        !self.off
+            && (!self.match_dst_ports.is_empty() || !self.match_apps.is_empty())
+            && self.matches(
+                scope,
+                from_zone,
+                to_zone,
+                src_ip,
+                dst_ip,
+                false,
+                protocol,
+                0,
+                0,
+                true,
+            ) != L4Match::NoMatch
+    }
+
     /// #3429: classify whether a known tuple, or a fragment with missing L4
     /// fields, can satisfy this rule's L4 constraints. Empty constraints are a
     /// definite wildcard; destination-port and application clauses are AND-ed.
@@ -1111,11 +1140,13 @@ impl SourceNatRule {
         if self.match_dst_ports.is_empty() && self.match_apps.is_empty() {
             return L4Match::Definite;
         }
+
         if tuple_unknown {
             return L4Match::NoMatch;
         }
 
-        let protocol_unknown = protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+        let protocol_unknown = non_first_fragment
+            && protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
         let ports_unknown = non_first_fragment;
         let destination_port_match =
             port_range_match(dst_port, &self.match_dst_ports, ports_unknown);

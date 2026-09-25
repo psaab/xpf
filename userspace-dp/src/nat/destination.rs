@@ -812,6 +812,71 @@ impl DnatTable {
             hit_counter,
         ))
     }
+    /// Whether a fragment whose shim metadata carries the protocol-unknown
+    /// sentinel would match any same-family DNAT translation. Probe concrete
+    /// protocols represented by host/prefix buckets and at most one
+    /// unrepresented protocol for protocol-agnostic rules. This preserves exact
+    /// rule matching without recovering the fragment's real protocol or
+    /// performing 255 table lookups.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn has_unknown_protocol_translation_match_scoped(
+        &self,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> bool {
+        let fragment_sentinel = u16::from(crate::session::SHIM_PROTO_FRAGMENT_NO_L4);
+        let mut configured_protocols = [0u64; 4];
+        for key in self.entries.keys() {
+            if key.protocol < fragment_sentinel
+                && key.dst_ip == dst_ip
+                && key.dst_port == dst_port
+            {
+                let protocol = key.protocol as usize;
+                configured_protocols[protocol / 64] |= 1u64 << (protocol % 64);
+            }
+        }
+        for (key, slots) in &self.prefix_entries {
+            if key.protocol < fragment_sentinel
+                && key.dst_port == dst_port
+                && slots.iter().any(|slot| slot.contains(dst_ip))
+            {
+                let protocol = key.protocol as usize;
+                configured_protocols[protocol / 64] |= 1u64 << (protocol % 64);
+            }
+        }
+        let matches_protocol = |protocol| {
+            self.lookup_with_counter_scoped(
+                protocol,
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+                packet_icmp,
+            )
+            .is_some()
+        };
+        let mut wildcard_probe_done = false;
+        for protocol in 0..usize::from(fragment_sentinel) {
+            let configured = configured_protocols[protocol / 64] & (1u64 << (protocol % 64)) != 0;
+            if configured || !wildcard_probe_done {
+                if matches_protocol(protocol as u8) {
+                    return true;
+                }
+                wildcard_probe_done |= !configured;
+            }
+        }
+        false
+    }
+
 
     #[allow(clippy::too_many_arguments)]
     fn match_entries(

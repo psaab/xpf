@@ -570,6 +570,17 @@ sync.
     default policy (fail-closed drop) until the deferred
     fragment-association-cache stage of the #3291 plan carries the first
     fragment's verdict; tracked as the deferred fragment-association-cache stage of #3291.
+    The #10660 MissingNeighbor gate runs before the neighbor
+    probe/seed/buffer: an unassociated non-first fragment is dropped and
+    counted as `nat_frag_untranslated_dropped` when a live forward NAT
+    session's reverse identity matches the tail or a matching source-NAT
+    rule has L4 selectors satisfied by the fragment's known attributes.
+    Native protocol 255 is an unknown-protocol wildcard for protocol selectors,
+    never recovered; missing L4 ports cannot satisfy port constraints. A
+    blanket-only rule without a live session is intentionally not sufficient,
+    because raw IPsec/passthrough is indistinguishable; that residual is
+    tracked as #10957. Plain no-NAT fragments still use the normal
+    buffer-and-retry path.
   - **#5467 — egress `filter output` on the flowless TX path:** the #3291 gate
     above enforces the INGRESS input filter / PBR / zone policy on a flowless
     packet, but the EGRESS interface `filter output` was evaluated only on the

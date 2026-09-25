@@ -434,26 +434,45 @@ pub(super) fn flowless_fragment_requires_nat_translation(
             | crate::nptv6::Nptv6Translation::Untranslatable => return true,
         }
     }
-    if !forwarding.dnat_table.is_empty()
-        && forwarding
-            .dnat_table
-            .lookup_with_counter_scoped(
-                meta.protocol,
-                l3_flow.src_ip,
-                l3_flow.dst_ip,
-                // No L4 ports on a non-first fragment → 0. A port-wildcard
-                // (address-only) DNAT rule still matches; a port-specific one
-                // does not (documented residual).
-                0,
-                0,
-                scope.zone_name,
-                scope.ifname,
-                scope.routing_instance,
-                None,
-            )
-            .is_some()
-    {
-        return true;
+    if !forwarding.dnat_table.is_empty() {
+        // The native-fragment 255 protocol is unknown, not a concrete DNAT
+        // protocol. Probe the configured concrete-protocol buckets and the
+        // protocol-agnostic fallback without attempting protocol recovery.
+        let dnat_match = if meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4 {
+            forwarding
+                .dnat_table
+                .has_unknown_protocol_translation_match_scoped(
+                    l3_flow.src_ip,
+                    l3_flow.dst_ip,
+                    // No L4 ports on a non-first fragment → 0. A
+                    // port-wildcard (address-only) DNAT rule still matches; a
+                    // port-specific one does not (documented residual).
+                    0,
+                    0,
+                    scope.zone_name,
+                    scope.ifname,
+                    scope.routing_instance,
+                    None,
+                )
+        } else {
+            forwarding
+                .dnat_table
+                .lookup_with_counter_scoped(
+                    meta.protocol,
+                    l3_flow.src_ip,
+                    l3_flow.dst_ip,
+                    0,
+                    0,
+                    scope.zone_name,
+                    scope.ifname,
+                    scope.routing_instance,
+                    None,
+                )
+                .is_some()
+        };
+        if dnat_match {
+            return true;
+        }
     }
     if forwarding
         .static_nat
@@ -497,4 +516,54 @@ pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
         l3_flow.forward_key.routing_domain,
         now_ns,
     )
+}
+
+/// #10660: before parking a permitted non-first fragment on a neighbor miss,
+/// check the two reliable signs that the untranslated decision cannot be used:
+/// an existing forward NAT session whose reverse identity is this tail, or a
+/// matching source-NAT rule with L4 selectors whose known fragment attributes
+/// pass. Blanket rules without a session are intentionally not sufficient;
+/// their ambiguous IPsec/passthrough case remains tracked as #10957.
+#[cold]
+#[inline(never)]
+pub(super) fn flowless_fragment_missing_neighbor_requires_nat_translation(
+    forwarding: &ForwardingState,
+    sessions: &crate::session::SessionTable,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+    now_ns: u64,
+) -> bool {
+    if session_gated_reverse_fragment_requires_nat_translation(sessions, l3_flow, meta, now_ns) {
+        return true;
+    }
+    let from_zone = forwarding
+        .zone_id_to_name
+        .get(&from_zone_id)
+        .map(String::as_str)
+        .unwrap_or("");
+    let to_zone = forwarding
+        .zone_id_to_name
+        .get(&to_zone_id)
+        .map(String::as_str)
+        .unwrap_or("");
+    let scope = super::super::forwarding::nat_scope_ctx_for_flow(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        egress_ifindex,
+        l3_flow.forward_key.routing_domain,
+    );
+    forwarding.source_nat_rules.iter().any(|rule| {
+        rule.matches_scoped_l4_non_first_fragment(
+            &scope,
+            from_zone,
+            to_zone,
+            l3_flow.src_ip,
+            l3_flow.dst_ip,
+            meta.protocol,
+        )
+    })
 }

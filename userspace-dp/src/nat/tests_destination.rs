@@ -52,6 +52,48 @@ fn dnat_basic_lookup_tcp() {
     );
 }
 
+#[test]
+fn dnat_unknown_fragment_protocol_matches_concrete_rule_10674() {
+    let table = DnatTable::from_snapshots(
+        &[DestinationNATRuleSnapshot {
+            name: "udp-service".to_string(),
+            destination_address: "203.0.113.10".to_string(),
+            destination_port: 0,
+            protocol: "udp".to_string(),
+            pool_address: "192.168.1.10".to_string(),
+            ..DestinationNATRuleSnapshot::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+
+    assert!(
+        table.has_unknown_protocol_translation_match_scoped(
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.10".parse().unwrap(),
+            0,
+            0,
+            "",
+            "",
+            "",
+            None,
+        ),
+        "native protocol 255 is unknown: a concrete UDP address-only DNAT rule must be considered"
+    );
+    assert!(
+        !table.has_unknown_protocol_translation_match_scoped(
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.11".parse().unwrap(),
+            0,
+            0,
+            "",
+            "",
+            "",
+            None,
+        ),
+        "the unknown-protocol probe must remain address-qualified"
+    );
+}
+
 // #4074 FAIL-ON-REVERT: an UNSCOPED pool DNAT rule (no `match destination-port`)
 // whose pool carries a `port` must NOT attach that port to a port-less ICMP
 // flow. `validateDNATPoolStrict` does not require a destination-port, so such a
