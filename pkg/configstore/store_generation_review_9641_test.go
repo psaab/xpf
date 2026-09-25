@@ -29,6 +29,12 @@ func TestRetainedGenerationResolvesASlotWithRetiredSyntax9641(t *testing.T) {
 		t.Fatalf("FIXTURE: write the old slot: %v", err)
 	}
 
+	// This models a pre-generation store: old rollback text has no generation
+	// sidecar, so new readers must keep the legacy slot-loading path.
+	if err := os.Remove(s.rollbackMetadataPath()); err != nil {
+		t.Fatalf("FIXTURE: remove generation sidecar: %v", err)
+	}
+
 	restarted := newTestStoreAt(t, path)
 	if err := restarted.Load(); err != nil {
 		t.Fatalf("Load: %v", err)

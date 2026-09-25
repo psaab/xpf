@@ -1479,6 +1479,11 @@ func (s *Store) saveRollbackFiles() {
 	}
 
 	entries := s.history.List() // most-recent-first
+	previousGeneration, _, _, _ := s.readRollbackMetadataSnapshot()
+	generation := previousGeneration + 1
+	if generation == 0 {
+		generation = 1
+	}
 	metadata := make([]rollbackSlotMetadataEntry, len(entries))
 	degraded := false
 	for i, entry := range entries {
@@ -1533,16 +1538,17 @@ func (s *Store) saveRollbackFiles() {
 			degraded = true
 		}
 		metadata[i] = rollbackSlotMetadataEntry{
-			Hash:      rollbackSlotHash(data),
-			Device:    identity.Device,
-			Inode:     identity.Inode,
-			ModTime:   identity.ModTime,
-			Timestamp: entry.Timestamp,
-			Comment:   entry.Comment,
+			Hash:       rollbackSlotHash(data),
+			Device:     identity.Device,
+			Inode:      identity.Inode,
+			ModTime:    identity.ModTime,
+			Timestamp:  entry.Timestamp,
+			Comment:    entry.Comment,
+			Generation: generation,
 		}
 	}
 	s.cleanupRollbackFiles(len(entries) + 1)
-	if err := s.writeRollbackMetadata(metadata); err != nil {
+	if err := s.writeRollbackMetadataGeneration(generation, metadata); err != nil {
 		slog.Warn("failed to write rollback metadata", "path", s.rollbackMetadataPath(), "err", err)
 		degraded = true
 	}
@@ -1598,120 +1604,96 @@ func (s *Store) loadRollbackHistory() {
 	}
 
 	var entries []*HistoryEntry
-	metadata := s.readRollbackMetadata()
+	generation, metadataActiveHash, metadataActiveIdentity, metadata := s.readRollbackMetadataSnapshot()
+	currentActiveHash, currentActiveIdentity, currentActiveOK := s.rollbackActiveBindingFromDisk()
+	generationMismatch := generation != 0 && metadataActiveIdentity.Inode != 0 && currentActiveOK &&
+		(metadataActiveHash != currentActiveHash ||
+			metadataActiveIdentity.Device != currentActiveIdentity.Device ||
+			metadataActiveIdentity.Inode != currentActiveIdentity.Inode ||
+			!metadataActiveIdentity.ModTime.Equal(currentActiveIdentity.ModTime))
 	for i := 1; i <= s.history.MaxSize(); i++ {
 		path := s.rollbackPath(i)
 		// #8597 (muse-004 K70): bounded, like every other authoritative read in
 		// this package.
 		data, err := ReadBoundedFile(path, MaxConfigSize)
 		if err != nil {
-			// #3441 L2: stop only at a genuinely missing slot (the
-			// contiguous-sequence terminator). A transient/permission
-			// error on an intermediate slot must NOT drop all the later
-			// readable slots — log and continue so the rest of the
-			// history still loads.
+			// A genuinely missing slot terminates the contiguous history.
 			if os.IsNotExist(err) {
 				break
 			}
-			// #4810: continuing must NOT bare-skip this slot — appending
-			// nothing here collapses every LATER slot's position in
-			// `entries` down by one. Since position maps 1:1 onto the
-			// user-facing `rollback N` index (History.Get(N-1)), that
-			// silently redirected `rollback N` to slot N+1's config.
-			// Push a tombstone (nil Config) so the position is preserved;
-			// rollbackEntry() rejects a tombstone with a clear error
-			// instead of ever returning the wrong generation.
+			// #4810: do not collapse later positions after an unreadable slot.
 			slog.Warn("error reading rollback file, continuing", "path", path, "err", err)
 			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
 			continue
 		}
+
 		slotTimestamp := time.Now()
 		slotComment := ""
 		identity, identityOK := rollbackSlotIdentityForPath(path)
+		metadataValid := false
 		if ts, comment, ok := rollbackMetadataForSlot(metadata, i-1, data, identity, identityOK); ok {
-			slotTimestamp = ts
-			slotComment = comment
+			metadataValid = generation == 0 ||
+				(i-1 < len(metadata) && metadata[i-1].Generation == generation)
+			if metadataValid {
+				slotTimestamp = ts
+				slotComment = comment
+			}
 		}
-		// #5557: bound a rollback slot the same way every other parse
-		// entry point is bounded (LoadOverride/LoadMerge/LoadSet/SyncApply
-		// via checkConfigSize). loadRollbackHistory reads straight off disk
-		// and would otherwise hand an unbounded payload to the parser at
-		// boot — a local-root-planted or corrupt oversized slot could
-		// exhaust memory before the daemon even finishes starting. Tombstone
-		// the slot (preserving later slots' `rollback N` positions, per the
-		// #4810 invariant above) rather than parse it.
+		// A changed active hash or file identity means the sidecar predates the
+		// active generation, so every old numbered slot may now occupy the wrong index.
+		// Otherwise verify each slot independently: an unreadable or corrupt slot
+		// must not hide later entries whose metadata still matches their files.
+		if generationMismatch || (generation != 0 && !metadataValid) {
+			slog.Warn("rollback slot does not match its saved generation; refusing this slot",
+				"path", path, "slot", i, "generation", generation)
+			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
+			continue
+		}
+		if generation == 0 {
+			if !metadataValid && identityOK {
+				slotTimestamp = identity.ModTime
+			}
+		}
+
+		// #5557: bound a rollback slot the same way every other parse entry
+		// point is bounded. Keep an oversized slot position but tombstone it.
 		if len(data) > MaxConfigSize {
 			slog.Warn("rollback file exceeds max config size, skipping",
 				"path", path, "bytes", len(data), "max", MaxConfigSize)
 			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
-		// #10296: a power cut can leave a rollback slot zero-length, and
-		// hand-edited/partially-written whitespace has the same parser shape.
-		// Keep the slot position but tombstone it; an empty rollback target
-		// must never be offered as a healthy config that can wipe active state.
+		// #10296: empty files and whitespace-only files are not valid rollback
+		// targets; keeping their position prevents a later slot from shifting.
 		if len(bytes.TrimSpace(data)) == 0 {
 			slog.Warn("skipping empty rollback file", "path", path)
 			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 
-		// #7176 (C179-056): an explicit tombstone written by saveRollbackFiles.
-		//
-		// THIS CHECK IS DIAGNOSTIC, NOT A CORRECTNESS GUARD, and the mutation
-		// matrix is how I know: deleting it changes no outcome. The marker ends
-		// in a stray "}", so a loader that falls through to the parser gets a
-		// parse error and tombstones the slot via the corrupt-file branch below
-		// — the same result. What this buys is the LOG: an operator seeing
-		// "corrupt rollback file" on every boot cannot tell a recorded tombstone
-		// from a slot that needs investigating.
-		//
-		// The safety property lives entirely in the marker's CONTENT, and it is
-		// load-bearing there. A bare "# xpf-rollback-tombstone" comment parses
-		// with ZERO errors into an EMPTY config (measured), so without the
-		// trailing brace a reader predating this check would present the slot as
-		// a healthy empty configuration and `rollback N` would WIPE the config
-		// rather than return the wrong generation — the fix making the bug
-		// worse. TestTombstoneMarkerFailsToParse_7176 binds that, and it is the
-		// cell to keep if this check is ever removed.
+		// #7176: a recorded tombstone is distinct from an unrecorded parse
+		// failure for diagnostics. Its malformed brace also protects older
+		// readers that do not recognize the explicit marker.
 		if bytes.HasPrefix(data, []byte(rollbackTombstoneMarkerPrefix)) {
 			slog.Info("rollback slot is a recorded tombstone", "path", path)
 			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
-		parser := config.NewParser(string(data))
-		tree, errs := parser.Parse()
+		tree, errs := config.NewParser(string(data)).Parse()
 		if len(errs) > 0 {
-			// Log POSITION only (#4690, mirroring the #4099 rescue-path
-			// invariant): config.ParseError.Error() embeds ParseError.Message,
-			// which the lexer/parser can populate with the OFFENDING TOKEN
-			// VALUE (e.g. an unterminated `pre-shared-key "SECRET…`). Forwarding
-			// errs[0] / the ParseError text would echo secret file content into
-			// the log. Line/Column are ints and cannot hold a token.
-			//
-			// #4810: same positional-integrity reasoning as the read-error
-			// branch above — a corrupt-but-readable slot also tombstones
-			// rather than shifting later slots' indices.
+			// Log POSITION only (#4690, #4099); parser messages may contain
+			// secret-bearing token values from a corrupt rollback file.
 			slog.Warn("skipping corrupt rollback file",
 				"path", path, "line", errs[0].Line, "column", errs[0].Column)
 			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
-		// #10296: comment-only files also parse successfully into an empty
-		// tree. Treat every parser-empty result as a tombstone, not a healthy
-		// rollback target, so `rollback N` cannot replace active with nothing.
 		if tree == nil || len(tree.Children) == 0 {
 			slog.Warn("skipping empty rollback configuration", "path", path)
 			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 
-		if ts, comment, ok := rollbackMetadataForSlot(metadata, i-1, data, identity, identityOK); ok {
-			slotTimestamp = ts
-			slotComment = comment
-		} else if identityOK {
-			slotTimestamp = identity.ModTime
-		}
 		entries = append(entries, &HistoryEntry{
 			Config:    tree,
 			Timestamp: slotTimestamp,
@@ -1719,7 +1701,7 @@ func (s *Store) loadRollbackHistory() {
 		})
 	}
 
-	// Push oldest-first so History ordering is correct
+	// Push oldest-first so History ordering is correct.
 	for i := len(entries) - 1; i >= 0; i-- {
 		s.history.Push(entries[i])
 	}

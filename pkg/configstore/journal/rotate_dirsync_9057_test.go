@@ -83,6 +83,41 @@ func TestJournalRotateReportsDirSyncFailure9057(t *testing.T) {
 	}
 }
 
+// TestJournalRotationSyncSurvivesPostRotateOpenFailure10723 pins the failure
+// after namespace mutation: a failed append must not discard the rotated fact
+// or defer the directory barrier until a later append.
+func TestJournalRotationSyncSurvivesPostRotateOpenFailure10723(t *testing.T) {
+	// RED-on-revert: losing the rotated fact skips the only directory sync after
+	// an open failure, leaving the renamed segment vulnerable across a crash.
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".config.journal")
+	j := New(path, WithMaxSegmentBytes(1))
+	mustLogJournal9057(t, j)
+
+	openErr := errors.New("injected post-rotation open failure")
+	j.openFile = func(string, int, os.FileMode) (*os.File, error) {
+		return nil, openErr
+	}
+	var synced []string
+	j.syncDir = func(d string) error {
+		synced = append(synced, d)
+		return nil
+	}
+
+	err := j.Log(&Entry{Action: "commit", Detail: "must rotate"})
+	if !errors.Is(err, openErr) {
+		t.Fatalf("Log error = %v, want the injected append-open failure", err)
+	}
+	if len(synced) != 1 || synced[0] != filepath.Dir(path) {
+		t.Fatalf("post-rotation append failure synced dirs %v, want [%q]",
+			synced, filepath.Dir(path))
+	}
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("rotation did not leave segment .1: %v", err)
+	}
+}
+
+
 func mustLogJournal9057(t *testing.T, j *Journal) {
 	t.Helper()
 	if err := j.Log(&Entry{Action: "commit", Detail: "seed"}); err != nil {

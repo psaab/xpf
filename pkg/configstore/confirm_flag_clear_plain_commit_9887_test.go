@@ -279,11 +279,15 @@ func TestRemovalRetryNeverDeletesLiveRecordOnTransientReadError_9887(t *testing.
 			"outstanding (writeConfirmState clears arm/read-failure flags, not removal debt)")
 	}
 	// Capture the live record's identity from the raw bytes (reads are faulted,
-	// so ReadConfirm is unusable). maybeDecryptTreeJSON keeps this correct
-	// whether or not the test DB encrypts.
+	// so ReadConfirm is unusable). Strip the outer format marker before decrypt,
+	// matching ReadConfirm's decode order.
 	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), ".configdb", "confirm.json"))
 	if err != nil {
 		t.Fatalf("PREMISE: the live record file must exist: %v", err)
+	}
+	raw, err = stripConfirmEnvelope(raw)
+	if err != nil {
+		t.Fatalf("PREMISE: strip live record envelope: %v", err)
 	}
 	raw, _, err = s.db.maybeDecryptTreeJSON(raw, nil)
 	if err != nil {

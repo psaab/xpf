@@ -46,13 +46,13 @@ func TestLoadRescueConfigRedactedFailClosedOnParseError(t *testing.T) {
 		t.Fatalf("write rescue.conf: %v", err)
 	}
 
-	// Independently derive the raw parser error the OLD code forwarded, so the
-	// RED-on-revert assertion is exact and parser-agnostic.
+	// Independently derive the parser's detailed diagnostic, which the OLD code
+	// forwarded (including its offending-character detail).
 	_, perrs := config.NewParser(malformed).Parse()
 	if len(perrs) == 0 {
 		t.Fatalf("test setup: malformed rescue.conf parsed cleanly; adjust the fixture")
 	}
-	rawDetail := perrs[0].Error()
+	rawDetail := perrs[0].Message
 
 	out, err := s.LoadRescueConfigRedacted()
 	if err == nil {

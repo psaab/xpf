@@ -2,7 +2,10 @@ package config
 
 import "fmt"
 
-// ParseError represents a configuration parse error with location.
+// ParseError represents a configuration parse error with location. Message is
+// retained for trusted, programmatic diagnostics; Error deliberately exposes
+// only the position because parser messages can contain bytes from the
+// configuration being parsed (which may include credentials).
 type ParseError struct {
 	Line    int
 	Column  int
@@ -10,7 +13,7 @@ type ParseError struct {
 }
 
 func (e ParseError) Error() string {
-	return fmt.Sprintf("line %d, column %d: %s", e.Line, e.Column, e.Message)
+	return fmt.Sprintf("line %d, column %d", e.Line, e.Column)
 }
 
 // maxParseDepth caps recursive-descent block nesting. parseStatement recurses

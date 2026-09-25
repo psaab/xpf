@@ -40,6 +40,7 @@ package journal
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -226,6 +227,9 @@ type Journal struct {
 	// an outcome-only assertion cannot see a directory fsync that did not
 	// happen — fsync leaves no artifact. Defaults to fsatomic.SyncDir.
 	syncDir func(string) error
+	// openFile is the append open seam. It lets tests inject a failure after a
+	// rotation and prove that the rotated namespace still gets fsynced.
+	openFile func(string, int, os.FileMode) (*os.File, error)
 	// inflight counts appends whose bytes are written but whose fsync has
 	// not completed yet, keyed by the INODE they were written to (#7174
 	// C06). Guarded by j.mu. Key 0 is the sentinel for "inode could not be
@@ -268,6 +272,7 @@ func New(path string, opts ...Option) *Journal {
 		maxSegments:     DefaultMaxSegments,
 		syncFile:        (*os.File).Sync,
 		syncDir:         fsatomic.SyncDir,
+		openFile:        os.OpenFile,
 		inflight:        make(map[uint64]int),
 	}
 	for _, o := range opts {
@@ -435,6 +440,15 @@ func (j *Journal) Log(entry *Entry) error {
 
 	f, ino, created, rotated, err := j.appendLocked(data)
 	if err != nil {
+		if created || rotated {
+			syncdir := j.syncDir
+			if syncdir == nil {
+				syncdir = fsatomic.SyncDir
+			}
+			if dirErr := syncdir(filepath.Dir(j.path)); dirErr != nil {
+				return errors.Join(err, fmt.Errorf("sync journal dir after failed append: %w", dirErr))
+			}
+		}
 		return err
 	}
 	defer f.Close()
@@ -496,7 +510,7 @@ func (j *Journal) appendLocked(data []byte) (f *os.File, ino uint64, created, ro
 
 	rotated, err = j.maybeRotateLocked()
 	if err != nil {
-		return nil, 0, false, false, err
+		return nil, 0, false, rotated, err
 	}
 
 	if _, statErr := os.Stat(j.path); os.IsNotExist(statErr) {
@@ -547,19 +561,23 @@ func (j *Journal) appendLocked(data []byte) (f *os.File, ino uint64, created, ro
 	// itself now gets a clear error instead of silent indirection. Symlinking
 	// the journal DIRECTORY still works — O_NOFOLLOW only constrains the final
 	// component.
-	f, err = os.OpenFile(j.path, os.O_APPEND|os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	openFile := j.openFile
+	if openFile == nil {
+		openFile = os.OpenFile
+	}
+	f, err = openFile(j.path, os.O_APPEND|os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
-		return nil, 0, false, false, fmt.Errorf("open journal: %w", err)
+		return nil, 0, created, rotated, fmt.Errorf("open journal: %w", err)
 	}
 	fi, statErr := f.Stat()
 	if statErr != nil {
 		f.Close()
-		return nil, 0, false, false, fmt.Errorf("stat journal after open: %w", statErr)
+		return nil, 0, created, rotated, fmt.Errorf("stat journal after open: %w", statErr)
 	}
 	if !fi.Mode().IsRegular() {
 		mode := fi.Mode()
 		f.Close()
-		return nil, 0, false, false, fmt.Errorf(
+		return nil, 0, created, rotated, fmt.Errorf(
 			"journal path %s is not a regular file (mode %s) — refusing to append the "+
 				"audit journal into it", j.path, mode)
 	}
@@ -583,7 +601,7 @@ func (j *Journal) appendLocked(data []byte) (f *os.File, ino uint64, created, ro
 
 	if _, writeErr := f.Write(buf); writeErr != nil {
 		f.Close()
-		return nil, 0, false, false, fmt.Errorf("write journal entry: %w", writeErr)
+		return nil, 0, created, rotated, fmt.Errorf("write journal entry: %w", writeErr)
 	}
 	// #7174 C06: registered under j.mu, released by Log after the fsync. The
 	// registration has to happen HERE, before the lock is dropped, or a
@@ -671,17 +689,27 @@ func (j *Journal) maybeRotateLocked() (bool, error) {
 	if j.oldestSegmentHasInflightAppendLocked() {
 		return false, nil
 	}
-	if err := os.Remove(j.segmentPath(j.maxSegments)); err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("rotate journal: remove oldest segment: %w", err)
+	changed := false
+	if err := os.Remove(j.segmentPath(j.maxSegments)); err != nil {
+		if !os.IsNotExist(err) {
+			return false, fmt.Errorf("rotate journal: remove oldest segment: %w", err)
+		}
+	} else {
+		changed = true
 	}
 	for i := j.maxSegments - 1; i >= 1; i-- {
-		if err := os.Rename(j.segmentPath(i), j.segmentPath(i+1)); err != nil && !os.IsNotExist(err) {
-			return false, fmt.Errorf("rotate journal: shift segment %d: %w", i, err)
+		if err := os.Rename(j.segmentPath(i), j.segmentPath(i+1)); err != nil {
+			if !os.IsNotExist(err) {
+				return changed, fmt.Errorf("rotate journal: shift segment %d: %w", i, err)
+			}
+		} else {
+			changed = true
 		}
 	}
 	if err := os.Rename(j.path, j.segmentPath(1)); err != nil {
-		return false, fmt.Errorf("rotate journal: rotate current: %w", err)
+		return changed, fmt.Errorf("rotate journal: rotate current: %w", err)
 	}
+	changed = true
 	// The renamed segment inherits the current file's mode. New v2 files
 	// are 0600, but an un-migrated legacy 0644 current would carry
 	// world-read into the rotated (secret-bearing) segment; re-assert
@@ -693,7 +721,7 @@ func (j *Journal) maybeRotateLocked() (bool, error) {
 		j.permsDegraded = true
 		j.migrated = false
 	}
-	return true, nil
+	return changed, nil
 }
 
 // oldestSegmentHasInflightAppendLocked reports whether the segment the next
