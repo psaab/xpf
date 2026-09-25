@@ -340,9 +340,13 @@ const (
 	// v32 (#10683): bind-less VPNs publish their rendered selector pairs to
 	// the dataplane, which drops matching AF_XDP transit without relying on SA
 	// state. An older helper ignores these rows and continues sending matching
-	// cleartext because AF_XDP TX bypasses kernel XFRM. Exact equality refuses
-	// the mixed version rather than silently losing the fence.
-	ProtocolVersion = 32
+	// cleartext because AF_XDP TX bypasses kernel XFRM.
+	// v32 -> v33 (#10702): post-teardown apply refusals now carry a
+	// machine-readable kind. A v32 manager interprets the old free-text refusal
+	// as proof that the prior snapshot is retained and can leave ctrl enabled
+	// after workers are gone; exact equality refuses that unsafe mixed pairing
+	// before teardown.
+	ProtocolVersion = 33
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

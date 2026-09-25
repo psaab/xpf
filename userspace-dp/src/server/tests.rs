@@ -2457,7 +2457,9 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
 /// gen 2. Every assertion below flips.
 #[test]
 fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{
+        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX,
+    };
 
     // Prior snapshot deferred workers -> previous_defer_workers=true makes
     // same_plan_apply_needs_binding_reconcile return true on the next
@@ -2538,8 +2540,9 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
         "a post-teardown worker-spawn failure must report ok=false"
     );
     assert!(
-        !response.error.is_empty() && response.error.contains("worker spawn failed"),
-        "unexpected error: {}",
+        response.error.starts_with(SNAPSHOT_POST_TEARDOWN_PREFIX)
+            && response.error.contains("worker spawn failed"),
+        "post-teardown refusal must carry the machine-readable kind and diagnostic: {}",
         response.error
     );
 
@@ -2633,7 +2636,9 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
 /// all flip as ASSERTION failures.
 #[test]
 fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{
+        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX,
+    };
 
     // Prior snapshot: one binding interface (ge-0/0/1, ifindex 11). NOT
     // deferred — a normal prior apply. Its only role here is to make
@@ -2719,8 +2724,9 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         "a post-teardown worker-spawn failure on the full-apply leg must report ok=false"
     );
     assert!(
-        !response.error.is_empty() && response.error.contains("worker spawn failed"),
-        "unexpected error: {}",
+        response.error.starts_with(SNAPSHOT_POST_TEARDOWN_PREFIX)
+            && response.error.contains("worker spawn failed"),
+        "post-teardown refusal must carry the machine-readable kind and diagnostic: {}",
         response.error
     );
 

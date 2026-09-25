@@ -377,7 +377,10 @@ const (
 	// v31 -> v32 BUMPED (#10683): bind-less VPN selector pairs are published
 	// independently of SA/capture state, and an old helper would ignore the
 	// rows and keep forwarding matching cleartext through AF_XDP.
-	snapshotShapeVersion8892 = 32
+	// v32 -> v33 BUMPED (#10702): the snapshot fields and shape digest stay the
+	// same, but the refusal-kind interpretation changes, so the version moves to
+	// prevent a v32 manager from mistaking dead workers for retained state.
+	snapshotShapeVersion8892 = 33
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

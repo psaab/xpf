@@ -268,26 +268,33 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 	return resp, nil
 }
 
-// errHelperRejected marks an IN-BAND refusal: the helper decoded the request,
-// ran its handler (for apply_snapshot, the non-mutating integrity preflight)
-// and answered `{"ok":false}`. It is the ONLY error class from which "the
-// helper still holds the state it held before this request" follows.
+// errHelperRejected marks a normal IN-BAND refusal: the helper decoded the
+// request, refused it before teardown, and answered `{"ok":false}`. Only
+// these refusals prove the helper still holds its prior state. The explicit
+// #10702 post-teardown refusal is a separate class because the old workers are
+// already gone; its dataplane state is not retained and Go must fail closed.
 //
-// Every other failure of a control round trip — dial, write, response-decode,
-// EOF, deadline — leaves the helper's state UNKNOWN, and not merely in
-// principle: controlRoundtripDeadline exists because a fixed 3s deadline
-// "reported the apply FAILED while the dataplane had applied it live"
-// (requestDetailedLocked above). Treating that as "the helper kept the old
-// snapshot" is precisely the inversion that turns a fail-closed compensation
-// into a fail-open one, which is why #7468's atomic retain is gated on this
-// sentinel and not on `err != nil`.
-var errHelperRejected = errors.New("userspace helper rejected the request")
+// Every control-roundtrip failure without a response — dial, write,
+// response-decode, EOF, deadline — also leaves helper state UNKNOWN, and not
+// merely in principle: controlRoundtripDeadline exists because a fixed 3s
+// deadline once "reported the apply FAILED while the dataplane had applied it
+// live" (requestDetailedLocked above). Treating unknown outcome as retention is
+// precisely the inversion that turns fail-closed compensation into fail-open.
+var (
+	errHelperRejected     = errors.New("userspace helper rejected the request")
+	errHelperPostTeardown = errors.New("userspace helper refused after dataplane teardown")
+)
+
+// #10702: machine-readable Rust/Go lockstep marker for a refusal that follows
+// teardown. It deliberately does not match errHelperRejected: outcome handling
+// must retain retry debt and disable ctrl, never roll classifier maps back.
+const snapshotPostTeardownPrefix = "snapshot post-teardown refusal:"
 
 // Deterministic-local control failures: the request provably never reached the
 // helper (pre-transmission), so retry is futile and the failure must never adopt
 // retry-debt authority (#9642, isKnownUnsentFailure). Dial/write/deadline/EOF
 // failures are NOT in this class — the helper may hold content the manager never
-// saw accepted, so those adopt.
+// saw accepted.
 var (
 	errControlSocketNotConfigured = errors.New("userspace dataplane control socket not configured")
 	errControlRequestEncode       = errors.New("userspace control request encoding failed")
@@ -327,20 +334,34 @@ func isKnownUnsentFailure(err error) bool {
 	return errors.As(err, &unsent)
 }
 
-// helperRejectedError carries the helper's own message VERBATIM while matching
-// errHelperRejected under errors.Is.
+// helperRejectedError carries an ordinary helper refusal's message VERBATIM
+// while matching errHelperRejected. The post-teardown #10702 kind uses the
+// separate helperPostTeardownError so it cannot satisfy the retention gate.
 //
-// A wrapping fmt.Errorf("%w: %s", ...) would prepend a prefix to every in-band
-// refusal the helper can produce, changing operator-facing text on paths that
-// have nothing to do with #7468. The classification is new information about an
-// existing error, so it is added beside the message rather than in front of it.
+// A wrapping fmt.Errorf("%w: %s", ...) would prepend a prefix to refusals and
+// change operator-facing text. Classification is new information about an
+// existing error, so it is added beside the message rather than in front.
 type helperRejectedError struct{ msg string }
 
-func newHelperRejection(msg string) error { return &helperRejectedError{msg: msg} }
+func newHelperRejection(msg string) error {
+	if strings.HasPrefix(msg, snapshotPostTeardownPrefix) {
+		return &helperPostTeardownError{msg: msg}
+	}
+	return &helperRejectedError{msg: msg}
+}
 
 func (e *helperRejectedError) Error() string { return e.msg }
 
 func (e *helperRejectedError) Is(target error) bool { return target == errHelperRejected }
+
+// helperPostTeardownError preserves the Rust message but records that workers
+// were already torn down; outcome handling therefore fails closed and arms
+// retry debt instead of treating this as evidence that the old snapshot lives.
+type helperPostTeardownError struct{ msg string }
+
+func (e *helperPostTeardownError) Error() string { return e.msg }
+
+func (e *helperPostTeardownError) Is(target error) bool { return target == errHelperPostTeardown }
 
 // sessionSocketPathFor derives the helper's dedicated session socket without
 // reading Manager state. The watchdog publishes this path under m.mu and uses
