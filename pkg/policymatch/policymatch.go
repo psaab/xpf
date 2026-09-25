@@ -49,11 +49,15 @@
 package policymatch
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
@@ -62,6 +66,104 @@ import (
 
 // MaxPort is the largest valid TCP/UDP port number.
 const MaxPort = 65535
+
+const policyQuerySnapshotCacheCapacity = 16
+
+// policyQuerySnapshot contains immutable config-derived data used before each
+// query walks a tuple. A compiled *config.Config is immutable after publication,
+// so its pointer is the config-generation identity; dynamic feed prefixes are
+// separately keyed by their content digest.
+type policyQuerySnapshot struct {
+	rejectionReasons []string
+	policyIDs        map[[2]uint32]uint32
+}
+
+type policyQuerySnapshotEntry struct {
+	cfg          *config.Config
+	feedDigest   [sha256.Size]byte
+	snapshot     *policyQuerySnapshot
+}
+
+var policyQuerySnapshotCache struct {
+	sync.Mutex
+	entries []policyQuerySnapshotEntry
+}
+
+func feedOverlayDigest(overlay map[string][]string) [sha256.Size]byte {
+	if len(overlay) == 0 {
+		return sha256.Sum256(nil)
+	}
+	h := sha256.New()
+	names := make([]string, 0, len(overlay))
+	for name := range overlay {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var length [8]byte
+	writeCount := func(count int) {
+		binary.BigEndian.PutUint64(length[:], uint64(count))
+		_, _ = h.Write(length[:])
+	}
+	write := func(value string) {
+		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+		_, _ = h.Write(length[:])
+		_, _ = h.Write([]byte(value))
+	}
+	writeCount(len(names))
+	for _, name := range names {
+		write(name)
+		prefixes := overlay[name]
+		writeCount(len(prefixes))
+		for _, prefix := range prefixes {
+			write(prefix)
+		}
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
+}
+
+func querySnapshotFor(cfg *config.Config, overlay map[string][]string) (*policyQuerySnapshot, bool) {
+	digest := feedOverlayDigest(overlay)
+	policyQuerySnapshotCache.Lock()
+	for i, entry := range policyQuerySnapshotCache.entries {
+		if entry.cfg != cfg || entry.feedDigest != digest {
+			continue
+		}
+		// Keep recently used config generations resident in the bounded cache.
+		copy(policyQuerySnapshotCache.entries[1:i+1], policyQuerySnapshotCache.entries[0:i])
+		policyQuerySnapshotCache.entries[0] = entry
+		snapshot := entry.snapshot
+		policyQuerySnapshotCache.Unlock()
+		return snapshot, true
+	}
+	policyQuerySnapshotCache.Unlock()
+
+	snapshot := &policyQuerySnapshot{
+		rejectionReasons: policyContentRejectionReasons(cfg, overlay),
+		policyIDs:        dpuserspace.RuntimePolicyIDs(cfg),
+	}
+	policyQuerySnapshotCache.Lock()
+	// Another concurrent query may have built this exact generation while the
+	// lock was released; use the already-published immutable result in that case.
+	for i, entry := range policyQuerySnapshotCache.entries {
+		if entry.cfg == cfg && entry.feedDigest == digest {
+			copy(policyQuerySnapshotCache.entries[1:i+1], policyQuerySnapshotCache.entries[0:i])
+			policyQuerySnapshotCache.entries[0] = entry
+			cached := entry.snapshot
+			policyQuerySnapshotCache.Unlock()
+			return cached, true
+		}
+	}
+	policyQuerySnapshotCache.entries = append(policyQuerySnapshotCache.entries, policyQuerySnapshotEntry{})
+	copy(policyQuerySnapshotCache.entries[1:], policyQuerySnapshotCache.entries[:len(policyQuerySnapshotCache.entries)-1])
+	policyQuerySnapshotCache.entries[0] = policyQuerySnapshotEntry{cfg: cfg, feedDigest: digest, snapshot: snapshot}
+	if len(policyQuerySnapshotCache.entries) > policyQuerySnapshotCacheCapacity {
+		policyQuerySnapshotCache.entries = policyQuerySnapshotCache.entries[:policyQuerySnapshotCacheCapacity]
+	}
+	policyQuerySnapshotCache.Unlock()
+	return snapshot, false
+}
 
 // icmpProtoNum / icmpv6ProtoNum are the IANA protocol numbers for ICMP and
 // ICMPv6. They gate an ICMP-type-constrained application term (#3284) so it can
@@ -377,8 +479,8 @@ type Query struct {
 	// the actual address bytes: address CONTAINMENT still uses q.SrcIP/q.DstIP;
 	// the family only selects which family's rules/tokens the side is tested
 	// against.
-	SrcFamily string
-	DstFamily string
+	SrcFamily   string
+	DstFamily   string
 }
 
 // SelectorArgs is the parsed, VALIDATED result of a policy-simulator selector
@@ -1114,10 +1216,11 @@ func Match(cfg *config.Config, q Query) (res Result) {
 		// flags are present, ContentRejected wins DisplayAction precedence
 		// while UnsupportedTupleFamily and conservative Action remain intact.
 		if cfg != nil {
-			if reasons := policyContentRejectionReasons(cfg, q.FeedOverlay); len(reasons) > 0 {
+			snapshot, _ := querySnapshotFor(cfg, q.FeedOverlay)
+			if len(snapshot.rejectionReasons) > 0 {
 				defer func() {
 					res.ContentRejected = true
-					res.ContentRejectionReasons = reasons
+					res.ContentRejectionReasons = slices.Clone(snapshot.rejectionReasons)
 				}()
 			}
 		}
@@ -1162,22 +1265,26 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	// dpuserspace.PolicyContentRejectionReasons SSOT, feed-aware via q.FeedOverlay),
 	// BEFORE any per-tier / host-gate evaluation, so every query for the config
 	// reports the runtime's retention rather than a fabricated answer.
-	if reasons := policyContentRejectionReasons(cfg, q.FeedOverlay); len(reasons) > 0 {
-		return Result{ContentRejected: true, ContentRejectionReasons: reasons, Action: config.PolicyDeny}
+	snapshot, _ := querySnapshotFor(cfg, q.FeedOverlay)
+	if len(snapshot.rejectionReasons) > 0 {
+		return Result{
+			ContentRejected:         true,
+			ContentRejectionReasons: slices.Clone(snapshot.rejectionReasons),
+			Action:                  config.PolicyDeny,
+		}
 	}
 
-	// #3331: resolve the stable runtime policy-ID namespace once, up front, so a
-	// match can stamp Result.PolicyID. This is the SAME SSOT the dataplane write
-	// side and the `show policies` Index column use (RuntimePolicyIDs ->
-	// walkPolicyRuleSlots), keyed by [policySetID, sliceIndex] — the exact
-	// (set index, slice index) coordinates the tier loops below already iterate.
-	ids := dpuserspace.RuntimePolicyIDs(cfg)
+	// #3331: resolve the stable runtime policy-ID namespace once, up front. It
+	// is part of the cached query snapshot and matches the dataplane's ID walk.
+	ids := snapshot.policyIDs
+	var addressMemo addressExpansionMemo
+	addressMemoPtr := &addressMemo
 
 	// #3285: host-bound (LocalDelivery) traffic is governed by the dataplane's
 	// host gate, which does NOT apply transit global/default fallback. Branch
 	// before the transit tiers so that invariant cannot regress.
 	if q.ToZone == JunosHostZone {
-		return matchJunosHost(cfg, q, ids)
+		return matchJunosHostWithMemo(cfg, q, ids, addressMemoPtr)
 	}
 
 	// #3355: the runtime gates the ENTIRE transit block — exact zone-pair, the
@@ -1236,7 +1343,7 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	// #6576: the machinery now lives on the shared fragDenyTracker so the host
 	// walk (matchJunosHost) uses the SAME implementation instead of silently
 	// lacking one.
-	frag := newFragDenyTracker(cfg, q, ids)
+	frag := newFragDenyTrackerWithMemo(cfg, q, ids, addressMemoPtr)
 	noteFrag := frag.note
 	matchOr := frag.override
 
@@ -1251,7 +1358,7 @@ func Match(cfg *config.Config, q Query) (res Result) {
 			if pol == nil {
 				continue
 			}
-			if ruleMatches(cfg, q, pol) {
+			if ruleMatchesWithMemo(cfg, q, pol, addressMemoPtr) {
 				return matchOr(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx))
 			}
 			noteFrag(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
@@ -1281,7 +1388,7 @@ func Match(cfg *config.Config, q Query) (res Result) {
 			if pol == nil {
 				continue
 			}
-			if ruleMatches(cfg, q, pol) {
+			if ruleMatchesWithMemo(cfg, q, pol, addressMemoPtr) {
 				return matchOr(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx))
 			}
 			noteFrag(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
@@ -1297,7 +1404,7 @@ func Match(cfg *config.Config, q Query) (res Result) {
 			if pol == nil {
 				continue
 			}
-			if ruleMatches(cfg, q, pol) {
+			if ruleMatchesWithMemo(cfg, q, pol, addressMemoPtr) {
 				return matchOr(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx))
 			}
 			noteFrag(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
@@ -1325,7 +1432,7 @@ func Match(cfg *config.Config, q Query) (res Result) {
 		// never a joined label (#3331/#3148/#4626 A10).
 		gFrom := reportedScopeZone(pol.Match.FromZones, q.FromZone)
 		gTo := reportedScopeZone(pol.Match.ToZones, q.ToZone)
-		if ruleMatches(cfg, q, pol) {
+		if ruleMatchesWithMemo(cfg, q, pol, addressMemoPtr) {
 			return matchOr(matchedResult(ids, pol, true, gFrom, gTo, globalSetIdx, sliceIdx))
 		}
 		noteFrag(pol, true, gFrom, gTo, globalSetIdx, sliceIdx)
@@ -1356,7 +1463,12 @@ func Match(cfg *config.Config, q Query) (res Result) {
 // to-zone any` transit wildcards are deliberately NOT pulled onto the host
 // path, matching the runtime gate — only a global explicitly scoped to
 // `to-zone junos-host` is consulted.
-func matchJunosHost(cfg *config.Config, q Query, ids map[[2]uint32]uint32) Result {
+func matchJunosHostWithMemo(
+	cfg *config.Config,
+	q Query,
+	ids map[[2]uint32]uint32,
+	addressMemo *addressExpansionMemo,
+) Result {
 	// #3627 B1a: classify the ingress zone's host-inbound-traffic admission for
 	// this tuple ONCE and attach it to every Result this host path returns, so a
 	// host-inbound verdict names the admitting service/protocol token (or reports
@@ -1384,7 +1496,7 @@ func matchJunosHost(cfg *config.Config, q Query, ids map[[2]uint32]uint32) Resul
 	// non-first fragment carries no L4 header, exactly as the transit walk
 	// does — the host gate learned this in #6465 (policy.rs) and the Go mirror
 	// did not follow.
-	frag := newFragDenyTracker(cfg, q, ids)
+	frag := newFragDenyTrackerWithMemo(cfg, q, ids, addressMemo)
 
 	// Exact ingress -> junos-host.
 	for setIdx, zpp := range cfg.Security.Policies {
@@ -1395,7 +1507,7 @@ func matchJunosHost(cfg *config.Config, q Query, ids map[[2]uint32]uint32) Resul
 			if pol == nil {
 				continue
 			}
-			if ruleMatches(cfg, q, pol) {
+			if ruleMatchesWithMemo(cfg, q, pol, addressMemo) {
 				return withHI(frag.override(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)))
 			}
 			frag.note(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
@@ -1410,7 +1522,7 @@ func matchJunosHost(cfg *config.Config, q Query, ids map[[2]uint32]uint32) Resul
 			if pol == nil {
 				continue
 			}
-			if ruleMatches(cfg, q, pol) {
+			if ruleMatchesWithMemo(cfg, q, pol, addressMemo) {
 				return withHI(frag.override(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)))
 			}
 			frag.note(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
@@ -1439,7 +1551,7 @@ func matchJunosHost(cfg *config.Config, q Query, ids map[[2]uint32]uint32) Resul
 		}
 		gFrom := reportedScopeZone(pol.Match.FromZones, q.FromZone)
 		gTo := reportedScopeZone(pol.Match.ToZones, q.ToZone)
-		if ruleMatches(cfg, q, pol) {
+		if ruleMatchesWithMemo(cfg, q, pol, addressMemo) {
 			return withHI(frag.override(matchedResult(ids, pol, true, gFrom, gTo, globalSetIdx, sliceIdx)))
 		}
 		frag.note(pol, true, gFrom, gTo, globalSetIdx, sliceIdx)
@@ -1682,7 +1794,7 @@ func matchedResult(ids map[[2]uint32]uint32, pol *config.Policy, global bool, fr
 	}
 }
 
-func ruleMatches(cfg *config.Config, q Query, pol *config.Policy) bool {
+func ruleMatchesWithMemo(cfg *config.Config, q Query, pol *config.Policy, addressMemo *addressExpansionMemo) bool {
 	// #3104: scheduler gate, FIRST — mirror policy.rs try_match_rule, which
 	// returns None for a scheduler-inactive rule before any app/address
 	// matching. Skipping here lets Match fall through to the next active rule
@@ -1693,10 +1805,16 @@ func ruleMatches(cfg *config.Config, q Query, pol *config.Policy) bool {
 	if q.PolicyInactiveFn != nil && q.PolicyInactiveFn(pol.SchedulerName) {
 		return false
 	}
-	if !matchAddr(cfg, q.FeedOverlay, pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded, q.SrcIP, q.SrcFamily) {
+	if !matchAddrWithMemo(
+		cfg, q.FeedOverlay, pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded,
+		q.SrcIP, q.SrcFamily, addressMemo,
+	) {
 		return false
 	}
-	if !matchAddr(cfg, q.FeedOverlay, pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded, q.DstIP, q.DstFamily) {
+	if !matchAddrWithMemo(
+		cfg, q.FeedOverlay, pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded,
+		q.DstIP, q.DstFamily, addressMemo,
+	) {
 		return false
 	}
 	// #5572: a non-first fragment is flowless (l4_present == false) — port-bearing
@@ -1705,6 +1823,17 @@ func ruleMatches(cfg *config.Config, q Query, pol *config.Policy) bool {
 	// the fragment carries. The default (NonFirstFragment == false) passes
 	// l4Present == true, so the existing L4 path is byte-identical.
 	return matchApp(cfg, pol.Match.Applications, q.Protocol, q.SrcPort, q.DstPort, q.ICMPType, q.ICMPCode, !q.NonFirstFragment)
+}
+
+type resolvedAddressToken struct {
+	v4nets []*net.IPNet
+	v6nets []*net.IPNet
+	anyV4  bool
+	anyV6  bool
+}
+
+type addressExpansionMemo struct {
+	resolved map[string]resolvedAddressToken
 }
 
 // matchAddr replicates policy.rs try_match_rule's per-side address logic
@@ -1749,6 +1878,18 @@ func ruleMatches(cfg *config.Config, q Query, pol *config.Policy) bool {
 // SETS, not the packet family, so the #3023 cross-family + #2008 excluded
 // fail-closed semantics above are unchanged.
 func matchAddr(cfg *config.Config, overlay map[string][]string, addrs []string, excluded bool, ip net.IP, family string) bool {
+	return matchAddrWithMemo(cfg, overlay, addrs, excluded, ip, family, nil)
+}
+
+func matchAddrWithMemo(
+	cfg *config.Config,
+	overlay map[string][]string,
+	addrs []string,
+	excluded bool,
+	ip net.IP,
+	family string,
+	memo *addressExpansionMemo,
+) bool {
 	if ip == nil {
 		return true
 	}
@@ -1759,7 +1900,9 @@ func matchAddr(cfg *config.Config, overlay map[string][]string, addrs []string, 
 	v4Empty := true
 	v6Empty := true
 	for _, tok := range addrs {
-		v4nets, v6nets, anyV4, anyV6 := resolveToken(cfg, overlay, tok)
+		resolved := resolvePolicyAddressToken(cfg, overlay, tok, memo)
+		v4nets, v6nets := resolved.v4nets, resolved.v6nets
+		anyV4, anyV6 := resolved.anyV4, resolved.anyV6
 		if anyV4 || len(v4nets) > 0 {
 			v4Empty = false
 		}
@@ -1913,6 +2056,36 @@ func resolveToken(cfg *config.Config, overlay map[string][]string, tok string) (
 
 	addCIDRValue(tok, &v4nets, &v6nets, &anyV4, &anyV6)
 	return v4nets, v6nets, anyV4, anyV6
+}
+
+func resolvePolicyAddressToken(
+	cfg *config.Config,
+	overlay map[string][]string,
+	tok string,
+	memo *addressExpansionMemo,
+) resolvedAddressToken {
+	if tok == "" {
+		return resolvedAddressToken{}
+	}
+	if v4, v6, ok := config.PolicyAddressWildcardFamilies(tok); ok {
+		return resolvedAddressToken{anyV4: v4, anyV6: v6}
+	}
+	if memo == nil || !isBookName(cfg, overlay, tok) {
+		v4nets, v6nets, anyV4, anyV6 := resolveToken(cfg, overlay, tok)
+		return resolvedAddressToken{v4nets: v4nets, v6nets: v6nets, anyV4: anyV4, anyV6: anyV6}
+	}
+	if memo.resolved != nil {
+		if resolved, ok := memo.resolved[tok]; ok {
+			return resolved
+		}
+	}
+	v4nets, v6nets, anyV4, anyV6 := resolveToken(cfg, overlay, tok)
+	resolved := resolvedAddressToken{v4nets: v4nets, v6nets: v6nets, anyV4: anyV4, anyV6: anyV6}
+	if memo.resolved == nil {
+		memo.resolved = make(map[string]resolvedAddressToken)
+	}
+	memo.resolved[tok] = resolved
+	return resolved
 }
 
 // addCIDRValue parses one address value (CIDR, bare IP, "any", or a family
@@ -2399,14 +2572,20 @@ func fragDenyResult(ids map[[2]uint32]uint32, c fragDenyCandidate) Result {
 // For an ordinary L4 query q.NonFirstFragment is false, so every method is
 // inert and both walks are byte-identical to before.
 type fragDenyTracker struct {
-	cfg  *config.Config
-	q    Query
-	ids  map[[2]uint32]uint32
-	cand *fragDenyCandidate
+	cfg         *config.Config
+	q           Query
+	ids         map[[2]uint32]uint32
+	addressMemo *addressExpansionMemo
+	cand        *fragDenyCandidate
 }
 
-func newFragDenyTracker(cfg *config.Config, q Query, ids map[[2]uint32]uint32) *fragDenyTracker {
-	return &fragDenyTracker{cfg: cfg, q: q, ids: ids}
+func newFragDenyTrackerWithMemo(
+	cfg *config.Config,
+	q Query,
+	ids map[[2]uint32]uint32,
+	addressMemo *addressExpansionMemo,
+) *fragDenyTracker {
+	return &fragDenyTracker{cfg: cfg, q: q, ids: ids, addressMemo: addressMemo}
 }
 
 // note remembers the FIRST port-bearing DENY/REJECT this walk SKIPPED because
@@ -2416,7 +2595,7 @@ func (f *fragDenyTracker) note(pol *config.Policy, global bool, fromZone, toZone
 	if !f.q.NonFirstFragment || f.cand != nil || pol == nil {
 		return
 	}
-	if isSkippedFragDeny(f.cfg, f.q, pol) {
+	if isSkippedFragDenyWithMemo(f.cfg, f.q, pol, f.addressMemo) {
 		f.cand = &fragDenyCandidate{
 			pol: pol, global: global, fromZone: fromZone, toZone: toZone,
 			setIdx: setIdx, sliceIdx: sliceIdx,
@@ -2449,12 +2628,10 @@ func (f *fragDenyTracker) overridePermissiveTerminal(res Result) Result {
 	return res
 }
 
-// isSkippedFragDeny mirrors the dataplane's rule_is_skipped_frag_ambiguous_deny
-// (policy.rs #4569): is pol a port-bearing (L4-constrained) DENY/REJECT that a
-// flowless non-first fragment SKIPPED only because l4_present == false, and whose
-// L3 (source + destination address — the zone side is already fixed by the tier
-// the caller is walking) OVERLAPS the fragment? Only such a deny is remembered so
-// a later PERMIT can be failed closed. Returns true iff ALL hold:
+// isSkippedFragDenyWithMemo mirrors the Rust #4569 outcome: `try_match_rule`
+// returns `FragmentDenyOverlap` after an L4-constrained app miss and one L3
+// overlap check, then `note_skipped_frag_deny` records the outcome. This
+// simulator helper returns true iff ALL hold:
 //   - the policy is scheduler-active (mirrors rule.inactive);
 //   - its action is deny or reject (a permit is not a fail-open risk);
 //   - it carries an L4-constrained term for the fragment's protocol
@@ -2466,7 +2643,12 @@ func (f *fragDenyTracker) overridePermissiveTerminal(res Result) Result {
 //
 // A non-overlapping deny, a different-protocol deny, or a permit therefore leaves
 // the fragment on its normal (forward) path.
-func isSkippedFragDeny(cfg *config.Config, q Query, pol *config.Policy) bool {
+func isSkippedFragDenyWithMemo(
+	cfg *config.Config,
+	q Query,
+	pol *config.Policy,
+	addressMemo *addressExpansionMemo,
+) bool {
 	if q.PolicyInactiveFn != nil && q.PolicyInactiveFn(pol.SchedulerName) {
 		return false
 	}
@@ -2485,10 +2667,10 @@ func isSkippedFragDeny(cfg *config.Config, q Query, pol *config.Policy) bool {
 	// L3 overlap: the zone is fixed by the tier bucket, so only source +
 	// destination address overlap is checked (the same matchAddr the runtime uses
 	// via rule_l3_matches).
-	if !matchAddr(cfg, q.FeedOverlay, pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded, q.SrcIP, q.SrcFamily) {
+	if !matchAddrWithMemo(cfg, q.FeedOverlay, pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded, q.SrcIP, q.SrcFamily, addressMemo) {
 		return false
 	}
-	if !matchAddr(cfg, q.FeedOverlay, pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded, q.DstIP, q.DstFamily) {
+	if !matchAddrWithMemo(cfg, q.FeedOverlay, pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded, q.DstIP, q.DstFamily, addressMemo) {
 		return false
 	}
 	return true
