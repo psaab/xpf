@@ -72,26 +72,24 @@ func ipsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 // one), and a record made after the teardown would leave re-initiation, which does not
 // hold applySem, attributing against the PREVIOUS generation for the whole teardown.
 //
-// FAILED-RELOAD WINDOW (#9511 stopgap). Written clears the record the moment the
-// on-disk swanctl config changes, before the reload. If the reload then fails, charon
-// keeps running the previous generation, but the NEW file stays on disk, and
-// strongswan.service loads it on charon's own next start or reload (ExecStartPost and
-// ExecReload run `swanctl --load-all`, Restart=on-abnormal). A record still naming the
-// previous generation would then describe a config charon no longer runs, which is
-// worse than master. With the record cleared, attribution stops trusting it. A render
-// or write failure changes nothing on disk, so Written does not run and the previous
-// record stays, still matching both the file and charon.
+// FAILED-RELOAD WINDOW (#9511, disk rollback #10712). Written clears the record the
+// moment the on-disk swanctl config changes, before the reload. If the reload then fails,
+// charon keeps the previous generation and the manager restores the previous file before
+// returning; a later service start/reload cannot load the rejected candidate. The record
+// stays cleared conservatively through that transition, so attribution asks charon rather
+// than trusting a record that might describe a partial load. A render or write failure
+// changes nothing on disk, so Written does not run and the previous record stays, still
+// matching both the file and charon.
 //
 // GENERATION MARKER (#9641). The written file also names cfg's generation inside
 // charon (ipsecApplyGeneration: the store's digest when cfg is its active config).
 // While the record is empty, in this window or after an xpfd restart, attribution asks
 // charon which generation it loaded and validates the answer against charon's loaded
 // connections. When charon cannot tell, it falls back to the promoted config, the
-// generation charon will load next (ipsec_loaded_generation_9641.go). The apply is
-// bracketed (ipsecApplyActive, ipsecApplySeq) so a pass can tell that an apply
-// overlapped it, and Written remembers the generation it put on disk
-// (rememberWrittenIPsecGeneration) for a charon still running a tree the store has
-// since dropped.
+// generation used by attribution before #9641. The apply is bracketed
+// (ipsecApplyActive, ipsecApplySeq) so a pass can tell that an apply overlapped it, and
+// Written remembers the generation it put on disk (rememberWrittenIPsecGeneration) for
+// a charon still running a tree the store has since dropped.
 func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
 	d.ipsecApplyActive.Add(1)
 	d.ipsecApplySeq.Add(1)
@@ -123,10 +121,10 @@ func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
 //  3. otherwise the promoted config, which is what attribution read before #9641.
 //
 // The record comes first because it is exact whenever it is set: Written clears it as
-// soon as a new file is on disk, so a record names the file charon loaded and would
+// soon as a new file is on disk, so a record names the config charon loaded and would
 // reload. Asking charon costs two swanctl calls, so it is kept for the states with no
 // record: after an xpfd restart whose boot IPsec apply failed (charon still runs the
-// previous process's generation), and in the failed-reload window.
+// previous process's generation), and during a failed-reload window.
 //
 // A name the loaded generation does not render is ROUTINE, not anomalous. It happens
 // whenever the peer loaded a newer generation first (config-sync lag) or still

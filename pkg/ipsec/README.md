@@ -19,21 +19,22 @@ the apply path pays no fsync (the file is regenerated on every apply).
   whether the operator DELETED it (#3941) or it became UNRENDERABLE and was
   omitted from the render (#5494). **The returned error is
   load-bearing (#4433):** a render/write/`swanctl --load-all` failure leaves
-  the previously-loaded strongSwan config (the OLD tunnels) active, so the
-  commit path (`daemon_apply.go` step 6) MUST surface this error rather than
-  swallow it at WARN — otherwise a new config is reported committed while the
-  enforced IPsec runtime is stale. The daemon joins it into the
+  the previously-loaded strongSwan config (the OLD tunnels) active and restores
+  the prior swanctl file before returning (#10712), so a later service restart
+  cannot activate the rejected candidate. The commit path (`daemon_apply.go` step 6)
+  MUST surface this error rather than swallow it at WARN — otherwise a new config is
+  reported committed while the enforced IPsec runtime is stale. The daemon joins it into
   `applyConfigLocked` tail result alongside networkd / Kea / host-inbound /
   lo0 (fail-closed on commit); the config stays promoted + peer-synced and the
   remaining reconcile steps still run, so the operator sees a degraded-state
   error instead of a false success. **The empty-clear branch is symmetric
-  (#4898):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which now
-  RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
-  reported success). Promotion of `prevConnNames` and removed-SA termination are
-  gated on reload SUCCESS — a failed reload leaves the OLD config effective, so
-  the applied-name set is preserved and no SA is torn down, letting the next
-  successful Apply/Clear retry the diff + teardown. **A FAILED terminate is
-  also load-bearing (#6542):** the failed subset becomes teardown DEBT
+  (#4898/#10712):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which
+  now RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
+  reported success) and restores the prior file on reload failure. Promotion of
+  `prevConnNames` and removed-SA termination are gated on reload SUCCESS — a failed
+  reload leaves the OLD config effective, so the applied-name set is preserved and
+  no SA is torn down, letting the next successful Apply/Clear retry the diff + teardown.
+  **A FAILED terminate is also load-bearing (#6542):** the failed subset becomes teardown DEBT
   (`pendingTerminate`) that the next Apply folds back into its removed set,
   and Apply RETURNS the failure instead of reporting success over a stale SA
   that is still forwarding.
@@ -49,11 +50,12 @@ the apply path pays no fsync (the file is regenerated on every apply).
   at the two points where the on-disk swanctl config and what charon runs can diverge.
   `ApplyNotifyLoaded` is `ApplyWithHooks` with only `Loaded`.
   - `Written` runs once the on-disk config has CHANGED (the new file written, or removed
-    for an empty config) and BEFORE the reload. From then until a successful reload,
-    charon runs a generation that is not the file on disk, and its own next start or
-    reload (`strongswan.service` `ExecStartPost`/`ExecReload` `swanctl --load-all`) loads
-    the file. That is the #9511 stopgap window. It does not run on a render or write
-    failure.
+    for an empty config) and BEFORE the reload. Until the reload succeeds or a failed
+    reload restores the prior file (#10712), charon runs a generation that is not the
+    file on disk. The restore means a later service start/reload cannot load a config
+    whose reload failed. `Written` stays fired on that failure, so attribution
+    conservatively stops trusting its prior record and asks charon (#9511/#9641). It
+    does not run on a render or write failure.
   - `Loaded` runs the moment strongSwan has LOADED the config: right after the loaded
     connection set is promoted and before departed connections are torn down (#9511).
     It does not run on a failed reload, and it does run when the apply then returns

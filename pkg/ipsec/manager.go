@@ -4,6 +4,7 @@ package ipsec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -248,10 +249,13 @@ func (m *Manager) ApplyNotifyLoaded(ipsecCfg *config.IPsecConfig, loaded func())
 type ApplyHooks struct {
 	// Written runs once the on-disk swanctl config has CHANGED (the new file is
 	// written, or the file is removed for an empty config) and BEFORE the reload.
-	// From that moment until a successful reload, charon runs a generation that
-	// is not the file on disk, and its own next start or reload will load the file
-	// (#9511 stopgap). It does not run when render or write fails, because the
-	// previous file is still on disk.
+	// From that moment until the reload succeeds or the prior file is restored
+	// (#10712), charon runs a generation that is not the file on disk. A failed
+	// reload restores the prior file, so once the apply returns an error the disk
+	// again matches what charon runs — but Written has already fired and stays
+	// fired (conservative: the caller re-validates rather than trusting a record
+	// that may briefly have described the wrong generation). It does not run when
+	// render or write fails, because the previous file is still on disk.
 	Written func()
 	// Loaded runs once strongSwan has LOADED the config: right after the newly
 	// loaded connection set is promoted, before departed connections are torn down.
@@ -273,8 +277,9 @@ func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks)
 // path removes the file, so charon then lists no marker at all.
 //
 // A successful apply runs Written, then Loaded. A write followed by a failed reload
-// runs only Written. A render or write failure runs neither. Both run on the caller's
-// goroutine with no Manager lock held.
+// runs only Written, and the prior file is restored (#10712), so the disk again
+// matches the generation charon still runs. A render or write failure runs neither.
+// Both run on the caller's goroutine with no Manager lock held.
 func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation string, hooks ApplyHooks) error {
 	// loadedNames is the set of connections swanctl actually loaded on this
 	// apply. For the render path it is renderConfig's exact emitted set; for
@@ -361,6 +366,23 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 		return nil, fmt.Errorf("create config dir: %w", err)
 	}
 
+	// #10712: snapshot the prior file BEFORE replacing it. reload() runs
+	// `swanctl --load-all`, which reads this same live path, so the NEW file
+	// must be on disk when the reload runs — but if the reload fails, charon
+	// keeps the OLD generation while the NEW file would stay on disk, and
+	// charon's own next start or reload (strongswan.service ExecStartPost/
+	// ExecReload `swanctl --load-all`) would then load a config that was never
+	// successfully loaded. The snapshot lets the reload-failure path below
+	// restore the prior bytes, so disk again matches what charon runs.
+	prior, priorErr := os.ReadFile(m.configPath)
+	havePrior := true
+	if priorErr != nil {
+		if !os.IsNotExist(priorErr) {
+			return nil, fmt.Errorf("read prior config: %w", priorErr)
+		}
+		havePrior = false
+	}
+
 	// AtomicGeneratedConfig (#1894): regenerated on every apply — a
 	// torn file must never reach the strongSwan parser, but fsync is
 	// deliberately skipped on this hot apply path.
@@ -370,16 +392,20 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 
 	slog.Info("swanctl config written", "path", m.configPath)
 
-	// #9511 stopgap: the NEW file is on disk from here on. If the reload below
-	// fails, charon keeps the old generation, but its own next start or reload
-	// (strongswan.service ExecStartPost/ExecReload `swanctl --load-all`) loads
-	// this file. Tell the caller before reloading, so it stops trusting its
-	// record of the loaded generation.
+	// #9511: the NEW file is on disk from here until the reload below succeeds
+	// or the prior file is restored. Tell the caller before reloading, so it
+	// stops trusting its record of the loaded generation. On a reload failure
+	// the record stays cleared (conservative — attribution re-asks charon,
+	// #9641) even though the restore below returns the disk to the generation
+	// charon still runs.
 	if written != nil {
 		written()
 	}
 	if err := m.reload(); err != nil {
 		slog.Warn("swanctl reload failed", "err", err)
+		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
+			return nil, errors.Join(err, restoreErr)
+		}
 		return nil, err
 	}
 
@@ -395,15 +421,56 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 // would stay authorized and could re-initiate. This now mirrors applyConfig,
 // which already propagates reload errors (the #4433 contract).
 func (m *Manager) clearConfig(written func()) error {
+	// #10712: snapshot the prior file BEFORE removing it, mirroring applyConfig:
+	// if the reload below fails, charon still runs the OLD config, so the
+	// removed file must be restored — otherwise charon's own next start or
+	// reload would load NO xpf config while charon runs the old one.
+	prior, priorErr := os.ReadFile(m.configPath)
+	havePrior := true
+	if priorErr != nil {
+		if !os.IsNotExist(priorErr) {
+			return fmt.Errorf("read prior config: %w", priorErr)
+		}
+		havePrior = false
+	}
 	if err := os.Remove(m.configPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove config: %w", err)
 	}
-	// #9511 stopgap: the on-disk config no longer matches what charon runs; a
-	// charon restart or reload now loads no xpf config at all.
+	// #9511: the file is gone from here until the reload below succeeds or the
+	// prior file is restored. Tell the caller before reloading, so it stops
+	// trusting its record of the loaded generation (see applyConfig).
 	if written != nil {
 		written()
 	}
-	return m.reload()
+	if err := m.reload(); err != nil {
+		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
+			return errors.Join(err, restoreErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// restoreConfigAfterFailedReload returns the swanctl snippet to its pre-apply
+// state after a failed reload (#10712): the prior bytes when a file existed, or
+// no file when the apply would have created one. reload() reads the live path,
+// so the divergence window between the write and the restore cannot be closed
+// further here — but it is synchronous and short, and once the apply returns an
+// error the disk again matches the generation charon runs, so charon's own next
+// start or reload cannot pick up a config that was never successfully loaded.
+func (m *Manager) restoreConfigAfterFailedReload(prior []byte, havePrior bool) error {
+	if !havePrior {
+		if err := os.Remove(m.configPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove unloaded config after failed reload: %w", err)
+		}
+		slog.Info("swanctl reload failed; removed unloaded config", "path", m.configPath)
+		return nil
+	}
+	if err := fsatomic.WriteFileAtomic(m.configPath, prior, 0600); err != nil {
+		return fmt.Errorf("restore prior config after failed reload: %w", err)
+	}
+	slog.Info("swanctl reload failed; restored prior config", "path", m.configPath)
+	return nil
 }
 
 func (m *Manager) reload() error {

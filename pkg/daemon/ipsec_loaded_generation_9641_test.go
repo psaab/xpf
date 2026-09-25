@@ -179,10 +179,10 @@ func TestAttributionFollowsCharonsGenerationAfterARestart9641(t *testing.T) {
 }
 
 // THE FAILED-RELOAD WINDOW, end to end through applyIPsecTracked. C0 is applied and
-// loaded; C1 is promoted and written, and its reload FAILS. charon still runs C0, and the
-// marker it lists is read out of the file xpf wrote for C0, so the cell also binds the
-// apply's stamp. The #9511 stopgap alone answered with the promoted C1 here. Then charon's
-// own restart loads the file on disk (C1), and attribution follows it.
+// loaded; C1 is promoted and written, and its reload FAILS. charon still runs C0 and
+// manager.go restores C0's file before returning (#10712), so charon's own subsequent
+// start/reload continues to load C0. The marker it lists is read out of that file, so the
+// cell also binds the apply's stamp. The #9511 stopgap alone answered with promoted C1.
 func TestAttributionFollowsCharonThroughTheFailedReloadWindow9641(t *testing.T) {
 	store := storeWith9511(t, blueOnRG1_9511...)
 	ch := &charon9641{}
@@ -206,10 +206,10 @@ func TestAttributionFollowsCharonThroughTheFailedReloadWindow9641(t *testing.T) 
 	if !initiates9641(d, "blue-red") {
 		t.Error("in the window charon still runs C0, where blue-red is blue's RG1 child; an RG1 owner must initiate it")
 	}
-	ch.loadFile(t) // charon's own restart loads the file on disk
-	ch.conns = listBlue9641 + listBlueRed9641
-	if initiates9641(d, "blue-red") {
-		t.Error("charon loaded C1 from disk, where blue-red is ambiguous with RG2; an RG1-only owner must skip it")
+	ch.loadFile(t) // charon's own restart loads the restored C0 file
+	ch.conns = listBlue9641
+	if !initiates9641(d, "blue-red") {
+		t.Error("after a failed C1 reload and restart, charon still runs C0; an RG1 owner must initiate blue-red")
 	}
 }
 

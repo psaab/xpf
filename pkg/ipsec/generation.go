@@ -14,13 +14,14 @@ import (
 
 // GENERATION MARKER (#9641).
 //
-// HA IPsec re-initiation attributes each SA name the peer advertises against the xpf
-// config generation charon RUNS. The daemon's own record of that (#9511) is empty after
-// an xpfd restart until the first successful load, and it is cleared in the
-// failed-reload window, where charon's own start or reload can load the file that xpfd's
-// reload did not. So every swanctl config xpf WRITES names its generation inside charon,
-// as an unreferenced address pool `xpf-gen-<generation>`, and LoadedGeneration reads it
-// back.
+// HA IPsec re-initiation attributes each SA name the xpf config generation charon RUNS.
+// The daemon's own record of that (#9511) is empty after an xpfd restart until the first
+// successful load, and is cleared while an apply is in flight. On a failed reload,
+// manager.go restores the prior file (#10712), so a later service start/reload cannot
+// make the rejected candidate live. The marker still lets attribution identify what
+// charon actually runs when its in-process record is empty. So every swanctl config xpf
+// WRITES names its generation inside charon, as an unreferenced address pool
+// `xpf-gen-<generation>`, and LoadedGeneration reads it back.
 //
 // INERT. No connection references the pool (no `pools =` is ever rendered), so no IKE SA
 // can lease from it, and a pool is not a connection: charon cannot initiate or respond
