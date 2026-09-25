@@ -19,14 +19,13 @@ import (
 const unsupportedApplicationSentinel = "__unsupported__"
 
 // lenientDroppedConstraintToken is the synthetic offending-token label recorded
-// for a rule the lenient / HA-sync compile path poisons because the compiler
-// SILENTLY DROPPED a match / then-permit constraint (#5575) — a missing required
-// match dimension, an unsupported `match` leaf, or an unsupported `then permit`
-// modifier (config.Policy.LenientContentDropped). There is no single
-// unrepresentable token to name (the offending constraint was dropped, not left
-// behind), so this label stands in for collectPolicyContentRejections' #3376
-// per-side reason. It is a build-time diagnostic only, never emitted on the wire.
-const lenientDroppedConstraintToken = "lenient-dropped-match-or-then-permit-constraint"
+// for a policy the lenient / HA-sync compile path poisons because the compiler
+// silently dropped enforcement content (#5575, #11013, #11014). There is no
+// single unrepresentable token to name (the authored constraint was dropped,
+// not left behind), so this label stands in for
+// collectPolicyContentRejections' #3376 per-side reason. It is a build-time
+// diagnostic only, never emitted on the wire.
+const lenientDroppedConstraintToken = "lenient-dropped-policy-enforcement-constraint"
 
 // unsupportedAddressSentinel is the reserved address literal emitted in a policy
 // rule's source/destination address fields (#3261) when the userspace matcher

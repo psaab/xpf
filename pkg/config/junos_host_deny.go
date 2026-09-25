@@ -244,9 +244,9 @@ type junosHostTerm struct {
 	l4            []JunosHostDenyL4
 	appAny        bool
 	representable bool
-	// lenientDropped marks a PERMIT whose tolerant-path compile silently dropped
-	// a match / then-permit constraint (#5575 LenientContentDropped). Its empty
-	// dimension would resolve to `any` here, so it contributes nothing (#9572).
+	// lenientDropped marks a permit whose tolerant compile accepted only by
+	// dropping enforcement content (#5575/#11013/#11014 LenientContentDropped).
+	// The kernel projection must not turn that incomplete permit into an allow.
 	lenientDropped bool
 }
 
@@ -542,21 +542,15 @@ func containsZone(zs []string, z string) bool {
 // deny, reject and permit each keep their verdict in first-match order.
 func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[string]bool) junosHostTerm {
 	t := junosHostTerm{key: key, action: p.Action, representable: true}
-	// A #5575-poisoned PERMIT contributes no subtraction (#9572). The tolerant
-	// compile left a dimension it dropped EMPTY, and every resolver below reads
-	// an empty dimension as `any`: an omitted `application` became an
-	// application-any permit and an omitted `source-address` a permit for every
-	// source, so the permitAll arm erased every later deny from the kernel
-	// program. The userspace snapshot builder refuses the same policy
-	// (policies_lower.go), yet the daemon still installs this program from the
-	// refused config — and on the host-bound path this program IS the
-	// enforcement. The operator's real carve is unknowable from the dropped
-	// content, so the permit is skipped entirely: later denies render as
-	// authored, which can only drop MORE host-bound traffic than configured,
-	// never admit traffic a deny names. It is skipped before resolution, so an
-	// un-representable leftover dimension cannot empty the zone's program
-	// either. A poisoned DENY is not changed here: its empty dimension widens a
-	// DROP, the fail-closed direction.
+	// A LenientContentDropped permit has enforcement intent absent from the
+	// compiled policy: a match constraint may be missing, an unsupported then
+	// sibling may have been ignored, or a nested enforcement subtree may have
+	// been discarded. The userspace snapshot builder refuses the same policy,
+	// but this kernel projection is also active for host-bound traffic. Since
+	// the operator's intended permit scope is unknowable, skip the permit before
+	// resolution; any later deny rules remain authored and can only drop more
+	// traffic, never admit traffic that a configured deny names. A poisoned
+	// DENY is left intact because widening a DROP is the fail-closed direction.
 	if p.LenientContentDropped && p.Action == PolicyPermit {
 		t.lenientDropped = true
 		return t

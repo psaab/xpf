@@ -6,7 +6,7 @@ import "fmt"
 // the contiguous SAFE first phase extracted from compileExpanded as step 1 of
 // the #4406 god-orchestrator decomposition (ps-review-011 / codex-173 #4).
 //
-// It runs the ~22 AST-level validators/gates that must observe the
+// It runs the ~24 AST-level validators/gates that must observe the
 // group-expanded, inactive-pruned tree BEFORE section compilation, threads
 // their warnings in execution order, and returns the FIRST gate error (strict
 // paths return it; lenient paths downgrade to warnings via the opts.lenient*
@@ -509,6 +509,20 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #11013: security policies do not implement the firewall filter's
+	// `then next term` semantics. An unrecognized then sibling is dropped,
+	// so keep it visible on tolerant ingress and reject it on strict commits.
+	policyThenSiblingWarnings, err := validatePolicyUnsupportedThenSiblings(
+		tree.Children, opts.lenientPolicyThenSiblings)
+	if err != nil {
+		return nil, err
+	}
+	policyEnforcementWarnings, err := validatePolicyEnforcementSubtrees(
+		tree.Children, opts.lenientPolicyEnforcementSubtrees)
+	if err != nil {
+		return nil, err
+	}
+
 	// #3044: reject a security policy whose `match` clause omits a required
 	// Junos dimension (source-address, destination-address, application) or
 	// omits the `match` block entirely. compilePolicy fills each match slice
@@ -745,6 +759,8 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, policyThenPermitWarnings...)
 	warnings = append(warnings, policyThenRejectWarnings...)
 	warnings = append(warnings, policyThenDenyWarnings...)
+	warnings = append(warnings, policyThenSiblingWarnings...)
+	warnings = append(warnings, policyEnforcementWarnings...)
 	warnings = append(warnings, policyMissingMatchWarnings...)
 	warnings = append(warnings, firewallValuelessFromWarnings...)
 	warnings = append(warnings, emptyIdentityWarnings...)

@@ -381,6 +381,9 @@ func compilePolicy(polInst struct {
 		}
 	}
 
+	// #11014: directly dropped term or session-options children can carry
+	// enforcement constraints; dropping them must poison any direct policy action.
+	droppedEnforcementSubtrees := policyDroppedEnforcementSubtrees(polInst.node)
 	// #4626 M03: canonicalize the accumulated scoped-global zone sets to a
 	// sorted, de-duplicated form so display is stable, HA expansion is
 	// order-symmetric, and `[ dmz trust ]` == `[ trust dmz ]`. A single-zone
@@ -390,29 +393,21 @@ func compilePolicy(polInst struct {
 	pol.Match.FromZones = sortDedupZones(pol.Match.FromZones)
 	pol.Match.ToZones = sortDedupZones(pol.Match.ToZones)
 
-	// #5575: fail-CLOSED on the tolerant load / peer-sync path. A policy the
-	// #3044 / #3113 / #3114 strict gates would REJECT (a missing required match
-	// dimension, an unsupported `match` leaf, or an unsupported `then permit`
-	// modifier) is downgraded to a WARNING by CompileConfigLenient — but the
-	// compiler then SILENTLY DROPS the offending constraint: a missing dimension
-	// leaves the corresponding match slice empty, an unsupported match leaf /
-	// then-permit modifier is never read. The userspace matcher reads an empty
-	// dimension as match-ANY, so the leniently-loaded policy silently widens to
-	// a permit BROADER than configured (a fail-open on the persisted-load /
-	// HA-sync path). Record the invalidation on the typed Policy so the
-	// userspace snapshot builder can poison the rule with the __unsupported__
-	// sentinel (never-match) instead of publishing the widened permit.
+	// #5575 / #11013 / #11014: fail-CLOSED on tolerant load / peer-sync.
+	// A policy the strict gates reject for a dropped match/then constraint is
+	// downgraded to a warning, but the compiler silently discards that content.
+	// Empty match dimensions become match-ANY; a dropped then sibling can leave
+	// an earlier permit active; and an unknown policy subtree can carry
+	// enforcement constraints the direct policy compiler ignores. Record the
+	// invalidation so the userspace snapshot builder poisons the rule with the
+	// __unsupported__ sentinel instead of publishing incomplete enforcement.
 	//
-	// This uses the SAME per-policy predicates the three strict gates use
-	// (single source of truth), so the flag is set for EXACTLY the policies a
-	// strict commit would reject. On the strict path those policies never reach
-	// compilePolicy — runPreWalkGates hard-rejects them first — so a clean
-	// strict-committed policy always leaves the flag false and its snapshot is
-	// byte-identical to before. The distinction between an INTENTIONAL wildcard
-	// (`match application any` → a non-empty ["any"] slice → match-any, flag
-	// false) and a DROPPED / MISSING constraint (empty slice, flag true) is made
-	// here on the AST: policyMissingRequiredMatchDimensions treats an omitted
-	// leaf differently from an explicit `any`.
+	// These per-policy predicates share their definitions with the strict
+	// gates where available. The unsupported-then predicate is also used by
+	// its named strict/warning gate; enforcement-bearing unknown subtrees are
+	// identified separately from harmless unknown policy metadata.
+	// Explicit `any` remains distinguishable from omitted or valueless match
+	// content; the AST predicates below preserve that distinction.
 	//
 	// #6526: policyValuelessMatchDimensions is the third predicate because a
 	// dimension written with NO OPERAND (`source-address;`) compiles to the
@@ -425,11 +420,78 @@ func compilePolicy(polInst struct {
 	if len(policyMissingRequiredMatchDimensions(polInst.node)) > 0 ||
 		len(policyValuelessMatchDimensions(polInst.node, isGlobal)) > 0 ||
 		len(policyUnsupportedMatchLeafFindings(polInst.node, isGlobal)) > 0 ||
-		len(policyUnsupportedThenPermitModifiers(polInst.node)) > 0 {
+		len(policyUnsupportedThenPermitModifiers(polInst.node)) > 0 ||
+		len(policyUnsupportedThenSiblings(polInst.node)) > 0 ||
+		len(droppedEnforcementSubtrees) > 0 {
 		pol.LenientContentDropped = true
 	}
 
 	return pol
+}
+
+// policyUnsupportedThenSiblings returns then-sibling tokens the policy
+// compiler does not implement. It checks direct `then` children and compact
+// `then` tails (`then next term;`), keeping its supported set aligned with
+// compilePolicy's `then` switch. Unknown siblings are silently dropped there
+// and must be diagnosed and poison a leniently compiled policy.
+func policyUnsupportedThenSiblings(polNode *Node) []string {
+	var unsupported []string
+	if polNode == nil {
+		return unsupported
+	}
+	for _, then := range polNode.Children {
+		if then.Name() != "then" {
+			continue
+		}
+		if len(then.Keys) > 1 {
+			action := ""
+			for i := 1; i < len(then.Keys); i++ {
+				label := then.Keys[i]
+				if label == "next" && i+1 < len(then.Keys) && then.Keys[i+1] == "term" {
+					label = "next term"
+					i++
+				}
+				switch label {
+				case "permit", "deny", "reject", "log", "count":
+					action = label
+					continue
+				case "session-init", "session-close":
+					if action == "log" {
+						continue
+					}
+				}
+				unsupported = append(unsupported, label)
+			}
+		}
+		for _, child := range then.Children {
+			switch child.Name() {
+			case "permit", "deny", "reject", "log", "count":
+				continue
+			}
+			label := child.Name()
+			if label == "next" && len(child.Keys) > 1 && child.Keys[1] == "term" {
+				label = "next term"
+			}
+			unsupported = append(unsupported, label)
+		}
+	}
+	return unsupported
+}
+
+// policyDroppedEnforcementSubtrees distinguishes unknown policy metadata
+// from direct children that may contain constraints the compiler would discard.
+func policyDroppedEnforcementSubtrees(polNode *Node) []string {
+	var dropped []string
+	if polNode == nil {
+		return dropped
+	}
+	for _, child := range polNode.Children {
+		switch child.Name() {
+		case "term", "session-options":
+			dropped = append(dropped, child.Name())
+		}
+	}
+	return dropped
 }
 
 // recognizedCollapsedDenyToken reports whether tok is a token that
@@ -511,8 +573,8 @@ func applyCollapsedDenyModifiers(pol *Policy, denyNode *Node) {
 }
 
 // LenientDroppedPolicyLocator names the first policy in cfg whose compile
-// SILENTLY DROPPED a match / then-permit constraint on the tolerant path
-// (#5575 LenientContentDropped), or "" when none did.
+// silently dropped enforcement content on the tolerant path (#5575/#11013/
+// #11014 LenientContentDropped), or "" when none did.
 //
 // The flag is the compiler's fail-closed poison: policies_lower.go stamps such
 // a rule with the __unsupported__ application sentinel so the Rust integrity
