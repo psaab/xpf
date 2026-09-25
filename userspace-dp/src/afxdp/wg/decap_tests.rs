@@ -111,6 +111,57 @@ fn forwarding_with_engine(resp: WgEngine) -> (ForwardingState, u16) {
     (forwarding, id)
 }
 
+#[test]
+fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
+    let mut snapshot = wg_outer_mtu_snapshot();
+    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet6".to_string(),
+        address: "2001:db8::1/64".to_string(),
+        scope: 0,
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_wg_tunnels, "fixture must configure WireGuard");
+    let mut frame = vec![0u8; 14 + 40 + 8];
+    frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    frame[14] = 0x60;
+    frame[18..20].copy_from_slice(&8u16.to_be_bytes());
+    frame[20] = PROTO_UDP;
+    frame[21] = 64;
+    frame[22..38].copy_from_slice(&"::ffff:203.0.113.7".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    frame[38..54].copy_from_slice(&"2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    frame[54..56].copy_from_slice(&PEER_SPORT.to_be_bytes());
+    frame[56..58].copy_from_slice(&WG_PORT.to_be_bytes());
+    frame[58..60].copy_from_slice(&8u16.to_be_bytes());
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 62,
+        pkt_len: 48,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        ..UserspaceDpMeta::default()
+    };
+    assert!(
+        super::decap::is_wg_underlay_frame(&frame, meta, &forwarding),
+        "the local WG listen-port datagram is underlay transport, not the \
+         inner IPv6 packet to which the mapped-address ingress policy applies"
+    );
+    frame[38..54].copy_from_slice(&"2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    assert!(
+        !super::decap::is_wg_underlay_frame(&frame, meta, &forwarding),
+        "transit traffic to a non-local destination is not WG underlay, even \
+         when it shares a configured listen port"
+    );
+    frame[38..54].copy_from_slice(&"2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    frame[56..58].copy_from_slice(&12345u16.to_be_bytes());
+    assert!(
+        !super::decap::is_wg_underlay_frame(&frame, meta, &forwarding),
+        "ordinary UDP must not be classified as WireGuard underlay"
+    );
+}
+
+
 /// Sum of every decap outcome counter the engine keeps. A record the stage
 /// declines on its OWN gate must leave all of them untouched; a record it
 /// hands to `try_decap` moves exactly one, whichever way `try_decap` rules.

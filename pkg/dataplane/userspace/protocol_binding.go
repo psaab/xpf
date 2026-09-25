@@ -89,6 +89,9 @@ type BindingStatus struct {
 	// `default` keep cross-version wire safety. Rendered as the "IPv6 ext-header
 	// drops" status row.
 	IPv6ExtHeaderDropped uint64 `json:"ipv6_ext_header_dropped,omitempty"`
+	// #10686: IPv6 ingress drops for IPv4-mapped or IPv4-compatible addresses.
+	// Surfaced as "V4-mapped IPv6 drops" in userspace status.
+	V4MappedIPv6Dropped uint64 `json:"v4_mapped_ipv6_dropped,omitempty"`
 	NeighborMissPackets  uint64 `json:"neighbor_miss_packets,omitempty"`
 	DiscardRoutePackets  uint64 `json:"discard_route_packets,omitempty"`
 	NextTablePackets     uint64 `json:"next_table_packets,omitempty"`

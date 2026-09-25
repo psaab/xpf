@@ -66,6 +66,7 @@ impl BindingLiveState {
             route_miss_packets: self.route_miss_packets.load(Ordering::Relaxed),
             martian_dropped: self.martian_dropped.load(Ordering::Relaxed),
             ipv6_ext_header_dropped: self.ipv6_ext_header_dropped.load(Ordering::Relaxed),
+            v4_mapped_ipv6_dropped: self.v4_mapped_ipv6_dropped.load(Ordering::Relaxed),
             umem_slice_dropped: self.umem_slice_dropped.load(Ordering::Relaxed),
             unknown_vlan_dropped: self.unknown_vlan_dropped.load(Ordering::Relaxed),
             dst_mac_dropped: self.dst_mac_dropped.load(Ordering::Relaxed),

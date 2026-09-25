@@ -16,6 +16,68 @@
         }
       ]
     },
+    "embedded-v4-ipv6-policy-family-10686": {
+      "default_policy": "deny",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/deny-v4-source",
+          "name": "deny-v4-source",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_addresses": [
+            "10.0.0.0/8"
+          ],
+          "destination_addresses": [
+            "any"
+          ],
+          "source_literals": [
+            "10.0.0.0/8"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "deny"
+        },
+        {
+          "rule_id": "trust-\u003euntrust/permit-any",
+          "policy_id": 1,
+          "name": "permit-any",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_addresses": [
+            "any"
+          ],
+          "destination_addresses": [
+            "any"
+          ],
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "permit"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 50675,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 20665,
+          "host_inbound_configured": true
+        }
+      ]
+    },
     "exact-pair-outranks-scoped-global": {
       "default_policy": "deny",
       "rules": [

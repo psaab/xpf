@@ -241,6 +241,7 @@
     "umem_total_frames": 0,
     "unknown_vlan_dropped": 0,
     "unsupported_packets": 0,
+    "v4_mapped_ipv6_dropped": 0,
     "v_min_suspended_batches": 0,
     "v_min_throttle_hard_cap_overrides": 0,
     "v_min_throttles": 0,

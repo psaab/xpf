@@ -1026,6 +1026,8 @@ pub(in crate::afxdp) struct BatchCounters {
     // (still on an ext header after MAX_IPV6_EXT_HEADERS iterations). Bumped at
     // the flow-parse stage when the helper walkers fail closed.
     ipv6_ext_header_dropped: u64,
+    // #10686: IPv6 ingress drops of v4-mapped or v4-compatible src/dst.
+    v4_mapped_ipv6_dropped: u64,
     // #10498: named pre-L3 drops, kept distinct from downstream dispositions.
     umem_slice_dropped: u64,
     unknown_vlan_dropped: u64,
@@ -1538,6 +1540,11 @@ impl BatchCounters {
             live.ipv6_ext_header_dropped
                 .fetch_add(self.ipv6_ext_header_dropped, Ordering::Relaxed);
             self.ipv6_ext_header_dropped = 0;
+        }
+        if self.v4_mapped_ipv6_dropped != 0 {
+            live.v4_mapped_ipv6_dropped
+                .fetch_add(self.v4_mapped_ipv6_dropped, Ordering::Relaxed);
+            self.v4_mapped_ipv6_dropped = 0;
         }
         if self.umem_slice_dropped != 0 {
             live.umem_slice_dropped

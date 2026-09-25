@@ -45,6 +45,7 @@ type statusSummaryAggregates struct {
 	// over-limit IPv6 ext-header fail-closed drops, summed across bindings.
 	martianDropped       uint64
 	ipv6ExtHeaderDropped uint64
+	v4MappedIPv6Dropped uint64
 	neighborMisses       uint64
 	exceptionPackets      uint64
 	flowCacheHits         uint64
@@ -206,6 +207,7 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.dstMACDropped += binding.DstMACDropped
 		agg.martianDropped += binding.MartianDropped
 		agg.ipv6ExtHeaderDropped += binding.IPv6ExtHeaderDropped
+		agg.v4MappedIPv6Dropped += binding.V4MappedIPv6Dropped
 		agg.neighborMisses += binding.NeighborMissPackets
 		agg.exceptionPackets += binding.ExceptionPackets
 		agg.flowCacheHits += binding.FlowCacheHits
@@ -453,6 +455,7 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  Destination MAC drops:     %d\n", agg.dstMACDropped)
 	fmt.Fprintf(b, "  Martian drops:             %d\n", agg.martianDropped)
 	fmt.Fprintf(b, "  IPv6 ext-header drops:     %d\n", agg.ipv6ExtHeaderDropped)
+	fmt.Fprintf(b, "  V4-mapped IPv6 drops:    %d\n", agg.v4MappedIPv6Dropped)
 	fmt.Fprintf(b, "  Neighbor misses:           %d\n", agg.neighborMisses)
 	fmt.Fprintf(b, "  Exception packets:         %d\n", agg.exceptionPackets)
 	fmt.Fprintf(b, "  Flow cache hits:           %d\n", agg.flowCacheHits)

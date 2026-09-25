@@ -415,6 +415,10 @@ pub(crate) struct BindingStatus {
     /// status row.
     #[serde(rename = "ipv6_ext_header_dropped", default)]
     pub ipv6_ext_header_dropped: u64,
+    /// #10686: ingress drops of IPv4-mapped/compatible IPv6 addresses.
+    /// Serde default keeps old helpers wire-compatible.
+    #[serde(rename = "v4_mapped_ipv6_dropped", default)]
+    pub v4_mapped_ipv6_dropped: u64,
     #[serde(rename = "umem_slice_dropped", default)]
     pub umem_slice_dropped: u64,
     #[serde(rename = "unknown_vlan_dropped", default)]

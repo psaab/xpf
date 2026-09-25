@@ -214,6 +214,17 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"\"no ext-header drops\" signal.",
 		nil, nil,
 	)
+	c.userspaceV4MappedIPv6Dropped = prometheus.NewDesc(
+		"xpf_userspace_v4_mapped_ipv6_dropped_total",
+		"IPv6 ingress packets dropped because their source or destination "+
+			"was an IPv4-mapped (::ffff:0:0/96) or IPv4-compatible (::/96) "+
+			"address. The common ingress gate runs after tunnel decapsulation "+
+			"and before policy/session/NAT; unspecified ::, loopback ::1, "+
+			"injected packets, and WireGuard underlay packets are excluded "+
+			"(#10686; RFC 4291 §2.5.5.2 / RFC 4038 §4.2). Summed across "+
+			"bindings and emitted unconditionally so 0 is a real no-drop signal.",
+		nil, nil,
+	)
 	c.userspaceUMEMSliceDropped = prometheus.NewDesc(
 		"xpf_userspace_umem_slice_dropped_total",
 		"Packets dropped before raw-frame access because the UMEM slice "+

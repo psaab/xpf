@@ -647,6 +647,8 @@ type xpfCollector struct {
 	// #4768: per-binding drop-class counters (#4743) summed across bindings.
 	userspaceMartianDropped       *prometheus.Desc
 	userspaceIPv6ExtHeaderDropped *prometheus.Desc
+	// #10686: RFC 4291 / RFC 4038 embedded-v4 IPv6 ingress drops.
+	userspaceV4MappedIPv6Dropped *prometheus.Desc
 	// #10498: pre-L3 admission counters, summed across bindings.
 	userspaceUMEMSliceDropped     *prometheus.Desc
 	userspaceUnknownVLANDropped   *prometheus.Desc
@@ -1203,6 +1205,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceRejectRateLimitedBySource
 	ch <- c.userspaceMartianDropped
 	ch <- c.userspaceIPv6ExtHeaderDropped
+	ch <- c.userspaceV4MappedIPv6Dropped
 	ch <- c.userspaceUMEMSliceDropped
 	ch <- c.userspaceUnknownVLANDropped
 	ch <- c.userspaceDstMACDropped

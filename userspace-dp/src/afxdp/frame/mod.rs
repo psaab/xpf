@@ -98,8 +98,8 @@ pub(super) use inspect::{
 pub(in crate::afxdp) use inspect::{
     authoritative_forward_ports, decode_frame_summary, declared_l3_end, dest_is_directed_broadcast,
     dest_is_multicast_or_broadcast, forward_tuple_mismatch_reason, icmp_reply_type,
-    ipv4_is_any_fragment,
-    ipv4_is_non_first_fragment, ipv6_ext_chain_over_limit, ipv6_is_any_fragment,
+    ipv4_is_any_fragment, ipv4_is_non_first_fragment, ipv6_ext_chain_over_limit,
+    ipv6_addr_is_v4_mapped_or_compat, ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment,
     ipv6_is_non_first_fragment, ipv6_is_nonatomically_fragmented, is_any_fragment,
     L3_CTX_NONE_UNSPECIFIED_ADDR, is_non_first_fragment, l3_enforcement_flow_from_meta,
     l3_session_flow_from_meta,

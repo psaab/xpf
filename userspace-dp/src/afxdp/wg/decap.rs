@@ -96,6 +96,73 @@ fn wg_endpoint_for_listen_port(
     None
 }
 
+/// Is this a UDP datagram addressed to one of OUR OWN configured WireGuard
+/// sockets — a listen port on a locally owned destination?
+/// `poll_descriptor` uses this to keep an undecapsulated WG underlay datagram
+/// outside inner IPv6 ingress policy classification (handshakes and records the
+/// worker declines remain owned by the kernel/control socket). Successfully
+/// decapsulated transport data is checked on its INNER frame instead.
+///
+/// #10686 (review advisory): the port match alone is NOT enough. A transit
+/// datagram to an unrelated destination that merely shares the listen-port
+/// number is not underlay — exempting it would let embedded-v4 IPv6 reach
+/// policy via permit-any, the exact bypass the ingress gate closes. The
+/// destination must be an address this box answers for
+/// (`owns_configured_ip`: interface IPs plus NAT/DNAT locals).
+#[inline]
+pub(in crate::afxdp) fn is_wg_underlay_frame(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+) -> bool {
+    if !forwarding.has_wg_tunnels || meta.protocol != PROTO_UDP {
+        return false;
+    }
+    let Some(end) = outer_datagram_end(frame, meta) else {
+        return false;
+    };
+    let l4 = meta.l4_offset as usize;
+    let Some(udp_end) = l4.checked_add(8) else {
+        return false;
+    };
+    if udp_end > end {
+        return false;
+    }
+    let Some(udp) = frame.get(l4..udp_end) else {
+        return false;
+    };
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    if wg_endpoint_for_listen_port(forwarding, dst_port).is_none() {
+        return false;
+    }
+    // This helper is reached only for a mapped/compatible IPv6 packet. Mirror
+    // the ingress gate's wire-L3 derivation and version check before trusting
+    // the destination address.
+    if meta.addr_family as i32 != libc::AF_INET6 {
+        return false;
+    }
+    let Some(l3) = frame_l3_offset(frame) else {
+        return false;
+    };
+    let Some(v6_end) = l3.checked_add(40) else {
+        return false;
+    };
+    let Some(hdr) = frame.get(l3..v6_end) else {
+        return false;
+    };
+    if hdr[0] >> 4 != 6 {
+        return false;
+    }
+    let Ok(raw_dst) = <[u8; 16]>::try_from(&hdr[24..40]) else {
+        return false;
+    };
+    forwarding.owns_configured_ip(std::net::IpAddr::V6(
+        std::net::Ipv6Addr::from(raw_dst),
+    ))
+}
+
+
+
 /// Decapsulate an inbound WireGuard transport-data record, or `None`.
 ///
 /// `None` means "not ours, or not decryptable" and the caller leaves the packet
