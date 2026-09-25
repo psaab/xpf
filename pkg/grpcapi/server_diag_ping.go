@@ -53,13 +53,7 @@ func (s *Server) Ping(req *pb.PingRequest, stream grpc.ServerStreamingServer[pb.
 	if err := checkDiagArgs(req.Target, req.Source, req.RoutingInstance); err != nil {
 		return err
 	}
-	count := int(req.Count)
-	if count <= 0 {
-		count = 5
-	}
-	if count > 100 {
-		count = 100
-	}
+	count := diagcmd.ClampPingCount(int(req.Count))
 
 	// Aggregate concurrency bound (#5057): acquire a diagnostic slot
 	// before spawning any child. Fail-fast with RESOURCE_EXHAUSTED when

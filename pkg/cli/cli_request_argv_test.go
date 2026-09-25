@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/diagcmd"
@@ -190,6 +191,55 @@ func TestBuildPingArgvPreservesNonPositiveSize_6382(t *testing.T) {
 		if got := pingArgvSize(buildPingArgv("192.0.2.1", "5", "", tok, "")); got != tok {
 			t.Fatalf("ping -s = %q, want %q preserved (console keeps explicit non-positive -s)", got, tok)
 		}
+	}
+}
+
+func pingArgvCount(argv []string) string {
+	if i := indexOf(argv, "-c"); i >= 0 && i+1 < len(argv) {
+		return argv[i+1]
+	}
+	return ""
+}
+
+// TestBuildPingArgvClampsCount_10727 is the A10-F5 fail-on-revert guard: a
+// parseable count clamps to the shared 1..100 rule (<=0 means unset -> 5),
+// and an int64-overflow token caps at 100. A non-numeric token is preserved
+// for the ping child to reject, mirroring the -s handling.
+func TestBuildPingArgvClampsCount_10727(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"5", "5"},
+		{"0", "5"},
+		{"-3", "5"},
+		{"500", "100"},
+		{"99999999999999999999", "100"},
+	} {
+		if got := pingArgvCount(buildPingArgv("192.0.2.1", tc.in, "", "", "")); got != tc.want {
+			t.Fatalf("ping -c = %q for token %q, want %q", got, tc.in, tc.want)
+		}
+	}
+	if got := pingArgvCount(buildPingArgv("192.0.2.1", "many", "", "", "")); got != "many" {
+		t.Fatalf("ping -c = %q, want %q preserved (non-numeric count must reach ping unchanged)", got, "many")
+	}
+}
+
+// TestHandlePingRejectsOverlongFields_10727 pins the A10-F5 CheckArgs call:
+// overlong target/source/vrf return the shared bounds error before any exec.
+func TestHandlePingRejectsOverlongFields_10727(t *testing.T) {
+	c := &CLI{}
+	long := strings.Repeat("a", diagcmd.MaxArgLen+1)
+	for _, args := range [][]string{
+		{long},
+		{"192.0.2.1", "source", long},
+		{"192.0.2.1", "routing-instance", long},
+	} {
+		if err := c.handlePing(args); err == nil {
+			t.Fatalf("handlePing(%q) must reject an overlong field", args)
+		} else if !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("handlePing(%q) error = %q, want the shared bounds error", args, err)
+		}
+	}
+	if err := c.handleTraceroute([]string{long}); err == nil {
+		t.Fatal("handleTraceroute must reject an overlong target")
 	}
 }
 

@@ -41,6 +41,11 @@ func (c *CLI) handlePing(args []string) error {
 		}
 	}
 
+	// #10727 A10-F5: the local path must enforce the same field bounds as
+	// REST/gRPC (diagcmd.CheckArgs) instead of handing raw tokens to exec.
+	if err := diagcmd.CheckArgs(target, source, vrfName); err != nil {
+		return err
+	}
 	cmdArgs := buildPingArgv(target, count, source, size, vrfName)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -97,6 +102,14 @@ func (c *CLI) handlePing(args []string) error {
 // A leading '-' overflow stays a huge negative the child rejects,
 // consistent with the ≤0 pass-through above.
 func buildPingArgv(target, count, source, size, vrfName string) []string {
+	// #10727 A10-F5: a parseable count clamps to the shared 1..100 rule;
+	// a non-numeric token is preserved for the ping child to reject,
+	// mirroring the -s handling below (never silently rewrite input).
+	if n, err := strconv.Atoi(count); err == nil {
+		count = strconv.Itoa(diagcmd.ClampPingCount(n))
+	} else if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(count, "-") {
+		count = strconv.Itoa(diagcmd.MaxPingCount)
+	}
 	if n, err := strconv.ParseInt(size, 10, 64); err == nil {
 		if n > diagcmd.MaxPingSize {
 			size = strconv.Itoa(diagcmd.MaxPingSize)
@@ -134,6 +147,10 @@ func (c *CLI) handleTraceroute(args []string) error {
 		}
 	}
 
+	// #10727 A10-F5: same shared field bounds as ping (see handlePing).
+	if err := diagcmd.CheckArgs(target, source, vrfName); err != nil {
+		return err
+	}
 	cmdArgs := buildTracerouteArgv(target, source, vrfName)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
