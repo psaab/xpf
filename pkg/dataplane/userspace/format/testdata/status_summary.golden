@@ -82,6 +82,7 @@ Userspace dataplane helper:
   NAT64 tunnel encap unsupported drops:13
   NAT64 ineligible-protocol drops:11
   NAT frag untranslated drops:9
+  NAT flowless untranslated drops:10
   Fragment overlap drops:    14
   Fragment overlap overflow drops:15
   Fragment overlap shard-full drops:16

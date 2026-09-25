@@ -1760,6 +1760,33 @@ fn run_stage11_frame_poll_on_snapshot_with_options_10516(
     Vec<bool>,
     u64,
 ) {
+    let (trusted, delegated, counters, recycled, queues, forwarded, _pending) =
+        run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
+            snapshot,
+            frame,
+            meta,
+            sa_key,
+            stale,
+            remove_after_seed,
+        );
+    (trusted, delegated, counters, recycled, queues, forwarded)
+}
+fn run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    sa_key: Option<crate::afxdp::forwarding::IpsecSaKey>,
+    stale: bool,
+    remove_after_seed: bool,
+) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    crate::afxdp::forwarding::IpsecSaCounterSnapshot,
+    usize,
+    Vec<bool>,
+    u64,
+    usize,
+) {
     let mut forwarding = build_forwarding_state(snapshot);
     forwarding.ipsec_sa.publish_empty_dump_for_test();
     if let Some(sa_key) = sa_key {
@@ -1829,6 +1856,7 @@ fn run_stage11_frame_poll_on_snapshot_with_options_10516(
         binding.scratch.scratch_recycle.len(),
         reinjector.test_enqueued_delegated(),
         dbg.tx,
+        binding.pending_neigh.len(),
     )
 }
 fn run_stage11_frame_poll_with_seeded_ike_10516(
@@ -2133,6 +2161,8 @@ fn stage11_raw_protocol_arm_is_fail_closed_10516() {
 /// disposal is pinned explicitly — a mutant that changes any disposal reds
 /// here. (The v4-park / v6-drop asymmetry is #10810; both arms below pin
 /// observed behavior, not a claim that the asymmetry is intended.)
+/// #10679: the same-family flowless NAT fence leaves raw IPsec non-first
+/// fragments on this established reassembly path.
 #[test]
 fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
     let v4_esp = build_stage11_raw_v4_frame_10516(PROTO_ESP);
@@ -2141,8 +2171,8 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
     let v4_esp_fragment = build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP);
     let v4_ah_fragment = build_stage11_raw_v4_non_first_frame_10516(PROTO_AH);
     let v6_esp_fragment = build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP);
-    // (label, frame, meta, parked): whole packets recycle on NotClaimed;
-    // non-first fragments park in reassembly instead.
+    // (label, frame, meta, non-first, parked): whole packets recycle on
+    // NotClaimed; v4 non-first fragments park, while v6 follows its pinned drop.
     let cases = [
         (
             "v4 ESP",
@@ -2151,6 +2181,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v4_frame_10516(PROTO_ESP),
                 PROTO_ESP,
             ),
+            false,
             false,
         ),
         (
@@ -2161,6 +2192,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 PROTO_AH,
             ),
             false,
+            false,
         ),
         (
             "v6 ESP",
@@ -2170,6 +2202,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 PROTO_ESP,
             ),
             false,
+            false,
         ),
         (
             "v4 ESP non-first fragment",
@@ -2177,6 +2210,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v4_non_first_meta_10516(
                 &build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP),
             ),
+            true,
             true,
         ),
         (
@@ -2186,6 +2220,7 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v4_non_first_frame_10516(PROTO_AH),
             ),
             true,
+            true,
         ),
         (
             "v6 ESP non-first fragment",
@@ -2193,17 +2228,36 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v6_non_first_meta_10516(
                 &build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP),
             ),
-            // NOT parked: v6 drops (see doc above; asymmetry is #10810).
+            true,
             false,
         ),
     ];
-    for (label, frame, meta, parked) in cases {
+    for (label, frame, meta, non_first, parked) in cases {
         assert!(
             parse_session_flow_from_bytes(&frame, meta).is_none(),
             "{label}: raw IPsec must remain flowless"
         );
-        let (_trusted, delegated, counters, recycled, _queues, forwarded) =
-            run_stage11_frame_poll_10516(&frame, meta, None);
+        assert_eq!(
+            crate::afxdp::frame::frame_is_non_first_fragment(&frame, meta),
+            non_first,
+            "{label}: fixture must have the declared fragment shape"
+        );
+        if non_first {
+            assert_eq!(
+                meta.protocol,
+                u8::MAX,
+                "{label}: non-first fragment metadata must keep the unknown-protocol sentinel"
+            );
+        }
+        let (_trusted, delegated, counters, recycled, _queues, forwarded, pending) =
+            run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
+                &nat_snapshot(),
+                &frame,
+                meta,
+                None,
+                false,
+                false,
+            );
         assert_eq!(delegated.queued_packets, 0, "{label}: raw packet minted q1");
         assert_eq!(counters.sa_miss_dropped_packets, 0, "{label}: SA gate consulted");
         assert_eq!(counters.sa_snapshot_stale_deny, 0, "{label}: stale gate consulted");
@@ -2218,8 +2272,16 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 "{label}: a parked non-first fragment must not forward (a forward here \
                  means it bypassed reassembly)"
             );
+            assert_eq!(
+                pending, 1,
+                "{label}: blanket-only source NAT must preserve the raw non-first park path"
+            );
         } else {
             assert_eq!(recycled, 1, "{label}: descriptor was not recycled exactly once");
+            assert_eq!(
+                pending, 0,
+                "{label}: only v4 non-first fragments are parked in this pinned behavior"
+            );
         }
     }
 }

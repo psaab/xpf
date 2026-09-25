@@ -425,6 +425,15 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// matches no rule and is NOT counted here — ordinary fragmented forwarding
     /// is preserved.
     pub(super) nat_frag_untranslated_dropped: AtomicU64,
+    /// #10679: cumulative fail-closed drops of a flowless packet whose L3
+    /// identity matches an ordinary same-family NAT rule (SNAT / static-NAT /
+    /// DNAT / NPTv6). Unlike #6122's real non-first fragments, these
+    /// unfragmented port-less packets have no translation association/session
+    /// and the flowless decision carries no NAT, so forwarding them would leak
+    /// the internal source / pre-NAT destination. Surfaced separately from
+    /// `nat_frag_untranslated_dropped` so an ESP/GRE datagram is not reported as
+    /// a fragmentation/PMTU fault.
+    pub(super) nat_flowless_untranslated_dropped: AtomicU64,
     /// #10131: binding-local fragment-overlap attribution, batched from each
     /// worker while the matching global atomics remain the alert path.
     pub(super) frag_overlap_dropped: AtomicU64,
@@ -998,9 +1007,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // sentinels. The alignment unit grows by 64 bytes; both offsets move by 24.
 // #10686 adds one unconditional u64 drop counter before both sentinels; offsets
 // advance by 8 bytes while the 2496-byte alignment unit remains unchanged.
+// #10679 adds one unconditional u64 flowless-NAT-fence counter before both
+// sentinels; offsets advance by 8 bytes while the 2496-byte alignment unit
+// remains unchanged.
 const _: [(); 2496] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2320] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2448] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2328] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2456] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1104,6 +1116,7 @@ impl BindingLiveState {
             nat64_ineligible_protocol: AtomicU64::new(0),
             nat_alloc_fail: AtomicU64::new(0),
             nat_frag_untranslated_dropped: AtomicU64::new(0),
+            nat_flowless_untranslated_dropped: AtomicU64::new(0),
             slow_path_packets: AtomicU64::new(0),
             slow_path_bytes: AtomicU64::new(0),
             slow_path_local_delivery_packets: AtomicU64::new(0),

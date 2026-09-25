@@ -209,20 +209,20 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
         64,
         "#6304: ...nor its ALIGNMENT"
     );
-    // #10021/#10131/#10498/#10686: unconditional release-visible atomics
-    // inserted before these sentinels shift both pinned offsets in BOTH
-    // builds. #10686 advances them by 8 while size stays 2496 and alignment
-    // remains 64.
+    // #10021/#10131/#10498/#10686/#10679: unconditional release-visible
+    // atomics inserted before these sentinels shift both pinned offsets in
+    // BOTH builds. #10679 advances them by 8 while size stays 2496 and
+    // alignment remains 64.
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2320,
-        "#6304/#10021/#10131/#10498/#10686: ...nor the OFFSET of the admission counter whose \
+        2328,
+        "#6304/#10021/#10131/#10498/#10686/#10679: ...nor the OFFSET of the admission counter whose \
          cacheline this is all about"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2448,
-        "#6304/#10021/#10131/#10498/#10686: ...nor the offset of the last-declared field, which is \
+        2456,
+        "#6304/#10021/#10131/#10498/#10686/#10679: ...nor the offset of the last-declared field, which is \
          the sentinel for a cfg(test) member appended at the END of the struct"
     );
 }

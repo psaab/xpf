@@ -155,25 +155,24 @@ fn source_nat_decision_with_holder(
     }
 }
 
-/// #6122: READ-ONLY "would source NAT translate this fragment?" probe for the
-/// flowless non-first-fragment MISS discriminator. Wraps
+/// #6122/#10679: READ-ONLY "would source NAT translate this flowless packet?"
+/// probe for the same-family NAT transparency fence. It wraps
 /// [`source_nat_decision_for_flow`] with `non_first_fragment = true` (which
 /// reports a pool-mode match as `Unavailable` BEFORE minting any pool mapping)
 /// and collapses the result to a boolean:
 ///   - `Ok` with a concrete address rewrite (interface / static SNAT) → `true`
-///   - `Err` (a pool rule matched but a fragment can't be port-mapped, or an
-///     interface rule with no egress address) → `true` (the flow WOULD be
-///     source-translated, so the miss must fail closed)
+///   - `Err` (a pool rule matched but a flowless packet cannot be port-mapped,
+///     or an interface rule with no egress address) → `true` (the flow WOULD be
+///     source-translated, so the packet must fail closed)
 ///   - `Ok(NatDecision::default())` (no rule, or an explicit `off` rule) → `false`
 ///
-/// Side-effect-free: it NEVER records a source-NAT allocation failure (that is
-/// the job of the two real decision sites the #1377 contract enforces) and
-/// mints no session / pool state. Kept here alongside `source_nat_decision_for_flow`
-/// so the `poll_descriptor/mod.rs` call-site count the #1377 SNAT contract guard
-/// asserts (exactly two fail-closed decision sites) is unaffected.
+/// Side-effect-free: it NEVER records a source-NAT allocation failure and
+/// mints no session / pool state. The non-first flag is deliberately used for
+/// every flowless packet because none has the L4 identity or session required
+/// to commit a source-NAT allocation, not only for IP fragments.
 #[cold]
 #[inline(never)]
-pub(super) fn source_nat_would_translate_fragment(
+pub(super) fn source_nat_would_translate_flowless(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
@@ -193,8 +192,9 @@ pub(super) fn source_nat_would_translate_fragment(
         egress_ifindex,
         flow,
         now_ns,
-        // A non-first fragment: pool-mode SNAT reports `Unavailable` before
-        // allocating, so this stays read-only.
+        // Mark L4 identity unavailable: pool-mode SNAT reports `Unavailable`
+        // before allocating, so this remains a read-only probe for any
+        // flowless packet.
         true,
         // #6522: side-effect-free by the contract above — it mints no pool
         // mapping, so there is no allocation to record a holder on.

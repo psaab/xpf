@@ -1273,6 +1273,83 @@ impl SourceNatRule {
     }
 }
 
+/// Does a flowless packet possibly match a translating source-NAT rule using
+/// its known scope, addresses, and protocol? Protocol 255 is the non-first
+/// fragment's unknown sentinel; it means possible, never a cue to inspect bytes.
+pub(crate) fn flowless_source_nat_rule_possible(
+    rules: &[SourceNatRule],
+    scope: &NatScopeCtx<'_>,
+    from_zone: &str,
+    to_zone: &str,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    require_l4_selector: bool,
+) -> bool {
+    let protocol_unknown = protocol == u8::MAX;
+    rules.iter().any(|rule| {
+        let has_l4_selector =
+            !rule.match_dst_ports.is_empty() || !rule.match_apps.is_empty();
+        if rule.off
+            || (require_l4_selector && !has_l4_selector)
+            || !rule.zone_matches(from_zone, to_zone)
+            || !rule.scope_matches(scope)
+            || !rule.address_matches(src_ip, dst_ip)
+        {
+            return false;
+        }
+        flowless_source_nat_l4_possible(rule, protocol, protocol_unknown)
+    })
+}
+
+fn flowless_source_nat_l4_possible(
+    rule: &SourceNatRule,
+    protocol: u8,
+    protocol_unknown: bool,
+) -> bool {
+    let carries_ports = protocol_unknown || crate::ip_proto::has_l4_ports(protocol);
+    if !rule.match_dst_ports.is_empty()
+        && (!carries_ports || !has_valid_port_range(&rule.match_dst_ports))
+    {
+        return false;
+    }
+    if rule.match_apps.is_empty() {
+        return true;
+    }
+    rule.match_apps.iter().any(|term| {
+        if term.protocol != SOURCE_NAT_PROTO_ANY
+            && (term.protocol > u8::MAX as u16
+                || (!protocol_unknown && term.protocol != u16::from(protocol)))
+        {
+            return false;
+        }
+        let has_port_selector = !term.ports.is_empty() || !term.src_ports.is_empty();
+        if (has_port_selector && !carries_ports)
+            || !has_valid_port_range(&term.ports)
+            || !has_valid_port_range(&term.src_ports)
+        {
+            return false;
+        }
+        term.ports.is_empty()
+            || rule.match_dst_ports.is_empty()
+            || port_ranges_intersect(&term.ports, &rule.match_dst_ports)
+    })
+}
+
+fn has_valid_port_range(ranges: &[(u16, u16)]) -> bool {
+    ranges.is_empty() || ranges.iter().any(|(low, high)| low <= high)
+}
+
+fn port_ranges_intersect(left: &[(u16, u16)], right: &[(u16, u16)]) -> bool {
+    left.iter().any(|(left_low, left_high)| {
+        right.iter().any(|(right_low, right_high)| {
+            left_low <= left_high
+                && right_low <= right_high
+                && (*left_low).max(*right_low) <= (*left_high).min(*right_high)
+        })
+    })
+}
+
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<SourceNatRule> {

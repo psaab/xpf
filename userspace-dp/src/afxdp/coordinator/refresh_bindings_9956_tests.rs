@@ -66,6 +66,38 @@ fn flowless_counters_round_trip_batch_to_status_to_reset_9956() {
 }
 
 #[test]
+fn nat_flowless_fence_counter_round_trips_to_status_10679() {
+    let mut batch = crate::afxdp::BatchCounters::default();
+    batch.record_nat_flowless_untranslated_dropped();
+    let live = crate::afxdp::binding_state::BindingLiveState::new();
+    batch.flush(&live);
+    assert_eq!(
+        live.nat_flowless_untranslated_dropped
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "flowless NAT-fence drop must flush batch → live"
+    );
+
+    let snap = live.snapshot();
+    assert_eq!(
+        snap.nat_flowless_untranslated_dropped, 1,
+        "snapshot must carry the flowless NAT-fence count"
+    );
+    let mut status = crate::protocol::BindingStatus::default();
+    copy_live_snapshot(&mut status, snap);
+    assert_eq!(
+        status.nat_flowless_untranslated_dropped, 1,
+        "BindingStatus must expose the flowless NAT-fence count"
+    );
+
+    zero_unbound_slot(&mut status);
+    assert_eq!(
+        status.nat_flowless_untranslated_dropped, 0,
+        "an unbound slot must not retain a prior binding's flowless NAT-fence count"
+    );
+}
+
+#[test]
 fn named_pre_l3_counters_round_trip_and_reset_10498() {
     let mut batch = crate::afxdp::BatchCounters::default();
     batch.touched = true;

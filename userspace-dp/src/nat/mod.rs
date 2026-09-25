@@ -220,6 +220,7 @@ pub(crate) use source::{
     PoolAddressOwners, nat64_refuse_if_peer_owns, peer_owns_identity_in,
     wire_nat64_overlap_peers,
     SourceNatFailure, SourceNatFailureReason, SourceNatFlowKey, SourceNatLookup, SourceNatRule,
+    flowless_source_nat_rule_possible,
     SyncedNatZones, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
     match_source_nat_result_for_tuple, parse_source_nat_rules,
     parse_source_nat_rules_with_previous, release_nat64_pool_port,

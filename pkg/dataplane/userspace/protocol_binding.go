@@ -305,6 +305,10 @@ type BindingStatus struct {
 	// preserved. omitempty + the Rust serde `default` keep cross-version wire
 	// safety (an older helper omits it → 0).
 	NatFragUntranslatedDropped uint64 `json:"nat_frag_untranslated_dropped,omitempty"`
+	// #10679: unfragmented flowless packets dropped by the same-family NAT
+	// transparency fence. Kept distinct from real non-first-fragment
+	// association misses so tunnel drops are not surfaced as fragmentation/PMTU.
+	NatFlowlessUntranslatedDropped uint64 `json:"nat_flowless_untranslated_dropped,omitempty"`
 	// #10131: fragment-overlap attribution from the binding-local batch
 	// counters. Global alert atomics remain process-wide; these fields identify
 	// the worker/binding that observed each reason. omitempty keeps old-helper

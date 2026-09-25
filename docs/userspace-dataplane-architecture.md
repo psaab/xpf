@@ -1045,10 +1045,19 @@ the NAT module applies it:
   of **0** (a valid on-wire value, 0..=65535) is translated like any other id
   rather than misread as flowless (#4088; the earlier `src_port != 0` gate left
   id==0 colliding on `(pool_addr, 0)`). A non-identifier ICMP control/error
-  message parses flowless (no SessionFlow, `icmp_identifier_present` false) and,
-  like a genuinely port-less protocol (GRE/ESP/AH/OSPF), takes the address-only
-  path — its L4 bytes are never rewritten. A genuine IPv4 **protocol 0**
-  (HOPOPT) packet is one such port-less protocol and is handled correctly:
+  message parses flowless (no SessionFlow, `icmp_identifier_present` false) and
+  its L4 bytes are never rewritten. The address-only allocator supports
+  decisions for port-less protocol identities, but that is not a live transit
+  NAT decision by itself: flowless transit has no session carrying one.
+  #10679 drops flowless packets before TX, missing-neighbor buffering, or a
+  permitted NoRoute kernel-FIB reinjection whenever configured same-family NAT
+  may require translation. NoRoute probes each configured egress because its
+  actual egress is unknown; unresolved source-side NAT fails closed. Pref64
+  destinations retain NAT64 attribution, and raw ESP/AH non-first fragments
+  retain the Stage-11/reassembly park path. With no matching NAT candidate,
+  ordinary flowless forwarding remains available.
+  A genuine IPv4 **protocol 0** (HOPOPT) packet is one such port-less protocol
+  and is handled correctly:
   `match_source_nat_result_for_tuple` carries the L4 protocol **out-of-band** as
   `Option<u8>`, so the synthetic "L4 tuple unknown" caller (the address-only
   `match_source_nat` wrapper) is `None` while a real HOPOPT packet is `Some(0)`
@@ -1060,9 +1069,9 @@ the NAT module applies it:
   only the in-code "is this unknown?" test moved out-of-band. `port
   no-translation` preserves the
   id just as it preserves a TCP/UDP source port. By default, pool address
-  selection is round-robin within the packet address family. For an
-  address-only flow (`port no-translation` / a port-less protocol) the
-  round-robin selection **probes the whole pool from its round-robin start**
+  selection is round-robin within the packet address family. For a flow
+  carrying an address-only NAT decision, round-robin selection **probes the
+  whole pool from its round-robin start**
   (`reserve_address_only_roundrobin`), mirroring the port-translating
   `allocate_translation` loop: if the chosen address's reverse identity
   `(protocol, pool_addr, preserved id, remote)` is already owned by a different

@@ -69,6 +69,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.nat64_ineligible_protocol = 0;
         binding.nat_alloc_fail = 0;
         binding.nat_frag_untranslated_dropped = 0;
+        binding.nat_flowless_untranslated_dropped = 0;
         binding.frag_overlap_dropped = 0;
         binding.frag_overlap_overflow_dropped = 0;
         binding.frag_overlap_shard_full_dropped = 0;
@@ -116,6 +117,16 @@ mod reset_9956_tests {
             ),
             (0, 0),
             "reset_binding_counters must clear the flowless family"
+        );
+    }
+    #[test]
+    fn reset_binding_counters_clears_flowless_nat_fence_10679() {
+        let mut binding = BindingStatus::default();
+        binding.nat_flowless_untranslated_dropped = 7;
+        reset_binding_counters(std::slice::from_mut(&mut binding));
+        assert_eq!(
+            binding.nat_flowless_untranslated_dropped, 0,
+            "reset_binding_counters must clear flowless NAT-fence drops"
         );
     }
     #[test]
