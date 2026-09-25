@@ -127,6 +127,20 @@ type vrrpInstance struct {
 	// through the ungated masterDownTimer path. Guarded by mu.
 	lastMasterPriority int       // last non-zero peer advert priority
 	lastMasterSeen     time.Time // when lastMasterPriority was recorded
+	// lastMasterIPv4 / lastMasterIPv6 store the learned nonzero-priority source
+	// per family — the currently-known master identity the #10719 detector
+	// compares against. They are recorded by recordMasterAdvert alongside
+	// lastMasterPriority/lastMasterSeen; the Known flags distinguish cold start.
+	// Two fixed-size slots, not one, because a dual-stack instance hears its
+	// master from two UNRELATED sources (v4 from getLocalIP, v6 from the
+	// link-local) — a single slot would flip-flop and misreport every legitimate
+	// cross-family advert as unknown. Priority-0 adverts are NOT recorded (same
+	// early return as the priority), so a resignation never overwrites the
+	// identity it is resigning FROM. Guarded by mu.
+	lastMasterIPv4      [4]byte
+	lastMasterIPv4Known bool
+	lastMasterIPv6      [16]byte
+	lastMasterIPv6Known bool
 
 	// masterAdverInterval is the advertisement interval LEARNED from the
 	// current master's advertisement — RFC 5798 §6.1/§6.4.2 Master_Adver_Interval
@@ -233,6 +247,18 @@ type vrrpInstance struct {
 	// AF_PACKET-fallback path (#2225); a plain time.Time would be a data
 	// race. Mirrors the lastGARPTime atomic pattern below.
 	lastDropWarn atomic.Int64
+	// unrecognizedMasterAdverts counts priority-0 resignation and priority-255
+	// owner adverts whose source does not match the last nonzero-priority source
+	// learned for that family (#10719). The VRRP wire carries no authentication
+	// (RFC 5798 removed it), so this is an unknown-source signal, not proof of
+	// spoofing. Exposed via RXDropStats as
+	// "<key>/unrecognized_master_adverts". Atomic for lock-free status readers.
+	unrecognizedMasterAdverts atomic.Uint64
+	// lastUnknownMasterWarn is the Unix-nanos timestamp of the last
+	// unknown-source priority-0/255 warning (#10719). Same once-per-10s
+	// CompareAndSwap dampener as lastDropWarn (#2225): the counter above
+	// advances per advert, the log line at most once per interval.
+	lastUnknownMasterWarn atomic.Int64
 
 	// GARP suppression for strict-vip-ownership mode.
 	suppressGARP    atomic.Bool   // when true, becomeMaster() skips GARP/NA

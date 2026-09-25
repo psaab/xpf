@@ -1002,17 +1002,19 @@ func (m *Manager) InstanceStates() []VRRPEvent {
 	return out
 }
 
-// RXDropStats returns per-instance RX drop and received counts.
+// RXDropStats returns per-instance RX drop, received, and unrecognized
+// priority-0/255 advert counts.
 // Key format: "VI_<iface>_<group>[_<family>]".
 func (m *Manager) RXDropStats() map[string]uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	stats := make(map[string]uint64, len(m.instances)*2)
+	stats := make(map[string]uint64, len(m.instances)*3)
 	for _, vi := range m.instances {
 		k := vi.key()
 		stats[k+"/drops"] = vi.rxDrops.Load()
 		stats[k+"/received"] = vi.rxReceived.Load()
+		stats[k+"/unrecognized_master_adverts"] = vi.unrecognizedMasterAdverts.Load()
 	}
 	return stats
 }

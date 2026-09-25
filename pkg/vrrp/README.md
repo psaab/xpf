@@ -231,6 +231,35 @@ paths rather than asserting it.
 
 `pkg/config`, `pkg/cluster`.
 
+## VRRP wire trust boundary (#10719)
+
+VRRPv3 is unauthenticated on the wire: RFC 5798 removed the VRRPv2
+authentication field. The implementation checks packet structure, checksum,
+VRID, and the required IPv4 TTL / IPv6 hop limit of 255, but none of these
+checks authenticate the sender. Any host able to inject protocol-112 traffic
+on the VRRP VLAN can forge an advertisement, including priority 0 (resignation,
+which causes a BACKUP to take over immediately) or priority 255 (address-owner
+priority, which can force a lower-priority MASTER to step down). This is a
+protocol trust-boundary limitation, not a checksum failure or an authentication
+feature that can be enabled.
+
+The compiler rejects configured VRRP authentication statements on strict
+commit and warns while dropping the affected group on tolerant load. Native
+VRRPv3 does not enforce an authentication key; configured Junos-style MD5 is
+not supported, and must not be treated as protection.
+
+Restrict access to VRRP VLANs and use network-device ingress controls to limit
+which ports and source addresses may send protocol 112. The runtime detector
+compares priority-0/255 advert sources with the last nonzero-priority source
+learned for that address family; the `Manager.RXDropStats()` counter
+`Manager.RXDropStats()[\"<key>/unrecognized_master_adverts\"]` increments for
+every advert from an unrecognized source. A rate-limited warning is emitted at
+most once per instance per 10 seconds. With no previously learned source, a
+priority-0/255 advert is reported as unrecognized; the first nonzero advert
+establishes a source baseline. This is detection only: VRRP election behavior
+is unchanged, and unauthenticated traffic can spoof a learned source or change
+the baseline with an ordinary advert.
+
 ## Failover timing (CLAUDE.md authoritative)
 
 - ~60 ms with 30 ms RETH advertisements (masterDownInterval ~97 ms).
