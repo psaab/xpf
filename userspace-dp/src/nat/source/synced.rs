@@ -190,10 +190,13 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
     )
 }
 
-/// Returns whether the translation is RESERVED on this node — either because a
-/// pass took it, or because there was nothing to reserve (a reverse entry, or a
-/// decision with no `rewrite_src`). `false` means every candidate rule REFUSED,
-/// i.e. a different live allocation already owns the port (#6600).
+/// Returns whether this node can own a peer-synced source-NAT translation.
+/// `true` means a source-NAT reservation was taken or is unnecessary (a reverse
+/// entry, a NAT64 decision, or no `rewrite_src`); `false` means a candidate
+/// source-NAT rule refused the tuple (#6600). NAT64 tuples belong exclusively
+/// to `reserve_synced_nat64_allocation`: booking one here first makes that
+/// allocator's peer check mistake the same import for a conflicting SNAT owner
+/// (#10706).
 ///
 /// Before #6600 the bool `reserve_synced_on_first_pool_owner` already computed
 /// was discarded here, and the whole chain up to `handle_upsert_synced` returned
@@ -219,7 +222,10 @@ fn reserve_synced_source_nat_allocation_with_holder(
     now_ns: u64,
     holder: NatHolder,
 ) -> bool {
-    if is_reverse {
+    // NAT64's translated source belongs exclusively to its NAT64 allocator.
+    // Reserving it in a peer source-NAT pool first makes the NAT64 leg's
+    // peer-ownership check refuse this same import (#10706).
+    if is_reverse || nat.nat64 {
         return true;
     }
     let Some(rewrite_src) = nat.rewrite_src else {
