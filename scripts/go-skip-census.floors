@@ -10,16 +10,25 @@
 # commit message, the same rule the Rust ignored-cell census applies to a new
 # `#[ignore]`.
 
-total        = 365
+# #10716 banks the drift from the original 365-site measurement: 9 additional
+# privilege-absent sites need kernel/network capabilities, and 15 additional
+# non-privilege sites are fixture, socket, or external-input gated. Since the
+# issue's 386-site recount, three further non-privilege sites were added:
+# the #10702 Unix-socket availability guard and two #10641 bridge-netfilter
+# availability guards. These reasons describe real skip conditions; the
+# census counts them rather than claiming those cells ran.
+# The 2026-09-24 master recount adds four #10708 route-reader cells gated on
+# netlink handle creation, link/route reads, or a usable main-table route.
+total        = 393
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 40
+priv-absent  = 49
 priv-present = 10
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 314
+other        = 333
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket
