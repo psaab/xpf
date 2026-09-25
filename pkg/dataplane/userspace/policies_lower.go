@@ -182,21 +182,16 @@ func buildOneRuleSnapshot(
 			Protocol: unsupportedApplicationSentinel,
 		}}
 	}
-	// #5575: a policy the tolerant load / peer-sync compile path accepted only
-	// by DOWNGRADING a hard reject to a warning (a missing required match
-	// dimension #3044, an unsupported `match` leaf #3113, or an unsupported
-	// `then permit` modifier #3114) had that constraint SILENTLY DROPPED by the
-	// compiler, leaving the dimension EMPTY / the permit UNCONDITIONAL. The
-	// matcher reads an empty dimension as match-ANY, so the leniently-loaded
-	// policy would otherwise arm a permit BROADER than the operator configured
-	// (a fail-open). Poison the rule with the SAME __unsupported__ application
-	// sentinel the #2124/#3261 unrepresentable-content path uses so the Rust
-	// integrity preflight rejects the WHOLE snapshot (previous-good retained;
-	// fresh-boot default-deny) — an action-agnostic fail-CLOSED that turns the
-	// widened permit (and a symmetric over-broad deny) into never-match instead
-	// of match-any. A strict commit rejects such a policy outright, so this only
-	// ever fires on the tolerant load / peer-sync path (LenientContentDropped is
-	// never set for a clean strict-committed policy).
+	// #5575 / #11013 / #11014: a policy the tolerant load / peer-sync compile
+	// path accepted only by DOWNGRADING a reject for dropped enforcement
+	// content had its constraint silently discarded, leaving an empty match
+	// dimension, an unconditional direct permit, or an incomplete policy
+	// subtree. Poison the rule with the __unsupported__ application sentinel
+	// so the Rust integrity preflight rejects the WHOLE snapshot
+	// (previous-good retained; fresh-boot default-deny) — an action-agnostic
+	// fail-CLOSED instead of publishing the incomplete policy.
+	// A strict commit rejects these policies outright, so this only fires on
+	// tolerant load / peer-sync ingress.
 	if pol.LenientContentDropped {
 		if len(rejectedApps) == 0 {
 			rejectedApps = []string{lenientDroppedConstraintToken}

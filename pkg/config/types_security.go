@@ -557,26 +557,26 @@ type Policy struct {
 	// keyword is not one the compiler reads (match / then / description /
 	// scheduler-name) — e.g. a typo'd `descripton` or `scheduler-nam`, which
 	// Junos rejects at commit but xpf silently dropped (#4232, fable-167 P-4b).
-	// The exhaustive #3113/#3114/#3115 gates cover the `match`/`then` subtrees
-	// but not the policy level itself. compilePolicy records the unrecognized
-	// keywords so validateSecurityAcceptedOnly (compiler_validate_warn.go) can
-	// emit an accepted-but-inert / probable-typo advisory. Recorded in config
-	// order so the warning is deterministic.
+	// The #3113/#3114/#3115 gates cover known match/then subtrees, while
+	// #11013 diagnoses an unsupported then sibling. At the policy level,
+	// compilePolicy records unrecognized keywords so validateSecurityAcceptedOnly
+	// (compiler_validate_warn.go) can emit an accepted-but-inert / probable-typo
+	// advisory. Recorded in config order so the warning is deterministic.
 	UnknownChildren []string
 	// LenientContentDropped marks a policy the TOLERANT compile path
 	// (CompileConfigLenient / CompileConfigForNodeLenient) accepted only by
-	// DOWNGRADING a hard reject to a warning for a match / then-permit
-	// constraint the compiler then SILENTLY DROPPED — a MISSING required match
-	// dimension (#3044), an UNSUPPORTED `match` leaf (#3113, incl. the #3142
-	// collapsed-tail and #3673 swallowed-keyword escapes), or an UNSUPPORTED
-	// `then permit` modifier (#3114). In each case the dropped constraint
-	// leaves the corresponding dimension EMPTY / the permit UNCONDITIONAL, and
-	// the userspace matcher reads an empty dimension as match-ANY — a permit
-	// BROADER than the operator configured (a security fail-OPEN on the
-	// persisted-load / peer-sync path, #5575). The strict commit path
-	// hard-rejects all three before compilePolicy runs, so this flag is only
-	// ever set on the tolerant load / peer-sync path; a clean strict-committed
-	// policy always leaves it false (byte-identical snapshots).
+	// DOWNGRADING a hard reject to a warning after silently dropping an
+	// enforcement constraint: a MISSING required match dimension (#3044), an
+	// UNSUPPORTED `match` leaf (#3113, incl. #3142/#3673), an unsupported
+	// `then permit` modifier (#3114), an unrecognized `then` sibling (#11013),
+	// or an enforcement-bearing unknown policy subtree such as `term` or
+	// `session-options` (#11014). Missing or dropped match content can widen a
+	// policy because the userspace matcher reads empty dimensions as match-ANY;
+	// dropped policy actions or subtrees can also leave a direct permit active
+	// when the authored enforcement intent was different. The strict commit
+	// path rejects unsupported then siblings and strict schema validation
+	// rejects unknown policy subtrees, so this flag is set only on tolerant
+	// load / peer-sync paths.
 	//
 	// compilePolicy derives it (never the raw AST / wire), so it is recomputed
 	// identically on both HA peers and needs no serialization. The userspace
@@ -587,7 +587,7 @@ type Policy struct {
 	// permit (and a symmetric over-broad deny) into never-match instead of
 	// match-any.
 	//
-	// #9571 adds one cause that is not a dropped LEAF: the tolerant #8752 fold
+	// #9571 adds one cause that is not a dropped leaf: the tolerant #8752 fold
 	// merged repeated same-named statements into a policy that PERMITS although
 	// one statement said deny or reject. The merge drops the first-match boundary
 	// that kept the permit off the denied traffic, which is the same harm (a

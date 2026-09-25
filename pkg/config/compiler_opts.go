@@ -2360,6 +2360,16 @@ type compileOpts struct {
 	// binary silently accepted still BOOTS (#1960). Same doctrine as
 	// lenientPolicyThenReject.
 	lenientPolicyThenDeny bool
+	// lenientPolicyThenSiblings (#11013) downgrades unsupported siblings under
+	// security-policy `then` to warnings on tolerant ingress. These children
+	// are dropped by the compiler, so compilePolicy also poisons the policy to
+	// prevent an earlier permit from being published as if no sibling existed.
+	lenientPolicyThenSiblings bool
+	// lenientPolicyEnforcementSubtrees (#11014) downgrades directly dropped
+	// term/session-options policy subtrees to warnings on tolerant ingress.
+	// compilePolicy also poisons a policy carrying these enforcement-bearing
+	// children instead of publishing its incomplete direct action.
+	lenientPolicyEnforcementSubtrees bool
 	// lenientPolicyMissingMatch (#3044) downgrades the security-policy
 	// required-match gate (validatePolicyRequiredMatchStrict) from a hard
 	// compile error to a cfg.Warnings entry. A security policy whose `match`
@@ -3079,6 +3089,8 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenPermit:                true,
 		lenientPolicyThenReject:                true,
 		lenientPolicyThenDeny:                  true,
+		lenientPolicyThenSiblings:              true,
+		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,
 		lenientPolicyValuelessMatch:            true,
 		lenientFirewallValuelessFrom:           true,

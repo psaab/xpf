@@ -1048,34 +1048,27 @@ rejected. VPN-object validation, such as the separate missing-bind-interface
 gate (#10638), is independent.
 
 
-**The tolerant-path downgrade of #3044/#3113/#3114 must NOT widen the permit
-(#5575):** the #1960 lenient downgrade keeps the daemon booting, but the compiler
-then SILENTLY DROPS the offending constraint — a missing required match dimension
-(#3044) leaves the match slice EMPTY; an unsupported `match` leaf (#3113) or an
-unsupported `then permit` modifier (#3114) is never read. The userspace matcher
-reads an empty dimension as match-ANY (`expandUserspacePolicyApplications`
-returns `(nil, true)` for an empty slice; the address/literal sides default to
-match-any when empty), so the leniently-loaded policy silently widens to a permit
-BROADER than the operator configured — a security fail-OPEN on exactly the
-persisted-load / HA-sync path `CompileConfigLenient` serves. `compilePolicy` now
-records this on the typed policy: `Policy.LenientContentDropped` is set (via the
-SAME per-policy predicates the three strict gates use —
-`policyMissingRequiredMatchDimensions`, `policyUnsupportedMatchLeafFindings`,
-`policyUnsupportedThenPermitModifiers` — so the flag fires for EXACTLY the
-policies a strict commit would reject). The userspace snapshot builder
-(`buildOneRuleSnapshot`) then poisons such a rule with the `__unsupported__`
-application sentinel, so the Rust integrity preflight rejects the WHOLE snapshot
-(previous-good retained; fresh-boot default-deny) — an action-agnostic fail-CLOSED
-that turns the widened permit (and a symmetric over-broad deny) into never-match
-instead of match-any. Because the strict path hard-rejects all three BEFORE
-`compilePolicy` runs, a clean strict-committed policy always leaves the flag
-false and its snapshot is byte-identical. The flag is derived at compile time
-(never serialized), so it is recomputed identically on both HA peers. The
-distinction between an INTENTIONAL wildcard (`match application any` → a non-empty
-`["any"]` slice → legitimate match-any, flag false) and a DROPPED / MISSING
-constraint (empty slice, flag true) is made on the AST: an omitted leaf is treated
-differently from an explicit `any`, so a legitimate `any→any:any` permit is NOT
-poisoned.
+**Tolerant policy enforcement poison (#5575, #11013, #11014):** the #1960
+lenient downgrade keeps the daemon booting, but the compiler may silently drop
+authored enforcement content. Missing required match dimensions (#3044) and
+unsupported `match` leaves / `then permit` modifiers (#3113/#3114) can widen a
+rule; an unsupported `then` sibling such as `next term` (#11013) can leave an
+earlier direct permit active; and an unknown policy-level `term` or
+`session-options` subtree can carry enforcement constraints discarded by the
+compiler (#11014). `compilePolicy` sets `Policy.LenientContentDropped` for these
+cases: shared AST predicates cover the existing match/permit gates;
+`policyUnsupportedThenSiblings` checks child and compact `then` tails, and
+`policyDroppedEnforcementSubtrees` distinguishes enforcement-bearing direct
+children from harmless metadata typos. The
+userspace snapshot builder (`buildOneRuleSnapshot`) poisons such a rule with
+the `__unsupported__` application sentinel, so the Rust integrity preflight
+rejects the WHOLE snapshot (previous-good retained; fresh-boot default-deny) —
+an action-agnostic fail-CLOSED. The `then` sibling is named in a strict
+commit-time rejection or tolerant warning; firewall-filter `next term` remains
+supported. Harmless unknown policy metadata stays advisory-only. The flag is
+derived at compile time (never serialized), so it is recomputed identically on
+both HA peers. An explicit wildcard (`match application any`) remains distinct
+from a missing or dropped constraint and is not poisoned.
 
 **Unsupported security-policy `then reject` children are rejected at commit
 (#3115, interim — codex-review-066 finding 066-03):** the sibling of #3114 for the

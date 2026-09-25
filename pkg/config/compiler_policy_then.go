@@ -592,3 +592,141 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 	}
 	return warnings, nil
 }
+
+// validatePolicyUnsupportedThenSiblings rejects a `then` child the policy
+// compiler does not implement, including explicit `then next term`. The
+// firewall-filter compiler has separate, supported next-term semantics; this
+// gate is intentionally scoped to security policies only.
+func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]string, error) {
+	var warnings []string
+	checkPolicy := func(scope, policyName string, polNode *Node) error {
+		for _, sibling := range policyUnsupportedThenSiblings(polNode) {
+			msg := fmt.Sprintf(
+				"security policies %s policy %q has unsupported then sibling %q "+
+					"(the compiler drops it, which can leave an earlier permit active); "+
+					"remove it (#11013)",
+				scope, policyName, sibling,
+			)
+			if !lenient {
+				return fmt.Errorf("%s", msg)
+			}
+			warnings = append(warnings, msg)
+		}
+		return nil
+	}
+
+	walkErr := forEachChild(nodes, "security", func(security *Node) error {
+		return forEachChild(security.Children, "policies", func(policies *Node) error {
+			for _, child := range policies.Children {
+				switch child.Name() {
+				case "global":
+					for _, polInst := range namedInstances(child.FindChildren("policy")) {
+						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+							return err
+						}
+					}
+				case "from-zone":
+					type zonePair struct {
+						from, to   string
+						policyNode *Node
+					}
+					var pairs []zonePair
+					if len(child.Keys) >= 4 {
+						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
+					} else {
+						for _, fzSub := range child.Children {
+							tzNode := fzSub.FindChild("to-zone")
+							if tzNode == nil {
+								continue
+							}
+							for _, tzSub := range tzNode.Children {
+								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							}
+						}
+					}
+					for _, zp := range pairs {
+						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
+						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
+							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
+			return nil
+		})
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return warnings, nil
+}
+
+// validatePolicyEnforcementSubtrees rejects direct policy `term` and
+// `session-options` children that compilePolicy drops, while allowing harmless
+// unknown policy metadata to remain advisory-only.
+func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, error) {
+	var warnings []string
+	checkPolicy := func(scope, policyName string, polNode *Node) error {
+		for _, subtree := range policyDroppedEnforcementSubtrees(polNode) {
+			msg := fmt.Sprintf(
+				"security policies %s policy %q contains dropped enforcement subtree %q "+
+					"(nested enforcement is not compiled and could weaken the direct policy action) (#11014)",
+				scope, policyName, subtree,
+			)
+			if !lenient {
+				return fmt.Errorf("%s", msg)
+			}
+			warnings = append(warnings, msg)
+		}
+		return nil
+	}
+
+	walkErr := forEachChild(nodes, "security", func(security *Node) error {
+		return forEachChild(security.Children, "policies", func(policies *Node) error {
+			for _, child := range policies.Children {
+				switch child.Name() {
+				case "global":
+					for _, polInst := range namedInstances(child.FindChildren("policy")) {
+						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+							return err
+						}
+					}
+				case "from-zone":
+					type zonePair struct {
+						from, to   string
+						policyNode *Node
+					}
+					var pairs []zonePair
+					if len(child.Keys) >= 4 {
+						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
+					} else {
+						for _, fzSub := range child.Children {
+							tzNode := fzSub.FindChild("to-zone")
+							if tzNode == nil {
+								continue
+							}
+							for _, tzSub := range tzNode.Children {
+								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							}
+						}
+					}
+					for _, zp := range pairs {
+						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
+						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
+							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
+			return nil
+		})
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return warnings, nil
+}
