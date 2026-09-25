@@ -155,11 +155,19 @@ func (c *CLI) showSecurityLog(args []string) error {
 				appName, inIface)
 
 		case "POLICY_DENY", "POLICY_REJECT":
-			fmt.Printf("%s %s RT_FLOW - RT_FLOW_SESSION_DENY [source-address=\"%s\" source-port=\"%s\" destination-address=\"%s\" destination-port=\"%s\" protocol-id=\"%s\" policy-name=\"%s\" source-zone-name=\"%s\" destination-zone-name=\"%s\" application=\"%s\" packet-incoming-interface=\"%s\"]\n",
-				ts, hostname, srcAddr, srcPort, dstAddr, dstPort,
-				protoNameToID(e.Protocol), policyName(e),
-				zoneName(e.InZoneName, e.InZone), zoneName(e.OutZoneName, e.OutZone),
-				appName, inIface)
+			if e.Reason != "" {
+				fmt.Printf("%s %s RT_FLOW - RT_FLOW_SESSION_DENY [source-address=\"%s\" source-port=\"%s\" destination-address=\"%s\" destination-port=\"%s\" protocol-id=\"%s\" policy-name=\"%s\" source-zone-name=\"%s\" destination-zone-name=\"%s\" application=\"%s\" packet-incoming-interface=\"%s\" reason=\"%s\"]\n",
+					ts, hostname, srcAddr, srcPort, dstAddr, dstPort,
+					protoNameToID(e.Protocol), policyName(e),
+					zoneName(e.InZoneName, e.InZone), zoneName(e.OutZoneName, e.OutZone),
+					appName, inIface, e.Reason)
+			} else {
+				fmt.Printf("%s %s RT_FLOW - RT_FLOW_SESSION_DENY [source-address=\"%s\" source-port=\"%s\" destination-address=\"%s\" destination-port=\"%s\" protocol-id=\"%s\" policy-name=\"%s\" source-zone-name=\"%s\" destination-zone-name=\"%s\" application=\"%s\" packet-incoming-interface=\"%s\"]\n",
+					ts, hostname, srcAddr, srcPort, dstAddr, dstPort,
+					protoNameToID(e.Protocol), policyName(e),
+					zoneName(e.InZoneName, e.InZone), zoneName(e.OutZoneName, e.OutZone),
+					appName, inIface)
+			}
 
 		case "SCREEN_DROP":
 			fmt.Printf("%s %s RT_IDS - RT_SCREEN_DROP [attack-name=\"%s\" source-address=\"%s\" destination-address=\"%s\" protocol-id=\"%s\" source-zone-name=\"%s\" action=\"%s\"]\n",

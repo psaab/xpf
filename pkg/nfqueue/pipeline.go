@@ -602,6 +602,18 @@ func (p *CapturePipeline) emitDeny(frame CaptureFrame, reason IpsecInnerReason) 
 	})
 }
 
+// emitD11Deny records a reason-52 denial only after the configured sink has
+// successfully delivered its operator-visible event.
+func (p *CapturePipeline) emitD11Deny(frame CaptureFrame, reason IpsecInnerReason) bool {
+	delivered := p.emitDeny(frame, reason)
+	if delivered && reason == ReasonEvaluatorUnavailable {
+		p.mu.Lock()
+		p.stats.D11Deny52++
+		p.mu.Unlock()
+	}
+	return delivered
+}
+
 func zoneReasonWire(reason ZoneReason) IpsecInnerReason {
 	switch reason {
 	case ZoneReasonUnzoned:
@@ -1072,11 +1084,7 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 	}
 	if wouldPermit {
 		if pending.ledger != nil {
-			if p.emitDeny(pending.frame, ReasonEvaluatorUnavailable) {
-				p.mu.Lock()
-				p.stats.D11Deny52++
-				p.mu.Unlock()
-			}
+			p.emitD11Deny(pending.frame, ReasonEvaluatorUnavailable)
 		}
 		p.finishFrame(pending.frame, VerdictDrop)
 		return true

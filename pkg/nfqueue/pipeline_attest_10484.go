@@ -809,49 +809,71 @@ type D11AttestationConfig struct {
 	AuthorityCurrent func() bool
 }
 
+type d11ValidationError struct {
+	reason IpsecInnerReason
+	err    error
+}
+
+func (e *d11ValidationError) Error() string { return e.err.Error() }
+func (e *d11ValidationError) Unwrap() error { return e.err }
+
+func d11ValidationFailure(reason IpsecInnerReason, err error) error {
+	return &d11ValidationError{reason: reason, err: err}
+}
+
+func d11ValidationDenyReason(err error) IpsecInnerReason {
+	var validationErr *d11ValidationError
+	if errors.As(err, &validationErr) {
+		return validationErr.reason
+	}
+	return ReasonEvaluatorUnavailable
+}
+
 func (p *CapturePipeline) validateD11Frame(frame CaptureFrame) (ZoneEvaluation, error) {
 	if frame.Packet == nil {
-		return ZoneEvaluation{}, errors.New("nil packet")
+		return ZoneEvaluation{}, d11ValidationFailure(ReasonProvenance, errors.New("nil packet"))
 	}
 	if p.attestation != nil && p.attestation.AuthorityCurrent != nil && !p.attestation.AuthorityCurrent() {
-		return ZoneEvaluation{}, errors.New("D11 authority override is no longer current")
+		return ZoneEvaluation{}, d11ValidationFailure(ReasonStaleGeneration, errors.New("D11 authority override is no longer current"))
 	}
-	if frame.origin.Family != CaptureFamilyInet ||
-		(frame.origin.Hook != CaptureHookForward && frame.origin.Hook != CaptureHookInput) {
-		return ZoneEvaluation{}, errors.New("unsupported family or hook")
+	if frame.origin.Family != CaptureFamilyInet || frame.origin.Hook != CaptureHookForward {
+		return ZoneEvaluation{}, d11ValidationFailure(ReasonUnsupportedHook, errors.New("unsupported family or hook"))
 	}
 	if p.attestation != nil {
 		if p.attestation.OriginValid != nil {
 			if !p.attestation.OriginValid(frame.origin) {
-				return ZoneEvaluation{}, errors.New("origin owner mismatch")
+				return ZoneEvaluation{}, d11ValidationFailure(ReasonProvenance, errors.New("origin owner mismatch"))
 			}
 		} else {
 			if p.attestation.OriginOwner != "" && frame.origin.Owner != p.attestation.OriginOwner {
-				return ZoneEvaluation{}, errors.New("origin owner mismatch")
+				return ZoneEvaluation{}, d11ValidationFailure(ReasonProvenance, errors.New("origin owner mismatch"))
 			}
 			if p.attestation.OriginSTN != "" && frame.origin.STN != p.attestation.OriginSTN {
-				return ZoneEvaluation{}, errors.New("origin stn mismatch")
+				return ZoneEvaluation{}, d11ValidationFailure(ReasonProvenance, errors.New("origin stn mismatch"))
 			}
 			if p.attestation.OriginIfindex != 0 && frame.origin.OwnedIfindex != p.attestation.OriginIfindex {
-				return ZoneEvaluation{}, errors.New("origin ifindex mismatch")
+				return ZoneEvaluation{}, d11ValidationFailure(ReasonProvenance, errors.New("origin ifindex mismatch"))
 			}
 		}
 	}
 	if p.zoneEvaluator == nil || p.zoneSnapshot == nil {
-		return ZoneEvaluation{}, errors.New("zone evaluator unavailable")
+		return ZoneEvaluation{}, d11ValidationFailure(ReasonEvaluatorUnavailable, errors.New("zone evaluator unavailable"))
 	}
 	if !p.zoneSnapshot.Current() {
-		return ZoneEvaluation{}, errors.New("zone snapshot stale")
+		return ZoneEvaluation{}, d11ValidationFailure(ReasonStaleGeneration, errors.New("zone snapshot stale"))
 	}
 	if reason := validateCapturedGenerations(frame, frame.origin, p.zoneSnapshot); reason != ZoneReasonZoned {
-		return ZoneEvaluation{}, fmt.Errorf("captured generation rejected: %s", zoneReasonWire(reason))
+		return ZoneEvaluation{}, d11ValidationFailure(zoneReasonWire(reason),
+			fmt.Errorf("captured generation rejected: %s", zoneReasonWire(reason)))
 	}
 	evaluation := p.zoneEvaluator.Evaluate(frame.origin, p.zoneSnapshot)
 	if reason := ValidateZoneEvaluation(evaluation); reason != ZoneReasonZoned {
-		return ZoneEvaluation{}, fmt.Errorf("zone evaluation rejected: %s", zoneReasonWire(reason))
+		return ZoneEvaluation{}, d11ValidationFailure(zoneReasonWire(reason),
+			fmt.Errorf("zone evaluation rejected: %s", zoneReasonWire(reason)))
 	}
 	if evaluation.Decision != ZonePass {
-		return ZoneEvaluation{}, fmt.Errorf("zone evaluation denied: %s", zoneReasonWire(evaluation.Reason))
+		return ZoneEvaluation{}, d11ValidationFailure(zoneReasonWire(evaluation.Reason),
+			fmt.Errorf("zone evaluation denied: %s", zoneReasonWire(evaluation.Reason)))
 	}
 	return evaluation, nil
 }
@@ -876,6 +898,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		for _, frame := range frames {
 			if p != nil && p.attestation != nil && p.attestation.Ledger != nil {
 				p.attestation.Ledger.RecordFailure(frame, "D11 authority unavailable")
+				p.emitD11Deny(frame, ReasonEvaluatorUnavailable)
 			}
 			if p != nil {
 				p.finishFrame(frame, VerdictDrop)
@@ -892,6 +915,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 	if d11Revoked {
 		for _, frame := range frames {
 			p.attestation.Ledger.RecordFailure(frame, "D11 authority is draining")
+			p.emitD11Deny(frame, ReasonStaleGeneration)
 			p.finishFrame(frame, VerdictDrop)
 		}
 		p.submitGate.RUnlock()
@@ -901,12 +925,14 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		evaluation, err := p.validateD11Frame(frame)
 		if err != nil {
 			p.attestation.Ledger.RecordFailure(frame, err.Error())
+			p.emitD11Deny(frame, d11ValidationDenyReason(err))
 			p.finishFrame(frame, VerdictDrop)
 			continue
 		}
 		lease, err := p.attestLease(frame)
 		if err != nil {
 			p.attestation.Ledger.RecordFailure(frame, "lease: "+err.Error())
+			p.emitD11Deny(frame, ReasonEvaluatorUnavailable)
 			p.finishFrame(frame, VerdictDrop)
 			continue
 		}
@@ -915,6 +941,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		if flow == nil || flow.pending != nil || len(flow.frames) == 0 || flow.frames[0].Packet != frame.Packet {
 			p.mu.Unlock()
 			p.attestation.Ledger.RecordFailure(frame, "flow is no longer pending")
+			p.emitD11Deny(frame, ReasonProvenance)
 			p.finishFrame(frame, VerdictDrop)
 			continue
 		}
@@ -922,6 +949,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		if err != nil {
 			p.mu.Unlock()
 			p.attestation.Ledger.RecordFailure(frame, "reserve: "+err.Error())
+			p.emitD11Deny(frame, ReasonWorkerQueueFull)
 			p.finishFrame(frame, VerdictDrop)
 			continue
 		}

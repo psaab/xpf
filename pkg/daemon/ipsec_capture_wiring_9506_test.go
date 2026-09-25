@@ -13,6 +13,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/nfqueue"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
@@ -399,7 +400,7 @@ func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"zone": {Interfaces: []string{"st1.0"}},
 	}
-	daemon := &Daemon{}
+	daemon := &Daemon{eventBuf: logging.NewEventBuffer(8)}
 	old, staged, err := daemon.stageIpsecCapture(cfg)
 	if err != nil {
 		t.Fatalf("stage capture: %v", err)
@@ -424,6 +425,37 @@ func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {
 	if captured.Pipeline.DenyEvents == nil {
 		t.Fatal("staged pipeline has no production deny-event sink")
 	}
+
+	for _, reason := range []nfqueue.IpsecInnerReason{
+		nfqueue.ReasonZoneUnzoned, nfqueue.ReasonStaleGeneration,
+		nfqueue.ReasonEvaluatorUnavailable, nfqueue.ReasonUnsupportedHook,
+	} {
+		if !captured.Pipeline.DenyEvents.EmitIpsecInnerDeny(nfqueue.IpsecInnerDeny{
+			Reason: reason, Tunnel: "st1.0", Generation: 4,
+		}) {
+			t.Fatalf("production sink rejected %s", reason)
+		}
+	}
+	events := daemon.eventBuf.Latest(8)
+	if len(events) != 4 {
+		t.Fatalf("operator event buffer received %d D11 denials, want 4: %+v", len(events), events)
+	}
+	for i, reason := range []nfqueue.IpsecInnerReason{
+		nfqueue.ReasonUnsupportedHook, nfqueue.ReasonEvaluatorUnavailable,
+		nfqueue.ReasonStaleGeneration, nfqueue.ReasonZoneUnzoned,
+	} {
+		got := events[i]
+		if got.Type != "POLICY_DENY" || got.Action != "deny" ||
+			got.Reason != "D11 "+reason.String() || got.IngressIface != "st1.0" {
+			t.Fatalf("operator event[%d]=%+v, want D11 %s POLICY_DENY for st1.0", i, got, reason)
+		}
+	}
+	daemon.eventBuf = nil
+	if captured.Pipeline.DenyEvents.EmitIpsecInnerDeny(nfqueue.IpsecInnerDeny{
+		Reason: nfqueue.ReasonEvaluatorUnavailable, Tunnel: "st1.0",
+	}) {
+		t.Fatal("production sink claimed delivery after the operator event buffer disappeared")
+	}
 	if staged.actor.Status().Active {
 		t.Fatal("staged actor active before explicit start")
 	}
@@ -433,6 +465,90 @@ func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {
 	if err := staged.close(); err != nil {
 		t.Fatalf("second staged close: %v", err)
 	}
+}
+
+func TestIpsecCaptureZoneOnlyRezoneRotatesAuthorityWithoutQueueKeyChange11015(t *testing.T) {
+	origLink := ipsecCaptureLinkByName
+	origOpen := ipsecCaptureOpenQueue
+	origNew := ipsecCaptureNewPipeline
+	t.Cleanup(func() {
+		ipsecCaptureLinkByName = origLink
+		ipsecCaptureOpenQueue = origOpen
+		ipsecCaptureNewPipeline = origNew
+	})
+	ipsecCaptureLinkByName = func(name string) (netlink.Link, error) {
+		return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name, Index: 41}}, nil
+	}
+	ipsecCaptureOpenQueue = func(uint16, ipsecQueueFamily) (*nfqueue.Queue, error) {
+		return nil, nil
+	}
+	ipsecCaptureNewPipeline = func(cfg IpsecCapturePipelineConfig) (*IpsecCapturePipeline, error) {
+		cfg.Queues = nil
+		return NewIpsecCapturePipeline(cfg)
+	}
+
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{"vpn": {BindInterface: "st1.0"}}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{"zone-a": {Interfaces: []string{"st1.0"}}}
+	oldHandles := make([]ipsecQueueHandle, 0, 4)
+	for i, class := range []struct {
+		family ipsecQueueFamily
+		hook   ipsecQueueHook
+	}{
+		{ipsecFamilyInet, ipsecHookForward},
+		{ipsecFamilyInet, ipsecHookInput},
+		{ipsecFamilyBridge, ipsecHookForward},
+		{ipsecFamilyBridge, ipsecHookInput},
+	} {
+		oldHandles = append(oldHandles, ipsecQueueHandle{
+			Number: uint16(1001 + i), Epoch: 9,
+			Key: ipsecQueueKey{
+				Generation: 4, Family: class.family, Hook: class.hook,
+				Owner: "vpn", STN: "st1.0", Ifindex: 41,
+			},
+		})
+	}
+	old := &ipsecCaptureRuntime{
+		handles: oldHandles, spec: xnft.IpsecDivertSpec{},
+		zoneSnapshot: buildPMechZoneSnapshot(cfg, oldHandles, 4, 4),
+	}
+	daemon := &Daemon{ipsecCapture: old}
+
+	unchangedOld, unchangedStaged, err := daemon.stageIpsecCapture(cfg)
+	if err != nil {
+		t.Fatalf("stage unchanged config: %v", err)
+	}
+	if unchangedOld != old || unchangedStaged != old || daemon.ipsecCaptureStagePending {
+		t.Fatal("unchanged authority rotated capture queues")
+	}
+
+	cfg.Security.Zones = map[string]*config.ZoneConfig{"zone-b": {Interfaces: []string{"st1.0"}}}
+	oldRuntime, staged, err := daemon.stageIpsecCapture(cfg)
+	if err != nil {
+		t.Fatalf("stage zone-only rezone: %v", err)
+	}
+	if oldRuntime != old || staged == nil || staged == old {
+		t.Fatalf("zone-only rezone runtime=(%p,%p), want old runtime and a rotated staged runtime", oldRuntime, staged)
+	}
+	if !daemon.ipsecCaptureStagePending || len(staged.handles) != 4 {
+		t.Fatalf("zone-only rezone stage pending=%v queues=%d, want pending complete four-class rotation",
+			daemon.ipsecCaptureStagePending, len(staged.handles))
+	}
+	for i, handle := range staged.handles {
+		if handle.Key.Generation == oldHandles[i].Key.Generation ||
+			handle.Key.Family != oldHandles[i].Key.Family ||
+			handle.Key.Hook != oldHandles[i].Key.Hook ||
+			handle.Key.Owner != oldHandles[i].Key.Owner ||
+			handle.Key.STN != oldHandles[i].Key.STN ||
+			handle.Key.Ifindex != oldHandles[i].Key.Ifindex {
+			t.Fatalf("queue identity changed beyond capture generation: old=%+v next=%+v", oldHandles[i].Key, handle.Key)
+		}
+	}
+	resolution := staged.zoneSnapshot.ResolveSTN("st1.0")
+	if resolution.Reason != nfqueue.ZoneReasonZoned || resolution.ZoneID != config.StableZoneID("zone-b") {
+		t.Fatalf("staged zone authority=%+v, want zone-b=%d", resolution, config.StableZoneID("zone-b"))
+	}
+	_ = daemon.rollbackIpsecCaptureStage(old, staged)
 }
 
 func TestIpsecCaptureStageInvalidVPNPublishesQuarantine9506(t *testing.T) {
