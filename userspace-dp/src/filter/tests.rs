@@ -3666,6 +3666,58 @@ fn lo0_filter_evaluation() {
 }
 
 #[test]
+fn lo0_protocol_filter_matches_native_255_and_keeps_decapped_protocol_exact_10676() {
+    let state = parse_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "protect-fragments".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "drop-tcp".into(),
+                protocols: vec!["tcp".into()],
+                action: "discard".into(),
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[],
+        "protect-fragments",
+        "",
+    )
+    .expect("fragment lo0 filter compiles");
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let fragment_extra = || TermMatchExtra {
+        is_fragment: true,
+        l4_present: false,
+        ..Default::default()
+    };
+
+    for (label, protocol, expected) in [
+        (
+            "native-255",
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            FilterAction::Discard,
+        ),
+        ("decapped-tcp", crate::ip_proto::PROTO_TCP, FilterAction::Discard),
+        ("decapped-udp", crate::ip_proto::PROTO_UDP, FilterAction::Accept),
+    ] {
+        let result = evaluate_lo0_filter(
+            &state,
+            false,
+            src,
+            dst,
+            protocol,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        );
+        assert_eq!(result.action, expected, "#10676 lo0 {label} protocol");
+    }
+}
+
+
+#[test]
 fn dscp_match_in_term() {
     let state = make_filter_state(
         &[FirewallFilterSnapshot {
