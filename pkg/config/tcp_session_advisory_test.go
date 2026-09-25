@@ -5,16 +5,11 @@ import (
 	"testing"
 )
 
-// #2078: the `security flow tcp-session` presence flags (no-syn-check,
-// no-syn-check-in-tunnel, rst-invalidate-session, no-sequence-check) are typed
-// and committed but the userspace AF_XDP dataplane enforces none of them (it
-// does not track TCP sequence/window state). #6539 narrowed that clause: the
-// advisory used to say the dataplane "has no TCP state machine", which #3152
-// (OPENING vs established) and #3046 (RST vs FIN close) have since made false.
-// Research #2078 converged PLAN-KILL on enforcement
-// and recommended C2: emit a commit-time advisory so an operator who sets one
-// is not silently misled into believing it has runtime effect. These tests
-// pin that the advisory fires for each knob and folds them into one warning.
+// #2078: no-syn-check-in-tunnel, rst-invalidate-session and no-sequence-check
+// remain accepted-only. #10703 wires no-syn-check and strict-syn-check into
+// transit session-miss admission. These tests pin the advisory for the
+// unenforced flags and ensure the two live selectors no longer get a stale
+// warning.
 
 // findTCPSessionAdvisory returns the single #2078 tcp-session advisory warning,
 // or "" if none was emitted. It is keyed on the stable substrings the warning
@@ -40,7 +35,6 @@ func TestTCPSessionAdvisory_PerKnob(t *testing.T) {
 		setLine string
 		token   string // the exact knob name that must appear in the advisory
 	}{
-		{"set security flow tcp-session no-syn-check", "no-syn-check"},
 		{"set security flow tcp-session no-syn-check-in-tunnel", "no-syn-check-in-tunnel"},
 		{"set security flow tcp-session rst-invalidate-session", "rst-invalidate-session"},
 		{"set security flow tcp-session no-sequence-check", "no-sequence-check"},
@@ -56,28 +50,18 @@ func TestTCPSessionAdvisory_PerKnob(t *testing.T) {
 			if !strings.Contains(adv, tc.token) {
 				t.Fatalf("advisory does not name knob %q: %q", tc.token, adv)
 			}
-			// Guard against a substring false-positive: no-syn-check is a
-			// prefix of no-syn-check-in-tunnel. When ONLY no-syn-check is set,
-			// the advisory must not also claim the longer in-tunnel knob.
-			if tc.token == "no-syn-check" && strings.Contains(adv, "no-syn-check-in-tunnel") {
-				t.Fatalf("advisory wrongly names no-syn-check-in-tunnel when only no-syn-check set: %q", adv)
-			}
 		})
 	}
 }
 
-// All four knobs set together must fold into a SINGLE advisory that names all
-// four (the C2 plan calls for one folded warning across the whole family, not
-// four separate lines).
-func TestTCPSessionAdvisory_FoldsAllKnobs(t *testing.T) {
+// All three remaining accepted-only flags fold into one advisory.
+func TestTCPSessionAdvisory_FoldsRemainingFlags(t *testing.T) {
 	cfg := compileSetLines(t, []string{
-		"set security flow tcp-session no-syn-check",
 		"set security flow tcp-session no-syn-check-in-tunnel",
 		"set security flow tcp-session rst-invalidate-session",
 		"set security flow tcp-session no-sequence-check",
 	})
 
-	// Exactly one advisory line, not one per knob.
 	count := 0
 	for _, w := range cfg.Warnings {
 		if strings.Contains(w, "security flow tcp-session") &&
@@ -92,11 +76,26 @@ func TestTCPSessionAdvisory_FoldsAllKnobs(t *testing.T) {
 
 	adv := findTCPSessionAdvisory(cfg)
 	for _, token := range []string{
-		"no-syn-check", "no-syn-check-in-tunnel",
-		"rst-invalidate-session", "no-sequence-check",
+		"no-syn-check-in-tunnel", "rst-invalidate-session", "no-sequence-check",
 	} {
 		if !strings.Contains(adv, token) {
 			t.Fatalf("folded advisory missing knob %q: %q", token, adv)
+		}
+	}
+}
+
+// #10703: no-syn-check is enforced by the dataplane, so its explicit opt-out
+// must not receive the accepted-only warning reserved for inert flags.
+func TestTCPNoSynCheckIsNotAdvisedAsInert10703(t *testing.T) {
+	cfg := compileSetLines(t, []string{
+		"set security flow tcp-session no-syn-check",
+	})
+	if cfg.Security.Flow.TCPSession == nil || !cfg.Security.Flow.TCPSession.NoSynCheck {
+		t.Fatal("no-syn-check did not compile into typed config")
+	}
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "no-syn-check") && strings.Contains(warning, "accepted-only") {
+			t.Fatalf("live no-syn-check selector still receives an inert warning: %q", warning)
 		}
 	}
 }

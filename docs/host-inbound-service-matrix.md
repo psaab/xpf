@@ -2447,22 +2447,17 @@ decline-gates and closes the residual they left open:
   (`is_initial_syn` false at install → `established = true`). Aligning on
   `has_syn` matches the gate to its stated "only off the handshake" intent.
 
-The `!has_syn` decline is the **same predicate** the transit strict-syn-check
-applies (#4400, `strict_syn_check_drops_new_flow`), but the **action differs by
-disposition**, exactly as #4400 chose. Transit dispositions (ForwardCandidate /
-MissingNeighbor) **DROP** the packet. Host-inbound `LocalDelivery` must **NOT**
-drop it: a peer RST/FIN tearing down a firewall-**originated** TCP flow
-(BGP-active, syslog-TCP/TLS, feed/RPM fetches, DNS-over-TCP), or a
-connection-refused RST for the firewall's own outbound SYN whose dataplane
-session was already GC'd, arrives as a session MISS and must still reach the
-local stack so the kernel socket tears down promptly (the #4400 LocalDelivery
-drop-exemption). So the guard here only declines to **cache**; the
-`LocalDelivery` disposition still delivers the declined packet to the host via
-the reinject chokepoint. An established-session packet is a session HIT and
-never consults this miss-only gate; and any later real SYN is re-evaluated by
-the `to-zone junos-host` mandatory-teardown gate that runs on EVERY
-LocalDelivery session hit (`poll_descriptor`), so declining to cache never skips
-policy.
+Host-inbound `LocalDelivery` uses a separate, always-SYN-only cache gate. It
+declines to cache every non-SYN TCP first packet regardless of
+`no-syn-check`/`strict-syn-check`, but does **not** drop the packet: peer
+teardowns for firewall-originated flows (BGP-active, syslog-TCP/TLS,
+feed/RPM fetches, DNS-over-TCP) and connection-refused RSTs still reach the
+kernel stack through the reinject chokepoint. The transit
+`ForwardCandidate`/`MissingNeighbor` gate is configurable by #10703; its
+default is also SYN-first, while `no-syn-check` only permits non-closing
+mid-stream transit misses. Existing session hits are unaffected, and a later
+real SYN is re-evaluated by the `to-zone junos-host` mandatory-teardown gate,
+so declining to cache never skips policy.
 
 ## On-wire coverage: what a compile-side test structurally cannot show (#6936)
 

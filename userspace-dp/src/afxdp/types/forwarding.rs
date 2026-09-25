@@ -379,6 +379,10 @@ pub(in crate::afxdp) struct ForwardingState {
     /// an old Go binary) — sessions then keep app_id 0 (unknown).
     pub(in crate::afxdp) app_catalog: AppCatalog,
     pub(in crate::afxdp) session_timeouts: crate::session::SessionTimeouts,
+    /// `security flow tcp-session no-syn-check`, controls transit session-miss
+    /// admission. Strict mode wins if both flags are set.
+    pub(in crate::afxdp) tcp_no_syn_check: bool,
+    pub(in crate::afxdp) tcp_strict_syn_check: bool,
     /// #3527: per-ingress-zone override (zone id → ns) of the global half-open
     /// (`tcp_opening_ns`) TCP window, built from each screened zone's
     /// `syn-flood timeout`. Pushed onto the worker `SessionTable` via

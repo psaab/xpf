@@ -1033,13 +1033,16 @@ export path — so the residual was always confined to the receiving node.)
 
 The fast path and its call site are REMOVED. Session-less fabric-ingress
 packets now take the normal session-miss path: zone-pair policy under the
-#6458-validated zone, source-NAT applied, a FORWARD session when
-permitted — the standard Junos no-syn-check asymmetric-routing pickup
-(#3152), identical to the packet arriving on the real interface. The
-sync-race sub-window the fast path covered (a peer-punted return packet
-arriving before its synced session installs) reverts to a drop, which the
-#6478 verifier explicitly prefers over unauthenticated seeding. A genuine
-established flow's return traffic is unaffected: it is a session HIT
+#6458-validated zone, source-NAT applied, and a FORWARD session when permitted.
+With `security flow tcp-session no-syn-check` configured, a session-less
+fabric-ingress ACK can use the standard asymmetric-routing pickup (#3152);
+otherwise non-SYN misses are dropped by the default SYN-first admission gate.
+Without `no-syn-check`, the sync-race sub-window the fast path covered (a
+peer-punted return packet arriving before its synced session installs) still
+drops by default, which the #6478 verifier prefers over unauthenticated
+seeding. Configuring `no-syn-check` deliberately admits policy-permitted
+non-closing ACK misses for the requested mid-stream pickup.
+A genuine established flow's return traffic is unaffected: it is a session HIT
 served by `resolve_flow_session_decision` (synced session + #2120 standby
 retention) and never reached the session-less fast path.
 

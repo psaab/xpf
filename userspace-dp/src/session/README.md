@@ -2400,54 +2400,29 @@ bounded regardless of the window — a 71-min worst case is bounded by the SAME
 4096-source / 1024-entry caps as a 5-second window; a longer floor only defers
 reclamation of idle entries.
 
-## Strict-syn-check drop on the new-flow path (#4400/#10270)
+## TCP SYN-check selectors on the transit session-miss path (#4400/#10270/#10703)
 
-A TCP packet that MISSES the session table and carries **no SYN** cannot
-legitimately create a new transit session. A bare ACK/PSH/data tuple with no
-matching state is either a late segment for an already-GC'd session or a
-midstream tuple this firewall never observed; admitting it would forward
-traffic without conntrack state (#10270). A bare RST/FIN is the original
-#4400 subset: it can never open a connection and otherwise creates an
-immediately-closing entry with no forwarding value. Before these fixes, all
-of those packets flowed through the ordinary session-miss install after policy
-evaluation.
+The transit session-MISS gate runs after HA resolution and before either
+`ForwardCandidate` or `MissingNeighbor` can install a new session. By default,
+every non-SYN TCP miss drops: this closes the #10270 ACK/PSH/data gap and
+prevents stale packets from forwarding without conntrack state. Bare RST/FIN
+misses always drop as well (#4400), avoiding immediately-closing table entries.
 
-The fix is a **strict-syn-check-style guard** at the session-MISS choke point
-in `afxdp/poll_descriptor` (`strict_syn_check_drops_new_flow`), applied right
-after `finalize_new_flow_ha_resolution` and BEFORE both transit install sites
-(the `ForwardCandidate` forward install and the `MissingNeighbor` seed
-install). Any non-SYN TCP packet on a `ForwardCandidate` /
-`MissingNeighbor` miss is DROPPED — the frame is recycled, no session is
-installed, and the aggregate `screen_drops` flow-statistics counter is bumped
-(no per-reason ordinal — that array mirrors the Junos SCREEN checks, and this
-is a flow `tcp-session` control; it joins the syn-cookie / icmp-fragment
-aggregate-only class). No per-packet event is emitted: a non-SYN session-miss
-flood must never become a log storm.
+`security flow tcp-session no-syn-check` is the explicit Junos opt-out. The
+Go snapshot carries it into `ForwardingState`; when set, non-closing TCP
+session misses such as ACK/PSH may seed a policy-permitted transit session for
+mid-stream pickup after failover or on asymmetric routes. `strict-syn-check`
+is also carried; it forces SYN-first admission and takes precedence if both
+selectors are set. Absent either knob, xpf keeps its fail-closed SYN-first
+default. Existing and HA-synced session hits never reach this gate.
 
-Scope and deliberate exemptions:
-
-- **Applied unconditionally (no config knob).** Junos exposes
-  `security flow tcp-session strict-syn-check` as an opt-in that requires the
-  first packet of EVERY TCP flow to be a SYN. xpf still permits SYN-ACK first
-  packets for asymmetric-routing pickup (#3152), but a session-less bare
-  ACK/PSH/data packet is never admitted. A legitimate midstream packet is
-  unaffected when the established or HA-synced session is already present:
-  those packets are session HITS and resolve before this miss guard.
-- **SYN-bearing segments are untouched.** A bare SYN still installs; a SYN-ACK
-  on miss still installs per existing asymmetric-routing behavior; the
-  malformed SYN-FIN stays owned by the `tcp-syn-fin` screen check (the guard's
-  `!has_syn` clause excludes it).
-- **LocalDelivery (host-inbound to the RE) is exempt.** The guard gates only
-  the two TRANSIT dispositions. A peer control packet for a firewall-originated
-  TCP session (BGP, IKE, management SSH) is host-inbound and MUST reach the
-  local kernel stack, so it is never dropped here.
-- **No fabric exemption needed.** Since #6478 removed the
-  `cluster_peer_return_fast_path`, a fabric-ingress non-SYN TCP packet takes
-  the normal miss block and is dropped by this guard — a legitimate
-  cross-chassis flow arrives as a session HIT (the synced session is present),
-  never as a session-less fabric packet. Any non-SYN TCP reaching the guard is
-  a genuine new-flow attempt and is dropped whether it ingressed locally or
-  crossed the fabric.
+The drop is counted in aggregate `screen_drops` flow statistics (no per-reason
+ordinal and no per-packet event, to avoid a flood becoming a log storm). The
+gate applies only to transit dispositions. Host-inbound `LocalDelivery` still
+declines to cache non-SYN first packets but delivers them to the local kernel
+stack, so a peer teardown for a firewall-originated connection is not lost.
+Fabric-ingress session misses take the same policy path as local transit; a
+legitimate cross-chassis flow arrives as an existing synced-session hit.
 
 ## Why a slab + integer handles
 

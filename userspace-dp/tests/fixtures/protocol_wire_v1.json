@@ -294,7 +294,9 @@
       "tcp_mss_gre_in": 0,
       "tcp_mss_gre_out": 0,
       "tcp_mss_ipsec_vpn": 0,
+      "tcp_no_syn_check": false,
       "tcp_session_timeout": 0,
+      "tcp_strict_syn_check": false,
       "tcp_time_wait_timeout": 0,
       "udp_session_timeout": 0
     },
@@ -663,7 +665,9 @@
     "tcp_mss_gre_in": 0,
     "tcp_mss_gre_out": 0,
     "tcp_mss_ipsec_vpn": 0,
+    "tcp_no_syn_check": false,
     "tcp_session_timeout": 0,
+    "tcp_strict_syn_check": false,
     "tcp_time_wait_timeout": 0,
     "udp_session_timeout": 0
   },

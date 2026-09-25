@@ -340,13 +340,18 @@ const (
 	// v32 (#10683): bind-less VPNs publish their rendered selector pairs to
 	// the dataplane, which drops matching AF_XDP transit without relying on SA
 	// state. An older helper ignores these rows and continues sending matching
-	// cleartext because AF_XDP TX bypasses kernel XFRM.
+	// cleartext because AF_XDP TX bypasses kernel XFRM. Exact equality refuses
+	// the mixed version rather than silently losing the fence.
 	// v32 -> v33 (#10702): post-teardown apply refusals now carry a
 	// machine-readable kind. A v32 manager interprets the old free-text refusal
 	// as proof that the prior snapshot is retained and can leave ctrl enabled
 	// after workers are gone; exact equality refuses that unsafe mixed pairing
 	// before teardown.
-	ProtocolVersion = 33
+	// v33 -> v34 (#10703): `tcp_no_syn_check` and `tcp_strict_syn_check` select
+	// transit TCP session-miss admission. A v33 helper ignores the explicit
+	// no-syn-check opt-out and keeps dropping the midstream packet the option
+	// permits; exact equality fences this mixed version.
+	ProtocolVersion = 34
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -925,6 +930,11 @@ type FlowSnapshot struct {
 	TCPInitialTimeout  int `json:"tcp_initial_timeout,omitempty"`
 	TCPClosingTimeout  int `json:"tcp_closing_timeout,omitempty"`
 	TCPTimeWaitTimeout int `json:"tcp_time_wait_timeout,omitempty"`
+	// #10703: TCP session-MISS SYN admission. The v34 version fence prevents a
+	// v33 helper from ignoring no-syn-check and silently keeping the default
+	// drop; strict-syn-check takes precedence when both fields are set.
+	TCPNoSynCheck     bool `json:"tcp_no_syn_check,omitempty"`
+	TCPStrictSynCheck bool `json:"tcp_strict_syn_check,omitempty"`
 	UDPSessionTimeout  int `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
 	ICMPSessionTimeout int `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
 	// GREAcceleration carries `security flow gre-performance-acceleration`

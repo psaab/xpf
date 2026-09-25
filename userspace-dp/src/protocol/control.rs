@@ -205,7 +205,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // kind. A v32 Go manager treats that response as proof the prior snapshot is
 // retained and may keep ctrl enabled after the workers are gone; exact version
 // equality refuses the unsafe mixed pairing before teardown.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 33;
+// v33 -> v34 (#10703): `tcp_no_syn_check` and `tcp_strict_syn_check` make
+// transit TCP session-miss admission configurable. A v33 helper ignores the
+// no-syn-check opt-out and continues the default SYN-first drop; exact
+// equality fences the mixed version.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 34;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

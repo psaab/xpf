@@ -323,32 +323,17 @@ type TCPSessionConfig struct {
 	InitialTimeout       int
 	ClosingTimeout       int
 	TimeWaitTimeout      int
-	NoSynCheck           bool // allow mid-stream TCP session creation
+	NoSynCheck           bool // allow non-closing mid-stream TCP transit misses (#10703)
 	NoSynCheckInTunnel   bool // allow mid-stream TCP for tunnel traffic only
 	RstInvalidateSession bool // immediately expire session on RST
 	// NoSequenceCheck disables TCP sequence-number validation for flow
 	// sessions (`set security flow tcp-session no-sequence-check`, #2008 M9).
-	// Typed-config only today, exactly like NoSynCheck / RstInvalidateSession:
-	// the userspace AF_XDP dataplane does not currently perform TCP
-	// sequence-number window validation, so there is nothing to skip yet. The
-	// field captures operator intent at commit (with schema validation +
-	// completion) and is the single seam a future sequence-checking dataplane
-	// would read.
+	// Typed-config only: the userspace dataplane does not currently perform
+	// TCP sequence-number window validation, so there is nothing to skip yet.
 	NoSequenceCheck bool
 	// StrictSynCheck records `set security flow tcp-session strict-syn-check`
-	// (#8296). ACCEPTED-ONLY: the userspace AF_XDP dataplane tracks no TCP
-	// sequence/window state and reads neither this knob nor NoSynCheck, and it
-	// applies two handshake guards of its own that neither knob selects (see
-	// docs/feature-gaps.md "TCP Strict SYN Check").
-	//
-	// It exists because the keyword was previously accepted by NOTHING: absent
-	// from setSchema, absent from this compiler, and — contrary to what
-	// feature-gaps.md claimed — carrying no advisory either. So a real Junos
-	// keyword committed clean, rendered back, and reached no consumer, which is
-	// #8296's own defect for a documented knob. Modelling it is also what makes
-	// the tcp-session subtree LEAF-COMPLETE, which is the precondition
-	// schemaNode.closedWorld requires before that subtree can reject unknown
-	// keywords.
+	// (#8296). It is carried to the transit session-MISS gate, where it requires
+	// SYN-first admission and overrides NoSynCheck when both are set.
 	StrictSynCheck bool
 }
 

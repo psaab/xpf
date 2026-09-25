@@ -114,9 +114,9 @@ func TestFlowSessionClosedWorldRejectsATypo8296(t *testing.T) {
 	}
 }
 
-// #8296 also made `strict-syn-check` reach a consumer for the first time: the
-// accepted-only advisory docs/feature-gaps.md already claimed existed.
-func TestStrictSynCheckNowCarriesItsAdvisory8296(t *testing.T) {
+// #8296 modelled the keyword; #10703 carries it to the transit session-MISS
+// gate. It must no longer be described as accepted-only.
+func TestStrictSynCheckIsNotAdvisedAsInert10703(t *testing.T) {
 	tree, perrs := config.NewParser(flowText8296("tcp-session { strict-syn-check; }")).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
@@ -126,19 +126,12 @@ func TestStrictSynCheckNowCarriesItsAdvisory8296(t *testing.T) {
 		t.Fatalf("compile: %v", cerr)
 	}
 	if cfg.Security.Flow.TCPSession == nil || !cfg.Security.Flow.TCPSession.StrictSynCheck {
-		t.Fatal("strict-syn-check did not reach the typed config — it is modelled " +
-			"in the schema but read by nothing, which is the #8296 defect again")
+		t.Fatal("strict-syn-check did not reach the typed config")
 	}
-	var found bool
-	for _, w := range config.ValidateConfig(cfg) {
-		if strings.Contains(w, "strict-syn-check") {
-			found = true
+	for _, warning := range config.ValidateConfig(cfg) {
+		if strings.Contains(warning, "strict-syn-check") && strings.Contains(warning, "accepted-only") {
+			t.Fatalf("live strict-syn-check selector still receives an inert warning: %q", warning)
 		}
-	}
-	if !found {
-		t.Error("no advisory names strict-syn-check. docs/feature-gaps.md states " +
-			"`Commit emits an accepted-only advisory`; before #8296 that claim was " +
-			"false and the keyword reached nothing at all")
 	}
 }
 

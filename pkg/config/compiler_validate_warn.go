@@ -656,31 +656,18 @@ func ValidateConfig(cfg *Config) []string {
 			"session-forwarded regardless of this setting")
 	}
 
-	// #2078: the `security flow tcp-session` presence flags are typed and
-	// committed but the userspace AF_XDP dataplane enforces none of them
-	// today. no-syn-check / no-syn-check-in-tunnel would gate the
-	// session-create SYN check; rst-invalidate-session would tear a session
-	// down on RST; no-sequence-check (#2008 M9) would skip sequence-window
-	// validation. The dataplane session table is a 5-tuple flow entry with no
-	// sequence/window tracking, so there is nothing for any of these knobs to
-	// enforce or skip. This is an intentional, reviewed parity gap (see #2008
-	// M9 and the RST design rationale in docs/active-active-new-connections.md);
-	// research #2078 converged PLAN-KILL on enforcement. Warn so an operator
-	// who sets one of these is not silently misled into believing it has
-	// runtime effect.
+	// #2078: the remaining `security flow tcp-session` presence flags
+	// (no-syn-check-in-tunnel, rst-invalidate-session, no-sequence-check) are
+	// typed and committed but not enforced by the userspace dataplane. Warn so
+	// an operator setting one is not misled about its runtime effect.
 	//
-	// #6539: the message used to say the dataplane "has no TCP state machine",
-	// which stopped being true — #3152 added the OPENING-vs-established
-	// distinction and #3046 the RST-vs-FIN close split, and those very states
-	// are why the tcp-session TIMEOUT leaves need their own, differently-worded
-	// advisory below. What remains true for these four PRESENCE flags is the
-	// absence of sequence/window tracking, so the sentence now claims only
-	// that.
+	// #10703 wires no-syn-check and strict-syn-check into the transit
+	// session-MISS gate: mid-stream non-closing TCP is admitted only when
+	// no-syn-check is set, and strict-syn-check overrides it. Bare RST/FIN
+	// remain fail-closed. Those two selectors are therefore deliberately
+	// excluded from the accepted-only advisory.
 	if ts := cfg.Security.Flow.TCPSession; ts != nil {
 		var unenforced []string
-		if ts.NoSynCheck {
-			unenforced = append(unenforced, "no-syn-check")
-		}
 		if ts.NoSynCheckInTunnel {
 			unenforced = append(unenforced, "no-syn-check-in-tunnel")
 		}
@@ -692,7 +679,7 @@ func ValidateConfig(cfg *Config) []string {
 		}
 		if len(unenforced) > 0 {
 			warnings = append(warnings, fmt.Sprintf(
-				"security flow tcp-session %s configured but accepted-only — the userspace dataplane does not track TCP sequence/window state and does not enforce these knobs (config-only parity, #2078)",
+				"security flow tcp-session %s configured but accepted-only — the userspace dataplane does not enforce these knobs (config-only parity, #2078)",
 				strings.Join(unenforced, ", ")))
 		}
 		// #6539/#7342: the three tcp-session TIMEOUT leaves (initial / closing
@@ -760,15 +747,6 @@ func ValidateConfig(cfg *Config) []string {
 		}
 		if flow.PreserveIncomingFragmentSize {
 			flowUnenforced = append(flowUnenforced, "preserve-incoming-fragment-size")
-		}
-		// #8296: `tcp-session strict-syn-check`. docs/feature-gaps.md said
-		// "Commit emits an accepted-only advisory" — it did not: the keyword
-		// appeared in no schema, no compiler and no advisory, so it committed
-		// clean and reached nothing. That is exactly #8296's defect, for a
-		// keyword the tree documents as supported-but-inert. The advisory the
-		// doc promised now exists.
-		if flow.TCPSession != nil && flow.TCPSession.StrictSynCheck {
-			flowUnenforced = append(flowUnenforced, "tcp-session strict-syn-check")
 		}
 		if len(flowUnenforced) > 0 {
 			warnings = append(warnings, fmt.Sprintf(
