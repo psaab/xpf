@@ -33,6 +33,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/psaab/xpf/pkg/linuxsock"
 	"golang.org/x/sys/unix"
 )
 
@@ -226,7 +227,7 @@ func OpenFamily(queueID uint16, protocolFamily int) (*Queue, error) {
 }
 
 func openWithFamilies(queueID uint16, protocolFamilies []int) (*Queue, error) {
-	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW, unix.NETLINK_NETFILTER)
+	fd, err := linuxsock.Socket(unix.AF_NETLINK, unix.SOCK_RAW, unix.NETLINK_NETFILTER)
 	if err != nil {
 		return nil, fmt.Errorf("nfqueue: socket NETLINK_NETFILTER: %w", err)
 	}
