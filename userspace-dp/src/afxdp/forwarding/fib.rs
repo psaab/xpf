@@ -480,16 +480,34 @@ fn local_delivery_resolution_v6(
     ip: Ipv6Addr,
     table: &str,
 ) -> Option<ForwardingResolution> {
-    if !local_v6_owned_by_table(state, ip, table) {
-        return None;
-    }
-    // #10645: match the row's unmasked HOST address (see the v4 arm).
-    let local_ifindex = state
-        .connected_v6
-        .iter()
-        .find(|entry| entry.table == table && entry.host == ip)
-        .map(|entry| entry.ifindex)
-        .unwrap_or(0);
+    let local_ifindex = if local_v6_owned_by_table(state, ip, table) {
+        // #10645: match the row's unmasked HOST address (see the v4 arm).
+        state
+            .connected_v6
+            .iter()
+            .find(|entry| entry.table == table && entry.host == ip)
+            .map(|entry| entry.ifindex)
+            .unwrap_or(0)
+    } else {
+        // #10692: Linux puts the subnet-router anycast address of an assigned
+        // connected prefix in table local, ahead of the ordinary connected
+        // route. Mirror that priority for the prefix network address, but only
+        // where an anycast IID exists. RFC 6164 removes subnet-router anycast
+        // on /127 point-to-point links; /128 has no host bits, and /0's `::`
+        // is the unspecified address rather than an assignable subnet anycast.
+        // `connected_v6` is longest-prefix-first and table-scoped (#2388), so
+        // the first matching row supplies the owning interface without
+        // allocating or crossing VRF boundaries.
+        state
+            .connected_v6
+            .iter()
+            .find(|entry| {
+                entry.table == table
+                    && (1..127).contains(&entry.prefix.prefix_len())
+                    && entry.prefix.addr() == ip
+            })
+            .map(|entry| entry.ifindex)?
+    };
     if local_ifindex == 0 {
         LOCAL_DELIVERY_IFINDEX0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }

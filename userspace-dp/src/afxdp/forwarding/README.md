@@ -126,6 +126,13 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
     match, so its LocalDelivery carries ifindex 0 — now reached ONLY when
     the table genuinely owns the address, and counted by the
     `LOCAL_DELIVERY_IFINDEX0` diagnostic atomic.
+- **IPv6 subnet-router anycast (#10692).** Linux installs a connected
+  prefix's `prefix::` subnet-router anycast in table local ahead of the
+  ordinary connected route. The FIB mirrors that table-scoped LocalDelivery
+  decision from the exact connected-prefix network address and attributes
+  its interface. Only prefix lengths `/1`–`/126` qualify: `/0`'s `::` is
+  unspecified, `/127` point-to-point links have no subnet-router anycast
+  (RFC 6164), and `/128` has no host bits.
 - **ECMP: all next-hops retained, dead ones skipped (#2389), per-FLOW
   spread (#2734).** A static route keeps EVERY configured next-hop
   (`RouteEntryV4::next_hops: Vec<RouteNextHopV4>`). `select_route_next_hop`

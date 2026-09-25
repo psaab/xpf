@@ -7041,3 +7041,146 @@ fn ingress_destination_mac_guard_fails_closed_without_local_mac_10314() {
         "broadcast remains accepted under PACKET_OTHERHOST semantics"
     );
 }
+
+/// #10692: Linux installs each connected prefix's subnet-router anycast
+/// (`prefix::`) in table local, ahead of the connected transit route. The base
+/// fixture also covers an interface-mode-SNAT egress: its configured host is
+/// excluded from `local_v6`, but the distinct prefix anycast remains local.
+///
+/// FAIL-ON-REVERT: remove the anycast match in `local_delivery_resolution_v6`
+/// and the first resolution falls through to MissingNeighbor → RED.
+#[test]
+fn connected_prefix_v6_subnet_router_anycast_is_local_delivery_10692() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let anycast = "2001:559:8585:80::".parse::<Ipv6Addr>().unwrap();
+
+    assert!(!state.local_v6.contains(&anycast));
+    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
+        &state,
+        &neighbors,
+        IpAddr::V6(anycast),
+        None,
+    );
+    assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(resolved.local_ifindex, 12);
+
+    let onlink = lookup_forwarding_resolution_in_table_with_dynamic(
+        &state,
+        &neighbors,
+        IpAddr::V6("2001:559:8585:80::9".parse().unwrap()),
+        None,
+    );
+    assert_eq!(onlink.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(onlink.egress_ifindex, 12);
+}
+
+/// #10692: anycast matching is table-scoped just like its connected prefix.
+/// Removing the table check flips the tenant-b lookup to LocalDelivery → RED.
+#[test]
+fn connected_prefix_v6_subnet_router_anycast_is_table_scoped_10692() {
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces.extend([
+        crate::InterfaceSnapshot {
+            name: "ge-0/0/1.80".to_string(),
+            zone: "lan".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            linux_name: "ge-0-0-1.80".to_string(),
+            ifindex: 301,
+            hardware_addr: "02:00:00:00:00:a1".to_string(),
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8:1::5/64".to_string(),
+                scope: 0,
+            }],
+            ..Default::default()
+        },
+        crate::InterfaceSnapshot {
+            name: "ge-0/0/1.90".to_string(),
+            zone: "wan".to_string(),
+            routing_instance: "tenant-b".to_string(),
+            linux_name: "ge-0-0-1.90".to_string(),
+            ifindex: 402,
+            hardware_addr: "02:00:00:00:00:b2".to_string(),
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8:2::5/64".to_string(),
+                scope: 0,
+            }],
+            ..Default::default()
+        },
+    ]);
+    let state = build_forwarding_state(&snapshot);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+
+    let owner = lookup_forwarding_resolution_in_table_with_dynamic(
+        &state,
+        &neighbors,
+        IpAddr::V6("2001:db8:1::".parse().unwrap()),
+        Some("tenant-a.inet6.0"),
+    );
+    assert_eq!(owner.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(owner.local_ifindex, 301);
+    let cross = lookup_forwarding_resolution_in_table_with_dynamic(
+        &state,
+        &neighbors,
+        IpAddr::V6("2001:db8:1::".parse().unwrap()),
+        Some("tenant-b.inet6.0"),
+    );
+    assert_eq!(cross.disposition, ForwardingDisposition::NoRoute);
+}
+
+/// #10692 boundaries: /127 point-to-point prefixes have no subnet-router
+/// anycast (RFC 6164); a /128 host has no host bits. Both must remain on their
+/// connected transit routes rather than being treated as subnet anycast.
+///
+/// FAIL-ON-REVERT: widen the prefix-length guard through /128 and the
+/// interface-mode-SNAT /128 host flips from MissingNeighbor to LocalDelivery.
+#[test]
+fn subnet_router_anycast_v6_prefix_len_guards_10692() {
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces.extend([
+        crate::InterfaceSnapshot {
+            name: "ge-0/0/2.0".to_string(),
+            zone: "wan".to_string(),
+            linux_name: "ge-0-0-2.0".to_string(),
+            ifindex: 13,
+            hardware_addr: "02:00:00:00:00:0d".to_string(),
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8:9::7/128".to_string(),
+                scope: 0,
+            }],
+            ..Default::default()
+        },
+        crate::InterfaceSnapshot {
+            name: "ge-0/0/3.0".to_string(),
+            zone: "wan".to_string(),
+            linux_name: "ge-0-0-3.0".to_string(),
+            ifindex: 14,
+            hardware_addr: "02:00:00:00:00:0e".to_string(),
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8:b::7/127".to_string(),
+                scope: 0,
+            }],
+            ..Default::default()
+        },
+    ]);
+    let state = build_forwarding_state(&snapshot);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let host128 = "2001:db8:9::7".parse::<Ipv6Addr>().unwrap();
+    assert!(state.interface_nat_v6.contains_key(&host128));
+    assert!(!state.local_v6.contains(&host128));
+
+    for (destination, ifindex) in [("2001:db8:9::7", 13), ("2001:db8:b::6", 14)] {
+        let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
+            &state,
+            &neighbors,
+            IpAddr::V6(destination.parse().unwrap()),
+            None,
+        );
+        assert_eq!(resolved.disposition, ForwardingDisposition::MissingNeighbor);
+        assert_eq!(resolved.egress_ifindex, ifindex);
+    }
+}
