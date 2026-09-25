@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // Fabric gRPC listener authentication (#4107 F1).
@@ -66,16 +68,23 @@ import (
 // source arms during the transition. Independently, an unkeyed listener remains
 // GetStatus-only and never opens that grace for other RPCs.
 //
-// Residual 1 (same-method replay): the token is HMAC(PSK, domain ||
-// method-length || method || window), where window = unix_time /
-// fabricAuthWindowSeconds. Binding the canonical gRPC method into the digest
-// means a captured GetStatus token cannot be replayed on ClearSessions or
-// failover. A same-method retry remains stateless and succeeds while its
-// window is accepted (the current window plus one adjacent window for clock
-// skew). mTLS with per-node certs would remove that bounded same-method horizon
-// entirely and is the deferred stronger posture (#4047 convergence); this PSK
-// layer closes the "no auth at all" HIGH hole with zero cert-lifecycle
-// machinery, reusing the key the operator already provisions for the heartbeat.
+// Residual 1 (same-args replay): the token is HMAC(PSK, domain ||
+// method-length || method || request-digest || window), where window =
+// unix_time / fabricAuthWindowSeconds and request-digest is SHA-256 over the
+// deterministic protobuf encoding of the request (#10709). Binding the
+// canonical gRPC method AND the request arguments into the digest means a
+// captured GetStatus token cannot be replayed on ClearSessions or failover,
+// and a captured ClearSessions{filter A} / failover rg1 token cannot be
+// replayed with a different filter or RG. A byte-identical retry remains
+// stateless and succeeds while its window is accepted (the current window
+// plus one adjacent window for clock skew). Streaming RPCs (MonitorInterface)
+// bind the method only: no request body exists where a stream token is minted
+// or verified, so a captured stream token stays replayable with any stream
+// arguments inside the window. mTLS with per-node certs would remove those
+// bounded horizons entirely and is the deferred stronger posture (#4047
+// convergence); this PSK layer closes the "no auth at all" HIGH hole with
+// zero cert-lifecycle machinery, reusing the key the operator already
+// provisions for the heartbeat.
 //
 // Residual 2 (clock skew): because the token is time-windowed, a wall-clock skew
 // between the two nodes larger than the tolerance (window ± 1 = ~60–90s across a
@@ -90,9 +99,10 @@ import (
 // and the operator-visible symptom named sessions ("fw0 has only 1 established
 // sessions") while the cause was the clock.
 //
-// The accept band is still ±1 and deliberately so — it IS the replay horizon,
-// and the allowlisted RPCs include ClearSessions and cross-node failover, so
-// widening it to tolerate a drifting clock would trade a real attack bound for
+// The accept band is still ±1 and deliberately so — it bounds replay of the
+// identical unary request and any arguments on a method-bound stream. Widening
+// it to tolerate a drifting clock would extend those replay horizons for the
+// allowlisted ClearSessions and cross-node failover RPCs, to buy tolerance for
 // an operational fault the operator can fix in seconds once it is named. What
 // changed in #6708 is diagnosis: fabric_auth_skew_6708.go scans a bounded band
 // around the local window on the REJECT path and, when the token verifies under
@@ -124,51 +134,100 @@ func fabricAuthWindow(t time.Time) int64 {
 	return t.Unix() / fabricAuthWindowSeconds
 }
 
+// fabricAuthEmptyRequestDigest is the digest of the empty protobuf encoding.
+// Empty request messages marshal to zero bytes, as does a stream's absent
+// request body at the time its auth token is minted.
+var fabricAuthEmptyRequestDigest = sha256.Sum256(nil)
+
+var fabricAuthDeterministicMarshal = proto.MarshalOptions{Deterministic: true}
+
+// fabricRequestDigest returns SHA-256 over req's deterministic protobuf
+// encoding. A nil request is the empty protobuf encoding; any non-protobuf or
+// unmarshalable request fails closed rather than receiving an unbound token.
+func fabricRequestDigest(req interface{}) ([]byte, error) {
+	if req == nil {
+		return fabricAuthEmptyRequestDigest[:], nil
+	}
+	msg, ok := req.(proto.Message)
+	if !ok {
+		return nil, errors.New("fabric auth request is not a protobuf message")
+	}
+	wire, err := fabricAuthDeterministicMarshal.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(wire)
+	return digest[:], nil
+}
+
 // computeFabricAuthToken returns HMAC-SHA256(key,
-// domain || method-length || method || window) — the raw 32-byte digest for
-// one window. The optional method argument lets isolated skew fixtures use an
-// empty method; production verification and client credentials always pass the
-// full gRPC method explicitly.
+// domain || method-length || method || request-digest || window) — the raw
+// 32-byte digest for one window. request-digest is fixed-size SHA-256, so the
+// framing stays unambiguous without another length prefix.
 func computeFabricAuthToken(key []byte, window int64, method ...string) []byte {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(fabricAuthDomain))
 	methodName := ""
 	if len(method) > 0 {
 		methodName = method[0]
 	}
+	return computeFabricAuthTokenForDigest(key, window, methodName, fabricAuthEmptyRequestDigest[:])
+}
+
+func computeFabricAuthTokenForDigest(key []byte, window int64, method string, reqDigest []byte) []byte {
+	if len(reqDigest) != sha256.Size {
+		return nil
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(fabricAuthDomain))
 	// Length-prefix the method so the signed message has one canonical,
-	// unambiguous framing before the window integer.
+	// unambiguous framing before the request digest and window integer.
 	var ml [8]byte
-	methodBytes := []byte(methodName)
+	methodBytes := []byte(method)
 	binary.LittleEndian.PutUint64(ml[:], uint64(len(methodBytes)))
 	mac.Write(ml[:])
 	mac.Write(methodBytes)
+	mac.Write(reqDigest)
 	var wb [8]byte
 	binary.LittleEndian.PutUint64(wb[:], uint64(window))
 	mac.Write(wb[:])
 	return mac.Sum(nil)
 }
 
-// fabricAuthTokenHex returns the hex-encoded current-window token for a key, or
-// "" when no key is configured (a not-yet-keyed peer sends no token — legacy).
-// Passing method binds the token to that canonical gRPC method. Omitting method
-// is retained only for isolated empty-method skew fixtures; the inbound
-// interceptor always supplies the method and never accepts an empty-method
-// credential for an RPC.
+// fabricAuthTokenHex returns the hex-encoded current-window token for a key,
+// bound to method and the empty request body. It exists for empty-request and
+// isolated skew fixtures; production unary callers use
+// fabricAuthTokenHexForDigest. A missing key still sends no token during rollout.
 func fabricAuthTokenHex(key []byte, t time.Time, method ...string) string {
 	if len(key) == 0 {
 		return ""
 	}
-	return hex.EncodeToString(computeFabricAuthToken(key, fabricAuthWindow(t), method...))
+	methodName := ""
+	if len(method) > 0 {
+		methodName = method[0]
+	}
+	return fabricAuthTokenHexForDigest(key, t, methodName, fabricAuthEmptyRequestDigest[:])
+}
+
+func fabricAuthTokenHexForDigest(key []byte, t time.Time, method string, reqDigest []byte) string {
+	if len(key) == 0 || len(reqDigest) != sha256.Size {
+		return ""
+	}
+	return hex.EncodeToString(computeFabricAuthTokenForDigest(key, fabricAuthWindow(t), method, reqDigest))
 }
 
 // verifyFabricAuthToken reports whether tokenHex is a valid token for key in
-// the current or an adjacent window. Passing method verifies a token bound to
-// that canonical gRPC method. Omitting it is retained only for isolated
-// empty-method skew fixtures; the inbound interceptor always supplies method.
-// The digest comparison is constant-time (hmac.Equal).
+// the current or an adjacent window, bound to method and the empty request.
+// Production unary calls use verifyFabricAuthTokenForDigest. The digest
+// comparison is constant-time (hmac.Equal).
 func verifyFabricAuthToken(key []byte, tokenHex string, method ...string) bool {
-	if len(key) == 0 || tokenHex == "" {
+	methodName := ""
+	if len(method) > 0 {
+		methodName = method[0]
+	}
+	return verifyFabricAuthTokenForDigest(key, tokenHex, methodName, fabricAuthEmptyRequestDigest[:])
+}
+
+func verifyFabricAuthTokenForDigest(key []byte, tokenHex string, method string, reqDigest []byte) bool {
+	if len(key) == 0 || tokenHex == "" || len(reqDigest) != sha256.Size {
 		return false
 	}
 	got, err := hex.DecodeString(tokenHex)
@@ -178,12 +237,13 @@ func verifyFabricAuthToken(key []byte, tokenHex string, method ...string) bool {
 	now := fabricAuthWindow(time.Now())
 	// Accept the current window plus one on each side (clock skew / boundary).
 	for _, w := range []int64{now, now - 1, now + 1} {
-		if hmac.Equal(got, computeFabricAuthToken(key, w, method...)) {
+		if hmac.Equal(got, computeFabricAuthTokenForDigest(key, w, method, reqDigest)) {
 			return true
 		}
 	}
 	return false
 }
+
 
 // fabricAuthTokenFromMetadata extracts the token header from an inbound context.
 // present is false when the caller sent no token (a not-yet-keyed peer).
@@ -297,23 +357,34 @@ func (s *Server) heartbeatPeerAuthSeen() bool {
 	return false
 }
 
-// checkFabricAuth authenticates one inbound fabric RPC by its metadata token.
-// Returns a codes.Unauthenticated status when the call is rejected; nil to
-// admit it. The key is never logged.
+// checkFabricAuth authenticates an empty-request or stream RPC by its metadata
+// token. Unary production calls use checkFabricAuthRequest to verify the actual
+// protobuf arguments.
+func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
+	return s.checkFabricAuthRequest(ctx, method, nil)
+}
+
+// checkFabricAuthRequest authenticates one inbound RPC by its metadata token.
+// req is the inbound unary message whose digest is bound into the token; streams
+// pass nil because they have no body at auth time. The key is never logged.
 // #10698: with no PSK configured only GetStatus is admitted; every other
 // method is rejected Unauthenticated (counted under the fabric-auth
 // denyaudit surface) until a key is committed.
-func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
+func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req interface{}) error {
 	// #6630: verify against every ACCEPTED key so a PSK rotation does not turn
 	// every peer-proxied RPC into codes.Unauthenticated for the window between
 	// the two nodes' commits. keyConfigured below is the accepted SET being
 	// non-empty, for the same reason.
 	keys := s.fabricAcceptedKeys()
 	token, present := fabricAuthTokenFromMetadata(ctx)
+	reqDigest, err := fabricRequestDigest(req)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: request arguments cannot be bound")
+	}
 	tokenOK := false
 	if present {
 		for _, k := range keys {
-			if verifyFabricAuthToken(k, token, method) {
+			if verifyFabricAuthTokenForDigest(k, token, method, reqDigest) {
 				tokenOK = true
 				break
 			}
@@ -359,7 +430,7 @@ func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
 		// holder can produce. A forgery or a genuine key mismatch adds nothing,
 		// so a bad-PSK failure is never mislabelled as a clock problem.
 		if present && !tokenOK {
-			reason += s.noteFabricAuthSkew(keys, token, time.Now(), method)
+			reason += s.noteFabricAuthSkewForDigest(keys, token, time.Now(), method, reqDigest)
 		}
 		// #9042: the fabric listener is NETWORK-EXPOSED, so this is the
 		// worst-positioned of the five sites -- an off-box peer controls the
@@ -384,7 +455,7 @@ func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
 // interceptor, so an unauthenticated caller is rejected before authorization is
 // even consulted. The loopback listener does NOT install this interceptor.
 func (s *Server) fabricAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	if err := s.checkFabricAuth(ctx, info.FullMethod); err != nil {
+	if err := s.checkFabricAuthRequest(ctx, info.FullMethod, req); err != nil {
 		return nil, err
 	}
 	return handler(ctx, req)
@@ -392,6 +463,9 @@ func (s *Server) fabricAuthUnaryInterceptor(ctx context.Context, req interface{}
 
 // fabricAuthStreamInterceptor authenticates streaming RPCs on the fabric
 // listener with the control-link PSK (#4107), before the #4122 allowlist.
+// Stream messages arrive only after the handler starts receiving, so no
+// request body exists at auth time: the token binds the method only (the
+// documented #10709 stream residual).
 func (s *Server) fabricAuthStreamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	if err := s.checkFabricAuth(ss.Context(), info.FullMethod); err != nil {
 		return err
@@ -399,32 +473,71 @@ func (s *Server) fabricAuthStreamInterceptor(srv interface{}, ss grpc.ServerStre
 	return handler(srv, ss)
 }
 
-// fabricAuthMethodContextKey carries the full gRPC method from the client
-// interceptor to the per-RPC credentials callback. gRPC's uri argument to
-// GetRequestMetadata is only the service audience, not the method, so relying
-// on uri would leave every RPC in a service sharing one replayable token.
+// fabricAuthMethodContextKey carries the full gRPC method and unary request
+// digest from the client interceptor to the per-RPC credentials callback.
+// gRPC's uri argument to GetRequestMetadata is only the service audience, not
+// the method or body, so neither can be recovered there.
 type fabricAuthMethodContextKey struct{}
 
-func withFabricAuthMethod(ctx context.Context, method string) context.Context {
-	return context.WithValue(ctx, fabricAuthMethodContextKey{}, method)
+type fabricAuthContext struct {
+	method   string
+	reqDigest []byte
 }
 
-// WithFabricAuthMethod is a narrow helper for custom fabric clients that need
-// to compose the credential manually. Generated gRPC clients should install
-// FabricAuthUnaryClientInterceptor and FabricAuthStreamClientInterceptor
-// instead, which populate this context automatically.
+func withFabricAuthMethod(ctx context.Context, method string) context.Context {
+	binding, _ := ctx.Value(fabricAuthMethodContextKey{}).(fabricAuthContext)
+	binding.method = method
+	return context.WithValue(ctx, fabricAuthMethodContextKey{}, binding)
+}
+
+func withFabricAuthMethodAndReqDigest(ctx context.Context, method string, digest []byte) context.Context {
+	return context.WithValue(ctx, fabricAuthMethodContextKey{}, fabricAuthContext{
+		method: method, reqDigest: digest,
+	})
+}
+
+// WithFabricAuthMethod is a narrow helper for custom fabric clients composing
+// credentials manually. Unary requests must also use WithFabricAuthRequest to
+// bind their arguments; streams (which have no request at auth time) need only
+// the method. Generated clients should install the provided interceptors.
 func WithFabricAuthMethod(ctx context.Context, method string) context.Context {
 	return withFabricAuthMethod(ctx, method)
 }
 
 func fabricAuthMethod(ctx context.Context) string {
-	method, _ := ctx.Value(fabricAuthMethodContextKey{}).(string)
-	return method
+	binding, _ := ctx.Value(fabricAuthMethodContextKey{}).(fabricAuthContext)
+	return binding.method
 }
 
-// FabricAuthUnaryClientInterceptor carries the exact method being invoked to
-// fabricAuthCreds. Install it alongside NewFabricAuthCreds on every fabric
-// client connection.
+func withFabricAuthReqDigest(ctx context.Context, digest []byte) context.Context {
+	binding, _ := ctx.Value(fabricAuthMethodContextKey{}).(fabricAuthContext)
+	binding.reqDigest = digest
+	return context.WithValue(ctx, fabricAuthMethodContextKey{}, binding)
+}
+
+// WithFabricAuthRequest binds a manual client's credential to req's arguments.
+// Compose it with WithFabricAuthMethod. Generated clients should install
+// FabricAuthUnaryClientInterceptor instead, which binds the request automatically.
+func WithFabricAuthRequest(ctx context.Context, req interface{}) (context.Context, error) {
+	digest, err := fabricRequestDigest(req)
+	if err != nil {
+		return nil, err
+	}
+	return withFabricAuthReqDigest(ctx, digest), nil
+}
+
+func fabricAuthReqDigest(ctx context.Context) []byte {
+	binding, _ := ctx.Value(fabricAuthMethodContextKey{}).(fabricAuthContext)
+	if binding.reqDigest != nil {
+		return binding.reqDigest
+	}
+	// Streams and manual empty-request calls have no request digest in context.
+	return fabricAuthEmptyRequestDigest[:]
+}
+
+// FabricAuthUnaryClientInterceptor carries the exact method being invoked — and
+// the request's argument digest (#10709) — to fabricAuthCreds. Install it
+// alongside NewFabricAuthCreds on every fabric client connection.
 func FabricAuthUnaryClientInterceptor(
 	ctx context.Context,
 	method string,
@@ -433,12 +546,18 @@ func FabricAuthUnaryClientInterceptor(
 	invoker grpc.UnaryInvoker,
 	opts ...grpc.CallOption,
 ) error {
-	return invoker(withFabricAuthMethod(ctx, method), method, req, reply, cc, opts...)
+	digest, err := fabricRequestDigest(req)
+	if err != nil {
+		return err
+	}
+	ctx = withFabricAuthMethodAndReqDigest(ctx, method, digest)
+	return invoker(ctx, method, req, reply, cc, opts...)
 }
 
 // FabricAuthStreamClientInterceptor carries the exact stream method being
-// invoked to fabricAuthCreds. Install it alongside NewFabricAuthCreds on every
-// fabric client connection.
+// invoked to fabricAuthCreds. A stream has no request body at dial time, so
+// the token binds the method only (the documented #10709 stream residual).
+// Install it alongside NewFabricAuthCreds on every fabric client connection.
 func FabricAuthStreamClientInterceptor(
 	ctx context.Context,
 	desc *grpc.StreamDesc,
@@ -451,11 +570,11 @@ func FabricAuthStreamClientInterceptor(
 }
 
 // fabricAuthCreds is the client-side gRPC per-RPC credential that attaches the
-// control-link PSK token bound to the full method being invoked. keyFn is read
-// fresh per RPC so the token rotates with the window and picks up a live key
-// change. Calls made without one of the method-carrying client interceptors
-// deliberately emit no metadata rather than falling back to a cross-method
-// replayable token.
+// control-link PSK token bound to the full method being invoked and — for unary
+// RPCs — the request arguments. keyFn is read fresh per RPC so the token rotates
+// with the window and picks up a live key change. Calls made without one of the
+// method-carrying client interceptors deliberately emit no metadata rather than
+// falling back to a cross-method replayable token.
 type fabricAuthCreds struct {
 	keyFn func() []byte
 }
@@ -465,7 +584,7 @@ func (c fabricAuthCreds) GetRequestMetadata(ctx context.Context, uri ...string) 
 	if method == "" || c.keyFn == nil {
 		return nil, nil
 	}
-	token := fabricAuthTokenHex(c.keyFn(), time.Now(), method)
+	token := fabricAuthTokenHexForDigest(c.keyFn(), time.Now(), method, fabricAuthReqDigest(ctx))
 	if token == "" {
 		return nil, nil
 	}

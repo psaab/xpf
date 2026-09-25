@@ -145,10 +145,10 @@ editing cmdtree.
   caller with the control-link PSK (#4107, `fabricAuthUnaryInterceptor` /
   `fabricAuthStreamInterceptor` in `pkg/grpcapi/fabric_auth.go`, chained
   BEFORE the allowlist). When `set chassis cluster authentication-key <key>`
-  is configured, every peer-proxied RPC must carry a time-windowed HMAC
-  bearer token (`HMAC-SHA256(PSK, domain‖window)`, 30 s window ±1 for skew)
-  in the `xpf-fabric-auth` metadata header, verified constant-time; the
-  local node attaches it on `dialPeer` via `fabricAuthCreds`. **Both**
+  bearer token (`HMAC-SHA256(PSK, domain‖method‖SHA-256(deterministic
+  protobuf request)‖window)`, 30 s window ±1 for skew) in the
+  `xpf-fabric-auth` metadata header, verified constant-time. The local node
+  attaches it on `dialPeer` via `fabricAuthCreds`. **Both**
   fabric dialers attach the token: the daemon's own `Server.dialPeer`
   (`server_diag.go`) and the in-process operator CLI's peer dialer
   (`pkg/cli` `dialPeer`, which reaches the peer directly for cluster-wide
@@ -165,9 +165,12 @@ editing cmdtree.
   makes every cross-node fabric RPC fail `Unauthenticated` — permanently,
   since skew does not self-correct without NTP — while VRRP, forwarding and
   failover keep working, so the cluster looks healthy and every cross-node
-  query returns LOCAL-ONLY. The accept band is deliberately NOT widened (it
-  is the replay horizon for `ClearSessions` and cross-node failover). Instead
-  a bounded, throttled scan on the reject path measures the offset from a
+  query returns LOCAL-ONLY. The accept band is deliberately NOT widened: it
+  bounds replay of an identical unary request and any request on a stream
+  (whose body cannot be bound at auth time). #10709 binds each unary token to
+  the deterministic protobuf request digest, so a captured
+  `ClearSessions{filter A}` / `failover rg1` token cannot authorize a different
+  filter or RG. A bounded, throttled scan on the reject path measures the
   token that verifies under an accepted key at another window — an
   authenticated measurement, since only a key holder can produce one — so the
   rejection names the clock and the remedy, and `show chassis cluster status`
@@ -217,11 +220,11 @@ editing cmdtree.
   Operator guidance — generation, distribution, rolling rollout with the
   required restart, rotation — is in `pkg/cluster/README.md` →
   "Operating the control-link PSK (#6611)". The stronger residuals —
-  removing the ~1-window replay horizon (mTLS with per-node certs) and
-  giving the session-sync stream CONFIDENTIALITY (#6629 — it is
-  HMAC-authenticated today, F23 having landed, but not encrypted, so a
-  config-sync push crosses it in cleartext) — remain deferred
-  (see `pkg/cluster/README.md`).
+  removing the remaining identical-request / stream replay horizon (mTLS with
+  per-node certs and stream request binding or a nonce challenge) and giving
+  the session-sync stream CONFIDENTIALITY (#6629 — it is HMAC-authenticated
+  today, F23 having landed, but not encrypted, so a config-sync push crosses it
+  in cleartext) — remain deferred (see `pkg/cluster/README.md`).
   - **No allowlisted RPC may render a configured secret (#6532).** Being on
     this allowlist means being reachable from the peer chassis over the
     fabric IP, so the usual "loopback only" mitigation does not apply to

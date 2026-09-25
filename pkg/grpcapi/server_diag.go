@@ -42,10 +42,11 @@ func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
 	}
 
 	// #4107: authenticate every RPC we dial on the peer's fabric listener with
-	// the control-link PSK. The client interceptors carry each full method to
-	// the per-RPC credential, preventing a captured token from crossing RPC
-	// methods; GetRequestMetadata is read per RPC, so the token rotates with
-	// the auth window and a not-yet-keyed node dials tokenless (dual-accept).
+	// the control-link PSK. The client interceptors carry each full method and
+	// unary request digest to the per-RPC credential, so a captured token cannot
+	// cross methods or authorize changed unary arguments. GetRequestMetadata is
+	// read per RPC, so tokens rotate with the auth window and a not-yet-keyed
+	// node dials tokenless (dual-accept).
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithPerRPCCredentials(fabricAuthCreds{keyFn: s.fabricAuthKey}),

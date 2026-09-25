@@ -15,8 +15,8 @@ import (
 // on both nodes. The operator-visible symptom named SESSIONS ("fw0 has only 1
 // established sessions"); the cause was the clock.
 //
-// The accept band is deliberately NOT widened — it is the replay horizon, and
-// the allowlisted fabric RPCs include ClearSessions and cross-node failover.
+// The accept band is deliberately NOT widened — it bounds replay of identical
+// unary requests and any arguments on method-bound streams.
 // What is added is diagnosis, and its trustworthiness rests on one property:
 // a skew is reported ONLY when the token verifies under an accepted key at some
 // window. Only a key holder can produce that, so a forged token or a genuine
@@ -300,12 +300,14 @@ func TestClusterStatusWarnsOnlyWhenSkewed6708(t *testing.T) {
 //
 // #6708's scan proves the token verified under an accepted key at some window.
 // That makes the PSK certainly correct, and the clock only PROBABLY skewed:
-// producing the token requires the key, but PRESENTING it does not. Tokens ride
-// every fabric RPC on the control link and are method-bound; this verifier has
-// no nonce (same-method replay within the accepted window remains the bounded
-// Residual 1), so a captured token replayed from outside the accept band but
-// inside the scan band fails verification — correctly — and arrives here
-// indistinguishable from a drifting clock.
+// producing the token requires the key, but PRESENTING it does not. Unary
+// tokens ride the control link and bind method plus deterministic request
+// digest; stream tokens bind only the method because no request body exists
+// when auth is checked. Neither includes a nonce, so a captured unary token can
+// replay the identical request, and a captured stream token can replay any
+// stream arguments inside the accepted window. Replayed from outside the
+// accept band but inside the scan band, either fails verification — correctly —
+// and arrives here indistinguishable from a drifting clock.
 //
 // This test is the guard on the WORDING, because that is where the defect would
 // be: an unhedged "peer wall clock is Ns behind ours" is a confident wrong
