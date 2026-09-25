@@ -984,6 +984,115 @@ fn app_scoped_snat_nonfirst_fragment_assoc_miss_fails_closed_10675() {
 
 
 #[test]
+fn nat_nonfirst_fragment_assoc_miss_neighbor_miss_drops_not_parked_10660() {
+    // #10660 (residual of #6122): the #6122 fail-closed drop above runs only on
+    // the ForwardCandidate arm, so a SNAT'd non-first fragment that resolves
+    // MissingNeighbor was PARKED with its untranslated default decision and
+    // later transmitted with the INTERNAL source on the wire (retry-sweep TX).
+    // Same-family NAT fixture as the #6122 cell — empty association cache (a
+    // pure miss), and a protocol-scoped UDP SNAT rule whose first fragments
+    // would translate — but with the WAN next-hop neighbor UNRESOLVED (neighbors
+    // cleared, the #4024 injection), so the flowless miss takes the
+    // MissingNeighbor cold path instead of ForwardCandidate. The MissingNeighbor
+    // arm must drop it fail-closed at park time, counted on
+    // nat_frag_untranslated_dropped, and never buffer it.
+    //
+    // Native-255 metadata: production non-first fragments carry the shim's
+    // SHIM_PROTO_FRAGMENT_NO_L4 sentinel, not the datagram's real protocol
+    // (sentinel family, #10674 design). As the fragment's real protocol is
+    // unknown, the discriminator must wildcard the protocol-scoped UDP rule
+    // without attempting to recover that protocol.
+    //
+    // RED-on-revert: reverting the MissingNeighbor gate re-parks the tail —
+    // nat_frag_untranslated_dropped falls to 0 and pending_neigh holds the
+    // untranslated representative (which the retry sweep would TX with src
+    // 10.0.61.100 once the neighbor resolves).
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    // Neighbor miss injected: the connected WAN route resolves egress but no
+    // MAC, so the flowless miss resolves MissingNeighbor, not ForwardCandidate.
+    snapshot.neighbors.clear();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-lan-wan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        match_applications: vec![crate::NatAppTermWire {
+            protocol: PROTO_UDP as u16,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+
+    // Precondition: the association cache is EMPTY (no first fragment seen), so
+    // the flowless consult below is a genuine MISS.
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        0,
+        "#10660 precondition: no fragment association installed (a pure miss)"
+    );
+
+    // NON-first fragment (offset 1, id 0xbeef) arriving WITHOUT its first
+    // fragment and WITHOUT a resolved next-hop neighbor -> flowless ->
+    // association MISS + neighbor MISS -> #10660 fail-closed drop.
+    let non_first = udp_frag_frame_5689(0x0001, 0xbeef);
+    let mut meta = udp_frag_meta_5689();
+    meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &non_first,
+        meta,
+        true,
+    );
+    assert_eq!(
+        dbg.missing_neigh, 1,
+        "#10660 premise: no neighbor for the connected WAN dst must resolve MissingNeighbor"
+    );
+    assert_eq!(
+        dbg.policy_deny, 0,
+        "#10660 attribution: the drop is the NAT fail-closed gate, not zone policy"
+    );
+    assert_eq!(
+        dbg.forward, 0,
+        "#10660: a NAT'd non-first fragment that misses the association must NOT forward on the neighbor-miss path"
+    );
+    assert_eq!(
+        dbg.nat_applied_none, 0,
+        "#10660: the fragment must NOT be forwarded untranslated (no internal-source leak)"
+    );
+    assert_eq!(
+        batch.nat_frag_untranslated_dropped, 1,
+        "#10660: the fail-closed drop must be counted (RED on revert: 0)"
+    );
+    assert!(
+        binding.pending_neigh.is_empty(),
+        "#10660: the NAT'd miss must NOT be parked for neighbor retry (RED on revert: holds the untranslated representative)"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "#10660: a flowless miss seeds no session"
+    );
+    assert_eq!(
+        binding.live.slow_path_packets.load(Ordering::Relaxed),
+        0,
+        "#10660: the dropped miss must NOT be reinjected to the kernel slow path"
+    );
+}
+
+
+#[test]
 fn nonnat_nonfirst_fragment_assoc_miss_still_forwards_6122() {
     // #6122 no-regression: a NON-NAT'd (plain-forwarded) non-first fragment that
     // misses the association must STILL forward normally. The #6122 fail-closed

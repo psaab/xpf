@@ -393,6 +393,49 @@ fn source_nat_app_source_port_never_match_sentinel_3491() {
 }
 
 #[test]
+fn source_nat_real_proto_255_is_not_unknown_fragment_10674() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "udp-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        match_applications: vec![NatAppTermWire {
+            protocol: PROTO_UDP as u16,
+            ports: vec![],
+            src_ports: vec![],
+        }],
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    let mut counter = None;
+    let lookup = match_source_nat_result_for_tuple(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &NatScopeCtx::default(),
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        Some(crate::session::SHIM_PROTO_FRAGMENT_NO_L4),
+        12345,
+        443,
+        Some("172.16.80.8".parse().unwrap()),
+        None,
+        0,
+        false,
+        false,
+        NatHolder::Untracked,
+        &mut counter,
+    );
+
+    assert_eq!(
+        lookup,
+        SourceNatLookup::NoMatch,
+        "a real protocol-255 packet must not match a UDP-only NAT rule"
+    );
+}
+
+#[test]
 fn source_nat_unconstrained_rule_still_matches_any_l4_3429() {
     // A rule with NO L4 match fields keeps the pre-#3429 match-any behavior,
     // including for the address-only (`None`) tuple-unknown caller.
