@@ -916,33 +916,26 @@ type Result struct {
 	// the kernel actually opens.
 	HostInbound *dpuserspace.HostInboundAdmission
 
-	// RouteDropBeforePolicy is true when the query's DESTINATION address is a
-	// class the transit forwarding path drops at ROUTE LOOKUP, before the
-	// security-policy engine ever runs (#4373 E4/H2/H7): IPv4/IPv6 multicast,
-	// the IPv4 limited broadcast 255.255.255.255, the unspecified address, or a
-	// loopback address. For such a destination the dataplane has no forwarding
-	// route to reach policy evaluation, so the permit/deny verdict this Result
-	// carries does NOT describe what happens to real traffic — the packet is
-	// dropped at route regardless of any policy that "matches". A firewall
-	// filter `then accept; then log` for the same tuple likewise logs an ACCEPT
-	// the packet never survives (the E4 "filter-accept log but the flow is
-	// dropped at route" confusion). This is ADVISORY context, exactly like
-	// HostInbound: it does NOT change Matched / Action / DefaultUsed. Every
-	// operator surface (CLI show, `test policy`, REST) must surface RouteDropNote
-	// so a simulator verdict cannot over-promise forwarding for a
-	// non-transit-routable destination. Only a TRANSIT query is annotated; a
-	// `to-zone junos-host` query takes the local-delivery gate, not the transit
-	// route lookup, so it is never stamped. The route-drop itself is enforced in
-	// userspace-dp; a dataplane NoRoute/martian drop COUNTER (so a live filter-
-	// accept log has a matching visible drop) is the deferred Rust half of the
-	// same remedy.
+	// RouteDropBeforePolicy is true when a transit Result carries the
+	// route-drop / neighbor-delivery advisory. For #4373 classes, forwarding
+	// drops at route lookup before policy: multicast, limited broadcast,
+	// unspecified, and loopback. Directed-broadcast (#11004) is different: when
+	// its connected route wins, policy is evaluated on that egress before
+	// neighbor resolution fails. This flag alone therefore does not say that
+	// policy was bypassed; RouteDropClass and RouteDropNote describe the exact
+	// stage. A directed-broadcast DENY remains the policy result, while a permit
+	// cannot forward without the not-yet-implemented targeted-broadcast support
+	// (#4308). This is ADVISORY context only; it does NOT change Matched / Action
+	// / DefaultUsed. Every surface must render RouteDropNote. Host-bound
+	// (junos-host) queries take the local-delivery gate and are never stamped.
+	// The route / neighbor behavior is enforced in userspace-dp; a route-drop
+	// counter remains the deferred Rust half of #4373.
 	RouteDropBeforePolicy bool
-	// RouteDropClass names the destination address class ("multicast",
-	// "broadcast", "unspecified", or "loopback") when RouteDropBeforePolicy is
-	// set; empty otherwise. It feeds RouteDropNote so the operator sees WHICH
-	// class triggered the route-drop advisory.
+	// RouteDropClass names the destination class ("multicast", "broadcast",
+	// "directed-broadcast", "unspecified", or "loopback") when the advisory
+	// flag is set; empty otherwise. RouteDropNote describes the class-specific
+	// route-drop or neighbor-delivery behavior.
 	RouteDropClass string
-
 	// FragmentAssociatedDeny is true when this verdict is a #5572 non-first
 	// fragment whose PERMIT (matched or default) was OVERRIDDEN to the DENY it
 	// skipped, reproducing the dataplane's #4569 fragment-associated deny. When
@@ -996,14 +989,14 @@ func (r Result) FragmentDenyNote() string {
 // renders RouteDropNote(), never a hand-built string.
 const RouteDropNotePrefix = "route-drop advisory:"
 
-// RouteDropNote returns the operator-facing advisory line for a Result whose
-// destination address is dropped at route lookup before policy evaluation
-// (#4373 E4/H2/H7), or "" when the Result carries no route-drop condition. The
-// line states plainly that the verdict does not describe real forwarding, so an
-// operator does not read a permit/deny for a multicast/broadcast/unspecified/
-// loopback destination as if the flow is actually forwarded. It is ADVISORY —
-// it does not alter the verdict — and mirrors the HostInboundShowLine /
-// ContentRejectedShowLine SSOT pattern so the surfaces stay in lock-step.
+// RouteDropNote returns the operator-facing advisory line for a transit Result
+// carrying a route-drop or neighbor-delivery caveat, or "" when it carries no
+// such advisory. For the #4373 classes it preserves the existing pre-policy
+// route-drop wording. For "directed-broadcast", it states that the connected
+// egress policy is evaluated before neighbor resolution fails; that class is
+// not a pre-policy route drop. The advisory does not alter the verdict and
+// mirrors the HostInboundShowLine / ContentRejectedShowLine SSOT pattern so
+// surfaces stay in lock-step.
 func (r Result) RouteDropNote() string {
 	if !r.RouteDropBeforePolicy {
 		return ""
@@ -1012,6 +1005,15 @@ func (r Result) RouteDropNote() string {
 	if class == "" {
 		class = "non-routable"
 	}
+	if class == "directed-broadcast" {
+		return fmt.Sprintf("%s destination is %s — when the connected prefix wins, "+
+			"policy is evaluated on its egress before neighbor resolution; the "+
+			"directed-broadcast NOARP neighbor is rejected, so no usable neighbor "+
+			"resolves (#10690). A policy DENY remains effective, but a permit cannot "+
+			"be forwarded without the not-yet-implemented `family inet "+
+			"targeted-broadcast` (#4308). This is a neighbor-resolution drop, not a "+
+			"pre-policy route drop.", RouteDropNotePrefix, class)
+	}
 	return fmt.Sprintf("%s destination is %s — transit traffic to this address is "+
 		"dropped at route lookup BEFORE security-policy evaluation, so this verdict "+
 		"does not describe real forwarding (the packet is dropped at route regardless "+
@@ -1019,15 +1021,26 @@ func (r Result) RouteDropNote() string {
 }
 
 // routeDropClass classifies a query DESTINATION address into the transit
-// forwarding class that is dropped at route lookup before policy evaluation
-// (#4373 E4/H2/H7), or "" for an ordinary unicast destination that reaches the
-// policy engine. Multicast (IPv4 224.0.0.0/4, IPv6 ff00::/8), the IPv4 limited
-// broadcast 255.255.255.255, the unspecified address (0.0.0.0 / ::), and
-// loopback (127.0.0.0/8 / ::1) are all destinations the transit forwarding path
-// has no route to hand to policy. A nil dst (the "unspecified destination"
-// simulator wildcard) is NOT classified: it means the operator did not pin a
-// destination, not that the destination is 0.0.0.0.
-func routeDropClass(dst net.IP) string {
+// forwarding class carrying a route-drop or neighbor-delivery advisory. It
+// returns "" for ordinary unicast. Multicast (IPv4 224.0.0.0/4, IPv6 ff00::/8),
+// the IPv4 limited broadcast 255.255.255.255, unspecified (0.0.0.0 / ::), and
+// loopback (127.0.0.0/8 / ::1) are dropped at route lookup before policy. A nil
+// dst (the "unspecified destination" simulator wildcard) is NOT classified: it
+// means the operator did not pin a destination, not that it is 0.0.0.0.
+//
+// #11004 adds IPv4 subnet-directed broadcasts of connected prefixes (for
+// example 10.2.0.255 on 10.2.0.0/24). When the connected route wins, its cold
+// MissingNeighbor path evaluates policy on the selected egress before neighbor
+// resolution. A directed-broadcast NOARP neighbor is rejected (#10690), so a
+// permit does not establish delivery and the note describes a neighbor-
+// resolution drop, not a pre-policy route drop. This address-based classifier
+// scans static interface-unit prefixes; the simulator query has no selected
+// FIB table or egress and cannot account for a more-specific static route or
+// distinguish routing-instance tables. It mirrors the Rust
+// v4_addr_is_directed_broadcast guards: IPv4-only, prefix length 1..30 (/31 has
+// no broadcast per RFC 3021; /32's all-ones host is the host itself). A nil cfg
+// carries no connected prefixes and therefore never classifies this advisory.
+func routeDropClass(cfg *config.Config, dst net.IP) string {
 	if dst == nil {
 		return ""
 	}
@@ -1040,9 +1053,68 @@ func routeDropClass(dst net.IP) string {
 		return "unspecified"
 	case dst.IsLoopback():
 		return "loopback"
+	case isDirectedBroadcastOfConnected(cfg, dst):
+		return "directed-broadcast"
 	default:
 		return ""
 	}
+}
+
+// isDirectedBroadcastOfConnected reports whether dst is the all-ones host
+// (subnet-directed broadcast) of any static connected prefix in cfg (#11004).
+// It is the Go-simulator sibling of the Rust v4_addr_is_directed_broadcast
+// helper (userspace-dp/src/afxdp/frame/addr_class.rs): broadcast equality
+// (network | !mask == dst) already implies containment, so only the
+// broadcast-equality and prefix-length guards remain. DHCP-learned addresses
+// are runtime-only and invisible to the simulator, so only static
+// unit.Addresses are scanned.
+func isDirectedBroadcastOfConnected(cfg *config.Config, dst net.IP) bool {
+	if cfg == nil {
+		return false
+	}
+	dstV4 := dst.To4()
+	if dstV4 == nil {
+		return false
+	}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			for _, addr := range unit.Addresses {
+				_, ipnet, err := net.ParseCIDR(strings.TrimSpace(addr))
+				if err != nil || ipnet == nil {
+					continue
+				}
+				if ipnet.IP.To4() == nil {
+					continue
+				}
+				ones, bits := ipnet.Mask.Size()
+				if bits != 32 || ones < 1 || ones >= 31 {
+					continue
+				}
+				network := ipnet.IP.To4()
+				mask := net.IP(ipnet.Mask).To4()
+				if network == nil || mask == nil {
+					continue
+				}
+				isBroadcast := true
+				for i := range dstV4 {
+					if dstV4[i] != network[i]|^mask[i] {
+						isBroadcast = false
+						break
+					}
+				}
+				if isBroadcast {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // HostInboundActionString is the operator-facing verdict rendered for a
@@ -1226,18 +1298,15 @@ func Match(cfg *config.Config, q Query) (res Result) {
 		}
 		return Result{UnsupportedTupleFamily: true, Action: config.PolicyDeny}
 	}
-	// #4373 (E4/H2/H7): a TRANSIT destination that is multicast / broadcast /
-	// unspecified / loopback is dropped by the forwarding path at ROUTE LOOKUP,
-	// before the policy engine runs, so any permit/deny verdict below (and a
-	// firewall `then accept; then log` for the same tuple) over-promises
-	// forwarding the dataplane never performs. Classify the destination up front
-	// and stamp the advisory onto whatever Result the tier chain returns via a
-	// defer, so EVERY return path (default, matched, content-rejected) carries it
-	// without threading the flag through each construction. Host-bound
-	// (junos-host) queries take the local-delivery gate, not transit route
-	// lookup, so they are exempt — matchJunosHost never sees this stamp.
+	// #4373 (E4/H2/H7): multicast / broadcast / unspecified / loopback transit
+	// destinations are dropped at ROUTE LOOKUP before policy. #11004 adds a
+	// directed-broadcast neighbor-delivery caveat: when the connected route wins,
+	// policy is evaluated on its egress before neighbor resolution fails. Stamp
+	// either advisory onto every Result via defer, without threading it through
+	// each construction. Host-bound (junos-host) queries use the local-delivery
+	// gate rather than transit routing and are exempt.
 	if q.ToZone != JunosHostZone {
-		if class := routeDropClass(q.DstIP); class != "" {
+		if class := routeDropClass(cfg, q.DstIP); class != "" {
 			defer func() {
 				res.RouteDropBeforePolicy = true
 				res.RouteDropClass = class

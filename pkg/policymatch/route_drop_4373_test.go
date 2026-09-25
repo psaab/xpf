@@ -126,3 +126,103 @@ func TestRouteDropNotAppliedToUnicastOrHost(t *testing.T) {
 		t.Fatalf("host-bound query wrongly stamped with transit route-drop: %+v", host)
 	}
 }
+
+// TestRouteDropAdvisoryForConnectedDirectedBroadcast11004 is the #11004
+// regression: a permitted IPv4 destination equal to the directed-broadcast
+// address of a configured connected prefix must carry a neighbor-delivery
+// advisory, while an ordinary host on that prefix remains an unqualified
+// permit. The note must distinguish this post-policy neighbor failure from the
+// #4373 pre-policy route-drop classes.
+//
+// RED-on-revert: remove the connected-prefix directed-broadcast classification
+// from routeDropClass and the broadcast query returns the same plain permit as
+// the unicast control, with no RouteDropNote.
+func TestRouteDropAdvisoryForConnectedDirectedBroadcast11004(t *testing.T) {
+	cfg := cfgWith(config.SecurityConfig{
+		DefaultPolicy: config.PolicyDeny,
+		Policies: []*config.ZonePairPolicies{
+			zonePair("trust", "untrust", permit("permit-any", config.PolicyMatch{})),
+		},
+	}, config.ApplicationsConfig{})
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/2": {
+			Name: "ge-0/0/2",
+			Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"10.2.0.1/24"}},
+				1: {Number: 1, Addresses: []string{"192.0.2.0/31"}},
+				2: {Number: 2, Addresses: []string{"198.51.100.7/32"}},
+			},
+		},
+	}
+
+	query := func(dst string) Result {
+		return Match(cfg, Query{
+			FromZone: "trust",
+			ToZone:   "untrust",
+			DstIP:    net.ParseIP(dst),
+		})
+	}
+
+	t.Run("ordinary unicast control", func(t *testing.T) {
+		res := query("10.2.0.42")
+		if !res.Matched || res.Action != config.PolicyPermit {
+			t.Fatalf("control verdict changed: got Matched=%v Action=%v, want matched permit", res.Matched, res.Action)
+		}
+		if res.RouteDropBeforePolicy || res.RouteDropClass != "" || res.RouteDropNote() != "" {
+			t.Fatalf("ordinary unicast on the connected prefix wrongly flagged as route-drop: %+v", res)
+		}
+	})
+
+	t.Run("point-to-point and host prefixes", func(t *testing.T) {
+		for _, dst := range []string{"192.0.2.1", "198.51.100.7"} {
+			res := query(dst)
+			if !res.Matched || res.Action != config.PolicyPermit {
+				t.Fatalf("%s verdict changed: got Matched=%v Action=%v, want matched permit", dst, res.Matched, res.Action)
+			}
+			if res.RouteDropBeforePolicy || res.RouteDropClass != "" || res.RouteDropNote() != "" {
+				t.Fatalf("%s wrongly flagged as directed-broadcast: %+v", dst, res)
+			}
+		}
+	})
+
+	t.Run("egress prefix directed broadcast", func(t *testing.T) {
+		res := query("10.2.0.255")
+		if !res.Matched || res.Action != config.PolicyPermit {
+			t.Fatalf("advisory changed the policy verdict: got Matched=%v Action=%v, want matched permit", res.Matched, res.Action)
+		}
+		if !res.RouteDropBeforePolicy {
+			t.Fatalf("RouteDropBeforePolicy = false, want true for connected-prefix directed broadcast")
+		}
+		if res.RouteDropClass != "directed-broadcast" {
+			t.Fatalf("RouteDropClass = %q, want directed-broadcast", res.RouteDropClass)
+		}
+		note := res.RouteDropNote()
+		if !strings.HasPrefix(note, RouteDropNotePrefix) ||
+			!strings.Contains(note, "directed-broadcast") ||
+			!strings.Contains(note, "policy is evaluated on its egress before neighbor resolution") ||
+			!strings.Contains(note, "not a pre-policy route drop") ||
+			!strings.Contains(note, "NOARP") ||
+			!strings.Contains(note, "targeted-broadcast") {
+			t.Fatalf("directed-broadcast RouteDropNote %q omits its policy/neighbor caveat", note)
+		}
+	})
+
+	t.Run("policy deny remains effective", func(t *testing.T) {
+		denyCfg := cfgWith(config.SecurityConfig{DefaultPolicy: config.PolicyDeny}, config.ApplicationsConfig{})
+		denyCfg.Interfaces.Interfaces = cfg.Interfaces.Interfaces
+		res := Match(denyCfg, Query{
+			FromZone: "trust",
+			ToZone:   "untrust",
+			DstIP:    net.ParseIP("10.2.0.255"),
+		})
+		if !res.DefaultUsed || res.Action != config.PolicyDeny {
+			t.Fatalf("directed-broadcast policy verdict changed: got DefaultUsed=%v Action=%v, want default deny", res.DefaultUsed, res.Action)
+		}
+		if !res.RouteDropBeforePolicy || res.RouteDropClass != "directed-broadcast" {
+			t.Fatalf("directed-broadcast deny missing neighbor-delivery advisory: %+v", res)
+		}
+		if !strings.Contains(res.RouteDropNote(), "policy DENY remains effective") {
+			t.Fatalf("directed-broadcast deny note does not preserve the policy result: %q", res.RouteDropNote())
+		}
+	})
+}

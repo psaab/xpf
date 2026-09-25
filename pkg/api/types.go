@@ -834,18 +834,18 @@ type MatchPoliciesResult struct {
 	// verdict, which has no host-inbound gate. Additional context, never a
 	// verdict — it does not change Matched / HostInboundUnmatched.
 	HostInbound *MatchPoliciesHostInbound `json:"host_inbound,omitempty"`
-	// RouteDropBeforePolicy is true when the query DESTINATION is a class the
-	// transit forwarding path drops at ROUTE LOOKUP before the policy engine runs
-	// (#4373 E4/H2/H7): multicast, the IPv4 limited broadcast, the unspecified
-	// address, or loopback. For such a destination the permit/deny Action does
-	// NOT describe real forwarding — the packet is dropped at route regardless of
-	// the matching policy (and a `then accept; then log` filter logs an accept
-	// the flow never survives). ADVISORY, like HostInbound: it does not change
-	// Matched / Action / DefaultUsed. RouteDropClass names the class and
-	// RouteDropNote carries the SSOT operator string (policymatch.RouteDropNote)
-	// so the REST answer states the caveat identically to the CLI surfaces.
-	// Omitted for an ordinary unicast destination and for a host-bound query
-	// (which takes the local-delivery gate, not transit route lookup).
+	// RouteDropBeforePolicy is true when a transit Result carries the route-drop
+	// / neighbor-delivery advisory. Multicast, limited broadcast, unspecified,
+	// and loopback destinations are dropped at route lookup before policy
+	// (#4373). Directed-broadcast (#11004) is different: when its connected
+	// route wins, policy is evaluated on that egress before neighbor resolution
+	// fails; the NOARP broadcast neighbor is rejected (#10690). This flag alone
+	// does not mean policy was bypassed for every class, so clients should read
+	// RouteDropClass and RouteDropNote for the exact stage. A directed-broadcast
+	// DENY remains the policy result, while a permit cannot forward without
+	// targeted-broadcast support (#4308). The advisory does not change Matched /
+	// Action / DefaultUsed. Omitted for ordinary unicast and host-bound queries
+	// (which use the local-delivery gate, not transit routing).
 	RouteDropBeforePolicy bool   `json:"route_drop_before_policy,omitempty"`
 	RouteDropClass        string `json:"route_drop_class,omitempty"`
 	RouteDropNote         string `json:"route_drop_note,omitempty"`
