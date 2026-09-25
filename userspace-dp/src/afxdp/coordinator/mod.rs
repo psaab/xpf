@@ -525,6 +525,14 @@ pub struct Coordinator {
     /// release builds; per-instance.
     #[cfg(test)]
     pub(crate) force_worker_healthy_stub: bool,
+    /// #10694 test seam (per-instance, NOT a process-global): when true,
+    /// bring_up_workers pins the #10516 SA gate as ready with an empty
+    /// baseline (no SAs) and skips the monitor spawn/wait, so spawn-failure
+    /// seam tests exercise their subject unprivileged without tearing down
+    /// the production gate order. Always false in release builds (the field
+    /// does not exist); per-instance so parallel tests never race.
+    #[cfg(test)]
+    pub(crate) force_ipsec_sa_ready: bool,
     /// #5674 test seam (per-instance, NOT a process-global): when nonzero,
     /// `synced_import_cap()` returns TWICE this value (the override expresses a
     /// LOGICAL ceiling; `synced_import_cap()` doubles it) instead of the real
@@ -678,6 +686,8 @@ impl Coordinator {
             force_worker_spawn_fail_skip: 0,
             #[cfg(test)]
             force_worker_healthy_stub: false,
+            #[cfg(test)]
+            force_ipsec_sa_ready: false,
             #[cfg(test)]
             synced_import_cap_override: Arc::clone(&synced_import_cap_override),
             #[cfg(test)]
