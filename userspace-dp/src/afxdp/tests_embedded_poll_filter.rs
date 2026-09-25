@@ -7871,7 +7871,7 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
-    let meta = UserspaceDpMeta {
+    let mut meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
@@ -7888,6 +7888,8 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    meta.flow_src_addr[..4].copy_from_slice(&router_ip.octets());
+    meta.flow_dst_addr[..4].copy_from_slice(&client_ip.octets());
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };

@@ -219,27 +219,21 @@ pub(super) struct ForwardPacketMeta {
     pub(super) dscp: u8,
     pub(super) flow_src_port: u16,
     pub(super) flow_dst_port: u16,
-    // #5467: the shim-stamped L3 (src, dst) addresses, carried through from the
-    // wire `UserspaceDpMeta` so the flowless output-filter enforcement gate
-    // (`resolve_cos_tx_selection_internal`) can evaluate the interface `filter
-    // output` against a fragment / non-query-ICMP packet's own L3 tuple. Zeroed
-    // (unspecified) for a synthetic/test meta, which `l3_addrs()` reports as
-    // absent — leaving the flowless pass-through behavior unchanged.
+    // #5467: shim-stamped L3 addresses from the wire, carried for the flowless
+    // output-filter evaluator. Zeroed synthetic/test metadata represents the
+    // parsed unspecified address; `l3_addrs()` preserves it as `0.0.0.0`/`::`.
+    // Transit source martians are separately rejected by #10689 after route
+    // resolution, before the ordinary egress path.
     pub(super) flow_src_addr: [u8; 16],
     pub(super) flow_dst_addr: [u8; 16],
 }
 
 impl ForwardPacketMeta {
-    /// #5467: reconstruct the packet's L3 `(src, dst)` addresses from the
-    /// shim-stamped meta for the flowless output-filter enforcement gate.
-    /// Mirrors [`crate::afxdp::frame::l3_session_flow_from_meta`]: returns
-    /// `None` for a non-IP family or an unspecified address, in which case the
-    /// caller leaves the flowless (default-queue, no-output-filter)
-    /// pass-through behavior unchanged.
-    /// The addresses with no unspecified handling at all — used by
-    /// `l3_enforcement_flow_from_meta` to tell an unparseable family (no
-    /// addresses to enforce against) from an unspecified one (addresses that
-    /// enforce fine). Does not touch the witness counter (#7890).
+    /// Address-level L3 tuple used by `l3_enforcement_flow_from_meta`.
+    ///
+    /// Preserves parsed unspecified addresses so enforcement can distinguish
+    /// them from an unparseable family. Returns `None` only when the family is
+    /// not IPv4 or IPv6; does not touch the witness counter (#7890).
     pub(in crate::afxdp) fn l3_addrs_unfiltered(&self) -> Option<(IpAddr, IpAddr)> {
         match self.addr_family as i32 {
             libc::AF_INET => {
@@ -258,6 +252,10 @@ impl ForwardPacketMeta {
         }
     }
 
+    /// #5467: addresses supplied to the flowless output-filter evaluator.
+    /// Preserves unspecified values and increments the witness counter when
+    /// either address is unspecified. Transit source disposition is handled
+    /// separately by #10689's post-FIB gate.
     pub(super) fn l3_addrs(&self) -> Option<(IpAddr, IpAddr)> {
         let (src_ip, dst_ip) = match self.addr_family as i32 {
             libc::AF_INET => {
@@ -275,19 +273,13 @@ impl ForwardPacketMeta {
             _ => return None,
         };
         if src_ip.is_unspecified() || dst_ip.is_unspecified() {
-            // #7890: SEEN, not refused. This used to `return None`, and its two
-            // callers are both flowless egress output-filter evaluations gated
-            // on it inside an `&&` chain — so an unspecified source skipped the
-            // operator's `filter output` entirely, `then discard` included.
+            // #7890: SEEN, not refused. Keep the parsed address distinct from a
+            // refused session identity; `l3_addrs()` is an address accessor.
+            // #10689 separately rejects martian source addresses on transit
+            // before the normal egress output-filter path.
             //
-            // A filter needs the packet's ADDRESSES, not a session identity, and
-            // `0.0.0.0` is a well-defined value to evaluate a `from`-clause
-            // against. The refusal belongs to `l3_session_flow_from_meta`, whose
-            // question is identity; this accessor answers the address question
-            // and must not inherit the other one's answer.
-            //
-            // The counter is kept as the WITNESS a test asserts to prove the arm
-            // was entered before asserting what enforcement did.
+            // The counter remains a witness for tests that prove this reachable
+            // address-value arm was entered.
             crate::afxdp::frame::L3_CTX_NONE_UNSPECIFIED_ADDR
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -562,20 +554,11 @@ mod flow_rr_ring_tests {
 mod l3_addrs_tests_7890 {
     use super::*;
 
-    /// The MIRRORED resolver must not refuse an unspecified address either.
-    ///
-    /// `l3_addrs()` carries the same refusal `l3_session_flow_from_meta` does —
-    /// its own doc said it "Mirrors" it — and its two callers are both flowless
-    /// egress output-filter evaluations gated on it inside an `&&` chain. So an
-    /// unspecified source skipped the operator's `filter output` entirely,
-    /// `then discard` included.
-    ///
-    /// This cell exists because fixing resolver A alone left this half
-    /// unguarded: restoring the refusal here reds nothing in the
-    /// `l3_enforcement_flow_from_meta` cells, which is the
-    /// two-correct-halves-and-no-join shape one resolver over. Four
-    /// `poll_descriptor` sites fixed alone would leave the egress filter still
-    /// skipping while the issue read as closed.
+    /// Address extraction keeps an unspecified value distinct from an
+    /// unparseable address family. Session identity still refuses this value;
+    /// transit source disposition is separately checked in the poll path by
+    /// #10689. This test binds the accessor contract, while the #10689 poll
+    /// cells bind the observable transit-drop behavior.
     #[test]
     fn l3_addrs_yields_an_unspecified_source_rather_than_refusing_7890() {
         let mut dst = [0u8; 16];
@@ -587,24 +570,20 @@ mod l3_addrs_tests_7890 {
             ..ForwardPacketMeta::default()
         };
 
-        let (src, dst_ip) = meta.l3_addrs().expect(
-            "the egress output filter needs the packet's addresses; refusing \
-             here skips the operator's `filter output` entirely, including \
-             `then discard`",
-        );
+        let (src, dst_ip) = meta
+            .l3_addrs()
+            .expect("an IP-family address is preserved even when unspecified");
         assert_eq!(src, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(dst_ip, "203.0.113.9".parse::<IpAddr>().unwrap());
 
-        // The unparseable family still refuses — there are no addresses to
-        // evaluate a filter against, and widening that too would be the
-        // over-correction.
+        // An unparseable family still has no addresses to extract.
         let bad = ForwardPacketMeta {
             addr_family: libc::AF_UNIX as u8,
             ..meta
         };
         assert!(
             bad.l3_addrs().is_none(),
-            "#7890 widens the UNSPECIFIED leg only"
+            "only an IP-family packet has extractable L3 addresses"
         );
     }
 }

@@ -108,7 +108,7 @@ pub(in crate::afxdp) use inspect::{
     parse_session_flow, post_nat_expected_ports,
     source_is_invalid_for_icmp_error,
     src_is_directed_broadcast, term_match_extra_from_frame,
-    term_match_extra_from_meta,
+    term_match_extra_from_meta, transit_src_is_martian,
     try_parse_metadata,
 };
 

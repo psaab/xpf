@@ -290,3 +290,51 @@ pub(in crate::afxdp) fn neighbor_ip_is_learnable(ip: IpAddr) -> bool {
         IpAddr::V6(v6) => !v6.is_unspecified() && !v6.is_loopback() && !v6.is_multicast(),
     }
 }
+
+/// #10689: transit source-class gate — `true` iff `ip` is a source class the
+/// Linux forwarder this dataplane replaces refuses to TRANSIT. Such a source
+/// may still be legitimately RECEIVED (LocalDelivery) but must never be
+/// forwarded, and must never have forward+reverse sessions minted for it.
+///
+///   - IPv6: unspecified (`::`), loopback (`::1`), multicast (`ff00::/8`),
+///     link-local (`fe80::/10`). RFC 4291 sections 2.5.2/2.5.3/2.5.5/2.5.6:
+///     the first three are never a valid unicast source, and link-local is
+///     single-link scope a router MUST NOT forward.
+///   - IPv4: `0.0.0.0/8` (this network, RFC 1122 section 3.2.1.3), loopback
+///     `127/8` (RFC 1122 section 3.2.1.3g — never appears on a wire),
+///     link-local `169.254/16` (RFC 3927 section 2.1 — MUST NOT be
+///     forwarded), multicast `224/4` (RFC 1112 — never a valid source),
+///     reserved `240/4` up to and including the limited broadcast
+///     `255.255.255.255` (RFC 1112 section 4), and connected subnet-directed
+///     broadcasts.
+///
+/// TRANSIT-ONLY by construction: call sites apply this AFTER FIB resolution
+/// and only to transit dispositions (ForwardCandidate / MissingNeighbor /
+/// FabricRedirect), so firewall-local receptions that legitimately carry
+/// these sources — DHCP (`0.0.0.0`), NDP/DAD (`::`, `fe80::/10`) — still
+/// reach LocalDelivery. An ingress-wide drop here would break them; the
+/// #10686 mapped/compat gate is the contrast (those classes are invalid
+/// everywhere, so that gate sits at shared ingress).
+/// Hot-path: octet compares plus standard address class tests and one O(1)
+/// membership check in the build-time connected directed-broadcast index.
+#[inline]
+pub(in crate::afxdp) fn transit_src_is_martian(forwarding: &ForwardingState, ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 0
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || o[0] >= 240
+                || forwarding.connected_v4_directed_broadcasts.contains(&v4)
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified() || v6.is_loopback() || v6.is_multicast() {
+                return true;
+            }
+            let o = v6.octets();
+            o[0] == 0xfe && (o[1] & 0xc0) == 0x80
+        }
+    }
+}

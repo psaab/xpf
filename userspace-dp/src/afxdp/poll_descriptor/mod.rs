@@ -101,6 +101,26 @@ use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
 
 #[inline]
+fn transit_source_class_disposition(disposition: ForwardingDisposition) -> bool {
+    matches!(
+        disposition,
+        ForwardingDisposition::ForwardCandidate
+            | ForwardingDisposition::MissingNeighbor
+            | ForwardingDisposition::FabricRedirect
+    )
+}
+
+#[inline]
+fn transit_source_class_drop(
+    forwarding: &ForwardingState,
+    disposition: ForwardingDisposition,
+    source: IpAddr,
+) -> bool {
+    transit_source_class_disposition(disposition)
+        && crate::afxdp::frame::transit_src_is_martian(forwarding, source)
+}
+
+#[inline]
 pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
     protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
 }
@@ -3154,6 +3174,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             from_zone_id,
                             ha_startup_grace_until_secs,
                         );
+                        // #10689: source-class rejection is transit-only and
+                        // precedes policy/session installation. LocalDelivery
+                        // remains exempt for DHCP, NDP and DAD packets; both
+                        // ForwardCandidate and MissingNeighbor are transit
+                        // decisions (the latter must not seed/buffer a session).
+                        if transit_source_class_drop(
+                            worker_ctx.forwarding,
+                            decision.resolution.disposition,
+                            flow.src_ip,
+                        ) {
+                            telemetry.counters.touched = true;
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         // #10597 G5: apply the local-only fence to the
                         // pipeline's final FIB resolution. This intentionally
                         // allows addresses owned by lo0/management/another
@@ -5597,6 +5631,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         continue;
                     }
 
+                    // #10689: flowless packets (including non-first fragments)
+                    // take the same transit source-class gate as flow-backed
+                    // misses. l3_ctx preserves unspecified addresses, unlike
+                    // session identity parsing, so `::` / `0.0.0.0` cannot fall
+                    // through merely because they cannot key a session.
+                    if let Some(l3_flow) = l3_ctx.as_ref()
+                        && transit_source_class_drop(
+                            worker_ctx.forwarding,
+                            final_resolution.disposition,
+                            l3_flow.src_ip,
+                        )
+                    {
+                        telemetry.counters.touched = true;
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
+
                     // #6458 V2: honor the zone-encoded fabric stamp for this
                     // flowless enforcement only when the resolution's owner RG
                     // is forwarding-active locally (mirrors the flow-backed
@@ -5790,26 +5841,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     //     only ever comes from `parse_ipv4`/`parse_ipv6`, which
                     //     hard-code AF_INET/AF_INET6; a packet whose parse fails
                     //     never receives metadata at all.
-                    //   - An unspecified source or destination: REACHABLE, and
-                    //     nothing upstream drops it. The shim stamps
-                    //     `flow_{src,dst}_addr` faithfully from the IP header,
-                    //     so a header carrying `0.0.0.0`/`::` yields `None` from
-                    //     a fully-parsed packet. A dst-unspecified packet dies
-                    //     at NoRoute, but a SRC-unspecified one with a valid
-                    //     destination routes normally: `is_martian_dst` only
-                    //     sub-classifies an already-decided NoRoute, and the
-                    //     `addr_class` source predicates gate ICMP-error
-                    //     generation and neighbour learning, not transit.
+                    //   - An unspecified source or destination: REACHABLE. The
+                    //     shim stamps `flow_{src,dst}_addr` faithfully, so an
+                    //     IP header carrying `0.0.0.0`/`::` yields `None` from a
+                    //     fully-parsed packet. A dst-unspecified packet dies at
+                    //     NoRoute. A source-unspecified packet can resolve to a
+                    //     transit route, but #10689 rejects it after FIB and
+                    //     before policy/session/neighbor/egress handling.
                     //
-                    // So a fragment IS normally `Some` — the shim stamps the
-                    // addresses for every packet that got this far — but "the
-                    // field is stamped" does not imply "the value is usable",
-                    // which is the step both the old comment and the issue that
-                    // corrected it skipped. Placed after the transit
-                    // policy block (not inside it) for the same reason, and
-                    // scoped to ForwardCandidate: NoRoute/MissingNeighbor/
-                    // HAInactive/LocalDelivery have their own arms and none of
-                    // them emits the packet natively.
+                    // A fragment with ordinary addresses is normally `Some`;
+                    // `None` for an unspecified address means the stamped value
+                    // is not usable as session identity, not that metadata was
+                    // absent. This distinction is the reason the flowless path
+                    // uses the separate address-level enforcement context.
+                    // The destination guard stays after the transit policy block
+                    // and applies only to ForwardCandidate; NoRoute,
+                    // MissingNeighbor, HAInactive and LocalDelivery follow their
+                    // own disposition handling.
                     if final_resolution.disposition == ForwardingDisposition::ForwardCandidate
                         && let Some(IpAddr::V6(dst_v6)) =
                             crate::afxdp::frame::parse_packet_destination_from_frame(
@@ -6033,6 +6081,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     {
                         decision.resolution = redirect;
                     }
+                }
+                // #10689: enforce the same source-class invariant for cached
+                // session hits and deferred dispositions after HA redirect
+                // resolution. The earlier miss/flowless gates run before any
+                // new session or pending-neighbor state can be installed.
+                let transit_source = flow.as_ref().map(|flow| flow.src_ip).or_else(|| {
+                    ForwardPacketMeta::from(meta)
+                        .l3_addrs_unfiltered()
+                        .map(|(source, _)| source)
+                });
+                if transit_source.is_some_and(|source| {
+                    transit_source_class_drop(
+                        worker_ctx.forwarding,
+                        decision.resolution.disposition,
+                        source,
+                    )
+                }) {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // #10683: apply the immutable selector fence only to transit
                 // candidates, before overlap/session/egress accounting. It is
@@ -6721,11 +6789,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // MissingNeighbor policy arm). That is deliberate: those
                             // sites carry an explicit invariant that they must not
                             // diverge on what the filter sees, and the disposition
-                            // question for all of them is tracked in #7890. See the
-                            // `L3_CTX_NONE_UNKNOWN_FAMILY` doc block in
-                            // frame/inspect.rs, which this arm is now enumerated in.
-                            // The reachable case is a dst-unspecified packet, which
-                            // that doc notes "dies at NoRoute".
+                            // on #7890 NoRoute policy adjudication; #10689's source
+                            // gate rejects martians on transit dispositions before
+                            // their policy sites. See the `L3_CTX_NONE_UNKNOWN_FAMILY`
+                            // doc block in frame/inspect.rs, which this arm is now
+                            // enumerated in. The reachable case is a dst-unspecified
+                            // packet, which that doc notes "dies at NoRoute".
                             let synthetic_l3;
                             let adjudicated = match flow.as_ref() {
                                 Some(f) => Some((f, true)),
