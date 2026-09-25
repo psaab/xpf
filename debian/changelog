@@ -7,5 +7,8 @@ xpf (0.0.0) unstable; urgency=medium
     in-place upgrade cut-over mechanism is a separate increment.
   * The version field above is a placeholder; `make deb` rewrites it
     from `git describe` before building.
+  * Keep transit forwarding closed when the armed bridge-family barrier
+    leg is unsupported; reject malformed SSH authorized_keys entries at
+    apply (#10725).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

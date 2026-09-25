@@ -188,3 +188,83 @@ func TestLookupUIDGIDErrThreeState(t *testing.T) {
 		t.Fatal("lookupUID on unreadable passwd returned ok=true; want false (unchanged bool contract)")
 	}
 }
+
+// TestApplyRejectsMalformedAuthorizedKeys10725 is RED-on-revert for both
+// authorized_keys writers. Newlines and non-ssh-* prefixes must be rejected
+// before login/root credentials or provenance markers are mutated.
+func TestApplyRejectsMalformedAuthorizedKeys10725(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{name: "multiline", key: "ssh-ed25519 AAAA first\nssh-rsa AAAA forged"},
+		{name: "non-ssh-prefix", key: `command="true" ssh-ed25519 AAAA key`},
+		{name: "carriage-return", key: "ssh-ed25519 AAAA first\rssh-rsa AAAA forged"},
+	} {
+		t.Run("system-login/"+tc.name, func(t *testing.T) {
+			stageDeprovisionEnv(t,
+				"root:x:0:0:root:/root:/bin/bash\nalice:x:1001:1001:,,,:/home/alice:/bin/bash\n",
+				"root:!:19000:0:99999:7:::\nalice:!:19000:0:99999:7:::\n")
+			oldRun := runCommandTimeout
+			var commands int
+			runCommandTimeout = func(string, ...string) ([]byte, error) {
+				commands++
+				return nil, nil
+			}
+			t.Cleanup(func() { runCommandTimeout = oldRun })
+
+			cfg := &config.Config{System: config.SystemConfig{
+				Login: &config.LoginConfig{Users: []*config.LoginUser{{
+					Name: "alice", SSHKeys: []string{tc.key},
+				}}},
+			}}
+			if err := (&Daemon{}).applySystemLogin(cfg); err == nil {
+				t.Fatal("applySystemLogin accepted a malformed authorized_keys entry")
+			}
+			if commands != 0 {
+				t.Fatalf("invalid key reached account/SSH commands: %d commands", commands)
+			}
+			if _, err := os.Stat(managedAuthorizedKeysPath("alice")); !os.IsNotExist(err) {
+				t.Fatalf("invalid key created authorized_keys (stat err=%v)", err)
+			}
+			if _, err := os.Stat(markerPathIn(provisionedKeysDir(), "alice")); !os.IsNotExist(err) {
+				t.Fatalf("invalid key claimed SSH-key ownership (stat err=%v)", err)
+			}
+		})
+
+		t.Run("root-authentication/"+tc.name, func(t *testing.T) {
+			stageDeprovisionEnv(t,
+				"root:x:0:0:root:/root:/bin/bash\nalice:x:1001:1001:,,,:/home/alice:/bin/bash\n",
+				"root:!:19000:0:99999:7:::\nalice:!:19000:0:99999:7:::\n")
+			oldRoot, oldRun := rootSSHDir, runCommandTimeout
+			rootSSHDir = filepath.Join(t.TempDir(), "root-ssh")
+			var commands int
+			runCommandTimeout = func(string, ...string) ([]byte, error) {
+				commands++
+				return nil, nil
+			}
+			t.Cleanup(func() {
+				rootSSHDir, runCommandTimeout = oldRoot, oldRun
+			})
+
+			cfg := &config.Config{System: config.SystemConfig{
+				RootAuthentication: &config.RootAuthConfig{
+					EncryptedPassword: config.Secret("$6$rounds=5000$abc$def"),
+					SSHKeys:           []string{tc.key},
+				},
+			}}
+			if err := (&Daemon{}).applyRootAuth(cfg); err == nil {
+				t.Fatal("applyRootAuth accepted a malformed authorized_keys entry")
+			}
+			if commands != 0 {
+				t.Fatalf("invalid key reached root credential commands: %d commands", commands)
+			}
+			if _, err := os.Stat(rootAuthorizedKeysPath()); !os.IsNotExist(err) {
+				t.Fatalf("invalid key created root authorized_keys (stat err=%v)", err)
+			}
+			if _, err := os.Stat(markerPathIn(provisionedKeysDir(), "root")); !os.IsNotExist(err) {
+				t.Fatalf("invalid key claimed root SSH-key ownership (stat err=%v)", err)
+			}
+		})
+	}
+}

@@ -156,3 +156,62 @@ func TestUnarmedTransitBarrierRemainsUnconditional10302(t *testing.T) {
 		t.Fatalf("unarmed transit must not install an armed pinhole fence: %v", f.fenceCalls10302)
 	}
 }
+
+type leasedFenceRuntime10302 struct {
+	*fenceRuntime10302
+}
+
+func (r *leasedFenceRuntime10302) WithAttachedXDPFence(fn func([]int) error) error {
+	return fn(r.ifindexes)
+}
+
+// TestArmedTransitUnsupportedBridgeKeepsGateClosed10725 is RED-on-revert for
+// both armed-fence paths: bridge-family unsupported must propagate before
+// either path raises the transit sysctls. Unlike ip_forward, bridge frames do
+// not pass through the inet hook or obey the routing sysctl.
+func TestArmedTransitUnsupportedBridgeKeepsGateClosed10725(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		runtime func() dataplane.RuntimeDataPlane
+	}{
+		{
+			name: "without-XDP-lease",
+			runtime: func() dataplane.RuntimeDataPlane {
+				return &fenceRuntime10302{ifindexes: []int{101}}
+			},
+		},
+		{
+			name: "with-XDP-lease",
+			runtime: func() dataplane.RuntimeDataPlane {
+				return &leasedFenceRuntime10302{
+					fenceRuntime10302: &fenceRuntime10302{ifindexes: []int{101}},
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v4, v6 := withTempTransitForwardSysctls(t, "0")
+			oldLinks := transitFenceLinkList
+			t.Cleanup(func() { transitFenceLinkList = oldLinks })
+			transitFenceLinkList = func() ([]netlink.Link, error) {
+				return []netlink.Link{
+					&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "xdp-owned0", Index: 101}},
+				}, nil
+			}
+
+			f := withBarrierRecorder(t)
+			injected := errors.Join(xnft.ErrTransitBarrierBridgeUnsupported)
+			f.fenceInstall10302 = func(xnft.ForwardFenceSpec) error { return injected }
+			d := &Daemon{}
+			d.setDataplane(tc.runtime())
+
+			if err := d.openTransitGateLocked(); !errors.Is(err, xnft.ErrTransitBarrierBridgeUnsupported) {
+				t.Fatalf("openTransitGateLocked error = %v, want bridge barrier unsupported", err)
+			}
+			assertTransitForwarding(t, v4, v6, "0", "when the armed bridge barrier leg is unsupported")
+			if len(f.fenceCalls10302) != 1 {
+				t.Fatalf("armed fence install calls = %v, want one failed bridge-leg install", f.fenceCalls10302)
+			}
+		})
+	}
+}

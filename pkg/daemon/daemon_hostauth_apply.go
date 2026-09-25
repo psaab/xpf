@@ -44,7 +44,20 @@ import (
 // `hostAuthCloseoutOwners` member and returning nothing, so it belongs with the
 // best-effort set by the cluster's own definition.
 //
-// Pure code motion: no signature, body or behaviour changed.
+// The moved implementations remain unchanged except for the #10725
+// apply-boundary validation immediately below.
+
+// validateAuthorizedSSHKeys enforces the authorized_keys apply-boundary format
+// shared by non-root login and root-authentication.
+
+func validateAuthorizedSSHKeys(principal string, keys []string) error {
+	for i, key := range keys {
+		if strings.ContainsAny(key, "\r\n") || !strings.HasPrefix(key, "ssh-") {
+			return fmt.Errorf("SSH key %d for %s must be a single-line ssh-* public key", i+1, principal)
+		}
+	}
+	return nil
+}
 
 // applySystemLogin creates OS user accounts and SSH authorized_keys from
 // system { login { user ... } } configuration.
@@ -58,6 +71,7 @@ import (
 // authorized_keys must not report success. Pure defensive skips (an invalid
 // username refused before any mutation) are NOT accumulated — they are the
 // safe outcome, not an incomplete reconcile.
+
 func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 	fail := func(e error) { err = errors.Join(err, e) }
 	if cfg.System.Login == nil || len(cfg.System.Login.Users) == 0 {
@@ -81,6 +95,10 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 		if err := config.ValidateLoginUsername(user.Name, nil); err != nil {
 			slog.Warn("refusing to provision invalid login user name",
 				"user", user.Name, "err", err)
+			continue
+		}
+		if err := validateAuthorizedSSHKeys(user.Name, user.SSHKeys); err != nil {
+			fail(err)
 			continue
 		}
 
@@ -905,6 +923,10 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 	if ra != nil {
 		password = ra.EncryptedPassword
 		keys = ra.SSHKeys
+	}
+
+	if err := validateAuthorizedSSHKeys("root", keys); err != nil {
+		return err
 	}
 
 	// Password: reuse the non-root #1944 reconciler keyed on name "root" / UID 0.
