@@ -14,7 +14,9 @@ that behaviour entirely in the Go control plane.
 A slow (10s) daemon-resident loop (`Monitor.run`) samples the helper's
 LAST-APPLIED NAT pool snapshot and, for each rule-referenced source pool,
 computes utilization as the max of the ports leg
-`UsedPorts * 100 / (AddressCount * (PortHigh - PortLow + 1))` and the
+`UsedPorts * 100 / (AddressCount * (PortHigh - PortLow + 1))` — where
+`AddressCount` is the unique expanded address count (duplicate and overlapping
+members count once, matching the dataplane and its status row #10700) — and the
 tracked-flow leg `max(LiveFlows, PersistentLeases) * 100 / MaxTrackedFlows`
 (#9896 — the cap that actually refuses new flows; deterministic and
 address-only pools evaluate the flow leg alone), and applies hysteresis:

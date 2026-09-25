@@ -49,6 +49,30 @@ func TestSourceNATPoolReportableAddressesExpandsAndIncludesSingular7000(t *testi
 	}
 }
 
+// #10700: the Rust pool expander keeps the first occurrence of an address
+// across all configured members. Capacity and utilization denominators must
+// count that same unique expanded set, not sum each overlapping member.
+func TestSourceNATPoolReportableAddressesDeduplicatesExpandedMembers10700(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pool *NATPool
+		want int
+	}{
+		{"duplicate host spellings", mkPool(t, "", "203.0.113.7", "203.0.113.7/32"), 1},
+		{"v4 prefix contains host", mkPool(t, "", "203.0.113.0/31", "203.0.113.1/32"), 2},
+		{"v4 partial overlap", mkPool(t, "", "203.0.113.0/30", "203.0.113.2/31"), 4},
+		{"singular address overlaps list", mkPool(t, "203.0.113.7", "203.0.113.0/24"), 256},
+		{"v6 prefix contains host", mkPool(t, "", "2001:db8::/127", "2001:db8::1/128"), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := SourceNATPoolReportableAddresses(tc.pool, "p", nil)
+			if reason != "" || got != tc.want {
+				t.Fatalf("unique addresses = (%d, %q), want (%d, \"\")", got, reason, tc.want)
+			}
+		})
+	}
+}
+
 // Direction 1: a pool the dataplane REFUSED reports ZERO, not a fabricated
 // figure derived from members it never installed.
 func TestSourceNATPoolReportableAddressesIsZeroForRefusedPools7000(t *testing.T) {
@@ -138,6 +162,11 @@ func TestSourceNATPoolReportablePorts7000(t *testing.T) {
 	ports, reason := SourceNATPoolReportablePorts(mkPool(t, "", "203.0.113.0/24"), "p", 1024, 65535, nil)
 	if reason != "" || ports != 256*64512 {
 		t.Fatalf("healthy /24 = (%d, %q), want (%d, \"\")", ports, reason, 256*64512)
+	}
+	ports, reason = SourceNATPoolReportablePorts(
+		mkPool(t, "", "203.0.113.0/31", "203.0.113.1/32"), "p", 20000, 20001, nil)
+	if reason != "" || ports != 4 {
+		t.Fatalf("overlapping members = (%d, %q), want (4, \"\")", ports, reason)
 	}
 	ports, reason = SourceNATPoolReportablePorts(mkPool(t, "", "10.0.0.0/016"), "p", 1024, 65535, nil)
 	if ports != 0 || reason != "invalid_pool" {

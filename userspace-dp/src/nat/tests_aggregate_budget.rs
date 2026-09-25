@@ -65,7 +65,7 @@ use super::allocator::{
 };
 use super::source::{
     SOURCE_NAT_AGGREGATE_BUDGET, SourceNatAggregateBudget, SourceNatAggregateUse,
-    SourceNatFailureReason, expand_pool_address, parse_source_nat_rules_with_budget,
+    SourceNatFailureReason, expand_pool_address_member, parse_source_nat_rules_with_budget,
     parse_source_nat_rules_with_previous,
 };
 use super::*;
@@ -946,7 +946,7 @@ fn nat_pool_grammar_parity_fixture() {
 
         let mut v4 = Vec::new();
         let mut v6 = Vec::new();
-        let got_ok = expand_pool_address(addr, &mut v4, &mut v6);
+        let got_ok = expand_pool_address_member(addr, &mut v4, &mut v6);
         assert_eq!(
             got_ok, want_ok,
             "expand_pool_address({addr:?}) = {got_ok}, want {want_ok}; the Go predicate              and this expander disagree about whether the member is honorable              (fixture note: {note})",
@@ -1069,11 +1069,11 @@ fn nat_pool_bare_and_host_cidr_grammars_agree() {
     ];
     for addr in bare_addresses {
         let (mut b4, mut b6) = (Vec::new(), Vec::new());
-        let bare_ok = expand_pool_address(addr, &mut b4, &mut b6);
+        let bare_ok = expand_pool_address_member(addr, &mut b4, &mut b6);
         let host_mask = if addr.contains(':') { "/128" } else { "/32" };
         let cidr = format!("{addr}{host_mask}");
         let (mut c4, mut c6) = (Vec::new(), Vec::new());
-        let cidr_ok = expand_pool_address(&cidr, &mut c4, &mut c6);
+        let cidr_ok = expand_pool_address_member(&cidr, &mut c4, &mut c6);
         assert_eq!(
             bare_ok, cidr_ok,
             "grammar split: expand_pool_address({addr:?}) = {bare_ok} but \

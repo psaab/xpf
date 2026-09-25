@@ -77,14 +77,13 @@
 //! earns its own cell, for the ROLLBACK: #6528 frees a block port with
 //! `free_no_recycle`, and a skipped rollback strands it.
 //!
-//! Everything is reachable only from the same tolerated / peer-synced / handcrafted
-//! population as the covered case (the Go #5144 strict gate rejects overlapping
-//! pools at commit on address overlap alone). That population is real and
-//! verified, not hypothetical: `lenientCompileOpts` is wired at
-//! `configstore.Store` load and SyncApply, and unlike its `lenientNPTv6` /
-//! `lenientNAT64Prefix` siblings the dataplane does NOT reject the overlapping
-//! snapshot — the compiler's own doc records that it "installs with a LATENT
-//! reverse-index collision that persists until corrected".
+//! Everything is reachable only from the same tolerated / peer-synced /
+//! handcrafted population as the covered case (the Go #5144 strict gate rejects
+//! overlapping independent pools at commit on address overlap alone). That
+//! population is real and verified: `lenientCompileOpts` is wired at
+//! `configstore.Store` load and SyncApply. The dataplane keeps only each
+//! address's first occurrence within one pool (#10700), but separate allocators
+//! with overlapping addresses still install and can collide as described above.
 
 use super::*;
 use crate::nat::allocator::AddressOnlyReverseKey;
@@ -92,11 +91,9 @@ use crate::nat::allocator::AddressOnlyReverseKey;
 /// One allocator that covers a pool address, and the index that address has in
 /// THAT allocator's occupancy vector.
 ///
-/// The index is recorded per OCCURRENCE, not per address: `expand_pool_address`
-/// does not deduplicate, so a pool whose configured members overlap can carry
-/// one address at several positions and `PortAllocator::new` gives each
-/// position its own bitmap. Recording only the first (`.position()`) would let
-/// a peer's SECOND position hand out an identity this query reports free.
+/// The source-NAT pool parser now deduplicates expanded addresses in first-seen
+/// order (#10700), so an address has one slot per allocator. Keeping its exact
+/// slot here is required by the peer bitmap lookup.
 #[derive(Clone, Debug)]
 struct PoolAddressOwner {
     allocator: PortAllocator,
@@ -149,10 +146,9 @@ impl PoolAddressOwners {
     /// previous-generation key, a this-apply key already assigned, or a #7858
     /// rename carry.
     ///
-    /// It also means a pool's own duplicate positions are NOT compared against
-    /// each other. That intra-pool case is a distinct, pre-existing defect
-    /// (one pool, no peer, `[X, X]` mints `X:P` twice) that this change neither
-    /// introduces nor is required to fix; it is tracked separately.
+    /// The parser stores each pool address only once (#10700). Skipping this
+    /// allocator instance is still required because rules sharing one pool
+    /// intentionally share one occupancy domain.
     fn peer_holds(&self, own: &PortAllocator, addr: IpAddr, port: u16) -> bool {
         let owners = match addr {
             IpAddr::V4(v4) => self.v4.get(&v4),

@@ -138,6 +138,27 @@ pub(in crate::nat) fn expand_pool_address(
     addr_str: &str,
     out_v4: &mut Vec<Ipv4Addr>,
     out_v6: &mut Vec<Ipv6Addr>,
+    seen_v4: &mut rustc_hash::FxHashSet<Ipv4Addr>,
+    seen_v6: &mut rustc_hash::FxHashSet<Ipv6Addr>,
+) -> bool {
+    expand_pool_address_inner(addr_str, out_v4, out_v6, Some(seen_v4), Some(seen_v6))
+}
+
+#[cfg(test)]
+pub(in crate::nat) fn expand_pool_address_member(
+    addr_str: &str,
+    out_v4: &mut Vec<Ipv4Addr>,
+    out_v6: &mut Vec<Ipv6Addr>,
+) -> bool {
+    expand_pool_address_inner(addr_str, out_v4, out_v6, None, None)
+}
+
+fn expand_pool_address_inner(
+    addr_str: &str,
+    out_v4: &mut Vec<Ipv4Addr>,
+    out_v6: &mut Vec<Ipv6Addr>,
+    mut seen_v4: Option<&mut rustc_hash::FxHashSet<Ipv4Addr>>,
+    mut seen_v6: Option<&mut rustc_hash::FxHashSet<Ipv6Addr>>,
 ) -> bool {
     if let Some((addr_part, mask_part)) = addr_str.split_once('/') {
         // CIDR form: enumerate every address in the prefix range.
@@ -156,7 +177,10 @@ pub(in crate::nat) fn expand_pool_address(
                 // over-cap prefixes that would overflow returned above.
                 let base = u32::from(ip) & !(count as u32 - 1);
                 for i in 0..count {
-                    out_v4.push(Ipv4Addr::from(base.wrapping_add(i as u32)));
+                    let addr = Ipv4Addr::from(base.wrapping_add(i as u32));
+                    if seen_v4.as_mut().map_or(true, |seen| seen.insert(addr)) {
+                        out_v4.push(addr);
+                    }
                 }
                 true
             }
@@ -172,7 +196,10 @@ pub(in crate::nat) fn expand_pool_address(
                 let count = 1u128 << host_bits; // 1 for /128
                 let base = u128::from(ip) & !(count - 1);
                 for i in 0..count {
-                    out_v6.push(Ipv6Addr::from(base.wrapping_add(i)));
+                    let addr = Ipv6Addr::from(base.wrapping_add(i));
+                    if seen_v6.as_mut().map_or(true, |seen| seen.insert(addr)) {
+                        out_v6.push(addr);
+                    }
                 }
                 true
             }
@@ -182,11 +209,15 @@ pub(in crate::nat) fn expand_pool_address(
         // Bare IP (no mask): exactly one host.
         match addr_str.parse::<IpAddr>() {
             Ok(IpAddr::V4(v4)) => {
-                out_v4.push(v4);
+                if seen_v4.as_mut().map_or(true, |seen| seen.insert(v4)) {
+                    out_v4.push(v4);
+                }
                 true
             }
             Ok(IpAddr::V6(v6)) => {
-                out_v6.push(v6);
+                if seen_v6.as_mut().map_or(true, |seen| seen.insert(v6)) {
+                    out_v6.push(v6);
+                }
                 true
             }
             Err(_) => false,

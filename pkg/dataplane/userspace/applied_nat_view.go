@@ -31,7 +31,10 @@ type appliedSnapshot struct {
 // downstream consumers (pkg/natpoolalarm) need not depend on this package's
 // wire types.
 type AppliedNATPoolStatus struct {
-	PoolName     string
+	PoolName string
+	// AddressCount is the helper's unique expanded address count (#10700),
+	// used as the ports-utilization capacity denominator. Do not rederive it
+	// from raw config members: overlapping members are deduplicated at apply.
 	AddressCount int
 	PortLow      uint16
 	PortHigh     uint16

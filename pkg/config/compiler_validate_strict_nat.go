@@ -3949,17 +3949,11 @@ func sourceNATAggregateReferencedCharges(cfg *Config) []sourceNATAggregatePoolCh
 			// INVARIANT (#6812 F1 round 2): every member of a pool that reaches
 			// this line is honorable — SourceNATPoolUnusableReason above is
 			// all-or-nothing over sourceNATPoolAddressReason, so a single
-			// rejected member already skipped the pool. An honorable member
-			// parses, so sourceNATPoolMemberHostCount returns at least 1 for
-			// it, and a pool with NO members reported empty_pool. poolAddrs is
-			// therefore >= 1 here by construction, which is why there is no
-			// zero-total skip: the shape it used to catch (every member
-			// unparseable) is no longer representable past the shared verdict.
-			// TestBudgetChargeImpliesHonorableMembers_6812 binds both halves.
-			var poolAddrs uint64
-			for _, a := range SourceNATPoolMembers(pool) {
-				poolAddrs = checkedAddU64(poolAddrs, sourceNATPoolMemberHostCount(a))
-			}
+			// rejected member already skipped the pool. Charge the same unique
+			// expanded address cardinality as Rust's first-occurrence dedupe:
+			// overlapping and repeated members contribute no extra allocator
+			// slots or port capacity.
+			poolAddrs := sourceNATPoolUniqueAddressCount(SourceNATPoolMembers(pool))
 			// Port range: CONSULT the shared resolver rather than recompute
 			// from the raw fields (#6812 F2 round 3). SourceNATPoolPortRange is
 			// what the snapshot builder ships to the dataplane
@@ -4696,10 +4690,9 @@ func natOverlapMessage(owners []natAllocOwner, instA int, memberA string, instB 
 	if instA == instB {
 		return fmt.Sprintf(
 			"security nat: %s has overlapping or duplicate pool members %q and %q; "+
-				"the allocator builds a separate occupancy bitmap per pool member, so "+
-				"overlapping members can each hand out the same translated (address, "+
-				"port) and the reverse NAT index cannot disambiguate the return flow — "+
-				"remove the duplicate/overlapping member (#5144)",
+				"the dataplane keeps only the first occurrence of each expanded address on "+
+				"tolerated loads (#10700), but strict validation rejects the ambiguous "+
+				"membership — remove the duplicate/overlapping member (#5144)",
 			a.desc, memberA, memberB)
 	}
 	b := owners[instB]

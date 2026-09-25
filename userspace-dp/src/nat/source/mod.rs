@@ -1397,16 +1397,27 @@ fn parse_source_nat_rules_inner(
         }
         // Parse pool addresses and port range for pool-mode SNAT.
         let mut invalid_pool_address = false;
+        let mut seen_pool_v4 = FxHashSet::default();
+        let mut seen_pool_v6 = FxHashSet::default();
         for addr_str in &snap.pool_addresses {
             // #3049: a pool entry may be a bare IP, a host CIDR (/32, /128), or
             // a subnet CIDR. A subnet must enumerate the FULL prefix range — the
             // pre-#3049 code stripped the mask and kept only the network host, so
             // a `203.0.113.0/28` pool collapsed to a single address. A single-
             // host prefix still yields exactly one address.
+            //
+            // #10700: overlapping members (for example `/31` followed by a
+            // contained `/32`) must not create duplicate pool positions: each
+            // position previously got its own occupancy bitmap and could mint
+            // the same reverse `(address, port)` tuple. These sets preserve
+            // first-occurrence ordering while making each address one allocator
+            // slot and one capacity/alarm denominator.
             if !expand_pool_address(
                 addr_str,
                 &mut rule.pool_addresses_v4,
                 &mut rule.pool_addresses_v6,
+                &mut seen_pool_v4,
+                &mut seen_pool_v6,
             ) {
                 invalid_pool_address = true;
             }

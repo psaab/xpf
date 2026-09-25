@@ -72,6 +72,38 @@ func TestAggregateOverBudgetPoolsAddresses_6812(t *testing.T) {
 		poisonSet(t, snat5877Pools(16, distinctSlash16, "5000 to 5001")...))
 }
 
+// #10700: Go's tolerated-load aggregate budget must charge the unique expanded
+// addresses the Rust parser installs, not repeated member host counts.
+func TestAggregateBudgetCountsUniqueExpandedMembers10700(t *testing.T) {
+	cmds := []string{
+		"set security nat source rule-set RS from zone trust",
+		"set security nat source rule-set RS to zone untrust",
+	}
+	for i := range 17 {
+		// SetPath retains these distinct host-bit spellings, but each /16
+		// expands to the same network address set.
+		cmds = append(cmds, fmt.Sprintf("set security nat source pool p address 10.0.%d.0/16", i))
+	}
+	cmds = append(cmds,
+		"set security nat source rule-set RS rule r1 match source-address 192.0.2.0/24",
+		"set security nat source rule-set RS rule r1 then source-nat pool p",
+	)
+	cfg, err := CompileConfigLenient(snat5877Tree(t, cmds...))
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	members := SourceNATPoolMembers(cfg.Security.NAT.SourcePools["p"])
+	if len(members) != 17 {
+		t.Fatalf("pool members = %d, want 17 distinct configured spellings: %v", len(members), members)
+	}
+	if got := sourceNATPoolUniqueAddressCount(members); got != 1<<16 {
+		t.Fatalf("unique expanded addresses = %d, want 65536", got)
+	}
+	if got := SourceNATAggregateOverBudgetPools(cfg); got["p"] {
+		t.Fatalf("overlapping /16 members were charged 17 times and poisoned their pool: %v", got)
+	}
+}
+
 // TestAggregateOverBudgetPoolsCount_6812 pins the distinct-pool COUNT
 // budget: pools 0..1023 fit, pool 1024 (the 1025th) is poisoned.
 func TestAggregateOverBudgetPoolsCount_6812(t *testing.T) {

@@ -1167,16 +1167,13 @@ type compileOpts struct {
 	// lenientNATPoolOverlap (#5144) downgrades the source-NAT / NAT64
 	// external-tuple overlap gate (validateNATPoolExternalTupleOverlapStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
-	// commit-check path hard-rejects a config in which two independent source-NAT
-	// / NAT64 allocators (differently-named overlapping source pools, a source
-	// pool that also backs a NAT64 rule-set, two NAT64 rule-sets sharing a pool
-	// under different prefixes, or duplicate members within one pool) can mint the
-	// same translated external tuple. The tolerant load / peer-sync paths downgrade
-	// to a warning so an already-persisted or peer-synced config committed before
-	// this gate existed still BOOTS (#1960 no-brick). Unlike lenientNPTv6 /
-	// lenientNAT64Prefix the dataplane does NOT reject the overlapping snapshot —
-	// the config installs with a LATENT reverse-index collision that persists until
-	// corrected — so the warning carries that caveat. Commit stays strict so the
+	// commit-check path rejects overlapping independent source-NAT / NAT64
+	// allocators (differently-named pools, a source pool shared with NAT64, or
+	// NAT64 rule-sets sharing addresses) and duplicate members within one pool.
+	// Tolerant load / peer-sync still boots older configurations (#1960). The
+	// dataplane now deduplicates overlapping members within one pool (#10700),
+	// but separate allocators with overlapping addresses still install and can
+	// collide, so the warning retains that caveat. Commit stays strict so the
 	// operator's next edit fails loudly. Same doctrine as lenientNPTv6.
 	lenientNATPoolOverlap bool
 	// lenientFirewallRefs (#2217) downgrades the firewall-filter term
