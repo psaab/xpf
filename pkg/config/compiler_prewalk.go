@@ -736,6 +736,12 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #10707: open-world routing schemas intentionally remain tolerant of
+	// incompletely modeled Junos subtrees, but a direct unknown child can still
+	// be silently discarded by the section compiler. Surface those keywords as
+	// warnings on both strict commit and tolerant load / peer-sync paths.
+	openWorldRoutingWarnings := warnUnknownRoutingLeaves10707(tree)
+
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
 	warnings = append(warnings, trackWarnings...)
@@ -775,5 +781,6 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, rgArityWarnings...)
 	warnings = append(warnings, garpCountWarnings...)
 	warnings = append(warnings, bareLeafWarnings...)
+	warnings = append(warnings, openWorldRoutingWarnings...)
 	return warnings, nil
 }
