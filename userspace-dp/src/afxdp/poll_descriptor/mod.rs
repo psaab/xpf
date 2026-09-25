@@ -2879,6 +2879,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 true,
                             )
                         };
+                        // #10685: NAT64 targeting a firewall-owned IPv4 is not
+                        // a valid helper LocalDelivery. This disposition hands
+                        // the original IPv6 frame to the kernel without NAT64
+                        // translation, but the kernel owns no matching
+                        // synthetic address. Drop before LocalMiss session
+                        // installation and reinject, regardless of the
+                        // host-bound policy result.
+                        if nat64_match.is_some()
+                            && resolution.disposition == ForwardingDisposition::LocalDelivery
+                        {
+                            telemetry.dbg.policy_deny += 1;
+                            telemetry.counters.touched = true;
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         let fabric_ingress = packet_fabric_ingress;
                         let resolution = prefer_local_forward_candidate_for_fabric_ingress(
                             worker_ctx.forwarding,
