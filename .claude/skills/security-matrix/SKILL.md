@@ -109,7 +109,7 @@ Loss cluster max-throughput target: **172.16.80.200 / 2001:559:8585:80::200**
 Create a scratch worktree off origin/master (NEVER build/deploy from the main
 checkout, and NEVER `git checkout` there):
 ```bash
-git -C /home/ps/git/bpfrx worktree add --detach .claude/worktrees/secmatrix origin/master
+git -C /home/ps/git/bpfrx worktree add --detach /var/tmp/worktrees/secmatrix origin/master
 ```
 - **Loss cluster:** `make cluster-deploy` from the worktree (self-locks).
 - **Standalone:** `make test-deploy` from the worktree (pushes + sha-verifies the
