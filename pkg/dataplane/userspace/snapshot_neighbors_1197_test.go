@@ -31,6 +31,16 @@ func TestNeighborSnapshotPublishable(t *testing.T) {
 			true,
 		},
 		{
+			"NOARP unusable for resolved forwarding",
+			NeighborSnapshot{Ifindex: 5, IP: "10.0.0.1", MAC: "aa:bb:cc:dd:ee:ff", State: "noarp"},
+			false,
+		},
+		{
+			"reachable composite with NOARP is unusable",
+			NeighborSnapshot{Ifindex: 5, IP: "10.0.0.1", MAC: "aa:bb:cc:dd:ee:ff", State: "reachable|noarp"},
+			false,
+		},
+		{
 			"failed unusable",
 			NeighborSnapshot{Ifindex: 5, IP: "10.0.0.1", MAC: "aa:bb:cc:dd:ee:ff", State: "failed"},
 			false,

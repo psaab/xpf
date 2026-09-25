@@ -396,15 +396,12 @@ Every peer-MAC resolution that reaches the dataplane is keyed on the
   walks the AST of `daemon_ha_fabric.go` and fails both if a `NUD_*`
   constant is named there again and if the delegating call count changes,
   so re-duplicating the mask AND deleting a check outright are both
-  caught. Note that `usableNUD` in `daemon_neighbor_listener.go` is a
-  DIFFERENT set (it admits `NUD_NOARP` and is a publish-time filter for
-  the neighbour snapshot) and is deliberately not folded in. #7443 wrote
-  that separation into a comment at BOTH masks, each naming the other and
-  the question it answers, so a future single-sourcing pass cannot read
-  the divergence as drift and "fix" it. What is recorded is that keeping
-  them apart is deliberate; what is NOT recorded anywhere is a rationale
-  for excluding `NUD_NOARP` from `FabricNeighValidStates` specifically,
-  and the comment says so rather than inventing one.
+  caught. Note that `usableNUD` in `daemon_neighbor_listener.go` uses the same
+  NUD state bits as `FabricNeighValidStates`, including rejecting
+  `NUD_NOARP`; it is a separate publish-time filter, not the fabric peer
+  selector. The fabric predicate additionally validates the peer hardware
+  address length. Keep the state bits synchronized while preserving those
+  distinct checks.
 
   **The live resolver is bound by a test, not just the helper it calls
   (#7443).** #6598's coverage was a table over `selectFabricPeerMAC` plus

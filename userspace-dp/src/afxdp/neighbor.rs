@@ -652,12 +652,13 @@ pub(super) fn parse_neighbor_msg(
     };
     match nlmsg_type {
         28 => {
-            // Treat INCOMPLETE (0x01) and FAILED (0x20) as unusable;
-            // everything else (REACHABLE, STALE, DELAY, PROBE,
-            // PERMANENT, NOARP) is a valid resolved neighbor.
+            // INCOMPLETE, FAILED, and NOARP are unusable resolved neighbors.
+            // Remove a prior row too: keeping its old MAC would preserve a
+            // stale forwarding path after the kernel changes the NUD state.
             const NUD_INCOMPLETE: u16 = 0x01;
             const NUD_FAILED: u16 = 0x20;
-            if (state & (NUD_INCOMPLETE | NUD_FAILED)) != 0 {
+            const NUD_NOARP: u16 = 0x40;
+            if (state & (NUD_INCOMPLETE | NUD_FAILED | NUD_NOARP)) != 0 {
                 return removal(remove_dynamic_neighbor(dynamic_neighbors, ifindex, ip));
             }
             let Some(mac) = mac else {
@@ -2305,6 +2306,67 @@ mod monitor_lifecycle_tests_5165 {
         unsafe {
             libc::close(write_fd);
             libc::close(read_fd);
+        }
+    }
+}
+#[cfg(test)]
+mod noarp_listener_10690_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    fn newneigh_body(ifindex: i32, ip: Ipv4Addr, mac: [u8; 6], state: u16) -> Vec<u8> {
+        let mut body = vec![0u8; 12];
+        body[0] = libc::AF_INET as u8;
+        body[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+        body[8..10].copy_from_slice(&state.to_ne_bytes());
+
+        body.extend_from_slice(&8u16.to_ne_bytes());
+        body.extend_from_slice(&1u16.to_ne_bytes());
+        body.extend_from_slice(&ip.octets());
+        body.extend_from_slice(&10u16.to_ne_bytes());
+        body.extend_from_slice(&2u16.to_ne_bytes());
+        body.extend_from_slice(&mac);
+        body.extend_from_slice(&[0u8; 2]);
+        body
+    }
+
+    #[test]
+    fn noarp_neighbor_event_never_becomes_a_resolved_neighbor_10690() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_NOARP: u16 = 0x40;
+        let ip = Ipv4Addr::new(10, 0, 61, 255);
+        for state in [NUD_NOARP, NUD_NOARP | NUD_REACHABLE] {
+            for had_prior_row in [false, true] {
+                let neighbors = Arc::new(ShardedNeighborMap::new());
+                let key = (7, IpAddr::V4(ip));
+                if had_prior_row {
+                    neighbors.insert_if_changed(
+                        key,
+                        NeighborEntry {
+                            mac: [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+                        },
+                    );
+                }
+                let effect = parse_neighbor_msg(
+                    28,
+                    &newneigh_body(7, ip, [0xff; 6], state),
+                    &neighbors,
+                );
+                assert_eq!(
+                    effect,
+                    if had_prior_row {
+                        NeighborMsgEffect::Removed
+                    } else {
+                        NeighborMsgEffect::None
+                    },
+                    "NOARP must remove, not install, the neighbor row"
+                );
+                assert!(
+                    neighbors.get(&key).is_none(),
+                    "NOARP row must not survive in dynamic resolution"
+                );
+            }
         }
     }
 }

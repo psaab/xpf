@@ -42,27 +42,17 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// usableNUD is the set of NUD states userspace-dp treats as
-// usable for forwarding. MUST mirror the Rust accept rules at
-// userspace-dp/src/server/handlers.rs:165 and
-// userspace-dp/src/afxdp/forwarding/mod.rs:45.
+// usableNUD is the set of NUD states the userspace dataplane accepts as
+// resolved neighbors for forwarding. It mirrors the Rust snapshot and state
+// classifiers; NUD_NOARP is excluded because a NOARP row can map a directed
+// broadcast destination to Ethernet's all-ones MAC instead of resolving a
+// unicast peer.
 //
-// NUD_NONE (state==0) is INTENTIONALLY excluded — Rust treats
-// "none" as usable but state-0 entries have no learned MAC info,
-// so we filter them out at publish time
-// (see neighborSnapshotPublishable in pkg/dataplane/userspace).
-//
-// NUD_NOARP is accepted here and is NOT accepted by
-// FabricNeighValidStates (pkg/dataplane/userspace/fabric.go). That is the one
-// axis on which the two masks differ, and it is permissible because they answer
-// different questions: this mask decides which neighbours reach the general
-// snapshot, that one decides which single entry may be adopted as the fabric
-// peer's forwarding identity. Do not unify them -- keeping the two apart is
-// recorded as deliberate in docs/fabric-cross-chassis-fwd.md, and the note at
-// FabricNeighValidStates carries the rest (#7443).
+// NUD_NONE (state==0) is INTENTIONALLY excluded — Rust treats "none" as
+// unknown, and state-0 entries have no learned MAC info, so they are filtered
+// out at publish time (see neighborSnapshotPublishable).
 const usableNUD = netlink.NUD_REACHABLE | netlink.NUD_STALE |
-	netlink.NUD_DELAY | netlink.NUD_PROBE |
-	netlink.NUD_PERMANENT | netlink.NUD_NOARP
+	netlink.NUD_DELAY | netlink.NUD_PROBE | netlink.NUD_PERMANENT
 
 // neighborProbeMaxTargetsDefault caps the per-tick force-probe
 // target count by default. Override via env
@@ -270,14 +260,12 @@ func shouldTriggerRegenWithProvider(u netlink.NeighUpdate, provider neighborSnap
 		return true
 	case syscall.RTM_NEWNEIGH:
 		hasMAC := u.HardwareAddr != nil && len(u.HardwareAddr) > 0
-		// Composite-state safety: a state with both REACHABLE and
-		// FAILED bits set must NOT be classified as usable. Define
-		// usable as: at least one usableNUD bit AND no failed/
-		// incomplete bit.
+		// Composite-state safety: a state with both usable bits and a
+		// known-unusable bit must not be classified as resolved.
 		usable := u.State&usableNUD != 0 &&
-			u.State&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE) == 0
-		// "unusable" covers state==0/NONE/FAILED/INCOMPLETE OR
-		// composite states that include FAILED/INCOMPLETE.
+			u.State&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE|netlink.NUD_NOARP) == 0
+		// "unusable" covers state==0/NONE/FAILED/INCOMPLETE/NOARP and
+		// composite states that include any known-unusable bit.
 		unusable := !usable
 
 		var existing *userspace.NeighborSnapshot
@@ -296,7 +284,7 @@ func shouldTriggerRegenWithProvider(u netlink.NeighUpdate, provider neighborSnap
 			}
 		}
 		// Transition to unusable → snapshot must drop entry.
-		// Includes NUD_FAILED, NUD_INCOMPLETE, NUD_NONE (state==0).
+		// Includes NUD_FAILED, NUD_INCOMPLETE, NUD_NOARP, NUD_NONE (state==0).
 		if unusable {
 			return true
 		}

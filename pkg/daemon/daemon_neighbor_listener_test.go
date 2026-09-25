@@ -54,7 +54,7 @@ func TestUsableNUDMask(t *testing.T) {
 		{"DELAY usable", netlink.NUD_DELAY, true},
 		{"PROBE usable", netlink.NUD_PROBE, true},
 		{"PERMANENT usable", netlink.NUD_PERMANENT, true},
-		{"NOARP usable", netlink.NUD_NOARP, true},
+		{"NOARP NOT usable", netlink.NUD_NOARP, false},
 		{"FAILED NOT usable", netlink.NUD_FAILED, false},
 		{"INCOMPLETE NOT usable", netlink.NUD_INCOMPLETE, false},
 		{"NUD_NONE (0) NOT in mask", 0, false},
@@ -76,12 +76,10 @@ func TestUsableNUDMask(t *testing.T) {
 
 func TestNeighborListenerNUDStateBitmaskCoverage(t *testing.T) {
 	// Sanity: documented learnedMask in the plan must match
-	// usableNUD constant. usableNUD = REACHABLE | STALE | DELAY
-	// | PROBE | PERMANENT | NOARP — matches Codex round-5 #5
-	// requirement.
+	// usableNUD constant. NOARP is excluded because it is not a resolved
+	// unicast neighbor suitable for forwarding.
 	expected := netlink.NUD_REACHABLE | netlink.NUD_STALE |
-		netlink.NUD_DELAY | netlink.NUD_PROBE |
-		netlink.NUD_PERMANENT | netlink.NUD_NOARP
+		netlink.NUD_DELAY | netlink.NUD_PROBE | netlink.NUD_PERMANENT
 	if usableNUD != expected {
 		t.Errorf("usableNUD = %x, want %x", usableNUD, expected)
 	}
@@ -95,6 +93,9 @@ func TestNeighborListenerNUDStateBitmaskCoverage(t *testing.T) {
 	}
 	if usableNUD&netlink.NUD_INCOMPLETE != 0 {
 		t.Error("usableNUD must not include NUD_INCOMPLETE")
+	}
+	if usableNUD&netlink.NUD_NOARP != 0 {
+		t.Error("usableNUD must not include NUD_NOARP")
 	}
 }
 
@@ -212,6 +213,19 @@ func TestShouldTriggerRegen(t *testing.T) {
 			}
 		})
 	})
+	t.Run("transition to NOARP triggers", func(t *testing.T) {
+		withStubProvider(t, func(p *stubProviderForListener) {
+			ip := net.ParseIP("10.0.0.1")
+			mac := parseMAC("aa:aa:aa:aa:aa:aa")
+			p.entries[neighborProbeKey{5, "10.0.0.1"}] = &userspace.NeighborSnapshot{
+				Ifindex: 5, IP: "10.0.0.1", MAC: "aa:aa:aa:aa:aa:aa",
+			}
+			u := mkUpdate(syscall.RTM_NEWNEIGH, 5, ip, mac, netlink.NUD_NOARP)
+			if !shouldTriggerRegenWithProvider(u, p) {
+				t.Error("transition to NOARP should trigger snapshot removal")
+			}
+		})
+	})
 
 	t.Run("transition to INCOMPLETE triggers", func(t *testing.T) {
 		withStubProvider(t, func(p *stubProviderForListener) {
@@ -258,12 +272,20 @@ func TestShouldTriggerRegen(t *testing.T) {
 			}
 		})
 	})
+	t.Run("composite REACHABLE|NOARP for new entry does not trigger", func(t *testing.T) {
+		withStubProvider(t, func(p *stubProviderForListener) {
+			ip := net.ParseIP("10.0.0.99")
+			mac := parseMAC("aa:aa:aa:aa:aa:aa")
+			u := mkUpdate(syscall.RTM_NEWNEIGH, 5, ip, mac, netlink.NUD_REACHABLE|netlink.NUD_NOARP)
+			if shouldTriggerRegenWithProvider(u, p) {
+				t.Error("composite REACHABLE|NOARP must not publish as usable")
+			}
+		})
+	})
 }
 
-// TestCompositeNUDStateUnusable verifies that a state with both
-// usable bits AND failed/incomplete bits is correctly classified
-// as unusable. Codex code-review v2 found this composite-state
-// hole; v3 fixed via 'usable := has-usable AND no-failed'.
+// TestCompositeNUDStateUnusable verifies that usable bits combined with any
+// known-unusable bit are rejected by the listener.
 func TestCompositeNUDStateUnusable(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -295,12 +317,22 @@ func TestCompositeNUDStateUnusable(t *testing.T) {
 			netlink.NUD_PERMANENT | netlink.NUD_FAILED,
 			false,
 		},
+		{
+			"NOARP alone is NOT usable",
+			netlink.NUD_NOARP,
+			false,
+		},
+		{
+			"REACHABLE|NOARP composite is NOT usable",
+			netlink.NUD_REACHABLE | netlink.NUD_NOARP,
+			false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Mirror the logic in shouldTriggerRegen.
 			usable := tc.state&usableNUD != 0 &&
-				tc.state&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE) == 0
+				tc.state&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE|netlink.NUD_NOARP) == 0
 			if usable != tc.usable {
 				t.Errorf("state=%v: composite usable check = %v, want %v",
 					tc.state, usable, tc.usable)

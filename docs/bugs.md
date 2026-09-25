@@ -160,6 +160,21 @@
   drives the actual poll path with a v4-keyed deny and controls that ordinary
   NAT64 transit continues to translate and forward.
 
+### Directed-broadcast forwarding accepts NOARP neighbor (#10690)
+- Go neighbor publication/listener and Rust netlink/FIB state handling treated
+  `NUD_NOARP` as a resolved peer. A directed-broadcast destination on the selected
+  connected subnet could therefore reuse the all-ones Ethernet MAC and bypass
+  the intended unicast-only forwarding boundary.
+- **Fix:** Reject NOARP neighbor states at Go publication/listener and Rust
+  netlink/FIB admission, and remove a prior dynamic row on NOARP transitions.
+  A NOARP row cannot supply the all-ones MAC for a unicast-shaped permit.
+  No TX policy guard was added; explicit broadcast-rule behavior remains
+  outside this neighbor-state fix.
+- **Regression tests:** Rust netlink transition and FIB-state classification;
+  Go listener and snapshot publication, including NOARP-only and composite
+  NUD states.
+
+
 
 ### Transit forwards martian and non-unicast sources (#10689)
 - Transit under an `application any` permit forwarded packets and installed
