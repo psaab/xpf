@@ -100,7 +100,7 @@ gh api repos/psaab/xpf/pulls/<PR>/comments
 
 ```bash
 # In an isolated worktree dedicated to this review:
-WT=/home/ps/git/bpfrx/.claude/worktrees/pr-<PR>-review
+WT=/var/tmp/worktrees/pr-<PR>-review
 git worktree add -B pr-<PR>-review-rebased "$WT" pr-<PR>-head
 cd "$WT"
 git rebase origin/master
@@ -259,7 +259,7 @@ Agent({
   run_in_background: true,
   prompt: "You are the Claude hostile reviewer in a four-reviewer methodology (Claude / Codex / Antigravity / Copilot) on PR #<PR> commit <SHA>.
 
-  Repo: /home/ps/git/bpfrx/.claude/worktrees/pr-<PR>-review
+  Repo: /var/tmp/worktrees/pr-<PR>-review
 
   Read the full PR diff and write a hostile review. Post the review as a single PR comment via `gh pr comment <PR> --body \"...\"` and return only the comment URL.
 

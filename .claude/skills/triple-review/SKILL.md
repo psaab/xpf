@@ -262,13 +262,15 @@ reviewable change:
   `docs/refactoring-audit-current.txt`) in its own commit, not folded
   into a logic commit.
 
-Each commit message follows the project convention (CLAUDE.md): a
-specific imperative subject plus a body explaining the *why*,
-implementation notes, and validation, wrapped to ~72 columns. No terse
-checkpoint messages ("wip", "fix", "address review") for production
-work — if a review-fix commit is mechanical, still describe what it
-addresses and why. Build clean at every commit boundary so the merged
-history stays bisectable.
+Each commit message follows the project convention (CLAUDE.md) with this exact shape. Subject: `<area>: <imperative summary> (#NNNN)` (or `(plan-step N/M)` for plan steps without an issue), ≤72 cols. Area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`, `userspace-dp:`, `afxdp:`, `policy:`, `nat:`, `firewall:`, `grpcapi:`, `snmp:`, `ipsec:`, `xdp:`, `shim:`, `ci:`, `build:`, `metrics:` (new areas allowed when none fits, never bare). Summary names the BEHAVIOR change in imperative mood (`extract`, `gate`, `split`, `move`, `drop`, `bound`), not the file.
+Body (required, via `git commit -F -` heredoc — messages contain backticked identifiers, never `git commit -m`), wrapped ~72 cols, four sections:
+1. `Why:` the problem + consequence — what breaks or why the refactor step is needed; for plan steps, which approved-plan step this is and what depends on it.
+2. `What:` approach + key files/symbols + deliberate scope cuts (`NOT changed: X because Y`). A reader must know where to look without opening the diff.
+3. `Validation:` exact commands + results — new/updated tests with RED-before evidence where applicable, suites with totals, verifier headroom for shim changes. `Builds + tests pass` without the command is not validation.
+4. `Risk:` residuals, follow-ups, operator-visible deltas. Omit only when genuinely none.
+One logical change per commit; build clean at every commit boundary so merged history stays bisectable. Squash WIP/scratch before review. Review-fold commits describe what finding they address and why, never `address review`. PROHIBITED: `Issue #NNNN:` prefix subjects, ref-less subjects, title-only commits, `wip`/`fix`/`misc` checkpoint messages.
+Good: `sessions: extract NAT accessors into maps/nat.go (plan-step 2/5)` + Why (plan step; unblocks facade wiring in step 5) / What (move X, Y; keep re-export; NOT changed: call sites) / Validation (`go build ./...`; `go test ./pkg/...` 412 passed) / Risk (none — pure move, no behavior change).
+Bad: `wip`, `fix tests`, `Issue #1234: refactor` (no area, no behavior, no validation).
 
 ## Step 6: Test
 
