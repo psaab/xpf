@@ -684,6 +684,24 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     for request in pending_forwards.iter_mut() {
         let mut overlap_admissions = request.overlap_admissions.take();
         let source_offset = request.desc.addr;
+        // #10683: keep a final TX choke point for live ingress frames. The
+        // poll path enforces the same fence, while this backstop prevents a
+        // queued forward from bypassing it after a later refactor.
+        if matches!(
+            request.decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+        ) && matches!(&request.frame, PendingForwardFrame::Live)
+            && request.meta.l3_addrs_unfiltered().is_some_and(|(source, destination)| {
+                forwarding
+                    .bindless_ipsec_selector_fence
+                    .matches_with_nat(source, destination, request.decision.nat)
+            })
+        {
+            dbg.policy_deny += 1;
+            counters.touched = true;
+            recycle_ingress_frame(ingress_binding, source_offset, now_ns);
+            continue;
+        }
         let ingress_slot = ingress_binding.slot;
         // #hb166 T-7: the deferred CoS-TX-selection resolution that used to
         // live here was DEAD. Every PendingForwardRequest is constructed

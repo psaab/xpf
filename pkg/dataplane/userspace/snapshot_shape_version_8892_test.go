@@ -38,6 +38,7 @@ func snapshotShapeStructs8892() []any {
 	return []any{
 		ConfigSnapshot{}, InterfaceSnapshot{}, FlowSnapshot{},
 		AddressBookSnapshot{}, SnapshotSummary{}, FabricSnapshot{},
+		IpsecBindlessSelectorSnapshot{},
 	}
 }
 
@@ -226,7 +227,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "9cb14940c227ef4255f3190e41244d240bb5da231b0b3ed2b259f432a112ea14"
+	snapshotShapeGolden8892 = "0d5d6d623830672e3c12e84cbc85a42bceb07c1c320f0843ba9d5a7f57796f6f"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -373,7 +374,10 @@ const (
 	// digest. The shared protocol version still moves so the manager can fence
 	// old helpers before the new verbs, while this shape's field set and
 	// golden remain unchanged.
-	snapshotShapeVersion8892 = 31
+	// v31 -> v32 BUMPED (#10683): bind-less VPN selector pairs are published
+	// independently of SA/capture state, and an old helper would ignore the
+	// rows and keep forwarding matching cleartext through AF_XDP.
+	snapshotShapeVersion8892 = 32
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

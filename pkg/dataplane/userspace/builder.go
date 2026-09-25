@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/ipsec"
 )
 
 func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32) (*ConfigSnapshot, error) {
@@ -166,11 +168,14 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	}
 	mirrorConfigs, mirrorExclusions := buildMirrorConfigSnapshots(cfg, interfaces)
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
+	bindlessSelectorRows := buildBindlessSelectorRows(cfg)
 	snap := &ConfigSnapshot{
-		Version:                 ProtocolVersion,
-		Generation:              generation,
-		FIBGeneration:           fibGeneration,
-		GeneratedAt:             time.Now().UTC(),
+		Version:                          ProtocolVersion,
+		Generation:                       generation,
+		FIBGeneration:                    fibGeneration,
+		GeneratedAt:                      time.Now().UTC(),
+		BindlessSelectorFenceEnabled:     len(bindlessSelectorRows) > 0,
+		BindlessSelectorRows:             bindlessSelectorRows,
 		Capabilities:            caps,
 		MapPins:                 userspaceMapPins(),
 		Userspace:               ucfg,
@@ -273,6 +278,34 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	reportInterfaceSNATPoolOverlaps(snap)
 
 	return snap, nil
+}
+func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapshot {
+	if cfg == nil || len(cfg.Security.IPsec.VPNs) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Security.IPsec.VPNs))
+	for name := range cfg.Security.IPsec.VPNs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var rows []IpsecBindlessSelectorSnapshot
+	for _, name := range names {
+		vpn := cfg.Security.IPsec.VPNs[name]
+		if vpn == nil || vpn.BindInterface != "" {
+			continue
+		}
+		for _, selector := range ipsec.EffectiveTrafficSelectors(name, vpn) {
+			if !config.IsTrafficSelectorShape(selector.LocalTS) ||
+				!config.IsTrafficSelectorShape(selector.RemoteTS) {
+				continue
+			}
+			rows = append(rows, IpsecBindlessSelectorSnapshot{
+				LocalTS:  selector.LocalTS,
+				RemoteTS: selector.RemoteTS,
+			})
+		}
+	}
+	return rows
 }
 
 // snapshotContentHash computes a SHA-256 hash over the stable content of a

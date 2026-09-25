@@ -337,7 +337,12 @@ const (
 	// A v30 helper cannot distinguish a quarantined/legacy partial map from a
 	// real zone disappearance and can retain stale peer sessions; exact
 	// equality refuses the mixed pair.
-	ProtocolVersion = 31
+	// v32 (#10683): bind-less VPNs publish their rendered selector pairs to
+	// the dataplane, which drops matching AF_XDP transit without relying on SA
+	// state. An older helper ignores these rows and continues sending matching
+	// cleartext because AF_XDP TX bypasses kernel XFRM. Exact equality refuses
+	// the mixed version rather than silently losing the fence.
+	ProtocolVersion = 32
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -647,6 +652,14 @@ type IpsecTunnelRowSnapshot struct {
 	IfID           uint32 `json:"if_id"`
 	LogicalIfindex int32  `json:"logical_ifindex"`
 }
+// IpsecBindlessSelectorSnapshot is one complete pair of IPsec traffic-selector
+// sides for a policy-based VPN with no bind-interface. Empty sides are not
+// published: they resolve to dynamic endpoints rather than a shape the helper
+// can classify precisely.
+type IpsecBindlessSelectorSnapshot struct {
+	LocalTS  string `json:"local_ts"`
+	RemoteTS string `json:"remote_ts"`
+}
 
 type ConfigSnapshot struct {
 	Version       int       `json:"version"`
@@ -662,6 +675,12 @@ type ConfigSnapshot struct {
 	// state: Rust binds an empty set to generation 0, so every D14 submit
 	// remains E28-denied exactly as before the publisher exists.
 	IpsecTunnelRows []IpsecTunnelRowSnapshot `json:"ipsec_tunnel_rows,omitempty"`
+	// BindlessSelectorFenceEnabled gates shape-based cleartext fencing for
+	// policy-based IPsec selector pairs. The helper drops matching transit even
+	// while no SA is present: AF_XDP TX bypasses kernel XFRM and SA state is not
+	// a safe authorization oracle.
+	BindlessSelectorFenceEnabled bool `json:"bindless_selector_fence_enabled,omitempty"`
+	BindlessSelectorRows         []IpsecBindlessSelectorSnapshot `json:"bindless_selector_rows,omitempty"`
 	// IpsecTunnelSnapshotGeneration is the daemon capture-generation stamp
 	// paired with IpsecTunnelRows. It is distinct from ConfigSnapshot.Generation:
 	// the latter advances for ordinary config/FIB publishes, while the former

@@ -496,6 +496,13 @@ pub(crate) struct IpsecTunnelRowSnapshot {
     #[serde(rename = "logical_ifindex", default)]
     pub logical_ifindex: i32,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct IpsecBindlessSelectorSnapshot {
+    #[serde(rename = "local_ts", default)]
+    pub local_ts: String,
+    #[serde(rename = "remote_ts", default)]
+    pub remote_ts: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConfigSnapshot {
@@ -522,6 +529,21 @@ pub(crate) struct ConfigSnapshot {
     pub ipsec_tunnel_snapshot_generation: u64,
     #[serde(rename = "ipsec_tunnel_rows", default, skip_serializing_if = "Vec::is_empty")]
     pub ipsec_tunnel_rows: Vec<IpsecTunnelRowSnapshot>,
+    /// #10683: exact IP-shape pairs from bind-less policy-based IPsec VPNs.
+    /// The marker and rows are one contract: a v31 helper cannot enforce
+    /// them, so protocol v32 refuses a mixed-version producer/consumer.
+    #[serde(
+        rename = "bindless_selector_fence_enabled",
+        default,
+        skip_serializing_if = "crate::protocol::bool_is_false"
+    )]
+    pub bindless_selector_fence_enabled: bool,
+    #[serde(
+        rename = "bindless_selector_rows",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub bindless_selector_rows: Vec<IpsecBindlessSelectorSnapshot>,
     pub generation: u64,
     #[serde(rename = "fib_generation", default)]
     pub fib_generation: u32,

@@ -5993,6 +5993,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         decision.resolution = redirect;
                     }
                 }
+                // #10683: apply the immutable selector fence only to transit
+                // candidates, before overlap/session/egress accounting. It is
+                // intentionally independent of the kernel SA monitor.
+                let bindless_selector_match = matches!(
+                    decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+                ) && ForwardPacketMeta::from(meta)
+                    .l3_addrs_unfiltered()
+                    .is_some_and(|(source, destination)| {
+                        worker_ctx
+                            .forwarding
+                            .bindless_ipsec_selector_fence
+                            .matches_with_nat(source, destination, decision.nat)
+                    });
+                if bindless_selector_match {
+                    telemetry.dbg.policy_deny += 1;
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #9950 post-commit overlap record + translated re-check. Keep
                 // this before forward/session/zone accounting so shard-full and
                 // overlap drops are not counted as forwarded candidates.
@@ -6740,6 +6760,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // decap/tunnel cases that still fall through to the
                             // shared slow-path gate below.
                             let missing_neighbor_outcome: StageOutcome<()> = 'missing_neighbor: {
+                                // #10683: unresolved-neighbor traffic must be
+                                // fenced before probing, seeding a session, or
+                                // entering the deferred retry queue.
+                                if ForwardPacketMeta::from(meta)
+                                    .l3_addrs_unfiltered()
+                                    .is_some_and(|(source, destination)| {
+                                        worker_ctx
+                                            .forwarding
+                                            .bindless_ipsec_selector_fence
+                                            .matches_with_nat(source, destination, decision.nat)
+                                    })
+                                {
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    break 'missing_neighbor StageOutcome::RecycleAndContinue;
+                                }
                                 telemetry.dbg.missing_neigh += 1;
                                 // #919/#922: zero-allocation ID-native zone
                                 // resolution. Computed at the TOP of the arm so
@@ -7529,6 +7565,38 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                             }
                                         }
+                                    }
+                                    // #10683: include the final composed NAT
+                                    // tuple before installing the retry seed.
+                                    // Undo any just-reserved source translation
+                                    // when the selector fence rejects it.
+                                    if ForwardPacketMeta::from(meta)
+                                        .l3_addrs_unfiltered()
+                                        .is_some_and(|(source, destination)| {
+                                            worker_ctx
+                                                .forwarding
+                                                .bindless_ipsec_selector_fence
+                                                .matches_with_nat(
+                                                    source,
+                                                    destination,
+                                                    pending_decision.nat,
+                                                )
+                                        })
+                                    {
+                                        if let Some(release_key) = source_nat_release_key.as_ref() {
+                                            rollback_source_nat_allocation_for_worker(
+                                                &worker_ctx.forwarding.iface_nat_allocators,
+                                                &worker_ctx.forwarding.source_nat_rules,
+                                                release_key,
+                                                pending_decision.nat,
+                                                false,
+                                                now_ns,
+                                                worker_id,
+                                            );
+                                        }
+                                        telemetry.dbg.policy_deny += 1;
+                                        telemetry.counters.touched = true;
+                                        break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                     }
                                     let pending_resolution_target =
                                         crate::afxdp::session_glue::resolution_target_for_session(

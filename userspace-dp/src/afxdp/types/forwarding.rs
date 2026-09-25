@@ -415,6 +415,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// config apply cannot transiently empty the monitor's live table.
     pub(in crate::afxdp) ipsec_sa:
         std::sync::Arc<crate::afxdp::forwarding::IpsecSaStore>,
+    /// Immutable bind-less IPsec selector fence compiled from the snapshot.
+    /// Deliberately has no SA-state dependency: matching cleartext is dropped
+    /// during both SA-up and SA-down windows.
+    pub(in crate::afxdp) bindless_ipsec_selector_fence:
+        crate::afxdp::ipsec_selector_fence::BindlessIpsecSelectorFence,
     pub(in crate::afxdp) nptv6: Nptv6State,
     pub(in crate::afxdp) screen_profiles: FastMap<String, ScreenProfile>,
     /// #3082: zone → name of a screen profile the zone REFERENCES but that was
