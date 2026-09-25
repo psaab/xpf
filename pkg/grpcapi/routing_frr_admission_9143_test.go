@@ -13,17 +13,10 @@ import (
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
-// #9143: the gRPC FRR status RPCs forked a `vtysh` child per request with no
-// admission bound and discarded their request context (`_ context.Context`).
-//
-// The two surfaces must classify the SAME event the same way — the lesson #9142
-// wrote down on the session-clear surface, where an admission refusal answered
-// 429 standalone and 500 clustered. REST renders frr.ErrVtyshBusy as 429; gRPC
-// must render it as codes.ResourceExhausted, the code every other admission
-// refusal in this process already uses.
-//
-// As on REST, this is additive: an ordinary FRR failure still yields
-// codes.Internal, unchanged.
+// #9143: every buffered gRPC FRR status read uses the process-wide
+// VtyshLimiter, propagates the request context, and maps admission refusals to
+// ResourceExhausted. The full-RIB BGP RPC now streams through a separate
+// bounded path (#10708), so it has its own admission test below.
 
 type stubFRRExec9143g struct{ frr.RecordingExecutor }
 
@@ -52,10 +45,6 @@ func TestGRPCFRRStatusOverCapIsResourceExhausted9143(t *testing.T) {
 		},
 		"GetBGPStatus/summary": func(s *Server, c context.Context) error {
 			_, e := s.GetBGPStatus(c, &pb.GetBGPStatusRequest{})
-			return e
-		},
-		"GetBGPStatus/routes": func(s *Server, c context.Context) error {
-			_, e := s.GetBGPStatus(c, &pb.GetBGPStatusRequest{Type: "routes"})
 			return e
 		},
 		"GetRIPStatus": func(s *Server, c context.Context) error {
@@ -96,6 +85,27 @@ func TestGRPCFRRStatusOverCapIsResourceExhausted9143(t *testing.T) {
 	}
 }
 
+func TestGRPCBGPRouteStreamUsesDedicatedAdmission10708(t *testing.T) {
+	orig := grpcBGPStreamLimiter
+	grpcBGPStreamLimiter = diagcmd.NewLimiter(1)
+	t.Cleanup(func() { grpcBGPStreamLimiter = orig })
+
+	s := &Server{frr: frr.NewForTest(t.TempDir()+"/frr.conf", &stubFRRExec9143g{})}
+	release, err := grpcBGPStreamLimiter.Acquire()
+	if err != nil {
+		t.Fatalf("pre-acquire: %v", err)
+	}
+	_, err = s.GetBGPStatus(context.Background(), &pb.GetBGPStatusRequest{Type: "routes"})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("saturated BGP stream admission -> %v, want ResourceExhausted", status.Code(err))
+	}
+	release()
+
+	if _, err := s.GetBGPStatus(context.Background(), &pb.GetBGPStatusRequest{Type: "routes"}); err != nil {
+		t.Fatalf("released BGP stream admission did not accept request: %v", err)
+	}
+}
+
 func TestGRPCFRROrdinaryErrorStaysInternal9143(t *testing.T) {
 	withFreshVtyshLimiter9143g(t, 4)
 	s := &Server{frr: frr.NewForTest(t.TempDir()+"/frr.conf", &failingFRRExec9143g{})}
@@ -106,17 +116,19 @@ func TestGRPCFRROrdinaryErrorStaysInternal9143(t *testing.T) {
 	}
 }
 
-// The gRPC handlers used to discard their context entirely (`_ context.Context`).
-// A cancelled RPC must now abort the shell-out.
+// The buffered and streaming gRPC handlers must both abort a request whose
+// context is already cancelled.
 func TestGRPCFRRCancelledRPCAbortsTheRead9143(t *testing.T) {
 	withFreshVtyshLimiter9143g(t, 4)
 	s := &Server{frr: frr.NewForTest(t.TempDir()+"/frr.conf", &ctxWatchExec9143g{})}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := s.GetOSPFStatus(ctx, &pb.GetOSPFStatusRequest{Type: "database"})
-	if err == nil {
-		t.Fatal("a cancelled RPC still ran the FRR read to completion — the request context is not propagated")
+	if _, err := s.GetOSPFStatus(ctx, &pb.GetOSPFStatusRequest{Type: "database"}); err == nil {
+		t.Fatal("a cancelled buffered RPC still ran the FRR read to completion")
+	}
+	if _, err := s.GetBGPStatus(ctx, &pb.GetBGPStatusRequest{Type: "routes"}); err == nil {
+		t.Fatal("a cancelled streaming RPC still ran the FRR read to completion")
 	}
 }
 

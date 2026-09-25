@@ -112,7 +112,7 @@ func (rowEscapeExecutor6579) FrrReloadPy(context.Context, string) error { return
 func (rowEscapeExecutor6579) VtyshLoad(context.Context, string) ([]byte, error) { return nil, nil }
 
 func (rowEscapeExecutor6579) VtyshStream(context.Context, string) (io.ReadCloser, func() error, error) {
-	return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
+	return io.NopCloser(strings.NewReader(evilBGPRouteTable6579)), func() error { return nil }, nil
 }
 
 func rowEscapeServer6579(t *testing.T) *Server {

@@ -102,16 +102,10 @@ func TestStreamBGPRoutesIsExemptFromTheVtyshFunnel9755(t *testing.T) {
 	}
 }
 
-// #9755: the exemption is only safe while the ONE caller bounds itself. A second
-// caller -- a gRPC or CLI stream, say -- would get neither the process-wide slot
-// nor a deadline, and nothing in the tree would notice.
-//
-// So the count is pinned. This is a census, not a style rule: if it fails,
-// someone added a streaming FRR read and has to choose a contract for it rather
-// than inherit an exemption written for a caller that bounds itself.
-func TestStreamPathKeepsExactlyOneBoundedCaller9755(t *testing.T) {
-	// 1. Inside pkg/frr, the executor's streaming entry point has exactly one
-	//    call site, and it is StreamBGPRoutes.
+// #9755: the executor's streaming read is only safe while every caller has
+// independent concurrency admission and an elapsed budget. #10708 adds a
+// second caller for the bounded gRPC unary response.
+func TestStreamPathKeepsEveryCallerBounded9755(t *testing.T) {
 	inFRR := callSitesOfSelector9755(t, ".", "VtyshStream")
 	if len(inFRR) != 1 || inFRR[0] != "StreamBGPRoutes" {
 		t.Fatalf("VtyshStream call sites in pkg/frr: %v, want exactly [StreamBGPRoutes].\n"+
@@ -119,22 +113,32 @@ func TestStreamPathKeepsExactlyOneBoundedCaller9755(t *testing.T) {
 			"a new direct streaming call inherits neither that bound nor a deadline", inFRR)
 	}
 
-	// 2. Outside pkg/frr, StreamBGPRoutes has exactly one caller, and that file
-	//    takes the REST-local stream limiter.
-	callers := callersAcrossPkg9755(t, "../api", "StreamBGPRoutes")
-	if len(callers) != 1 {
-		t.Fatalf("StreamBGPRoutes callers under pkg/api: %v, want exactly one.\n"+
-			"The funnel exemption is justified by that caller holding ribStreamLimiter and a "+
-			"10-minute progress budget; a second caller does not inherit either", callers)
+	owners := []struct {
+		dir     string
+		limiter string
+		budget  string
+	}{
+		{dir: "../api", limiter: "ribStreamLimiter", budget: "bgpStreamTotalBudget"},
+		{dir: "../grpcapi", limiter: "grpcBGPStreamLimiter", budget: "bgpGRPCStreamBudget"},
 	}
-	file := strings.SplitN(callers[0], ":", 2)[0]
-	src, err := os.ReadFile(filepath.Join("../api", file))
-	if err != nil {
-		t.Fatalf("read %s: %v", file, err)
-	}
-	if !strings.Contains(string(src), "ribStreamLimiter") {
-		t.Fatalf("%s calls StreamBGPRoutes but does not mention ribStreamLimiter — "+
-			"the stream path's only admission bound", file)
+	for _, owner := range owners {
+		callers := callersAcrossPkg9755(t, owner.dir, "StreamBGPRoutes")
+		if len(callers) != 1 {
+			t.Fatalf("StreamBGPRoutes callers under %s: %v, want exactly one", owner.dir, callers)
+		}
+		file := strings.SplitN(callers[0], ":", 2)[0]
+		src, err := os.ReadFile(filepath.Join(owner.dir, file))
+		if err != nil {
+			t.Fatalf("read %s/%s: %v", owner.dir, file, err)
+		}
+		if !strings.Contains(string(src), owner.limiter) {
+			t.Fatalf("%s/%s calls StreamBGPRoutes without its bounded admission %s",
+				owner.dir, file, owner.limiter)
+		}
+		if !strings.Contains(string(src), owner.budget) {
+			t.Fatalf("%s/%s calls StreamBGPRoutes without its elapsed bound %s",
+				owner.dir, file, owner.budget)
+		}
 	}
 }
 

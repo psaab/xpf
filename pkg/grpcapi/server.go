@@ -58,6 +58,11 @@ import (
 // fed to the parser.
 const maxRecvMsgSize = 16 << 20 // 16 MiB
 
+// maxSendMsgSize bounds each outbound gRPC message. The extra 1 MiB above
+// MaxConfigSize preserves the remote CLI's existing large-configuration
+// contract while preventing a unary response from exhausting server memory.
+const maxSendMsgSize = maxRecvMsgSize + (1 << 20) // 17 MiB
+
 // maxConcurrentStreams caps how many RPCs one HTTP/2 connection may have in
 // flight (#6552). grpc-go's SERVER default is unlimited, so before this a
 // single connection could open an unbounded number of concurrent streams —
@@ -838,6 +843,7 @@ func (s *Server) buildPrimaryServer() *grpc.Server {
 	stream := append([]grpc.StreamServerInterceptor{s.principalStreamInterceptor}, loopbackStream...)
 	return grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
+		grpc.MaxSendMsgSize(maxSendMsgSize),
 		grpc.MaxConcurrentStreams(maxConcurrentStreams), // #6552
 		// #5278: resolve the caller's identity ONCE per connection, at
 		// connection setup, and authorize every RPC against it. TagConn runs on
@@ -968,6 +974,7 @@ func (s *Server) RunFabricListener(ctx context.Context, addr, vrfDevice string) 
 func (s *Server) buildFabricServer() *grpc.Server {
 	return grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
+		grpc.MaxSendMsgSize(maxSendMsgSize),
 		grpc.MaxConcurrentStreams(maxConcurrentStreams), // #6552
 		// #5883: peerMarker runs LAST in the chain on purpose —
 		// ChainUnaryInterceptor invokes in order, so #4107 auth and the #4122

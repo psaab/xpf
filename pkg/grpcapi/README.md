@@ -938,6 +938,19 @@ contract.
   256 is far above real operator load (low tens, single-digit long-lived
   streams), so it is a runaway ceiling rather than a throttle.
 
+  Both builders set `grpc.MaxSendMsgSize(maxSendMsgSize)` to 17 MiB, matching
+  the CLI's 16 MiB configuration ceiling plus 1 MiB framing headroom. Unary
+  route responses are bounded before transport: `GetRoutes` incrementally
+  visits the kernel route iterator, returns at most `frr.MaxBGPRoutes` RouteInfo
+  rows (one per ECMP next-hop path), and sets `GetRoutesResponse.truncated`
+  only when a row was omitted.
+  `GetBGPStatus{type="routes"}` uses `StreamBGPRoutes`, the same shared
+  100000-route ceiling, a separate 8 MiB rendered-output ceiling, and a visible
+  truncation notice. Its vtysh stream is limited to two concurrent gRPC scans
+  and a 10-minute elapsed budget; the route cap prevents a full RIB from being
+  buffered or serialized as one unary message. RED-on-revert coverage uses
+  synthetic over-cap kernel and FRR tables in `server_routing_caps_10708_test.go`.
+
   `MonitorInterface` draws its own 64-stream budget
   (`diagcmd.MonitorInterfaceLimiter`, `monitorInterfaceLimiter` alias, #9891)
   — sized to the sibling `EventBuffer` streaming cap, fail-fast with

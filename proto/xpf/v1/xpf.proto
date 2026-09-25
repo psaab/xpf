@@ -811,6 +811,7 @@ message ClearDHCPClientIdentifierResponse {
 message GetRoutesRequest {}
 message GetRoutesResponse {
   repeated RouteInfo routes = 1;
+  bool truncated = 2;
 }
 message RouteInfo {
   string destination = 1;

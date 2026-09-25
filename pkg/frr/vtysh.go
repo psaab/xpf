@@ -237,31 +237,14 @@ var ErrVtyshBusy = errors.New("FRR vtysh concurrency limit reached")
 // funnel makes every present AND future BUFFERED FRR read bounded by
 // construction.
 //
-// #9755 CORRECTS THE SCOPE OF THAT CLAIM. This used to say "nothing in this
-// package can reach vtysh except through here", and that was false: the ONE
-// streaming read, StreamBGPRoutes, calls the executor's VtyshStream directly, so
-// it takes no VtyshLimiter slot and gets no vtyshTimeout. The #9143 census had no
-// row for it either, so nothing detected the gap between the sentence and the
-// code.
-//
-// The exemption is KEPT rather than closed, deliberately. A full-RIB stream is
-// allowed a 10-minute progress budget (pkg/api's bgpStreamTotalBudget), far
-// longer than the 15 s here; making it hold one of four shared slots would let a
-// single slow reader occupy a quarter of the budget for EVERY FRR status surface
-// on the box for ten minutes. A shared limiter would also imply a cross-surface
-// bound that does not exist -- the gRPC and CLI `show route protocol bgp` paths
-// call the buffered GetBGPRoutes, which cannot be pinned by a slow reader.
-//
-// So the true invariant is: every BUFFERED operational read in this package goes
-// through here; the one STREAMING read is exempt and carries its own admission
-// (pkg/api's ribStreamLimiter, capacity 2) plus its own budget; and the apply
-// path is excluded for the separate reason below. Worst case is therefore four
-// buffered plus two streaming children, not four.
-//
-// That exemption is only safe while the stream path's single caller bounds
-// itself, so the count is pinned by
-// TestStreamPathKeepsExactlyOneBoundedCaller9755 -- a second caller has to choose
-// a contract rather than inherit this one.
+// #9755 establishes the streaming exception: StreamBGPRoutes calls VtyshStream
+// directly, outside this buffered-read funnel. A full-RIB scan needs a
+// 10-minute budget rather than vtyshTimeout's 15 seconds, so it must not occupy
+// one of the four slots while every other FRR read waits. The REST and gRPC
+// callers each hold their own two-slot admission limiter and elapsed budget.
+// Those limits are deliberately separate; the process-wide worst case is four
+// buffered children plus two streams per surface. The census test
+// TestStreamPathKeepsEveryCallerBounded9755 pins each call site to its bound.
 //
 // Admission is FAIL-FAST, mirroring diagcmd.Limiter's contract and #6809's
 // stated reason: a queued request holds the same connection it would have held

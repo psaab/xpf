@@ -340,17 +340,15 @@ var SnapshotReadLimiter = NewLimiter(MaxConcurrentSnapshotReads)
 // status reads — while the 15s per-child cap plus this aggregate bound together
 // cap the worst-case BUFFERED footprint at MaxConcurrentVtyshShellOuts children.
 //
-// #9755: BUFFERED is the operative word, and it used to be missing. The one
-// STREAMING FRR read (pkg/frr's StreamBGPRoutes, reached only by
-// `GET /api/v1/routing/bgp?type=routes`) does not pass through the funnel and
-// takes no slot here. It is bounded instead by pkg/api's ribStreamLimiter
-// (capacity 2) and a 10-minute progress budget, because a full-RIB stream needs
-// far longer than 15s and must not hold a quarter of this budget while it runs.
+// #9755: BUFFERED is the operative word. StreamBGPRoutes takes no slot here;
+// its REST and gRPC callers each hold an independent capacity-2 limiter and a
+// 10-minute progress/elapsed budget. They must stay outside this 15s shared
+// funnel so one full-table query cannot occupy a shared slot for ten minutes.
 //
-// The whole-process worst case is therefore MaxConcurrentVtyshShellOuts buffered
-// children PLUS maxConcurrentRIBStreams streaming ones — six, not four. Stated
-// here rather than left implicit, because this constant is where a reader comes
-// to find the number.
+// The whole-process worst case is MaxConcurrentVtyshShellOuts buffered
+// children plus two REST and two gRPC streaming children — eight, not four.
+// Stated here rather than left implicit, because this constant is where a
+// reader comes to find the operational subprocess bound.
 const MaxConcurrentVtyshShellOuts = 4
 
 // VtyshLimiter is the process-wide limiter for FRR vtysh shell-outs, shared by
