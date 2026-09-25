@@ -236,6 +236,41 @@ pub(in crate::afxdp) fn ingress_destination_mac_accepted(
         None => false,
     }
 }
+/// Whether an ingress frame is an L2 group delivery carrying a unicast IP
+/// destination. This is distinct from `ingress_destination_mac_accepted`:
+/// group MACs are accepted at the pre-L3 boundary for ARP, multicast, and
+/// local delivery, but Linux does not route `PACKET_BROADCAST` /
+/// `PACKET_MULTICAST` unicast-IP frames. Transit callers use this after route
+/// adjudication and before forwarding or fabric redirection.
+#[inline]
+pub(in crate::afxdp) fn ingress_l2_group_unicast_ip(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    ingress_meta: UserspaceDpMeta,
+) -> bool {
+    let Some(dst_mac) = frame.get(..6).and_then(|dst| <&[u8; 6]>::try_from(dst).ok()) else {
+        return false;
+    };
+    if !crate::afxdp::frame::l2_dst_is_group_or_broadcast(dst_mac) {
+        return false;
+    }
+    let Some(dst_ip) = crate::afxdp::frame::parse_packet_destination_from_frame(frame, ingress_meta)
+    else {
+        return false;
+    };
+    match dst_ip {
+        IpAddr::V4(dst) => {
+            !dst.is_unspecified()
+                && !dst.is_multicast()
+                && !dst.is_broadcast()
+                && !frame
+                    .get(ingress_meta.l3_offset as usize..)
+                    .is_some_and(|l3| crate::afxdp::frame::dest_is_directed_broadcast(forwarding, l3))
+        }
+        IpAddr::V6(dst) => !dst.is_unspecified() && !dst.is_multicast(),
+    }
+}
+
 
 
 /// #6458: the fabric link whose parent OR overlay ifindex is

@@ -7038,7 +7038,7 @@ fn ingress_destination_mac_guard_fails_closed_without_local_mac_10314() {
     broadcast[0..6].copy_from_slice(&[0xff; 6]);
     assert!(
         ingress_destination_mac_accepted(&forwarding, 999, 0, &broadcast),
-        "broadcast remains accepted under PACKET_OTHERHOST semantics"
+        "broadcast remains eligible at the L2 MAC gate; transit packet type is checked after routing"
     );
 }
 

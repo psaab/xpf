@@ -1150,6 +1150,7 @@ fn run_stage_seeded(
         false,
         None,
         seed.fabric_link_ingress,
+        false,
         ValidationState::default(),
         &mut sessions,
         seed.now_ns,
