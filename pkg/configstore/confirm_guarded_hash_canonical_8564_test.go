@@ -11,12 +11,12 @@ import (
 // text — the text it has after one JSON round trip — because the two ends of
 // the binding never see the same tree.
 //
-// It is computed at ARM time over the IN-MEMORY promoted tree
-// (`store_commit.go` writeConfirmState) and re-computed at BOOT over the tree
-// DECODED FROM DISK (`store_persist.go` recoverPendingConfirmLocked). Any value
-// the JSON encoding normalizes therefore makes the two differ, and recovery
-// drops a LIVE record as stale: no timer, no rollback, and the UNCONFIRMED
-// config stands permanently — the #4577 failure the record exists to prevent —
+// It is computed before writeActive from the staged candidate, and checked at
+// boot over the active tree DECODED FROM DISK (`store_persist.go`
+// recoverPendingConfirmLocked). The finalized record uses the same canonical
+// basis. Any value the JSON encoding normalizes therefore makes the two differ,
+// and recovery drops a LIVE record as stale: no timer, no rollback, and the
+// UNCONFIRMED config stands permanently — the #4577 failure the record exists to prevent —
 // while the log says "a later commit/confirm superseded it" and nothing did.
 //
 // The reachable instance: `hasControlChars` (pkg/config/freetext.go) rejects

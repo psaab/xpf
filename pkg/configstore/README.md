@@ -816,37 +816,37 @@ per-path:
   the confirm window made the UNCONFIRMED config PERMANENT — the
   safety hatch was silently lost (an operator commits a
   management-stranding config relying on the auto-revert, the daemon
-  crashes, the box is stranded). `CommitConfirmed` now also persists a
-  `confirm.json` in `.configdb` holding the absolute **deadline**, the
-  **rollback-target tree** (`confirmPrevTree` — the ORIGINAL
-  last-confirmed tree for a nested re-arm), and the **first-commit**
-  flag (`confirmPrevFirst`, the #1922 Item 1b never-committed case —
-  see the #6538 note below; it used to be re-derived as
-  `confirmPrevCfg == nil` at each consumer). It is written durably (temp+fsync+rename+dir-fsync),
-  encrypted with the same master-password machinery as `active.json`
-  (the target tree may carry secret leaves), 0600, AFTER the successful
-  `writeActive`+promote (a failed commit-confirmed never leaves a
-  `confirm.json`). `Store.Load` (`recoverPendingConfirmLocked`) restores
-  it at boot: if the deadline already passed during downtime it rolls
-  back to the prev tree now (including the Item 1b committed=0 marker on
-  a first-commit target); if the deadline is still in the future it
-  re-arms the timer for the REMAINING duration. Every confirmation path
-  (`clearPendingConfirmLocked` — plain commit / HA sync / explicit
-  confirm / demotion) and the timeout rollback (`PromoteRollback`)
-  remove `confirm.json`; a nested `commit confirmed` re-writes it with
-  the extended deadline. The removal is a **durable transition** too
-  (#4864): `DeleteConfirm` unlinks `confirm.json` and then fsyncs the
-  parent directory (`fsatomic.SyncDir`), matching the dir-fsync `WriteConfirm`
-  performs — a bare `os.Remove` is not durable, so a crash in the window
-  before the dirent removal flushes could replay a stale `confirm.json` on
-  reboot and revert an already-confirmed config (in HA, re-diverge a confirmed
-  standby). The unlink + dir fsync route through the package durability seams
-  (`rbRemove`/`rbSyncDir`) so a dropped dir sync fails a test RED. A clean restart inside the window also keeps
-  the hatch (Junos parity: the pending confirm persists across a
-  reboot and rolls back if not confirmed). One residual window remains:
-  a crash in the microseconds between the `writeActive` syscall and the
-  `confirm.json` write leaves no `confirm.json` — vastly smaller than
-  the whole multi-minute window this closes.
+  crashes, the box is stranded). `CommitConfirmed` now writes a durable
+  `confirm.json` in `.configdb` BEFORE `active.json` changes. It records the
+  guarded candidate hash, absolute deadline, **rollback-target tree**
+  (`confirmPrevTree` — the ORIGINAL last-confirmed tree for a nested re-arm),
+  and **first-commit** flag (`confirmPrevFirst`, the #1922 Item 1b
+  never-committed case; see #6538). During a nested re-arm or deferred prior
+  rollback persistence, the provisional record accepts the prior active hash so
+  the new active file lands preserves the existing rollback window. Once the
+  candidate is active, a final durable write removes that temporary alias and
+  records the full deadline measured after commit work. If this finalization
+  fails, the provisional candidate record remains recoverable and a retry
+  finalizes it. A failure to write the initial record rejects the commit
+  before promotion, leaving the candidate staged. `Store.Load`
+  (`recoverPendingConfirmLocked`) accepts the candidate hash after promotion,
+  or the previous hash while the candidate is not yet durable; unrelated hashes
+  are stale and dropped. An already-expired deadline rolls back to the prev
+  tree (including the Item 1b committed=0 marker on a first-commit target);
+  a future deadline re-arms the timer for its remaining duration. Every
+  confirmation path (`clearPendingConfirmLocked` — plain commit / HA sync /
+  explicit confirm / demotion) and timeout rollback (`PromoteRollback`) remove
+  `confirm.json`; a nested `commit confirmed` replaces it with the extended
+  deadline. Removal is a **durable transition** too (#4864): `DeleteConfirm`
+  unlinks `confirm.json` and fsyncs the parent directory
+  (`fsatomic.SyncDir`), matching `WriteConfirm` — a bare `os.Remove` is not
+  durable, so a crash before the dirent removal flushes could replay a stale
+  record and revert an already-confirmed config. The unlink and dir fsync route
+  through package durability seams (`rbRemove`/`rbSyncDir`) so a dropped dir
+  sync fails a test RED. A clean restart inside the window keeps the hatch
+  (Junos parity: the pending confirm persists across reboot and rolls back if
+  not confirmed); the former `writeActive`-to-record loss window is closed
+  (#10696).
 
   **The re-armed timer dispatches into a HALF-BUILT daemon (#6739).**
   `recoverPendingConfirmLocked` runs at the tail of `Load`, which the daemon
@@ -995,50 +995,45 @@ per-path:
     — both mean the window is resolved — and differ only in how long
     `ConfigPersistDegraded()` keeps reporting the undeleted record.
   - **A boot read failure is REPORTED, not swallowed (#8566).**
-*   **#9014 — the ARM write was the LAST confirm-durability leg with no
-    health state.** `writeConfirmState` logged one `slog.Warn` and returned:
-    no flag, no journal entry, no retry, and `CommitConfirmed` still returned
-    `(compiled, nil)`. A crash or reboot inside the confirm window then found
-    no record, the unconfirmed configuration stood permanently, and /health
-    returned 200 throughout. The asymmetry was the decisive evidence, because
-    the invariant it broke is written down in this same package, in #8566's
-    own rationale directly below:
+*   **#10696 — the crash-recovery record is written before promotion.**
+    The former sequence persisted `active.json` and did journal/history work
+    before `confirm.json`, so a crash could leave the unconfirmed config active
+    with no recoverable deadline. `CommitConfirmed` now writes a provisional
+    record bound to the candidate before `writeActive`; if that initial write
+    fails, it rejects the commit and leaves the candidate staged. A first-arm
+    crash before active persistence finds a stale candidate hash and does not
+    promote anything. A nested re-arm carries `PreviousHash` and its separate
+    `PreviousDeadline` temporarily, so the old active tree still matches its
+    pending rollback record if power fails before the candidate is durable.
+    The candidate's provisional `Deadline` starts a fresh window, while
+    `PreviousDeadline` preserves the prior generation's expiry. Once active
+    persistence succeeds, the record is finalized with the candidate deadline
+    and without either alias.
+    If an earlier rollback write remains owed, `PreviousHash` is bound to the
+    actual on-disk active generation, even when a rejected nested provisional
+    record names a different candidate; `PreviousDeadline` carries that
+    generation's effective expiry. Recovery selects the deadline belonging
+    to whichever generation matches `active.json`.
 
-    | failure | flag | journal | retry | health |
-    | --- | --- | --- | --- | --- |
-    | confirm **read** at boot | `confirmRecoveryReadFailed` (#8566) | yes | — | degraded |
-    | confirm **removal** | `confirmRemoveDegraded` (#5835) | yes | yes | degraded |
-    | confirm **arm/write** (before #9014) | **none** | **none** | **none** | **200 OK** |
+    `TestCommitConfirmedCrashBoundariesRecoverSafely_10696` injects a crash at
+    each boundary from record persistence through timer arm and record binding;
+    the active candidate always recovers with its rollback window. The nested
+    matrix proves that a crash at the record boundary preserves the older
+    rollback target. `TestPendingRollbackLegacyRecordTransitionSurvivesCrash_10696`
+    covers legacy records at the record and active boundaries.
+    `TestPendingRollbackAliasPreservesPriorRecovery_10696` proves a rejected
+    provisional record cannot discard the actual old active generation.
+    `TestNestedFinalizationFailureRecoversAgainstCandidateDeadline_10696`
+    proves recovery keeps a fresh candidate window when finalization fails
+    after the earlier generation's deadline.
+    `TestArmWriteFailureRejectsBeforeActive9014` proves a failed first record
+    write cannot promote an unprotected candidate.
 
-    It now logs at ERROR, journals `confirm_arm_error`, sets
-    `confirmArmDegraded` (folded into `ConfigPersistDegraded()`), and takes
-    retry debt in the singleton persist-retry loop, which re-drives
-    `WriteConfirm` until it lands and journals `confirm_arm_recovered`.
-
-    **The commit is deliberately NOT failed.** That matches both neighbours
-    and the #1960 no-brick posture: the configuration is applied and correct,
-    only its crash-recovery record is missing, and refusing the commit would
-    turn a durability problem into an availability one.
-
-    **The retry is generation-pinned, and this is the part that is easy to get
-    wrong.** `confirmArmGen` records which window the debt belongs to. If the
-    window is confirmed, superseded or rolled back while the write is still
-    owed, re-driving it would create a crash-recovery record for a window that
-    no longer exists — a restart would then resurrect a rollback the operator
-    had already resolved. That is the exact mirror of #7675 on the removal
-    side, where re-driving a delete would have removed a LIVE window's record.
-    The debt is instead dropped with a `confirm_arm_superseded` journal entry.
-    `TestArmWriteDebtIsNotResurrectedAfterResolution9014` pins it, and removing
-    the generation guard reproduces the resurrection deterministically.
-
-    A SUCCESSFUL arm — first try or a later re-arm — discharges any outstanding
-    debt, because the record on disk is then current; holding health down
-    behind a satisfied debt would misreport a durable window as unsafe.
-
-    `DB.WriteConfirm` now goes through the `rbWriteFileDurable` seam rather
-    than calling `fsatomic` directly. Until #9014 there was no way to fail the
-    arm write in a test at all, which is part of why this was the leg with no
-    guard: nothing could reach the failure path.
+    Finalization failure is distinct from initial record failure: the durable
+    provisional record already protects the active candidate, so the store
+    raises degraded health and retries the final rewrite. The retry remains
+    generation-pinned; if the window is resolved or replaced, it must not
+    recreate a rollback record for that obsolete window.
 
 *   **#8566 — a failed confirm READ at boot lost the window silently.**
     `recoverPendingConfirmLocked` logged a WARN and returned nil when

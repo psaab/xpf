@@ -52,6 +52,29 @@ var (
 // before a factory reset erases the archive directory. Never mutated by
 // production code.
 var archiveWriteBarrier = func() {}
+type commitConfirmedCrashStage string
+
+const (
+	commitConfirmedStageRecord        commitConfirmedCrashStage = "record"
+	commitConfirmedStageActive        commitConfirmedCrashStage = "active"
+	commitConfirmedStagePromote       commitConfirmedCrashStage = "promote"
+	commitConfirmedStageJournal       commitConfirmedCrashStage = "journal"
+	commitConfirmedStageHistory       commitConfirmedCrashStage = "rollback"
+	commitConfirmedStageArm           commitConfirmedCrashStage = "arm"
+	commitConfirmedStageBind          commitConfirmedCrashStage = "bind"
+)
+
+// commitConfirmedCrashHook is a package-local fault seam used to emulate a
+// process crash between durable commit-confirmed stages. Production leaves it
+// nil; callers must never install it outside tests.
+var commitConfirmedCrashHook func(commitConfirmedCrashStage)
+
+func runCommitConfirmedCrashHook(stage commitConfirmedCrashStage) {
+	if commitConfirmedCrashHook != nil {
+		commitConfirmedCrashHook(stage)
+	}
+}
+
 
 // maxCommitDescriptionBytes bounds the operator-supplied commit description
 // (the `commit comment` text) that is recorded verbatim in the in-memory
@@ -520,90 +543,108 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	// target is recorded the flag no longer says what it said on entry.
 	everCommittedOnEntry := s.everCommitted
 
-	// #1799 Option A: persist BEFORE promoting and BEFORE touching
-	// any confirm state (see contract above).
-	//
-	// #5185: classify the failure exactly as CommitWithDescription does. A
-	// PRE-rename failure is a clean rejection — old active intact, and (per
-	// the #1799 ordering) no confirm state touched. A POST-rename dir-fsync
-	// failure leaves the candidate (C) visible on disk, so converge to it
-	// (promote, arm the timer, return compiled) and flag degraded
-	// durability, rather than report REJECTED while a restart would activate
-	// C. Rationale (converge-to-C over restore-A) is in CommitWithDescription.
-	// #9617: preflight the commit-confirmed RECORD before anything is
-	// promoted. confirm.json nests the rollback target one indentation level
-	// deeper than active.json (MarshalIndent adds two bytes per line), so a
-	// readable active DB does not bound its own confirm record, and the record
-	// is only written after promotion (writeConfirmState below). Without this, a
-	// record ReadConfirm will refuse is reported as an armed, crash-surviving
-	// window, and a restart inside it keeps the unconfirmed config with no
-	// timer. The record encoded here is the one writeConfirmState writes: the
-	// same rollback target, a deadline of the same JSON WIDTH, and the guarded
-	// hash of the tree about to become active; the encrypted length is a
-	// function of the plaintext length. The real deadline is still taken at the
-	// arm site below, after the commit work, so the persisted deadline and the
-	// live timer describe ONE window. The preflight stands in
-	// widestConfirmDeadline for it, a deadline whose JSON is as long as any
-	// deadline's can be, so the record it sizes is never shorter than the one
-	// written. A deadline read from the clock here would not be: across a DST
-	// change into a non-zero UTC offset its zone suffix grows from "Z" to
-	// "+hh:mm" between this line and the arm site.
-	if s.db != nil {
-		prevTree, prevFirst := s.active, !everCommittedOnEntry
-		if s.confirmTimer != nil {
-			prevTree, prevFirst = s.confirmPrevTree, s.confirmPrevFirst
+	// #10696: persist the crash-recovery record before active.json. A crash
+	// after the durable active write must never leave an unconfirmed tree with
+	// no record to recover. Preflight the largest record shape first, then
+	// write the provisional record with the candidate's guarded hash.
+	duration := time.Duration(minutes) * time.Minute
+	provisionalDeadline := time.Now().Add(duration)
+	prevTree, prevFirst := s.active, !everCommittedOnEntry
+	if s.confirmTimer != nil {
+		prevTree, prevFirst = s.confirmPrevTree, s.confirmPrevFirst
+	}
+	previousHash := ""
+	previousDeadline := time.Time{}
+	if s.db != nil && s.confirmTimer != nil {
+		// The previous live window must survive a crash after the new record
+		// lands but before the candidate becomes active.
+		previousHash = guardedConfigHash(s.active)
+		previousDeadline = s.confirmDeadline
+	} else if s.db != nil && s.confirmResolvePendingPersist {
+		// A prior rollback may still be owed. Bind both generations to their
+		// own deadlines: the new arm's provisional deadline belongs to the
+		// candidate, while the old record's effective deadline belongs to the
+		// currently active file.
+		previous, err := s.db.ReadConfirm()
+		if err != nil || previous == nil {
+			if err == nil {
+				err = fmt.Errorf("pending rollback record is absent")
+			}
+			return nil, fmt.Errorf("commit confirmed failed: cannot preserve prior rollback recovery state: %w", err)
 		}
-		// Encode the TOMBSTONE form (Resolved: true). #8565 re-writes the record
-		// with `resolved` before removing it, so that form is the larger of the
-		// two this window will write, and a window that arms must also be
-		// resolvable: a tombstone refused at the ceiling, followed by a failed
-		// removal, would leave the unresolved record to re-arm a confirmed
-		// window on reboot. Any encode failure rejects, with the candidate
-		// intact: a window whose rollback record cannot be produced now has no
-		// rollback to offer, and discovering that after promotion is the defect
-		// this preflight exists to remove.
+		diskActive, err := s.db.ReadActive()
+		if err != nil || diskActive == nil {
+			if err == nil {
+				err = fmt.Errorf("active config is absent")
+			}
+			return nil, fmt.Errorf("commit confirmed failed: cannot bind prior rollback generation: %w", err)
+		}
+		previousHash = guardedConfigHash(diskActive)
+		switch {
+		case previous.GuardedHash == previousHash:
+			previousDeadline = previous.Deadline
+		case previous.PreviousHash == previousHash:
+			previousDeadline = previous.PreviousDeadline
+			if previousDeadline.IsZero() {
+				previousDeadline = previous.Deadline
+			}
+		case previous.GuardedHash == "":
+			previousDeadline = previous.Deadline
+		default:
+			return nil, fmt.Errorf("commit confirmed failed: prior rollback record does not bind the active config on disk")
+		}
+	}
+	if s.db != nil {
 		if _, err := s.db.encodeConfirm(&confirmRecord{
-			Deadline:    widestConfirmDeadline,
-			PrevTree:    prevTree,
-			FirstCommit: prevFirst,
-			GuardedHash: guardedConfigHash(s.candidate),
-			Resolved:    true,
+			Deadline:         widestConfirmDeadline,
+			PrevTree:         prevTree,
+			FirstCommit:      prevFirst,
+			GuardedHash:      guardedConfigHash(s.candidate),
+			PreviousHash:     previousHash,
+			PreviousDeadline: widestConfirmDeadline,
+			Resolved:         true,
 		}); err != nil {
 			return nil, fmt.Errorf("commit confirmed failed: the rollback record would not survive a restart: %w", err)
 		}
+		provisional := &confirmRecord{
+			Deadline:         provisionalDeadline,
+			PrevTree:         prevTree,
+			FirstCommit:      prevFirst,
+			GuardedHash:      guardedConfigHash(s.candidate),
+			PreviousHash:     previousHash,
+			PreviousDeadline: previousDeadline,
+		}
+		if err := s.writeConfirmState(provisional); err != nil {
+			if isPostRenameDurabilityFailure(err) && s.confirmTimer == nil && !s.confirmResolvePendingPersist {
+				s.resolveConfirmRemovalLocked("commit_confirmed_record_reject")
+			}
+			return nil, fmt.Errorf("commit confirmed failed: persist rollback record before active config: %w", err)
+		}
 	}
+	runCommitConfirmedCrashHook(commitConfirmedStageRecord)
 	if err := s.writeActive(s.candidate); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
+			if s.confirmTimer == nil && !s.confirmResolvePendingPersist {
+				s.resolveConfirmRemovalLocked("commit_confirmed_active_reject")
+			}
 			return nil, fmt.Errorf("commit confirmed failed: persist active config: %w", err)
 		}
 		s.everCommitted = true
 		s.persistMarkerCommitted = true
 		s.noteActivePersistFailureLocked("commit_confirmed_postrename", err)
-		// #5473: E's config is VISIBLE on disk (post-rename converge) and a fresh
-		// window is about to be armed below (writeConfirmState). Finalize any
-		// confirm.json removal deferred by an earlier failed resolution write
-		// HERE — before the fresh window is written — so the stale flag does not
-		// survive to make the degraded retry's heal delete E's OWN fresh record.
-		// Symmetric with the success branch (removes STALE record; the fresh one
-		// is written afterward by writeConfirmState). No-op unless a removal was
-		// deferred.
-		s.clearConfirmResolutionPendingLocked()
 	} else {
 		s.persistDegraded = false // disk now holds the current config
-		// #1922 step-0: a commit confirmed persists the candidate as the
-		// active config (committed=1 on disk via writeActive). The marker is
-		// set here, NOT gated on confirmation — the on-disk DB is now a real
-		// committed config; if the timer fires, the Item 1b first-commit
-		// rollback path (prevCfg==nil) re-writes the never-committed marker.
+		// #1922 step-0: the active DB is now an operator commit. If this was
+		// the first commit and the timer later fires, rollback writes the
+		// never-committed marker again.
 		s.everCommitted = true
 		s.persistMarkerCommitted = true
-		// #5473: this commit's config is durable. Drop any confirm.json whose
-		// removal was deferred by an earlier failed resolution write before the
-		// fresh window below re-arms and re-writes it (clearConfirmResolution
-		// removes the STALE record; writeConfirmState writes the NEW one). No-op
-		// unless a removal was deferred.
-		s.clearConfirmResolutionPendingLocked()
 	}
+	runCommitConfirmedCrashHook(commitConfirmedStageActive)
+	// The candidate is active; its provisional record still preserves the old
+	// disk generation as an alias until finalization. This supersedes a deferred
+	// rollback write without deleting the new recovery record.
+	s.confirmResolvePendingPersist = false
 
 	if s.confirmTimer != nil {
 		// Nested confirmed commit: cancel the pending timer but keep
@@ -658,6 +699,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	s.dirty = false
 	s.touchConfigLockLocked()          // #4476: a commit is activity — refresh the lease
 	s.noteLocalActivePromotionLocked() // #9530
+	runCommitConfirmedCrashHook(commitConfirmedStagePromote)
 
 	// Log to journal
 	s.journalLog(&JournalEntry{
@@ -665,116 +707,74 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		ConfigHash: journalConfigHash(s.active),
 		Principal:  principal,
 	})
+	runCommitConfirmedCrashHook(commitConfirmedStageJournal)
 
 	s.saveRollbackFiles()
+	runCommitConfirmedCrashHook(commitConfirmedStageHistory)
 
-	// Start auto-rollback timer. The closure captures the generation
-	// at arm time; a stale callback from a superseded timer no-ops in
-	// performAutoRollback.
+	// Start auto-rollback with the deadline recorded after commit work. The
+	// prewritten record remains recoverable if a crash happened before this
+	// finalization, and the live timer uses the same remaining interval.
 	s.confirmGen++
 	gen := s.confirmGen
-	deadline := time.Now().Add(time.Duration(minutes) * time.Minute)
-	s.confirmTimer = time.AfterFunc(time.Duration(minutes)*time.Minute, func() {
+	deadline := time.Now().Add(duration)
+	s.confirmTimer = time.AfterFunc(time.Until(deadline), func() {
 		s.fireConfirmTimer(gen)
 	})
 	s.confirmDeadline = deadline // #9615
 	s.confirmRecovered = false
 	s.confirmAlarm = ""
+	runCommitConfirmedCrashHook(commitConfirmedStageArm)
 
-	// #4577: persist the pending-confirm state so the auto-rollback deadline
-	// survives a daemon crash/reboot inside the window. The in-memory timer
-	// above is lost on restart; without confirm.json the just-promoted (and
-	// still UNCONFIRMED) config would become permanent. Written AFTER the
-	// successful writeActive+promote so a FAILED commit-confirmed never leaves
-	// a confirm.json (persist-before-promote already returned above on
-	// failure). PrevTree is confirmPrevTree — the ORIGINAL last-confirmed tree
-	// for a nested re-arm; firstCommit is the recorded confirmPrevFirst, NOT a
-	// re-derivation from confirmPrevCfg==nil (#6538: a nested arm preserves a
-	// recovered rollback target, so that nil can mean "the target failed to
-	// compile" and persisting it as firstCommit durably mislabels a real config
-	// as the empty bootstrap tree). A residual crash window remains between the
-	// writeActive syscall and this write (microseconds vs. the whole
-	// multi-minute window before this fix).
-	s.writeConfirmState(s.confirmPrevTree, deadline, s.confirmPrevFirst)
+	// Finalize the prewritten record: the candidate is active now, so the
+	// temporary previous-generation alias can be removed and the full window
+	// can start at the end of commit work.
+	finalRecord := &confirmRecord{
+		Deadline:    deadline,
+		PrevTree:    s.confirmPrevTree,
+		FirstCommit: s.confirmPrevFirst,
+		GuardedHash: guardedConfigHash(s.active),
+	}
+	if s.db != nil {
+		if err := s.writeConfirmState(finalRecord); err != nil {
+			s.noteConfirmArmFailureLocked(finalRecord, err)
+		} else {
+			s.confirmRecoveryReadFailed = false
+			s.confirmArmDegraded = false
+			s.confirmArmRec = nil
+		}
+	}
+	runCommitConfirmedCrashHook(commitConfirmedStageBind)
 
 	slog.Info("commit confirmed started", "timeout_minutes", minutes)
 	return compiled, nil
 }
 
-// writeConfirmState persists the pending commit-confirmed state (#4577) so the
-// auto-rollback deadline + rollback target survive a daemon crash/reboot.
-// Best-effort: a failure is logged, not fatal — the in-memory timer still
-// covers the no-crash case (the #1799 degrade-not-fail doctrine). Caller holds
-// s.mu.
-func (s *Store) writeConfirmState(prevTree *config.ConfigTree, deadline time.Time, firstCommit bool) {
+// writeConfirmState durably persists a supplied commit-confirmed record. The
+// caller controls whether it is the pre-active provisional record or the
+// post-promotion finalized record. Caller holds s.mu.
+func (s *Store) writeConfirmState(rec *confirmRecord) error {
 	if s.db == nil {
-		return
+		return nil
 	}
-	rec := &confirmRecord{
-		Deadline:    deadline,
-		PrevTree:    prevTree,
-		FirstCommit: firstCommit,
-		// #5835: bind the record to the unconfirmed config it guards (s.active is
-		// the just-promoted, still-unconfirmed tree at every arm/re-arm site). On
-		// boot recovery a mismatch means a later commit/confirm advanced the
-		// active config while this record's durable removal had failed — the
-		// record is then stale and must not resurrect a rollback.
-		GuardedHash: guardedConfigHash(s.active),
-	}
-	if err := s.db.WriteConfirm(rec); err != nil {
-		s.noteConfirmArmFailureLocked(rec, err)
-		return
-	}
-	// #8566: a readable record now exists again, so the "boot lost the window"
-	// state is over. It clears on operator action rather than on its own
-	// because nothing else can heal it — the lost window cannot be recovered.
-	s.confirmRecoveryReadFailed = false
-	// #9014: this write IS the debt. A successful arm — whether the first try
-	// or a re-arm by a later `commit confirmed` — discharges any outstanding
-	// arm-write debt, because the record on disk is now current.
-	s.confirmArmDegraded = false
-	s.confirmArmRec = nil
+	return s.db.WriteConfirm(rec)
 }
 
-// noteConfirmArmFailureLocked records that the ARM write establishing a
-// commit-confirmed window did not become durable, and starts the self-healing
-// retry (#9014).
-//
-// THIS WAS THE ONE CONFIRM-DURABILITY LEG THAT RAISED NOTHING. It logged a
-// single slog.Warn and returned; CommitConfirmed still reported success and
-// /health stayed 200, so a crash or reboot inside the confirm window found no
-// record, the unconfirmed configuration stood permanently, and nothing had
-// alerted. Its two neighbours already did the opposite:
-//
-//	confirm READ at boot      confirmRecoveryReadFailed  journal  —      degraded
-//	confirm REMOVAL           confirmRemoveDegraded      journal  retry  degraded
-//	confirm ARM (this)        none                       none     none   200 OK
-//
-// The invariant it broke is written down in the same package, in #8566's own
-// rationale: "Every OTHER way the store ends a boot unsafe raises degraded
-// health; this one did not, so nothing alerted on it."
-//
-// The commit is NOT failed. That matches both neighbours and the #1960
-// no-brick doctrine: the configuration is applied and correct, only its
-// crash-recovery record is missing, and refusing the commit would turn a
-// durability problem into an availability one. Health, the journal and the
-// retry are what make it legible.
-//
+// noteConfirmArmFailureLocked records failure to finalize an already-durable
+// commit-confirmed record and starts the self-healing retry. The candidate is
+// active and the provisional record still protects its rollback window.
 // Caller holds s.mu (write lock).
 func (s *Store) noteConfirmArmFailureLocked(rec *confirmRecord, err error) {
-	slog.Error("failed to persist commit-confirmed state; the auto-rollback will not "+
-		"survive a crash within the confirm window, so a restart would leave the "+
-		"UNCONFIRMED configuration standing permanently — configuration persistence "+
-		"is degraded until the retry lands or the window is resolved",
-		"err", err, "issue", "#9014")
+	slog.Error("failed to finalize the durable commit-confirmed record; the current "+
+		"rollback window remains recoverable, but configuration persistence is degraded "+
+		"until the record retry lands or the window is resolved",
+		"err", err, "issue", "#10696")
 	s.confirmArmDegraded = true
 	s.confirmArmRec = rec
-	// Pin the window this debt belongs to, so the retry cannot resurrect a
-	// record for a window that has since been confirmed or rolled back.
 	s.confirmArmGen = s.confirmGen
 	s.journalLog(&JournalEntry{
 		Action:    "confirm_arm_error",
-		Detail:    fmt.Sprintf("durable write of the pending commit-confirmed record failed; auto-rollback would not survive a crash: %v", err),
+		Detail:    fmt.Sprintf("finalizing the durable commit-confirmed record failed; retrying: %v", err),
 		Principal: "system:configstore",
 	})
 	s.ensurePersistRetryLoopLocked()
