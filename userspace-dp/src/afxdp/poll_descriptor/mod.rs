@@ -6130,12 +6130,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
-                // #10691: after the final HA redirect resolution, refuse
-                // native L2-group unicast-IP transit on both session hits and
-                // flowless paths, before accounting, pending-neighbor work or TX.
+                // #10691/#10966: after final HA resolution, refuse native
+                // L2-group unicast-IP transit before accounting,
+                // pending-neighbor buffering/replay, or TX.
                 if matches!(
                     decision.resolution.disposition,
                     ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::MissingNeighbor
                         | ForwardingDisposition::FabricRedirect
                 ) && l2_group_unicast_ip
                     && owned_packet_frame.is_none()

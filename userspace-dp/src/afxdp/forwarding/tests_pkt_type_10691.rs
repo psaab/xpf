@@ -1,6 +1,7 @@
 use super::*;
 use crate::afxdp::test_fixtures::{nat_snapshot, nat_snapshot_with_fabric};
 use crate::afxdp::tests_support::{
+    gre_to_self_snapshot,
     TEST_LAN_MAC, build_txn_tcp_syn_frame_v4, build_txn_tcp_syn_frame_v6, txn_ha_state,
     txn_meta_v4, txn_meta_v6, txn_run_descriptor,
 };
@@ -341,4 +342,110 @@ fn l2_group_classifier_only_matches_unicast_ip_destination_10691() {
         &frame_v6,
         txn_meta_v6(24, frame_v6.len()),
     ));
+}
+
+/// A permitted group-MAC unicast packet must not enter the pending-neighbor
+/// replay queue: once the next hop resolves, retry must still produce no TX.
+///
+/// FAIL-ON-REVERT: without `MissingNeighbor` in the common L2 disposition gate,
+/// the initial packet is seeded and buffered, then replay enqueues a TX.
+#[test]
+fn non_host_l2_group_unicast_missing_neighbor_drops_before_replay_10966() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.neighbors.clear();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let dst = Ipv4Addr::new(10, 0, 61, 50);
+    assert_eq!(
+        lookup_forwarding_for_ip(&forwarding, IpAddr::V4(dst)),
+        ForwardingDisposition::MissingNeighbor,
+        "fixture must route through an unresolved neighbor"
+    );
+
+    let ha_state = txn_ha_state();
+    let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 24, 0)];
+    bindings[0].interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let frame = build_txn_tcp_syn_frame_v4(
+        CLIENT,
+        dst,
+        40_000,
+        443,
+        TCP_FLAG_SYN,
+        [0xff; 6],
+    );
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let (batch, dbg) = txn_run_descriptor(
+        &mut bindings[0],
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(batch.validated_packets, 1, "fixture must arrive");
+    assert_eq!(batch.dst_mac_dropped, 0, "frame must reach L3 disposition");
+    assert_eq!(dbg.tx, 0, "unresolved next hop cannot TX synchronously");
+    let pending_count_before_resolution = bindings[0].pending_neigh.len();
+
+    // Simulate the neighbor becoming reachable, then run the real deferred
+    // retry path. The fixed gate leaves no group frame available to replay.
+    forwarding.neighbors.insert(
+        (24, IpAddr::V4(dst)),
+        NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut shared_recycles = Vec::new();
+    let area = bindings[0].umem.area() as *const MmapArea;
+    let (left, rest) = bindings.split_at_mut(0);
+    let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let mut retry_counters = BatchCounters::default();
+    crate::afxdp::neighbor_dispatch::retry_pending_neigh(
+        binding,
+        left,
+        0,
+        right,
+        &lookup,
+        &mirror_targets,
+        &forwarding,
+        &dynamic_neighbors,
+        None,
+        123_000_000_100,
+        // SAFETY: the pointer comes from this binding's Rc-backed UMEM; this
+        // test is single-threaded and the split borrows are disjoint.
+        unsafe { &*area },
+        &mut shared_recycles,
+        None,
+        &mut retry_counters,
+    );
+
+    let retry_tx_requests: usize = bindings
+        .iter()
+        .map(|binding| {
+            binding.tx_pipeline.pending_tx_prepared.len()
+                + binding.tx_pipeline.pending_tx_local.len()
+        })
+        .sum();
+    assert_eq!(
+        retry_tx_requests, 0,
+        "resolved-neighbor retry must not enqueue a transmit"
+    );
+    assert_eq!(
+        bindings[0].pending_neigh.len(),
+        0,
+        "group frame must not remain in the pending-neighbor queue"
+    );
+    assert_eq!(
+        pending_count_before_resolution, 0,
+        "group frame must be dropped before it can be queued"
+    );
+    assert_eq!(sessions.len(), 0, "group frame must not seed a session");
+    assert_eq!(
+        bindings[0].scratch.scratch_recycle,
+        vec![128],
+        "the dropped group frame must be recycled"
+    );
 }

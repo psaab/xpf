@@ -1359,7 +1359,9 @@ poll path classifies the original native Ethernet frame, preserves the policy
 decision, then drops permitted L2-group/unicast-IP traffic before NAT, session
 installation, forwarding, or fabric redirection. Established-flow cache hits
 and post-HA session/flowless dispositions receive the same gate. A punt seed is
-not installed for such a packet. Multicast and limited/directed IPv4 broadcast,
+not installed for such a packet. MissingNeighbor is included before the
+pending-neighbor buffer, preventing a resolved-next-hop retry from transmitting
+the group copy. Multicast and limited/directed IPv4 broadcast,
 IPv6 multicast, and configured local-MAC/unicast controls remain eligible.
 
 The native packet type is not inherited by an injected or decapsulated GRE/WG
@@ -1368,7 +1370,8 @@ only while the packet still has its native, unowned frame.
 
 FAIL-ON-REVERT coverage is in
 `userspace-dp/src/afxdp/forwarding/tests_pkt_type_10691.rs` (IPv4, IPv6, peer
-fabric redirect, cached hit, session hit, and classifier boundaries). The
+fabric redirect, cached hit, session hit, unresolved-neighbor resolution/replay,
+and classifier boundaries). The
 pre-L3 MAC acceptance control in
 `userspace-dp/src/afxdp/tests_named_pre_l3_10498.rs` pairs group Ethernet MACs
 with actual IP multicast/broadcast UDP instead of unicast IP.
