@@ -261,13 +261,13 @@ type RelayStats struct {
 	RepliesDroppedUnknownServer uint64
 
 	// RepliesDroppedNoRequest counts server replies dropped because they do not
-	// bind to an outstanding relayed request (#6562). The #4163 source-IP
+	// bind to an outstanding relayed request (#6562, #10699). The source-IP
 	// allow-list is spoofable, so a reply must additionally match a request the
-	// relay actually forwarded (xid + chaddr, see pending.go). A nonzero value
-	// means either an injection attempt that guessed/spoofed its way past the
-	// source check, or a LEGITIMATE reply that arrived outside the binding
-	// window — the second is a client-visible DHCP failure, so this counter
-	// MUST be watched, not assumed hostile.
+	// relay actually forwarded: xid + chaddr for DHCPv4, xid + Client DUID +
+	// IAID/type for DHCPv6. A nonzero value means either an injection attempt
+	// that guessed/spoofed its way past the source check, or a LEGITIMATE reply
+	// that arrived outside the binding window — the second is a client-visible
+	// DHCP failure, so this counter MUST be watched, not assumed hostile.
 	RepliesDroppedNoRequest uint64
 
 	// RepliesDroppedForceRenew counts DHCPFORCERENEW messages refused by the
@@ -281,26 +281,21 @@ type RelayStats struct {
 	RepliesDroppedForceRenew uint64
 
 	// PendingEvicted counts outstanding-request entries dropped by CAP PRESSURE
-	// on the #6562 pending table (not by ordinary expiry). Capacity is derived
-	// from the interface's maximum-packet-rate, so under a correctly-sized
-	// relay this stays 0; a nonzero value means the table filled anyway (the
-	// rate limiter's burst allowance, or a rate high enough that the memory
-	// ceiling clamped capacity) and legitimate replies may now be dropped for
-	// want of a binding.
+	// on the bounded pending table (not by ordinary expiry). Capacity is derived
+	// from the configured ingress packet rate for DHCPv4 and the default rate
+	// for DHCPv6; a nonzero value means the table filled and legitimate replies
+	// may now be dropped for want of a binding.
 	//
 	// NOTE it is a COINCIDENT signal, not a leading one: an eviction is what
 	// CAUSES the subsequent drop, so the lead time is one server RTT. Use
 	// PendingSize/PendingCapacity for advance warning.
 	PendingEvicted uint64
 
-	// PendingSize is the CURRENT occupancy of the #6562 outstanding-request
-	// table, and PendingCapacity its ceiling. This pair is the genuine LEADING
-	// indicator (#6603 review F3): occupancy climbing toward capacity means the
-	// relay is about to start evicting bindings and dropping legitimate
-	// replies, and it is observable BEFORE any reply is lost. Alert on the
-	// ratio; PendingEvicted only rises once the damage has begun.
-	//
-	// These are gauges (instantaneous), not monotonic counters.
+	// PendingSize is the CURRENT occupancy of the bounded outstanding-request
+	// table, and PendingCapacity its ceiling. Occupancy climbing toward capacity
+	// means the relay is about to evict bindings and drop legitimate replies;
+	// PendingEvicted only rises once that damage has begun. These are gauges
+	// (instantaneous), not monotonic counters.
 	PendingSize     uint64
 	PendingCapacity uint64
 
@@ -1180,6 +1175,10 @@ func (m *Manager) Stats() []RelayStats {
 				RequestsDroppedPeer:         relay.requestsDroppedPeer.Load(),
 				RequestsDroppedBuild:        relay.requestsDroppedBuild.Load(),
 				RepliesDroppedUnknownServer: relay.repliesDroppedUnknownSrv.Load(),
+				RepliesDroppedNoRequest:     relay.repliesDroppedNoRequest.Load(),
+				PendingEvicted:              relay.pending.evictions(),
+				PendingSize:                 uint64(relay.pending.occupancy()),
+				PendingCapacity:             uint64(relay.pending.capacity()),
 				RepliesDroppedIID:           relay.repliesDroppedIID.Load(),
 				RepliesDroppedParse:         relay.repliesDroppedParse.Load(),
 				RepliesDroppedInvalid:       relay.repliesDroppedInvalid.Load(),

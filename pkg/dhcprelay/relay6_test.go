@@ -44,6 +44,31 @@ func newDHCPV6TestMessage(t *testing.T) dhcpv6.DHCPv6 {
 	return msg
 }
 
+func newDHCPV6BindingMessage(t *testing.T, xid dhcpv6.TransactionID) *dhcpv6.Message {
+	t.Helper()
+	message := newDHCPV6TestMessage(t).(*dhcpv6.Message)
+	message.TransactionID = xid
+	message.MessageType = dhcpv6.MessageTypeSolicit
+	message.AddOption(dhcpv6.OptClientID(&dhcpv6.DUIDUUID{
+		UUID: [16]byte{0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+			0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f},
+	}))
+	message.AddOption(&dhcpv6.OptIANA{IaId: [4]byte{1, 2, 3, 4}})
+	return message
+}
+
+func armDHCPV6Reply(t *testing.T, relay *dhcpV6Relay, message dhcpv6.DHCPv6) {
+	t.Helper()
+	if relay.pending == nil {
+		relay.pending = newPendingTableOf[pending6Key](64, pendingTTL, time.Now)
+	}
+	key, ok := pending6KeyFor(message)
+	if !ok {
+		t.Fatal("failed to create DHCPv6 pending key")
+	}
+	relay.pending.insert(key)
+}
+
 func TestBuildRelayForwardV6RFC8415(t *testing.T) {
 	msg := newDHCPV6TestMessage(t)
 	link := net.ParseIP("2001:db8:1::1")
@@ -303,7 +328,8 @@ func TestDHCPV6ManagerWiresSocketsAndHAGate(t *testing.T) {
 	}
 	m.SetMasterGate(func(string) bool { return true })
 	m.Apply(context.Background(), cfg)
-	client.push(newDHCPV6TestMessage(t).ToBytes())
+	request := newDHCPV6BindingMessage(t, dhcpv6.TransactionID{1, 2, 3})
+	client.push(request.ToBytes())
 	deadline := time.Now().Add(time.Second)
 	for server.writeCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -331,7 +357,9 @@ func TestDHCPV6ManagerWiresSocketsAndHAGate(t *testing.T) {
 		PeerAddr:    net.ParseIP("fe80::2"),
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("ge-0/0/0.0")))
-	reply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	replyInner := *request
+	replyInner.MessageType = dhcpv6.MessageTypeAdvertise
+	reply.AddOption(dhcpv6.OptRelayMessage(&replyInner))
 	pushServer := func(source *net.UDPAddr, data []byte) {
 		server.mu.Lock()
 		server.srcAddr = source
@@ -371,8 +399,9 @@ func TestDHCPV6ManagerWiresSocketsAndHAGate(t *testing.T) {
 			break
 		}
 	}
-	if v6Stats == nil || v6Stats.RequestsRelayed != 1 || v6Stats.RepliesForwarded != 1 {
-		t.Fatalf("DHCPv6 stats row = %+v, want one request and reply", v6Stats)
+	if v6Stats == nil || v6Stats.RequestsRelayed != 1 || v6Stats.RepliesForwarded != 1 ||
+		v6Stats.PendingSize != 1 || v6Stats.RepliesDroppedNoRequest != 0 {
+		t.Fatalf("DHCPv6 stats row = %+v, want one request/reply, one pending binding, and no unbound drops", v6Stats)
 	}
 
 	missingIID := &dhcpv6.RelayMessage{

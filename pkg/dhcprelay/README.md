@@ -383,6 +383,30 @@ it and only RFC 6842 §3 (2013) reversed that to a MUST, so keying on it would
 drop every reply from a pre-RFC-6842 server — a silent, segment-wide outage. The
 ingress interface is not keyed either: each relay interface owns its own table.
 
+### DHCPv6 binding (#10699)
+
+The DHCPv6 server socket is also unconnected and accepts datagrams addressed
+to UDP/547 from any source. Its source-IP-and-port allow-list and default
+Interface-ID (the authored interface name) do not authenticate a Relay-Reply:
+both are public and the server address can be spoofed. Each DHCPv6 relay
+therefore uses the same bounded, TTL'd pending-table core as DHCPv4. The
+client loop inserts a binding immediately before sending its Relay-Forward;
+after source, relay-layer, and Interface-ID checks, the reply path forwards a
+decapsulated message only when its binding matches. A miss is dropped and
+counted in `RepliesDroppedNoRequest`.
+
+The v6 key is the inner message's 24-bit transaction ID, exact Client
+Identifier DUID bytes, and one IAID plus its IA option type (`IA_NA`, `IA_TA`,
+or `IA_PD`). To avoid relying on IA option order, the selected IA is the
+lowest `(option type, IAID)` pair in the message. Messages without an IA (for
+example, Information-request) use type 0 and a zero IAID. A DUID longer than
+128 octets cannot be represented in the fixed-size key, so the request is
+dropped before forwarding rather than creating an unbindable transaction.
+Bindings remain live for the same 30-second TTL, are bounded with the v6
+default ingress rate, and are carried across relay reconfiguration; the match
+is not consumed, so both multi-server Advertises and later replies can use it.
+
+
 **Bounded — capacity is derived from `maximum-packet-rate`, evict-oldest.**
 Steady-state occupancy is `rate × TTL`, and the fill rate is the configurable
 #5670 limit — so capacity **must** track it. `pendingCapacityFor` sizes the

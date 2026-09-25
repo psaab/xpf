@@ -53,6 +53,12 @@ import (
 // that can drop a legitimate reply is counted and logged on interfaceRelay
 // (repliesDroppedNoRequest, pendingEvicted) — an over-strict binding must be
 // visible in `show services dhcp relay`, never silent.
+//
+// SHARED CORE (#10699). The table is generic over its key: v4 instantiates
+// pendingTable (pendingKey: xid+chaddr, below) and DHCPv6 instantiates
+// pendingTableOf[pending6Key] (xid+DUID+IAID, see pending6.go). One ring, one
+// expiry/eviction discipline, one set of O(1) pins — a second copy would
+// re-learn every lesson in these comments the hard way.
 
 const (
 	// pendingTTL is the NOMINAL reply-binding window: how long a forwarded
@@ -206,15 +212,20 @@ func pendingKeyFor(pkt *dhcpv4.DHCPv4) pendingKey {
 	return k
 }
 
-// pendingSlot is one insertion in the expiry-ordered ring.
-type pendingSlot struct {
-	key pendingKey
+// pendingSlotOf is one insertion in the expiry-ordered ring. pendingSlot is
+// the v4 instantiation; the v6 relay uses pendingSlotOf[pending6Key].
+type pendingSlotOf[K comparable] struct {
+	key K
 	exp time.Time
 	// gen identifies WHICH insertion of this key the slot represents. When a
 	// key is re-inserted, the map moves to the new generation and every older
 	// slot becomes stale. See pendingEntry.gen.
 	gen uint64
 }
+
+// pendingSlot is the v4 pending key's ring slot. Alias, not a copy: every
+// method below is defined once on pendingTableOf[K].
+type pendingSlot = pendingSlotOf[pendingKey]
 
 // pendingEntry is the live state for one key: its expiry, and the generation
 // of the ring slot that owns it.
@@ -223,13 +234,18 @@ type pendingEntry struct {
 	gen uint64
 }
 
-// pendingTable is a bounded, expiring set of outstanding relayed requests.
+// pendingTableOf is a bounded, expiring set of outstanding relayed requests,
+// generic over the key so the v4 and DHCPv6 relays share one ring, one
+// expiry/eviction discipline, and one set of O(1) pins. pendingTable is the
+// v4 instantiation (key pendingKey, below); the v6 relay instantiates
+// pendingTableOf[pending6Key] (see pending6.go).
 //
 // It is written by the client-facing read loop and read by the server-facing
 // reply loop — two different goroutines within one relay session — so it is
-// mutex-guarded. The table lives on interfaceRelay rather than on the session,
-// so a session rebuild (#2347 ifindex drift / #3960 re-address) does NOT wipe
-// in-flight bindings and strand a client mid-transaction.
+// mutex-guarded. The table lives on the relay struct (interfaceRelay /
+// dhcpV6Relay) rather than on the session, so a session rebuild (#2347 ifindex
+// drift / #3960 re-address) does NOT wipe in-flight bindings and strand a
+// client mid-transaction.
 //
 // STRUCTURE. A map for O(1) lookup, plus a fixed-size ring of insertions for
 // O(1) expiry and eviction. The ring works because EVERY entry is inserted with
@@ -248,27 +264,27 @@ type pendingEntry struct {
 // the capacity and a slot is always freed before a push, len(entries) <= count
 // <= capacity holds — the ring bounds the map, so duplicate inserts cannot grow
 // either structure past the cap.
-type pendingTable struct {
+type pendingTableOf[K comparable] struct {
 	mu      sync.Mutex
-	entries map[pendingKey]pendingEntry // key -> expiry + owning generation
-	ring    []pendingSlot               // fixed length == capacity; expiry-ordered
-	head    int                         // index of the oldest slot
-	count   int                         // slots in use
+	entries map[K]pendingEntry   // key -> expiry + owning generation
+	ring    []pendingSlotOf[K]   // fixed length == capacity; expiry-ordered
+	head    int                   // index of the oldest slot
+	count   int                   // slots in use
 	ttl     time.Duration
 	now     func() time.Time
 
-	// nextGen hands out slot generations. It makes slot identity EXACT rather
-	// than inferring it from the expiry: two inserts of the same key can
-	// receive the SAME expiry (time.Now() is not guaranteed to advance between
-	// two calls, and a frozen test clock never does), and comparing expiries
-	// would then treat the older slot as the live one — popping it at capacity
-	// would delete a binding that a newer slot still owns, silently losing a
-	// legitimate reply. Generations cannot collide.
+	// nextGen hands out slot generations. It makes slot identity EXACT
+	// rather than inferring it from the expiry: two inserts of the same key
+	// can receive the SAME expiry (time.Now() is not guaranteed to advance
+	// between two calls, and a frozen test clock never does), and comparing
+	// expiries would then treat the older slot as the live one — popping it at
+	// capacity would delete a binding that a newer slot still owns, silently
+	// losing a legitimate reply. Generations cannot collide.
 	nextGen uint64
 
 	// evicted counts entries removed by CAP PRESSURE (not by ordinary expiry).
-	// It is surfaced through interfaceRelay.pendingEvicted; a nonzero value
-	// means the table is full and a legitimate reply may now be dropped.
+	// It is surfaced as RelayStats.PendingEvicted; a nonzero value means the
+	// table is full and a legitimate reply may now be dropped.
 	evicted uint64
 
 	// slotScans counts ring slots examined by the expiry/eviction path. It
@@ -279,11 +295,14 @@ type pendingTable struct {
 	slotScans uint64
 }
 
-// newPendingTable builds a table. A nil clock defaults to time.Now; a
-// non-positive capacity or ttl falls back to the package defaults so a
-// mis-wired caller cannot silently create an unbounded or never-expiring
-// table. Production sizes capacity with pendingCapacityFor.
-func newPendingTable(capacity int, ttl time.Duration, now func() time.Time) *pendingTable {
+// pendingTable is the v4 instantiation of pendingTableOf. Alias, not a copy.
+type pendingTable = pendingTableOf[pendingKey]
+
+// newPendingTableOf builds a table for any comparable key. A nil clock
+// defaults to time.Now; a non-positive capacity or ttl falls back to the
+// package defaults so a mis-wired caller cannot silently create an unbounded
+// or never-expiring table. Production sizes capacity with pendingCapacityFor.
+func newPendingTableOf[K comparable](capacity int, ttl time.Duration, now func() time.Time) *pendingTableOf[K] {
 	if now == nil {
 		now = time.Now
 	}
@@ -293,12 +312,18 @@ func newPendingTable(capacity int, ttl time.Duration, now func() time.Time) *pen
 	if ttl <= 0 {
 		ttl = pendingTTL
 	}
-	return &pendingTable{
-		entries: make(map[pendingKey]pendingEntry),
-		ring:    make([]pendingSlot, capacity),
+	return &pendingTableOf[K]{
+		entries: make(map[K]pendingEntry),
+		ring:    make([]pendingSlotOf[K], capacity),
 		ttl:     ttl,
 		now:     now,
 	}
+}
+
+// newPendingTable builds the v4 table. It is newPendingTableOf[pendingKey],
+// kept so every v4 caller and test reads unchanged.
+func newPendingTable(capacity int, ttl time.Duration, now func() time.Time) *pendingTable {
+	return newPendingTableOf[pendingKey](capacity, ttl, now)
 }
 
 // insert records a forwarded request as bindable for ttl.
@@ -309,7 +334,7 @@ func newPendingTable(capacity int, ttl time.Duration, now func() time.Time) *pen
 // legitimate first reply of every exchange.
 //
 // A nil receiver is a no-op (see matches for the fail-closed rationale).
-func (t *pendingTable) insert(k pendingKey) {
+func (t *pendingTableOf[K]) insert(k K) {
 	if t == nil {
 		return
 	}
@@ -334,7 +359,7 @@ func (t *pendingTable) insert(k pendingKey) {
 		t.slotScans++ // the one probe read above
 		t.head = 0
 		t.count = 0
-		t.entries = make(map[pendingKey]pendingEntry)
+		t.entries = make(map[K]pendingEntry)
 	}
 
 	// Reclaim expired slots from the head, BOUNDED. The ring is expiry-ordered,
@@ -403,11 +428,11 @@ func (t *pendingTable) insert(k pendingKey) {
 // pushLocked records one key with an explicit expiry, assigning it a fresh
 // generation. Callers MUST push in non-decreasing expiry order so the ring
 // stays expiry-ordered, and MUST have already made room. Caller holds mu.
-func (t *pendingTable) pushLocked(k pendingKey, exp time.Time) {
+func (t *pendingTableOf[K]) pushLocked(k K, exp time.Time) {
 	gen := t.nextGen
 	t.nextGen++
 	t.entries[k] = pendingEntry{exp: exp, gen: gen}
-	t.ring[(t.head+t.count)%len(t.ring)] = pendingSlot{key: k, exp: exp, gen: gen}
+	t.ring[(t.head+t.count)%len(t.ring)] = pendingSlotOf[K]{key: k, exp: exp, gen: gen}
 	t.count++
 }
 
@@ -421,9 +446,9 @@ func (t *pendingTable) pushLocked(k pendingKey, exp time.Time) {
 // calls, and a frozen test clock never does); comparing expiries would then
 // match the OLDER slot and delete a binding the newer slot still owns — a
 // silently lost reply. Caller holds mu.
-func (t *pendingTable) popHeadLocked() bool {
+func (t *pendingTableOf[K]) popHeadLocked() bool {
 	s := t.ring[t.head]
-	t.ring[t.head] = pendingSlot{} // drop the time.Time reference
+	t.ring[t.head] = pendingSlotOf[K]{} // drop the time.Time reference
 	t.head = (t.head + 1) % len(t.ring)
 	t.count--
 	t.slotScans++
@@ -438,19 +463,20 @@ func (t *pendingTable) popHeadLocked() bool {
 //
 // The entry is deliberately NOT consumed. One relayed request legitimately
 // draws MULTIPLE replies: the relay fans each request out to EVERY server in
-// the group, so an N-server group answers one DISCOVER with N OFFERs. On top
-// of that, RFC 2131 §4.4.1 states "The DHCPREQUEST message contains the same
-// 'xid' as the DHCPOFFER message", so the whole SELECTING exchange
-// (DISCOVER/OFFER/REQUEST/ACK) shares one xid and the same binding must also
-// admit the ACK/NAK. Consuming on first match would drop every reply after
-// the first and silently break multi-server redundancy.
+// the group, so an N-server group answers one v4 DISCOVER with N OFFERs — and
+// likewise one v6 Solicit with N Advertises. On top of that, RFC 2131 §4.4.1
+// states "The DHCPREQUEST message contains the same 'xid' as the DHCPOFFER
+// message", so the whole v4 SELECTING exchange (DISCOVER/OFFER/REQUEST/ACK)
+// shares one xid and the same binding must also admit the ACK/NAK. Consuming
+// on first match would drop every reply after the first and silently break
+// multi-server redundancy.
 //
 // A nil receiver returns false (fail-closed). Production wires the table where
-// interfaceRelay is built, so nil means a caller was mis-wired; failing closed
-// makes that a loud, counted, immediately visible outage rather than a silent
-// loss of the binding this file exists to enforce — the same posture as the
-// #4163 empty-allow-set rule.
-func (t *pendingTable) matches(k pendingKey) bool {
+// the relay struct is built (interfaceRelay / dhcpV6Relay), so nil means a
+// caller was mis-wired; failing closed makes that a loud, counted, immediately
+// visible outage rather than a silent loss of the binding this file exists to
+// enforce — the same posture as the #4163 empty-allow-set rule.
+func (t *pendingTableOf[K]) matches(k K) bool {
 	if t == nil {
 		return false
 	}
@@ -483,14 +509,14 @@ func (t *pendingTable) matches(k pendingKey) bool {
 // Expired entries are excluded, and each entry keeps its ORIGINAL expiry when
 // adopted — a config reload must not extend the binding window, which would
 // hand an attacker a longer guessing window for free.
-func (t *pendingTable) snapshot() []pendingSlot {
+func (t *pendingTableOf[K]) snapshot() []pendingSlotOf[K] {
 	if t == nil {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	live := make([]pendingSlot, 0, t.count)
+	live := make([]pendingSlotOf[K], 0, t.count)
 	for i := 0; i < t.count; i++ {
 		s := t.ring[(t.head+i)%len(t.ring)]
 		// Skip stale slots (a newer generation owns the key) and expired ones.
@@ -518,7 +544,7 @@ func (t *pendingTable) snapshot() []pendingSlot {
 // The destination MUST be empty — see the assertion in the body. adopt appends
 // rather than merging, so it cannot preserve expiry ordering against
 // pre-existing entries, and every other operation depends on that ordering.
-func (t *pendingTable) adopt(slots []pendingSlot) {
+func (t *pendingTableOf[K]) adopt(slots []pendingSlotOf[K]) {
 	if t == nil || len(slots) == 0 {
 		return
 	}
@@ -534,13 +560,13 @@ func (t *pendingTable) adopt(slots []pendingSlot) {
 	// destination bindings, and both the head drain and occupancy's binary
 	// search would mis-locate the boundary.
 	//
-	// This is a programmer-error assertion, not a runtime condition: the sole
-	// production caller (Apply's phase-2.5 migration) adopts into a table built
-	// moments earlier and never launched, so it cannot fire. Failing loudly
-	// here is deliberate — the alternative is silent corruption of the
-	// structure that decides which replies reach clients. An ordered merge
-	// would make the general case work, but no caller needs it and it is not
-	// worth the complexity on a security-relevant path.
+	// This is a programmer-error assertion, not a runtime condition: the
+	// production callers (the v4/v6 apply phase-2.5 migrations) adopt into
+	// tables built moments earlier and never launched, so it cannot fire.
+	// Failing loudly here is deliberate — the alternative is silent corruption
+	// of the structure that decides which replies reach clients. An ordered
+	// merge would make the general case work, but no caller needs it and it is
+	// not worth the complexity on a security-relevant path.
 	if t.count != 0 {
 		panic("dhcprelay: pendingTable.adopt requires an empty destination " +
 			"(appending would break the ring's expiry ordering)")
@@ -555,7 +581,7 @@ func (t *pendingTable) adopt(slots []pendingSlot) {
 }
 
 // evictions returns the cap-pressure eviction count.
-func (t *pendingTable) evictions() uint64 {
+func (t *pendingTableOf[K]) evictions() uint64 {
 	if t == nil {
 		return 0
 	}
@@ -590,7 +616,7 @@ func (t *pendingTable) evictions() uint64 {
 // Stats() while the packet path is running.
 //
 // Use liveEntries for the count of distinct bindable keys.
-func (t *pendingTable) occupancy() int {
+func (t *pendingTableOf[K]) occupancy() int {
 	if t == nil {
 		return 0
 	}
@@ -602,7 +628,7 @@ func (t *pendingTable) occupancy() int {
 // expiredPrefixLocked returns how many slots at the head have expired. The ring
 // is expiry-ordered, so expired slots are a contiguous prefix and the first
 // unexpired index can be found by binary search. Caller holds mu.
-func (t *pendingTable) expiredPrefixLocked(now time.Time) int {
+func (t *pendingTableOf[K]) expiredPrefixLocked(now time.Time) int {
 	lo, hi := 0, t.count
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
@@ -620,7 +646,7 @@ func (t *pendingTable) expiredPrefixLocked(now time.Time) int {
 // can include entries past their expiry; they are inert either way because
 // matches re-checks the expiry. Diagnostic/test accessor — the operator-facing
 // gauge is occupancy.
-func (t *pendingTable) liveEntries() int {
+func (t *pendingTableOf[K]) liveEntries() int {
 	if t == nil {
 		return 0
 	}
@@ -630,7 +656,7 @@ func (t *pendingTable) liveEntries() int {
 }
 
 // capacity returns the table's fixed entry ceiling.
-func (t *pendingTable) capacity() int {
+func (t *pendingTableOf[K]) capacity() int {
 	if t == nil {
 		return 0
 	}
@@ -641,7 +667,7 @@ func (t *pendingTable) capacity() int {
 
 // scans returns the number of ring slots examined by the expiry/eviction path.
 // Test probe for the O(1) invariant; see slotScans.
-func (t *pendingTable) scans() uint64 {
+func (t *pendingTableOf[K]) scans() uint64 {
 	if t == nil {
 		return 0
 	}

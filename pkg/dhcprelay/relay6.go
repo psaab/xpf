@@ -256,6 +256,9 @@ type dhcpV6Relay struct {
 	repliesDroppedParse      atomic.Uint64
 	repliesDroppedInvalid    atomic.Uint64
 	repliesDroppedNested     atomic.Uint64
+	pending                  *pendingTableOf[pending6Key]
+	repliesDroppedNoRequest  atomic.Uint64
+	warnedNoRequest          atomic.Bool
 }
 
 type dhcpV6DesiredRelay struct {
@@ -312,10 +315,12 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 	desired := computeDHCPV6Desired(cfg, resolveIfName)
 	m.mu.Lock()
 	var stop []*dhcpV6Relay
+	replaced := make(map[string]*dhcpV6Relay)
 	for name, relay := range m.relays {
 		d, ok := desired[name]
 		if !ok || !relay.spec.equal(d.spec) {
 			stop = append(stop, relay)
+			replaced[name] = relay
 			delete(m.relays, name)
 		}
 	}
@@ -331,11 +336,13 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 			continue
 		}
 		rctx, cancel := context.WithCancel(ctx)
+		pendingCapacity, _ := pendingCapacityFor(defaultMaxPacketRate)
 		relay := &dhcpV6Relay{
 			ifaceName:     d.ifaceName,
 			kernelName:    d.kernelName,
 			spec:          d.spec,
 			maxPacketRate: defaultMaxPacketRate,
+			pending:       newPendingTableOf[pending6Key](pendingCapacity, pendingTTL, m.now),
 			cancel:        cancel,
 			done:          make(chan struct{}),
 		}
@@ -347,6 +354,15 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 	for _, relay := range stop {
 		relay.cancel()
 		<-relay.done
+	}
+
+	// Keep outstanding bindings across a configuration restart: replies for
+	// already-forwarded requests can still arrive on the replacement socket.
+	for _, s := range start {
+		if old := replaced[s.relay.ifaceName]; old != nil {
+			carried := old.pending.snapshot()
+			s.relay.pending.adopt(carried)
+		}
 	}
 	for _, s := range start {
 		go func(s startRelay) {
@@ -1201,6 +1217,15 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			relay.requestsDroppedBuild.Add(1)
 			continue
 		}
+
+		key, ok := pending6KeyFor(packet)
+		if !ok {
+			relay.requestsDroppedBuild.Add(1)
+			continue
+		}
+		// Insert before sending; the server read loop can receive a fast reply
+		// concurrently with this client loop.
+		relay.pending.insert(key)
 		data := forward.ToBytes()
 		for _, destination := range servers {
 			if _, err := server.WriteTo(data, destination); err == nil {
@@ -1286,6 +1311,19 @@ func processDHCPV6ServerPacket(relay *dhcpV6Relay, client net.PacketConn, packet
 			}
 		} else {
 			relay.repliesDroppedInvalid.Add(1)
+		}
+		return
+	}
+
+	key, ok := pending6KeyFor(inner)
+	if !ok || !relay.pending.matches(key) {
+		relay.repliesDroppedNoRequest.Add(1)
+		if !relay.warnedNoRequest.Swap(true) {
+			slog.Warn("dhcpv6-relay: dropping server reply with no outstanding request",
+				"interface", relay.ifaceName, "src", source)
+		} else {
+			slog.Debug("dhcpv6-relay: dropping server reply with no outstanding request",
+				"interface", relay.ifaceName, "src", source)
 		}
 		return
 	}
