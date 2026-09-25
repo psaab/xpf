@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"path/filepath"
 	"testing"
@@ -121,10 +122,10 @@ set security nat source rule-set rs rule r1 then source-nat pool bigpool`); err 
 }
 
 // TestGetNATPoolStatsClampsInt32Overflow guards the #2282 int32 port-pool
-// overflow. The port-pool size (portHigh-portLow+1)*len(Addresses) is
-// computed in int64 and clamped to int32 max for the int32 proto fields; a
-// bare int32() cast would wrap negative for a large pool and corrupt the
-// avail=total-used display.
+// overflow. The port-pool size (portHigh-portLow+1)*(unique expanded
+// addresses) is computed in int64 and clamped to int32 max for the int32
+// proto fields; a bare int32() cast would wrap negative for a large pool and
+// corrupt the avail=total-used display.
 //
 // Fail-on-revert: reverting the int64 computation + clampInt32 back to the
 // bare int32() cast makes TotalPorts wrap negative, failing the
@@ -143,12 +144,15 @@ func TestGetNATPoolStatsClampsInt32Overflow(t *testing.T) {
 
 	// Force a large pool: default port window is 1024..65535 (64512 ports).
 	// 64512 * 40000 ≈ 2.58e9 > math.MaxInt32 (~2.147e9), so the int64
-	// product overflows int32 and must be clamped to MaxInt32.
+	// product overflows int32 and must be clamped to MaxInt32. The members
+	// must be DISTINCT: capacity counts the union of expanded addresses
+	// (#10700), so 40000 copies of one /32 would count as 1 address and
+	// never reach the clamp.
 	pool.PortLow = 0
 	pool.PortHigh = 0 // handler defaults these to 1024/65535
 	pool.Addresses = make([]string, 40000)
 	for i := range pool.Addresses {
-		pool.Addresses[i] = "10.0.0.0/32"
+		pool.Addresses[i] = fmt.Sprintf("10.%d.%d.%d/32", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
 	}
 	const portWindow = 65535 - 1024 + 1
 	wantTotal64 := int64(portWindow) * int64(len(pool.Addresses))
