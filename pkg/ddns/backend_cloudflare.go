@@ -289,12 +289,19 @@ func (b *cloudflareBackend) listRecords(ctx context.Context, zoneID, rtype, fqdn
 // an API-ordering artifact, not a statement of ownership (mirrors the
 // content-scoped DELETE, #2770). The precedence is:
 //
-//  1. A row already carrying the NEW content → no write (idempotent re-publish;
-//     extra ban-avoidance on top of the engine's change-detection).
-//  2. Else a row carrying xpf's PREVIOUS published value (rec.PrevAddr) → PATCH
+//  1. A row already carrying the NEW content with the desired TTL → no write to
+//     the live row (idempotent re-publish; extra ban-avoidance on top of the
+//     engine's change-detection), but xpf's stale PREVIOUS row (if any) is
+//     still DELETEd (#10715: the pre-fix early return leaked it when the
+//     desired new row coexisted with the known previous value).
+//  2. A row carrying the NEW content with the WRONG TTL → PATCH that row in
+//     place (#9067), then DELETE xpf's stale previous row if one survived
+//     alongside (#10715: the pre-fix arm overwrote prevID, converging the
+//     live row and leaking the stale one).
+//  3. Else a row carrying xpf's PREVIOUS published value (rec.PrevAddr) → PATCH
 //     that row in place. This is the renumber of xpf's OWN record; the foreign
 //     row (if any) is left untouched.
-//  3. Else no xpf-owned row exists at this name → POST a NEW record. Any foreign
+//  4. Else no xpf-owned row exists at this name → POST a NEW record. Any foreign
 //     record at the name survives (never PATCH recs[0], which would rewrite a
 //     foreign value to xpf's address — the #3739 H11 bug).
 //
@@ -323,25 +330,16 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 		prevContent = rec.PrevAddr.Unmap().String()
 	}
 	prevID := ""
-	// #9067: the row whose CONTENT already matches but whose TTL does not. The
-	// pre-#9067 loop returned on a content match alone, so a TTL-ONLY change was
-	// never propagated — not delayed, NEVER. Every later refresh, including the
-	// operator's explicit `request system dynamic-dns update` force latch,
-	// re-entered the same early return. Route 53's sibling comparison has always
-	// been `live.found && live.ttl == ttl && sameValueSet(...)`
-	// (backend_route53.go), and `cfRecord.TTL` was already parsed here — the
-	// datum was available and simply unread.
-	//
-	// The harm lands later and silently: no error, no warning, and `show`
-	// reports the CONFIGURED TTL. An operator who lowers TTL before a planned
-	// renumber gets no propagation — precisely the case the shorter TTL was
-	// bought for.
 	sameContentID := ""
+	sameContentCorrect := false
+	// #9067: a content match with the wrong TTL must be PATCHed rather than
+	// POSTed; retain a correct match as a no-op candidate, but keep scanning so
+	// a stale PrevAddr row can still be removed (#10715).
 	for _, r := range recs {
 		if r.Content == content {
 			if r.TTL == ttl {
-				// Already correct — no write.
-				return nil
+				sameContentCorrect = true
+				continue
 			}
 			// Content right, TTL wrong: PATCH THIS row. Falling through to the
 			// POST below would create a DUPLICATE at the same name rather than
@@ -349,15 +347,9 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 			sameContentID = r.ID
 			continue
 		}
-		if prevContent != "" && r.Content == prevContent {
+		if prevContent != "" && prevContent != content && r.Content == prevContent {
 			prevID = r.ID
 		}
-	}
-	if sameContentID != "" {
-		// Prefer the content-matching row over a prev-address row: it is the
-		// one carrying the wrong TTL, and the payload below already holds the
-		// desired content, so one PATCH converges both fields.
-		prevID = sameContentID
 	}
 	payload := map[string]any{
 		"type":    rec.ForwardType,
@@ -365,9 +357,31 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 		"content": content,
 		"ttl":     ttl,
 	}
-	if prevID != "" {
-		// Renumber xpf's OWN row in place — never a foreign row.
-		_, err = b.do(ctx, http.MethodPatch, "/zones/"+zoneID+"/dns_records/"+prevID, payload)
+	if sameContentCorrect {
+		// The desired record already exists. Delete xpf's stale previous value
+		// if it is still present, without writing the already-correct row.
+		if prevID == "" {
+			return nil
+		}
+		_, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+prevID, nil)
+		return err
+	}
+	targetID := prevID
+	if sameContentID != "" {
+		// Prefer the content-matching row over a prev-address row: it is the
+		// one carrying the wrong TTL, and the payload below already holds the
+		// desired content, so one PATCH converges both fields. Keep prevID
+		// separate so its stale row is deleted after a successful PATCH.
+		targetID = sameContentID
+	}
+	if targetID != "" {
+		_, err = b.do(ctx, http.MethodPatch, "/zones/"+zoneID+"/dns_records/"+targetID, payload)
+		if err != nil {
+			return err
+		}
+		if prevID != "" && targetID != prevID {
+			_, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+prevID, nil)
+		}
 		return err
 	}
 	// No xpf-owned row to update — create a new one alongside any foreign record.

@@ -219,6 +219,58 @@ func TestCloudflareRenumberPatchesOnlyOwnedRow(t *testing.T) {
 		t.Fatalf("foreign A was clobbered on renumber: content=%q (want 198.51.100.20)", got)
 	}
 }
+// TestCloudflareExistingNewValueRemovesStalePreviousRecord is the #10715
+// fail-on-revert for a renumber whose new value already exists at Cloudflare.
+// The previous value remains stale: both the exact-content no-op and the
+// TTL-correction path must clean it up without touching a foreign record.
+func TestCloudflareExistingNewValueRemovesStalePreviousRecord10715(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		liveTTL    int
+		wantPatches int
+	}{
+		{name: "renumber with desired TTL", liveTTL: 300, wantPatches: 0},
+		{name: "renumber with TTL-only correction", liveTTL: 3600, wantPatches: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newCFFakeAPI(t)
+			srv := httptest.NewServer(fake.handler())
+			defer srv.Close()
+			b := newCFTestBackend(t, srv, fake)
+
+			const fqdn = "wan.example.net"
+			foreignID := fake.seedRecordTTL("A", fqdn, "198.51.100.20", 1800)
+			newID := fake.seedRecordTTL("A", fqdn, "203.0.113.9", tc.liveTTL)
+			oldID := fake.seedRecordTTL("A", fqdn, "203.0.113.5", 300)
+			rec := hostRecordTTL(t, fqdn, "203.0.113.9", 300)
+			rec.PrevAddr = netip.MustParseAddr("203.0.113.5")
+			if err := b.UpsertLease(context.Background(), rec); err != nil {
+				t.Fatalf("renumber with existing new value: %v", err)
+			}
+
+			if fake.deleted != 1 {
+				t.Fatalf("#10715: expected stale PrevAddr row to be deleted exactly once, deleted=%d", fake.deleted)
+			}
+			if fake.patched != tc.wantPatches || fake.posted != 0 {
+				t.Fatalf("existing new value must be reused: patched=%d posted=%d, want patched=%d posted=0",
+					fake.patched, fake.posted, tc.wantPatches)
+			}
+			if _, ok := fake.records[oldID]; ok {
+				t.Fatal("#10715: stale PrevAddr row survived")
+			}
+			if got := fake.records[newID].TTL; got != 300 {
+				t.Errorf("new-value row TTL=%d, want 300", got)
+			}
+			if got := fake.records[foreignID]; got.Content != "198.51.100.20" || got.TTL != 1800 {
+				t.Errorf("foreign row changed: %+v", got)
+			}
+			if len(fake.records) != 2 {
+				t.Errorf("expected only the foreign and new-value rows, got %d", len(fake.records))
+			}
+		})
+	}
+}
+
 
 // TestCloudflareFirstPublishOntoForeignName is the #3739 H11 fail-on-revert for a
 // FIRST publish onto a name that already carries only a FOREIGN A (no xpf row,
