@@ -148,6 +148,19 @@
 - **Fix:** Added `else if (orig_proto == PROTO_ICMPV6) { old_sport = meta->dst_port; }` — `meta->dst_port` retains original echo ID since policy only changes `src_port`
 - **File:** `bpf/xdp/xdp_nat64.c` line 282
 
+### NAT64 to firewall-local IPv4 reinjects untranslated (#10685)
+- A NAT64 destination embedding a firewall-owned IPv4 resolved to
+  `LocalDelivery` while host-bound policy still judged the IPv6 wire tuple.
+  Consequently a v4-keyed `to-zone junos-host` deny missed, a `LocalMiss`
+  session was minted, and the original untranslated IPv6 frame was reinjected.
+- **Fix:** Drop NAT64 session misses whose extracted IPv4 target resolves to
+  `LocalDelivery`, before host-bound gates and session installation. The kernel
+  owns no synthetic NAT64 address to receive the untranslated frame.
+- **Regression test:** `userspace-dp/src/afxdp/tests_nat64_local_10685.rs`
+  drives the actual poll path with a v4-keyed deny and controls that ordinary
+  NAT64 transit continues to translate and forward.
+
+
 ### NAT64 reverse path copies Ethernet padding into IPv6 payload (#1641)
 - **Severity:** MAJOR — reverse-path packet corruption / L4 checksum failure
 - **Symptom:** Every TCP/UDP/ICMPv6 NAT64 reply whose original IPv4
