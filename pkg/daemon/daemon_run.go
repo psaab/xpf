@@ -348,7 +348,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 						key.DstPort = binary.BigEndian.Uint16(raw[42:44])
 						key.Protocol = proto
 						if val, err := rt.Sessions().GetV6(key); err == nil && val.IsReverse == 0 {
-							if ss.ShouldSyncZone(val.IngressZone) {
+							if ss.ShouldSyncSessionV6(val) {
 								ss.QueueSessionV6(key, val)
 							}
 						}
@@ -360,7 +360,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 						key.DstPort = binary.BigEndian.Uint16(raw[42:44])
 						key.Protocol = proto
 						if val, err := rt.Sessions().GetV4(key); err == nil && val.IsReverse == 0 {
-							if ss.ShouldSyncZone(val.IngressZone) {
+							if ss.ShouldSyncSessionV4(val) {
 								ss.QueueSessionV4(key, val)
 							}
 						}

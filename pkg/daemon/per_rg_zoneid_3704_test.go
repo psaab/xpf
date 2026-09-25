@@ -54,9 +54,9 @@ func TestZoneRGMapKeyedByStableZoneID(t *testing.T) {
 			t.Errorf("buildZoneIDs[%q] = %d, want StableZoneID %d",
 				tc.zone, zoneIDs[tc.zone], stable)
 		}
-		if rg, ok := rgMap[stable]; !ok || rg != tc.rg {
-			t.Errorf("zoneRGMap[StableZoneID(%q)=%d] = (%d, %v), want (%d, true)",
-				tc.zone, stable, rg, ok, tc.rg)
+		if rgs, ok := rgMap[stable]; !ok || len(rgs) != 1 || rgs[0] != tc.rg {
+			t.Errorf("zoneRGMap[StableZoneID(%q)=%d] = (%v, %v), want ([%d], true)",
+				tc.zone, stable, rgs, ok, tc.rg)
 		}
 	}
 
@@ -65,7 +65,7 @@ func TestZoneRGMapKeyedByStableZoneID(t *testing.T) {
 	ss := cluster.NewSessionSync(":0", "10.0.0.2:4785", nil)
 	ss.IsPrimaryFn = func() bool { return false }                  // NOT global primary
 	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 1 } // primary for RG 1 only
-	ss.SetZoneRGMap(rgMap)
+	ss.SetZoneOwnership(rgMap, nil, nil)
 
 	// trust -> RG 1 (primary): syncs via per-RG ownership despite IsPrimaryFn=false.
 	if !ss.ShouldSyncZone(config.StableZoneID("trust")) {

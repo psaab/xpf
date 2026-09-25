@@ -323,13 +323,13 @@ func TestBuildZoneRGMap(t *testing.T) {
 	m := buildZoneRGMap(cfg, zoneIDs)
 
 	// trust (zone 2) → reth0 → RG 1
-	if rg, ok := m[2]; !ok || rg != 1 {
-		t.Errorf("zone 'trust' (ID 2): expected RG 1, got %d (ok=%v)", rg, ok)
+	if rgs, ok := m[2]; !ok || len(rgs) != 1 || rgs[0] != 1 {
+		t.Errorf("zone 'trust' (ID 2): expected RG set [1], got %v (ok=%v)", rgs, ok)
 	}
 
 	// untrust (zone 3) → reth1 → RG 2
-	if rg, ok := m[3]; !ok || rg != 2 {
-		t.Errorf("zone 'untrust' (ID 3): expected RG 2, got %d (ok=%v)", rg, ok)
+	if rgs, ok := m[3]; !ok || len(rgs) != 1 || rgs[0] != 2 {
+		t.Errorf("zone 'untrust' (ID 3): expected RG set [2], got %v (ok=%v)", rgs, ok)
 	}
 
 	// dmz (zone 1) → ge-0/0/2 → no RG → not in map
@@ -337,6 +337,20 @@ func TestBuildZoneRGMap(t *testing.T) {
 		t.Error("zone 'dmz' (ID 1): should not be in zone RG map (no RG)")
 	}
 }
+func TestBuildZoneFoldRGMapResolvesEachIngressGroup11012(t *testing.T) {
+	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+		"reth0": {Name: "reth0", RedundancyGroup: 1},
+		"reth1": {Name: "reth1", RedundancyGroup: 2},
+	}}}
+	foldRG := buildZoneFoldRGMap(cfg)
+	for name, want := range map[string]int{"reth0": 1, "reth1": 2} {
+		fold := config.StableIfaceID(name)
+		if got, ok := foldRG[fold]; !ok || got != want {
+			t.Errorf("fold-to-RG map[%q/%#x] = (%d, %v), want (%d, true)", name, fold, got, ok, want)
+		}
+	}
+}
+
 
 // TestBuildZoneRGMapSkipsNilZones asserts that a nil zone value in
 // cfg.Security.Zones (reachable on the tolerant/programmatic/HA-peer-sync
@@ -369,8 +383,8 @@ func TestBuildZoneRGMapSkipsNilZones(t *testing.T) {
 	m := buildZoneRGMap(cfg, zoneIDs)
 
 	// The healthy zone is still mapped: trust (zone 2) → reth0 → RG 1.
-	if rg, ok := m[2]; !ok || rg != 1 {
-		t.Errorf("zone 'trust' (ID 2): expected RG 1, got %d (ok=%v)", rg, ok)
+	if rgs, ok := m[2]; !ok || len(rgs) != 1 || rgs[0] != 1 {
+		t.Errorf("zone 'trust' (ID 2): expected RG set [1], got %v (ok=%v)", rgs, ok)
 	}
 	// The nil zone contributes nothing.
 	if _, ok := m[9]; ok {
@@ -403,8 +417,8 @@ func TestBuildZoneRGMapSkipsNilInterfaceValue(t *testing.T) {
 	// Must not panic on the nil "reth9" interface value.
 	m := buildZoneRGMap(cfg, zoneIDs)
 
-	if rg, ok := m[2]; !ok || rg != 1 {
-		t.Errorf("zone 'trust' (ID 2): expected RG 1, got %d (ok=%v)", rg, ok)
+	if rgs, ok := m[2]; !ok || len(rgs) != 1 || rgs[0] != 1 {
+		t.Errorf("zone 'trust' (ID 2): expected RG set [1], got %v (ok=%v)", rgs, ok)
 	}
 	if _, ok := m[5]; ok {
 		t.Error("zone 'bad' (ID 5): nil interface value should contribute no RG")
@@ -582,5 +596,20 @@ func TestReconcileDiscoversVRRPInstances(t *testing.T) {
 	}
 	if !hasRG2 {
 		t.Error("should have RG 2 from cluster discovery")
+	}
+}
+func TestBuildZoneRGMapResolvesRedundantParent11012(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
+			"member-zone": {Interfaces: []string{"ge-0/0/1.0"}},
+		}},
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"reth0":     {Name: "reth0", RedundancyGroup: 2},
+			"ge-0/0/1": {Name: "ge-0/0/1", RedundantParent: "reth0"},
+		}},
+	}
+	got := buildZoneRGMap(cfg, map[string]uint16{"member-zone": 9})
+	if rgs := got[9]; len(rgs) != 1 || rgs[0] != 2 {
+		t.Fatalf("member-backed zone RG set = %v, want [2]", rgs)
 	}
 }

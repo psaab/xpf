@@ -66,11 +66,9 @@ func sweepIntervalsForDataPlane(dp any) (time.Duration, time.Duration) {
 func (s *SessionSync) ShouldSyncZone(zoneID uint16) bool {
 	if s.IsPrimaryForRGFn != nil {
 		s.zoneRGMu.RLock()
-		rgID, ok := s.zoneRGMap[zoneID]
+		zoneRG := s.zoneRGMap
 		s.zoneRGMu.RUnlock()
-		if ok {
-			return s.IsPrimaryForRGFn(rgID)
-		}
+		return zoneSetSyncs(zoneID, zoneRG, s.IsPrimaryForRGFn, s.IsPrimaryFn)
 	}
 	if s.IsPrimaryFn != nil {
 		return s.IsPrimaryFn()
@@ -99,7 +97,7 @@ func (s *SessionSync) stampSweepV4(
 		current.IsReverse != 0 ||
 		current.Created < threshold ||
 		current.Created > now ||
-		!s.ShouldSyncZone(current.IngressZone) {
+		!s.ShouldSyncSessionV4(current) {
 		return dataplane.SessionValue{}, false
 	}
 	s.stampInstallGenV4(key, &current)
@@ -118,7 +116,7 @@ func (s *SessionSync) stampSweepV6(
 		current.IsReverse != 0 ||
 		current.Created < threshold ||
 		current.Created > now ||
-		!s.ShouldSyncZone(current.IngressZone) {
+		!s.ShouldSyncSessionV6(current) {
 		return dataplane.SessionValueV6{}, false
 	}
 	s.stampInstallGenV6(key, &current)
@@ -260,7 +258,7 @@ func (s *SessionSync) syncSweep() int {
 			future = true
 			return true
 		}
-		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
+		if val.Created >= threshold && val.Created <= now && s.ShouldSyncSessionV4(val) {
 			announced := s.installTableAnnouncedV4(key)
 			var ok bool
 			val, ok = s.stampSweepV4(key, threshold, now)
@@ -308,7 +306,7 @@ func (s *SessionSync) syncSweep() int {
 			future = true
 			return true
 		}
-		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
+		if val.Created >= threshold && val.Created <= now && s.ShouldSyncSessionV6(val) {
 			announced := s.installTableAnnouncedV6(key)
 			var ok bool
 			val, ok = s.stampSweepV6(key, threshold, now)

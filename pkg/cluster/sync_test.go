@@ -2235,8 +2235,8 @@ func TestSetZoneRGMap(t *testing.T) {
 	if len(ss.zoneRGMap) != 3 {
 		t.Fatalf("expected 3 entries, got %d", len(ss.zoneRGMap))
 	}
-	if ss.zoneRGMap[1] != 1 {
-		t.Fatalf("zone 1 should map to RG 1")
+	if len(ss.zoneRGMap[1]) != 1 || ss.zoneRGMap[1][0] != 1 {
+		t.Fatalf("zone 1 should map to singleton RG set [1], got %v", ss.zoneRGMap[1])
 	}
 	ss.zoneRGMu.RUnlock()
 

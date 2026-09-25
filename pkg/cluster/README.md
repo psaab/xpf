@@ -4390,19 +4390,28 @@ outside the monitor loop:
   bulk-prime retry bound (35 s), exported so there is one number. Cells:
   `sync_cold_prime_ack_9626_test.go`.
 
-  **The stale-session reconcile judges zones by the bulk-start ownership
-  snapshot (#9655).** At BulkEnd, `reconcileStaleSessions` deletes a session
-  absent from the peer's authoritative bulk only when the bulk-start
-  ownership answer says this node does not own it.
-  - `SetZoneRGMap` bumps `zoneRGMapGen` when the map's CONTENTS change. The
-    reconcile skips a bulk whose snapshot came from an older generation,
-    because old answers could delete a session in a zone that has since moved
-    to this node. An identical map re-set by a config apply is not a change, so
-    a commit during a bulk does not cost it its reconcile.
-  - `snapshotZoneOwnership` captures the RG 0 `IsPrimaryFn` fallback once at
-    BulkStart. A zone named by the map uses its captured RG ownership answer;
-    an absent zone uses the captured RG 0 answer, matching the live
-    `ShouldSyncZone` predicate without re-querying ownership during reconcile.
+  **The stale-session reconcile judges ownership by the bulk-start snapshot
+  (#9655, #11012).** At BulkEnd, `reconcileStaleSessions` deletes a session
+  absent from the peer's authoritative bulk only when the bulk-start snapshot
+  says this node does not own that session.
+  - The zone map contains the complete, sorted set of positive RGs represented
+    by each zone. Live bulk-store walks and periodic sweeps resolve a session's
+    cluster-stable `IngressIfaceFold` to its ingress RG, using the local
+    `{ifindex, vlan}` resolver for local rows. This prevents a multi-RG zone
+    from being collapsed to whichever interface happened to be enumerated
+    first. A row whose fold cannot be resolved falls back to zone ownership;
+    `ShouldSyncZone` admits a mapped zone when this node is primary for any RG
+    in its set.
+  - `SetZoneOwnership` installs the zone set, fold-to-RG lookup and local fold
+    resolver atomically, and advances `zoneRGMapGen` on each apply because the
+    resolver closes over an apply-time interface snapshot. The legacy
+    `SetZoneRGMap` setter adapts a single-RG map and bumps the generation only
+    when its contents change. Reconcile skips a bulk whose ownership snapshot
+    generation is stale, because old answers could delete a session this node
+    now owns.
+  - `snapshotZoneOwnership` captures each RG's primary answer, the zone-level
+    answers and RG 0 fallback at BulkStart; per-session reconcile uses only
+    those captured answers, never re-querying ownership at BulkEnd.
   - A nil zone map has no ownership answers and takes no snapshot, so the bulk
     deletes nothing and the next one tries again. An installed empty map is a
     valid all-unmapped snapshot and still reconciles
@@ -4415,13 +4424,13 @@ outside the monitor loop:
   applying the RG 0 fallback does not delete a node-local flow merely because
   its zone has no RETH-backed RG mapping.
 
-  Cells: `sync_zone_snapshot_rg0_9655_test.go`; origin-gate controls:
-  `session_origin_10227_test.go`.
+  Cells: `sync_zone_snapshot_rg0_9655_test.go`, `sync_zone_rg_11012_test.go`;
+  origin-gate controls: `session_origin_10227_test.go`.
 
   **Accepted limitation, with its owner (#9626 item 3).** A cold prime carries
   only the redundancy groups this node is PRIMARY for when the bulk is built:
-  `storeBulkWalk` filters by `ShouldSyncZone`, and the table-truth snapshot
-  comes from the owner-RG export (`primaryOwnerRGIDs`,
+  `storeBulkWalk` filters by each session's ingress RG, and the table-truth
+  snapshot comes from the owner-RG export (`primaryOwnerRGIDs`,
   `pkg/daemon/daemon_ha_userspace_export.go`). A survivor that is still
   SECONDARY for an RG when a table-losing replacement reconnects sends none of
   that RG's standby copies. The window is narrow: heartbeat loss (`~1 s`) makes
@@ -4431,6 +4440,7 @@ outside the monitor loop:
   detection, or a timeout suppressed by the sync-recency or transfer-commit
   guards. Closing it means exporting standby copies on the owner-RG export path.
   That path's owner is the daemon's session export, not this latch.
+
 
   **The two classifiers consume each other's evidence (#9636).** `installConn`
   retires an incarnation on a raised heartbeat boot epoch, and the BulkStart arm

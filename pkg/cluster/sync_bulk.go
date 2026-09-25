@@ -237,7 +237,7 @@ func (s *SessionSync) storeBulkWalk() *bulkWalk {
 			if val.IsReverse != 0 {
 				return true
 			}
-			if !s.ShouldSyncZone(val.IngressZone) {
+			if !s.ShouldSyncSessionV4(val) {
 				w.skipped++
 				return true
 			}
@@ -249,7 +249,7 @@ func (s *SessionSync) storeBulkWalk() *bulkWalk {
 			if val.IsReverse != 0 {
 				return true
 			}
-			if !s.ShouldSyncZone(val.IngressZone) {
+			if !s.ShouldSyncSessionV6(val) {
 				w.skipped++
 				return true
 			}
