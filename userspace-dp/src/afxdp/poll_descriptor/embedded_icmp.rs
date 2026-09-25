@@ -126,10 +126,11 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
             icmp_match.resolution.neighbor_mac,
         );
     }
-    // A matched quote with no NAT rewrite is an untranslated live session.
-    // Keep it on this related-error path: the existing session is the
-    // admission authority, while ordinary flowless reverse-zone policy would
-    // incorrectly classify the error as a new packet and drop PMTUD.
+    // A matched quote with no NAT rewrite is an untranslated live-session
+    // candidate. Carry its expected arrival zone to the queued-policy
+    // adjudicator: a zone-consistent error may use the RELATED shortcut,
+    // while a cross-zone or unresolved arrival receives ordinary
+    // arrival-to-egress policy judgment.
     //
     // #9030 widened the old SNAT-only gate to test every rewrite field so
     // pure-DNAT, port-only, and composed NAT sessions reach their builders.
@@ -162,16 +163,23 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     // the zone check keeps PMTUD working while a wrong-zone forgery falls
     // to the gate below. Non-PMTUD NAT'd errors retain the gate
     // unconditionally, so the #9948 Time-Exceeded cell keeps proving it.
-    let (fwd_ingress_zone, fwd_egress_zone) = related_forward_zones(&icmp_match.metadata);
-    let expected_arrival_zone = if icmp_match.outbound_snat {
-        fwd_ingress_zone
+    // #10671: the matcher resolves whether this quote names the forward or
+    // reply packet and carries its expected arrival zone. Use that direction
+    // for untranslated errors; NAT PMTUD retains the session-forward rule.
+    let expected_arrival_zone = if untranslated_related {
+        icmp_match.related_expected_zone
     } else {
-        fwd_egress_zone
+        let (fwd_ingress_zone, fwd_egress_zone) =
+            related_forward_zones(&icmp_match.metadata);
+        if icmp_match.outbound_snat {
+            fwd_ingress_zone
+        } else {
+            fwd_egress_zone
+        }
     };
-    let related_admit = untranslated_related
-        || (expected_arrival_zone != 0
-            && arrival_zone == expected_arrival_zone
-            && outer_is_pmtud_error(packet_frame, meta));
+    let related_admit = expected_arrival_zone != 0
+        && arrival_zone == expected_arrival_zone
+        && (untranslated_related || outer_is_pmtud_error(packet_frame, meta));
     // Builders consume the match's resolution for L2 construction. Replace it
     // with the finalized (possibly zone-stamped FabricRedirect) decision before
     // building the prebuilt frame.
@@ -479,7 +487,7 @@ pub(super) fn outer_is_pmtud_error(packet_frame: &[u8], meta: UserspaceDpMeta) -
 /// #10666: the quoted session's FORWARD-direction zones (ingress side →
 /// egress side), normalizing a reverse-half match back to the forward
 /// flow so the RELATED arrival check reads one way for every match arm.
-pub(super) fn related_forward_zones(metadata: &SessionMetadata) -> (u16, u16) {
+pub(in crate::afxdp) fn related_forward_zones(metadata: &SessionMetadata) -> (u16, u16) {
     if metadata.is_reverse {
         (metadata.egress_zone, metadata.ingress_zone)
     } else {

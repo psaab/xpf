@@ -1504,6 +1504,7 @@ fn embedded_icmp_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };
@@ -1567,6 +1568,7 @@ fn embedded_icmp_no_route_uses_zone_encoded_fabric_redirect() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };
@@ -1630,6 +1632,7 @@ fn embedded_icmp_discard_route_uses_zone_encoded_fabric_redirect() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };
@@ -1689,6 +1692,7 @@ fn embedded_icmp_from_fabric_does_not_redirect_back_to_fabric() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };

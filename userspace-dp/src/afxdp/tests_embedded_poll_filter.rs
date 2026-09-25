@@ -7827,7 +7827,12 @@ fn outer_slack_quote_refused_at_match_9901() {
 /// gate to `return NotHandled` and the error falls through to ordinary
 /// flowless enforcement (WAN->LAN default deny) — no prebuilt forward is
 /// queued, so `scratch_forwards` is empty and this test goes RED.
-fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(install_session: bool) {
+fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
+    install_session: bool,
+    cross_zone_arrival: bool,
+    unknown_zone_arrival: bool,
+    reverse_half: bool,
+) {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
@@ -7845,7 +7850,17 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(install_session:
     snapshot.flow.allow_embedded_icmp = true;
     // Default-deny reverse: NO WAN->LAN permit. The LAN->WAN allow-all from
     // the fixture stays (the forward session's own permit).
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    if cross_zone_arrival {
+        // The packet arrives on a different zone than the quoted session's
+        // egress zone. Preserve its route but force the actual ingress zone
+        // used by the RELATED consumer and policy evaluator to LAN.
+        forwarding
+            .ifindex_to_zone_id
+            .insert(12, TEST_LAN_ZONE_ID);
+    } else if unknown_zone_arrival {
+        forwarding.ifindex_to_zone_id.remove(&12);
+    }
 
     // The error ingresses on the WAN (reth0.80, ifindex 12); the RELATED
     // return resolves egress toward the client on the LAN (reth1.0, ifindex
@@ -7956,56 +7971,95 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(install_session:
 
     let mut sessions = SessionTable::new();
     if install_session {
-        // Live permitted UN-NAT'd forward session (no translation at all).
-        assert!(sessions.install_with_protocol(
-            SessionKey {
-                addr_family: libc::AF_INET as u8,
-                protocol: PROTO_TCP,
-                src_ip: IpAddr::V4(client_ip),
-                dst_ip: IpAddr::V4(server_ip),
-                src_port: client_port,
-                dst_port: 80,
-                discriminator: Default::default(),
-                routing_domain: 0,
+        let session_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(if reverse_half { server_ip } else { client_ip }),
+            dst_ip: IpAddr::V4(if reverse_half { client_ip } else { server_ip }),
+            src_port: if reverse_half { 80 } else { client_port },
+            dst_port: if reverse_half { client_port } else { 80 },
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let session_decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: if reverse_half { 24 } else { 12 },
+                tx_ifindex: if reverse_half { 24 } else { 12 },
+                tunnel_endpoint_id: 0,
+                next_hop: Some(if reverse_half {
+                    IpAddr::V4(client_ip)
+                } else {
+                    IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))
+                }),
+                neighbor_mac: Some(if reverse_half {
+                    [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+                } else {
+                    [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]
+                }),
+                src_mac: Some(if reverse_half {
+                    [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]
+                } else {
+                    [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]
+                }),
+                tx_vlan_id: if reverse_half { 0 } else { 80 },
             },
-            SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-                    neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-                    src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-                    tx_vlan_id: 80,
-                },
-                nat: NatDecision::default(),
-                install_table_domain: 0,
-                install_table_check: 0,
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let session_metadata = SessionMetadata {
+            // The reverse-half case stores this single record's zones
+            // direction-relatively, swapped from the LAN->WAN forward tuple.
+            ingress_zone: if reverse_half {
+                TEST_WAN_ZONE_ID
+            } else {
+                TEST_LAN_ZONE_ID
             },
-            SessionMetadata {
-                ingress_zone: TEST_LAN_ZONE_ID,
-                egress_zone: TEST_WAN_ZONE_ID,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                owner_rg_id: 0,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter_idx: 0,
-                policy_counter: None,
+            egress_zone: if reverse_half {
+                TEST_LAN_ZONE_ID
+            } else if unknown_zone_arrival {
+                0
+            } else {
+                TEST_WAN_ZONE_ID
             },
-            123_000_000_000,
-            PROTO_TCP,
-            0x18,
-        ));
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: reverse_half,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        };
+        let installed = if reverse_half {
+            sessions.install_with_protocol_with_origin(
+                session_key,
+                session_decision,
+                session_metadata,
+                crate::session::SessionOrigin::ReverseFlow,
+                123_000_000_000,
+                PROTO_TCP,
+                0x18,
+            )
+        } else {
+            sessions.install_with_protocol(
+                session_key,
+                session_decision,
+                session_metadata,
+                123_000_000_000,
+                PROTO_TCP,
+                0x18,
+            )
+        };
+        assert!(installed, "live session fixture install");
     }
     let sessions_before = sessions.len();
 
@@ -8065,6 +8119,28 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(install_session:
         );
         return;
     }
+    if cross_zone_arrival || unknown_zone_arrival {
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "zone-mismatched ICMP error quoting a live session must not queue a RELATED forward"
+        );
+        assert_eq!(
+            binding.scratch.scratch_recycle.len(),
+            1,
+            "zone-mismatched error recycles its descriptor under default-deny"
+        );
+        assert_eq!(telemetry.dbg.policy_deny, 1);
+        let event = event_rx
+            .try_recv()
+            .expect("zone-mismatched policy-deny event")
+            .decode_dataplane_event()
+            .expect("zone-mismatched policy-deny payload");
+        assert_eq!(
+            event.kind,
+            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+        );
+        return;
+    }
 
     // The load-bearing #10286 assertion: the untranslated error quoting a
     // live permitted session is admitted as RELATED despite the reverse
@@ -8109,17 +8185,41 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(install_session:
 }
 #[test]
 fn poll_descriptor_untranslated_frag_needed_admitted_10286() {
-    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true);
+    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, false, false, false);
 }
 #[test]
 fn poll_descriptor_unsolicited_icmp_still_denied_10286() {
-    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(false);
+    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(false, false, false, false);
 }
+/// #10671 fail-on-revert: a live un-NAT'd session must not authorize an
+/// error whose actual arrival zone differs from the session's expected zone.
+#[test]
+fn poll_descriptor_cross_zone_untranslated_frag_needed_denied_10671() {
+    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, true, false, false);
+}
+/// Zone ID 0 cannot authorize RELATED admission even when both sides resolve
+/// to 0; the unknown arrival still faces ordinary flowless zone policy.
+#[test]
+fn poll_descriptor_unresolved_zone_untranslated_frag_needed_denied_10671() {
+    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, false, true, false);
+}
+
+/// A reverse-only session must authorize a forward quote via the reply key
+/// when it arrives from the forward egress zone (WAN); the reverse entry stores
+/// its zones direction-relatively and is the only installed lookup candidate.
+#[test]
+fn poll_descriptor_reply_key_reverse_half_frag_needed_admitted_10671() {
+    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, false, false, true);
+}
+
 
 /// #10286 v6 twin: an untranslated Packet-Too-Big quoting a live permitted
 /// v6 session must be admitted as RELATED despite the reverse default-deny.
 /// Fail-on-revert: same no-rewrite gate as the v4 cell.
-fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
+fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
+    cross_zone_arrival: bool,
+    reverse_half: bool,
+) {
     let router_ip: Ipv6Addr = "2001:559:8585:80::1".parse().expect("router v6");
     let client_ip: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("client v6");
     let server_ip: Ipv6Addr = "2606:4700:4700::1111".parse().expect("server v6");
@@ -8137,7 +8237,12 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
 
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    if cross_zone_arrival {
+        forwarding
+            .ifindex_to_zone_id
+            .insert(12, TEST_LAN_ZONE_ID);
+    }
 
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = Arc::<str>::from("reth0.80");
@@ -8244,55 +8349,93 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
     };
 
     let mut sessions = SessionTable::new();
-    assert!(sessions.install_with_protocol(
-        SessionKey {
-            addr_family: libc::AF_INET6 as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V6(client_ip),
-            dst_ip: IpAddr::V6(server_ip),
-            src_port: client_port,
-            dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
+    let session_key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V6(if reverse_half { server_ip } else { client_ip }),
+        dst_ip: IpAddr::V6(if reverse_half { client_ip } else { server_ip }),
+        src_port: if reverse_half { 80 } else { client_port },
+        dst_port: if reverse_half { client_port } else { 80 },
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let session_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: if reverse_half { 24 } else { 12 },
+            tx_ifindex: if reverse_half { 24 } else { 12 },
+            tunnel_endpoint_id: 0,
+            next_hop: Some(if reverse_half {
+                IpAddr::V6(client_ip)
+            } else {
+                IpAddr::V6(router_ip)
+            }),
+            neighbor_mac: Some(if reverse_half {
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+            } else {
+                [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]
+            }),
+            src_mac: Some(if reverse_half {
+                [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]
+            } else {
+                [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]
+            }),
+            tx_vlan_id: if reverse_half { 0 } else { 80 },
         },
-        SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V6(router_ip)),
-                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-                tx_vlan_id: 80,
-            },
-            nat: NatDecision::default(),
-            install_table_domain: 0,
-            install_table_check: 0,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    // The reverse-half case stores this single record's zones
+    // direction-relatively, swapped from the LAN->WAN forward tuple.
+    let session_metadata = SessionMetadata {
+        ingress_zone: if reverse_half {
+            TEST_WAN_ZONE_ID
+        } else {
+            TEST_LAN_ZONE_ID
         },
-        SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
+        egress_zone: if reverse_half {
+            TEST_LAN_ZONE_ID
+        } else {
+            TEST_WAN_ZONE_ID
         },
-        123_000_000_000,
-        PROTO_TCP,
-        0x18,
-    ));
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: reverse_half,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    let installed = if reverse_half {
+        sessions.install_with_protocol_with_origin(
+            session_key,
+            session_decision,
+            session_metadata,
+            crate::session::SessionOrigin::ReverseFlow,
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+        )
+    } else {
+        sessions.install_with_protocol(
+            session_key,
+            session_decision,
+            session_metadata,
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+        )
+    };
+    assert!(installed, "live v6 session fixture install");
     let sessions_before = sessions.len();
 
     let mut screen = ScreenState::new();
@@ -8325,6 +8468,24 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
         &worker_ctx,
         &mut telemetry,
     );
+    if cross_zone_arrival {
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "cross-zone ICMPv6 error quoting a live session must not queue a RELATED forward"
+        );
+        assert_eq!(binding.scratch.scratch_recycle.len(), 1);
+        assert_eq!(telemetry.dbg.policy_deny, 1);
+        let event = event_rx
+            .try_recv()
+            .expect("cross-zone policy-deny event")
+            .decode_dataplane_event()
+            .expect("cross-zone policy-deny payload");
+        assert_eq!(
+            event.kind,
+            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+        );
+        return;
+    }
 
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
@@ -8364,8 +8525,22 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
 }
 #[test]
 fn poll_descriptor_untranslated_ptb_v6_admitted_10286() {
-    poll_descriptor_untranslated_ptb_v6_admitted_10286_impl();
+    poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(false, false);
 }
+/// #10671 v6 fail-on-revert: an un-NAT'd session does not authorize a cross-zone
+/// PTB; it must face the actual arrival-to-egress policy.
+#[test]
+fn poll_descriptor_cross_zone_untranslated_ptb_v6_denied_10671() {
+    poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(true, false);
+}
+
+/// A reply-key reverse-half match quotes the forward packet and expects arrival
+/// from the forward egress zone (WAN), with default-deny still enforced on miss.
+#[test]
+fn poll_descriptor_reply_key_reverse_half_ptb_v6_admitted_10671() {
+    poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(false, true);
+}
+
 
 /// #10672 (#10286 residual): an untranslated Fragmentation-Needed quoting the
 /// REPLY packet (server → client) of a live permitted inbound flow must egress
@@ -8569,7 +8744,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         PROTO_TCP,
         0x18,
     ));
-    assert!(sessions.install_with_protocol(
+    assert!(sessions.install_with_protocol_with_origin(
         SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol: PROTO_TCP,
@@ -8596,9 +8771,11 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
             install_table_domain: 0,
             install_table_check: 0,
         },
+        // Reverse-half zones are direction-relative; keep them swapped from
+        // the forward WAN->LAN metadata so #10671 normalizes the quoted reply.
         SessionMetadata {
-            ingress_zone: TEST_WAN_ZONE_ID,
-            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
             egress_zone_check: 0,
             ingress_ifindex: 0,
@@ -8614,6 +8791,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        crate::session::SessionOrigin::ReverseFlow,
         123_000_000_000,
         PROTO_TCP,
         0x18,
@@ -8890,7 +9068,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         PROTO_TCP,
         0x18,
     ));
-    assert!(sessions.install_with_protocol(
+    assert!(sessions.install_with_protocol_with_origin(
         SessionKey {
             addr_family: libc::AF_INET6 as u8,
             protocol: PROTO_TCP,
@@ -8917,9 +9095,11 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
             install_table_domain: 0,
             install_table_check: 0,
         },
+        // Reverse-half zones are direction-relative; keep them swapped from
+        // the forward WAN->LAN metadata so #10671 normalizes the quoted reply.
         SessionMetadata {
-            ingress_zone: TEST_WAN_ZONE_ID,
-            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
             egress_zone_check: 0,
             ingress_ifindex: 0,
@@ -8935,6 +9115,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        crate::session::SessionOrigin::ReverseFlow,
         123_000_000_000,
         PROTO_TCP,
         0x18,

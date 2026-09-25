@@ -63,7 +63,7 @@ mod session_hit_authority;
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 use embedded_icmp::enforce_queued_embedded_icmp_policy;
 pub(in crate::afxdp) use embedded_icmp::{
-    EmbeddedIcmpReversal, try_reverse_embedded_icmp_error,
+    EmbeddedIcmpReversal, related_forward_zones, try_reverse_embedded_icmp_error,
 };
 use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
 use flow_cache_seed::stage_flow_cache_seed;

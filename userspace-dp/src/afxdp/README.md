@@ -708,6 +708,11 @@ sync.
     gate into clean untranslated flowless forwarding. Both directions ride
     the admitted session like the #5690 inbound reversal (prebuilt forward,
     `flow_key = None`, gated on `allow_embedded_icmp`).
+    The untranslated RELATED shortcut is zone-scoped (#10671): the quoted
+    session's expected arrival zone is derived from match direction, and only
+    a resolved, nonzero match bypasses the reverse flowless policy pair; a
+    mismatch or unresolved zone is judged by arrival-to-egress policy like a
+    translated error.
   - **#6472 — NAT64 (cross-family) ICMP error translation on the flowless
     arm:** the RFC 7915 §4.2/§5.2 translators in `nat64.rs` were previously
     reachable only via `build_nat64_forwarded_frame` on the FLOW-BACKED path,

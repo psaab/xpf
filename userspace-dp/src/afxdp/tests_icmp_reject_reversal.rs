@@ -360,6 +360,7 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
@@ -525,6 +526,7 @@ fn icmp_te_nat_reversal_v4_with_port_snat() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
@@ -655,6 +657,7 @@ fn icmp_dest_unreach_nat_reversal_v4() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
@@ -721,6 +724,7 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
         embedded_proto: PROTO_TCP,
         resolution: icmp_err_resolution_v4(client_c),
         metadata: icmp_err_metadata(),
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
@@ -795,6 +799,7 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
         embedded_proto: PROTO_TCP,
         resolution: icmp_err_resolution_v4(client_c),
         metadata: icmp_err_metadata(),
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
@@ -850,6 +855,7 @@ fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
         embedded_proto: PROTO_TCP,
         resolution: icmp_err_resolution_v4(client_ip),
         metadata: icmp_err_metadata(),
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
@@ -945,6 +951,7 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
@@ -1094,6 +1101,7 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
             tx_vlan_id: 0,
         },
         metadata: icmp_err_metadata(),
+        related_expected_zone: 0,
         outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };

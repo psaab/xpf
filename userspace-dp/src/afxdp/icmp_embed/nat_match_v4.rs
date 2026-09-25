@@ -130,6 +130,11 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         if !ctx.sessions.note_icmp_error_delivered(&fwd.key, now_ns) {
             return EmbeddedMatchOutcome::BudgetDenied;
         }
+        // #10671: the quote matched via its reply, so it names the session's
+        // forward packet in post-NAT form — an inbound error expects the
+        // far-side (egress) zone. Translated matches ignore the field.
+        let (_, fwd_egress_zone) =
+            crate::afxdp::poll_descriptor::related_forward_zones(&fwd.metadata);
         return EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
             nat,
             original_src,
@@ -138,6 +143,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             original_dst_port,
             embedded_proto: hdr.proto,
             resolution,
+            related_expected_zone: fwd_egress_zone,
             metadata: fwd.metadata,
             outbound_snat: false,
             budget_key: fwd.key.clone(),
@@ -227,6 +233,19 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         && !sl.metadata.is_reverse
         && sl.decision.nat.rewrite_src.is_some()
         && sl.decision.nat.rewrite_dst.is_none();
+    // #10671: the quoted packet is the session's reply (an outbound error)
+    // exactly when the match crossed direction (`via_reply_key XOR
+    // is_reverse`): a reply-key hit on a forward entry, or an as-is hit on
+    // a reverse entry. Inbound errors must arrive from the far-side
+    // (egress) zone; outbound ones from the near-side (ingress) zone.
+    let quoted_is_reply = via_reply_key != sl.metadata.is_reverse;
+    let (fwd_ingress_zone, fwd_egress_zone) =
+        crate::afxdp::poll_descriptor::related_forward_zones(&sl.metadata);
+    let related_expected_zone = if quoted_is_reply {
+        fwd_ingress_zone
+    } else {
+        fwd_egress_zone
+    };
     EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
         nat: sl.decision.nat,
         original_src: emb_src,
@@ -240,5 +259,6 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         metadata: sl.metadata,
         outbound_snat,
         budget_key,
+        related_expected_zone,
     })
 }
