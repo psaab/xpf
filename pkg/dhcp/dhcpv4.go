@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -17,6 +18,12 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 )
+
+// dhcpClasslessTrustOverrideEnv is the explicit operator escape hatch shared
+// with the FRR/management-VRF classless consumers (#9943). When set to "1" an
+// otherwise-refused DHCPv4 default gateway is honored with a loud security
+// warning. Unset by default.
+const dhcpClasslessTrustOverrideEnv = "XPF_DHCP_TRUST_CLASSLESS_OVERRIDE"
 
 // runDHCPv4 runs the DHCPv4 acquisition and renewal cycle. The initial
 // acquisition is a full DORA (Discover→Offer→Request→Ack). At T1 the
@@ -389,10 +396,13 @@ func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
 			lease.Gateway = defGW
 		}
 	} else {
-		// Gateway (option 3) — honored only when option 121/249 is absent.
+		// Gateway (option 3) — honored only when option 121/249 is absent,
+		// and only when the value passes the same martian gate destinations
+		// get (#10728 A10b-F02): a rogue server must not install a bogus
+		// default next-hop.
 		routers := ack.Router()
 		if len(routers) > 0 {
-			if gw, ok := netip.AddrFromSlice(routers[0].To4()); ok {
+			if gw, ok := netip.AddrFromSlice(routers[0].To4()); ok && dhcpDefaultGatewayAcceptable(gw, "option-3") {
 				lease.Gateway = gw
 			}
 		}
@@ -492,11 +502,15 @@ func classlessStaticRoutes(ack *dhcpv4.DHCPv4) (routes []LeaseRoute, defaultGW n
 		}
 		if ones == 0 {
 			// Default-route entry — supplies lease.Gateway (RFC 3442's way
-			// to express the default gateway). First one wins, matching the
-			// single-gateway model of the option-3 path (routers[0]).
-			if !defaultGW.IsValid() {
+			// to express the default gateway). First VALID one wins: a
+			// martian gateway is refused like an option-3 martian (#10728
+			// A10b-F02) rather than poisoning the default next-hop.
+			if !defaultGW.IsValid() && dhcpDefaultGatewayAcceptable(gw, "option-121/0") {
 				defaultGW = gw
 			}
+			continue
+		}
+		if !dhcpDefaultGatewayAcceptable(gw, "option-121-route") {
 			continue
 		}
 		routes = append(routes, LeaseRoute{
@@ -538,5 +552,25 @@ func ClasslessRouteIsMartian(prefix netip.Prefix) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// dhcpDefaultGatewayAcceptable reports whether a DHCP-supplied gateway value
+// may become a next-hop (#10728 A10b-F02). The value gets the same martian
+// gate classless destinations get: a gateway inside a non-forwardable range
+// is refused with a loud warning instead of becoming the default (or classless)
+// next-hop and a neighbor entry. The XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1
+// escape hatch honors it anyway, matching the destination consumers.
+func dhcpDefaultGatewayAcceptable(gw netip.Addr, source string) bool {
+	if !ClasslessRouteIsMartian(netip.PrefixFrom(gw, 32)) {
+		return true
+	}
+	if os.Getenv(dhcpClasslessTrustOverrideEnv) == "1" {
+		slog.Warn("dhcp: honoring martian DHCP gateway under explicit override",
+			"source", source, "gateway", gw.String(), "override", dhcpClasslessTrustOverrideEnv)
+		return true
+	}
+	slog.Warn("dhcp: refusing martian DHCP gateway; no next-hop installed from this option",
+		"source", source, "gateway", gw.String())
 	return false
 }
