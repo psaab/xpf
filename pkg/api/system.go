@@ -130,13 +130,7 @@ func (s *Server) pingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count := req.Count
-	if count <= 0 {
-		count = 5
-	}
-	if count > 100 {
-		count = 100
-	}
+	count := diagcmd.ClampPingCount(req.Count)
 
 	// Aggregate concurrency bound (#5057): acquire a diagnostic slot
 	// before spawning any child. Fail-fast with 429 when the cap is

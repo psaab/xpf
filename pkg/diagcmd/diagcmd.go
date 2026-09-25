@@ -76,8 +76,9 @@ const MaxArgLen = 512
 // never reaches exec or the combined-output line scanner (#6904).
 //
 // It returns a plain error naming the field and both lengths; each surface
-// wraps it in its own transport error — gRPC in codes.InvalidArgument, REST in
-// a 400 — so the surfaces share the RULE without sharing a status vocabulary.
+// reports it in its own vocabulary — gRPC as codes.InvalidArgument, REST as
+// a 400, the CLI unwrapped — so the surfaces share the RULE without sharing
+// a status vocabulary.
 func CheckArg(name, v string) error {
 	if len(v) > MaxArgLen {
 		return fmt.Errorf("%s exceeds %d bytes (%d)", name, MaxArgLen, len(v))
@@ -86,7 +87,7 @@ func CheckArg(name, v string) error {
 }
 
 // CheckArgs bounds the shared ping/traceroute string fields in one pass, in a
-// FIXED order so both surfaces report the same field first for a request that
+// FIXED order so every surface reports the same field first for a request that
 // violates more than one.
 func CheckArgs(target, source, routingInstance string) error {
 	for _, f := range []struct{ name, val string }{
@@ -101,6 +102,33 @@ func CheckArgs(target, source, routingInstance string) error {
 	return nil
 }
 
+// DefaultPingCount is the probe count used when the operator does not supply
+// one (a REST/gRPC 0, an omitted CLI `count`), and MaxPingCount is the ceiling
+// every control surface enforces. They live here next to MaxPingSize and
+// MaxArgLen for the same reason: three surfaces enforcing one rule from three
+// literals is how they drift (#10727 DR-26:A10-F5 — the local CLI never clamped
+// count at all while REST and gRPC each clamped to their own inline 5/100).
+const (
+	DefaultPingCount = 5
+	MaxPingCount     = 100
+)
+
+// ClampPingCount maps an operator-supplied probe count to the 1..100 range
+// every control surface enforces: <= 0 means "unset" and yields the default 5,
+// above 100 is capped at 100. REST and gRPC call it on their structured count;
+// the CLI calls it on a successfully-parsed count token (a non-numeric token is
+// preserved for the ping child to reject, mirroring the -s handling in the CLI
+// builder).
+func ClampPingCount(n int) int {
+	if n <= 0 {
+		return DefaultPingCount
+	}
+	if n > MaxPingCount {
+		return MaxPingCount
+	}
+	return n
+}
+
 // PingOptions carries the already-validated, already-clamped ping
 // parameters the three control surfaces collect from their respective
 // request shapes (CLI argv, REST JSON, gRPC protobuf). The builder owns
@@ -108,7 +136,7 @@ func CheckArgs(target, source, routingInstance string) error {
 type PingOptions struct {
 	Target string
 	// Count is the ICMP probe count passed to ping -c. Callers clamp it
-	// before constructing the options.
+	// with ClampPingCount before constructing the options.
 	Count string
 	// Source is an optional source address (ping -I); empty means omit.
 	Source string
