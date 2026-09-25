@@ -624,10 +624,10 @@ pub(crate) struct BindingStatus {
     /// it and Go/Rust read 0).
     #[serde(rename = "nat64_frag_dropped", default)]
     pub nat64_frag_dropped: u64,
-    /// #7054: first-fragment installs that evicted a still-LIVE fragment
-    /// association because the shard was at cap with nothing expired to
-    /// reclaim. Additive + `default`, so an older reader simply does not see
-    /// it and no interpretation of existing bytes changes.
+    /// #7054: first-fragment installs that evicted the same source's oldest
+    /// live association at its quota. A full shard refuses an under-quota
+    /// source rather than evicting a foreign association. Additive + `default`,
+    /// so an older reader simply does not see it and no existing bytes change.
     #[serde(rename = "nat64_frag_assoc_evicted", default)]
     pub nat64_frag_assoc_evicted: u64,
     /// #5623: fail-closed NAT64 SOURCE-ineligibility drops — an incoming IPv6

@@ -853,14 +853,11 @@ pub(in crate::afxdp) struct BatchCounters {
     // let real fragments traverse end-to-end (#3291 stage 4) is deferred, so
     // this is the observable-drop half of #2562.
     nat64_frag_dropped: u64,
-    // #7054: first-fragment installs that evicted a still-LIVE association
-    // because their shard was at `FRAG_CAP_PER_SHARD` with nothing
-    // expired to reclaim. The eviction itself is correct — a fixed ceiling has
-    // to sacrifice something — but it was SILENT: the victim's non-first
-    // fragments then miss and are dropped fail-closed, and the only trace was a
-    // `nat64_frag_dropped` bump indistinguishable from an ordinary orphan.
-    // Counting it separates "capacity pressure" from "reorder/orphan", which is
-    // what tells an operator whether the shard cap is the problem.
+    // #7054: first-fragment installs that reach a source's live quota evict
+    // that source's oldest association. If a shard is full while an incoming
+    // source is below quota, its install is refused rather than evicting a
+    // foreign association. This count separates live source-quota eviction
+    // from ordinary reorder/orphan drops.
     nat64_frag_assoc_evicted: u64,
     // #5623: fail-closed NAT64 SOURCE-ineligibility drops — an incoming IPv6
     // packet whose SOURCE lies within a configured Pref64 (a looping/synthesized

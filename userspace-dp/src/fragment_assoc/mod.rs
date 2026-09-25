@@ -47,18 +47,17 @@
 //!     a released (reusable) translation. Non-first fragments only CONSULT — the
 //!     load-bearing DoS property: an attacker cannot grow the table with cheap
 //!     headerless fragments.
-//!   * BOUNDED: a fixed shard count x a fixed per-shard cap, LRU eviction, no
-//!     growth. Short TTL (~2s): we ASSOCIATE, we do not RFC-reassemble — real
-//!     fragments of one datagram arrive within microseconds-milliseconds; the
-//!     short TTL covers reorder/jitter while evicting attack residue fast.
-//!   * PRUNE-BEFORE-EVICT (#5447): on a full shard `install` reclaims EXPIRED
-//!     entries FIRST (same monotonic clock `lookup` prunes with) and only evicts
-//!     the oldest LIVE entry if the shard is STILL at cap. Without this, a flood
-//!     of first fragments (each a distinct ident) fills the shard and the LRU
-//!     eviction would sacrifice a still-LIVE association — whose non-first
-//!     fragments have not yet arrived — to an EXPIRED slot squatting in front,
-//!     dropping legitimate fragments fail-closed. When every entry is live the
-//!     hard capacity bound is unchanged (oldest live entry still evicted).
+//!   * BOUNDED: a fixed shard count x a fixed per-shard cap, with no growth.
+//!     Shards are selected by source address, and each source has a smaller
+//!     32-entry quota, so one source cannot occupy even its whole shard. At its
+//!     quota, a source replaces its own oldest association; if its shard is full
+//!     before it reaches quota, the new association is refused rather than
+//!     evicting another source's live entry.
+//!   * PRUNE-BEFORE-EVICT (#5447): before an install evicts for the per-source
+//!     quota or refuses an install at a full shard, it reclaims EXPIRED entries
+//!     FIRST (same monotonic clock `lookup` prunes with). A source at quota only
+//!     evicts its own oldest LIVE association; another source is never the
+//!     victim of a source-limit eviction.
 //!   * CROSS-WORKER visible for free: the cache rides `Nat64State`, which is
 //!     shared across all workers behind `Arc<ForwardingState>` (ArcSwap) and
 //!     threaded across config reloads by `from_snapshots_with_previous` — the
@@ -162,13 +161,16 @@ pub(crate) static NAT64_FRAG_PROTOCOL_ALIAS_MISSES: AtomicU64 = AtomicU64::new(0
 pub(crate) static FRAG_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const FRAG_SHARDS: usize = 16;
-/// Fixed per-shard entry cap (LRU eviction on overflow). Total ceiling is
+/// Fixed per-shard entry cap. Total ceiling is
 /// `FRAG_SHARDS * FRAG_CAP_PER_SHARD` = 1024 entries; each entry is
 /// a `Copy` `SessionDecision` + an optional `Nat64ReverseInfo` + a deadline —
 /// a few hundred bytes, so a few hundred KB fixed ceiling. No payload bytes are
 /// stored (no amplification by datagram size).
 pub(crate) const FRAG_CAP_PER_SHARD: usize = 64;
-/// Association lifetime. Deliberately SHORT (2s, not the RFC-6864 60s
+/// Maximum associations charged to one source address across the cache. Source-
+/// based shard selection makes the count local; keeping it below the shard cap
+/// reserves room for other sources even when their addresses share a shard.
+pub(crate) const FRAG_CAP_PER_SOURCE: usize = FRAG_CAP_PER_SHARD / 2;
 /// reassembly timeout): we associate a first fragment's decision with its
 /// non-first fragments, which arrive on the fast path within
 /// microseconds-milliseconds. Refreshed on every hit.
@@ -419,37 +421,24 @@ fn ip_octets(ip: IpAddr, out: &mut [u8; 16]) -> usize {
     }
 }
 
-/// FNV-1a over the port-free key -> shard index. Deterministic so the same key
-/// always maps to the same shard on install and consult (across workers).
+/// FNV-1a over the source address -> shard index. Deterministic so every
+/// association for one source maps to one bucket on every worker; this lets
+/// `install` enforce the network-wide per-source cap using its existing shard
+/// lock, with no cross-shard scan or global lock.
 ///
-/// #5798: the #5798 authority + protocol fields are DELIBERATELY NOT mixed in
-/// here. The shard index stays the coarse `(family, src, dst, ident)` digest —
-/// including the documented `ident.to_be_bytes()` byte order — for two reasons:
-///
-///  1. Correctness does not need it. Shard selection only decides WHICH bucket
-///     is scanned; membership is decided by full-key equality inside that
-///     bucket. A cross-domain fragment lands in the SAME shard, finds no equal
-///     key, and misses cleanly — which is exactly the fail-closed outcome.
-///  2. It keeps same-datagram candidates CO-LOCATED, so a cross-domain
-///     aliasing attempt is observable with a single-shard scan rather than a
-///     walk of all `FRAG_SHARDS` buckets.
+/// The rest of the fragment key is deliberately excluded. In particular,
+/// same-source candidates with different destinations, identifiers, protocols,
+/// or ingress authorities stay co-located for the full-key miss and alias
+/// diagnostics in `lookup`. Membership is still decided by full-key equality.
 pub(crate) fn frag_shard_index(key: &FragKey) -> usize {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |b: u8| {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
-    mix(key.addr_family);
     let mut buf = [0u8; 16];
     let n = ip_octets(key.src, &mut buf);
     for &b in &buf[..n] {
-        mix(b);
-    }
-    let n = ip_octets(key.dst, &mut buf);
-    for &b in &buf[..n] {
-        mix(b);
-    }
-    for b in key.ident.to_be_bytes() {
         mix(b);
     }
     (h as usize) & (FRAG_SHARDS - 1)
@@ -490,13 +479,11 @@ impl FragAssoc {
     /// Install (or refresh) the association a FIRST fragment established. Only a
     /// first fragment reaches this (the caller gates on offset 0 / MF=1 + an
     /// admitted, resolved decision), so non-first fragments can never grow the
-    /// table. On a full shard EXPIRED entries are pruned first (reclaiming dead
-    /// slots that a first-fragment flood would otherwise leave squatting), and
-    /// only if the shard is STILL at cap is the OLDEST (front) LIVE entry
-    /// evicted -> hard, fixed memory ceiling that no longer sacrifices a live
-    /// association to an expired one (#5447). A repeat install of the same key
-    /// refreshes the deadline and moves the entry to the back
-    /// (most-recently-used).
+    /// table. A full shard prunes EXPIRED entries first, then an at-quota source
+    /// replaces its own oldest LIVE entry. If the shard remains full but this
+    /// source is below quota, the install is refused instead of evicting a
+    /// foreign source's association (#10714). A repeat install of the same key
+    /// refreshes the deadline and moves the entry to the back (most-recently-used).
     ///
     /// #5624: `generation` is the current config-snapshot generation the first
     /// fragment was admitted + resolved under. It is stamped on the entry (and
@@ -545,21 +532,22 @@ impl FragAssoc {
             shard.push(e);
             return false;
         }
-        if shard.len() >= FRAG_CAP_PER_SHARD {
-            // Reclaim EXPIRED slots before touching a live one. Under a flood of
-            // first fragments (each a distinct ident -> a fresh install) the
-            // shard fills with entries, some already past their (short) TTL. A
-            // bare `remove(0)` would evict the OLDEST entry regardless of
-            // liveness, dropping a still-live association whose non-first
-            // fragments have not arrived yet (they would then miss + fail
-            // closed, #5447). Prune expired first using the SAME monotonic clock
-            // `lookup` uses; only if the shard is STILL at cap (every entry
-            // live) do we fall back to evicting the oldest live entry — the
-            // unavoidable hard capacity bound.
+        if shard.len() >= FRAG_CAP_PER_SOURCE {
+            // Prune expired slots before enforcing either limit. When source
+            // pressure reaches its quota, only its own oldest LIVE association
+            // is eligible for replacement; when the shard is full of foreign
+            // live entries, refusing this install protects those associations.
             shard.retain(|e| frag_entry_live(e, now_ns));
-            if shard.len() >= FRAG_CAP_PER_SHARD {
-                shard.remove(0);
-                evicted_live = true;
+            let source_len = shard.iter().filter(|e| e.key.src == key.src).count();
+            if source_len >= FRAG_CAP_PER_SOURCE {
+                if let Some(pos) = shard.iter().position(|e| e.key.src == key.src) {
+                    shard.remove(pos);
+                    evicted_live = true;
+                } else {
+                    return false;
+                }
+            } else if shard.len() >= FRAG_CAP_PER_SHARD {
+                return false;
             }
         }
         shard.push(FragEntry {
