@@ -139,6 +139,12 @@ sanitizer's allocation-free fast path means an already-clean record — every
 ordinary one — pays a scan and no allocation, which is what keeps this
 acceptable on the shared dataplane event path described below.
 
+The hostname is sanitized at that same frame boundary, independently of
+where the client was constructed. Only hostname-token bytes are allowed;
+spaces, control characters, line breaks, and other framing delimiters are
+replaced with `_` for both network RFC 3164/RFC 5424 and local RFC 5424
+records. The clean-hostname fast path allocates nothing.
+
 ## RFC 5424 SD-PARAM values are escaped at the interpolation (#9321)
 
 `formatStructuredMsg` builds the Junos `[junos@2636.1.1.1.2.129 …]`

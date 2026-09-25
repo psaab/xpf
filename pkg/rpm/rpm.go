@@ -878,7 +878,19 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 		DisableKeepAlives: true,
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			// A network-reachable health endpoint can return attacker-controlled
+			// Location headers. Keep one probe from fanning out into an unbounded
+			// chain of additional requests.
+			if len(via) > maxProbeRedirectHops {
+				return fmt.Errorf("RPM HTTP probe redirect limit (%d hops) exceeded", maxProbeRedirectHops)
+			}
+			return nil
+		},
+	}
 
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -925,7 +937,7 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 	// dominating the probe window inside that ceiling. Hitting the limit is NOT
 	// an error -- the response arrived and was readable, which is what the probe
 	// asked; only a read FAILURE is.
-	_, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, maxProbeBodyBytes9049))
+	drainErr := drainProbeBody(resp.Body)
 	resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
@@ -952,6 +964,15 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 // succeeds -- the server answered. Treating a big body as a failed probe would
 // score a healthy path down for a property the probe does not measure.
 const maxProbeBodyBytes9049 = 1 << 20
+
+// maxProbeRedirectHops bounds the number of additional requests one probe can
+// make after the configured target redirects.
+const maxProbeRedirectHops = 3
+
+func drainProbeBody(body io.Reader) error {
+	_, err := io.Copy(io.Discard, io.LimitReader(body, maxProbeBodyBytes9049))
+	return err
+}
 
 // probeMeasurementIdentity renders the RESOLVED measurement a verdict is about
 // (#6561): everything that determines WHAT is being probed and BY WHICH PATH.

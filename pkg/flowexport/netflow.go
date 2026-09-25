@@ -251,7 +251,7 @@ func recordSize(fields []templateField) int {
 type nfHeader struct {
 	Version   uint16
 	Count     uint16
-	SysUptime uint32 // milliseconds since boot
+	SysUptime uint32 // milliseconds since boot; wraps mod 2^32 (~49.7 d, see NetflowSysUptimeWrapMs)
 	UnixSecs  uint32
 	SeqNumber uint32
 	SourceID  uint32
@@ -512,12 +512,24 @@ func encodeRecordV6(b []byte, off int, r FlowRecord, bootTime time.Time,
 	return startOff + recSize
 }
 
+// NetflowSysUptimeWrapMs is the NetFlow v9 sysUptime wrap period in
+// milliseconds (#10726 A9-F5). SysUptime and the FirstSwitched/LastSwitched
+// record fields are uint32 milliseconds since boot (RFC 3954 §5.1/§8), so on
+// a host up longer than 2^32 ms (~49.7 days) they wrap to zero and keep
+// counting. Collectors MUST NOT read a SysUptime decrease (or a
+// FirstSwitched smaller than a previously seen value from the same exporter)
+// as a device reboot — correlate with the packet UnixSecs and sequence
+// number to disambiguate wrap from restart. An exported constant (rather
+// than a comment alone) so collector-side tooling and tests can reference
+// the exact boundary.
+const NetflowSysUptimeWrapMs = uint64(1) << 32
+
 func uptimeMs(boot, t time.Time) uint32 {
 	d := t.Sub(boot)
 	if d < 0 {
 		return 0
 	}
-	return uint32(d.Milliseconds())
+	return uint32(d.Milliseconds() % int64(NetflowSysUptimeWrapMs))
 }
 
 // Exporter sends NetFlow v9 packets to configured collectors.

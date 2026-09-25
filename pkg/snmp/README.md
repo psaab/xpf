@@ -5,6 +5,13 @@ versions) and GETBULK (v2c/v3 only — GETBULK is not an SNMPv1 PDU) on
 ifTable, ifXTable, and a small set of system OIDs. Also sends link-up /
 link-down traps. ASN.1 BER encoding is hand-coded, no external library.
 
+## Trap request IDs (#10726)
+
+SNMP link-trap request IDs are drawn from `crypto/rand`, in the
+nonnegative 31-bit range used by the BER INTEGER encoder. An entropy-read
+failure uses ID 0 rather than suppressing a link notification; the ID is a
+correlation field, not an authentication mechanism.
+
 ## SNMPv1 polling (RFC 1157 / RFC 2089, #5049)
 
 The request dispatch (`handlePacketFrom`) routes the message version field:

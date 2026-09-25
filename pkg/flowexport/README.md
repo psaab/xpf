@@ -99,6 +99,11 @@ combines both as `time.Unix(Created, CreatedNanos)`. The exported
 `uptimeMs` now reflect the true sub-second start. The fallback path
 (`Created == 0`) is unchanged.
 
+Values outside the wire contract are clamped to `999,999,999` ns before
+conversion to `time.Time`; `logging.InvalidCreatedNanos()` reports the
+process-lifetime count of rejected remainders. This prevents `time.Unix`
+from carrying a malformed sub-second value into the following second.
+
 **#2526 — the exporters now carry the post-NAT (translated) tuple.**
 Before #2526 both the NetFlow v9 and IPFIX templates/encoders exported
 only the pre-NAT 5-tuple, so a collector saw the private endpoint of a
@@ -932,6 +937,12 @@ Three hardening fixes to the exporter goroutine and its sysUptime clock.
   instant which predates every session, via the `bootTimeFunc` seam (tests
   inject a deterministic boot). IPFIX is unaffected — it exports absolute
   `flowStart/EndMilliseconds`, not an uptime-relative value.
+
+NetFlow v9 `SysUptime`, `FirstSwitched`, and `LastSwitched` are uint32
+milliseconds and wrap every 2^32 ms (~49.7 days); `NetflowSysUptimeWrapMs`
+names that exact boundary. Collectors MUST NOT interpret a decrease in these
+fields alone as a device reboot. Correlate with packet `UnixSecs` and the
+exporter sequence number to distinguish wrap from restart.
 
 ## Entry points
 

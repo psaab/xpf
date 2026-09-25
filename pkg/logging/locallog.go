@@ -149,7 +149,7 @@ func (lw *LocalLogWriter) Send(severity int, msg string) error {
 		// stream path. msg is the standard RT_FLOW body (formatSyslogMsg).
 		priority := lw.Facility*8 + severity
 		ts := time.Now().Format("2006-01-02T15:04:05.000Z07:00")
-		line = fmt.Sprintf("<%d>1 %s %s xpf - - - %s\n", priority, ts, lw.hostname, msg)
+		line = fmt.Sprintf("<%d>1 %s %s xpf - - - %s\n", priority, ts, sanitizeSyslogHostname(lw.hostname), msg)
 	} else {
 		// Standard ("" / syslog) and structured (Junos RT_FLOW) bodies share the
 		// local-file timestamp+severity-tag prefix; only the msg body differs

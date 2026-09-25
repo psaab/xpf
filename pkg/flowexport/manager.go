@@ -985,7 +985,11 @@ func flowStartTime(rec logging.EventRecord, proto uint8) (time.Time, bool) {
 		// Pre-#2853 this truncated to the whole second, collapsing every flow
 		// opened in the same second onto one start instant and flattening
 		// IPFIX flowStartMilliseconds for short flows.
-		created := time.Unix(int64(rec.Created), int64(rec.CreatedNanos))
+		// Clamp malformed wire values before time.Unix can normalize a value
+		// >= 1e9 into the next second. The logging package counts each bad
+		// value so producer incompatibility is observable.
+		nanos := logging.ClampCreatedNanos(rec.CreatedNanos)
+		created := time.Unix(int64(rec.Created), int64(nanos))
 		// Guard against a created stamp at or after the close time (clock skew
 		// across the monotonic→wall conversion): clamp to the EndTime so the
 		// flow never reports a negative duration.

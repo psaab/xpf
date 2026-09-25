@@ -809,15 +809,16 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 	msg = termsafe.SanitizeForDisplay(msg)
 
 	priority := s.Facility*8 + severity
+	hostname := sanitizeSyslogHostname(s.hostname)
 	var line string
 	if s.Format == "sd-syslog" {
 		// RFC 5424: <PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
 		ts := time.Now().Format("2006-01-02T15:04:05.000Z07:00")
-		line = fmt.Sprintf("<%d>1 %s %s xpf - - - %s", priority, ts, s.hostname, msg)
+		line = fmt.Sprintf("<%d>1 %s %s xpf - - - %s", priority, ts, hostname, msg)
 	} else {
 		// RFC 3164: <PRI>TIMESTAMP HOSTNAME TAG: MSG
 		ts := time.Now().Format(time.Stamp) // "Jan _2 15:04:05"
-		line = fmt.Sprintf("<%d>%s %s xpf: %s", priority, ts, s.hostname, msg)
+		line = fmt.Sprintf("<%d>%s %s xpf: %s", priority, ts, hostname, msg)
 	}
 
 	// pendingWarn is captured under s.mu by noteDrop and emitted AFTER the
@@ -922,6 +923,44 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 		return err
 	}
 	return nil
+}
+
+// sanitizeSyslogHostname keeps the HOSTNAME framing field a single safe token
+// in both RFC 3164 and RFC 5424 messages. Hostnames originate outside this
+// framing boundary (os.Hostname or test/embedding constructors), so sanitize
+// here rather than trusting any one construction path. Ordinary DNS/IP names
+// take an allocation-free fast path; unsupported bytes, including spaces and
+// record delimiters, become underscores.
+func sanitizeSyslogHostname(host string) string {
+	for i := range len(host) {
+		c := host[i]
+		if isSyslogHostnameByte(c) {
+			continue
+		}
+		var b strings.Builder
+		b.Grow(len(host))
+		b.WriteString(host[:i])
+		for j := i; j < len(host); j++ {
+			if isSyslogHostnameByte(host[j]) {
+				b.WriteByte(host[j])
+			} else {
+				b.WriteByte('_')
+			}
+		}
+		return b.String()
+	}
+	if host == "" {
+		return "xpf"
+	}
+	return host
+}
+
+func isSyslogHostnameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' ||
+		c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' ||
+		c == '-' || c == '.' || c == '_' ||
+		c == ':' || c == '[' || c == ']'
 }
 
 // isTimeout reports whether err is a network timeout (e.g. a SetWriteDeadline
