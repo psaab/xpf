@@ -12066,7 +12066,12 @@ reserved for whole-dataplane selection where a rewrite shim
     gate is the SAME one Surface B uses (publish only on the RG master;
     stop-writing-never-withdraw on a partial demotion). Warn-only validation:
     `validateSurfaceADDNSWarnings` (undefined provider, missing hostname,
-    rfc2136 provider with no update-server, P3-reserved backend). Observability:
+    rfc2136 provider with no update-server, P3-reserved backend, dual-stack
+    same-name on duckdns/dyndns2). Dual-stack same-name on those two backends
+    stays warn + stale-on-partial-withdraw BY DESIGN (#10728 A10b-F04): their
+    withdraw verbs are host-wide by provider design and destroy FOREIGN
+    co-resident records too — no code can prevent that, so use dedicated
+    names per host/family. Observability:
     `show services dynamic-dns [detail]` (CLI + gRPC), the
     `xpf_ddns_surface_a_*` Prometheus family. Regression coverage:
     `pkg/config/compiler_surface_a_ddns_test.go` (flat-set + hierarchical +
