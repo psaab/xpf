@@ -588,6 +588,19 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_gre_encap_df_oversize_drops_total",                  // #2331 GRE encap DF-set oversized-outer drops
 		"xpf_userspace_gre_decap_checksum_invalid_drops_total",             // #2782 GRE decap checksum-present invalid drops
 		"xpf_userspace_gre_decap_unsupported_version_refusals_total",       // #6842 GRE decap refused: non-zero GRE version (PPTP) at a configured endpoint
+		// #10695 (#9506): IPsec-inner Rust status counter census.
+		"xpf_userspace_zone_gate_unzoned_total",
+		"xpf_userspace_zone_gate_ambiguous_total",
+		"xpf_userspace_zone_gate_stale_total",
+		"xpf_userspace_zone_gate_no_generation_total",
+		"xpf_userspace_ipsec_inner_parse_drops_total",
+		"xpf_userspace_ipsec_inner_ecn_illegal_drops_total",
+		"xpf_userspace_ipsec_inner_worker_queue_full_total",
+		"xpf_userspace_ipsec_inner_verdict_queue_full_total",
+		"xpf_userspace_ipsec_inner_slab_exhausted_total",
+		"xpf_userspace_ipsec_inner_worker_retired_total",
+		"xpf_userspace_ipsec_inner_worker_orphan_reaped_total",
+		"xpf_userspace_ipsec_inner_orphan_provisional_total",
 		// #1771 §2.6 resolver backoff + §2.5 ENOBUFS/re-dump + key gauges
 		"xpf_userspace_neighbor_resolver_get_backoff_attempts_total",
 		"xpf_userspace_neighbor_netlink_enobufs_total",
