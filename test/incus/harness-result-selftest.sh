@@ -1210,7 +1210,7 @@ else
 fi
 
 wire_target=$(sed -n '/^test-wire-routing-separation:/,/^$/p' \
-	"$HARNESS_RESULT_DIR/../../Makefile")
+	"$SCRIPT_DIR/../../Makefile")
 if [[ "$wire_target" == *"--require-helper-attestation"* ]]; then
 	ok "#10467: test-wire-routing-separation requires helper provenance"
 else
