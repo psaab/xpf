@@ -4239,16 +4239,22 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
 // fail with "must be REFUSED".
 #[test]
 fn synced_session_rejects_unresolved_ipv6_ext_protocol_6923() {
-    let sync_req = |family: u8, protocol: u8, src: &str, dst: &str| SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: family,
-        protocol,
-        src_ip: src.to_string(),
-        dst_ip: dst.to_string(),
-        src_port: 0,
-        dst_port: 0,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
+    let sync_req = |family: u8, protocol: u8, src: &str, dst: &str| {
+        let (src_port, dst_port) = if matches!(protocol, 6 | 17) {
+            (1234, 443)
+        } else {
+            (0, 0)
+        };
+        SessionSyncRequest {
+            operation: "upsert".to_string(),
+            addr_family: family,
+            protocol,
+            src_ip: src.to_string(),
+            dst_ip: dst.to_string(),
+            src_port,
+            dst_port,
+            ingress_zone: "lan".to_string(),
+            egress_zone: "wan".to_string(),
         // #7188: state the discriminator explicitly. This fixture sweeps
         // protocol 47 in over-reach guard (a), and #7188's install gate refuses
         // a protocol-47 record whose peer did NOT carry a discriminator — so
@@ -4258,6 +4264,7 @@ fn synced_session_rejects_unresolved_ipv6_ext_protocol_6923() {
         // modern peer sends for every protocol in this sweep.
         tunnel_discriminator: crate::session::TunnelDiscriminator::None.to_wire(),
         ..SessionSyncRequest::default()
+        }
     };
     let v6 = libc::AF_INET6 as u8;
 
@@ -4285,11 +4292,9 @@ fn synced_session_rejects_unresolved_ipv6_ext_protocol_6923() {
 
     // OVER-REACH GUARDS, all GREEN under the revert.
     //
-    // (a) A resolved IPv6 terminal still imports, INCLUDING ones that carry
-    //     ports 0/0 the same way an unresolved chain does — ESP (50, never
-    //     traversable: encrypted payload) and No-Next-Header (59, a terminal
-    //     verdict on both sides). Refusing on "ports are 0/0" would take these
-    //     with it.
+    // (a) A resolved IPv6 terminal still imports. TCP/UDP carry complete
+    //     nonzero ports; non-port protocols keep their legitimate 0/0 fields,
+    //     including ESP (50) and No-Next-Header (59).
     for protocol in [6u8, 17, 50, 58, 59, 47] {
         let key = build_synced_session_key(
             &sync_req(v6, protocol, "2001:db8::11", "2001:db8::22"),

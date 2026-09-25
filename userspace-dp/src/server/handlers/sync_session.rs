@@ -3,7 +3,8 @@
 // sync_req.operation).
 
 use super::super::helpers::{
-    SyncedKeyIntent, build_synced_session_entry, build_synced_session_key,
+    SyncedKeyIntent, SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX, build_synced_session_entry,
+    build_synced_session_key,
 };
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
@@ -209,6 +210,9 @@ pub(super) fn handle(
                 }
             }
             Err(err) => {
+                if err.starts_with(SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX) {
+                    domain.note_incomplete_synced_key_import();
+                }
                 response.ok = false;
                 response.error = err;
             }
@@ -225,6 +229,9 @@ pub(super) fn handle(
                 }
             }
             Err(err) => {
+                if err.starts_with(SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX) {
+                    domain.note_incomplete_synced_key_import();
+                }
                 response.ok = false;
                 response.error = err;
             }

@@ -599,19 +599,20 @@ type xpfCollector struct {
 	userspaceIpsecInnerWorkerRetired      *prometheus.Desc
 	userspaceIpsecInnerWorkerOrphanReaped *prometheus.Desc
 	userspaceIpsecInnerOrphanProvisional  *prometheus.Desc
-	userspaceSyncedImportZoneUnresolved  *prometheus.Desc
-	userspaceSyncedImportUnpublished     *prometheus.Desc
+	userspaceSyncedImportZoneUnresolved   *prometheus.Desc
+	userspaceSyncedImportUnpublished      *prometheus.Desc
 	// #7398: three Coordinator counters that were computed and never shown.
 	userspaceSessionInstallStaleIgnored       *prometheus.Desc
 	userspaceSessionDeleteStaleIgnored        *prometheus.Desc
 	userspaceSyncedImportReserveRefused       *prometheus.Desc
 	userspaceSyncedImportUnknownRoutingDomain *prometheus.Desc
+	userspaceSyncedImportIncompleteKey        *prometheus.Desc
 	// #10512: policy-delete micro-batch gate-lease holds (count, total and
 	// max hold nanoseconds) — the empirical leg of the tree-consistent
 	// timing position.
-	userspacePolicyBatchCount	*prometheus.Desc
-	userspacePolicyBatchHoldNs	*prometheus.Desc
-	userspacePolicyBatchHoldMaxNs	*prometheus.Desc
+	userspacePolicyBatchCount     *prometheus.Desc
+	userspacePolicyBatchHoldNs    *prometheus.Desc
+	userspacePolicyBatchHoldMaxNs *prometheus.Desc
 	// #2315: GRE-decap RFC 6040 §4.2 illegal-combination drops (outer CE
 	// over a Not-ECT inner) — nonzero flags a misbehaving tunnel ingress
 	// that ECT-marked the outer for un-ECN inner traffic on a congested
@@ -1189,6 +1190,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSessionDeleteStaleIgnored
 	ch <- c.userspaceSyncedImportReserveRefused
 	ch <- c.userspaceSyncedImportUnknownRoutingDomain
+	ch <- c.userspaceSyncedImportIncompleteKey
 	ch <- c.userspacePolicyBatchCount
 	ch <- c.userspacePolicyBatchHoldNs
 	ch <- c.userspacePolicyBatchHoldMaxNs

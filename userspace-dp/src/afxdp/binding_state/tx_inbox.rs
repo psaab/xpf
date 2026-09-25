@@ -305,7 +305,12 @@ impl BindingLiveState {
     /// — calling `VecDeque::new()` / growing a fresh buffer on every drain
     /// put allocator noise back on the exact thread #706 is trying to
     /// keep quiet.
-    pub(in crate::afxdp) fn take_pending_tx_into(&self, out: &mut VecDeque<TxRequest>) {
+    ///
+    /// # Safety
+    /// This must run only on the binding's owner worker and must not overlap
+    /// another drain of the same inbox. `MpscInbox::pop` is single-consumer;
+    /// concurrent callers can read the same initialized slot, which is UB.
+    pub(in crate::afxdp) unsafe fn take_pending_tx_into(&self, out: &mut VecDeque<TxRequest>) {
         if self.pending_tx.is_empty() {
             return;
         }

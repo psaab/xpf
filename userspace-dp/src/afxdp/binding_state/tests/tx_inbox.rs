@@ -66,7 +66,7 @@ fn take_pending_tx_into_appends_without_resetting_caller_buffer() {
         .expect("push inbox");
 
     let mut out = VecDeque::from([test_tx_request_for_inbox(1), test_tx_request_for_inbox(2)]);
-    live.take_pending_tx_into(&mut out);
+    unsafe { live.take_pending_tx_into(&mut out) };
 
     let payloads: Vec<u8> = out.iter().map(|req| req.bytes[0]).collect();
     assert_eq!(

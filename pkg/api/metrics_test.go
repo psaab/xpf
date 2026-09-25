@@ -1248,6 +1248,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceSyncedImportIncompleteKey: prometheus.NewDesc(
+			"xpf_userspace_synced_import_incomplete_key_total",
+			"synced imports refused for incomplete keys",
+			nil,
+			nil,
+		),
 		userspaceSyncedImportZoneUnresolved: prometheus.NewDesc(
 			"xpf_userspace_synced_import_zone_unresolved_total",
 			"synced imports that skipped the #6211 zone narrowing",
@@ -1448,6 +1454,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #5674: synced-import aggregate admission-bound drop counter emitted
 		// unconditionally.
 		SyncedImportCapDropsTotal: 11,
+		SyncedImportIncompleteKey: 29,
 		// #1760 W3': shared-map displacement counter emitted unconditionally.
 		NatReverseKeySharedDisplacementsTotal: 4,
 		// #1807: poison-recovery counter emitted unconditionally.
@@ -1478,26 +1485,26 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		SyncedImportUnpublished:    31,
 		// #10512: distinct values (and distinct from the #7398 neighbours),
 		// so a mis-wired emit reads a number that differs.
-		PolicyBatchCount:      61,
-		PolicyBatchHoldNs:     62,
-		PolicyBatchHoldMaxNs:  63,
+		PolicyBatchCount:     61,
+		PolicyBatchHoldNs:    62,
+		PolicyBatchHoldMaxNs: 63,
 		// #2315: GRE-decap RFC 6040 §4.2 illegal-combo drop counter
 		// emitted unconditionally.
 		GreDecapEcnIllegalDropsTotal: 3,
 		// #10695: distinct fixture values make every IPsec-inner metric
 		// independently catch a missing or miswired collector mapping.
-		ZoneGateUnzonedTotal:               101,
-		ZoneGateAmbiguousTotal:             102,
-		ZoneGateStaleTotal:                 103,
-		ZoneGateNoGenerationTotal:          104,
-		IpsecInnerParseDropsTotal:          105,
-		IpsecInnerEcnIllegalDrops:          106,
-		IpsecInnerWorkerQueueFullTotal:     107,
-		IpsecInnerVerdictQueueFullTotal:    108,
-		IpsecInnerSlabExhaustedTotal:       109,
-		IpsecInnerWorkerRetiredTotal:       110,
-		IpsecInnerWorkerOrphanReapedTotal:  111,
-		IpsecInnerOrphanProvisionalTotal:   112,
+		ZoneGateUnzonedTotal:              101,
+		ZoneGateAmbiguousTotal:            102,
+		ZoneGateStaleTotal:                103,
+		ZoneGateNoGenerationTotal:         104,
+		IpsecInnerParseDropsTotal:         105,
+		IpsecInnerEcnIllegalDrops:         106,
+		IpsecInnerWorkerQueueFullTotal:    107,
+		IpsecInnerVerdictQueueFullTotal:   108,
+		IpsecInnerSlabExhaustedTotal:      109,
+		IpsecInnerWorkerRetiredTotal:      110,
+		IpsecInnerWorkerOrphanReapedTotal: 111,
+		IpsecInnerOrphanProvisionalTotal:  112,
 		// #2317: WG-decap RFC 6040 §4.2 illegal-combo drop counter
 		// emitted unconditionally.
 		WgDecapEcnIllegalDropsTotal: 5,
@@ -1648,13 +1655,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// +3 for the #10512 policy-batch hold trio (count, total and max hold
 	// nanoseconds) = 75. Counted separately because they are distinct series.
 	// +12 for #10695's zone-gate and IPsec-inner parse/ECN/queue/slab/orphan
-	// counters = 87; no cause may be folded into another series.
+	// counters, plus #10720's incomplete-synced-key refusal counter = 88; no
+	// cause may be folded into another series.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
-	// an unverified metric. The twelve new series ARE asserted below, so the
-	// original claim still holds and the number moves with the population.
-	if len(got) != 87 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 87 metrics, got %d", len(got))
+	// an unverified metric. All new series ARE asserted below, so the original
+	// claim still holds and the number moves with the population.
+	if len(got) != 88 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 88 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1750,6 +1758,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSessionInstallStaleIgnored, nil, 21)
 	assertCounterClose(t, got, c.userspaceSessionDeleteStaleIgnored, nil, 22)
 	assertCounterClose(t, got, c.userspaceSyncedImportReserveRefused, nil, 23)
+	// #10720 F4: nonzero and distinct from every sibling so an omitted or
+	// miswired emission fails instead of passing on a default.
+	assertCounterClose(t, got, c.userspaceSyncedImportIncompleteKey, nil, 29)
 	// #10512: assert the VALUES, not merely that three more series appeared.
 	assertCounterClose(t, got, c.userspacePolicyBatchCount, nil, 61)
 	assertCounterClose(t, got, c.userspacePolicyBatchHoldNs, nil, 62)

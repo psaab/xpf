@@ -345,6 +345,13 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.SyncedImportUnknownRoutingDomain),
 	)
+	// #10720 F4: a 0 is the informative "no incomplete synced keys refused"
+	// value; the series is emitted on every scrape.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceSyncedImportIncompleteKey,
+		prometheus.CounterValue,
+		float64(status.SyncedImportIncompleteKey),
+	)
 	// #10512: emitted unconditionally like their neighbours. All three are
 	// lifetime-monotonic (count, summed holds, max hold), so CounterValue is
 	// exact, not approximate.

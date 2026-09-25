@@ -666,6 +666,11 @@ type ProcessStatus struct {
 	// 0 on a single-instance node.
 	SyncedImportUnknownRoutingDomain uint64 `json:"synced_import_unknown_routing_domain,omitempty"`
 
+	// SyncedImportIncompleteKey is xpf_userspace_synced_import_incomplete_key_total
+	// (#10720 F4): peer-synced imports refused because their key has an address
+	// family mismatch, an unspecified address, or a zero TCP/UDP port. Such a
+	// tuple cannot be reproduced by the packet path.
+	SyncedImportIncompleteKey uint64 `json:"synced_import_incomplete_key,omitempty"`
 	// SyncedImportZoneUnresolved is xpf_userspace_synced_import_zone_unresolved_total.
 	// Decodes to 0 against a helper that predates #7209, which reads the same as
 	// "never happened" — acceptable here because the metric is diagnostic rather

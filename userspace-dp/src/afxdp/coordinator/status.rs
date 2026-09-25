@@ -416,6 +416,12 @@ impl super::Coordinator {
             .load(Ordering::Relaxed)
     }
 
+    /// #10720 F4: synced imports refused because the wire tuple cannot form a
+    /// complete packet-path key.
+    pub fn synced_import_incomplete_key_total(&self) -> u64 {
+        self.sessions.import_incomplete_key.load(Ordering::Relaxed)
+    }
+
     /// #6600: peer-synced imports refused because this node could not reserve
     /// the translated NAT port the session names. See
     /// `SessionManager::import_reserve_refused` for what a nonzero value means.

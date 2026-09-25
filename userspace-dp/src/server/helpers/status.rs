@@ -287,6 +287,10 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // its peer's sessions.
     state.status.synced_import_unknown_routing_domain =
         state.afxdp.synced_import_unknown_routing_domain_total();
+    // #10720 F4: synced imports refused because their tuple cannot form a
+    // complete packet-path key.
+    state.status.synced_import_incomplete_key =
+        state.afxdp.synced_import_incomplete_key_total();
     // #7209: peer-synced imports whose zone pair did not resolve, so the
     // source-NAT reservation skipped #6211's narrowing. Expected nonzero while
     // a config apply is in flight (sync_session reads the PUBLISHED forwarding

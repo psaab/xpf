@@ -702,6 +702,12 @@ pub(crate) struct ProcessStatus {
     /// Additive / defaulted for backward compatibility.
     #[serde(rename = "synced_import_unknown_routing_domain", default)]
     pub synced_import_unknown_routing_domain: u64,
+    /// #10720 F4: peer-synced imports refused because their key has an address
+    /// family mismatch, unspecified source/destination, or zero TCP/UDP port.
+    /// The packet path cannot reproduce these incomplete identities.
+    /// Additive / defaulted for backward compatibility.
+    #[serde(default)]
+    pub synced_import_incomplete_key: u64,
     /// #7209: peer-synced imports whose zone pair did not resolve, so the
     /// source-NAT reservation skipped #6211's zone narrowing. Surfaced as
     /// `xpf_userspace_synced_import_zone_unresolved_total`.

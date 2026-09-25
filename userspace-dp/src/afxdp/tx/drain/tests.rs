@@ -370,7 +370,7 @@ fn ingest_cos_pending_tx_step1_refusal_falls_through_to_step2_10310() {
     );
     // The request must be OBSERVABLE on Step 2 — not swallowed by a false Ok.
     let mut step2_queued = VecDeque::new();
-    step2_live.take_pending_tx_into(&mut step2_queued);
+    unsafe { step2_live.take_pending_tx_into(&mut step2_queued) };
     assert_eq!(
         step2_queued.len(),
         1,

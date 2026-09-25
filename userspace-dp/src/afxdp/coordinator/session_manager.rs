@@ -218,6 +218,11 @@ pub(in crate::afxdp) struct SessionManager {
     /// since #7398, and this counter is the only signal that a VRF cluster is
     /// silently not taking over a subset of its peer's sessions.
     pub(in crate::afxdp) import_unknown_routing_domain: AtomicU64,
+    /// #10720 F4: synced-session imports refused because their reconstructed
+    /// key is incomplete (address family mismatch, unspecified address, or a
+    /// zero TCP/UDP port). These records cannot be reproduced by the packet
+    /// path and must not be installed.
+    pub(in crate::afxdp) import_incomplete_key: AtomicU64,
     /// #6600: peer-synced imports REFUSED because this node could not reserve
     /// the translated NAT port the session names.
     ///
@@ -265,6 +270,7 @@ impl SessionManager {
             policy_batch_hold_ns: AtomicU64::new(0),
             policy_batch_hold_max_ns: AtomicU64::new(0),
             import_unknown_routing_domain: AtomicU64::new(0),
+            import_incomplete_key: AtomicU64::new(0),
             import_reserve_refused: AtomicU64::new(0),
         }
     }

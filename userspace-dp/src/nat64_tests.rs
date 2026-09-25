@@ -7764,6 +7764,15 @@ fn nat64_v6_to_v4_nonfirst_accepts_payload_at_65515_boundary_10191() {
     assert_eq!(n, 65535);
     assert_eq!(u16::from_be_bytes([out[2], out[3]]), 65535);
 }
+
+#[test]
+fn nat64_v4_to_v6_payload_len_narrowing_is_checked_10720() {
+    assert_eq!(checked_ipv6_payload_len(0, 65_535), Some(u16::MAX));
+    assert_eq!(checked_ipv6_payload_len(0, 65_536), None);
+    assert_eq!(checked_ipv6_payload_len(8, 65_527), Some(u16::MAX));
+    assert_eq!(checked_ipv6_payload_len(8, 65_528), None);
+    assert_eq!(checked_ipv6_payload_len(usize::MAX, 1), None);
+}
 // ---------------------------------------------------------------------------
 // #10432: embedded ICMP rewrite must advertise the ORIGINAL inner datagram
 // length (RFC 7915 §§4.2/5.2), not the captured quote length, while emitting

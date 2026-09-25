@@ -1429,6 +1429,8 @@ fn sync_session_upsert_with_malformed_mac_is_rejected() {
         protocol: 6,
         src_ip: "10.0.0.1".to_string(),
         dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
         neighbor_mac: "zz:zz:zz:zz:zz:zz".to_string(),
         ..SessionSyncRequest::default()
     });
@@ -4440,6 +4442,145 @@ fn parse_session_sync_mac_rejects_non_hex() {
     assert!(parse_session_sync_mac("zz:bf:72:01:02:03").is_err());
 }
 
+
+#[test]
+fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
+    let cases = [
+        (
+            "family mismatch",
+            libc::AF_INET as u8,
+            6,
+            "2001:db8::1",
+            "2001:db8::2",
+            1234,
+            443,
+            "family-mismatch",
+        ),
+        (
+            "unknown family",
+            1,
+            6,
+            "192.0.2.1",
+            "192.0.2.2",
+            1234,
+            443,
+            "family-mismatch",
+        ),
+        (
+            "unspecified source",
+            libc::AF_INET as u8,
+            6,
+            "0.0.0.0",
+            "192.0.2.2",
+            1234,
+            443,
+            "unspecified-address",
+        ),
+        (
+            "unspecified destination",
+            libc::AF_INET6 as u8,
+            6,
+            "2001:db8::1",
+            "::",
+            1234,
+            443,
+            "unspecified-address",
+        ),
+        (
+            "zero source port",
+            libc::AF_INET as u8,
+            6,
+            "192.0.2.1",
+            "192.0.2.2",
+            0,
+            443,
+            "zero-port",
+        ),
+        (
+            "zero destination port",
+            libc::AF_INET6 as u8,
+            6,
+            "2001:db8::1",
+            "2001:db8::2",
+            1234,
+            0,
+            "zero-port",
+        ),
+        (
+            "zero UDP source port",
+            libc::AF_INET as u8,
+            17,
+            "192.0.2.1",
+            "192.0.2.2",
+            0,
+            53,
+            "zero-port",
+        ),
+    ];
+
+    for (name, addr_family, protocol, src_ip, dst_ip, src_port, dst_port, reason) in cases {
+        let state = new_state(ProcessStatus::default());
+        let mut request = req("sync_session");
+        request.session_sync = Some(SessionSyncRequest {
+            operation: "upsert".to_string(),
+            addr_family,
+            protocol,
+            src_ip: src_ip.to_string(),
+            dst_ip: dst_ip.to_string(),
+            src_port,
+            dst_port,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(!response.ok, "{name}: incomplete key was accepted");
+        assert!(
+            response.error.contains(reason),
+            "{name}: refusal should identify {reason:?}, got {:?}",
+            response.error
+        );
+        let mut guard = state.lock().expect("server state");
+        assert_eq!(
+            guard.afxdp.synced_session_entry_count_for_test(),
+            0,
+            "{name}: refused key must not be published"
+        );
+        assert_eq!(
+            guard.afxdp.synced_import_incomplete_key_total(),
+            1,
+            "{name}: incomplete-key refusal must be counted exactly once"
+        );
+        refresh_status(&mut guard);
+        assert_eq!(
+            guard.status.synced_import_incomplete_key,
+            1,
+            "{name}: incomplete-key count must reach process status"
+        );
+    }
+}
+#[test]
+fn synced_import_allows_zero_ports_for_non_port_protocol_10720() {
+    let request = SessionSyncRequest {
+        addr_family: libc::AF_INET as u8,
+        protocol: 1,
+        src_ip: "192.0.2.1".to_string(),
+        dst_ip: "192.0.2.2".to_string(),
+        src_port: 0,
+        dst_port: 0,
+        ..SessionSyncRequest::default()
+    };
+    assert!(
+        super::helpers::build_synced_session_key(
+            &request,
+            0,
+            super::helpers::SyncedKeyIntent::Install,
+        )
+        .is_ok(),
+        "zero-valued ICMP identifier fields are not TCP/UDP ports"
+    );
+}
 #[test]
 fn should_run_afxdp_requires_armed_and_supported() {
     let mut status = ProcessStatus {
