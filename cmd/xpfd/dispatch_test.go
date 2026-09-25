@@ -33,6 +33,7 @@ func TestClassifyCommand(t *testing.T) {
 		{"publish-generation", []string{"xpfd", "publish-generation"}, cmdPublishGeneration},
 		{"verify-dataplane", []string{"xpfd", "verify-dataplane"}, cmdVerifyDataplane},
 		{"check-config", []string{"xpfd", "check-config", "/etc/xpf/xpf.conf"}, cmdCheckConfig},
+		{"export-config", []string{"xpfd", "export-config", "current.conf"}, cmdExportConfig},
 		{"unknown positional verb", []string{"xpfd", "show"}, cmdUnknown},
 		{"unknown positional verb with args", []string{"xpfd", "request", "system", "reboot"}, cmdUnknown},
 		{"leading-dash flag is daemon", []string{"xpfd", "--config", "/tmp/x.conf"}, cmdDaemon},

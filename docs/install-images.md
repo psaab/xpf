@@ -553,12 +553,24 @@ is a clean no-op.
 
 ## Upgrades
 
-The vSRX "replace-image" model: deploy a new VM from the new image,
-copy `/etc/xpf/xpf.conf` (+ `/etc/xpf/node-id` on cluster members),
-swap traffic. The text config is the portable artifact — not
-`.configdb`. For HA pairs this is `deploy_rolling()` at VM granularity:
-replace the secondary, wait for session sync, fail over, replace the
-primary. Kernel + userspace move as one tested unit.
+The vSRX "replace-image" model: deploy a new VM from the new image. Before
+the swap, export the running node's CURRENT committed config from the
+config DB to hierarchical day-0 text:
+
+```sh
+xpfd export-config /var/tmp/current-xpf.conf
+```
+
+Copy that exported file to the replacement image's day-0 drive as `xpf.conf`
+(and copy `/etc/xpf/node-id` separately for HA identity), then swap traffic.
+The export is the portable artifact; **do not copy the install-time
+`/etc/xpf/xpf.conf`**, which stays at its day-0 contents after later commits.
+Do not copy `.configdb` or `master.key` to a fresh image: the new image
+generates a new key and cannot decrypt the old DB. For HA pairs this is
+`deploy_rolling()` at VM granularity: replace the secondary, wait for session
+sync, fail over, replace the primary. Kernel + userspace move as one tested
+unit. HA config-sync behavior during image replacement is a separate
+amplification follow-up and is out of scope here.
 
 In-place binary upgrades inside a running appliance follow the #1869
 ordering invariant: copy the new binaries into a versioned runtime dir,
@@ -613,8 +625,9 @@ What this means in practice:
 - Lost mgmt connectivity after a bad commit: use the hypervisor
   console (`incus console xpf1` / `virsh console xpf1`), log in as
   root, run `cli`, `configure`, `rollback 1`, `commit`.
-- Unbootable/maimed instance: this is cattle — redeploy from the image
-  and re-apply your config (day-0 drive or copy `xpf.conf` in).
+- Unbootable/maimed instance: redeploy from the image and re-apply the current
+  export created with `xpfd export-config` via a day-0 drive; never reuse the
+  install-time `xpf.conf`.
 - Day-0 config rejected at first boot: `journalctl -u xpf-day0-config`
   shows the commit-check error verbatim. Fix the config, rebuild the
   ISO, reboot — the system is still factory-default, so the loader

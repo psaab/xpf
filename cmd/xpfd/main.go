@@ -45,6 +45,7 @@ const (
 	cmdPublishGeneration
 	cmdVerifyDataplane
 	cmdCheckConfig
+	cmdExportConfig
 	cmdTransitBarrier
 	cmdUnknown
 )
@@ -119,6 +120,8 @@ func classifyCommand(argv []string) xpfdCommand {
 		return cmdVerifyDataplane
 	case "check-config":
 		return cmdCheckConfig
+	case "export-config":
+		return cmdExportConfig
 	case "transit-barrier":
 		return cmdTransitBarrier
 	}
@@ -256,6 +259,14 @@ func main() {
 		// per-node HA drain so a cluster stays forwarding. Invoked from the
 		// .deb postinst (standalone) and by the operator / dogfood driver.
 		runUpgradeSubcommand(os.Args[2:])
+		return
+
+	case cmdExportConfig:
+		// #10736: the boot xpf.conf is an install-time day-0 input, not the
+		// current committed config. Export the active DB tree as hierarchical
+		// text for the next image's day-0 loader; never carry .configdb or its
+		// master.key across a fresh image.
+		runExportConfigSubcommand(os.Args[2:])
 		return
 
 	case cmdSeedRuntime:

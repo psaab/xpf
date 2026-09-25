@@ -56,6 +56,9 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   touching production dataplane state.
 - `xpfd check-config <config-file>` — runs strict config validation and the
   device-map management-stranding preflight.
+- `xpfd export-config <output-file>` — writes the CURRENT active config DB as
+  hierarchical day-0 text to a 0600 file for image-replace upgrades. Refuses
+  stdout, a missing/empty active config DB, or an invalid output path.
 - `xpfd transit-barrier close` — installs the inet and bridge forward-hook DROP
   barrier without loading configuration or taking the daemon lock. The early
   boot unit runs it before `systemd-networkd.service`.
