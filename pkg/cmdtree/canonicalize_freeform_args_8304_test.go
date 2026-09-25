@@ -42,6 +42,8 @@ func TestFreeFormArgCommandsResolve_8304(t *testing.T) {
 		"show configuration security zones",
 		"show configuration security zones security-zone trust",
 		"show configuration system services",
+		"show configuration bridge-domains",
+		"show configuration bridge-domains bd0",
 		"show configuration interfaces ge-0/0/0",
 		"show configuration firewall filter f1",
 	} {

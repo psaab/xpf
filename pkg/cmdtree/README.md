@@ -171,7 +171,7 @@ before, so it cannot re-open #8289. The mutant that deletes the opt-in and
 admits any trailing word (`if currentNode != nil`) reds the #8289 and #7172
 guards as well as #8304's own controls — that is the cell carrying the weight.
 
-Marked today: `show log`, the 16 `show configuration` stanza children, and
+Marked today: `show log`, the `show configuration` stanza children, and
 `monitor traffic matching` (#9505). The `count`/`size`/`source` options of `ping`
 and `traceroute`, marked by #9064, have been typed leaves since #9505, because
 `AcceptsArgs` absorbed every later word.

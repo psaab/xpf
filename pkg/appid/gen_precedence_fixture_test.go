@@ -69,6 +69,16 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 			tuple: precedenceParityTuple{Protocol: 6, SrcPort: 40000, DstPort: 8080},
 		},
 		{
+			name: "collision_displacement_uses_assigned_id",
+			note: "The #10722 binding case: svc-217 and svc-396 share natural StableAppID 49397; AssignStableAppIDs keeps svc-217 at 49397 and displaces svc-396 to 1. mmm-middle has id 22100. Rust resolves the exact-port overlap by lowest assigned app_id (svc-396), while the old Go natural-hash fallback chose mmm-middle. This pins the actual assigned-ID parity path.",
+			apps: []precedenceParityApp{
+				{Name: "mmm-middle", Protocol: "tcp", DestinationPort: "8080"},
+				{Name: "svc-217", Protocol: "tcp", DestinationPort: "8080"},
+				{Name: "svc-396", Protocol: "tcp", DestinationPort: "8080"},
+			},
+			tuple: precedenceParityTuple{Protocol: 6, SrcPort: 40000, DstPort: 8080},
+		},
+		{
 			name: "src_port_only_is_port_constrained",
 			note: "A source-port-only app (zzz-srcport, dst unconstrained) is port-constrained on both sides and beats a protocol-only sibling (aaa-proto) for a flow whose client source port matches — CROSS-tier, independent of id VALUES. RED-on-revert of #3612.",
 			apps: []precedenceParityApp{
@@ -98,7 +108,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 
 	fx := precedenceFixture{
 		Version:     1,
-		Description: "Cross-language AppID application-label precedence parity fixture (#3612). Each case is resolved by BOTH the AppID-ENABLED Rust catalog (AppCatalog::lookup_directional in userspace-dp/src/policy.rs) and the AppID-DISABLED Go fallback (resolveTupleFallback in pkg/appid/runtime.go); both MUST agree on the resolved application NAME so the same 5-tuple is labeled identically regardless of the services.application-identification knob. `apps` is the operator config (user apps only, #3612 scope S1); `catalog` is the (app_id, protocol, port-range) rows appid.BuildCatalog assigns; `tuple` is a FORWARD-keyed session. #5296: app_id is a STABLE name-hash (config.StableAppID), NOT the sorted position, and a same-tier overlap is resolved by LOWEST stable app_id on both paths — BuildCatalog emits entries in ascending-id order so the Rust exact_dst first-writer dedup also keeps the lowest id. GENERATED programmatically from BuildCatalog + resolveTupleFallback by pkg/appid TestRegeneratePrecedenceFixture (BPFRX_REGEN_APPID_FIXTURE=1); do not hand-edit ids/expected. expected_app_id 0 / expected_name \"\" means UNKNOWN.",
+		Description: "Cross-language AppID application-label precedence parity fixture (#3612). Each case is resolved by BOTH the AppID-ENABLED Rust catalog (AppCatalog::lookup_directional in userspace-dp/src/policy.rs) and the AppID-DISABLED Go fallback (resolveTupleFallback in pkg/appid/runtime.go); both MUST agree on the resolved application NAME so the same 5-tuple is labeled identically regardless of the services.application-identification knob. `apps` is the operator config (user apps only, #3612 scope S1); `catalog` is the (app_id, protocol, port-range) rows appid.BuildCatalog assigns; `tuple` is a FORWARD-keyed session. #5296: app_id is assigned from a STABLE name-hash (config.StableAppID), NOT the sorted position; rare hash collisions are deterministically displaced by config.AssignStableAppIDs, and same-tier overlaps resolve by LOWEST assigned app_id on both paths. BuildCatalog emits entries in ascending-id order so the Rust exact_dst first-writer dedup also keeps the lowest id. GENERATED programmatically from BuildCatalog + resolveTupleFallback by pkg/appid TestRegeneratePrecedenceFixture (BPFRX_REGEN_APPID_FIXTURE=1); do not hand-edit ids/expected. expected_app_id 0 / expected_name \"\" means UNKNOWN.",
 	}
 
 	for _, gc := range cases {
@@ -135,7 +145,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 				SrcPortHigh: e.SrcPortHigh,
 			})
 		}
-		wantName := resolveTupleFallback(gc.tuple.Protocol, gc.tuple.SrcPort, gc.tuple.DstPort, cfg)
+		wantName := resolveTupleFallback(gc.tuple.Protocol, gc.tuple.SrcPort, gc.tuple.DstPort, cfg, cat.AppNames)
 		var wantID uint16
 		if wantName != "" {
 			for _, e := range cat.Entries {

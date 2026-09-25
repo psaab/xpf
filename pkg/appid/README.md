@@ -51,9 +51,9 @@ and resolves session display names from the dataplane's assigned `app_id`.
   `resolveTupleFallback` resolves deterministically by **specificity**: a
   port-constrained app (`source-port` and/or `destination-port` set) wins
   over a protocol-only app of the same protocol, with remaining ties
-  broken by app name (#2578;
-  before that the map was iterated first-match, so a port-specific app
-  could non-deterministically lose to a protocol-only sibling). This is a
+  broken by the lowest assigned `app_id` (#2578/#10722). Before that,
+  the map was iterated first-match, so a port-specific app could
+  non-deterministically lose to a protocol-only sibling. This is a
   display-only label path — it does not affect policy enforcement, which
   uses the dataplane-assigned `app_id`.
 
@@ -61,12 +61,12 @@ and resolves session display names from the dataplane's assigned `app_id`.
   AppID-ENABLED Rust catalog (`AppCatalog::lookup_directional` in
   `userspace-dp/src/policy.rs`) resolves overlapping application labels by
   the *same* binary-specificity rule — **port-constrained beats
-  protocol-only, then lowest `app_id` (== alphabetically-first name) within
-  a tier.** Before #3612 the enabled path tie-broke purely on lowest
-  `app_id` regardless of specificity, so the same 5-tuple could be labeled
-  with a broad protocol-only app when AppID was on but the specific
-  port-based app when AppID was off. Both paths now agree; the shared,
-  self-describing fixture
+  protocol-only, then lowest assigned `app_id` within a tier, including
+  collision-displaced IDs (#5296/#10722).** Before #3612 the enabled
+  path tie-broke on the lowest `app_id` regardless of specificity, so
+  the same 5-tuple could be labeled with a broad protocol-only app when
+  AppID was on but the specific port-based app when AppID was off.
+  Both paths now agree; the shared, self-describing fixture
   `userspace-dp/tests/fixtures/appid_precedence_v1.json` pins the agreement
   (`TestAppIDPrecedenceParityFixture` here drives the disabled path;
   `app_catalog_precedence_parity_fixture` in `policy_tests.rs` drives the

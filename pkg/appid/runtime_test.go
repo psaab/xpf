@@ -334,10 +334,10 @@ func TestResolveTupleFallbackPrefersPortOverProtocol(t *testing.T) {
 	// first-match implementation would intermittently return the protocol-only
 	// app. The specificity sort must make every iteration deterministic.
 	for i := 0; i < 256; i++ {
-		if got := resolveTupleFallback(6, 0, 8443, cfg); got != "zzz-port-8443" {
+		if got := resolveTupleFallback(6, 0, 8443, cfg, nil); got != "zzz-port-8443" {
 			t.Fatalf("iter %d: TCP/8443 = %q, want zzz-port-8443 (port-based beats protocol-only)", i, got)
 		}
-		if got := resolveTupleFallback(6, 0, 9999, cfg); got != "aaa-proto-only" {
+		if got := resolveTupleFallback(6, 0, 9999, cfg, nil); got != "aaa-proto-only" {
 			t.Fatalf("iter %d: TCP/9999 = %q, want aaa-proto-only (only the protocol-only app matches)", i, got)
 		}
 	}
