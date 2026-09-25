@@ -76,18 +76,24 @@ the userspace dataplane admission boundary is in
   `xpf_userspace_ndp_na_frag_refused_total` (RFC 6980 Fragment header) and
   `xpf_userspace_ndp_na_bad_source_refused_total` (invalid on-link-unicast
   source), so cap pressure is not conflated with malformed-control-plane
-  learns. **The shard index is seeded per process (#7752)** so that cap
-  cannot be aimed. `FxHash` is a fixed public function, so with an unseeded
-  index, an attacker who chooses neighbour addresses could compute offline a set
-  in ONE shard — filling it for 2048 entries against an aggregate capacity of
-  131,072, a 64x discount, and choosing WHICH later addresses are refused,
-  since a new learn into a full shard is denied. A random per-process seed
-  (`SHARD_SEED`, `getrandom`, with a process-varying fallback that never
-  degrades to a compile-time constant) removes the OFFLINE precomputation: the
-  attacker must probe the live mapping, which is slow and observable. It is not
-  cryptographic keying and is not claimed as such — the Knuth post-multiply
-  already handled the ACCIDENTAL case (a `/24` whose low bits correlate); the
-  seed handles the CHOSEN-input one.
+  learns. **The shard index is seeded per process (#7752)** so that cap cannot
+  be aimed. `FxHash` is a fixed public function, so with an unseeded index, an
+  attacker who chooses neighbour addresses could compute offline a set in ONE
+  shard — filling it for 2048 entries against an aggregate capacity of 131,072,
+  a 64x discount, and choosing WHICH later addresses are refused, since a new
+  learn into a full shard is denied. A random per-process seed (`SHARD_SEED`,
+  `getrandom`, with a process-varying fallback that never degrades to a
+  compile-time constant) removes the OFFLINE precomputation: the attacker must
+  probe the live mapping, which is slow and observable. It is not cryptographic
+  keying and is not claimed as such — the Knuth post-multiply already handled
+  the ACCIDENTAL case (a `/24` whose low bits correlate); the seed handles the
+  CHOSEN-input one.
+  ARP replies also enforce solicited preference (#10704): the production
+  RTM_NEWNEIGH monitor and XSK parser arm allow a differing live MAC only
+  after a recent userspace probe, a kernel NUD_PROBE event, or an
+  authoritative NUD_PERMANENT entry; otherwise they apply NDP Override=0
+  semantics. Refusals (including gratuitous overwrites) are counted and
+  warned at most once per minute.
 - **Firewall filters**: policer (token bucket + three-color), lo0 filter,
   flexible match, port ranges, hit counters, logging, forwarding-class
   DSCP rewrite.

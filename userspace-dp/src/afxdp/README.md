@@ -304,21 +304,24 @@ sync.
         create a first-time entry or refresh the same LLA. A legitimate
         link-layer-address-change announcement sets Override=1 (§7.2.6), so
         this blocks the Override=0 hijack subclass while preserving legit
-        MAC-change propagation. The check reads the per-worker
-        `dynamic_neighbors` snapshot (best-effort; the worker is the sole
-        data-path writer for the key) and the STALE install is the second
-        line of defense for any residual race.
-    ARP replies carry no Override bit, so the ARP arm relies on the STALE
-    install (kernel revalidation) rather than a no-overwrite gate — a
-    stricter no-overwrite would break gratuitous-ARP gateway failover
-    (#3048). **Solicited-only learning** — caching a reply/NA ONLY when it
-    answers a probe the router actually sent — is the stronger fix but
-    needs a shared pending-solicitation table plumbed from the neighbor
-    warmer (`neighbor.rs::neighbor_warmer_loop`'s `last_probed`, today
-    confined to the warmer thread and an incomplete record of kernel-driven
-    solicitations) into the per-worker learn path; it is DEFERRED as a
-    follow-up. STALE + the Override honor already remove the
-    forced-REACHABLE hijack window, which was the core of #4475.
+        MAC-change propagation. The check and write share one shard lock in
+        `insert_ndp_na_if_override_allows` (#9893), closing the earlier
+        read-then-write TOCTOU; a refusal leaves the map and kernel untouched.
+    ARP replies have no wire Override bit; the shim intentionally sends them
+    to the kernel, so the RTM_NEWNEIGH neighbor monitor is the production
+    input to `dynamic_neighbors` (the XSK parser arm is guarded as well).
+    #10704 records bounded, one-shot evidence for five seconds after a
+    successful userspace probe. A differing-MAC IPv4 monitor update is
+    accepted only with that evidence, after a kernel `NUD_PROBE` event, or
+    from an authoritative `NUD_PERMANENT` entry; otherwise it follows
+    Override=0 semantics and can only create a first
+    binding or refresh the same MAC. The check and map write share one shard
+    lock. Refused unsolicited IPv4 updates, including gratuitous overwrites,
+    increment the exact refusal count and emit a warning at most once per
+    minute. The kernel may update its own table before the monitor receives
+    the event, but the dataplane cache keeps its existing live binding.
+    Probe evidence comes from the warmer, MissingNeighbor path, pending-neighbor
+    retry, and on-demand resolver.
   - **Bounded kernel-program rate limit (`#5288`,
     `neighbor_program_limiter.rs`):** `add_kernel_neighbor` allocates
     request/IP `Vec`s, opens a raw `AF_NETLINK` socket, `sendto`s an

@@ -1260,6 +1260,7 @@ fn start_post_readiness_neighbor_services(coord: &mut Coordinator) {
         let warm_stop = Arc::new(AtomicBool::new(false));
         let warm_stop_clone = warm_stop.clone();
         let last_probed = coord.neighbors.last_probed_at.clone();
+        let dynamic_neighbors = coord.neighbors.dynamic.clone();
         let warm_generation = coord.neighbors.warm_generation.clone();
         let rg_runtime = coord.ha.rg_runtime.clone();
         // #6314: RETAIN the warmer's join handle (was discarded via `.ok()`,
@@ -1277,6 +1278,7 @@ fn start_post_readiness_neighbor_services(coord: &mut Coordinator) {
             neighbor_warmer_loop(
                 rx,
                 last_probed,
+                dynamic_neighbors,
                 warm_generation,
                 rg_runtime,
                 warm_stop_clone,
