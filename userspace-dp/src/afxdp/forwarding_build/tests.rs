@@ -9614,6 +9614,24 @@ fn absent_tcp_session_timeout_fields_keep_the_dataplane_defaults_7342() {
     assert_eq!(t.tcp_closing_ns, t.tcp_time_wait_ns);
 }
 
+/// #10703: both TCP SYN-admission selectors survive the snapshot-to-forwarding
+/// build, and old snapshots keep the fail-closed default. RED on revert: either
+/// deleted assignment leaves the corresponding selector false below.
+#[test]
+fn tcp_syn_check_selectors_reach_forwarding_state_10703() {
+    let default_state = build_forwarding_state(&ConfigSnapshot::default());
+    assert!(!default_state.tcp_no_syn_check);
+    assert!(!default_state.tcp_strict_syn_check);
+
+    let mut snapshot = ConfigSnapshot::default();
+    snapshot.flow.tcp_no_syn_check = true;
+    snapshot.flow.tcp_strict_syn_check = true;
+    let state = build_forwarding_state(&snapshot);
+    assert!(state.tcp_no_syn_check);
+    assert!(state.tcp_strict_syn_check);
+}
+
+
 // ---------------------------------------------------------------------------
 // #7888: the inert set has to survive the trip from the wire into the
 // forwarding state. This is the Rust half of the wiring guard — the Go half

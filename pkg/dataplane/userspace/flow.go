@@ -106,6 +106,10 @@ func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 			"tcp_closing_timeout", ts.ClosingTimeout)
 		snap.TCPTimeWaitTimeout = coerceWireSessionTimeout(
 			"tcp_time_wait_timeout", ts.TimeWaitTimeout)
+		// #10703: carry both SYN-admission selectors. Strict mode overrides
+		// the mid-stream no-syn-check opt-out.
+		snap.TCPNoSynCheck = ts.NoSynCheck
+		snap.TCPStrictSynCheck = ts.StrictSynCheck
 	}
 	snap.ALGDisableFlags = algDisableFlags(&cfg.Security.ALG)
 	return snap

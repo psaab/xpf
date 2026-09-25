@@ -418,8 +418,8 @@ was dead config.
 | Feature | Junos Config Path | Description | Priority | Status |
 |---------|-------------------|-------------|----------|--------|
 | **SYN Flood Protection Mode** | `security flow syn-flood-protection-mode syn-cookie` | Global SYN flood protection mode: syn-cookie (stateless) or syn-proxy (stateful). Different from per-screen syn-flood thresholds. | Medium | Legacy eBPF done (`8cbf31a`) with BPF helpers, validated_clients LRU, and 4 counters. Userspace SYN-cookie runtime is wired for #1374 with bounded SYN-ACK/RST replies and status counters; final #1477 source-removal evidence still needs to include the SYN-cookie HA/flood artifacts for the exact deletion candidate. `syn-proxy` mode is not implemented. |
-| **TCP Strict SYN Check** | `security flow tcp-session strict-syn-check` | Require SYN as first packet for TCP session creation (drop mid-stream pickup) | Medium | **Config-only (#2078)** — the legacy eBPF SYN gate (`2114333`) was retired with the eBPF dataplane (#1373/#1476). The userspace AF_XDP dataplane tracks no TCP sequence/window state and reads neither this knob nor `no-syn-check`, both of which are parsed and committed but inert. It does apply two handshake guards of its own, unconditionally and NOT driven by either knob (#6539 correction): on the transit path a bare RST/FIN never seeds a session (`strict_syn_check_drops_new_flow`, #4400) while mid-stream ACK pickup is deliberately preserved for asymmetric routing; on the host-inbound path only a SYN seeds a session (#4539), though the declined packet still reaches the local stack. So transit behaviour is close to `no-syn-check` being on, and host-inbound is close to strict-syn-check being on — neither is selectable. Commit emits an accepted-only advisory. |
-| **TCP No-SYN-Check** | `security flow tcp-session no-syn-check` | Allow mid-stream TCP session pickup (useful after failover or asymmetric routing) | Medium | **Config-only (#2078)** — the legacy BPF `flow_config` `tcp_flags` bit (`2114333`) was retired with the eBPF dataplane (#1373/#1476). The knob is not read, but "so this opt-out is inert" overstated it (#6539 correction): what the operator wants — mid-stream pickup — is ALREADY the transit default, since `strict_syn_check_drops_new_flow` (#4400) refuses only a bare RST/FIN and deliberately lets a mid-stream ACK seed a session for asymmetric routing. Host-inbound is the opposite and the opt-out cannot reach it: a single positive `has_syn` gate (#4539) seeds a session only off the handshake, though the declined packet still reaches the local stack. Accepted-but-not-enforced; commit emits an advisory. Intentional parity gap (see #2008 M9). |
+| **TCP Strict SYN Check** | `security flow tcp-session strict-syn-check` | Require SYN as first packet for TCP session creation | Medium | **ENFORCED (#10703)** — carried into the transit session-MISS guard. The default is already SYN-first; when explicitly configured, this selector also takes precedence over `no-syn-check`. Session hits are unchanged; host-inbound LocalDelivery still declines to cache non-SYN first packets but delivers them to the local stack. Bare RST/FIN misses always drop (#4400). |
+| **TCP No-SYN-Check** | `security flow tcp-session no-syn-check` | Allow mid-stream TCP session pickup after failover or on asymmetric routing | Medium | **ENFORCED (#10703)** — carried into the transit session-MISS guard. With this opt-out, policy-permitted non-closing ACK/data misses may seed a session for mid-stream pickup; absent the knob, SYN-first remains the default. Explicit `strict-syn-check` wins if both are set. Bare RST/FIN misses remain fail-closed (#4400), and host-inbound LocalDelivery still delivers but does not cache non-SYN first packets. |
 | **TCP No-SYN-Check in Tunnel** | `security flow tcp-session no-syn-check-in-tunnel` | Allow mid-stream pickup specifically for tunneled traffic (IPsec, GRE) | Low | **Config-only (#2078)** — the legacy per-interface `IFACE_FLAG_TUNNEL`/`META_FLAG_TUNNEL` path (`2114333`) was eBPF; retired with the dataplane (#1373/#1476). No tunnel-decap session-create signal exists on the userspace path, so the knob is inert. Accepted-but-not-enforced; commit emits an advisory. |
 | **TCP RST Invalidate Session** | `security flow tcp-session rst-invalidate-session` | Immediately invalidate session on TCP RST instead of waiting for timeout | Medium | **Config-only (#2078)** — the legacy eBPF teardown (`2114333`, timeout=0/last_seen=0 on RST) was retired with the dataplane (#1373/#1476). The userspace dataplane shortens the session on close — 2s after a RST, 30s after a graceful FIN (#3046) — but does not invalidate immediately and does not honor this opt-in. Accepted-but-not-enforced; commit emits an advisory. Design rationale: `docs/active-active-new-connections.md` (suppress RST→CLOSED, keep this as the opt-in override). |
 | **TCP Initial Timeout** | `security flow tcp-session initial-timeout N` | Idle timeout for a TCP session whose three-way handshake has not completed (the half-open / SYN-flood bounding control) | Medium | **DONE (#7342)** — carried on the wire (`tcp_initial_timeout`) into `SessionTimeouts.tcp_opening_ns`, which the #3152 half-open reap already read; unset keeps the 20s `DEFAULT_TCP_OPENING_TIMEOUT_NS`. The per-zone `screen ... syn-flood timeout` override (#3527) still takes precedence for that zone's half-opens, so a screen control cannot be outranked by the global leaf. |
@@ -1532,24 +1532,22 @@ drift) closed in `fix/2008-quickwins-batch1`:
   on the call association learned from the TCP/1723 control channel rather than
   on an RFC 2890 Key — so the sentence above is now historical for both
   protocols, with the failover half still true for both.
-- **M9 `security flow tcp-session no-sequence-check`** — DONE (typed). Added
-  the schema child (`pkg/config/schema_security.go`), the
+- **M9 `security flow tcp-session no-sequence-check`** — DONE (typed; no runtime
+  consumer). Added the schema child (`pkg/config/schema_security.go`), the
   `TCPSessionConfig.NoSequenceCheck` field (`pkg/config/types_security.go`),
-  and the compiler case (`pkg/config/compiler_security.go`), at full parity
-  with the existing `no-syn-check` / `rst-invalidate-session` presence flags.
-  Like those siblings it is typed-config only: the userspace AF_XDP dataplane
-  performs no TCP sequence-number window validation today, so there is nothing
-  to skip. The field gives commit-time validation + completion and is the seam
-  a future sequence-checking dataplane would read. As of #2078 the whole
-  `tcp-session` presence-flag family (`no-syn-check`,
-  `no-syn-check-in-tunnel`, `rst-invalidate-session`, `no-sequence-check`)
-  emits a single accepted-only commit advisory so an operator is not silently
-  misled into believing any of these knobs has runtime effect; research #2078
-  converged PLAN-KILL on enforcement (the dataplane tracks no TCP
-  sequence/window state — #6539 narrowed this from the original "no TCP state
-  machine", which #3152's OPENING-vs-established split and #3046's RST-vs-FIN
-  close split have since falsified; proportionality favours warn-and-document
-  for these LOW, rarely-used knobs).
+  and the compiler case (`pkg/config/compiler_security.go`), at parity with the
+  remaining `no-syn-check-in-tunnel` / `rst-invalidate-session` presence flags.
+  It remains typed-config only: the userspace AF_XDP dataplane performs no TCP
+  sequence-number window validation today, so there is nothing to skip. The
+  field gives commit-time validation + completion and is the seam a future
+  sequence-checking dataplane would read. The remaining presence flags
+  (`no-syn-check-in-tunnel`, `rst-invalidate-session`, `no-sequence-check`)
+  emit one accepted-only advisory (#2078); `no-syn-check` was removed from that
+  group and wired to transit session-miss admission by #10703. The dataplane
+  tracks no TCP sequence/window state — #6539 narrowed this from the original
+  "no TCP state machine", which #3152's OPENING-vs-established split and
+  #3046's RST-vs-FIN close split have since falsified; warn-and-document
+  remains appropriate for the three unenforced flags.
 - **H6 residual — `system login user <name> class` enum validation** — DONE.
   RBAC was already enforced (`pkg/cli/permissions.go`); the remaining hole was
   that the `class` leaf accepted any string at commit and `config-viewer` was

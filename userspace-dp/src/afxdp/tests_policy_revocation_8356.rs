@@ -4866,11 +4866,10 @@ fn post_revoke_both_tuples_miss_and_drop_9604() {
     let mut sessions = SessionTable::new();
     let mut binding = binding_for_9604(WAN_INGRESS_IFINDEX, "reth0.80");
     let (syn, meta_syn, ack, meta_ack) = dnat_frames();
-    // Strict TCP admission requires a SYN; the following ACK then seeds the
-    // cacheable flow slot without weakening the phase-1 admission witness.
-    // This mirrors `strict_syn_check_drops_new_flow` in
-    // afxdp/poll_descriptor/session_admission.rs:56-72, called from
-    // afxdp/poll_descriptor/mod.rs:2492-2527: only SYN may admit a new flow.
+    // Default SYN-first transit admission applies here because this snapshot
+    // leaves `no-syn-check` disabled. The SYN seeds the session pair; the
+    // following ACK must hit that pair. Misses consult
+    // `strict_syn_check_drops_new_flow`; existing hits do not.
     let admit_syn = drive_packet_9604(
         &mut sessions,
         &forwarding_permit,

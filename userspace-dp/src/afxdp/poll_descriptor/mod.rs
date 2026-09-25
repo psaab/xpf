@@ -3264,8 +3264,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // a local session from this packet. Established and
                         // HA-synced sessions are session HITS served by
                         // `resolve_flow_session_decision` before this miss path.
-                        // A SYN or SYN-ACK remains eligible for the existing
-                        // asymmetric-routing no-syn-check behavior.
+                        // A SYN-bearing packet is always eligible; the
+                        // configured no-syn-check opt-out also admits
+                        // mid-stream ACK/data, while strict-syn-check
+                        // overrides it. Bare RST/FIN remain fail-closed.
                         // Counted in the aggregate `screen_drops` flow-statistics
                         // tally (no per-reason ordinal — that array mirrors the
                         // Junos SCREEN checks, and this is a flow tcp-session
@@ -3277,7 +3279,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             decision.resolution.disposition,
                             ForwardingDisposition::ForwardCandidate
                                 | ForwardingDisposition::MissingNeighbor
-                        ) && strict_syn_check_drops_new_flow(meta.protocol, meta.tcp_flags)
+                        ) && strict_syn_check_drops_new_flow(
+                            meta.protocol,
+                            meta.tcp_flags,
+                            worker_ctx.forwarding.tcp_no_syn_check,
+                            worker_ctx.forwarding.tcp_strict_syn_check,
+                        )
                         {
                             telemetry.counters.record_screen_drop(
                                 "strict-syn-check",

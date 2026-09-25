@@ -172,17 +172,15 @@ mod new_flow_session_limit_tests {
     }
 }
 
-/// #4400/#10270: strict-syn-check drop on the TCP session-MISS install path.
-/// A TCP packet that misses the session table can only create a new transit
-/// session when it carries SYN. Non-SYN ACK/PSH/data, including the original
-/// bare RST/FIN subset, is either a late segment for an already-GC'd session
-/// or a midstream tuple this firewall never observed. These drive the
-/// extracted decision predicate and model the guarded install directly
-/// against a real `SessionTable` (the poll loop body is un-callable).
-/// RED on revert: without the guard a non-SYN miss installs a session, so the
-/// expired/fresh burst tests observe transit/session creation.
+/// #4400/#10270/#10703: TCP SYN-selector behavior on the session-MISS install
+/// path. The default and strict modes require SYN; explicit no-syn-check
+/// admits non-closing mid-stream transit packets while bare RST/FIN still
+/// drop. These tests drive the extracted predicate and guarded install against
+/// a real `SessionTable` (the poll loop body is un-callable).
+/// RED on revert: the default non-SYN miss and explicit opt-out assertions
+/// observe the opposite session-creation outcomes if the policy is lost.
 #[cfg(test)]
-mod strict_syn_check_tests {
+mod tcp_syn_check_tests {
     use super::*;
     use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
     use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
@@ -237,13 +235,20 @@ mod strict_syn_check_tests {
         }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
     }
 
-    /// Model the poll_descriptor session-MISS guard for a ForwardCandidate
-    /// transit new flow: only SYN-bearing TCP packets are installed. Returns
-    /// true iff a session was installed. Byte-for-byte the same predicate
-    /// gate the production path applies before
-    /// `install_with_protocol_with_origin`.
+    /// Model the transit session-MISS guard and install path with the default
+    /// SYN-first policy.
     fn install_on_miss(table: &mut SessionTable, key: SessionKey, flags: u8) -> bool {
-        if strict_syn_check_drops_new_flow(PROTO_TCP, flags) {
+        install_on_miss_with_checks(table, key, flags, false, false)
+    }
+
+    fn install_on_miss_with_checks(
+        table: &mut SessionTable,
+        key: SessionKey,
+        flags: u8,
+        no_syn_check: bool,
+        strict_syn_check: bool,
+    ) -> bool {
+        if strict_syn_check_drops_new_flow(PROTO_TCP, flags, no_syn_check, strict_syn_check) {
             return false;
         }
         table.install_with_protocol_with_origin(
@@ -258,9 +263,9 @@ mod strict_syn_check_tests {
     }
 
     #[test]
-    fn predicate_drops_every_non_syn_tcp_miss() {
-        // The complete non-SYN family is fail-closed on a session miss,
-        // including ACK/PSH bursts and the original bare RST/FIN subset.
+    fn predicate_drops_every_non_syn_tcp_miss_by_default() {
+        // With no opt-out configured, ACK/PSH/data and the original bare
+        // RST/FIN subset remain fail-closed on a session miss.
         for flags in [
             TCP_ACK,
             TCP_ACK | TCP_PSH,
@@ -271,18 +276,68 @@ mod strict_syn_check_tests {
             TCP_RST | TCP_ACK,
         ] {
             assert!(
-                strict_syn_check_drops_new_flow(PROTO_TCP, flags),
-                "non-SYN TCP flags 0x{flags:02x} must drop on a miss"
+                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false),
+                "non-SYN TCP flags 0x{flags:02x} must drop on a default-policy miss"
             );
         }
         // SYN-bearing packets remain eligible for a new session, including
         // asymmetric-path SYN-ACK and the existing tcp-syn-fin screen case.
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN));
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN | TCP_ACK));
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN | TCP_FIN));
+        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN, false, false));
+        assert!(!strict_syn_check_drops_new_flow(
+            PROTO_TCP,
+            TCP_SYN | TCP_ACK,
+            false,
+            false
+        ));
+        assert!(!strict_syn_check_drops_new_flow(
+            PROTO_TCP,
+            TCP_SYN | TCP_FIN,
+            false,
+            false
+        ));
         // Non-TCP traffic is never gated by this TCP-only predicate.
-        assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_RST));
-        assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_FIN));
+        assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_RST, false, false));
+        assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_FIN, false, false));
+    }
+
+    #[test]
+    fn no_syn_check_admits_midstream_but_strict_and_closing_still_drop() {
+        let mut table = SessionTable::new();
+        for (port, flags) in [(40400, TCP_ACK), (40401, TCP_ACK | TCP_PSH)] {
+            assert!(
+                !strict_syn_check_drops_new_flow(PROTO_TCP, flags, true, false),
+                "no-syn-check must admit non-closing TCP flags 0x{flags:02x}"
+            );
+            assert!(
+                install_on_miss_with_checks(&mut table, tcp_key(port), flags, true, false),
+                "an explicitly admitted mid-stream packet must seed a transit session"
+            );
+        }
+        // The Junos opt-out does not weaken #4400's RST/FIN flood protection.
+        for (port, flags) in [
+            (40402, TCP_RST),
+            (40403, TCP_FIN),
+            (40404, TCP_RST | TCP_ACK),
+            (40405, TCP_FIN | TCP_ACK),
+        ] {
+            assert!(strict_syn_check_drops_new_flow(PROTO_TCP, flags, true, false));
+            assert!(
+                !install_on_miss_with_checks(&mut table, tcp_key(port), flags, true, false),
+                "no-syn-check must not install closing flags 0x{flags:02x}"
+            );
+        }
+        // Explicit strict mode has precedence if both knobs are configured.
+        assert!(strict_syn_check_drops_new_flow(
+            PROTO_TCP,
+            TCP_ACK | TCP_PSH,
+            true,
+            true
+        ));
+        assert!(
+            !install_on_miss_with_checks(&mut table, tcp_key(40406), TCP_ACK, true, true),
+            "strict-syn-check must override no-syn-check at the install gate"
+        );
+        assert_eq!(table.len(), 2);
     }
 
     #[test]

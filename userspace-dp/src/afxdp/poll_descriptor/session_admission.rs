@@ -50,25 +50,29 @@ pub(super) fn new_flow_session_limit_drop(
     None
 }
 
-/// #4400/#10270: strict-syn-check-style guard for the TCP session-MISS
-/// install path.
+/// #4400/#10270/#10703: TCP session-MISS admission for transit new flows.
 ///
-/// A TCP packet that misses the session table can only create a new transit
-/// session when it is a SYN. A non-SYN ACK/PSH/data packet with no matching
-/// session is either a late segment for an expired flow or a midstream tuple
-/// the firewall never observed; admitting it would let a policy-permitted
-/// destination carry traffic without conntrack state (#10270). The same
-/// fail-closed rule covers bare RST/FIN (#4400), which can never legitimately
-/// open a connection and would otherwise churn closing entries.
+/// By default, TCP misses require SYN so stale ACK/data cannot create new
+/// sessions (#10270), and bare RST/FIN misses are always dropped to prevent
+/// closing-entry churn (#4400). `no-syn-check` opts into mid-stream pickup
+/// for non-closing packets. Explicit `strict-syn-check` overrides that opt-out
+/// and keeps the SYN-first requirement.
 ///
 /// Established and HA-synced flows are session HITS and never reach this
-/// session-MISS predicate. SYN-bearing packets (including SYN-ACK on an
-/// asymmetric path) remain eligible for the existing no-syn-check behavior.
-/// LocalDelivery is exempt at the poll call site so a peer control packet for
-/// a firewall-originated connection still reaches the local stack.
+/// predicate. LocalDelivery uses its separate cache-only SYN gate so peer
+/// control traffic for firewall-originated connections still reaches the
+/// local stack.
 #[inline]
-pub(super) fn strict_syn_check_drops_new_flow(protocol: u8, tcp_flags: u8) -> bool {
-    matches!(protocol, crate::ip_proto::PROTO_TCP) && !crate::tcp_flags::has_syn(tcp_flags)
+pub(super) fn strict_syn_check_drops_new_flow(
+    protocol: u8,
+    tcp_flags: u8,
+    no_syn_check: bool,
+    strict_syn_check: bool,
+) -> bool {
+    if !matches!(protocol, crate::ip_proto::PROTO_TCP) || crate::tcp_flags::has_syn(tcp_flags) {
+        return false;
+    }
+    crate::tcp_flags::is_closing(tcp_flags) || !no_syn_check || strict_syn_check
 }
 
 #[cfg(test)]

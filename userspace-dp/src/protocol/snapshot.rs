@@ -320,6 +320,16 @@ pub(crate) struct FlowSnapshot {
     /// TIME_WAIT window, a FIN seen in both directions. Seconds; `0` = unset.
     #[serde(rename = "tcp_time_wait_timeout", default)]
     pub tcp_time_wait_timeout: u64,
+    /// `security flow tcp-session no-syn-check`: permit mid-stream TCP
+    /// session creation on transit session misses. Missing keys decode false;
+    /// the v34 exact-version gate refuses a v33 helper that would ignore this
+    /// configured opt-out and keep dropping those packets.
+    #[serde(rename = "tcp_no_syn_check", default)]
+    pub tcp_no_syn_check: bool,
+    /// `security flow tcp-session strict-syn-check`: force SYN-first transit
+    /// session admission, even if no-syn-check is also configured.
+    #[serde(rename = "tcp_strict_syn_check", default)]
+    pub tcp_strict_syn_check: bool,
     #[serde(rename = "udp_session_timeout", default)]
     pub udp_session_timeout: u64,
     #[serde(rename = "icmp_session_timeout", default)]

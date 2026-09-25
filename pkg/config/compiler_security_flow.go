@@ -623,8 +623,8 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 				sec.Flow.TCPSession.NoSequenceCheck = true
 				continue
 			case "strict-syn-check":
-				// #8296: accepted-only, and now ADVISED as such. Reading it
-				// here is what lets validateAcceptedOnlyWarnings see it.
+				// #10703: the selector is carried to the dataplane's
+				// session-MISS admission gate.
 				sec.Flow.TCPSession.StrictSynCheck = true
 				continue
 			}

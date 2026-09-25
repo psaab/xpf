@@ -13841,22 +13841,23 @@ the value sits in a single typed slot:
     `MAX_SESSION_TIMEOUT_NS` (`MAX_SESSION_TIMEOUT_SECS == MaxDurationSeconds ==
     i64::MAX / 1e9`) so an out-of-band snapshot or future caller that bypasses
     this gate can never wrap `secs*1e9` into a tiny premature-expiry timeout;
-    plus the
-    presence flags `no-syn-check`, `no-syn-check-in-tunnel`,
-    `rst-invalidate-session`, and `no-sequence-check` (#2008 M9) declared
-    presence-only for completion parity. The presence flags compile into
-    `TCPSessionConfig` (NoSynCheck / NoSynCheckInTunnel / RstInvalidateSession
-    / NoSequenceCheck) but are typed-config only — the userspace dataplane does
-    not read them. The session table is a 5-tuple flow entry with no
-    sequence/window tracking, so there is nothing for any of these knobs to
-    enforce or skip. **#2078:** setting any of them emits a
-    single accepted-only commit advisory (`pkg/config/compiler.go`,
-    `security flow tcp-session ... accepted-only`) so an operator is not
-    silently misled; research #2078 converged PLAN-KILL on enforcement.
-    (**#6539** narrowed that sentence: it used to say the dataplane has no TCP
-    state machine, which #3152 — OPENING vs established — and #3046 — RST vs
-    FIN close — have since made false. Those states are precisely why the
-    TIMEOUT leaves need a differently-worded advisory.)
+    plus the presence flags `no-syn-check`, `no-syn-check-in-tunnel`,
+    `rst-invalidate-session`, and `no-sequence-check` (#2008 M9). `no-syn-check`
+    and `strict-syn-check` are carried in the additive flow snapshot and
+    enforced at transit session-MISS admission (#10703): without either flag,
+    non-SYN TCP misses are dropped; `no-syn-check` permits non-closing
+    mid-stream TCP misses, while `strict-syn-check` wins if both are set. Bare
+    RST/FIN misses still drop (#4400). Missing selector keys decode false, and
+    the protocol-v34 exact-version gate rejects a v33 helper that would ignore
+    an explicitly configured selector. The remaining presence flags are
+    typed-config only and emit one accepted-only advisory (#2078):
+    `no-syn-check-in-tunnel` lacks a tunnel-decap signal,
+    `rst-invalidate-session` does not select immediate RST invalidation, and
+    `no-sequence-check` has no sequence-window check to skip.
+    (**#6539** narrowed an older sentence: the dataplane does have TCP state —
+    #3152 adds OPENING vs established and #3046 distinguishes RST vs FIN close.
+    Those states are precisely why the TIMEOUT leaves need a differently-worded
+    advisory.)
 
     **#6539 — the three unenforced timeout leaves.** `initial-timeout`,
     `closing-timeout` and `time-wait-timeout` are committable but have no wire

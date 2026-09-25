@@ -667,6 +667,11 @@ fn build_fallible_forwarding_state(
         closing: snapshot.flow.tcp_closing_timeout,
         time_wait: snapshot.flow.tcp_time_wait_timeout,
     });
+    // #10703: carry the TCP SYN-admission policy to the session-MISS gate.
+    // Missing fields from older Go snapshots stay false: SYN-first is the
+    // fail-closed default, and explicit strict mode takes precedence.
+    state.tcp_no_syn_check = snapshot.flow.tcp_no_syn_check;
+    state.tcp_strict_syn_check = snapshot.flow.tcp_strict_syn_check;
     // #3527: per-screened-zone half-open (`tcp_opening_ns`) overrides from each
     // zone's `syn-flood timeout`. The leaf maps to the Junos
     // half-completed-connection queue window, NOT the screen-rate substrate
