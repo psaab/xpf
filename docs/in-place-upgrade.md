@@ -2261,14 +2261,20 @@ boot + day-0 re-apply); there is no zero-gap standalone image replace.
 image carries the new kernel, glibc, systemd, FRR, strongSwan, kea, and
 chrony as one `validate.py`-gated unit.
 
-**State carries as TEXT config, not the encrypted DB.** The portable
-artifact is `/etc/xpf/xpf.conf` (+ `/etc/xpf/node-id` for HA identity),
-re-applied via the day-0 drive; the freshly-imaged node factory-bootstraps
-`.configdb` from the text on first boot. `master.key` is RE-GENERATED on
-the new image, NOT carried — do not attempt to carry `.configdb`/
-`master.key` across a fresh image (the new key cannot decrypt a carried
-DB). (For an *in-place* #1917 upgrade the DB persists; image-replace
-re-bootstraps from text — different paths.)
+**State carries as TEXT config, not the encrypted DB.** Before image-replace,
+run `xpfd export-config /var/tmp/current-xpf.conf` on the running node. This
+exports the CURRENT committed configuration from `.configdb` as hierarchical
+text — the same kind of input the `show configuration` view renders and the
+day-0 loader consumes. Carry that exported file as `xpf.conf` on the day-0
+drive (+ `/etc/xpf/node-id` separately for HA identity). **Do not use the
+install-time `/etc/xpf/xpf.conf`**: it is written once and is never rewritten
+after later commits, so it can silently restore the original day-0 config.
+The newly imaged node factory-bootstraps its own `.configdb` from the exported
+text on first boot. `master.key` is RE-GENERATED on the new image, NOT
+carried — do not attempt to carry `.configdb`/`master.key` across a fresh
+image (the new key cannot decrypt a carried DB). (For an *in-place* #1917
+upgrade the DB persists; image-replace re-bootstraps from text — different
+paths.)
 
 **In-place `do-release-upgrade` is UNSUPPORTED.** It modifies the entire
 userspace in-place and irreversibly (no rollback if the new userspace
