@@ -27,6 +27,8 @@ patched_postrm() {
       -e "s#^CURRENT=.*#CURRENT=\"\$VERSIONS/current\"#" \
       -e "s#^STAGED_GEN=.*#STAGED_GEN=$ROOT/var/lib/xpf/staged-gen#" \
       -e "s#^DROPIN=.*#DROPIN=$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf#" \
+      -e "s#^TRANSIT_IPV4_SYSCTL=.*#TRANSIT_IPV4_SYSCTL=$ROOT/proc/sys/net/ipv4/ip_forward#" \
+      -e "s#^TRANSIT_IPV6_SYSCTL=.*#TRANSIT_IPV6_SYSCTL=$ROOT/proc/sys/net/ipv6/conf/all/forwarding#" \
       -e "s#\\[ -d /run/systemd/system \\]#false#" \
       "$POSTRM" > "$ROOT/postrm"
     chmod +x "$ROOT/postrm"
@@ -41,6 +43,11 @@ run_scenario() {
     CURRENT="$VERSIONS/current"
     STAGED_GEN="$ROOT/var/lib/xpf/staged-gen"
     DROPIN="$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf"
+    TRANSIT_IPV4_SYSCTL="$ROOT/proc/sys/net/ipv4/ip_forward"
+    TRANSIT_IPV6_SYSCTL="$ROOT/proc/sys/net/ipv6/conf/all/forwarding"
+    mkdir -p "$(dirname "$TRANSIT_IPV4_SYSCTL")" "$(dirname "$TRANSIT_IPV6_SYSCTL")"
+    printf '0\n' > "$TRANSIT_IPV4_SYSCTL"
+    printf '0\n' > "$TRANSIT_IPV6_SYSCTL"
     BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
     patched_postrm
     "scenario_$name"
@@ -59,6 +66,9 @@ build_hardened() {
 #!/bin/sh
 if [ "$1" = seed-runtime ] && [ "$2" = --capability-check ]; then
     echo "seed-runtime supported"; exit 0
+fi
+if [ "$1" = transit-barrier ] && [ "$2" = remove ]; then
+    echo "transit barrier removed"; exit 0
 fi
 [ "$1" = version ] && { echo "xpfd VER (commit x, built y)"; exit 0; }
 echo "unknown command" >&2; exit 1
@@ -107,6 +117,20 @@ scenario_remove_keeps_versions() {
     [ -e "$DROPIN" ] && { echo "FAIL: drop-in not removed on remove"; exit 1; } || true
     # The empty .service.d dir should be rmdir'd too.
     [ -d "$(dirname "$DROPIN")" ] && { echo "FAIL: empty .service.d not rmdir'd on remove"; exit 1; } || true
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 1 ] || { echo "FAIL: IPv4 forwarding sysctl not restored on remove"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 1 ] || { echo "FAIL: IPv6 forwarding sysctl not restored on remove"; exit 1; }
+}
+
+scenario_remove_barrier_failure_keeps_sysctls_closed() {
+    build_hardened "1.0.0"
+    cat > "$VERSIONS/1.0.0/xpfd" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "$VERSIONS/1.0.0/xpfd"
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 0 ] || { echo "FAIL: IPv4 forwarding opened after failed barrier removal"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 0 ] || { echo "FAIL: IPv6 forwarding opened after failed barrier removal"; exit 1; }
 }
 
 # purge removes the through-current sbin links, the runtime drop-in (#1967),
@@ -208,9 +232,15 @@ scenario_upgrade_to_hardened_noop() {
 # operator-repointed sbin link is NOT removed (not owned).
 scenario_remove_skips_foreign_link() {
     build_hardened "1.0.0"
-    ln -sf "/opt/custom/xpfd" "$SBIN/xpfd"
+    cat > "$ROOT/foreign-xpfd" <<EOF
+#!/bin/sh
+echo called > "$ROOT/foreign-called"
+EOF
+    chmod +x "$ROOT/foreign-xpfd"
+    ln -sf "$ROOT/foreign-xpfd" "$SBIN/xpfd"
     "$ROOT/postrm" remove
-    [ "$(readlink "$SBIN/xpfd")" = "/opt/custom/xpfd" ] || { echo "FAIL: removed a foreign sbin link"; exit 1; }
+    [ "$(readlink "$SBIN/xpfd")" = "$ROOT/foreign-xpfd" ] || { echo "FAIL: removed a foreign sbin link"; exit 1; }
+    [ ! -e "$ROOT/foreign-called" ] || { echo "FAIL: invoked an operator-repointed xpfd"; exit 1; }
 }
 
 # legacy direct-to-staged sbin links are still removed (back-compat).
@@ -444,6 +474,7 @@ scenario_oldbug_leaves_orphan_proves_nontautology() {
 }
 
 run_scenario remove_keeps_versions
+run_scenario remove_barrier_failure_keeps_sysctls_closed
 run_scenario purge_removes_versions
 run_scenario remove_keeps_foreign_dropin
 run_scenario remove_no_dropin_ok

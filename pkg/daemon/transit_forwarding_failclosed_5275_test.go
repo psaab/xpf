@@ -32,7 +32,8 @@ import (
 // seams elsewhere in this package).
 
 // withTempTransitForwardSysctls points the two gated sysctl paths at temp
-// files seeded with `initial`, restoring the real /proc paths afterwards.
+// files seeded with `initial` and marks the fixture as an xpf appliance. Tests
+// that model an unowned foreign host must explicitly remove that marker.
 func withTempTransitForwardSysctls(t *testing.T, initial string) (v4, v6 string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -44,9 +45,15 @@ func withTempTransitForwardSysctls(t *testing.T, initial string) (v4, v6 string)
 		}
 	}
 	origV4, origV6 := ipv4ForwardSysctlPath, ipv6ForwardSysctlPath
+	origMarker := applianceMarkerFile
 	ipv4ForwardSysctlPath, ipv6ForwardSysctlPath = v4, v6
+	applianceMarkerFile = filepath.Join(dir, "appliance")
+	if err := os.WriteFile(applianceMarkerFile, []byte("appliance\n"), 0o644); err != nil {
+		t.Fatalf("seed appliance marker: %v", err)
+	}
 	t.Cleanup(func() {
 		ipv4ForwardSysctlPath, ipv6ForwardSysctlPath = origV4, origV6
+		applianceMarkerFile = origMarker
 	})
 	return v4, v6
 }

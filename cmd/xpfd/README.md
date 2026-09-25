@@ -62,6 +62,8 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
 - `xpfd transit-barrier close` — installs the inet and bridge forward-hook DROP
   barrier without loading configuration or taking the daemon lock. The early
   boot unit runs it before `systemd-networkd.service`.
+- `xpfd transit-barrier remove` — removes both transit-barrier tables so package
+  removal can release the boot/shutdown fence.
 - A kernel without bridge nf_tables reports degraded success with a warning
   when the inet barrier is active; inet failures and real bridge errors fail.
 

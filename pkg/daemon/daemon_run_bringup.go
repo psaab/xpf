@@ -604,22 +604,11 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 // the decision is drivable in a test against the sysctl seam rather than
 // buried behind the manager-construction block.
 //
-// Three cases, and the two closing ones are the decision this function
-// exists to state explicitly:
-//
-//   - --no-dataplane: there is no dataplane at all. Bring-up already declined
-//     to enable forwarding here; closing the knob makes the apply tail agree
-//     with bring-up instead of contradicting it.
-//   - bootstrap mode: no committed config, so no policy to enforce. #1922
-//     already SUPPRESSED enableForwarding — but suppression is not closure,
-//     because the sysctls outlive the process: a daemon restart into
-//     bootstrap (or into the #1960 compile-failed boot, which forces
-//     bootstrap) inherits ip_forward=1 from the previous armed run and routes
-//     transit under no policy. pkg/daemon/README.md already asserts transit
-//     is fail-closed in this state; this is what makes that true.
-//   - otherwise: apply the host forwarding posture but keep kernel transit
-//     CLOSED. The dataplane arm below does not open it by itself; a fresh
-//     kernel-truth re-evaluation opens it only after an XDP link is attached.
+// The not-armed cases close transit only when xpf owns the host's posture:
+// appliance marker present or a committed configuration in the store. An
+// uncommitted foreign-host package install must preserve OS forwarding state.
+// Previously committed bootstrap and appliance factory boots remain closed
+// because they have no policy they can currently enforce.
 func (d *Daemon) applyBootTransitPolicy() {
 	switch {
 	case d.opts.NoDataplane:

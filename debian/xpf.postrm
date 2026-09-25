@@ -114,6 +114,35 @@ STAGED_GEN_FLOOR="0.0.4200"
 # (TestManagedBinaryDriftCanary, pkg/upgrade/manifest) FAILS the suite if this
 # list diverges from manifest.Names(). Edit both together.
 BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
+# Transit sysctls are closed by xpfd on orderly shutdown and outlive it.
+TRANSIT_IPV4_SYSCTL=/proc/sys/net/ipv4/ip_forward
+TRANSIT_IPV6_SYSCTL=/proc/sys/net/ipv6/conf/all/forwarding
+
+cleanup_transit_state() {
+    # Keep the removal command before unlinking /usr/local/sbin/xpfd: the
+    # versioned runtime remains available until the purge tree cleanup below.
+    # Only invoke a package-owned link; an operator-repointed xpfd is not ours.
+    # If the runtime is unavailable or cannot remove the barrier, leave the
+    # sysctls untouched rather than opening forwarding behind a stale fence.
+    if ! link_is_owned "$SBIN/xpfd" || [ ! -x "$SBIN/xpfd" ]; then
+        echo "xpf: cannot remove the transit barrier; package xpfd is unavailable" >&2
+        return 0
+    fi
+    if ! "$SBIN/xpfd" transit-barrier remove; then
+        echo "xpf: transit barrier removal failed; leaving forwarding sysctls unchanged" >&2
+        return 0
+    fi
+    # Restore the normal forwarding posture after deleting the xpf fence.
+    # These are best-effort procfs writes; a non-booted package-build/chroot
+    # has no live sysctls and must not fail package removal.
+    for path in "$TRANSIT_IPV4_SYSCTL" "$TRANSIT_IPV6_SYSCTL"; do
+        if [ -e "$path" ]; then
+            printf '1\n' > "$path" 2>/dev/null || \
+                echo "xpf: could not restore forwarding sysctl $path" >&2
+        fi
+    done
+}
+
 
 # atomic_symlink LINK TARGET — point LINK at TARGET via temp symlink +
 # rename (atomic; no unlink-then-create window).
@@ -228,6 +257,7 @@ incoming_predates_staged_gen() {
 
 case "$1" in
     remove|purge)
+        cleanup_transit_state
         remove_owned_sbin_links
         # Remove the versioned-runtime unit drop-in too (#1967): an orphaned
         # drop-in pins ExecStart to a deleted versions/<ver>/xpfd path and

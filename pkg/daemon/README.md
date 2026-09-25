@@ -2146,6 +2146,13 @@ never lock an operator out of a remote box it manages.
   returns nil; the gate in `daemon_transit_gate.go` also requires the
   kernel-truth XDP census before it raises
   `/proc/sys/net/ipv4/ip_forward` and `/proc/sys/net/ipv6/conf/all/forwarding`.
+  - **Ownership boundary (#10733).** Transit close/reassert writers run only
+    on an appliance-marked image or after the config store records a committed
+    configuration. A foreign host that merely installs the package and has
+    never committed a config retains its existing forwarding sysctls, and the
+    periodic kernel-truth tick is gated by the same predicate. Once ownership
+    is established it stays latched through a first-commit rollback, so the
+    rollback closes forwarding before detaching the dataplane.
   - **Why.** A successful config *compile* followed by an *arm* failure took a
     branch that logged "running in config-only mode", cleared the dataplane
     cell, and fell through to `applyConfig` — while bring-up had already
