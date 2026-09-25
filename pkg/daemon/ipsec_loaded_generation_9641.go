@@ -9,9 +9,9 @@ package daemon
 //
 //   - after an xpfd restart whose boot IPsec apply failed, charon still runs the
 //     generation the previous xpfd process loaded;
-//   - in the failed-reload window, charon runs the previous generation until its own
-//     next start or reload loads the new file (strongswan.service ExecStartPost and
-//     ExecReload run `swanctl --load-all`).
+//   - during a failed-reload window, charon keeps the previous generation and the
+//     manager restores the previous file before returning (#10712). A later service
+//     start or reload therefore cannot load the rejected candidate.
 //
 // Before #9641 both fell back to the promoted config, which in each case can be a
 // generation charon is not running. Now every file xpf writes names its generation in

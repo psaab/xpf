@@ -9,12 +9,10 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #9511 stopgap: ApplyWithHooks' Written hook marks the moment the on-disk swanctl
-// config changes, which is when charon's own next start or reload would load something
-// other than the generation xpfd last recorded. These cells pin WHEN each hook fires.
-
-// Written fires after the new file is on disk and BEFORE `--load-all`. On a failed
-// reload only Written fires.
+// #9511/#10712: ApplyWithHooks' Written hook marks the temporary window from changing
+// the on-disk swanctl config through reload success or restoration after reload failure.
+// It fires before `--load-all`; after a failed reload only Written fires, and the prior
+// file is back on disk when Apply returns.
 func TestApplyHooksWrittenBeforeReloadOnlyOnFailure9511(t *testing.T) {
 	m := NewWithConfigDir(t.TempDir())
 	written, loaded := 0, 0

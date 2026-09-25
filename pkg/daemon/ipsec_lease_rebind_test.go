@@ -58,19 +58,18 @@ func readSwanctl(t *testing.T, dir string) (string, bool) {
 // a DHCP lease change on an IPsec-bound interface re-renders swanctl with
 // the NEW local_addrs. Fail-on-revert anchor — deleting the
 // ipsec.Apply call (or the HasDHCPBoundGateway-gated branch) in
-// reapplyIPsecForLeaseChange makes the second assertion go RED because
-// the stale address is retained / the file is never written.
-//
-// Apply shells out to a (likely absent) `swanctl` for reload, which fails
-// harmlessly; the swanctl config file is written before reload, so the
-// rendered local_addrs is still observable on disk.
+// reapplyIPsecForLeaseChange makes the second assertion go RED because the
+// stale address is retained / the file is never written. The swanctl seam
+// reports reload success so the assertions inspect a successfully applied
+// config rather than the transient file from a failed reload.
 func TestReapplyIPsecForLeaseChange_RebindsLocalAddr(t *testing.T) {
 	dir := t.TempDir()
+	m := ipsec.NewWithConfigDir(dir)
+	m.SetSwanctlForTesting(func(args ...string) ([]byte, error) { return nil, nil })
 	d := &Daemon{
-		ipsec:    ipsec.NewWithConfigDir(dir),
+		ipsec:    m,
 		applySem: semaphore.NewWeighted(1),
 	}
-
 	d.reapplyIPsecForLeaseChange(leaseRebindConfig(true, "198.51.100.7/24"))
 	got, ok := readSwanctl(t, dir)
 	if !ok {

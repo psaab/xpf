@@ -3135,15 +3135,14 @@ standby can re-initiate the primary's tunnels on takeover:
   generation first. It keeps the pre-#9511 lookup and the RG 0 default rather than
   being treated as an anomaly.
 
-  **Failed-reload window (#9511 stopgap).** The recorded loaded config is CLEARED the
-  moment the on-disk swanctl config changes, before the reload (`ApplyHooks.Written`),
-  and set again only when strongSwan loads it (`ApplyHooks.Loaded`). If the reload fails,
-  charon keeps the previous generation, but the new file stays on disk, and
-  strongswan.service loads it on charon's own next start or reload (`ExecStartPost` and
-  `ExecReload` run `swanctl --load-all`, `Restart=on-abnormal`). A record still naming the
-  previous generation would then describe a config charon no longer runs, which is worse
-  than master. With the record cleared, attribution in that window no longer trusts it. A
-  render or write failure leaves the disk unchanged and keeps the record.
+  **Failed-reload window (#9511, closed on disk by #10712).** The recorded loaded config
+  is CLEARED the moment the on-disk swanctl config changes, before the reload
+  (`ApplyHooks.Written`), and set again only when strongSwan loads it
+  (`ApplyHooks.Loaded`). If the reload fails, charon keeps the previous generation and
+  the apply restores the previous config file before returning; a later service start
+  or reload therefore cannot load the rejected candidate. The record remains cleared,
+  so attribution in the brief write/reload/restore window no longer trusts it. A render
+  or write failure leaves the disk unchanged and keeps the record.
 
   **Charon's own generation marker (#9641).** Every swanctl file xpf writes ends with an
   inert, unreferenced pool `xpf-gen-<digest>` naming the configstore digest of the active

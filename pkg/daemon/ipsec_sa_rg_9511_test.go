@@ -749,15 +749,14 @@ func TestApplyActiveConfigRecordsTheLoadedIPsecGeneration9511(t *testing.T) {
 	}
 }
 
-// ── FAILED-RELOAD WINDOW (#9511 stopgap) ──────────────────────────────────────
+// ── FAILED-RELOAD WINDOW (#9511, disk rollback #10712) ────────────────────────
 //
-// THE WINDOW: xpfd writes the new swanctl file, then its reload FAILS. charon keeps
-// running the previous generation C0, but the new file C1 stays on disk, and charon's
-// own next start or reload (strongswan.service ExecStartPost/ExecReload
-// `swanctl --load-all`, Restart=on-abnormal) loads it. A record still naming C0 would
-// attribute against a generation charon no longer runs, which is worse than master.
-// Inside this window attribution must equal the PROMOTED-config answer, which is
-// master's answer and the generation charon will load.
+// THE WINDOW: xpfd writes the candidate before its reload. If reload fails, charon
+// keeps C0 and manager.go restores the prior file before returning, so a later service
+// start/reload cannot load the rejected candidate. Written still clears the C0 record
+// during the attempt because a failed/partial load cannot safely trust that record.
+// This cell's charon listing is unavailable, so attribution falls back to the promoted
+// config while the record is empty.
 func TestFailedReloadWindowAttributesLikeThePromotedConfig9511(t *testing.T) {
 	c0 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
 		"set security ipsec vpn blue-red ike gateway gw-rg2",
@@ -779,8 +778,7 @@ func TestFailedReloadWindowAttributesLikeThePromotedConfig9511(t *testing.T) {
 		t.Fatal("FIXTURE: the reload of C1 must fail")
 	}
 	if got := d.ipsecLoadedCfg.Load(); got != nil {
-		t.Fatalf("THE WINDOW: C1 was written and its reload failed, so charon's next "+
-			"start or reload loads C1; the record must be cleared, still holds %p", got)
+		t.Fatalf("THE WINDOW: the failed reload must clear the possibly stale C0 record, still holds %p", got)
 	}
 
 	got := d.ipsecSAsToReinitiate(names)

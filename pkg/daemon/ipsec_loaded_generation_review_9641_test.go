@@ -177,41 +177,6 @@ func TestAttributionKeepsThePromotedConfigWhenItCannotBeCompared9641(t *testing.
 	}
 }
 
-// FINDING 3. This process WROTE C1, but its own reload of C1 failed, so nothing pinned C1 as
-// loaded; charon's own restart then loaded the file from disk. A rollback promoted C0 into a
-// store that no longer retains C1, and the rollback's reload failed too. The generation charon
-// names must still resolve, from what this process wrote. Unguarded, C1 is not retained, the
-// pass falls back to the promoted C0, and blue-red is initiated. The loaded-then-evicted case is
-// TestAttributionResolvesTheLastLoadedGenerationAfterManyFailedWrites9641.
-func TestAttributionResolvesAGenerationTheStoreDropped9641(t *testing.T) {
-	withC1, _, d1 := generations9641(t)
-	ch := &charon9641{loadErr: errors.New("charon vici socket refused")}
-	d := daemonAskingCharon9641(t, withC1, ch, 1)
-	if err := d.applyIPsecTracked(withC1.ActiveConfig()); err == nil {
-		t.Fatal("FIXTURE: this process's reload of C1 must fail")
-	}
-	if d.ipsecLastLoaded.Load() != nil {
-		t.Fatal("FIXTURE: nothing may be pinned as loaded, or the pin would answer instead of the written list")
-	}
-	ch.loadFile(t) // charon's own restart loads the file on disk
-	ch.conns = listBlue9641 + listBlueRed9641
-	if ch.marker != d1 {
-		t.Fatalf("FIXTURE: charon must name C1, got %q", ch.marker)
-	}
-
-	rolledBack := storeWith9511(t, blueOnRG1_9511...)
-	if _, ok := rolledBack.RetainedGeneration(d1); ok {
-		t.Fatal("FIXTURE: the rolled-back store must not retain C1")
-	}
-	d.store = rolledBack
-	d.cluster = clusterOwning9511(t, rolledBack, 1)
-	if err := d.applyIPsecTracked(rolledBack.ActiveConfig()); err == nil {
-		t.Fatal("FIXTURE: the rollback's reload must fail")
-	}
-	if initiates9641(d, "blue-red") {
-		t.Error("charon still runs C1, which this process wrote; attribution could not resolve it and used the promoted C0")
-	}
-}
 
 // CODEX RE-CHECK, finding 2. charon runs C1, which this process loaded. A rollback's
 // reload then fails, and so do ipsecWrittenMax+1 more applies of distinct generations.
