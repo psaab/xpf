@@ -284,6 +284,25 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
         TEST_LAN_ZONE_ID,
         "known VID traffic must remain in its configured sibling zone"
     );
+    // XDP may be attached to the VLAN child itself. Its ingress ifindex is
+    // already logical, so only the child's configured VID is known.
+    let child_match = prerouting_ingress_scope(&forwarding, 13, 50, None);
+    assert_eq!(child_match.logical_ifindex, 13);
+    assert_eq!(child_match.zone_name, "lan");
+    assert_eq!(child_match.ifname, "reth0.50");
+    assert!(
+        !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 50),
+        "a VLAN child must admit its configured VID"
+    );
+    let child_wrong_vid = prerouting_ingress_scope(&forwarding, 13, 99, None);
+    assert_eq!(
+        child_wrong_vid.zone_name, "",
+        "a different VID on the child must not inherit its configured zone"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 99),
+        "a VLAN child must still reject a VID other than its configured VID"
+    );
 
     // Unknown VID regression: the scope keeps the physical parent identity
     // for interface matching, but no configured unit owns VID 99, so the
@@ -429,6 +448,121 @@ fn unknown_vid_scope_populates_parent_ifname_10313() {
     assert_eq!(
         scope.ifname, "reth0",
         "unknown VID must not leave the parent interface scope empty"
+    );
+}
+/// #10656 (residual of #10313): an unknown tagged VID on a unit-less zoned
+/// port must not inherit the port's own zone. `reth2` (31, `lan`) carries
+/// no unit rows, so `(31, 99)` is an identity the snapshot does not own:
+/// the scope keeps the port config name for `from interface` matching, but
+/// the zone/policy identity is the unzoned sentinel. Untagged traffic on
+/// the port keeps its `lan` zone via the normal physical fallback.
+#[test]
+fn unknown_vid_on_unitless_zoned_port_is_unzoned_but_keeps_port_ifname_10656() {
+    let forwarding =
+        build_forwarding_state(&crate::afxdp::test_fixtures::unitless_zoned_port_snapshot_10656());
+
+    // Untagged control: the plain port keeps its own identity and `lan` zone.
+    let untagged = prerouting_ingress_scope(&forwarding, 31, 0, None);
+    assert_eq!(untagged.zone_name, "lan");
+    assert_eq!(untagged.ifname, "reth2");
+    let (untagged_from, _) = crate::afxdp::forwarding::zone_pair_ids_for_flow(
+        &forwarding,
+        untagged.logical_ifindex,
+        24,
+    );
+    assert_eq!(
+        untagged_from, TEST_LAN_ZONE_ID,
+        "untagged port traffic must remain in its configured zone"
+    );
+
+    // Unknown VID regression: no unit owns VID 99 on this bind, so the
+    // ingress zone must be the unzoned sentinel even though the port itself
+    // is zoned `lan`.
+    let unknown = prerouting_ingress_scope(&forwarding, 31, 99, None);
+    assert_eq!(
+        unknown.zone_name, "",
+        "unknown VID must not inherit the unit-less port's own zone"
+    );
+    let fabric_override =
+        prerouting_ingress_scope(&forwarding, 31, 99, Some(TEST_WAN_ZONE_ID));
+    assert_eq!(
+        fabric_override.zone_name, "wan",
+        "a valid fabric ingress override remains authoritative for an unknown local VID"
+    );
+    assert_eq!(
+        unknown.ifname, "reth2",
+        "unknown VID must keep the port config identity for from-interface scope"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 31, 99),
+        "unknown VID must be recognized at the common ingress boundary"
+    );
+    assert!(
+        !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 31, 0),
+        "untagged traffic must remain on the normal physical fallback"
+    );
+}
+
+/// #10656 packet-path guard: the unknown tagged VID on a unit-less port
+/// must be recycled before ARP learning, while untagged traffic on the
+/// same port still learns under its physical ifindex.
+#[test]
+fn unknown_vid_on_unitless_port_is_recycled_before_arp_learning_10656() {
+    let forwarding =
+        build_forwarding_state(&crate::afxdp::test_fixtures::unitless_zoned_port_snapshot_10656());
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 31, 0);
+    let neighbors =
+        std::sync::Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::default());
+
+    let unknown_ip = Ipv4Addr::new(192, 0, 2, 99);
+    let unknown_meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 31,
+        ingress_vlan_id: 99,
+        ingress_vlan_present: 1,
+        l3_offset: 14,
+        pkt_len: 42,
+        addr_family: libc::AF_INET as u8,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &broadcast_arp_reply_10313(unknown_ip, [0x02, 0x99, 0, 0, 0, 1]),
+        unknown_meta,
+        &neighbors,
+    );
+    assert!(
+        neighbors.get(&(31, IpAddr::V4(unknown_ip))).is_none(),
+        "unknown VID must recycle before the physical-port ARP learn"
+    );
+
+    let untagged_ip = Ipv4Addr::new(192, 0, 2, 1);
+    let untagged_meta = UserspaceDpMeta {
+        ingress_vlan_id: 0,
+        ingress_vlan_present: 0,
+        ..unknown_meta
+    };
+    txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &broadcast_arp_reply_10313(untagged_ip, [0x02, 0x01, 0, 0, 0, 1]),
+        untagged_meta,
+        &neighbors,
+    );
+    assert!(
+        neighbors.get(&(31, IpAddr::V4(untagged_ip))).is_some(),
+        "untagged port traffic must retain its physical fallback"
     );
 }
 }

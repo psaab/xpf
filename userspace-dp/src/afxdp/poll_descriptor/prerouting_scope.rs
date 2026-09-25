@@ -62,9 +62,9 @@ pub(super) fn prerouting_ingress_scope(
         physical_ifindex,
         ingress_vlan_id,
     );
-    // #10313: preserve physical parent/unit config identity for interface/RI
-    // scope, but don't let parent's inherited sibling zone answer unknown VID.
-    // A fabric-encoded override remains authoritative; only the local
+    // #10313/#10656: preserve physical parent/unit config identity for
+    // interface/RI scope, but don't let any fallback zone answer an unknown
+    // VID. A fabric-encoded override remains authoritative; only the local
     // ifindex-zone fallback is suppressed for an unknown local pair.
     // #919: ingress_zone_override is Option<u16>; DNAT/static NAT lookups take
     // zone names, so resolve ID→name lazily on this miss path. A fabric-encoded

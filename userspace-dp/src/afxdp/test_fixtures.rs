@@ -920,6 +920,84 @@ pub(super) fn agreed_zone_trunk_snapshot_10313() -> ConfigSnapshot {
     })
 }
 
+/// #10656 (residual of #10313): a zoned physical port with NO logical unit
+/// rows. `reth2` (ifindex 31, `lan`) is a plain untagged port — no snapshot
+/// row names it as a parent, so `ingress_logical_ifindex` holds only its
+/// `(31, 0)` physical entry. A frame tagged with any nonzero VID (e.g. 99)
+/// is an identity the snapshot does not own and must be rejected at the
+/// common ingress boundary, never adjudicated as `lan` via the physical
+/// fallback. Untagged traffic on the port keeps its `lan` zone.
+///
+/// Zones carry `any-service` host-inbound (admit) so a host-bound RED cell
+/// can only pass via the unknown-VLAN deny, never via the zone stanza; the
+/// `lan -> wan` permit proves the sibling zone WOULD admit, so an unknown
+/// VID denied under it is the fix working, not the policy. `reth1.0` (24,
+/// `wan`) is the transit egress.
+pub(super) fn unitless_zoned_port_snapshot_10656() -> ConfigSnapshot {
+    v5(ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "lan".to_string(),
+                id: TEST_LAN_ZONE_ID,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["any-service".to_string()],
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "wan".to_string(),
+                id: TEST_WAN_ZONE_ID,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["any-service".to_string()],
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            // A unit-less zoned port: no unit row names parent 31, so any
+            // tagged VID on this bind is unknown by construction.
+            InterfaceSnapshot {
+                name: "reth2".to_string(),
+                zone: "lan".to_string(),
+                linux_name: "ge-0-0-2".to_string(),
+                ifindex: 31,
+                hardware_addr: "02:bf:72:02:00:01".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "10.0.60.1/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+            // The wan transit egress.
+            InterfaceSnapshot {
+                name: "reth1.0".to_string(),
+                zone: "wan".to_string(),
+                linux_name: "ge-0-0-1".to_string(),
+                ifindex: 24,
+                hardware_addr: "02:bf:72:01:00:01".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "172.16.80.8/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+        ],
+        default_policy: "deny".to_string(),
+        policies: vec![PolicyRuleSnapshot {
+            name: "allow-lan-wan".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "permit".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
 pub(super) fn nat_snapshot_with_fabric() -> ConfigSnapshot {
     let mut snapshot = nat_snapshot();
     snapshot.interfaces.push(InterfaceSnapshot {

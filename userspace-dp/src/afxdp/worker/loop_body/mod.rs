@@ -261,8 +261,8 @@ fn rematch_bound_first_policy_sessions(
                 && let Ok(ifindex) = i32::try_from(metadata.ingress_ifindex)
                 // Untagged physical ports carry no (parent, vlan) entry; fall
                 // back to the physical ifindex exactly like the flow-cache
-                // classifier. A tagged miss on a trunk must fail closed before
-                // the physical parent's inherited first-unit zone can match.
+                // classifier. A tagged miss on any bind must fail closed
+                // before a fallback zone can match.
                 && !crate::afxdp::forwarding::unknown_ingress_vlan(
                     new_forwarding,
                     ifindex,

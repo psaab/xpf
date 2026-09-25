@@ -485,12 +485,7 @@ pub(super) fn populate_interfaces(
         if iface.ifindex <= 0 {
             continue;
         }
-        // #10313: remember which physical bind ifindexes have logical unit
-        // rows. A tagged frame whose VID is absent from the exact ingress map
-        // is an unknown VLAN only on these parents; ordinary untagged ports
-        // keep their byte-identical physical fallback.
         if iface.parent_ifindex > 0 && is_logical_unit_row(&iface.name, iface.is_unit) {
-            state.ingress_vlan_parents.insert(iface.parent_ifindex);
             // #10644: remember the trunk parent and, for an empty-zone unit
             // row, the child unit itself, for the post-walk unzoned-unit
             // sentinel. The parent half keys on ANY unit row naming a parent

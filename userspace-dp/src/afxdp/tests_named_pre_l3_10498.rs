@@ -1,6 +1,8 @@
 // #10498: named pre-L3 drops must be exercised through the poll-head harness.
 
-use super::test_fixtures::agreed_zone_trunk_snapshot_10313;
+use super::test_fixtures::{
+    agreed_zone_trunk_snapshot_10313, unitless_zoned_port_snapshot_10656,
+};
 use super::tests_support::*;
 use super::*;
 
@@ -70,6 +72,33 @@ fn poll_head_counts_unknown_vlan_drop_and_recycles_10498() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     let mut sessions = SessionTable::new();
     let (frame, mut meta) = frame_and_meta();
+    meta.ingress_vlan_present = 1;
+    meta.ingress_vlan_id = 99;
+
+    let (batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+
+    assert_eq!(batch.umem_slice_dropped, 0);
+    assert_eq!(batch.unknown_vlan_dropped, 1);
+    assert_eq!(batch.dst_mac_dropped, 0);
+    assert_pre_l3_drop_stops_downstream_10498(&batch, &dbg, &binding, &sessions);
+    assert_eq!(binding.scratch.scratch_recycle, vec![128]);
+}
+
+#[test]
+fn poll_head_counts_unknown_vlan_drop_on_unitless_zoned_port_10656() {
+    let forwarding = build_forwarding_state(&unitless_zoned_port_snapshot_10656());
+    let ha_state = BTreeMap::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 31, 0);
+    let mut sessions = SessionTable::new();
+    let (frame, mut meta) = frame_and_meta();
+    meta.ingress_ifindex = 31;
     meta.ingress_vlan_present = 1;
     meta.ingress_vlan_id = 99;
 
