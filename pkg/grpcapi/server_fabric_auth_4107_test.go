@@ -155,20 +155,86 @@ func TestFabricAuthUnary_RollingUpgradeGrace(t *testing.T) {
 	}
 }
 
-// TestFabricAuthUnary_NoKeyDualAccept: a node with no key configured cannot
-// verify, so it dual-accepts everything (standalone / legacy / not-yet-keyed
-// side of a rollout). A tokenless call is admitted.
-func TestFabricAuthUnary_NoKeyDualAccept(t *testing.T) {
+// TestFabricAuthUnary_NoKeyStatusOnly: GetStatus remains available as the
+// fabric listener's unauthenticated health probe when no PSK is configured.
+func TestFabricAuthUnary_NoKeyStatusOnly(t *testing.T) {
 	s := keyedServer("") // no key
-	// Even with the sticky flag somehow set, no key => cannot enforce.
-	s.fabricPeerAuthSeen.Store(true)
 	probe := &unaryCallProbe{}
-	info := &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_GetSessions_FullMethodName}
-	if _, err := s.fabricAuthUnaryInterceptor(context.Background(), nil, info, probe.handler); err != nil {
-		t.Fatalf("no-key dual-accept: expected allow, got %v", err)
+	info := &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_GetStatus_FullMethodName}
+	_, err := s.fabricAuthUnaryInterceptor(context.Background(), nil, info,
+		func(ctx context.Context, req interface{}) (interface{}, error) {
+			return s.fabricAllowlistUnaryInterceptor(ctx, req, info, probe.handler)
+		})
+	if err != nil {
+		t.Fatalf("unkeyed GetStatus health probe: expected allow, got %v", err)
 	}
 	if !probe.called {
-		t.Error("no-key dual-accept: handler was not invoked")
+		t.Fatal("unkeyed GetStatus health probe did not reach handler")
+	}
+}
+
+// TestFabricAuthUnary_NoKeyRejectsClearSessionsAndFailover is the #10698
+// fail-on-revert RED guard: without a configured PSK, destructive-within-peer-
+// trust methods must stop at authentication before the allowlist or handler.
+func TestFabricAuthUnary_NoKeyRejectsClearSessionsAndFailover(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		req    interface{}
+	}{
+		{
+			name:   "GetSessions",
+			method: pb.BpfrxService_GetSessions_FullMethodName,
+			req:    &pb.GetSessionsRequest{},
+		},
+		{
+			name:   "ClearSessions",
+			method: pb.BpfrxService_ClearSessions_FullMethodName,
+			req:    &pb.ClearSessionsRequest{},
+		},
+		{
+			name:   "cluster-failover",
+			method: pb.BpfrxService_SystemAction_FullMethodName,
+			req:    &pb.SystemActionRequest{Action: "cluster-failover:1:node1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := keyedServer("") // no key
+			probe := &unaryCallProbe{}
+			info := &grpc.UnaryServerInfo{FullMethod: tc.method}
+			_, err := s.fabricAuthUnaryInterceptor(context.Background(), tc.req, info,
+				func(ctx context.Context, req interface{}) (interface{}, error) {
+					return s.fabricAllowlistUnaryInterceptor(ctx, req, info, probe.handler)
+				})
+			if status.Code(err) != codes.Unauthenticated {
+				t.Fatalf("unkeyed %s: got err=%v (%s), want Unauthenticated",
+					tc.name, err, status.Code(err))
+			}
+			if probe.called {
+				t.Fatalf("unkeyed %s reached its handler", tc.name)
+			}
+		})
+	}
+}
+
+// TestFabricAuthStream_NoKeyRejectsMonitorInterface enforces the same unkeyed
+// GetStatus-only policy for the fabric listener's streaming surface.
+func TestFabricAuthStream_NoKeyRejectsMonitorInterface(t *testing.T) {
+	s := keyedServer("")
+	handlerCalled := false
+	err := s.fabricAuthStreamInterceptor(nil,
+		fakeServerStream{ctx: context.Background()},
+		&grpc.StreamServerInfo{FullMethod: pb.BpfrxService_MonitorInterface_FullMethodName},
+		func(srv interface{}, ss grpc.ServerStream) error {
+			handlerCalled = true
+			return nil
+		})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unkeyed MonitorInterface: got err=%v (%s), want Unauthenticated",
+			err, status.Code(err))
+	}
+	if handlerCalled {
+		t.Fatal("unkeyed MonitorInterface reached its handler")
 	}
 }
 
@@ -317,8 +383,9 @@ func TestFabricAuthCreds(t *testing.T) {
 	}
 }
 
-// TestFabricAuthDecision pins the dual-accept policy table (mirror of
-// cluster.heartbeatAuthDecision).
+// TestFabricAuthDecision pins the keyed dual-accept policy table (mirror of
+// cluster.heartbeatAuthDecision). The method-aware unkeyed restriction is
+// enforced by checkFabricAuth before this method-agnostic decision runs.
 func TestFabricAuthDecision(t *testing.T) {
 	type in struct{ keyConfigured, present, tokenOK, peerAuthSeen bool }
 	cases := map[in]bool{

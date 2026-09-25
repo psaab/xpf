@@ -623,13 +623,22 @@ func TestFabricListenerDoesNotApplyThePrincipalGate_5278(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// GetStatus is on the #4122 fabric allowlist and no control-link PSK is
-	// configured, so the fabric chain admits it (dual-accept).
-	_, err = pb.NewBpfrxServiceClient(conn).GetStatus(callCtx(t), &pb.GetStatusRequest{})
-	if status.Code(err) == codes.PermissionDenied {
-		t.Fatalf("the fabric listener denied a proxied GetStatus (%v): the #5278 "+
-			"principal gate must NOT be installed there — a cluster peer has no "+
-			"uid on this host, so it would fail every cross-node proxy", err)
+	// Without a configured PSK, only GetStatus remains available on the
+	// network-exposed fabric listener as its health probe (#10698). This call
+	// also proves the principal gate is not installed there: the peer is a
+	// cluster node, not a local uid on this host.
+	client := pb.NewBpfrxServiceClient(conn)
+	if _, err = client.GetStatus(callCtx(t), &pb.GetStatusRequest{}); err != nil {
+		t.Fatalf("unkeyed fabric GetStatus health probe was denied: %v", err)
+	}
+	if _, err = client.ClearSessions(callCtx(t), &pb.ClearSessionsRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unkeyed fabric ClearSessions err=%v (%s), want Unauthenticated",
+			err, status.Code(err))
+	}
+	failoverReq := &pb.SystemActionRequest{Action: "cluster-failover:1:node1"}
+	if _, err = client.SystemAction(callCtx(t), failoverReq); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unkeyed fabric cluster-failover err=%v (%s), want Unauthenticated",
+			err, status.Code(err))
 	}
 }
 

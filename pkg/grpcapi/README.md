@@ -61,6 +61,13 @@ network-exposed gRPC surface is the **separate** fabric listener
 (`RunFabricListener`), which authenticates (#4107) and allowlists (#4122)
 every call.
 
+**Unkeyed fabric listener (#10698).** Without `chassis cluster authentication-key`,
+the network-exposed listener admits only `GetStatus` for its health probe.
+Session/recon RPCs, `ClearSessions`, `MonitorInterface` and cross-node failover
+are rejected as `Unauthenticated` until a PSK is committed. Missing a key is an
+indefinite configuration state, not a rollout grace; a configured key retains
+the existing peer-authentication rollout grace.
+
 ### Peer hop markers are a listener capability, not a header (#5883)
 
 Two internal metadata keys bound cluster forwarding to one hop:

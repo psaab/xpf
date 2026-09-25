@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/denyaudit"
+	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -36,10 +37,15 @@ import (
 // (127.0.0.1) listener is UNCHANGED — local callers are trusted.
 //
 // Dual-accept (rolling upgrade / key rollout), mirroring
-// cluster.heartbeatAuthDecision:
-//   - No local key configured: accept everything (this node cannot verify; it
-//     may be the not-yet-keyed side of a key rollout, or a standalone/legacy
-//     node). Standalone nodes never start a fabric listener anyway.
+// cluster.heartbeatAuthDecision — EXCEPT that an unkeyed fabric listener is
+// GetStatus-only (#10698):
+//   - No local key configured: admit ONLY the GetStatus health probe (the
+//     dialPeer() liveness check must keep working on a not-yet-keyed
+//     cluster); reject every other method Unauthenticated. An unkeyed cluster
+//     stays unkeyed indefinitely — not a rollout grace — so dual-accept-all
+//     would leave session-flush and RG-failover open to any on-segment host
+//     with no credential. Standalone nodes never start a fabric listener
+//     anyway.
 //   - Local key + valid token: accept, and record that the peer holds the key.
 //   - Local key + present-but-invalid token: reject (Unauthenticated).
 //   - Local key + no token + enforcement NOT armed: accept (grace window while
@@ -47,17 +53,18 @@ import (
 //   - Local key + no token + enforcement armed: reject — a downgrade to
 //     tokenless once both nodes are keyed is an attack.
 //
-// ARMING SOURCE (the #4107 fold): the downgrade-guard arms off EITHER a prior
-// valid fabric token OR the heartbeat having authenticated the peer
-// (cluster.Manager.HeartbeatPeerAuthSeen). Arming only off the fabric token
-// would be LAZY: nothing periodically dials the fabric listener, so after a
-// keyed node restarts there is a window — until the peer next proxies an
-// on-demand RPC (operator show/clear/failover) — where the fabric would
-// grace-accept tokenless ClearSessions / cross-node-failover from any
-// on-segment host. Heartbeats flow continuously at ~200ms, so arming off the
+// ARMING SOURCE (the #4107 fold): when a key is configured, the downgrade guard
+// arms off EITHER a prior valid fabric token OR the heartbeat having
+// authenticated the peer (cluster.Manager.HeartbeatPeerAuthSeen). Arming only
+// off the fabric token would be LAZY: nothing periodically dials the fabric
+// listener, so after a keyed node restarts there is a window — until the peer
+// next proxies an on-demand RPC (operator show/clear/failover) — where the
+// fabric would grace-accept tokenless ClearSessions / cross-node-failover from
+// any on-segment host. Heartbeats flow continuously at ~200ms, so arming off the
 // heartbeat closes that window to ~one interval. The rolling-upgrade grace is
 // preserved: a not-yet-keyed peer is not signing heartbeats either, so neither
-// source arms during the transition.
+// source arms during the transition. Independently, an unkeyed listener remains
+// GetStatus-only and never opens that grace for other RPCs.
 //
 // Residual 1 (same-method replay): the token is HMAC(PSK, domain ||
 // method-length || method || window), where window = unix_time /
@@ -205,6 +212,14 @@ func fabricAuthTokenFromMetadata(ctx context.Context) (token string, present boo
 //	                authenticated heartbeat (see checkFabricAuth). Once armed, a
 //	                subsequent tokenless call is a downgrade attack, not a
 //	                rollout gap.
+//
+// #10698: the !keyConfigured accept-all branch below survives ONLY for the
+// GetStatus health probe. checkFabricAuth — the sole production caller of
+// this function — rejects every other unkeyed method before consulting it.
+// The restriction lives there (not here) because it is method-aware and this
+// function deliberately is not: it mirrors cluster.heartbeatAuthDecision,
+// and heartbeats need dual-accept for liveness while destructive RPCs must
+// not have it.
 func fabricAuthDecision(keyConfigured, present, tokenOK, enforceArmed bool) (bool, string) {
 	if !keyConfigured {
 		return true, ""
@@ -285,6 +300,9 @@ func (s *Server) heartbeatPeerAuthSeen() bool {
 // checkFabricAuth authenticates one inbound fabric RPC by its metadata token.
 // Returns a codes.Unauthenticated status when the call is rejected; nil to
 // admit it. The key is never logged.
+// #10698: with no PSK configured only GetStatus is admitted; every other
+// method is rejected Unauthenticated (counted under the fabric-auth
+// denyaudit surface) until a key is committed.
 func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
 	// #6630: verify against every ACCEPTED key so a PSK rotation does not turn
 	// every peer-proxied RPC into codes.Unauthenticated for the window between
@@ -309,16 +327,29 @@ func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
 		// one-shot warning for the next episode.
 		s.noteFabricAuthOK()
 	}
-	// The downgrade-guard is armed by EITHER a prior valid fabric token OR the
-	// heartbeat having authenticated the peer. The heartbeat path is what closes
-	// the post-restart window: after a keyed node restarts, nothing dials its
-	// fabric listener on-demand to arm the sticky flag, but its heartbeat
-	// receiver re-authenticates the peer within ~one interval and arms
-	// enforcement immediately. In a rolling upgrade where the peer is not yet
-	// keyed, the peer is not signing heartbeats either, so neither source arms
-	// and the dual-accept grace still holds.
-	armed := s.fabricPeerAuthSeen.Load() || s.heartbeatPeerAuthSeen()
-	accept, reason := fabricAuthDecision(len(keys) > 0, present, tokenOK, armed)
+	// #10698: without a PSK this node cannot authenticate ANY caller, so the
+	// network-exposed listener admits only the GetStatus health probe and
+	// rejects everything else (session recon, ClearSessions,
+	// MonitorInterface, cross-node failover) Unauthenticated until
+	// `set chassis cluster authentication-key` is committed.
+	keyConfigured := len(keys) > 0
+	var accept bool
+	var reason string
+	if !keyConfigured && method != pb.BpfrxService_GetStatus_FullMethodName {
+		accept, reason = false, "cluster authentication-key not configured " +
+			"(only GetStatus is served until a PSK is committed)"
+	} else {
+		// The downgrade-guard is armed by EITHER a prior valid fabric token OR
+		// the heartbeat having authenticated the peer. The heartbeat path is
+		// what closes the post-restart window: after a keyed node restarts,
+		// nothing dials its fabric listener on-demand to arm the sticky flag,
+		// but its heartbeat receiver re-authenticates the peer within ~one
+		// interval and arms enforcement immediately. In a rolling upgrade
+		// where the peer is not yet keyed, the peer is not signing heartbeats
+		// either, so neither source arms and the dual-accept grace still holds.
+		armed := s.fabricPeerAuthSeen.Load() || s.heartbeatPeerAuthSeen()
+		accept, reason = fabricAuthDecision(keyConfigured, present, tokenOK, armed)
+	}
 	if !accept {
 		// #6708: a present-but-invalid token may be a forgery, a wrong PSK, or
 		// a peer whose wall clock has drifted past the ±1-window accept band —
