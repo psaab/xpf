@@ -85,3 +85,17 @@ func TestMatchCategoryUnknownFailsClosed(t *testing.T) {
 		t.Error("unknown event type passed a narrow category mask; want fail-closed")
 	}
 }
+
+func TestD11DenyReasonSurvivesOperatorLogFormatting11017(t *testing.T) {
+	rec := logging.EventRecord{
+		Type: "POLICY_DENY", Action: "deny", Reason: "D11 ZONE_UNZONED",
+	}
+	const want = `RT_FLOW POLICY_DENY src= dst= proto= action=deny policy=0 zone=0->0 reason="D11 ZONE_UNZONED"`
+	if got := formatLogMessage(rec); got != want {
+		t.Fatalf("D11 denial log message=%q, want %q", got, want)
+	}
+	if !matchCategory(rec.Type, logging.CategoryPolicy) ||
+		eventRecordSeverity(rec) != logging.SyslogWarning {
+		t.Fatal("D11 POLICY_DENY did not retain the operator policy-deny category/severity")
+	}
+}

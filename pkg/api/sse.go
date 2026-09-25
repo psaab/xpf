@@ -577,7 +577,11 @@ func formatLogMessage(rec logging.EventRecord) string {
 			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
 			rec.InZone, rec.OutZone, source, rec.RuleID, rec.TermID)
 	}
-	return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s policy=%d zone=%d->%d",
+	message := fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s policy=%d zone=%d->%d",
 		rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
 		rec.PolicyID, rec.InZone, rec.OutZone)
+	if rec.Reason != "" {
+		message += fmt.Sprintf(" reason=%q", rec.Reason)
+	}
+	return message
 }

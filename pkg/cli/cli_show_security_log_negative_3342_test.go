@@ -40,3 +40,18 @@ func TestShowSecurityLogPositiveCount(t *testing.T) {
 		t.Errorf("showSecurityLog([\"5\"]) = %v, want nil", err)
 	}
 }
+
+func TestShowSecurityLogRendersD11DenialReason11017(t *testing.T) {
+	c := &CLI{eventBuf: logging.NewEventBuffer(4)}
+	c.eventBuf.Add(logging.EventRecord{
+		Type: "POLICY_DENY", Action: "deny", Reason: "D11 UNSUPPORTED_HOOK",
+	})
+	out := captureStdout(t, func() {
+		if err := c.showSecurityLog([]string{"1"}); err != nil {
+			t.Fatalf("showSecurityLog: %v", err)
+		}
+	})
+	if !strings.Contains(out, `reason="D11 UNSUPPORTED_HOOK"`) {
+		t.Fatalf("D11 operator denial reason missing from security log: %q", out)
+	}
+}

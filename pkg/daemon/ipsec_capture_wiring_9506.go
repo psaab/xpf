@@ -12,6 +12,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/nfqueue"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
@@ -330,6 +331,18 @@ func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, gene
 		}
 	}
 	return snapshot
+}
+
+func samePMechTunnelZones(a, b *pmechZoneSnapshot) bool {
+	if a == nil || b == nil || len(a.tunnels) != len(b.tunnels) {
+		return false
+	}
+	for stn, want := range b.tunnels {
+		if got, ok := a.tunnels[stn]; !ok || got != want {
+			return false
+		}
+	}
+	return true
 }
 
 type ipsecReinjectSubmitter interface {
@@ -1098,7 +1111,13 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	}
 	keys := plan.Keys
 	if !plan.Quarantine.QuarantineAll && old != nil && old.sameKeys(keys) && !old.spec.QuarantineAll {
-		return old, old, nil
+		// Queue provenance deliberately excludes zone. A zone-only rezone
+		// nevertheless changes the authority paired with those queues, so
+		// rotate the capture generation before its snapshot can be accepted.
+		candidateZones := buildPMechZoneSnapshot(cfg, old.handles, old.generation(), uint32(old.generation()))
+		if samePMechTunnelZones(old.zoneSnapshot, candidateZones) {
+			return old, old, nil
+		}
 	}
 	var runID string
 	if plan.Quarantine.QuarantineAll || len(keys) != 0 {
@@ -1221,8 +1240,26 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			},
 		}
 	}
+	var missingD11EventBufferLogged sync.Once
 	denyEvents := nfqueue.DenyEventSinkFunc(func(event nfqueue.IpsecInnerDeny) bool {
-		return event.Reason.Valid()
+		if !event.Reason.Valid() {
+			return false
+		}
+		if d.eventBuf == nil {
+			missingD11EventBufferLogged.Do(func() {
+				slog.Error("ipsec capture: D11 deny event could not reach the operator event buffer",
+					"tunnel", event.Tunnel, "reason", event.Reason.String())
+			})
+			return false
+		}
+		d.eventBuf.Add(logging.EventRecord{
+			Time:         time.Now(),
+			Type:         "POLICY_DENY",
+			Action:       "deny",
+			Reason:       "D11 " + event.Reason.String(),
+			IngressIface: event.Tunnel,
+		})
+		return true
 	})
 	actor, actorErr := ipsecCaptureNewPipeline(IpsecCapturePipelineConfig{
 		Supervisor:  d.ipsecS4,

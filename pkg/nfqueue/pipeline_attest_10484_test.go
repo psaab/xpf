@@ -699,3 +699,184 @@ func TestD11OriginValidRejectsWrongOwner10484(t *testing.T) {
 		t.Fatalf("accepted owner validation error = %v, want zone evaluator unavailable", err)
 	}
 }
+
+type d11AttestLeaseMinter11016 struct {
+	calls int
+}
+
+func (m *d11AttestLeaseMinter11016) MintLease(frame CaptureFrame) (ReinjectLease, error) {
+	return m.MintLeaseForAttest(frame, "", 1)
+}
+
+func (m *d11AttestLeaseMinter11016) MintLeaseForAttest(frame CaptureFrame, _ string, permitEpoch uint64) (ReinjectLease, error) {
+	m.calls++
+	return ReinjectLease{
+		RequestID: uint64(m.calls), PermitEpoch: permitEpoch,
+		QueueNumber: frame.Packet.QueueID(), QueueEpoch: frame.QueueEpoch,
+	}, nil
+}
+
+func d11IngressFrame11016(hook CaptureHook, flow string, id uint32) CaptureFrame {
+	return CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, id), FlowKey: flow,
+		Generation: 1, SnapshotGeneration: 1, ConfigGeneration: 1,
+		FIBGeneration: 1, QueueNumber: 77, QueueEpoch: 1,
+		origin: CaptureOrigin{
+			Family: CaptureFamilyInet, Hook: hook,
+			Owner: "owner-a", STN: "st0", OwnedIfindex: 7,
+		},
+		originSet: true,
+	}
+}
+
+func TestD11RejectsInputHookBeforeLeaseOrReserve11016(t *testing.T) {
+	ledger := NewD11AttestationLedger()
+	armer := NewD11AttestationArmer("node-a", ledger, func(string, uint64) error { return nil })
+	armer.SetEnvironmentGate(func() bool { return true })
+	if err := armer.Arm("attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9,
+		"00112233445566778899aabbccddeeff"); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	minter := new(d11AttestLeaseMinter11016)
+	submitter := new(pipelineTestSubmitter)
+	var denies []IpsecInnerDeny
+	p := &CapturePipeline{
+		leaseMinter: minter, submitter: submitter,
+		attestation: &D11AttestationConfig{
+			Armer: armer, Ledger: ledger,
+			OriginValid:      func(CaptureOrigin) bool { return true },
+			AuthorityCurrent: func() bool { return true },
+		},
+		zoneEvaluator: passZoneEvaluator9506{}, zoneSnapshot: passZoneSnapshot9506{},
+		denyEvents: DenyEventSinkFunc(func(event IpsecInnerDeny) bool {
+			denies = append(denies, event)
+			return true
+		}),
+		sink: new(pipelineTestSink), flows: make(map[string]*flowState),
+		pending: make(map[uint64]*pendingReinject),
+	}
+	input := d11IngressFrame11016(CaptureHookInput, "input", 11)
+	if _, err := p.validateD11Frame(input); err == nil || err.Error() != "unsupported family or hook" {
+		t.Fatalf("inet/input dry-run validation error=%v, want explicit unsupported-hook error", err)
+	}
+	p.attestSubmit([]CaptureFrame{input})
+	if minter.calls != 0 || len(submitter.submitted) != 0 {
+		t.Fatalf("inet/input consumed lease/submission resources: minted=%d submitted=%d",
+			minter.calls, len(submitter.submitted))
+	}
+	if got := ledger.Snapshot(); len(got.Records) != 0 || len(got.Failures) != 1 ||
+		got.Failures[0].Reason != "unsupported family or hook" {
+		t.Fatalf("inet/input ledger=%+v, want one explicit failure and no lease record", got)
+	}
+	if len(denies) != 1 || denies[0].Reason != ReasonUnsupportedHook ||
+		p.Stats().Adjudicated != 0 {
+		t.Fatalf("inet/input denies=%+v stats=%+v", denies, p.Stats())
+	}
+
+	output := d11IngressFrame11016(CaptureHookForward, "output", 12)
+	if _, err := p.validateD11Frame(output); err != nil {
+		t.Fatalf("inet/output dry-run validation: %v", err)
+	}
+	p.flows[output.FlowKey] = &flowState{frames: []CaptureFrame{output}}
+	p.attestSubmit([]CaptureFrame{output})
+	if minter.calls != 1 || len(submitter.submitted) != 1 ||
+		submitter.submitted[0].Origin.Hook != CaptureHookForward ||
+		p.Stats().Adjudicated != 1 {
+		t.Fatalf("inet/output did not retain D11 path: minted=%d submitted=%+v stats=%+v",
+			minter.calls, submitter.submitted, p.Stats())
+	}
+}
+
+type d11FixedZoneEvaluator11017 struct{ evaluation ZoneEvaluation }
+
+func (e d11FixedZoneEvaluator11017) Evaluate(CaptureOrigin, ZoneSnapshotRef) ZoneEvaluation {
+	return e.evaluation
+}
+
+type d11CurrentZoneSnapshot11017 struct{ current bool }
+
+func (d11CurrentZoneSnapshot11017) ResolveSTN(string) ZoneResolution {
+	return ZoneResolution{ZoneID: 1, IfID: 7, Reason: ZoneReasonZoned}
+}
+func (d11CurrentZoneSnapshot11017) Generations() (uint64, uint32) { return 1, 1 }
+func (s d11CurrentZoneSnapshot11017) Current() bool               { return s.current }
+
+func TestD11ValidationDenialsCountOnlyDeliveredReason52Events11017(t *testing.T) {
+	tests := []struct {
+		name      string
+		hook      CaptureHook
+		evaluator ZoneEvaluator
+		snapshot  ZoneSnapshotRef
+		reason    IpsecInnerReason
+	}{
+		{
+			name: "zone unzoned", hook: CaptureHookForward,
+			evaluator: d11FixedZoneEvaluator11017{evaluation: ZoneEvaluation{
+				Decision: ZoneDrop, Reason: ZoneReasonUnzoned,
+			}},
+			snapshot: d11CurrentZoneSnapshot11017{current: true}, reason: ReasonZoneUnzoned,
+		},
+		{
+			name: "stale generation", hook: CaptureHookForward,
+			evaluator: passZoneEvaluator9506{},
+			snapshot:  d11CurrentZoneSnapshot11017{current: false}, reason: ReasonStaleGeneration,
+		},
+		{
+			name: "evaluator unavailable", hook: CaptureHookForward,
+			snapshot: d11CurrentZoneSnapshot11017{current: true}, reason: ReasonEvaluatorUnavailable,
+		},
+		{
+			name: "unsupported hook", hook: CaptureHookInput,
+			evaluator: passZoneEvaluator9506{},
+			snapshot:  d11CurrentZoneSnapshot11017{current: true}, reason: ReasonUnsupportedHook,
+		},
+	}
+	for _, tc := range tests {
+		for _, delivered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delivered-%v", tc.name, delivered), func(t *testing.T) {
+				ledger := NewD11AttestationLedger()
+				ledger.Begin("node-a", "attest-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 9)
+				var attempted, events []IpsecInnerDeny
+				p := &CapturePipeline{
+					submitter: new(pipelineTestSubmitter),
+					attestation: &D11AttestationConfig{
+						Ledger: ledger,
+						OriginValid: func(CaptureOrigin) bool { return true },
+						AuthorityCurrent: func() bool { return true },
+					},
+					zoneEvaluator: tc.evaluator, zoneSnapshot: tc.snapshot,
+					denyEvents: DenyEventSinkFunc(func(event IpsecInnerDeny) bool {
+						attempted = append(attempted, event)
+						if delivered {
+							events = append(events, event)
+						}
+						return delivered
+					}),
+					sink: new(pipelineTestSink), flows: make(map[string]*flowState),
+					pending: make(map[uint64]*pendingReinject),
+				}
+				p.attestSubmit([]CaptureFrame{d11IngressFrame11016(tc.hook, "deny", 21)})
+				if len(attempted) != 1 || attempted[0].Reason != tc.reason ||
+					len(events) != boolInt11017(delivered) {
+					t.Fatalf("deny attempts=%+v delivered events=%+v, want reason=%s delivered=%v",
+						attempted, events, tc.reason, delivered)
+				}
+				wantMetric := uint64(0)
+				if delivered && tc.reason == ReasonEvaluatorUnavailable {
+					wantMetric = 1
+				}
+				if got := p.Stats().D11Deny52; got != wantMetric {
+					t.Fatalf("D11Deny52=%d, want %d for delivered=%v reason=%s",
+						got, wantMetric, delivered, tc.reason)
+				}
+			})
+		}
+	}
+}
+
+func boolInt11017(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
