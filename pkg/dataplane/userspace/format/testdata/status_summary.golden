@@ -29,6 +29,7 @@ Userspace dataplane helper:
   Bound bindings:            1/1
   XSK-registered bindings:   1/1
   Zerocopy bindings:         1/1
+  Hugepage-backed bindings:  1/1
   Shared UMEM bindings:      1/1
   Armed queues:              1/2
   Ready queues:              1/2

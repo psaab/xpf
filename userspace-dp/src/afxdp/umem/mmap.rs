@@ -18,6 +18,13 @@ static FALLBACK_BYTES: AtomicU64 = AtomicU64::new(0);
 /// this keeps the (long) operator instruction from repeating once per binding.
 static FALLBACK_REPORTED: AtomicBool = AtomicBool::new(false);
 
+/// Process-wide UMEM fallback total for the status snapshot (#10729 X1-09).
+/// Monotonic: regions never un-fall-back, so a Relaxed load is exact enough
+/// for a ≤1/s operator scrape.
+pub(in crate::afxdp) fn umem_fallback_bytes_total() -> u64 {
+    FALLBACK_BYTES.load(Ordering::Relaxed)
+}
+
 pub(in crate::afxdp) struct MmapArea {
     ptr: NonNull<u8>,
     /// Original requested size (passed to XSK via as_nonnull_slice).
@@ -180,7 +187,6 @@ impl MmapArea {
     }
 
     /// Whether this region is backed by explicit 2 MB hugepages.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::afxdp) fn is_hugepage_backed(&self) -> bool {
         self.hugepage
     }

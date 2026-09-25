@@ -43,6 +43,14 @@ type BindingStatus struct {
 	XSKRegistered            bool   `json:"xsk_registered"`
 	XSKBindMode              string `json:"xsk_bind_mode,omitempty"`
 	ZeroCopy                 bool   `json:"zero_copy,omitempty"`
+	// HugepageBacked reports whether this binding's UMEM region got explicit
+	// 2 MB hugepages (#10729 X1-09). False on fallback (standard pages +
+	// throughput cliff) and on unbound slots. omitempty + Rust serde default
+	// keep cross-version wire safety.
+	HugepageBacked bool `json:"hugepage_backed,omitempty"`
+	// UMEMFallbackBytesTotal is the process-wide UMEM bytes that fell back
+	// to standard pages. Identical on every bound row — take max, not sum.
+	UMEMFallbackBytesTotal uint64 `json:"umem_fallback_bytes_total,omitempty"`
 	SocketFD                 int    `json:"socket_fd,omitempty"`
 	SharedUMEMMode           string `json:"shared_umem_mode,omitempty"`
 	SharedUMEMGroup          string `json:"shared_umem_group,omitempty"`

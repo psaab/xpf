@@ -44,6 +44,8 @@ impl BindingLiveState {
             xsk_bind_mode: bind_mode.as_str().to_string(),
             zero_copy: bind_mode.is_zerocopy(),
             socket_fd: self.socket_fd.load(Ordering::Relaxed),
+            hugepage_backed: self.hugepage_backed.load(Ordering::Relaxed),
+            umem_fallback_bytes_total: super::super::umem::umem_fallback_bytes_total(),
             socket_ifindex: self.socket_ifindex.load(Ordering::Relaxed),
             socket_queue_id: self.socket_queue_id.load(Ordering::Relaxed),
             socket_bind_flags: self.socket_bind_flags.load(Ordering::Relaxed),

@@ -187,3 +187,51 @@ fn named_pre_l3_wire_keys_are_exact_10498() {
     assert_eq!(value["unknown_vlan_dropped"], 2);
     assert_eq!(value["dst_mac_dropped"], 3);
 }
+
+/// #10729 X1-09: the hugepage-backing flag and fallback total round-trip
+/// live → snapshot → copy → `BindingStatus`, and the unbound-slot half
+/// clears both. The fallback total is process-global (other tests may have
+/// fallen back in this binary), so the test asserts self-consistency with
+/// the live counter, not a fixed value.
+#[test]
+fn hugepage_backing_round_trips_live_to_status_to_zero_10729() {
+    let live = crate::afxdp::binding_state::BindingLiveState::new();
+    live.set_hugepage_backed(true);
+    let snap = live.snapshot();
+    assert!(snap.hugepage_backed, "snapshot must carry live → snapshot");
+    assert_eq!(
+        snap.umem_fallback_bytes_total,
+        crate::afxdp::umem::umem_fallback_bytes_total(),
+        "snapshot total must equal the live process counter"
+    );
+    let mut status = crate::protocol::BindingStatus::default();
+    copy_live_snapshot(&mut status, snap);
+    assert!(status.hugepage_backed, "copy must carry snapshot → status");
+    assert_eq!(
+        status.umem_fallback_bytes_total,
+        crate::afxdp::umem::umem_fallback_bytes_total(),
+        "copy must carry the total snapshot → status"
+    );
+    zero_unbound_slot(&mut status);
+    assert!(
+        !status.hugepage_backed && status.umem_fallback_bytes_total == 0,
+        "zero_unbound_slot must clear both halves"
+    );
+
+    // The default (never-set) live state snapshots as unbacked.
+    let fresh = crate::afxdp::binding_state::BindingLiveState::new();
+    assert!(
+        !fresh.snapshot().hugepage_backed,
+        "unset live state must snapshot as unbacked"
+    );
+
+    // Wire keys are exact.
+    let status = crate::protocol::BindingStatus {
+        hugepage_backed: true,
+        umem_fallback_bytes_total: 7,
+        ..Default::default()
+    };
+    let value = serde_json::to_value(status).expect("serialize BindingStatus");
+    assert_eq!(value["hugepage_backed"], true);
+    assert_eq!(value["umem_fallback_bytes_total"], 7);
+}

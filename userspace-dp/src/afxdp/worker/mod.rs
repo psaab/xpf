@@ -502,6 +502,7 @@ impl BindingWorker {
         let user_fd = user.as_raw_fd();
         live.set_bound(user_fd);
         live.set_bind_mode(bind_mode);
+        live.set_hugepage_backed(worker_umem.area().is_hugepage_backed());
         // getsockname() returns ENOTSUP on AF_XDP sockets (kernel doesn't
         // implement it for this family).  Use the binding plan's expected
         // ifindex/queue_id directly — umem.bind() already validated these.
@@ -1389,6 +1390,8 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) xsk_bind_mode: String,
     pub(crate) zero_copy: bool,
     pub(crate) socket_fd: c_int,
+    pub(crate) hugepage_backed: bool,
+    pub(crate) umem_fallback_bytes_total: u64,
     pub(crate) socket_ifindex: i32,
     pub(crate) socket_queue_id: u32,
     pub(crate) socket_bind_flags: u32,
