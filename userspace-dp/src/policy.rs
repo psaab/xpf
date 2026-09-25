@@ -1258,16 +1258,22 @@ impl CompiledApplications {
         if self.match_any {
             return false;
         }
-        match self.by_protocol.get(&protocol) {
-            None => false,
-            Some(terms) => {
-                !terms.exact_dst_ports.is_empty()
-                    || terms
-                        .range_terms
-                        .iter()
-                        .any(|(_, src, dst, _)| !(src.is_empty() && dst.is_empty()))
-                    || !terms.icmp_constraints.is_empty()
-            }
+        let has_l4_constraints = |terms: &ProtoTerms| {
+            !terms.exact_dst_ports.is_empty()
+                || terms
+                    .range_terms
+                    .iter()
+                    .any(|(_, src, dst, _)| !(src.is_empty() && dst.is_empty()))
+                || !terms.icmp_constraints.is_empty()
+        };
+        if protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4 {
+            // The native fragment sentinel has no protocol information, so any
+            // protocol-specific L4 deny can be ambiguous and fail closed.
+            self.by_protocol.values().any(has_l4_constraints)
+        } else {
+            self.by_protocol
+                .get(&protocol)
+                .is_some_and(has_l4_constraints)
         }
     }
 }
