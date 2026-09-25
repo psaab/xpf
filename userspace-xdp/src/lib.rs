@@ -1835,11 +1835,12 @@ fn parse_ipv6(
     let (payload_offset, tcp_flags, flow_src_port, flow_dst_port, icmp_type, udp_wg_transport_data) =
         parse_l4(data, data_end, offset, protocol, data_end)?;
     // #10662: keep the capture-bound L4 parse EXACTLY as before. Passing a
-    // declared bound through parse_l4 multiplied verifier states: both prior
-    // designs hit 1,000,001 instructions against the 1,000,000 cap (baseline
-    // master: 635,813). This single post-check compares only the consumed
-    // packet-relative L4 end; the scalar truncation verdict never becomes a
-    // new packet bound or enters the heavy parse.
+    // declared bound through parse_l4 multiplied verifier states past the
+    // kernel cap while the control build fit comfortably (dated figures in
+    // #10998, not here: absolute counts rot every merge). This single
+    // post-check compares only the consumed packet-relative L4 end; the
+    // scalar truncation verdict never becomes a new packet bound or enters
+    // the heavy parse.
     let declared_end = ipv6_declared_end(l3_offset as usize, payload_len);
     let l4_truncated = payload_offset as usize > declared_end;
     if l4_truncated {
@@ -2108,18 +2109,14 @@ fn first_fragment_l4(
 /// walks. The lever is bidirectional; the shape decides the direction, and
 /// "make them consistent" would be a regression whichever way it was applied.
 ///
-/// A NOTE ON THE FIGURES ABOVE, dated on purpose. The control is 795,764 at
-/// `a02e55248` — the FOURTH baseline this file has carried inside a single
-/// issue's lifetime. Its three predecessors are kept here as the evidence for
-/// that volatility, not as live numbers, and none can be re-dated: the earlier
-/// investigations never recorded the shas. What they CAN be measured against is
-/// the constant that actually blocks an install, the 15% floor at 850,000 insns
-/// — 777,901, then 801,448, then 686,201, all against that same floor.
-///
-/// So a headroom number here without the sha it was measured at is a trap.
-/// #8249 twice sent someone to reason against a baseline that had already
-/// moved, which is most of what that issue cost. #8241 is the census that now
-/// refuses an undated figure; date yours, or state the floor.
+/// A NOTE ON FIGURES HERE. Dated headroom measurements rot within days: this
+/// file has carried four successive control figures inside a single issue's
+/// lifetime, each stale by the next merge that touched the crate, because a
+/// headroom number without the sha it was measured at is a trap. #8249 twice
+/// sent someone to reason against a moved figure, which is most of what that
+/// issue cost. State relationships that do not move instead: carrying fits,
+/// consuming does not, and the install-blocking ceiling is the 15% floor, not
+/// the 1M cap. The current dated measurement lives in #10998, not here.
 /// `declared_end` (#9901, F-075) is the caller's bound on how far L4 reads
 /// may go — the IPv4 declared-datagram end, a pure scalar. Every arm below
 /// scalar-checks its span against it BEFORE reading; the reads themselves
