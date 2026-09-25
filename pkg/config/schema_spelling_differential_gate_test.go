@@ -1114,8 +1114,8 @@ func TestSchemaSpellingDifferentialGate(t *testing.T) {
 	}
 	var hits []hit
 	firedKeys := map[string]bool{}
+	var comparedBySubtree = map[string]int{}
 	compared := 0
-
 	for _, g := range leaves {
 		leafCompared := false
 		for _, vp := range gateValuePairs {
@@ -1199,6 +1199,18 @@ func TestSchemaSpellingDifferentialGate(t *testing.T) {
 		}
 		if leafCompared {
 			compared++
+			if len(g.path) > 0 {
+				switch g.path[0] {
+				case "protocols", "policy-options", "routing-options":
+					comparedBySubtree[g.path[0]]++
+				}
+			}
+		}
+	}
+
+	for _, root := range []string{"protocols", "policy-options", "routing-options"} {
+		if comparedBySubtree[root] == 0 {
+			t.Errorf("the spelling-differential gate compared no leaves under %q; a green global count must not hide an uncovered routing subtree (#10707)", root)
 		}
 	}
 

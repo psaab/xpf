@@ -7262,6 +7262,8 @@ dormant MECHANISM in PR-A:
   byte-identical to pre-#4313 (return nil, silent-accept) — which remains the
   default for every subtree that has not opted in.
 
+
+
   This paragraph deliberately carries NO count of armed subtrees. It used to
   say "the state for EVERY production subtree today", which was true when
   written and silently false a month later once the rollout began; the same
@@ -7269,6 +7271,22 @@ dormant MECHANISM in PR-A:
   armed set is whatever carries `closedWorld: true` in `pkg/config/schema_*.go`
   — grep it, or read the `schema_closedworld_*_4313_test.go` files, one per
   closed subtree. A count in prose is a coverage claim and it rots.
+
+**Open-world routing roots now report unknown children (#10707).** The
+`protocols`, `policy-options`, and `routing-options` schemas deliberately remain
+open-world: leaf-completeness is uneven across the Junos grammars, and
+`protocols ospf area <area> interface` is explicitly kept open pending that
+audit (#8296). Instead of arming `closedWorld` and false-rejecting such
+configurations, the schema-aware compiler prewalk reports unmodeled child
+keywords under declared containers, including the corresponding per-instance
+`protocols` and `routing-options` bodies. The warning is returned in
+`Config.Warnings` and printed by the CLI commit path; strict commit remains
+compatible and no longer silently drops the keyword without a diagnostic.
+`Store.Load` and `Store.SyncApply` use the same warning while continuing to
+load/sync the legacy config, preserving the #1960 no-brick contract. Leaf
+payloads and opaque bodies are not treated as child keywords. The spelling
+differential gate also requires an actually-compared value leaf under each of
+the three roots, so a green global count cannot hide an uncovered subtree.
 
 PR-A landed the mechanism DORMANT (no production subtree set `closedWorld`,
 zero false-reject risk). It is white-box tested with a SYNTHETIC subtree
