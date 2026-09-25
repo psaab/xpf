@@ -44,6 +44,7 @@ Userspace dataplane helper:
   Destination MAC drops:     3
   Martian drops:             1
   IPv6 ext-header drops:     4
+  V4-mapped IPv6 drops:    0
   Neighbor misses:           1
   Exception packets:         3
   Flow cache hits:           40

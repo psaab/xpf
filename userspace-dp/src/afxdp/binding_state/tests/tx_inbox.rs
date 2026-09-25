@@ -192,9 +192,9 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 //
 // #10498 re-measured size + both OFFSETS (2432 -> 2496, 2288 -> 2312,
 // 2416 -> 2440) when the three unconditional named pre-L3 drop counters
-// joined ahead of both sentinels. Same lockstep, verified the way the
-// paragraph above requires: BOTH build configurations report the same size
-// and shifts, so one set of literals makes both green.
+// joined ahead of both sentinels. #10686 adds one more unconditional drop
+// counter before both sentinels, shifting offsets 2312/2440 -> 2320/2448
+// while size stays 2496. Same lockstep, verified by both builds.
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
     assert_eq!(
         std::mem::size_of::<BindingLiveState>(),
@@ -209,20 +209,20 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
         64,
         "#6304: ...nor its ALIGNMENT"
     );
-    // #10021/#10131/#10498: unconditional release-visible atomics inserted
-    // before these sentinels shift both pinned offsets in BOTH builds
-    // (2240/2368 -> 2288/2416 -> 2312/2440); #10498 grew size 2432 -> 2496
-    // while 64-byte alignment remains unchanged.
+    // #10021/#10131/#10498/#10686: unconditional release-visible atomics
+    // inserted before these sentinels shift both pinned offsets in BOTH
+    // builds. #10686 advances them by 8 while size stays 2496 and alignment
+    // remains 64.
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2312,
-        "#6304/#10021/#10131/#10498: ...nor the OFFSET of the admission counter whose \
+        2320,
+        "#6304/#10021/#10131/#10498/#10686: ...nor the OFFSET of the admission counter whose \
          cacheline this is all about"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2440,
-        "#6304/#10021/#10131/#10498: ...nor the offset of the last-declared field, which is \
+        2448,
+        "#6304/#10021/#10131/#10498/#10686: ...nor the offset of the last-declared field, which is \
          the sentinel for a cfg(test) member appended at the END of the struct"
     );
 }

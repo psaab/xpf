@@ -1600,3 +1600,44 @@ fn icmp_reply_type_pins_the_answer_set_10637() {
         "a non-ICMP protocol is never an answer"
     );
 }
+
+#[test]
+fn ipv6_mapped_compat_ingress_predicate_boundaries_10686() {
+    let mapped: Ipv6Addr = "::ffff:10.0.61.100".parse().unwrap();
+    let compatible: Ipv6Addr = "::10.0.61.100".parse().unwrap();
+    for addr in [mapped, compatible] {
+        assert!(ipv6_addr_is_v4_mapped_or_compat(addr), "{addr}");
+    }
+    for addr in [
+        Ipv6Addr::UNSPECIFIED,
+        Ipv6Addr::LOCALHOST,
+        "2001:db8::61".parse().unwrap(),
+        "ff02::1".parse().unwrap(),
+    ] {
+        assert!(
+            !ipv6_addr_is_v4_mapped_or_compat(addr),
+            "must preserve unspecified, loopback, native-v6, and multicast: {addr}"
+        );
+    }
+
+    let mut frame = v6_frame(PROTO_UDP, 8, &[0; 8]);
+    frame[14 + 8..14 + 24].copy_from_slice(&mapped.octets());
+    assert!(ipv6_frame_has_v4_mapped_or_compat(
+        &frame,
+        libc::AF_INET6 as u8
+    ));
+    assert!(!ipv6_frame_has_v4_mapped_or_compat(
+        &frame,
+        libc::AF_INET as u8
+    ));
+    frame[14 + 8..14 + 24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+    assert!(
+        !ipv6_frame_has_v4_mapped_or_compat(&frame, libc::AF_INET6 as u8),
+        "::1 is loopback and must retain its existing local handling"
+    );
+    frame.truncate(14 + 39);
+    assert!(!ipv6_frame_has_v4_mapped_or_compat(
+        &frame,
+        libc::AF_INET6 as u8
+    ));
+}

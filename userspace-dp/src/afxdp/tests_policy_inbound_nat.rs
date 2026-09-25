@@ -982,3 +982,277 @@ fn nat64_reverse_companion_carries_the_routing_domain_9033() {
         );
     }
 }
+
+/// #10686: the operator policy is deliberately the vulnerable shape — a v4-only
+/// source deny followed by a permit-any. IPv6 embedded-v4 identities must be
+/// dropped by ingress before this family-typed policy can permit them.
+fn v4_source_deny_then_any_snapshot_10686() -> ConfigSnapshot {
+    let mut snapshot = inbound_dnat_snapshot(wan_to_lan_permit("any", "permit-any"));
+    snapshot.policies = vec![
+        PolicyRuleSnapshot {
+            name: "deny-v4-source".to_string(),
+            from_zone: "wan".to_string(),
+            to_zone: "lan".to_string(),
+            source_addresses: vec!["10.0.0.0/8".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "deny".to_string(),
+            ..Default::default()
+        },
+        wan_to_lan_permit("any", "permit-any"),
+    ];
+    snapshot
+}
+
+fn udp_v6_ingress_frame_10686(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    dst_mac: [u8; 6],
+) -> (Vec<u8>, UserspaceDpMeta) {
+    let mut frame = Vec::with_capacity(14 + 40 + 8);
+    frame.extend_from_slice(&dst_mac);
+    frame.extend_from_slice(&[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+    frame.extend_from_slice(&[0x60, 0, 0, 0]);
+    frame.extend_from_slice(&8u16.to_be_bytes());
+    frame.push(PROTO_UDP);
+    frame.push(64);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    frame.extend_from_slice(&[0xc0, 0x00, 0x00, 0x35, 0, 8, 0, 1]);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 62,
+        pkt_len: 48,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    (frame, meta)
+}
+
+fn run_v6_ingress_10686(src: Ipv6Addr, dst: Ipv6Addr) -> (BatchCounters, DebugPollCounters, usize) {
+    let forwarding = build_forwarding_state(&v4_source_deny_then_any_snapshot_10686());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    let (frame, meta) = udp_v6_ingress_frame_10686(src, dst, TEST_WAN_MAC);
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    (batch, dbg, sessions.len())
+}
+
+#[test]
+fn mapped_ipv6_source_is_dropped_before_v4_policy_and_session_10686() {
+    let (batch, dbg, sessions) = run_v6_ingress_10686(
+        "::ffff:10.0.61.100".parse().unwrap(),
+        "2001:559:8585:ef00::102".parse().unwrap(),
+    );
+    assert_eq!(dbg.rx, 1, "the packet must arrive at the real poll path");
+    assert_eq!(batch.validated_packets, 1, "metadata must validate");
+    assert_eq!(batch.v4_mapped_ipv6_dropped, 1);
+    assert_eq!(dbg.policy_deny, 0, "ingress drop precedes zone policy");
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0, "an ingress-dropped packet cannot install a session");
+}
+
+#[test]
+fn mapped_ipv6_destination_is_dropped_10686() {
+    let (batch, dbg, sessions) = run_v6_ingress_10686(
+        "2001:db8::61".parse().unwrap(),
+        "::ffff:10.0.61.102".parse().unwrap(),
+    );
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(batch.v4_mapped_ipv6_dropped, 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+}
+
+#[test]
+fn compat_ipv6_source_is_dropped_10686() {
+    let (batch, dbg, sessions) = run_v6_ingress_10686(
+        "::10.0.61.100".parse().unwrap(),
+        "2001:559:8585:ef00::102".parse().unwrap(),
+    );
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(batch.v4_mapped_ipv6_dropped, 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+}
+
+#[test]
+fn compat_ipv6_destination_is_dropped_10686() {
+    let (batch, dbg, sessions) = run_v6_ingress_10686(
+        "2001:db8::61".parse().unwrap(),
+        "::10.0.61.102".parse().unwrap(),
+    );
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(batch.v4_mapped_ipv6_dropped, 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+}
+
+#[test]
+fn mapped_ipv6_host_bound_packet_is_dropped_at_same_ingress_gate_10686() {
+    let (batch, dbg, sessions) = run_v6_ingress_10686(
+        "::ffff:10.0.61.100".parse().unwrap(),
+        "2001:559:8585:80::8".parse().unwrap(),
+    );
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(batch.v4_mapped_ipv6_dropped, 1);
+    assert_eq!(dbg.local, 0, "host delivery must not see the mapped identity");
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+}
+
+/// #10686 review regression: a transit packet to a non-local IPv6 destination
+/// must not escape the ingress drop merely because its UDP port is a WG listen
+/// port. The real poll path exercises the exact exception used by the gate.
+#[test]
+fn mapped_ipv6_transit_to_wg_listen_port_is_still_dropped_10686() {
+    let forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
+    assert!(forwarding.has_wg_tunnels, "fixture must configure WireGuard");
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    let (mut frame, meta) = udp_v6_ingress_frame_10686(
+        "::ffff:10.0.61.100".parse().unwrap(),
+        "2001:db8::2".parse().unwrap(),
+        [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08],
+    );
+    frame[56..58].copy_from_slice(&51820u16.to_be_bytes());
+
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(dbg.rx, 1, "the transit packet must reach the poll path");
+    assert_eq!(batch.validated_packets, 1, "metadata must validate");
+    assert_eq!(
+        batch.v4_mapped_ipv6_dropped, 1,
+        "the non-local WG-listen-port destination must not receive the underlay exemption"
+    );
+    assert_eq!(dbg.policy_deny, 0, "the ingress gate must precede policy");
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions.len(), 0);
+}
+
+
+#[test]
+fn v4_deny_and_permit_any_controls_remain_policy_driven_10686() {
+    let snapshot = v4_source_deny_then_any_snapshot_10686();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let run = |src: Ipv4Addr| {
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+        binding.interface = Arc::<str>::from("reth0.80");
+        let mut sessions = SessionTable::new();
+        let frame = build_udp_frame_v4_full(
+            TEST_WAN_MAC,
+            src,
+            Ipv4Addr::new(10, 0, 61, 102),
+            64,
+        );
+        let meta = UserspaceDpMeta {
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+            ingress_ifindex: 12,
+            l3_offset: 14,
+            l4_offset: 34,
+            payload_offset: 42,
+            pkt_len: 28,
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            config_generation: 7,
+            fib_generation: 9,
+            ..UserspaceDpMeta::default()
+        };
+        let (batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
+        );
+        (batch, dbg, sessions.len())
+    };
+
+    let (deny_batch, deny_dbg, deny_sessions) = run(Ipv4Addr::new(10, 0, 61, 100));
+    assert_eq!(deny_dbg.rx, 1);
+    assert_eq!(deny_batch.validated_packets, 1);
+    assert_eq!(deny_batch.v4_mapped_ipv6_dropped, 0);
+    assert!(deny_dbg.policy_deny >= 1, "the IPv4 source deny must still match");
+    assert_eq!(deny_dbg.tx, 0);
+    assert_eq!(deny_sessions, 0);
+
+    let (permit_batch, permit_dbg, permit_sessions) = run(Ipv4Addr::new(192, 0, 2, 100));
+    assert_eq!(permit_dbg.rx, 1);
+    assert_eq!(permit_batch.validated_packets, 1);
+    assert_eq!(permit_batch.v4_mapped_ipv6_dropped, 0);
+    assert_eq!(permit_dbg.policy_deny, 0);
+    assert_eq!(permit_dbg.tx, 1, "the permit-any control must still forward");
+    assert_eq!(permit_sessions, 2, "permitted IPv4 flow installs both directions");
+}
+
+#[test]
+fn injected_mapped_ipv6_packet_is_outside_ingress_drop_scope_10686() {
+    let forwarding = build_forwarding_state(&v4_source_deny_then_any_snapshot_10686());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    let mut sessions = SessionTable::new();
+    let (frame, meta) = udp_v6_ingress_frame_10686(
+        "::ffff:10.0.61.100".parse().unwrap(),
+        "2001:559:8585:ef00::102".parse().unwrap(),
+        TEST_WAN_MAC,
+    );
+    let deliveries: Arc<
+        arc_swap::ArcSwap<
+            std::collections::BTreeMap<i32, crate::afxdp::tunnel::LocalTunnelDelivery>,
+        >,
+    > = Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::BTreeMap::new()));
+    let (batch, _dbg) = txn_run_descriptor_with_injected(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        (frame, meta),
+        &deliveries,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(
+        batch.v4_mapped_ipv6_dropped, 0,
+        "the diagnostic injection leg must not use the wire-ingress gate"
+    );
+}

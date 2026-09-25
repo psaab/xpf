@@ -298,3 +298,16 @@ fn policy_verdict_corpus_pins_icmp_unknown_case_10511() {
         case.queries.len()
     );
 }
+
+/// #10686: pin the family-typed policy-core rows whose observable permit-any
+/// verdict is overridden by the earlier IPv6 ingress drop gate. The corpus
+/// count floor cannot detect removal of one case; Go carries the mirror pin.
+#[test]
+fn policy_verdict_corpus_pins_embedded_v4_ipv6_case_10686() {
+    let cases = corpus_cases();
+    let case = cases
+        .iter()
+        .find(|c| c.name == "embedded-v4-ipv6-policy-family-10686")
+        .expect("#10686 policy-core case must remain in the shared corpus");
+    assert_eq!(case.queries.len(), 5, "v4 deny + mapped/compat src/dst rows");
+}

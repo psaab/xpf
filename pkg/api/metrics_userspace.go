@@ -88,23 +88,24 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 
 // emitDropClassCounters exposes per-binding drop-class counters as aggregate
 // process-level Prometheus series: martian-destination NoRoute drops,
-// over-limit IPv6 extension-header fail-closed drops, invalid UMEM slices,
-// unknown VLAN identities, and destination-MAC admission drops. Each value is
-// summed across bindings and emitted without labels. #4766 already surfaces
-// the route/martian/IPv6 rows in the status output; #10498 adds the three
-// pre-L3 rows here. All five are emitted unconditionally so 0 is a real
-// "no such drops" signal, not an absent series.
+// over-limit IPv6 extension-header fail-closed drops, #10686 IPv4-mapped /
+// compatible IPv6 ingress drops, invalid UMEM slices, unknown VLAN identities,
+// and destination-MAC admission drops. Each value is summed across bindings
+// and emitted without labels. All six are emitted unconditionally so 0 is a
+// real "no such drops" signal, not an absent series.
 func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	var martian, ipv6ExtHeader, umemSlice, unknownVLAN, dstMAC uint64
+	var martian, ipv6ExtHeader, v4MappedIPv6, umemSlice, unknownVLAN, dstMAC uint64
 	for _, b := range status.Bindings {
 		martian += b.MartianDropped
 		ipv6ExtHeader += b.IPv6ExtHeaderDropped
+		v4MappedIPv6 += b.V4MappedIPv6Dropped
 		umemSlice += b.UMEMSliceDropped
 		unknownVLAN += b.UnknownVLANDropped
 		dstMAC += b.DstMACDropped
 	}
 	ch <- prometheus.MustNewConstMetric(c.userspaceMartianDropped, prometheus.CounterValue, float64(martian))
 	ch <- prometheus.MustNewConstMetric(c.userspaceIPv6ExtHeaderDropped, prometheus.CounterValue, float64(ipv6ExtHeader))
+	ch <- prometheus.MustNewConstMetric(c.userspaceV4MappedIPv6Dropped, prometheus.CounterValue, float64(v4MappedIPv6))
 	ch <- prometheus.MustNewConstMetric(c.userspaceUMEMSliceDropped, prometheus.CounterValue, float64(umemSlice))
 	ch <- prometheus.MustNewConstMetric(c.userspaceUnknownVLANDropped, prometheus.CounterValue, float64(unknownVLAN))
 	ch <- prometheus.MustNewConstMetric(c.userspaceDstMACDropped, prometheus.CounterValue, float64(dstMAC))

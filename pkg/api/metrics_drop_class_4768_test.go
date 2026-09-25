@@ -10,15 +10,17 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// #4768/#10498: emitDropClassCounters sums each per-binding drop class into
-// one process-level, unlabeled CounterValue series and emits every series at
-// zero when no bindings exist.
+// #4768/#10498/#10686: emitDropClassCounters sums each per-binding drop class
+// into one process-level, unlabeled CounterValue series and emits every series
+// at zero when no bindings exist.
 func TestEmitDropClassCounters_4768(t *testing.T) {
 	c := &xpfCollector{
 		userspaceMartianDropped: prometheus.NewDesc(
 			"xpf_userspace_martian_dropped_total", "test", nil, nil),
 		userspaceIPv6ExtHeaderDropped: prometheus.NewDesc(
 			"xpf_userspace_ipv6_ext_header_dropped_total", "test", nil, nil),
+		userspaceV4MappedIPv6Dropped: prometheus.NewDesc(
+			"xpf_userspace_v4_mapped_ipv6_dropped_total", "test", nil, nil),
 		userspaceUMEMSliceDropped: prometheus.NewDesc(
 			"xpf_userspace_umem_slice_dropped_total", "test", nil, nil),
 		userspaceUnknownVLANDropped: prometheus.NewDesc(
@@ -30,15 +32,15 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 	status := dpuserspace.ProcessStatus{
 		Bindings: []dpuserspace.BindingStatus{
 			{
-				MartianDropped: 3, IPv6ExtHeaderDropped: 0,
+				MartianDropped: 3, IPv6ExtHeaderDropped: 0, V4MappedIPv6Dropped: 4,
 				UMEMSliceDropped: 1, UnknownVLANDropped: 2, DstMACDropped: 3,
 			},
 			{
-				MartianDropped: 4, IPv6ExtHeaderDropped: 10,
+				MartianDropped: 4, IPv6ExtHeaderDropped: 10, V4MappedIPv6Dropped: 5,
 				UMEMSliceDropped: 5, UnknownVLANDropped: 7, DstMACDropped: 11,
 			},
 			{
-				MartianDropped: 0, IPv6ExtHeaderDropped: 5,
+				MartianDropped: 0, IPv6ExtHeaderDropped: 5, V4MappedIPv6Dropped: 6,
 			},
 		},
 	}
@@ -62,13 +64,14 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 		byName[m.Desc().String()] = pb.Counter.GetValue()
 	}
 
-	if count != 5 {
-		t.Fatalf("want exactly 5 aggregate metrics, got %d", count)
+	if count != 6 {
+		t.Fatalf("want exactly 6 aggregate metrics, got %d", count)
 	}
 
 	want := map[string]float64{
 		"martian_dropped_total":         7,
 		"ipv6_ext_header_dropped_total": 15,
+		"v4_mapped_ipv6_dropped_total":  15,
 		"umem_slice_dropped_total":      6,
 		"unknown_vlan_dropped_total":    9,
 		"dst_mac_dropped_total":         14,
@@ -107,7 +110,7 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 		}
 		zeros++
 	}
-	if zeros != 5 {
-		t.Errorf("empty bindings: want 5 series emitted at 0, got %d", zeros)
+	if zeros != 6 {
+		t.Errorf("empty bindings: want 6 series emitted at 0, got %d", zeros)
 	}
 }

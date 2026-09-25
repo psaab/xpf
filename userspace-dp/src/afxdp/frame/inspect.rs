@@ -660,6 +660,91 @@ pub(in crate::afxdp) fn ipv6_ext_chain_over_limit(frame: &[u8], addr_family: u8)
         ExtChainOutcome::OverLimit
     )
 }
+/// #10686: `true` iff `addr` is an IPv4-mapped (`::ffff:0:0/96`) or
+/// IPv4-compatible (`::/96`) IPv6 address. Mapped addresses MUST NOT appear in
+/// IPv6 packets; compatible addresses are deprecated.
+///
+/// Standards: RFC 4291 §2.5.5.2 requires routers to drop IPv4-mapped addresses;
+/// RFC 4038 §4.2 documents the IPv4-compatible transition form, which is
+/// deprecated. This dataplane drops both forms at ingress (see
+/// `ipv6_frame_has_v4_mapped_or_compat`) instead of folding them to IPv4 for
+/// policy — fold would need a coherent early rewrite across SessionKey, BPF
+/// keys, conntrack, HA wire, the NAT trio, and Go simulator parity.
+///
+/// Excludes `::` (unspecified) and `::1` (loopback): both fall inside `::/96`
+/// numerically but are legitimate local addresses with their own handling, never
+/// a v4 identity smuggled past family-typed policy. Multicast (`ff00::/8`) never
+/// matches (first byte non-zero). Hot-path: octet compares only, no allocation.
+#[inline]
+pub(in crate::afxdp) fn ipv6_addr_is_v4_mapped_or_compat(addr: Ipv6Addr) -> bool {
+    if addr.is_unspecified() || addr.is_loopback() {
+        return false;
+    }
+    let o = addr.octets();
+    if o[0] == 0
+        && o[1] == 0
+        && o[2] == 0
+        && o[3] == 0
+        && o[4] == 0
+        && o[5] == 0
+        && o[6] == 0
+        && o[7] == 0
+        && o[8] == 0
+        && o[9] == 0
+        && o[10] == 0xff
+        && o[11] == 0xff
+    {
+        return true;
+    }
+    o[0] == 0
+        && o[1] == 0
+        && o[2] == 0
+        && o[3] == 0
+        && o[4] == 0
+        && o[5] == 0
+        && o[6] == 0
+        && o[7] == 0
+        && o[8] == 0
+        && o[9] == 0
+        && o[10] == 0
+        && o[11] == 0
+}
+
+/// #10686: `true` iff `frame` is an IPv6 packet whose SRC or DST is
+/// v4-mapped or v4-compatible (see `ipv6_addr_is_v4_mapped_or_compat`). The wire
+/// nibble gates the read: `addr_family` (shim-stamped) selects v6, but the L3
+/// offset comes from `frame_l3_offset` and the version nibble must read 6, so a
+/// wrong-but-plausible stamp can never misread a v4 frame as v6 (#9900 idiom).
+/// A truncated base header, a non-v6 packet, or an unresolvable L3 returns
+/// `false` (no new drop — existing malformed handling owns those shapes). The
+/// base-header addresses are authoritative regardless of any extension chain,
+/// so no ext walk is needed. Callers exclude injection (`is_injected`) and rely
+/// on the addr predicate to exclude `::`/`::1`; the WG socket layer
+/// (`canonicalize_endpoint`/`wg_send_to` folding) is untouched — this gate sees
+/// only XDP wire frames, never socket-mapped endpoints.
+#[inline]
+pub(in crate::afxdp) fn ipv6_frame_has_v4_mapped_or_compat(frame: &[u8], addr_family: u8) -> bool {
+    if addr_family as i32 != libc::AF_INET6 {
+        return false;
+    }
+    let Some(l3) = frame_l3_offset(frame) else {
+        return false;
+    };
+    if frame.len() < l3 + 40 {
+        return false;
+    }
+    if frame[l3] >> 4 != 6 {
+        return false;
+    }
+    let Ok(src) = <[u8; 16]>::try_from(&frame[l3 + 8..l3 + 24]) else {
+        return false;
+    };
+    let Ok(dst) = <[u8; 16]>::try_from(&frame[l3 + 24..l3 + 40]) else {
+        return false;
+    };
+    ipv6_addr_is_v4_mapped_or_compat(Ipv6Addr::from(src))
+        || ipv6_addr_is_v4_mapped_or_compat(Ipv6Addr::from(dst))
+}
 
 pub(in crate::afxdp) fn packet_rel_l4_offset(packet: &[u8], addr_family: u8) -> Option<usize> {
     match addr_family as i32 {

@@ -1417,6 +1417,8 @@ pub(crate) struct BindingLiveSnapshot {
     /// #4743: over-limit IPv6 ext-header fail-closed drops snapshotted from
     /// BindingLiveState.
     pub(crate) ipv6_ext_header_dropped: u64,
+    /// #10686: IPv6 ingress drop counter snapshot.
+    pub(crate) v4_mapped_ipv6_dropped: u64,
     pub(crate) umem_slice_dropped: u64,
     pub(crate) unknown_vlan_dropped: u64,
     pub(crate) dst_mac_dropped: u64,

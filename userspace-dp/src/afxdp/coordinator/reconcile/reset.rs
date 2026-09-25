@@ -26,6 +26,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.route_miss_packets = 0;
         binding.martian_dropped = 0;
         binding.ipv6_ext_header_dropped = 0;
+        binding.v4_mapped_ipv6_dropped = 0;
         binding.umem_slice_dropped = 0;
         binding.unknown_vlan_dropped = 0;
         binding.dst_mac_dropped = 0;

@@ -463,6 +463,32 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                 }
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
+                // #10686: drop RFC 4291 IPv4-mapped and RFC 4038 deprecated
+                // IPv4-compatible IPv6 src/dst at the shared ingress choke,
+                // before flow parsing, policy, NAT, sessions, BPF, or logging
+                // can observe a false IPv6 identity. Run AFTER GRE/WG decap so
+                // authenticated tunnel plaintext is adjudicated, not its WG
+                // underlay packet. The listen-port exemption additionally
+                // requires a locally owned destination, so transit cannot
+                // bypass ingress by targeting that port. The address predicate
+                // explicitly excludes `::` and `::1`; injection remains a
+                // deliberate non-ingress diagnostic with its existing semantics.
+                if !is_injected
+                    && ipv6_frame_has_v4_mapped_or_compat(packet_frame, meta.addr_family)
+                {
+                    let wg_underlay = owned_packet_frame.is_none()
+                        && crate::afxdp::wg::decap::is_wg_underlay_frame(
+                            raw_frame,
+                            meta,
+                            worker_ctx.forwarding,
+                        );
+                    if !wg_underlay {
+                        telemetry.counters.touched = true;
+                        telemetry.counters.v4_mapped_ipv6_dropped += 1;
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
+                }
                 // #946 Phase 1 stage 7+8: parse session flow and
                 // learn the source-side dynamic neighbor.
                 // `learn_from_live_frame` MUST be

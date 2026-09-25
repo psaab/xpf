@@ -363,3 +363,31 @@ set security policies from-zone trust to-zone untrust policy p-icmp then permit
 q trust untrust 10.0.1.5 10.0.2.5 icmp 0 0 permit p-icmp
 q trust untrust 10.0.1.5 10.0.2.5 udp 0 0 deny -
 end
+
+# The policy evaluator remains family-typed: the v4-only source deny catches
+# plain IPv4, while mapped/compatible source and destination tuples reach the
+# explicit permit-any inside policy evaluation. Issue #10686's ingress gate
+# drops these embedded-v4 forms BEFORE policy; this corpus records the policy-
+# core verdict the bypass reached, not the end-to-end packet disposition.
+case embedded-v4-ipv6-policy-family-10686
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:1::1/64
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:2::1/64
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy deny-all
+set security policies from-zone trust to-zone untrust policy deny-v4-source match source-address 10.0.0.0/8
+set security policies from-zone trust to-zone untrust policy deny-v4-source match destination-address any
+set security policies from-zone trust to-zone untrust policy deny-v4-source match application any
+set security policies from-zone trust to-zone untrust policy deny-v4-source then deny
+set security policies from-zone trust to-zone untrust policy permit-any match source-address any
+set security policies from-zone trust to-zone untrust policy permit-any match destination-address any
+set security policies from-zone trust to-zone untrust policy permit-any match application any
+set security policies from-zone trust to-zone untrust policy permit-any then permit
+q trust untrust 10.0.1.5 10.0.2.5 udp 1234 80 deny deny-v4-source
+q trust untrust ::ffff:10.0.1.5 2001:db8:2::5 udp 1234 80 permit permit-any
+q trust untrust ::10.0.1.5 2001:db8:2::5 udp 1234 80 permit permit-any
+q trust untrust 2001:db8:1::5 ::ffff:10.0.2.5 udp 1234 80 permit permit-any
+q trust untrust 2001:db8:1::5 ::10.0.2.5 udp 1234 80 permit permit-any
+end

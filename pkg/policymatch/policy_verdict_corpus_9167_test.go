@@ -180,9 +180,13 @@ func TestPolicyVerdictCorpusGoHalf9167(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) {
 			cfg := policyCorpusConfig9167(t, c)
 			for _, q := range c.Queries {
+				// net.ParseIP folds mapped literals to To4 bytes. Preserve the
+				// corpus's colon-strict family just like the production selector
+				// path so mapped policy rows exercise the v6 matcher in Go and Rust.
 				res := Match(cfg, Query{
 					FromZone: q.From, ToZone: q.To,
 					SrcIP: net.ParseIP(q.Src), DstIP: net.ParseIP(q.Dst),
+					SrcFamily: config.NATAddrFamily(q.Src), DstFamily: config.NATAddrFamily(q.Dst),
 					Protocol: q.Protocol, SrcPort: q.SrcPort, DstPort: q.DstPort,
 					NonFirstFragment: q.Frag,
 				})
@@ -231,6 +235,25 @@ func TestPolicyVerdictCorpusPinsIcmpUnknownCase10511(t *testing.T) {
 	}
 	t.Fatalf("corpus case `icmp-unknown-application` is missing (%d cases present); "+
 		"the #10511 icmp-unknown coverage was removed", len(cases))
+}
+
+// TestPolicyVerdictCorpusPinsEmbeddedV4IPv6Case10686 makes the mapped/compatible
+// policy-core rows non-optional even while the corpus remains above its global
+// count floors. The Rust half carries the mirror pin.
+func TestPolicyVerdictCorpusPinsEmbeddedV4IPv6Case10686(t *testing.T) {
+	cases := parsePolicyCorpus9167(t, policyCorpusPath9167)
+	for _, c := range cases {
+		if c.Name != "embedded-v4-ipv6-policy-family-10686" {
+			continue
+		}
+		if len(c.Queries) != 5 {
+			t.Fatalf("embedded-v4-ipv6-policy-family-10686 carries %d queries, want 5",
+				len(c.Queries))
+		}
+		return
+	}
+	t.Fatalf("corpus case embedded-v4-ipv6-policy-family-10686 is missing (%d cases present)",
+		len(cases))
 }
 
 func policyActionName9167(a config.PolicyAction) string {
