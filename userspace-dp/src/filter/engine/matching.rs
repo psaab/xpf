@@ -172,6 +172,16 @@ pub(super) fn term_matches(
         _ => false,
     }
 }
+/// The XDP shim uses 255 when a fragment has no usable L4 header. It means
+/// "unknown protocol", not protocol 255, so protocol-constrained terms match
+/// it without recovering a value from fragment payload bytes.
+#[inline(always)]
+fn protocol_bitmap_matches(term: &FilterTerm, protocol: u8) -> bool {
+    !term.protocol_match_enabled
+        || protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4
+        || (term.protocol_bitmap[(protocol / 64) as usize] & (1u64 << (protocol % 64))) != 0
+}
+
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -185,9 +195,7 @@ pub(super) fn term_matches_v4(
     dscp: u8,
     extra: TermMatchExtra<'_>,
 ) -> bool {
-    if term.protocol_match_enabled
-        && (term.protocol_bitmap[(protocol / 64) as usize] & (1u64 << (protocol % 64))) == 0
-    {
+    if !protocol_bitmap_matches(term, protocol) {
         return false;
     }
     if !nets_match_v4(
@@ -384,9 +392,7 @@ pub(super) fn term_matches_v6(
     dscp: u8,
     extra: TermMatchExtra<'_>,
 ) -> bool {
-    if term.protocol_match_enabled
-        && (term.protocol_bitmap[(protocol / 64) as usize] & (1u64 << (protocol % 64))) == 0
-    {
+    if !protocol_bitmap_matches(term, protocol) {
         return false;
     }
     if !nets_match_v6(
