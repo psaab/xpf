@@ -1179,6 +1179,13 @@ These bugs were discovered testing iperf3 (~4.7 Gbps reverse mode) through the c
 
 Audit doc: `docs/archived/userspace-forwarding-and-failover-gap-audit.md`
 
+### Fragmented ESP/GRE to interface-NAT split across kernel and helper (FIXED #10677)
+- **Symptom:** An ESP/GRE datagram addressed to an interface-NAT endpoint was split: the whole packet or first fragment went to the kernel, while later fragments went to the helper as protocol 255 and were refused, so neither path could reassemble the datagram.
+- **Root cause:** The shim's #304 kernel arm matched the parsed protocol. The #7494 no-L4 sentinel replaces the protocol on non-first fragments, so the tail missed the ESP/non-native-GRE interface-NAT arm and fell through to XSK.
+- **Fix:** Preserve the wire protocol separately from the sentinel and use it only for the interface-NAT tunnel disposition. ESP tails follow the kernel path in healthy and degraded operation; non-native GRE tails follow the kernel path, while native GRE tails remain on the helper path. The helper's protocol gate and the no-L4 session-miss guarantee remain unchanged.
+- **Tests:** Shim truth-table cells cover ESP/GRE heads and tails, native-GRE and non-tunnel controls, and degraded ESP. The helper flowless cell verifies that an interface-NAT GRE tail stamped 255 is still refused while a real GRE protocol is admitted.
+
+
 ### Hybrid userspace/eBPF forwarding model (OPEN #302-#307)
 - **Symptom:** In userspace dataplane mode, transit packets can silently fall back to the eBPF pipeline (via XDP_PASS or XSK socket failure) without any indication in counters or logs. The XDP shim program returns XDP_PASS for protocols it does not handle (GRE, ESP), for AF_XDP socket errors, and when PASS_TO_KERNEL is set — all of which bypass the userspace forwarding path entirely
 - **Root cause:** No strict enforcement of which packets must go through the userspace path vs the eBPF path. The current `userspace_compat` mode treats eBPF fallback as acceptable, but there is no `userspace_strict` mode that would fail-closed on unexpected fallback

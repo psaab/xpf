@@ -27,7 +27,6 @@ const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
 const PROTO_ICMP: u8 = 1;
 const PROTO_GRE: u8 = 47;
-const PROTO_ESP: u8 = 50;
 const PROTO_ICMPV6: u8 = 58;
 const GRE_PROTO_IPV4: u16 = 0x0800;
 const GRE_PROTO_IPV6: u16 = 0x86dd;
@@ -76,6 +75,7 @@ mod gre_classify;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod ipv6_len_gate;
+mod tunnel_frag;
 mod wg_classify;
 use binding_index::{
     BINDING_QUEUES_PER_IFACE, BINDING_SLOT_MAP_MAX_ENTRIES, RawRxQueue, binding_slot,
@@ -87,6 +87,9 @@ use ipv6_ext_walk::{
     read_bytes,
 };
 use ipv6_len_gate::ipv6_declared_end;
+use tunnel_frag::{
+    degraded_interface_nat_esp_passes_to_kernel, interface_nat_tunnel_passes_to_kernel,
+};
 use wg_classify::{
     WG_STEERED_PORT_SET_MAX, wg_port_is_steered, wg_record_is_transport_data,
     wg_steer_to_kernel_on_port_match, wg_worker_claims_record,
@@ -854,16 +857,17 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // so the helper's reverse-NAT repair path can handle
                 // reply packets for SNATed flows (#290).
                 if is_interface_nat_destination(&parsed) {
-                    // #304: ESP and non-native GRE terminate on the KERNEL
-                    // (XFRM / a kernel GRE device), and this arm is the only
-                    // one that recognises a tunnel endpoint sitting on an
-                    // address that interface-mode SNAT owns — the common
-                    // WAN case, which is_local_destination deliberately
-                    // reports false for. GRE reaching here is necessarily
-                    // NON-native (the native-GRE arm is the else branch), so
-                    // no native-GRE flow is affected. Everything else keeps
-                    // falling through to the XSK redirect.
-                    if parsed.protocol == PROTO_ESP || parsed.protocol == PROTO_GRE {
+                    // #304 kernel arm is keyed by the parsed upper-layer
+                    // protocol. #7494 substitutes 255 on non-first fragments,
+                    // so retain the wire protocol solely for this disposition
+                    // and make ESP / non-native GRE tails follow their
+                    // kernel-bound heads. Native GRE is userspace-owned; its
+                    // tails and every non-tunnel miss stay on the helper path.
+                    if interface_nat_tunnel_passes_to_kernel(
+                        parsed.protocol,
+                        parsed.wire_protocol,
+                        (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0,
+                    ) {
                         return Ok(cpumap_or_pass(ctrl));
                     }
                     incr_fallback_stat(USERSPACE_FALLBACK_REASON_INTERFACE_NAT_NO_SESSION);
@@ -1426,7 +1430,9 @@ fn is_degraded_local_or_control(
     if is_icmp_to_interface_nat_local(parsed) || is_local_destination(parsed) {
         return true;
     }
-    if parsed.protocol == PROTO_ESP && is_interface_nat_destination(parsed) {
+    if degraded_interface_nat_esp_passes_to_kernel(parsed.protocol, parsed.wire_protocol)
+        && is_interface_nat_destination(parsed)
+    {
         return true;
     }
     // #10651: the degraded twin of the healthy native-GRE arm's outer-local
@@ -1550,6 +1556,10 @@ struct ParsedPacket {
     payload_offset: u16,
     addr_family: u8,
     protocol: u8,
+    // The IP header's real upper-layer protocol before #7494's non-first-
+    // fragment sentinel substitution. Read only by the #10677 interface-NAT
+    // tunnel disposition; session and L4 consumers keep using `protocol`.
+    wire_protocol: u8,
     icmp_type: u8,
     tcp_flags: u8,
     flow_src_port: u16,
@@ -1720,6 +1730,7 @@ fn parse_ipv4(
         udp_wg_transport_data,
         addr_family: AF_INET,
         protocol,
+        wire_protocol: iph[9],
         icmp_type,
         tcp_flags,
         flow_src_port,
@@ -1754,6 +1765,7 @@ fn parse_ipv6(
     // why — and driven on real buffers), so its advance arithmetic and bounds
     // revalidation are observed rather than asserted about the source text.
     let walk = ipv6_ext_walk::walk_ipv6_ext_headers(data, data_end, l3_offset, protocol, offset)?;
+    let wire_protocol = walk.protocol;
     // #6704: `walk.non_first_fragment` is NOT consumed here yet, and that is a
     // measured decision rather than an oversight. Every shape that acts on it
     // — masking the parsed L4 values, forking the session block, gating the
@@ -1850,6 +1862,7 @@ fn parse_ipv6(
         udp_wg_transport_data,
         addr_family: AF_INET6,
         protocol,
+        wire_protocol,
         icmp_type,
         tcp_flags,
         flow_src_port,

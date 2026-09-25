@@ -449,4 +449,44 @@ mod flowless_local_delivery_tests {
             "override-table-first (the #3600 Note 2 bug) would not deliver",
         );
     }
+    /// #10677 helper-side failure witness: a shim tail stamped with the
+    /// #7494 no-L4 protocol reaches interface-NAT LocalDelivery if diverted
+    /// here, but cannot pass the zone's real GRE host-inbound rule. This is
+    /// why the shim must keep the tail with its kernel-bound GRE head rather
+    /// than relaxing the helper's protocol gate.
+    #[test]
+    fn interface_nat_gre_tail_is_refused_by_helper_host_inbound_10677() {
+        let dst = Ipv4Addr::new(10, 0, 99, 1);
+        let mut fw = fw_with_host_inbound(ZONE, &["gre"], &[]);
+        fw.interface_nat_v4.insert(dst, INGRESS_IF);
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
+
+        let resolved = flowless_base_resolution(
+            &fw,
+            &dynamic_neighbors,
+            &ha_state,
+            0,
+            INGRESS_IF,
+            0,
+            255,
+            IpAddr::V4(dst),
+            None,
+        );
+        assert_eq!(
+            resolved.disposition,
+            ForwardingDisposition::LocalDelivery,
+            "the helper recognizes the interface-NAT target, but not the tail's protocol",
+        );
+        assert_eq!(
+            verdict(&fw, &flowless_flow(255), flowless_meta(255), ZONE),
+            FlowlessLocalVerdict::HostInboundDeny,
+            "a 255-stamped GRE tail cannot match system-services gre",
+        );
+        assert_eq!(
+            verdict(&fw, &flowless_flow(GRE), flowless_meta(GRE), ZONE),
+            FlowlessLocalVerdict::Deliver,
+            "the real GRE head protocol remains admitted",
+        );
+    }
 }
