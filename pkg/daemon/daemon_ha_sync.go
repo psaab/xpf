@@ -1263,11 +1263,11 @@ func (d *Daemon) currentRedundancyGroups() []*config.RedundancyGroup {
 
 // fenceAllRedundancyGroups disables rg_active for every redundancy-group in
 // the CURRENT active config. It is the peer-fence handler: when a fence
-// message arrives the local node must relinquish ALL redundancy-groups so
-// the peer can own them without a dual-active split-brain. #3917: reading
-// the live config here (via currentRedundancyGroups) ensures day-2 RGs are
-// fenced too. Safe when the dataplane is nil (config-only mode) or the
-// config has no cluster/RGs.
+// message arrives the local node attempts to suppress forwarding for every
+// group, reducing dual-active forwarding risk at that instant; it does not
+// demote the peer or release VIPs. #3917: reading the live config here (via
+// currentRedundancyGroups) ensures day-2 RGs are fenced too. Safe when the
+// dataplane is nil (config-only mode) or the config has no cluster/RGs.
 //
 // #7147: it now REPORTS what it achieved so a sequenced fence can be
 // acknowledged truthfully. The counts are what the peer's confirmed-fence gate

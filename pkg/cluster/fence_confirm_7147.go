@@ -63,6 +63,21 @@ const (
 // not).
 const FenceConfirmTimeout = 1 * time.Second
 
+func (m *Manager) markFenceUnconfirmedLocked(reason string) {
+	m.fenceUnconfirmedReason = reason
+	m.fenceUnconfirmedAt = time.Now()
+}
+
+func (m *Manager) clearFenceUnconfirmedLocked() {
+	m.fenceUnconfirmedReason = ""
+	m.fenceUnconfirmedAt = time.Time{}
+}
+
+func formatFenceUnconfirmedStatus(reason string, at time.Time) string {
+	return fmt.Sprintf("Peer-loss takeover: DEGRADED (peer fence unconfirmed: %s, since %s)",
+		reason, at.Format("Jan 02 15:04:05"))
+}
+
 // awaitPeerFenceLocked runs the confirmed peer fence.
 //
 // Called with m.mu HELD; it releases the lock across the network wait and
@@ -85,9 +100,10 @@ const FenceConfirmTimeout = 1 * time.Second
 //     proceeds anyway.
 //
 // A takeover that proceeded WITHOUT confirmation is recorded to the EventFence
-// history with the reason, because the operator selected this policy expecting
-// a guarantee and the one case where they did not get it must be visible. It is
-// also counted in SyncStats.FenceAcksTimedOut for the timeout case.
+// history with the reason and rendered as degraded in both status views. Even
+// a positive ack is only a point-in-time dataplane-suppression receipt; it is
+// not dual-primary exclusion or proof that the peer released its VIPs. Timeout
+// outcomes are also counted in SyncStats.FenceAcksTimedOut.
 //
 // TWO CONSEQUENCES OF RELEASING m.mu HERE, both deliberate.
 //
@@ -95,15 +111,13 @@ const FenceConfirmTimeout = 1 * time.Second
 // `disable-rg` the peer-loss decision and electSingleNode run under one
 // unbroken hold of m.mu; here the lock is released between them, so a peer
 // heartbeat can land during the wait and set peerAlive back to true before the
-// election runs. This function does NOT abort on that, and must not: by the
-// time it could notice, the fence has already been delivered and the peer has
-// disabled every RG it owns. Aborting the takeover at that point would leave
-// the peer dark AND this node passive — a total outage, and a strictly worse
-// outcome than the momentary dual-primary the abort would be trying to avoid.
-// Having fenced, committing to the takeover is the only safe direction. (The
-// #2080 pre-guard re-check at the top of handlePeerTimeout still applies; it
-// runs BEFORE anything has been fenced, which is what makes aborting safe
-// there and unsafe here.)
+// election runs. This function does NOT abort on that: the bounded policy is
+// fail-open, so it commits to the peer-loss takeover whether the result was a
+// complete point-in-time suppression, a partial fence, or no confirmation.
+// Unconfirmed outcomes are explicitly marked degraded. A later heartbeat
+// rebuilds the peer state and normal election reconverges. (The #2080 pre-guard
+// re-check at the top of handlePeerTimeout still applies; it runs BEFORE a
+// fence attempt and the takeover decision.)
 //
 // Second, on WHICH goroutine this blocks — the answer matters, because
 // believing it was the receive path is what made the hazard above look
@@ -120,8 +134,10 @@ const FenceConfirmTimeout = 1 * time.Second
 func (m *Manager) awaitPeerFenceLocked() {
 	fn := m.peerFenceConfirmFn
 	if fn == nil {
+		reason := "sync not available"
 		slog.Warn("cluster: fence: sync not available, taking over without peer confirmation")
 		m.history.Record(EventFence, -1, "Fence skipped: sync not available")
+		m.markFenceUnconfirmedLocked(reason)
 		return
 	}
 
@@ -163,11 +179,13 @@ func (m *Manager) awaitPeerFenceLocked() {
 	m.peerAlive = false
 
 	if err != nil {
+		m.markFenceUnconfirmedLocked(err.Error())
 		slog.Warn("cluster: fence: taking over WITHOUT peer confirmation", "err", err)
 		m.history.Record(EventFence, -1, fmt.Sprintf("Fence unconfirmed, took over anyway: %v", err))
 		return
 	}
 	if ack.Confirmed() {
+		m.clearFenceUnconfirmedLocked()
 		slog.Info("cluster: fence: peer confirmed fence",
 			"rgs_fenced", ack.RGsFenced, "rgs_total", ack.RGsTotal)
 		m.history.Record(EventFence, -1, fmt.Sprintf("Fence confirmed by peer (%s)", ack.Reason()))
@@ -176,7 +194,9 @@ func (m *Manager) awaitPeerFenceLocked() {
 	// A negative ack is not retried: the peer has already told us it could not
 	// fully comply, and repeating the request cannot change that within the
 	// takeover window. Fail open, loudly.
+	reason := ack.Reason()
+	m.markFenceUnconfirmedLocked(reason)
 	slog.Warn("cluster: fence: peer reported an INCOMPLETE fence, taking over anyway",
 		"status", ack.Status, "rgs_fenced", ack.RGsFenced, "rgs_total", ack.RGsTotal)
-	m.history.Record(EventFence, -1, fmt.Sprintf("Fence NOT confirmed (%s), took over anyway", ack.Reason()))
+	m.history.Record(EventFence, -1, fmt.Sprintf("Fence NOT confirmed (%s), took over anyway", reason))
 }
