@@ -289,19 +289,30 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	// from memory would silently falsify. The arm site is the one the #8564
 	// cells bind; do not "simplify" this one away on the grounds that it is
 	// provably a no-op.
-	if rec.GuardedHash != "" && rec.GuardedHash != guardedConfigHash(s.active) {
+	// A provisional transition record may bind PreviousHash while a nested
+	// window or a prior rollback persistence is being superseded. Until the new
+	// active file is durable, recovery accepts the previous disk generation.
+	activeHash := guardedConfigHash(s.active)
+	if rec.GuardedHash != "" && rec.GuardedHash != activeHash && rec.PreviousHash != activeHash {
 		slog.Warn("ignoring a stale pending commit-confirmed record on boot: it guards a config "+
 			"that is no longer active (a later commit/confirm superseded it); not resurrecting its "+
 			"rollback", "issue", "#5835")
 		s.resolveConfirmRemovalLocked("stale_confirm_recovery")
 		return nil
 	}
+	deadline := rec.Deadline
+	// A provisional record carries distinct expiries for its candidate and
+	// previous active generation. When only the alias matches, preserve that
+	// generation's original timeout; the candidate uses the new arm's deadline.
+	if rec.GuardedHash != activeHash && rec.PreviousHash == activeHash && !rec.PreviousDeadline.IsZero() {
+		deadline = rec.PreviousDeadline
+	}
 	prevTree := rec.PrevTree
 	if prevTree == nil {
 		prevTree = &config.ConfigTree{}
 	}
 
-	if time.Now().After(rec.Deadline) {
+	if time.Now().After(deadline) {
 		// Expired during downtime: the operator never confirmed, so the
 		// unconfirmed config on disk must NOT stand. Revert to the prev tree
 		// with the same persistence semantics as PromoteRollback.
@@ -388,7 +399,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	// rollback target) are restored so a subsequent expiry / plain-commit /
 	// sync resolves correctly. confirm.json is left in place until the window
 	// is resolved.
-	remaining := time.Until(rec.Deadline)
+	remaining := time.Until(deadline)
 	s.confirmPrevTree = prevTree
 	// #6538: first-commit-ness comes from the PERSISTED record, which is the
 	// only authority on whether PrevTree is the empty bootstrap tree. It must
@@ -420,7 +431,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	})
 	// #9615: this window was armed by an earlier process (possibly an older
 	// build), so its target was never pre-flighted here. The daemon checks it.
-	s.confirmDeadline = rec.Deadline
+	s.confirmDeadline = deadline
 	s.confirmRecovered = true
 	s.confirmAlarm = ""
 	slog.Info("restored pending commit-confirmed window after restart; auto-rollback re-armed",
@@ -564,13 +575,10 @@ func canonicalizeTree(tree *config.ConfigTree) *config.ConfigTree {
 // performAutoRollback) and the background retry has not yet succeeded
 // (#1799), OR a resolved commit-confirmed window's confirm.json removal is not
 // yet durable (#5835), OR boot recovery could not READ confirm.json and the
-// pending rollback window was lost (#8566), OR the ARM write that establishes a
-// commit-confirmed window did not become durable (#9014). While true, a daemon
-// restart would load a STALE config or resurrect a resolved rollback — or, for
-// #8566, an UNCONFIRMED config is already standing with no rollback, and for
-// #9014 a crash inside the window would leave one standing permanently because
-// no record exists to recover; /health returns 503 and
-// xpf_daemon_config_persist_degraded reads 1.
+// pending rollback window was lost (#8566), OR a durable record still needs
+// finalization after a candidate became active (#10696). While true, a daemon
+// restart could load a STALE config or resurrect a resolved rollback, and
+// /health returns 503 with xpf_daemon_config_persist_degraded reading 1.
 func (s *Store) ConfigPersistDegraded() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -646,7 +654,7 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 		if !s.persistDegraded && !s.confirmRemoveDegraded && !s.confirmArmDegraded {
 			// A successful write on a commit/sync path already persisted the
 			// current active config, no stale confirm.json removal is owed, and
-			// no armed window is missing its durable record.
+			// no confirm-record finalization is outstanding.
 			s.persistRefusedTree = nil // #9617: a heal between ticks exits here
 			s.persistRetryActive = false
 			s.mu.Unlock()
@@ -656,22 +664,19 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 		if s.confirmArmDegraded {
 			switch {
 			case s.confirmTimer == nil || s.confirmArmGen != s.confirmGen:
-				// #9014: THE WINDOW THIS DEBT BELONGS TO IS GONE. It was
-				// confirmed, superseded by a newer arm, or rolled back while the
-				// write was still owed. Re-driving WriteConfirm here would write
-				// a crash-recovery record for a window that no longer exists, so
-				// a restart would resurrect a rollback the operator already
-				// resolved — the mirror of #7675 on the removal side, where
-				// re-driving a delete would have removed a LIVE window's record.
+				// The window this finalization belongs to was confirmed,
+				// superseded, or rolled back while its write was still owed.
+				// Re-driving that record would resurrect a rollback for a window
+				// that no longer exists.
 				s.confirmArmDegraded = false
 				s.confirmArmRec = nil
 				s.journalLog(&JournalEntry{
 					Action:    "confirm_arm_superseded",
-					Detail:    "pending commit-confirmed arm-write debt cleared: the window it was owed for was resolved or replaced",
+					Detail:    "commit-confirmed record finalization debt cleared: its window was resolved or replaced",
 					Principal: "system:configstore",
 				})
-				slog.Info("pending commit-confirmed arm-write debt cleared: the window it was "+
-					"owed for is no longer pending", "issue", "#9014")
+				slog.Info("commit-confirmed record finalization debt cleared: its window was no longer pending",
+					"issue", "#10696")
 			case s.confirmArmRec == nil:
 				// Nothing to re-drive; do not hold health down on a debt that
 				// cannot be paid.
@@ -681,19 +686,19 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 					s.confirmArmDegraded = false
 					s.confirmArmRec = nil
 					// A readable record exists again, so #8566's "boot lost the
-					// window" state is over for the same reason writeConfirmState
-					// clears it on a first-try success.
+					// window" state is over for the same reason the arm path clears
+					// it on a successful finalization.
 					s.confirmRecoveryReadFailed = false
 					s.journalLog(&JournalEntry{
 						Action:    "confirm_arm_recovered",
-						Detail:    "commit-confirmed record persisted after an earlier arm-write failure",
+						Detail:    "commit-confirmed record finalized after an earlier write failure",
 						Principal: "system:configstore",
 					})
-					slog.Info("commit-confirmed record persisted after an earlier arm-write "+
-						"failure; the auto-rollback would now survive a crash", "issue", "#9014")
+					slog.Info("commit-confirmed record finalized after an earlier write failure",
+						"issue", "#10696")
 				} else {
-					slog.Warn("commit-confirmed arm-write retry failed", "err", err,
-						"retry_in", backoff*2, "issue", "#9014")
+					slog.Warn("commit-confirmed record finalization retry failed", "err", err,
+						"retry_in", backoff*2, "issue", "#10696")
 				}
 			}
 		}
@@ -801,10 +806,9 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 		}
 
 		// #9625: the SAME debt set as the top check. This exit used to omit
-		// confirmArmDegraded, so an arm-write retry that failed a second time,
-		// with no other debt owed, returned here with the debt still standing:
-		// the retry ran exactly once, and health stayed degraded for the rest of
-		// the window with nothing left to heal it.
+		// confirmArmDegraded, so a record-finalization retry that failed again
+		// could return with its debt outstanding and health degraded for the
+		// rest of the window.
 		if !s.persistDegraded && !s.confirmRemoveDegraded && !s.confirmArmDegraded {
 			s.persistRetryActive = false
 			s.mu.Unlock()

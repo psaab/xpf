@@ -10,73 +10,78 @@ import (
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
-// #9625: the #9014 arm-write retry ran exactly once. persistRetryLoop's top
-// check includes confirmArmDegraded but its bottom exit did not, so a retry that
-// failed a SECOND time, with no other debt owed, returned with the debt still
-// standing. Health then stayed degraded for the rest of the window, and nothing
-// was left to write the record. TestArmWriteDebtSelfHeals9014 fails the write
-// only once, so the first retry succeeds and that exit is never reached with arm
-// debt outstanding, which is why the suite was green.
-func TestArmWriteRetryOutlivesASecondFailure9625(t *testing.T) {
+func TestConfirmRecordFinalizationRetryOutlivesASecondFailure9625(t *testing.T) {
 	s := newTestStore(t)
+	commitBaseline(t, s)
+	restoreRollbackSeams(t)
 	var fail atomic.Bool
-	failConfirmArm(t, &fail)
 	var attempts atomic.Int32
 	inner := rbWriteFileDurable
 	rbWriteFileDurable = func(path string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
 		if filepath.Base(path) == "confirm.json" {
-			attempts.Add(1)
+			if attempts.Add(1) >= 2 && fail.Load() {
+				return errInjectedConfirmArm
+			}
 		}
 		return inner(path, data, perm, opts...)
 	}
-	commitBaseline(t, s)
-	s.SetPersistRetryBackoffForTesting(5*time.Millisecond, 20*time.Millisecond)
-
-	fail.Store(true)
-	if err := s.SetFromInput("system host-name armtwice"); err != nil {
+	if err := s.SetFromInput("system host-name finalize-retry"); err != nil {
 		t.Fatalf("SetFromInput: %v", err)
 	}
+	s.SetPersistRetryBackoffForTesting(5*time.Millisecond, 20*time.Millisecond)
+	fail.Store(true)
 	base := attempts.Load()
 	if _, err := s.CommitConfirmed(10); err != nil {
 		t.Fatalf("CommitConfirmed: %v", err)
 	}
-	// The arm plus at least three retries while the fault persists. Before the
-	// fix the count stopped at 2 (the arm and one retry) and never moved again.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && attempts.Load()-base < 4 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if n := attempts.Load() - base; n < 4 {
-		t.Fatalf("only %d confirm.json write attempts while the fault persisted: the retry "+
-			"loop exited with the arm-write debt still owed (#9625)", n)
+	if !s.IsConfirmPending() || !s.ConfigPersistDegraded() {
+		t.Fatal("finalization fault must leave a protected live window and degraded retry debt")
 	}
 
-	fail.Store(false) // the fault outlasted two retries, and now clears
+	// The provisional write succeeds; the final binding write and at least
+	// three retries fail. The loop must keep running after the second failure.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && attempts.Load()-base < 5 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := attempts.Load() - base; n < 5 {
+		t.Fatalf("only %d confirm.json writes occurred while the finalization fault persisted; want initial, final, and three retries", n)
+	}
+	rec, err := s.db.ReadConfirm()
+	if err != nil || rec == nil {
+		t.Fatalf("the provisional record must remain readable during retries: rec=%v err=%v", rec, err)
+	}
+	if rec.GuardedHash != guardedConfigHash(s.active) {
+		t.Fatal("the provisional record does not guard the active candidate")
+	}
+
+	fail.Store(false)
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) && s.ConfigPersistDegraded() {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if s.ConfigPersistDegraded() {
-		t.Fatal("the arm-write debt did not heal after the fault cleared (#9625)")
+		t.Fatal("finalization debt did not heal after the write fault cleared")
 	}
-	if rec, err := s.db.ReadConfirm(); err != nil || rec == nil {
-		t.Fatalf("health cleared but the confirm record was not written: rec=%v err=%v", rec, err)
+	rec, err = s.db.ReadConfirm()
+	if err != nil || rec == nil {
+		t.Fatalf("healed finalization lost confirm.json: rec=%v err=%v", rec, err)
 	}
-	// With nothing owed, the loop must end rather than spin.
+	if rec.PreviousHash != "" {
+		t.Fatalf("healed finalization retained temporary previous hash %q", rec.PreviousHash)
+	}
+	if rec.GuardedHash != guardedConfigHash(s.active) {
+		t.Fatal("healed record no longer guards the active candidate")
+	}
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
 		active := s.persistRetryActive
 		s.mu.Unlock()
 		if !active {
-			break
+			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	s.mu.Lock()
-	active, armDebt := s.persistRetryActive, s.confirmArmDegraded
-	s.mu.Unlock()
-	if active || armDebt {
-		t.Errorf("after the heal: persistRetryActive=%v confirmArmDegraded=%v, want both false", active, armDebt)
-	}
+	t.Fatal("persist retry loop did not stop after finalization debt healed")
 }

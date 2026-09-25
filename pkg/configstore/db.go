@@ -297,6 +297,15 @@ type confirmRecord struct {
 	// check and behaves exactly as #4577, preserving the cross-upgrade
 	// auto-rollback hatch (confirmRecord evolves via additive JSON fields).
 	GuardedHash string `json:"guarded_hash,omitempty"`
+	// PreviousHash is the active tree hash that preceded this arm. During a
+	// commit-confirmed re-arm the new record must be durable before active.json
+	// changes, so recovery accepts this alias until the candidate becomes
+	// durable and the record can be finalized.
+	PreviousHash string `json:"previous_hash,omitempty"`
+	// PreviousDeadline is the expiry that belongs to PreviousHash. It lets
+	// recovery preserve the old window at a record boundary while Deadline
+	// remains the new candidate's provisional expiry.
+	PreviousDeadline time.Time `json:"previous_deadline,omitempty"`
 	// Resolved marks this record as a RESOLUTION TOMBSTONE (#8565): the window
 	// it describes was already resolved — confirmed, superseded, or rolled back
 	// — and only the DURABLE DELETION of this file was still owed. Recovery must
