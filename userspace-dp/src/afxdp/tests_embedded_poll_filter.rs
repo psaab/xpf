@@ -7818,55 +7818,86 @@ fn outer_slack_quote_refused_at_match_9901() {
     );
 }
 
-/// #10286: an untranslated (no-NAT) Fragmentation-Needed quoting a live
-/// permitted session must be admitted as RELATED on the real flowless poll
-/// path — not dropped as flowless under the reverse default-deny (which
-/// black-holes PMTUD for every un-NAT'd flow, i.e. essentially all IPv6).
-///
-/// Fail-on-revert: restore the `try_reverse_embedded_icmp_error` no-rewrite
-/// gate to `return NotHandled` and the error falls through to ordinary
-/// flowless enforcement (WAN->LAN default deny) — no prebuilt forward is
-/// queued, so `scratch_forwards` is empty and this test goes RED.
-fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
+/// #10286 / #10684: an untranslated ICMPv4 error quoting a live no-NAT
+/// permitted session uses the RELATED shortcut only for path errors (types
+/// 3/11/12). Source Quench (4) and Redirect (5) must remain subject to the
+/// arrival-to-egress policy even when the error arrives in the session's
+/// expected zone.
+fn poll_descriptor_untranslated_v4_error_admission_impl(
     install_session: bool,
     cross_zone_arrival: bool,
     unknown_zone_arrival: bool,
     reverse_half: bool,
+    outer_error_type: u8,
+    same_zone_arrival: bool,
 ) {
-    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let router_ip = if same_zone_arrival {
+        Ipv4Addr::new(10, 0, 61, 1)
+    } else {
+        Ipv4Addr::new(10, 0, 0, 1)
+    };
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
-    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let server_ip = if same_zone_arrival {
+        Ipv4Addr::new(10, 0, 61, 103)
+    } else {
+        Ipv4Addr::new(1, 1, 1, 1)
+    };
     let client_port: u16 = 12345;
+    let arrival_ifindex = if same_zone_arrival { 24 } else { 12 };
 
     // Outer: router -> CLIENT (untranslated error travels back to the original
     // source); embedded quoted: client:client_port -> server:80, i.e. the
     // exact forward tuple the client sent (no NAT to reverse).
-    let mut frame =
-        build_icmp_te_frame_v4_with_mac(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP, TEST_WAN_MAC);
-    // Frag-Needed shape (type 3 / code 4, MTU 1400) — the v4 PMTUD signal.
-    n6472_patch_ptb(&mut frame, 34);
+    let arrival_mac = if same_zone_arrival { TEST_LAN_MAC } else { TEST_WAN_MAC };
+    let mut frame = build_icmp_te_frame_v4_with_mac(
+        router_ip,
+        client_ip,
+        server_ip,
+        client_port,
+        80,
+        PROTO_TCP,
+        arrival_mac,
+    );
+    if outer_error_type == 3 {
+        // Frag-Needed shape (type 3 / code 4, MTU 1400) — the v4 PMTUD signal.
+        n6472_patch_ptb(&mut frame, 34);
+    } else {
+        frame[35] = 0;
+        if outer_error_type == 5 {
+            // Redirect gateway field (ICMP bytes 4..8), before checksum refresh.
+            frame[38..42].copy_from_slice(&[192, 0, 2, 1]);
+        }
+        rewrite_outer_icmpv4_type(&mut frame, 34, outer_error_type);
+    }
 
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
-    // Default-deny reverse: NO WAN->LAN permit. The LAN->WAN allow-all from
-    // the fixture stays (the forward session's own permit).
+    // Default-deny arrival-to-egress: no WAN->LAN or LAN->LAN permit. The
+    // fixture's LAN->WAN allow-all stays (the forward session's own permit).
     let mut forwarding = build_forwarding_state(&snapshot);
+    if same_zone_arrival {
+        assert_eq!(
+            forwarding.ifindex_to_zone_id.get(&arrival_ifindex),
+            Some(&TEST_LAN_ZONE_ID),
+            "same-zone error must arrive in LAN"
+        );
+    }
     if cross_zone_arrival {
         // The packet arrives on a different zone than the quoted session's
         // egress zone. Preserve its route but force the actual ingress zone
         // used by the RELATED consumer and policy evaluator to LAN.
         forwarding
             .ifindex_to_zone_id
-            .insert(12, TEST_LAN_ZONE_ID);
+            .insert(arrival_ifindex, TEST_LAN_ZONE_ID);
     } else if unknown_zone_arrival {
-        forwarding.ifindex_to_zone_id.remove(&12);
+        forwarding.ifindex_to_zone_id.remove(&arrival_ifindex);
     }
 
-    // The error ingresses on the WAN (reth0.80, ifindex 12); the RELATED
-    // return resolves egress toward the client on the LAN (reth1.0, ifindex
-    // 24), so learn the client neighbor.
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
-    binding.interface = Arc::<str>::from("reth0.80");
+    // The error enters on WAN by default; same-zone cells use LAN ingress and
+    // LAN egress, with matching LAN zone metadata.
+    let arrival_interface = if same_zone_arrival { "reth1.0" } else { "reth0.80" };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, arrival_ifindex, 0);
+    binding.interface = Arc::<str>::from(arrival_interface);
 
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -7875,7 +7906,7 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
-        ingress_ifindex: 12,
+        ingress_ifindex: arrival_ifindex as u32,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -7987,39 +8018,45 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
             resolution: ForwardingResolution {
                 disposition: ForwardingDisposition::ForwardCandidate,
                 local_ifindex: 0,
-                egress_ifindex: if reverse_half { 24 } else { 12 },
-                tx_ifindex: if reverse_half { 24 } else { 12 },
+                egress_ifindex: if reverse_half || same_zone_arrival { 24 } else { 12 },
+                tx_ifindex: if reverse_half || same_zone_arrival { 24 } else { 12 },
                 tunnel_endpoint_id: 0,
                 next_hop: Some(if reverse_half {
                     IpAddr::V4(client_ip)
+                } else if same_zone_arrival {
+                    IpAddr::V4(server_ip)
                 } else {
                     IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))
                 }),
                 neighbor_mac: Some(if reverse_half {
                     [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+                } else if same_zone_arrival {
+                    [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x11]
                 } else {
                     [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]
                 }),
                 src_mac: Some(if reverse_half {
                     [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]
+                } else if same_zone_arrival {
+                    TEST_LAN_MAC
                 } else {
                     [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]
                 }),
-                tx_vlan_id: if reverse_half { 0 } else { 80 },
+                tx_vlan_id: if reverse_half || same_zone_arrival { 0 } else { 80 },
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
             install_table_check: 0,
         };
         let session_metadata = SessionMetadata {
-            // The reverse-half case stores this single record's zones
-            // direction-relatively, swapped from the LAN->WAN forward tuple.
-            ingress_zone: if reverse_half {
+            // Reverse-half records swap the forward LAN->WAN zones; the
+            // same-zone fixture keeps both sides in LAN.
+            ingress_zone: if reverse_half && !same_zone_arrival {
                 TEST_WAN_ZONE_ID
             } else {
                 TEST_LAN_ZONE_ID
             },
-            egress_zone: if reverse_half {
+            egress_zone: if reverse_half || same_zone_arrival {
                 TEST_LAN_ZONE_ID
             } else if unknown_zone_arrival {
                 0
@@ -8041,6 +8078,10 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
             policy_counter_idx: 0,
             policy_counter: None,
         };
+        if same_zone_arrival {
+            assert_eq!(session_metadata.ingress_zone, TEST_LAN_ZONE_ID);
+            assert_eq!(session_metadata.egress_zone, TEST_LAN_ZONE_ID);
+        }
         let installed = if reverse_half {
             sessions.install_with_protocol_with_origin(
                 session_key,
@@ -8143,24 +8184,50 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
         );
         return;
     }
+    if matches!(outer_error_type, 4 | 5) {
+        // #10684: a live session cannot skip the reverse
+        // arrival-to-egress policy for deprecated/link-scoped errors.
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "untranslated ICMPv4 type {outer_error_type} must face default-deny"
+        );
+        assert_eq!(
+            binding.scratch.scratch_recycle.len(),
+            1,
+            "policy-denied ICMPv4 type {outer_error_type} recycles its descriptor"
+        );
+        assert_eq!(telemetry.dbg.policy_deny, 1);
+        let event = event_rx
+            .try_recv()
+            .expect("policy-deny event for excluded RELATED type")
+            .decode_dataplane_event()
+            .expect("policy-deny payload for excluded RELATED type");
+        assert_eq!(
+            event.kind,
+            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+        );
+        return;
+    }
 
-    // The load-bearing #10286 assertion: the untranslated error quoting a
-    // live permitted session is admitted as RELATED despite the reverse
-    // default-deny — PMTUD works.
+    // The load-bearing #10286/#10684 assertion: the permitted path errors
+    // quoting a live session are admitted despite reverse default-deny.
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
         1,
-        "untranslated Frag-Needed quoting a live session must queue exactly one \
-         RELATED forward on the flowless poll path (RED on revert: dropped as \
-         flowless under the reverse pair)"
+        "untranslated path error quoting a live session must queue exactly one \
+         RELATED forward on the flowless poll path"
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let admitted = match &fwd.frame {
         PendingForwardFrame::Prebuilt(bytes) => bytes,
         _ => panic!("RELATED ICMP error must queue a PREBUILT frame"),
     };
-    assert_eq!(admitted[34], 3, "admitted frame stays ICMP Frag-Needed type");
-    assert_eq!(admitted[35], 4, "admitted frame stays Frag-Needed code 4");
+    assert_eq!(admitted[34], outer_error_type, "admitted frame preserves ICMP type");
+    assert_eq!(
+        admitted[35],
+        if outer_error_type == 3 { 4 } else { 0 },
+        "admitted frame preserves ICMP code"
+    );
     let outer_dst = Ipv4Addr::new(admitted[30], admitted[31], admitted[32], admitted[33]);
     assert_eq!(outer_dst, client_ip, "outer destination stays the client");
     // Pinned like every comparable builder test: the untranslated path depends
@@ -8185,25 +8252,26 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(
     assert_eq!(telemetry.dbg.policy_deny, 0);
     assert!(event_rx.try_recv().is_err(), "RELATED admission emits no deny");
 }
+
 #[test]
 fn poll_descriptor_untranslated_frag_needed_admitted_10286() {
-    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, false, false, false);
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 3, false);
 }
 #[test]
 fn poll_descriptor_unsolicited_icmp_still_denied_10286() {
-    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(false, false, false, false);
+    poll_descriptor_untranslated_v4_error_admission_impl(false, false, false, false, 3, false);
 }
 /// #10671 fail-on-revert: a live un-NAT'd session must not authorize an
 /// error whose actual arrival zone differs from the session's expected zone.
 #[test]
 fn poll_descriptor_cross_zone_untranslated_frag_needed_denied_10671() {
-    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, true, false, false);
+    poll_descriptor_untranslated_v4_error_admission_impl(true, true, false, false, 3, false);
 }
 /// Zone ID 0 cannot authorize RELATED admission even when both sides resolve
 /// to 0; the unknown arrival still faces ordinary flowless zone policy.
 #[test]
 fn poll_descriptor_unresolved_zone_untranslated_frag_needed_denied_10671() {
-    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, false, true, false);
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, true, false, 3, false);
 }
 
 /// A reverse-only session must authorize a forward quote via the reply key
@@ -8211,9 +8279,43 @@ fn poll_descriptor_unresolved_zone_untranslated_frag_needed_denied_10671() {
 /// its zones direction-relatively and is the only installed lookup candidate.
 #[test]
 fn poll_descriptor_reply_key_reverse_half_frag_needed_admitted_10671() {
-    poll_descriptor_untranslated_frag_needed_admitted_10286_impl(true, false, false, true);
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, true, 3, false);
 }
 
+#[test]
+fn poll_descriptor_untranslated_time_exceeded_admitted_10684() {
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 11, false);
+}
+
+#[test]
+fn poll_descriptor_untranslated_parameter_problem_admitted_10684() {
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 12, false);
+}
+
+#[test]
+fn poll_descriptor_untranslated_source_quench_policy_denied_10684() {
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 4, false);
+}
+
+#[test]
+fn poll_descriptor_untranslated_redirect_policy_denied_10684() {
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 5, false);
+}
+
+#[test]
+fn poll_descriptor_untranslated_frag_needed_same_zone_admitted_10684() {
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 3, true);
+}
+
+#[test]
+fn poll_descriptor_untranslated_source_quench_same_zone_policy_denied_10684() {
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 4, true);
+}
+
+#[test]
+fn poll_descriptor_untranslated_redirect_same_zone_policy_denied_10684() {
+    poll_descriptor_untranslated_v4_error_admission_impl(true, false, false, false, 5, true);
+}
 
 /// #10286 v6 twin: an untranslated Packet-Too-Big quoting a live permitted
 /// v6 session must be admitted as RELATED despite the reverse default-deny.

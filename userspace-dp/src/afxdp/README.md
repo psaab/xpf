@@ -722,11 +722,15 @@ sync.
     gate into clean untranslated flowless forwarding. Both directions ride
     the admitted session like the #5690 inbound reversal (prebuilt forward,
     `flow_key = None`, gated on `allow_embedded_icmp`).
-    The untranslated RELATED shortcut is zone-scoped (#10671): the quoted
-    session's expected arrival zone is derived from match direction, and only
-    a resolved, nonzero match bypasses the reverse flowless policy pair; a
-    mismatch or unresolved zone is judged by arrival-to-egress policy like a
-    translated error.
+    The untranslated RELATED shortcut is zone-scoped (#10671) and type-scoped
+    (#10684). Only a resolved, nonzero quoted-session arrival zone that matches
+    the packet's actual zone can bypass the reverse flowless policy pair, and
+    the error must be a supported path error (v4 3/11/12; v6 quoted errors
+    remain unchanged). Source Quench (v4 type 4, deprecated by RFC 6633) and
+    Redirect (v4 type 5, link-scoped) remain policy-gated even when they quote
+    a live untranslated session; their NAT reversal support remains intact.
+    Zone mismatches and unresolved zones also receive ordinary arrival-to-egress
+    policy judgment.
   - **#6472 — NAT64 (cross-family) ICMP error translation on the flowless
     arm:** the RFC 7915 §4.2/§5.2 translators in `nat64.rs` were previously
     reachable only via `build_nat64_forwarded_frame` on the FLOW-BACKED path,
@@ -766,7 +770,9 @@ sync.
     `ForwardCandidate`; route, HA, and fabric dispositions remain
     authoritative. Matching NAT'd Time-Exceeded and other non-PMTUD errors
     still use the #9948 policy gate, and a wrong-zone PTB still follows zone
-    policy. The un-NAT'd #10286 path is unchanged.
+    policy. The untranslated #10286 path is type-scoped by #10684: v4 types
+    4/5 retain arrival-to-egress policy; the path-error and v6 RELATED coverage
+    is unchanged.
   - **#9528 — both ICMP-error arms run AFTER the interface input filter and
     the PBR verdict:** each arm `continue`s with the descriptor consumed, and
     each used to run ahead of a gate below it. The #6472 arm ran before the
