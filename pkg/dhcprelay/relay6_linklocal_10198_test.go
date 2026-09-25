@@ -421,6 +421,7 @@ func TestDHCPv6ReplyDispatcherRoutesByInterfaceID10198(t *testing.T) {
 	serverAddr := server.LocalAddr().(*net.UDPAddr)
 
 	innerA := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, relayA, innerA)
 	replyA := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
@@ -430,6 +431,7 @@ func TestDHCPv6ReplyDispatcherRoutesByInterfaceID10198(t *testing.T) {
 	replyA.AddOption(dhcpv6.OptInterfaceID([]byte("ll-a")))
 	replyA.AddOption(dhcpv6.OptRelayMessage(innerA))
 	innerB := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, relayB, innerB)
 	replyB := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
@@ -491,6 +493,7 @@ func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.
 	defer releaseB()
 
 	innerA := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, relayA, innerA)
 	replyA := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
@@ -500,6 +503,7 @@ func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.
 	replyA.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
 	replyA.AddOption(dhcpv6.OptRelayMessage(innerA))
 	innerB := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, relayB, innerB)
 	replyB := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
@@ -664,7 +668,9 @@ func TestDHCPv6ServerLoopRoutesMismatchedInterfaceID10198(t *testing.T) {
 		PeerAddr:    net.ParseIP("::1"),
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("target")))
-	reply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	inner := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, targetRelay, inner)
+	reply.AddOption(dhcpv6.OptRelayMessage(inner))
 	server.push(reply.ToBytes())
 	deadline := time.Now().Add(time.Second)
 	for targetClient.writeCount() == 0 && time.Now().Before(deadline) {
@@ -723,7 +729,9 @@ func TestDHCPv6ServerLoopRoutesSameInterfaceIDDifferentLink10198(t *testing.T) {
 		PeerAddr:    net.ParseIP("::1"),
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
-	reply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	inner := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, targetRelay, inner)
+	reply.AddOption(dhcpv6.OptRelayMessage(inner))
 	server.push(reply.ToBytes())
 	deadline := time.Now().Add(time.Second)
 	for targetClient.writeCount() == 0 && time.Now().Before(deadline) {
@@ -784,6 +792,7 @@ func TestDHCPv6ClientReplyDispatchRateLimited10198(t *testing.T) {
 	}()
 
 	inner := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, replyRelay, inner)
 	reply := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
@@ -859,6 +868,7 @@ func TestDHCPv6ReplyDispatcherRestartsDeadServer10198(t *testing.T) {
 	}
 
 	inner := newDHCPV6TestMessage(t)
+	armDHCPV6Reply(t, relay, inner)
 	reply := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
