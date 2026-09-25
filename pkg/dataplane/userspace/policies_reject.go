@@ -105,7 +105,7 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 // fabricated permit/deny/default verdict (#4394) — the same SSOT-reuse pattern
 // as RuntimePolicyIDs and ClassifyHostInbound (#4352).
 //
-// It reproduces buildSnapshot's two policy-content fail-close paths exactly:
+// It mirrors the Go-visible whole-snapshot rejection checks, including:
 //
 //   - PER-RULE SENTINELS (collectPolicyContentRejections over the BUILT rules):
 //     the policy snapshot builder poisons a rule with the __unsupported__
@@ -137,12 +137,17 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 //     `match application [ any bad-set ]` policy is missed there but still fails
 //     closed here). It is consulted only when the per-rule scan is empty, so a
 //     bad set already named with a scoped per-rule reason is not double-reported.
+//   - WRONG-FAMILY ADDRESS-BOOK PREFIXES: the helper enforces that each
+//     address-book row's prefixes_v4 / prefixes_v6 array agrees with Rust's
+//     literal-family parser. Go's To4 folding can file an IPv4-mapped IPv6
+//     prefix into prefixes_v4; the helper rejects the whole snapshot.
 //
-// A non-empty result means the dataplane enforces NONE of this config; an empty
-// result means every policy rule is representable. feedOverlay is the live
-// dynamic-address feed-prefix overlay (nil = no live feeds); callers MUST pass
-// the same overlay the production builder uses so the simulator agrees with the
-// helper on feed-backed address-names.
+// A non-empty result means the helper refuses this snapshot; an empty result
+// means none of these mirrored rejection conditions was observed. feedOverlay is
+// the live dynamic-address feed-prefix overlay (nil = no live feeds); callers
+// MUST pass the same overlay the production builder uses so the simulator agrees
+// with the helper on feed-backed address-names.
+
 func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]string) []string {
 	if cfg == nil {
 		return nil
@@ -175,6 +180,18 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	// the simulator and every #3261 surface reported a snapshot the helper
 	// refuses as healthy. See policies_reject_identity_9584.go.
 	reasons = append(reasons, collectPolicyIdentityRejections(policies)...)
+	// #10688: the helper also validates each address-book prefix against its
+	// family-specific wire array. Go's To4 folds IPv4-mapped IPv6 literals into
+	// v4, while Rust parses their colon-bearing spelling as v6; the helper
+	// rejects the entire snapshot. Inspect the built rows so this arm follows
+	// the same feed-aware expansion and family split as publication.
+	books, _, bookErr := buildAddressBookTableWithFeeds(cfg, feedOverlay)
+	if bookErr != nil {
+		reasons = append(reasons,
+			fmt.Sprintf("address-book snapshot cannot be built (fail-closed): %v", bookErr))
+	} else {
+		reasons = append(reasons, collectAddressBookFamilyRejections(books)...)
+	}
 	if len(reasons) == 0 {
 		if _, cerr := buildAppCatalogSnapshot(cfg); cerr != nil {
 			reasons = append(reasons, fmt.Sprintf(
@@ -230,4 +247,29 @@ func addressListHasSentinel(addrs []string) bool {
 		}
 	}
 	return false
+}
+
+// collectAddressBookFamilyRejections mirrors the userspace helper's
+// family-enforcing address-book preflight. In particular, net.ParseCIDR plus
+// net.IP.To4 classifies an IPv4-mapped IPv6 prefix as v4 in Go, while Rust
+// parses the same colon-bearing literal as IPv6.
+func collectAddressBookFamilyRejections(books []AddressBookSnapshot) []string {
+	var reasons []string
+	for _, book := range books {
+		for _, prefix := range book.PrefixesV4 {
+			if family := config.NATAddrFamily(config.NATCIDRIPPart(prefix)); family != "" && family != "v4" {
+				reasons = append(reasons, fmt.Sprintf(
+					"address-book %q prefix %q is stored in prefixes_v4 but the userspace helper parses it as IPv6; the helper rejects the entire policy snapshot (#10688)",
+					book.Name, prefix))
+			}
+		}
+		for _, prefix := range book.PrefixesV6 {
+			if family := config.NATAddrFamily(config.NATCIDRIPPart(prefix)); family != "" && family != "v6" {
+				reasons = append(reasons, fmt.Sprintf(
+					"address-book %q prefix %q is stored in prefixes_v6 but the userspace helper parses it as IPv4; the helper rejects the entire policy snapshot",
+					book.Name, prefix))
+			}
+		}
+	}
+	return reasons
 }

@@ -496,6 +496,12 @@ the helper. It covers every fail-closed policy-content axis:
   (`addrRepresentable` false → `__unsupported_address__`). The scan is feed-aware
   (`q.FeedOverlay`): a healthy dynamic-address feed policy resolves through the
   overlay and is NOT falsely flagged.
+- **Wrong-family address-book prefix (#10688)** — a mapped IPv6 literal can be
+  folded by Go's `To4()` into `prefixes_v4`, while Rust parses the original
+  colon-bearing prefix as IPv6 and rejects the whole snapshot. The mirror scans
+  the same built address-book rows and reports the wrong-family prefix, so
+  match-policy surfaces do not invent a verdict for a snapshot the helper
+  refused.
 - **Zone-pair stanza naming `junos-global` (#9570)** — reachable only on the
   tolerant load path, since strict commit rejects it. The snapshot builder
   poisons the rule with `__unsupported__`, because the both-sided spelling is

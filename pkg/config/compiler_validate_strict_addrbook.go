@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // AddressBookRefKind classifies how a bare address-book name resolves within a
@@ -152,6 +153,58 @@ func addressBookNameCollision(scope string, ab *AddressBook) error {
 					"changing which traffic a permit/deny rule covers). Rename one "+
 					"of the two entries so every policy reference is unambiguous",
 				scope, n, n, n)
+		}
+	}
+	return nil
+}
+
+// validateAddressBookMappedPrefixesStrict rejects IPv4-mapped IPv6 address-book
+// values (#10688). Go's net.IP.To4 folds these prefixes into the IPv4 wire
+// array, while the userspace helper parses the colon-bearing token as IPv6 and
+// rejects the whole snapshot's wrong-family prefix. A strict commit must not
+// create that silent whole-snapshot refusal.
+func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	check := func(scope string, book *AddressBook) error {
+		if book == nil {
+			return nil
+		}
+		names := make([]string, 0, len(book.Addresses))
+		for name := range book.Addresses {
+			if strings.HasPrefix(name, zoneLocalNamePrefix) {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			address := book.Addresses[name]
+			if address != nil && FRRAddrIsMapped(address.Value) {
+				return fmt.Errorf(
+					"%s address-book address %q has IPv4-mapped IPv6 prefix %q; "+
+						"the userspace snapshot builder files it in prefixes_v4, "+
+						"but the helper parses it as IPv6 and rejects the entire policy snapshot; "+
+						"use a non-mapped IPv4 or IPv6 prefix (#10688)",
+					scope, name, address.Value)
+			}
+		}
+		return nil
+	}
+	if err := check("security global", cfg.Security.AddressBook); err != nil {
+		return err
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	for _, name := range zoneNames {
+		if zone := cfg.Security.Zones[name]; zone != nil {
+			if err := check(fmt.Sprintf("security zone %q", name), zone.AddressBook); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
