@@ -165,6 +165,10 @@ mod tests_newflow_lock;
 #[cfg(test)]
 #[path = "tests_det_lock_scope_9130.rs"]
 mod tests_det_lock_scope_9130;
+// #10721: deterministic PAT continues through address-only collisions.
+#[cfg(test)]
+#[path = "tests_deterministic_collision_10721.rs"]
+mod tests_deterministic_collision_10721;
 
 // #9131: the address-only PERSISTENT allocator's sibling-address fallback.
 #[cfg(test)]
