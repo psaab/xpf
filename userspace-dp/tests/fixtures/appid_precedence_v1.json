@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Cross-language AppID application-label precedence parity fixture (#3612). Each case is resolved by BOTH the AppID-ENABLED Rust catalog (AppCatalog::lookup_directional in userspace-dp/src/policy.rs) and the AppID-DISABLED Go fallback (resolveTupleFallback in pkg/appid/runtime.go); both MUST agree on the resolved application NAME so the same 5-tuple is labeled identically regardless of the services.application-identification knob. `apps` is the operator config (user apps only, #3612 scope S1); `catalog` is the (app_id, protocol, port-range) rows appid.BuildCatalog assigns; `tuple` is a FORWARD-keyed session. #5296: app_id is a STABLE name-hash (config.StableAppID), NOT the sorted position, and a same-tier overlap is resolved by LOWEST stable app_id on both paths — BuildCatalog emits entries in ascending-id order so the Rust exact_dst first-writer dedup also keeps the lowest id. GENERATED programmatically from BuildCatalog + resolveTupleFallback by pkg/appid TestRegeneratePrecedenceFixture (BPFRX_REGEN_APPID_FIXTURE=1); do not hand-edit ids/expected. expected_app_id 0 / expected_name \"\" means UNKNOWN.",
+  "description": "Cross-language AppID application-label precedence parity fixture (#3612). Each case is resolved by BOTH the AppID-ENABLED Rust catalog (AppCatalog::lookup_directional in userspace-dp/src/policy.rs) and the AppID-DISABLED Go fallback (resolveTupleFallback in pkg/appid/runtime.go); both MUST agree on the resolved application NAME so the same 5-tuple is labeled identically regardless of the services.application-identification knob. `apps` is the operator config (user apps only, #3612 scope S1); `catalog` is the (app_id, protocol, port-range) rows appid.BuildCatalog assigns; `tuple` is a FORWARD-keyed session. #5296: app_id is assigned from a STABLE name-hash (config.StableAppID), NOT the sorted position; rare hash collisions are deterministically displaced by config.AssignStableAppIDs, and same-tier overlaps resolve by LOWEST assigned app_id on both paths. BuildCatalog emits entries in ascending-id order so the Rust exact_dst first-writer dedup also keeps the lowest id. GENERATED programmatically from BuildCatalog + resolveTupleFallback by pkg/appid TestRegeneratePrecedenceFixture (BPFRX_REGEN_APPID_FIXTURE=1); do not hand-edit ids/expected. expected_app_id 0 / expected_name \"\" means UNKNOWN.",
   "cases": [
     {
       "name": "protocol_only_loses_to_exact_port",
@@ -185,6 +185,67 @@
       },
       "expected_app_id": 38751,
       "expected_name": "ccc-svc"
+    },
+    {
+      "name": "collision_displacement_uses_assigned_id",
+      "note": "The #10722 binding case: svc-217 and svc-396 share natural StableAppID 49397; AssignStableAppIDs keeps svc-217 at 49397 and displaces svc-396 to 1. mmm-middle has id 22100. Rust resolves the exact-port overlap by lowest assigned app_id (svc-396), while the old Go natural-hash fallback chose mmm-middle. This pins the actual assigned-ID parity path.",
+      "apps": [
+        {
+          "name": "mmm-middle",
+          "protocol": "tcp",
+          "destination_port": "8080",
+          "source_port": ""
+        },
+        {
+          "name": "svc-217",
+          "protocol": "tcp",
+          "destination_port": "8080",
+          "source_port": ""
+        },
+        {
+          "name": "svc-396",
+          "protocol": "tcp",
+          "destination_port": "8080",
+          "source_port": ""
+        }
+      ],
+      "catalog": [
+        {
+          "name": "svc-396",
+          "app_id": 1,
+          "protocol": 6,
+          "dst_port_low": 8080,
+          "dst_port_high": 8080,
+          "src_port_low": 0,
+          "src_port_high": 0
+        },
+        {
+          "name": "mmm-middle",
+          "app_id": 22100,
+          "protocol": 6,
+          "dst_port_low": 8080,
+          "dst_port_high": 8080,
+          "src_port_low": 0,
+          "src_port_high": 0
+        },
+        {
+          "name": "svc-217",
+          "app_id": 49397,
+          "protocol": 6,
+          "dst_port_low": 8080,
+          "dst_port_high": 8080,
+          "src_port_low": 0,
+          "src_port_high": 0
+        }
+      ],
+      "tuple": {
+        "protocol": 6,
+        "src_port": 40000,
+        "dst_port": 8080,
+        "is_reverse": false
+      },
+      "expected_app_id": 1,
+      "expected_name": "svc-396"
     },
     {
       "name": "src_port_only_is_port_constrained",

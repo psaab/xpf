@@ -204,7 +204,7 @@ func ResolveSessionName(appNames map[uint16]string, cfg *config.Config, proto ui
 		return Unknown
 	}
 
-	return resolveTupleFallback(proto, srcPort, dstPort, cfg)
+	return resolveTupleFallback(proto, srcPort, dstPort, cfg, appNames)
 }
 
 // SessionMatches reports whether a session's resolved application name equals
@@ -236,7 +236,24 @@ func sortedNames(names map[string]struct{}) []string {
 	return out
 }
 
-func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Config) string {
+// assignedIDForName resolves a catalog name's actual app_id without allocating
+// a second map for each session-name lookup. Most names retain their natural
+// hash, so the common case is one map lookup. Only a name whose natural slot is
+// occupied needs a scan to find its collision-displaced assigned id.
+func assignedIDForName(appNames map[uint16]string, name string) uint16 {
+	naturalID := config.StableAppID(name)
+	if owner := appNames[naturalID]; owner == "" || owner == name {
+		return naturalID
+	}
+	for assignedID, assignedName := range appNames {
+		if assignedName == name {
+			return assignedID
+		}
+	}
+	return naturalID
+}
+
+func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Config, appNames map[uint16]string) string {
 	if cfg != nil {
 		// #2578: cfg.Applications.Applications is a Go map; iterating it and
 		// returning the first match is non-deterministic. When BOTH a
@@ -244,19 +261,18 @@ func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Conf
 		// match the same session, the more-specific port-based app must win,
 		// deterministically. Scan all matches, prefer a port-constrained app
 		// (a source-port and/or destination-port constraint) over a
-		// protocol-only one, and break same-tier ties by LOWEST StableAppID.
+		// protocol-only one, and break same-tier ties by LOWEST assigned app_id.
 		//
-		// #5296: the within-tier tiebreak is keyed on config.StableAppID(name),
-		// NOT on the name alphabetically. This mirrors the AppID-ENABLED Rust
-		// catalog (AppCatalog::lookup_directional, #3612), which breaks a same-
-		// tier overlap by lowest app_id — and app_id is now the stable name-hash
-		// (StableAppID), no longer the sorted-name position. Keying this fallback
-		// on the same stable id keeps the AppID-on and AppID-off label paths in
-		// agreement (the #3612 cross-language precedence-parity contract,
-		// appid_precedence_v1.json). Before #5296 lowest-id == alphabetically-
-		// first, so the old `name < best` and the new stable-id key coincided;
-		// with stable ids the winner of a same-tier overlap is now the lowest
-		// StableAppID, which is what the dataplane stamps.
+		// #10722: use the assigned app_id carried by the catalog, not the natural
+		// StableAppID hash. AssignStableAppIDs displaces a user app that collides
+		// with an already-placed id, so its assigned id can differ from its hash.
+		// Rust resolves same-tier overlaps by the lowest assigned app_id; using
+		// this map keeps the AppID-disabled Go label path in parity, including
+		// collision-displaced apps (#5296/#5988/#3612).
+		//
+		// Names absent from this catalog map (for example, a tolerated config
+		// entry not referenced by policy) retain the natural hash fallback so
+		// the disabled label path keeps its existing configured-app coverage.
 		best := ""
 		bestPortBased := false
 		var bestID uint16
@@ -284,7 +300,7 @@ func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Conf
 				continue
 			}
 			portBased := app.DestinationPort != "" || app.SourcePort != ""
-			id := config.StableAppID(name)
+			id := assignedIDForName(appNames, name)
 			if best == "" || (portBased && !bestPortBased) ||
 				(portBased == bestPortBased && id < bestID) {
 				best = name

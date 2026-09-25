@@ -142,7 +142,7 @@ func TestAppIDPrecedenceParityFixture(t *testing.T) {
 			if tc.Tuple.IsReverse {
 				t.Fatalf("fixture case %q is is_reverse=true; resolveTupleFallback only models forward flows", tc.Name)
 			}
-			got := resolveTupleFallback(tc.Tuple.Protocol, tc.Tuple.SrcPort, tc.Tuple.DstPort, cfg)
+			got := resolveTupleFallback(tc.Tuple.Protocol, tc.Tuple.SrcPort, tc.Tuple.DstPort, cfg, cat.AppNames)
 			if got != tc.ExpectedName {
 				t.Fatalf("resolveTupleFallback(proto=%d src=%d dst=%d) = %q, want %q (must match the AppID-enabled Rust label)",
 					tc.Tuple.Protocol, tc.Tuple.SrcPort, tc.Tuple.DstPort, got, tc.ExpectedName)

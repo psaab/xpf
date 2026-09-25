@@ -357,7 +357,8 @@ var OperationalTree = map[string]*Node{
 		// services, interfaces ge-0/0/0, firewall filter f1 — were
 		// CanonicalUnknown, so a restricted class was refused all of them.
 		"configuration": {Desc: "Show active configuration", Children: map[string]*Node{
-			"applications": {Desc: "Application protocol definitions", AcceptsArgs: true},
+			"applications":   {Desc: "Application protocol definitions", AcceptsArgs: true},
+			"bridge-domains": {Desc: "Bridge domain configuration", AcceptsArgs: true},
 			// #9064: `groups` and `apply-groups` are real config stanzas and were
 			// absent from this map entirely, so `show configuration groups` was
 			// CanonicalUnknown rather than merely arg-less.

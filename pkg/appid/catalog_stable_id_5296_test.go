@@ -87,16 +87,14 @@ func TestStableIDResolvesRetainedSessionAfterCatalogEdit(t *testing.T) {
 	}
 }
 
-// TestResolveTupleFallbackTieBreakByStableID pins the #5296 tie-break re-key:
-// resolveTupleFallback breaks a same-tier overlap by LOWEST StableAppID, not by
-// alphabetically-first name, so it agrees with the AppID-enabled Rust catalog
-// (AppCatalog::lookup_directional, lowest app_id) under the stable ids — the
-// #3612 cross-language precedence-parity contract.
+// TestResolveTupleFallbackTieBreakByAssignedID pins the #10722 assigned-id
+// tiebreak: a same-tier overlap resolves by the lowest id actually assigned
+// by config.AssignStableAppIDs, including collision displacement, so it agrees
+// with the AppID-enabled Rust catalog's lookup_directional result.
 //
-// aaa-svc sorts before ccc-svc but StableAppID(aaa-svc) > StableAppID(ccc-svc),
-// so the stable-id tiebreak picks ccc-svc. RED-on-revert: restore the `name <
-// best` alphabetical tiebreak and the winner flips to aaa-svc.
-func TestResolveTupleFallbackTieBreakByStableID(t *testing.T) {
+// aaa-svc sorts before ccc-svc but has a higher assigned ID, so the catalog id
+// map makes ccc-svc the winner.
+func TestResolveTupleFallbackTieBreakByAssignedID(t *testing.T) {
 	if !(config.StableAppID("aaa-svc") > config.StableAppID("ccc-svc")) {
 		t.Skipf("fixture stale: StableAppID no longer orders aaa-svc after ccc-svc")
 	}
@@ -106,8 +104,52 @@ func TestResolveTupleFallbackTieBreakByStableID(t *testing.T) {
 		"ccc-svc": "8080",
 	})
 	// AppID-disabled fallback path (resolveTupleFallback is the label source).
-	name := resolveTupleFallback(6, 0, 8080, cfg)
+	cat, err := BuildCatalog(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := resolveTupleFallback(6, 0, 8080, cfg, cat.AppNames)
 	if name != "ccc-svc" {
-		t.Fatalf("same-tier tie-break resolved to %q, want ccc-svc (lowest StableAppID); the fallback must key on StableAppID to match the dataplane, not alphabetical order", name)
+		t.Fatalf("same-tier tie-break resolved to %q, want ccc-svc (lowest assigned app_id)", name)
+	}
+}
+
+// TestResolveTupleFallbackUsesDisplacedAssignedID_10722 is the fail-on-revert
+// guard for collision-aware fallback ordering. svc-217 and svc-396 have the
+// same natural StableAppID; config.AssignStableAppIDs keeps svc-217 at that id
+// and displaces svc-396 to id 1. mmm-middle's natural and assigned id is 22100,
+// so the old natural-hash comparator deterministically picks mmm-middle while
+// the Rust catalog's lowest-assigned-id lookup picks svc-396.
+func TestResolveTupleFallbackUsesDisplacedAssignedID_10722(t *testing.T) {
+	const displaced = "svc-396"
+	const naturalOwner = "svc-217"
+	const middle = "mmm-middle"
+	naturalID := config.StableAppID(displaced)
+	if naturalID != config.StableAppID(naturalOwner) {
+		t.Fatalf("collision fixture stale: StableAppID(%s)=%d, StableAppID(%s)=%d",
+			displaced, naturalID, naturalOwner, config.StableAppID(naturalOwner))
+	}
+	if config.StableAppID(middle) >= naturalID {
+		t.Fatalf("collision fixture stale: StableAppID(%s)=%d must be below colliding id %d",
+			middle, config.StableAppID(middle), naturalID)
+	}
+	cfg := mkAppIDCfg([]string{displaced, naturalOwner, middle}, map[string]string{
+		displaced:   "8080",
+		naturalOwner: "8080",
+		middle:       "8080",
+	})
+	cat, err := BuildCatalog(cfg)
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
+	displacedID := idOfName(cat, displaced)
+	middleID := idOfName(cat, middle)
+	if displacedID != 1 || middleID >= naturalID {
+		t.Fatalf("unexpected assigned IDs: displaced %s=%d, middle %s=%d, colliding natural id=%d",
+			displaced, displacedID, middle, middleID, naturalID)
+	}
+	if got := ResolveSessionName(cat.AppNames, cfg, 6, 40000, 8080, 0); got != displaced {
+		t.Fatalf("same-tier fallback resolved to %q, want %q (lowest assigned app_id %d; natural-hash order picks %q)",
+			got, displaced, displacedID, middle)
 	}
 }
