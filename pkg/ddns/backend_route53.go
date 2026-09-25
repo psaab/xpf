@@ -530,16 +530,17 @@ func (b *route53Backend) DeleteLease(ctx context.Context, rec LeaseDNSRecord) er
 //	 but it was not found]
 //
 // The Code alone (InvalidChangeBatch) is NOT sufficient — it also covers
-// genuine batch errors (e.g. an UPSERT whose value collides). We additionally
-// require the "but it was not found" / "was not found" marker, so a malformed
-// or conflicting batch (which must keep retrying / surface as a conflict) is
-// never mistaken for an idempotent delete.
+// genuine batch errors (e.g. an UPSERT whose value collides, a missing hosted
+// zone). We additionally require the exact delete-record shape — BOTH the
+// "tried to delete resource record set" action marker AND the "but it was
+// not found" outcome marker — so any other InvalidChangeBatch carrying a bare
+// "not found" / "was not found" (foreign zone/record, malformed batch) keeps
+// retrying / surfaces as a conflict instead of dropping ownership (#10727).
 func r53DeleteAlreadyGone(code, msg string) bool {
 	if !strings.EqualFold(strings.TrimSpace(code), "InvalidChangeBatch") {
 		return false
 	}
 	m := strings.ToLower(msg)
-	return strings.Contains(m, "but it was not found") ||
-		strings.Contains(m, "was not found") ||
-		strings.Contains(m, "not found")
+	return strings.Contains(m, "tried to delete resource record set") &&
+		strings.Contains(m, "but it was not found")
 }

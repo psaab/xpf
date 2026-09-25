@@ -441,6 +441,19 @@ func TestRoute53DeleteGenuineErrorRetries(t *testing.T) {
 			code: "InvalidChangeBatch", msg: "[RRSet with DNS name ... is not permitted in zone]",
 			wantSubstr: "InvalidChangeBatch",
 		},
+		{
+			// #10727 A10-F3: a FOREIGN "not found" (missing hosted zone, not
+			// the record) must keep retrying — the old bare-substring matcher
+			// swallowed it and dropped ownership.
+			name: "invalid-batch-foreign-zone-not-found", status: http.StatusBadRequest,
+			code: "InvalidChangeBatch", msg: "Hosted zone 'Z1234567890' was not found",
+			wantSubstr: "InvalidChangeBatch",
+		},
+		{
+			name: "invalid-batch-bare-not-found", status: http.StatusBadRequest,
+			code: "InvalidChangeBatch", msg: "NoSuchHostedZone: zone not found",
+			wantSubstr: "InvalidChangeBatch",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
