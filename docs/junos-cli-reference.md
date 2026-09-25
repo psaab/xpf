@@ -1225,11 +1225,10 @@ value is a non-literal dns-name / wildcard / range) (#4394). A single
 unrepresentable rule content-rejects EVERY query for the config (whole-snapshot
 semantics); a healthy config is never flagged.
 
-**Route-drop-before-policy advisory (#4373 E4/H2/H7).** A transit query whose
-`destination-ip` is a class the forwarding path drops at ROUTE LOOKUP *before*
-the policy engine runs — IPv4/IPv6 multicast, the IPv4 limited broadcast
-`255.255.255.255`, the unspecified address (`0.0.0.0` / `::`), or loopback
-(`127.0.0.0/8` / `::1`) — now carries an advisory line next to the verdict:
+**Route-drop / neighbor-delivery advisory (#4373 E4/H2/H7, #11004).** A
+transit query whose `destination-ip` is multicast, limited broadcast,
+unspecified, or loopback carries the existing route-drop advisory. Those
+classes are dropped at ROUTE LOOKUP before policy evaluation; for example:
 
 ```
 route-drop advisory: destination is multicast — transit traffic to this
@@ -1238,14 +1237,27 @@ verdict does not describe real forwarding (the packet is dropped at route
 regardless of the matching policy / filter-accept log)
 ```
 
-This closes an operator-confusion class: without it the simulator (and a
-firewall filter `then accept; then log` for the same tuple) reports a PERMIT
-the dataplane never forwards — the packet is silently dropped at route with no
-session and no policy eval, so the operator sees a permit/accept verdict but no
-traffic. The advisory is **additive** — it does NOT change the permit/deny
-verdict, `Matched`, or `default_used` — and rides both a positive match and the
-default-policy fall-through. It is emitted on all four live surfaces from one
-SSOT wording (`policymatch.RouteDropNote`): local + remote CLI `show security
+A connected-prefix subnet-directed broadcast has a different failure stage.
+When the connected route wins, the FIB resolves it as `MissingNeighbor` and the
+cold path evaluates policy on that connected egress before neighbor resolution.
+The directed-broadcast NOARP neighbor is rejected (#10690), so no usable
+neighbor resolves: a policy DENY remains the actual policy result, but a permit
+is dropped at neighbor resolution. The directed-broadcast note explicitly says
+this is **not** a pre-policy route drop. The packet cannot be forwarded without
+the not-yet-implemented `family inet targeted-broadcast` support (#4308).
+
+The simulator recognizes directed broadcasts from static IPv4 interface-unit
+prefixes; `/31` and `/32` do not have a directed-broadcast host. This
+address-based classification does not model the selected FIB table or a
+more-specific static route that shadows a connected prefix, so it can
+over-classify across routing instances or in such shadowed-route cases.
+
+The advisory is additive and does not change the policy verdict. The
+`route_drop_before_policy` flag is set for the advisory, but clients must read
+`route_drop_class` / `route_drop_note` to distinguish a pre-policy route drop
+from the directed-broadcast neighbor-resolution failure. Both matched and
+default-policy results are covered. The SSOT wording
+(`policymatch.RouteDropNote`) is emitted on local + remote CLI `show security
 match-policies` / `test policy`, REST `match-policies`
 (`route_drop_before_policy` / `route_drop_class` / `route_drop_note` JSON
 fields), and the gRPC `MatchPolicies` RPC (fields 22–24). A `to-zone

@@ -7737,21 +7737,18 @@ type MatchPoliciesResponse struct {
 	// which has no host-inbound gate. It is additional context, never a verdict:
 	// it does not change `matched` / `host_inbound_unmatched`.
 	HostInbound *HostInboundAdmission `protobuf:"bytes,21,opt,name=host_inbound,json=hostInbound,proto3" json:"host_inbound,omitempty"`
-	// #4373 (E4/H2/H7): route_drop_before_policy is true when the query
-	// DESTINATION is a class the transit forwarding path drops at ROUTE LOOKUP
-	// before the policy engine runs — multicast, the IPv4 limited broadcast
-	// 255.255.255.255, the unspecified address, or loopback. For such a
-	// destination the permit/deny `action` does NOT describe real forwarding: the
-	// packet is dropped at route regardless of the matching policy (and a
-	// firewall `then accept; then log` for the same tuple logs an accept the flow
-	// never survives — the E4 confusion). route_drop_class names the class and
-	// route_drop_note carries the SSOT operator advisory string
-	// (policymatch.RouteDropNote) so gRPC / remote-CLI clients state the caveat
-	// identically to the local CLI + REST surfaces. ADVISORY, like host_inbound —
-	// it does not change `matched` / `action` / `default_used`. Populated on the
-	// transit verdict paths (matched + no-match/default); omitted for an ordinary
-	// unicast destination and for a host-bound query (which takes the
-	// local-delivery gate, not transit route lookup).
+	// #4373 (E4/H2/H7, #11004): route_drop_before_policy is set when a transit
+	// result carries a route-drop / neighbor-delivery advisory. Multicast,
+	// limited broadcast, unspecified, and loopback are dropped at route lookup
+	// before policy (#4373). Directed-broadcast is different: when its connected
+	// route wins, policy is evaluated on that egress before neighbor resolution
+	// fails; the NOARP broadcast neighbor is rejected (#10690). This flag alone
+	// does not mean policy was bypassed for every class, so clients should read
+	// route_drop_class and route_drop_note for the exact stage. A
+	// directed-broadcast DENY remains the policy result, while a permit cannot
+	// forward without targeted-broadcast support (#4308). The advisory does not
+	// change `matched` / `action` / `default_used`. Populated on transit verdicts
+	// and omitted for ordinary unicast / host-bound queries.
 	RouteDropBeforePolicy bool   `protobuf:"varint,22,opt,name=route_drop_before_policy,json=routeDropBeforePolicy,proto3" json:"route_drop_before_policy,omitempty"`
 	RouteDropClass        string `protobuf:"bytes,23,opt,name=route_drop_class,json=routeDropClass,proto3" json:"route_drop_class,omitempty"`
 	RouteDropNote         string `protobuf:"bytes,24,opt,name=route_drop_note,json=routeDropNote,proto3" json:"route_drop_note,omitempty"`
