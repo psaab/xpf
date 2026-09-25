@@ -393,19 +393,22 @@ func compilePolicy(polInst struct {
 	pol.Match.FromZones = sortDedupZones(pol.Match.FromZones)
 	pol.Match.ToZones = sortDedupZones(pol.Match.ToZones)
 
-	// #5575 / #11013 / #11014: fail-CLOSED on tolerant load / peer-sync.
-	// A policy the strict gates reject for a dropped match/then constraint is
-	// downgraded to a warning, but the compiler silently discards that content.
-	// Empty match dimensions become match-ANY; a dropped then sibling can leave
-	// an earlier permit active; and an unknown policy subtree can carry
-	// enforcement constraints the direct policy compiler ignores. Record the
-	// invalidation so the userspace snapshot builder poisons the rule with the
-	// __unsupported__ sentinel instead of publishing incomplete enforcement.
+	// #5575 / #11013 / #11014 / #11023: fail-CLOSED on tolerant load /
+	// peer-sync. A policy the strict gates reject for dropped match/then
+	// enforcement or an unsupported then-log mode is downgraded to a warning,
+	// but the compiler silently discards that content. Empty match dimensions
+	// become match-ANY; a dropped then sibling can leave an earlier permit
+	// active; an unknown log mode drops configured session logging; and an
+	// unknown policy subtree can carry enforcement constraints the direct
+	// policy compiler ignores. Record the invalidation so the userspace
+	// snapshot builder poisons the rule with the __unsupported__ sentinel
+	// instead of publishing incomplete policy content.
 	//
 	// These per-policy predicates share their definitions with the strict
-	// gates where available. The unsupported-then predicate is also used by
-	// its named strict/warning gate; enforcement-bearing unknown subtrees are
-	// identified separately from harmless unknown policy metadata.
+	// gates where available. The unsupported-then-sibling and unsupported-
+	// then-log predicates are also used by their strict/warning gate;
+	// enforcement-bearing unknown subtrees are identified separately from
+	// harmless unknown policy metadata.
 	// Explicit `any` remains distinguishable from omitted or valueless match
 	// content; the AST predicates below preserve that distinction.
 	//
@@ -422,6 +425,7 @@ func compilePolicy(polInst struct {
 		len(policyUnsupportedMatchLeafFindings(polInst.node, isGlobal)) > 0 ||
 		len(policyUnsupportedThenPermitModifiers(polInst.node)) > 0 ||
 		len(policyUnsupportedThenSiblings(polInst.node)) > 0 ||
+		len(policyUnsupportedThenLogTokens(polInst.node)) > 0 ||
 		len(droppedEnforcementSubtrees) > 0 {
 		pol.LenientContentDropped = true
 	}
@@ -451,6 +455,12 @@ func policyUnsupportedThenSiblings(polNode *Node) []string {
 					label = "next term"
 					i++
 				}
+				// In a compact tail, tokens following `log` are its list
+				// values (or the explicit `next term` sibling). The dedicated
+				// log-mode predicate diagnoses the values.
+				if action == "log" && label != "next term" {
+					continue
+				}
 				switch label {
 				case "permit", "deny", "reject", "log", "count":
 					action = label
@@ -473,6 +483,75 @@ func policyUnsupportedThenSiblings(polNode *Node) []string {
 				label = "next term"
 			}
 			unsupported = append(unsupported, label)
+		}
+	}
+	return unsupported
+}
+
+// policyUnsupportedThenLogTokens reports session-log values the compiler does
+// not implement. #11023: policyUnsupportedThenSiblings intentionally skips the
+// recognized `log` action node, while compilePolicy only wires the two values
+// in securitySessionLogModes; an unknown value is therefore otherwise dropped.
+func policyUnsupportedThenLogTokens(polNode *Node) []string {
+	var unsupported []string
+	if polNode == nil {
+		return unsupported
+	}
+	recordMode := func(mode string) {
+		if mode == "" {
+			return
+		}
+		for _, known := range securitySessionLogModes {
+			if mode == known {
+				return
+			}
+		}
+		unsupported = append(unsupported, mode)
+	}
+	for _, then := range polNode.FindChildren("then") {
+		logActions := then.FindChildren("log")
+		for _, action := range logActions {
+			// Read the leaf tail directly instead of firewallMatchValues:
+			// that helper treats a repeated self-token as another keyword,
+			// but `log` itself is not a valid session-log mode (#11023).
+			for _, mode := range action.Keys[1:] {
+				recordMode(mode)
+			}
+			for _, child := range action.Children {
+				for _, mode := range child.Keys {
+					recordMode(mode)
+				}
+			}
+		}
+
+		// A compact `then` tail can keep its tokens on the `then` node rather
+		// than create a child log leaf. Treat values after `log` as modes here;
+		// the sibling predicate handles `next term` and other tokens outside
+		// the log-value position.
+		if len(logActions) == 0 && len(then.Keys) > 1 {
+			action := ""
+			for i := 1; i < len(then.Keys); i++ {
+				label := then.Keys[i]
+				if label == "next" && i+1 < len(then.Keys) && then.Keys[i+1] == "term" {
+					label = "next term"
+					i++
+				}
+				if action == "log" && label != "next term" {
+					switch label {
+					case "session-init", "session-close":
+						continue
+					default:
+						recordMode(label)
+						continue
+					}
+				}
+				switch label {
+				case "permit", "deny", "reject", "count":
+					action = label
+				case "log":
+					action = "log"
+				}
+			}
 		}
 	}
 	return unsupported
@@ -573,8 +652,8 @@ func applyCollapsedDenyModifiers(pol *Policy, denyNode *Node) {
 }
 
 // LenientDroppedPolicyLocator names the first policy in cfg whose compile
-// silently dropped enforcement content on the tolerant path (#5575/#11013/
-// #11014 LenientContentDropped), or "" when none did.
+// silently dropped enforcement or audit content on the tolerant path
+// (#5575/#11013/#11014/#11023 LenientContentDropped), or "" when none did.
 //
 // The flag is the compiler's fail-closed poison: policies_lower.go stamps such
 // a rule with the __unsupported__ application sentinel so the Rust integrity

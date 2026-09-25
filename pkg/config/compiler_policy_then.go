@@ -594,9 +594,11 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 }
 
 // validatePolicyUnsupportedThenSiblings rejects a `then` child the policy
-// compiler does not implement, including explicit `then next term`. The
-// firewall-filter compiler has separate, supported next-term semantics; this
-// gate is intentionally scoped to security policies only.
+// compiler does not implement, including explicit `then next term`. It also
+// diagnoses unknown `then log` modes that tolerant schema validation warns
+// about but lets ingress continue with. The firewall-filter compiler has
+// separate, supported next-term semantics; this gate is scoped to security
+// policies.
 func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	checkPolicy := func(scope, policyName string, polNode *Node) error {
@@ -606,6 +608,18 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 					"(the compiler drops it, which can leave an earlier permit active); "+
 					"remove it (#11013)",
 				scope, policyName, sibling,
+			)
+			if !lenient {
+				return fmt.Errorf("%s", msg)
+			}
+			warnings = append(warnings, msg)
+		}
+		for _, mode := range policyUnsupportedThenLogTokens(polNode) {
+			msg := fmt.Sprintf(
+				"security policies %s policy %q has unsupported then log mode %q "+
+					"(the compiler drops it, so configured session logging is incomplete; "+
+					"remove it or use session-init/session-close (#11023))",
+				scope, policyName, mode,
 			)
 			if !lenient {
 				return fmt.Errorf("%s", msg)

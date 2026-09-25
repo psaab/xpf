@@ -510,8 +510,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 
 	// #11013: security policies do not implement the firewall filter's
-	// `then next term` semantics. An unrecognized then sibling is dropped,
-	// so keep it visible on tolerant ingress and reject it on strict commits.
+	// `then next term` semantics. An unrecognized then sibling is dropped.
+	// #11023: unknown `then log` modes are also dropped because the compiler
+	// wires only session-init/session-close; both are visible on tolerant
+	// ingress and rejected on strict direct compilation.
 	policyThenSiblingWarnings, err := validatePolicyUnsupportedThenSiblings(
 		tree.Children, opts.lenientPolicyThenSiblings)
 	if err != nil {
