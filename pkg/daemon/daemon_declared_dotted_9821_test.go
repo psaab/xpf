@@ -431,9 +431,8 @@ func TestAssembleFRRConfigDeclaredNetdevs9821(t *testing.T) {
 	}
 }
 
-// TestBuildZoneRGMapDeclaredDotted9821 pins the D17 swap: a dotted RG
-// owner's member resolves to the declared stanza (session-sync ownership),
-// where first-dot-cut found nothing. Multi-RG zones keep first-wins.
+// TestBuildZoneRGMapDeclaredDotted9821 pins dotted-member resolution and
+// complete, order-independent ownership for a multi-RG zone.
 func TestBuildZoneRGMapDeclaredDotted9821(t *testing.T) {
 	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
 		"p.0":   {Name: "p.0", RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{1: {Number: 1}}},
@@ -445,14 +444,21 @@ func TestBuildZoneRGMapDeclaredDotted9821(t *testing.T) {
 		"zz": {Interfaces: []string{"p.0.1", "q.0.1"}},
 		"r":  {Interfaces: []string{"reth0.0"}},
 	}
-	got := buildZoneRGMap(cfg, map[string]uint16{"z": 5, "zz": 6, "r": 7})
-	if got[5] != 1 {
-		t.Errorf("zone z RG = %d, want 1 (dotted owner resolves)", got[5])
+	zoneIDs := map[string]uint16{"z": 5, "zz": 6, "r": 7}
+	got := buildZoneRGMap(cfg, zoneIDs)
+	if !reflect.DeepEqual(got[5], []int{1}) {
+		t.Errorf("zone z RG set = %v, want [1] (dotted owner resolves)", got[5])
 	}
-	if got[6] != 1 {
-		t.Errorf("multi-RG zone zz RG = %d, want 1 (first wins)", got[6])
+	if !reflect.DeepEqual(got[6], []int{1, 2}) {
+		t.Errorf("multi-RG zone zz RG set = %v, want [1 2]", got[6])
 	}
-	if got[7] != 1 {
-		t.Errorf("zone r RG = %d, want 1 (undotted control)", got[7])
+	if !reflect.DeepEqual(got[7], []int{1}) {
+		t.Errorf("zone r RG set = %v, want [1] (undotted control)", got[7])
+	}
+
+	cfg.Security.Zones["zz"] = &config.ZoneConfig{Interfaces: []string{"q.0.1", "p.0.1"}}
+	reversed := buildZoneRGMap(cfg, zoneIDs)
+	if !reflect.DeepEqual(got, reversed) {
+		t.Errorf("multi-RG zone ownership changed with interface order: forward=%v reversed=%v", got, reversed)
 	}
 }

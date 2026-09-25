@@ -1,8 +1,9 @@
 package daemon
 
 import (
-	"log/slog"
+	"slices"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -11,18 +12,15 @@ type userspaceXSKBindingController interface {
 	SetOnXSKBound(func())
 }
 
-// buildZoneRGMap builds a zone_id→RG mapping by looking up which interfaces
-// belong to each zone, then checking those interfaces' RedundancyGroup.
-// Zones with RETH interfaces inherit the RETH's RG; non-RETH zones are not
-// included (they fall back to global IsPrimaryFn in session sync).
-func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint16) map[uint16]int {
-	result := make(map[uint16]int)
+// buildZoneRGMap records every positive RG represented by each zone. A zone
+// can span multiple redundancy groups in active/active; keeping the complete
+// set makes its ownership independent of interface ordering. Non-RETH zones
+// without an RG are not included (they fall back to global IsPrimaryFn).
+func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint16) cluster.ZoneRGMap {
+	result := make(cluster.ZoneRGMap)
 	for zoneName, zone := range cfg.Security.Zones {
-		// Tolerant/programmatic/HA-peer-sync configs can leave a nil
-		// zone value in the map (the established nil-slot invariant the
-		// dataplane SSOT defends, e.g. zones.go's `if zone == nil`).
-		// Skip it here too, otherwise the zone.Interfaces deref below
-		// panics the per-RG session-sync apply path.
+		// Tolerant/programmatic/HA-peer-sync configs can leave a nil zone
+		// value in the map. Skip it rather than panicking during HA apply.
 		if zone == nil {
 			continue
 		}
@@ -30,27 +28,61 @@ func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint16) map[uint16]in
 		if !ok {
 			continue
 		}
-		rgSeen := -1
 		for _, ifName := range zone.Interfaces {
 			// #9821 D17: the split base (declared-aware), suffix ignored as
-			// before — a dotted RG owner's member (`p.0.1`) resolves to the
-			// declared stanza instead of nothing (strict-reachable via
-			// member-declared RedundantParent, which is name-agnostic).
+			// before — a dotted RG owner's member resolves to its declared stanza.
 			baseName := cfg.SplitInterfaceUnitRef(ifName).Base
-			// comma-ok checks key-presence, not value-non-nil; a
-			// (nil, true) map entry would panic on ifc.RedundancyGroup.
-			if ifc, ok := cfg.Interfaces.Interfaces[baseName]; ok && ifc != nil && ifc.RedundancyGroup > 0 {
-				if rgSeen >= 0 && rgSeen != ifc.RedundancyGroup {
-					slog.Warn("zone spans multiple redundancy groups; "+
-						"active/active session sync ownership is ambiguous",
-						"zone", zoneName,
-						"rg1", rgSeen, "rg2", ifc.RedundancyGroup)
+			if ifc, ok := cfg.Interfaces.Interfaces[baseName]; ok && ifc != nil {
+				rg := ifc.RedundancyGroup
+				if rg <= 0 && ifc.RedundantParent != "" {
+					parentName := cfg.SplitInterfaceUnitRef(ifc.RedundantParent).Base
+					if parent, ok := cfg.Interfaces.Interfaces[parentName]; ok && parent != nil {
+						rg = parent.RedundancyGroup
+					}
 				}
-				if rgSeen < 0 {
-					result[zid] = ifc.RedundancyGroup
-					rgSeen = ifc.RedundancyGroup
+				if rg > 0 {
+					result[zid] = append(result[zid], rg)
 				}
 			}
+		}
+	}
+	for zone := range result {
+		rgs := result[zone]
+		slices.Sort(rgs)
+		result[zone] = slices.Compact(rgs)
+	}
+	return result
+}
+
+// buildZoneFoldRGMap maps the stable wire identity of each configured ingress
+// interface to its owning RG. Ambiguous stable-ID collisions are omitted so
+// per-session ownership falls back to the complete zone RG set.
+func buildZoneFoldRGMap(cfg *config.Config) map[uint32]int {
+	result := make(map[uint32]int)
+	ambiguous := make(map[uint32]struct{})
+	for _, stable := range cfg.ClusterStableIfaceNames() {
+		fold := config.StableIfaceID(stable)
+		if fold == 0 {
+			continue
+		}
+		localName, ok := cfg.LocalIfaceForStableID(fold)
+		if !ok {
+			ambiguous[fold] = struct{}{}
+			delete(result, fold)
+			continue
+		}
+		baseName := cfg.SplitInterfaceUnitRef(localName).Base
+		ifc := cfg.Interfaces.Interfaces[baseName]
+		if ifc == nil || ifc.RedundancyGroup <= 0 {
+			continue
+		}
+		if prior, ok := result[fold]; ok && prior != ifc.RedundancyGroup {
+			ambiguous[fold] = struct{}{}
+			delete(result, fold)
+			continue
+		}
+		if _, bad := ambiguous[fold]; !bad {
+			result[fold] = ifc.RedundancyGroup
 		}
 	}
 	return result

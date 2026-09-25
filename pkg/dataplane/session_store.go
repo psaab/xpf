@@ -102,6 +102,10 @@ type ClusterBulkReconcileInput struct {
 	ReceivedV4     map[SessionKey]struct{}
 	ReceivedV6     map[SessionKeyV6]struct{}
 	ShouldSyncZone func(uint16) bool
+	// ShouldSyncV4/V6, when provided, judge row ownership using per-session
+	// ingress identity. They supersede ShouldSyncZone for multi-RG zones.
+	ShouldSyncV4 func(SessionValue) bool
+	ShouldSyncV6 func(SessionValueV6) bool
 	// IsZoneMapped distinguishes a zone named by the RG ownership snapshot
 	// from an unmapped (node-local or otherwise unowned) zone. When provided,
 	// stale rows in an unmapped zone are deletable only if their map value
@@ -1125,7 +1129,7 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	if s.dp == nil {
 		return result, errors.New("nil dataplane")
 	}
-	if input.ShouldSyncZone == nil {
+	if input.ShouldSyncZone == nil && input.ShouldSyncV4 == nil && input.ShouldSyncV6 == nil {
 		return result, nil
 	}
 	reason := input.DeleteReason
@@ -1154,13 +1158,16 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	// beside a complete-looking stale_v4/stale_v6 pair and cannot tell which
 	// number to distrust.
 	var errs []error
-	// An unmapped zone uses the bulk-start RG 0 fallback. When that fallback
-	// says this node is primary, keep every row; when it says secondary, only
-	// local-origin rows are kept. Mapped zones retain the existing RG answer.
 	var staleV4 []SessionEntryV4
 	if err := s.ForEachV4(func(key SessionKey, val SessionValue) bool {
 		mapped := input.IsZoneMapped == nil || input.IsZoneMapped(val.IngressZone)
-		shouldSync := input.ShouldSyncZone(val.IngressZone)
+		shouldSync := false
+		if input.ShouldSyncZone != nil {
+			shouldSync = input.ShouldSyncZone(val.IngressZone)
+		}
+		if input.ShouldSyncV4 != nil {
+			shouldSync = input.ShouldSyncV4(val)
+		}
 		if shouldSync || (!mapped && val.Flags&SessFlagClusterSynced == 0) {
 			return true
 		}
@@ -1184,7 +1191,13 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	var staleV6 []SessionEntryV6
 	if err := s.ForEachV6(func(key SessionKeyV6, val SessionValueV6) bool {
 		mapped := input.IsZoneMapped == nil || input.IsZoneMapped(val.IngressZone)
-		shouldSync := input.ShouldSyncZone(val.IngressZone)
+		shouldSync := false
+		if input.ShouldSyncZone != nil {
+			shouldSync = input.ShouldSyncZone(val.IngressZone)
+		}
+		if input.ShouldSyncV6 != nil {
+			shouldSync = input.ShouldSyncV6(val)
+		}
 		if shouldSync || (!mapped && val.Flags&SessFlagClusterSynced == 0) {
 			return true
 		}

@@ -10,7 +10,6 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"log/slog"
-	"maps"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -1241,10 +1240,11 @@ type SessionSync struct {
 	fenceAckWaiters map[uint64]fenceAckWaiter
 
 	zoneRGMu  sync.RWMutex
-	zoneRGMap map[uint16]int
-	// zoneRGMapGen changes whenever SetZoneRGMap installs a map with different
-	// contents (#9655), so a bulk can tell whether the zone map its snapshot was
-	// taken from still applies. Guarded by zoneRGMu.
+	zoneRGMap ZoneRGMap
+	foldRGMap map[uint32]int
+	// zoneRGMapGen changes when the legacy SetZoneRGMap contents change and on
+	// every SetZoneOwnership apply (#9655/#11012), so an in-flight bulk can
+	// detect stale ownership or resolver snapshots. Guarded by zoneRGMu.
 	zoneRGMapGen uint64
 
 	// ingressFoldFn resolves a session's LOCAL ingress identity to the
@@ -2010,25 +2010,58 @@ func (s *SessionSync) SetVRFDevice(dev string) {
 // SetZoneRGMap sets the zone ID to redundancy-group mapping used for per-RG
 // session synchronization.
 func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
+	next := make(ZoneRGMap, len(m))
+	for zone, rg := range m {
+		next[zone] = []int{rg}
+	}
+	if m == nil {
+		next = nil
+	}
 	s.zoneRGMu.Lock()
 	// #9655/#10227: nil (unwired) and an installed empty map have different
 	// reconcile safety semantics, so a nil↔empty transition is a generation
-	// change even though maps.Equal treats both as equal.
-	if (s.zoneRGMap == nil) != (m == nil) || !maps.Equal(s.zoneRGMap, m) {
+	// change.
+	if (s.zoneRGMap == nil) != (next == nil) || !zoneRGMapEqual(s.zoneRGMap, next) {
 		s.zoneRGMapGen++
 	}
-	s.zoneRGMap = m
+	s.zoneRGMap = next
+	s.zoneRGMu.Unlock()
+}
+
+// SetZoneOwnership atomically installs the zone-to-RG set, stable-ingress-fold
+// to RG lookup, and local fold resolver. A nil zone map preserves the prior
+// zone map (used when an apply result has no zone-ID snapshot); a non-nil empty
+// map installs an authoritative empty map. Each apply advances the generation
+// because the fold resolver closes over an apply-time interface snapshot.
+func (s *SessionSync) SetZoneOwnership(zoneRG ZoneRGMap, foldRG map[uint32]int, foldFn func(uint32, uint16) uint32) {
+	var zones ZoneRGMap
+	if zoneRG != nil {
+		zones = make(ZoneRGMap, len(zoneRG))
+		for zone, rgs := range zoneRG {
+			zones[zone] = append([]int(nil), rgs...)
+		}
+	}
+	folds := make(map[uint32]int, len(foldRG))
+	for fold, rg := range foldRG {
+		folds[fold] = rg
+	}
+	s.zoneRGMu.Lock()
+	if zoneRG != nil {
+		s.zoneRGMap = zones
+	}
+	s.foldRGMap = folds
+	s.ingressFoldFn = foldFn
+	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
 
 // SetIngressFoldFn wires the #7095 cluster-stable ingress-interface resolver.
-//
-// It is guarded by zoneRGMu because it is read on the send path exactly where
-// the zone map is, and passing nil restores the pre-#7095 behaviour of stamping
-// nothing — which the wire already treats as "unknown".
+// It advances the ownership generation as well: a bulk snapshot that captured
+// the previous resolver must not reconcile against it after this changes.
 func (s *SessionSync) SetIngressFoldFn(fn func(ifindex uint32, vlan uint16) uint32) {
 	s.zoneRGMu.Lock()
 	s.ingressFoldFn = fn
+	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
 
@@ -2216,12 +2249,16 @@ func (s *SessionSync) WaitForIdle(timeout time.Duration, stableSamples int, samp
 // zoneOwnershipSnapshot is the zone ownership a bulk's stale-session reconcile
 // judges by, taken when the bulk STARTS (#9655).
 type zoneOwnershipSnapshot struct {
-	// zones is ShouldSyncZone's answer for each zone the zone->RG map names.
+	// zones stores ShouldSyncZone's answer for each named zone.
 	zones map[uint16]bool
-	// fallbackPrimary is the RG 0 IsPrimaryFn answer captured at bulk start.
-	// Zones absent from the map use this answer, matching live ShouldSyncZone.
+	// fallbackPrimary is the captured RG 0 answer for absent zones.
 	fallbackPrimary bool
-	// mapGen is the zone->RG map generation the snapshot was taken from.
+	// Per-session ownership is evaluated only against these bulk-start answers.
+	useRG  bool
+	foldRG map[uint32]int
+	foldFn func(uint32, uint16) uint32
+	primary map[int]bool
+	// mapGen is the ownership-map generation captured at bulk start.
 	mapGen uint64
 }
 
@@ -2245,26 +2282,63 @@ func (z *zoneOwnershipSnapshot) isMapped(zoneID uint16) bool {
 func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	s.zoneRGMu.RLock()
 	m := s.zoneRGMap
-	gen := s.zoneRGMapGen
+	foldRG := s.foldRGMap
+	foldFn := s.ingressFoldFn
+	isPrimaryForRG := s.IsPrimaryForRGFn
+	mapGen := s.zoneRGMapGen
 	s.zoneRGMu.RUnlock()
-	// #9655/#10227: an unwired nil zone map has no ownership answers, so it
-	// takes no snapshot and the bulk skips. An installed empty map is different:
-	// it is an authoritative all-unmapped snapshot. Capture the RG 0 fallback
-	// once here so absent zones agree with live ShouldSyncZone for this bulk.
+	// #9655/#10227: nil is unwired; empty is an authoritative all-unmapped
+	// snapshot. Copy the installed maps so this snapshot remains immutable.
 	if m == nil {
 		return nil
 	}
-	fallbackPrimary := false
-	if s.IsPrimaryFn != nil {
-		fallbackPrimary = s.IsPrimaryFn()
+	zoneRG := make(ZoneRGMap, len(m))
+	for zone, rgs := range m {
+		zoneRG[zone] = append([]int(nil), rgs...)
 	}
+	foldRGCapture := make(map[uint32]int, len(foldRG))
+	for fold, rg := range foldRG {
+		foldRGCapture[fold] = rg
+	}
+	fallbackPrimary := s.IsPrimaryFn != nil && s.IsPrimaryFn()
 	snap := &zoneOwnershipSnapshot{
-		zones:           make(map[uint16]bool, len(m)),
+		zones:           make(map[uint16]bool, len(zoneRG)),
 		fallbackPrimary: fallbackPrimary,
-		mapGen:          gen,
+		useRG:           isPrimaryForRG != nil,
+		foldRG:          foldRGCapture,
+		foldFn:          foldFn,
+		primary:         make(map[int]bool),
+		mapGen:          mapGen,
 	}
-	for zoneID := range m {
-		snap.zones[zoneID] = s.ShouldSyncZone(zoneID)
+	if isPrimaryForRG != nil {
+		for _, rgs := range zoneRG {
+			for _, rg := range rgs {
+				if _, ok := snap.primary[rg]; !ok {
+					snap.primary[rg] = isPrimaryForRG(rg)
+				}
+			}
+		}
+		for _, rg := range foldRGCapture {
+			if _, ok := snap.primary[rg]; !ok {
+				snap.primary[rg] = isPrimaryForRG(rg)
+			}
+		}
+	}
+	for zoneID, rgs := range zoneRG {
+		// Record membership separately from ownership. A mapped zone whose
+		// RGs are all peer-owned must remain distinguishable from an unmapped
+		// zone during stale-session reconciliation.
+		snap.zones[zoneID] = false
+		if isPrimaryForRG == nil {
+			snap.zones[zoneID] = fallbackPrimary
+			continue
+		}
+		for _, rg := range rgs {
+			if snap.primary[rg] {
+				snap.zones[zoneID] = true
+				break
+			}
+		}
 	}
 	return snap
 }
@@ -2334,6 +2408,8 @@ func (s *SessionSync) reconcileStaleSessions() {
 		ReceivedV4:     recvV4,
 		ReceivedV6:     recvV6,
 		ShouldSyncZone: shouldSyncAtBulkStart,
+		ShouldSyncV4:   zoneSnap.shouldSyncV4,
+		ShouldSyncV6:   zoneSnap.shouldSyncV6,
 		IsZoneMapped:   isZoneMappedAtBulkStart,
 		DeleteReason:   dataplane.DeleteReasonClusterStale,
 	})

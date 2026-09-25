@@ -74,6 +74,7 @@ var legacyDataplaneImportAllowlist = map[string]string{
 	"pkg/cluster/sync_conn_write.go":                 "#5661 pure-motion split of sync_conn.go: send/queue/journal path still references legacy session types",
 	"pkg/cluster/sync_install_table_9752.go":         "#9752 round 5: install-table send/recv memos name legacy session key/value types for the cluster sync path (same types as sync_conn_gen.go guards); membership helpers only, no legacy enforcement path",
 	"pkg/cluster/sync_protocol.go":                   "wire protocol still carries legacy session records",
+	"pkg/cluster/sync_zone_rg.go":                  "#11012 per-session owner predicates and bulk-start snapshot consume legacy dataplane SessionValue/V6 wire types; no new DataPlane surface",
 	"pkg/cluster/test_seams.go":                      "#9631 test-only seam file in the production package (external HA cells drive it without internal-export tricks, peer of pkg/dhcp/test_seams.go); the generation/journal observers name the same legacy dataplane.SessionKey the sync_conn_gen.go guards already name — no new dataplane surface",
 	"pkg/conntrack/gc.go":                            "GC still uses root session-domain types until those move out of pkg/dataplane",
 	"pkg/daemon/daemon.go":                           "daemon owns dataplane.RuntimeDataPlane; legacyDP() accessor was deleted in #1519 — only the RuntimeDataPlane field + LastApplyResultOf adapter remain",

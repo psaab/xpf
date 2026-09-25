@@ -264,17 +264,15 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		d.gc.SetSessionLimitEnabled(sessionLimitEnabled)
 	}
 
-	// 2.2. Build zone→RG map for per-RG session sync.
-	if ss := d.getSessionSync(); ss != nil && applyResult != nil {
-		ss.SetZoneRGMap(buildZoneRGMap(cfg, applyResult.ZoneIDs))
-	}
-
-	// 2.21. #7095: rebuild the cluster-stable ingress-interface resolver the
-	// session-sync sender stamps outgoing sessions with. Rebuilt here rather
-	// than held, because it closes over BOTH the config (reth → local member)
-	// and an ifindex snapshot, and a commit can change either.
+	// 2.2. Install zone and session ownership as one apply-time snapshot. A
+	// nil zone map preserves the prior zone IDs when this phase has no apply
+	// result; fold ownership and its resolver still follow the new config.
 	if ss := d.getSessionSync(); ss != nil {
-		ss.SetIngressFoldFn(buildIngressFoldFn(cfg))
+		var zoneRG cluster.ZoneRGMap
+		if applyResult != nil {
+			zoneRG = buildZoneRGMap(cfg, applyResult.ZoneIDs)
+		}
+		ss.SetZoneOwnership(zoneRG, buildZoneFoldRGMap(cfg), buildIngressFoldFn(cfg))
 	}
 	// And the reverse direction, used when a peer's session is imported: the
 	// fold the peer sent becomes THIS node's ifindex. Both closures share the
