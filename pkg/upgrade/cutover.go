@@ -1,7 +1,10 @@
 package upgrade
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -1053,7 +1056,18 @@ func (r *Runner) copyStaged(j *Journal) error {
 		}
 		if existingGen == j.SourceGeneration {
 			// True resume (same generation, or both empty on the legacy path):
-			// the copy already landed; skip.
+			// the copy already landed; skip the copy. On the stamped path the
+			// stamp alone does not prove the bytes survived bitrot/tamper, so
+			// re-verify every managed binary against the pinned staged source
+			// before treating the copy as landed (#10727 A10-F7). The legacy
+			// path has no content identity (live staged/ is mutable), so there
+			// is nothing exact to compare against — it skips unverified as
+			// before.
+			if j.SourceGeneration != "" {
+				if err := r.verifyVersionDirMatchesStaged(ver, srcDir); err != nil {
+					return err
+				}
+			}
 			r.logf("upgrade: version dir %s already present (same source generation); skipping copy", dst)
 			return nil
 		}
@@ -1126,6 +1140,47 @@ func (r *Runner) copyStaged(j *Journal) error {
 		return fmt.Errorf("fsync versions dir after rename: %w", err)
 	}
 	return nil
+}
+
+// verifyVersionDirMatchesStaged re-verifies a same-generation version dir
+// against its pinned staged source before a resume skip treats the copy as
+// landed (#10727 A10-F7). The stamp proves the copy's provenance, not that
+// its bytes survived; every managed binary (including the non-lockstep
+// cli/day0-config the flip repoints) is hash-compared staged-vs-versioned.
+func (r *Runner) verifyVersionDirMatchesStaged(ver, srcDir string) error {
+	dst := r.versionDir(ver)
+	// Both trees carry the binaries FLAT by Name (the staged dir is what the
+	// deb installed; manifest StagedSrc is the repo-relative build path, not
+	// the staged layout).
+	for _, name := range manifest.Names() {
+		want, err := fileSHA256Hex(filepath.Join(srcDir, name))
+		if err != nil {
+			return fmt.Errorf("hash staged %s: %w", name, err)
+		}
+		got, err := fileSHA256Hex(filepath.Join(dst, name))
+		if err != nil {
+			return fmt.Errorf("hash version-dir %s: %w", name, err)
+		}
+		if want != got {
+			return fmt.Errorf("REFUSE: version dir %s binary %s differs from pinned staged source %s "+
+				"(bitrot, tamper, or same-stamp restage); re-stage under a DISTINCT version tag",
+				dst, name, srcDir)
+		}
+	}
+	return nil
+}
+
+func fileSHA256Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // removeStaleVersionDir removes a NON-live versions/<ver> (B-P3b OPT1
