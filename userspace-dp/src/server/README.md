@@ -861,6 +861,10 @@ queues. See PR #1243's kill record for why i40e doesn't reshape.
   Regression-tested (full-
   apply leg) by
   `full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143`.
+  #10694: the three handler-level spawn/bind failure tests explicitly pin an
+  empty SA baseline through a per-coordinator `cfg(test)` seam. This keeps the
+  tests on their worker-failure subjects without requiring NETLINK_XFRM
+  privileges; normal bring-up still enforces the #10516 monitor gate.
   #10516: `ReconcileError::IpsecSaNotReady` is the THIRD post-teardown
   variant — the XFRM-SA monitor did not complete its first full GETSA dump
   before the dataplane-ready deadline, so no worker launch was attempted.

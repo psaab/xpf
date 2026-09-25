@@ -2457,14 +2457,6 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
 /// gen 2. Every assertion below flips.
 #[test]
 fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
-    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
-    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
-    // IpsecSaNotReady before this test's subject — skip explicitly (visible
-    // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
-        return;
-    }
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
 
     // Prior snapshot deferred workers -> previous_defer_workers=true makes
@@ -2509,7 +2501,13 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
 
     // Force the single planned worker's spawn to fail on the post-teardown
     // path (the destructive step the fix guards).
-    state.lock().expect("state").afxdp.force_worker_spawn_fail = 1;
+    {
+        let mut guard = state.lock().expect("state");
+        // #10694: explicitly pin an empty SA baseline; this test targets
+        // the post-teardown worker-spawn failure, not monitor privileges.
+        guard.afxdp.force_ipsec_sa_ready = true;
+        guard.afxdp.force_worker_spawn_fail = 1;
+    }
 
     // New same-plan apply: defer_workers=false, VALID address so the
     // forwarding build SUCCEEDS and the reconcile reaches the worker spawn.
@@ -2635,14 +2633,6 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
 /// all flip as ASSERTION failures.
 #[test]
 fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
-    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
-    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
-    // IpsecSaNotReady before this test's subject — skip explicitly (visible
-    // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
-        return;
-    }
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
 
     // Prior snapshot: one binding interface (ge-0/0/1, ifindex 11). NOT
@@ -2704,7 +2694,13 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
 
     // Force the single planned worker's spawn to fail on the post-teardown
     // path (the destructive step the fix guards).
-    state.lock().expect("state").afxdp.force_worker_spawn_fail = 1;
+    {
+        let mut guard = state.lock().expect("state");
+        // #10694: explicitly pin an empty SA baseline; this test targets
+        // the post-teardown worker-spawn failure, not monitor privileges.
+        guard.afxdp.force_ipsec_sa_ready = true;
+        guard.afxdp.force_worker_spawn_fail = 1;
+    }
 
     let mut request = req("apply_snapshot");
     request.snapshot = Some(next);
@@ -2808,14 +2804,6 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
 /// Assertions (a)/(b)/(c)/(d) all flip as ASSERTION failures.
 #[test]
 fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
-    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
-    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
-    // IpsecSaNotReady before this test's subject — skip explicitly (visible
-    // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
-        return;
-    }
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
 
     // Prior snapshot: one binding interface (ge-0/0/1, ifindex 11). Its only
@@ -2873,11 +2861,13 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
 
     // Force the single planned worker to SPAWN but report an INCOMPLETE bound
     // set (the post-spawn in-thread bind failure the fix guards).
-    state
-        .lock()
-        .expect("state")
-        .afxdp
-        .force_worker_bind_incomplete = 1;
+    {
+        let mut guard = state.lock().expect("state");
+        // #10694: explicitly pin an empty SA baseline; this test targets
+        // the post-spawn in-thread bind failure, not monitor privileges.
+        guard.afxdp.force_ipsec_sa_ready = true;
+        guard.afxdp.force_worker_bind_incomplete = 1;
+    }
 
     let mut request = req("apply_snapshot");
     request.snapshot = Some(next);

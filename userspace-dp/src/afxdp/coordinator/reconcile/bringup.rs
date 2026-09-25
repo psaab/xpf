@@ -190,13 +190,39 @@ pub(super) fn bring_up_workers(
     // not merely a background best-effort task. A generation-zero store
     // remains defense-in-depth on every worker, but it must not report a
     // ready dataplane before the monitor has established its baseline.
-    ensure_ipsec_sa_monitor(coord);
-    if !coord
-        .neighbors
-        .ipsec_sa_monitor
-        .store
-        .wait_ready(Duration::from_secs(5))
-    {
+    #[cfg(test)]
+    let ipsec_sa_ready = if coord.force_ipsec_sa_ready {
+        // #10694: explicit empty baseline pin for worker bring-up seam tests.
+        // Production retains the mandatory monitor gate below.
+        coord
+            .neighbors
+            .ipsec_sa_monitor
+            .store
+            .reset_for_monitor_start();
+        coord
+            .neighbors
+            .ipsec_sa_monitor
+            .store
+            .publish_empty_dump_for_test();
+        true
+    } else {
+        ensure_ipsec_sa_monitor(coord);
+        coord
+            .neighbors
+            .ipsec_sa_monitor
+            .store
+            .wait_ready(Duration::from_secs(5))
+    };
+    #[cfg(not(test))]
+    let ipsec_sa_ready = {
+        ensure_ipsec_sa_monitor(coord);
+        coord
+            .neighbors
+            .ipsec_sa_monitor
+            .store
+            .wait_ready(Duration::from_secs(5))
+    };
+    if !ipsec_sa_ready {
         coord.neighbors.stop_and_join_ipsec_sa_monitor();
         let stage = ReconcileStage::IpsecSaNotReady;
         coord.last_reconcile_stage = stage.clone();
