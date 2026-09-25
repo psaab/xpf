@@ -1101,9 +1101,9 @@ func (e *IPFIXExporter) sendRecords(records []FlowRecord) {
 		pkt := make([]byte, 16+dataLen)
 		encodeIPFIXHeaderInto(pkt[:16], hdr)
 		encodeIPFIXDataSetInto(pkt[16:], batch, tmplID, recSize, e.includeDir)
-		e.conns.writeAll(pkt, "ipfix data send failed")
-
-		e.exportedFlows.Add(uint64(len(batch)))
-		e.exportedPkts.Add(1)
+		if e.conns.writeAll(pkt, "ipfix data send failed") {
+			e.exportedFlows.Add(uint64(len(batch)))
+			e.exportedPkts.Add(1)
+		}
 	}
 }

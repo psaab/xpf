@@ -772,15 +772,17 @@ Flow export is forensics/compliance data; a collector going unreachable
 used to be invisible — every failed UDP write in `writeAll` was
 `slog.Debug`-logged and dropped while the exporter kept counting
 "exported", so an operator got no warning that records were being lost.
-Each `collectorConn` now tracks `WriteAttempts`, `WriteFailures`,
+Issue #10713 corrects the exported-flow/packet statistics: a packet counts
+as exported only when at least one collector write succeeds. Each
+`collectorConn` tracks `WriteAttempts`, `WriteFailures`,
 `LastError`/`LastErrorTime`, `LastFailureTime`, `LastSuccessTime`, a
 `Healthy` flag, and the `SourceAddress` (local bind) the connection was
 dialed with (#3745 — so two same-family collectors that pin distinct
 sources are distinguishable in every surface). These are atomic counters
 plus a mutex-guarded snapshot, race-safe against a concurrent status
-reader. The export DATA path is unchanged:
-writes are still attempted to every collector and failures are still
-non-fatal — this is additive observability.
+reader. A failure to one collector does not stop delivery to the others:
+DATA writes are still attempted to every eligible collector and failures
+remain non-fatal.
 
 `writeAll` emits a state-change log ONLY on the
 unhealthy↔healthy edge (a `slog.Warn` when a healthy collector first

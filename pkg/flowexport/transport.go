@@ -326,9 +326,10 @@ func templateRefreshInterval(d time.Duration) time.Duration {
 // per-collector write-health (#2464). A failure to one collector does
 // not stop delivery to the others (the export DATA path is unchanged —
 // writes are still attempted to all collectors and failures are still
-// non-fatal). The change is observability: each write bumps the
-// attempt counter, a success refreshes LastSuccessTime, and a failure
-// records LastError/LastErrorTime + the failure counter.
+// non-fatal). It returns true if at least one collector write succeeded,
+// so exporters only count a packet as exported when it reached a collector.
+// Each write bumps the attempt counter, a success refreshes LastSuccessTime,
+// and a failure records LastError/LastErrorTime + the failure counter.
 //
 // Each attempted write is BOUNDED by collectorWriteTimeout (#4423 H07) so a
 // slow or blocked collector stalls the shared export goroutine — which also
@@ -347,7 +348,8 @@ func templateRefreshInterval(d time.Duration) time.Duration {
 // transition log fires once when a healthy collector starts failing and
 // once when it recovers. errMsg disambiguates the protocol/path
 // (template vs data) in the debug line kept for deep tracing.
-func (cc *collectorConns) writeAll(pkt []byte, errMsg string) {
+func (cc *collectorConns) writeAll(pkt []byte, errMsg string) bool {
+	succeeded := false
 	for _, c := range cc.conns {
 		// Backoff gate: an unhealthy collector still inside its probe window is
 		// SKIPPED, so a persistently-blocked collector does not cost a fresh
@@ -397,11 +399,13 @@ func (cc *collectorConns) writeAll(pkt []byte, errMsg string) {
 		wasUnhealthy := !c.healthy
 		c.healthy = true
 		c.consecFail = 0
+		succeeded = true
 		c.mu.Unlock()
 		if wasUnhealthy {
 			slog.Info("flow-export collector recovered", "collector", c.addr)
 		}
 	}
+	return succeeded
 }
 
 // health returns an immutable snapshot of every collector's write-health

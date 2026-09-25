@@ -845,9 +845,9 @@ func (e *Exporter) sendRecords(records []FlowRecord) {
 		encodeHeaderInto(pkt[:20], hdr)
 		encodeDataFlowSetInto(pkt[20:], batch, e.bootTime,
 			tmplID, fields, recSize, e.cfg.V9TemplateOpts.IncludeFlowDir)
-		e.conns.writeAll(pkt, "netflow data send failed")
-
-		e.exportedFlows.Add(uint64(len(batch)))
-		e.exportedPkts.Add(1)
+		if e.conns.writeAll(pkt, "netflow data send failed") {
+			e.exportedFlows.Add(uint64(len(batch)))
+			e.exportedPkts.Add(1)
+		}
 	}
 }
