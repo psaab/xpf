@@ -655,6 +655,9 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.peerAlive = true
 	m.peerEverSeen = true
 	m.peerConfirmedAbsent = false
+	// A returning peer ends the reported peer-loss degradation; this marker
+	// describes the last takeover only while the partition remains unresolved.
+	m.clearFenceUnconfirmedLocked()
 	m.peerNodeID = int(pkt.NodeID)
 	m.peerSoftwareVersion = pkt.SoftwareVersion
 	m.peerHAProtocolVersion = normalizeHAProtocolVersion(pkt.HAProtocolVersion)
@@ -765,6 +768,18 @@ func (m *Manager) handlePeerTimeout() {
 	m.peerMonitors = nil
 	m.peerSoftwareVersion = ""
 	m.peerHAProtocolVersion = 0
+	// The default and best-effort policies have no peer-applied confirmation.
+	// Mark the takeover before the election so the status cannot render this
+	// path as a cleanly fenced failover. The confirmed policy sets its mark
+	// after waiting and knows whether the ack actually arrived.
+	switch m.peerFencing {
+	case PeerFencingDisableRGConfirmed:
+		// Set by awaitPeerFenceLocked on its fail-open paths.
+	case PeerFencingDisableRG:
+		m.markFenceUnconfirmedLocked("best-effort fence is unacknowledged")
+	default:
+		m.markFenceUnconfirmedLocked("peer fencing is disabled")
+	}
 	slog.Warn("cluster: peer heartbeat timeout, marking peer lost")
 	m.history.Record(EventHeartbeat, -1, "Peer heartbeat timeout")
 

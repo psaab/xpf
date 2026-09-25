@@ -530,6 +530,18 @@ type Manager struct {
 	// peerFencing holds the configured fencing action (e.g. "disable-rg").
 	peerFencing string
 
+	// fenceUnconfirmedReason records WHY the last peer-loss takeover proceeded
+	// WITHOUT peer confirmation (#10701). Empty means no unconfirmed takeover
+	// is outstanding: either the configured confirmed fence succeeded, or the
+	// peer has since been heard from again and cleared the mark. The default
+	// (disabled) and `disable-rg` policies mark every takeover; the confirmed
+	// policy marks only its fail-open paths. FormatStatus/FormatInformation
+	// expose the degraded result. Guarded by mu.
+	fenceUnconfirmedReason string
+	// fenceUnconfirmedAt is when the outstanding unconfirmed takeover ran.
+	// Meaningless while fenceUnconfirmedReason is empty. Guarded by mu.
+	fenceUnconfirmedAt time.Time
+
 	// onEventDrop is called when a cluster event is dropped due to a full
 	// channel. The daemon uses this to trigger immediate reconciliation.
 	onEventDrop func()

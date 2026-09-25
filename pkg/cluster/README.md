@@ -3244,6 +3244,14 @@ The mechanism lives in `sync_fence_ack_7147.go` (wire + waiter) and
 `fence_confirm_7147.go` (policy); `docs/ha-failover-status.md` carries the
 operator-facing table.
 
+No fencing is configured by default. Both the default and `disable-rg` leave
+dual-primary ownership possible; `disable-rg-confirmed` only waits for a
+point-in-time dataplane-suppression acknowledgement and also does not demote
+the peer or release its VIPs. `FormatStatus` and `FormatInformation` render any
+takeover without peer confirmation as `Peer-loss takeover: DEGRADED`; the
+information view marks local health degraded. This is diagnostic, not a
+takeover gate, and the marker clears when a peer heartbeat returns.
+
 - **Wire** — one additive message type `syncMsgFenceAck = 35` carries
   `{seq u64, status u8, rgs_fenced u16, rgs_total u16}` LE. `syncMsgFence`
   gains an optional 8-byte sequence; seq 0 is RESERVED and means "no ack
@@ -3259,10 +3267,13 @@ operator-facing table.
   achieved. The decoder REFUSES a short frame rather than zero-filling it:
   status 0 is `FenceAckOK`, so a lenient decode would turn fabric corruption
   into a fabricated confirmation.
-- **It always fails open.** No connection, no capability, write error, timeout,
-  or a negative ack all proceed with the takeover, each recorded to
-  `EventFence` with its reason. `SendFenceAwait` returns immediately when there
-  is no active connection, so the ordinary dead-peer takeover pays nothing.
+- **It always fails open and reports the outcome.** No connection, no
+  capability, write error, timeout, or a negative ack all proceed with the
+  takeover, each recorded to `EventFence` with its reason. `SendFenceAwait`
+  returns immediately when there is no active connection, so the ordinary
+  dead-peer takeover pays nothing. Any takeover without confirmation is also
+  marked degraded in both status views; the default and best-effort modes are
+  necessarily unconfirmed.
 - **The first election after peer loss is the one after the fence (#9640).**
   `handlePeerTimeout` clears a manual failover with `manualFailoverRestoreWeightLocked`
   (the non-electing helper `electRG` already uses), not `recalcWeight`. `recalcWeight` elects, and with `peerAlive` already false it promoted
@@ -3285,15 +3296,14 @@ operator-facing table.
   `sync_fence_ack_7147.go` carries the long form; the pinning cell is
   `TestFenceAckProvesDataplaneSuppressionOnly9120`, which is the counterpart of
   #6530's `TestFenceRearmsReconcileRetry`, not its inversion.
-- **It REDUCES the split-brain window; it does not eliminate it.** The residual
-  is a partition where the sync socket is live but blackholed — TCP has not
-  timed out, so the fence is written and no ack returns, and after the bound
-  this node takes over while the peer may still be forwarding. Failing CLOSED
-  instead would be worse for an appliance (a partition that never resolves
-  leaves nobody forwarding), so this is a deliberate trade. The policy NAME
-  overclaims; `docs/ha-failover-status.md` states the residual, and the
-  `EventFence` line is the only surface that distinguishes a confirmed fence
-  from a fail-open — the configured action renders identically either way.
+- **It does not exclude dual-primary ownership.** The residual is a partition
+  where the peer's heartbeat is lost while the dataplane/sync paths remain
+  live. A confirmed acknowledgement means only that `rg_active=false` was
+  applied at one instant; it does not release VIPs, clear `clusterPri`, or
+  prevent the next reconcile from restoring forwarding. The election-after-ack
+  ordering reduces one forwarding window but is not a mutual-exclusion
+  guarantee. Every fail-open is explicitly marked degraded, rather than being
+  rendered as a confirmed takeover.
 
 DHCP-server (Kea) leases ride the SAME session-sync channel and follow the
 IPsec-SA-sync precedent (`QueueIPsecSA` / `peerIPsecSAs` /

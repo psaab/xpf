@@ -19,6 +19,8 @@ func (m *Manager) FormatStatus() string {
 	peerProtocol := normalizeHAProtocolVersion(m.peerHAProtocolVersion)
 	configSyncFailing := m.configSyncFailing // #6387: node-global CF annotation
 	takeoverHold := m.takeoverHoldTime       // #103: hold is part of eligibility
+	fenceUnconfirmedReason := m.fenceUnconfirmedReason
+	fenceUnconfirmedAt := m.fenceUnconfirmedAt
 	// #6495: read the REASON, not just the flag. The daemon sets this one flag
 	// for two materially different conditions (an armed candidate, and the
 	// #5682 fail-closed unreadable-journal hold) whose remedies differ, so
@@ -43,6 +45,9 @@ func (m *Manager) FormatStatus() string {
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "Cluster ID: %d\n", m.clusterID)
 	fmt.Fprintf(&b, "Node name: node%d\n", m.nodeID)
+	if fenceUnconfirmedReason != "" {
+		fmt.Fprintln(&b, formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+	}
 	// #6495: a node parked SECONDARY by the kernel-candidate promotion gate is
 	// otherwise INDISTINGUISHABLE from one demoted by a monitor failure or a
 	// manual failover. That is the wrong ambiguity to leave during a kernel
@@ -213,6 +218,8 @@ func (m *Manager) FormatInformation() string {
 	configSyncReason := m.configSyncFailReason // #6387
 	takeoverHold := m.takeoverHoldTime         // #103
 	syncBulkPrimed := m.syncBulkPrimed         // #10261
+	fenceUnconfirmedReason := m.fenceUnconfirmedReason
+	fenceUnconfirmedAt := m.fenceUnconfirmedAt
 	// #6495: the hold REASON, not just the flag (see FormatStatus).
 	kernelHold := ""
 	if m.kernelUpgradeHold {
@@ -283,6 +290,9 @@ func (m *Manager) FormatInformation() string {
 	if configSyncFailing {
 		localHealth = "degraded"
 	}
+	if fenceUnconfirmedReason != "" {
+		localHealth = "degraded"
+	}
 	for _, rg := range states {
 		if len(rg.MonitorFails) > 0 || rg.Weight < 255 {
 			localHealth = "degraded"
@@ -296,6 +306,9 @@ func (m *Manager) FormatInformation() string {
 	fmt.Fprintln(&b, "Node health:")
 	fmt.Fprintf(&b, "  Local node: %s\n", localHealth)
 	fmt.Fprintf(&b, "  Remote node: %s\n", remoteHealth)
+	if fenceUnconfirmedReason != "" {
+		fmt.Fprintf(&b, "  %s\n", formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+	}
 	// #6495: name the kernel-upgrade election hold here too. It does NOT
 	// degrade node health — the node is fine, it is deliberately not eligible —
 	// so it is its own line rather than folded into localHealth, which would

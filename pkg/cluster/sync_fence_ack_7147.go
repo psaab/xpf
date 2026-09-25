@@ -60,10 +60,10 @@ import (
 //
 // So the honest reading of a fenceAckOK is: "at the instant it replied, the
 // peer had driven rg_active=false for every RG in its live config." It is a
-// point-in-time DATAPLANE SUPPRESSION receipt. It is sound for what the gate
-// actually uses it for — ORDERING the local takeover behind the peer's
-// suppression, closing the window where both nodes forward — and it is NOT a
-// lease, a VIP transfer, or a demotion. Do not build a gate on the stronger
+// point-in-time DATAPLANE SUPPRESSION receipt. It is sound for ordering the
+// local election after that suppression, but it does not establish
+// dual-primary exclusion, release VIPs, demote the peer, or keep its dataplane
+// suppressed through the next reconcile. Do not build a gate on the stronger
 // reading; if a future gate needs one, it needs a fence that changes an input
 // to `desired` (and then a bounded self-clearing timer, because a fence that
 // clears clusterPri and never expires converts a lost sync channel into a
@@ -75,12 +75,11 @@ import (
 // connection, peer not capable, send error, timeout, partial or unavailable ack
 // — proceeds with the takeover. Availability of the surviving node is the
 // higher-order property: a fence gate that can withhold ownership indefinitely
-// turns every peer failure into an outage. What the gate buys is the ORDERING
-// in the case where the peer is reachable (the true split-brain risk: heartbeat
-// lost, sync channel alive) — there this node now waits for the peer to confirm
-// it went dark before claiming the groups. Each fail-open is recorded to the
-// EventFence history with its reason so an operator can never mistake one for a
-// confirmed fence; see docs/ha-failover-status.md.
+// turns every peer failure into an outage. What a positive ack buys is
+// point-in-time ordering, not mutual exclusion. Every fail-open is recorded to
+// EventFence and rendered as degraded with its reason so an operator cannot
+// mistake an unconfirmed takeover for a confirmed one; see
+// docs/ha-failover-status.md.
 //
 // WHY THIS IS ADDITIVE — NO SessionSyncWireVersion / CurrentHAProtocolVersion
 // BUMP. Three independent reasons, each verified against this tree:

@@ -675,10 +675,11 @@ booted with none.
 
 ### Peer fence reads the live config (#3917)
 
-On a heartbeat timeout the surviving node sends a **fence** over the sync
-channel; on receipt `OnFenceReceived` (`pkg/daemon/daemon_ha_sync.go`) must
-deactivate `rg_active` for EVERY redundancy-group so the peer can own them
-without a dual-active split-brain. The handler
+On a heartbeat timeout the surviving node may send a **fence** over the sync
+channel; on receipt `OnFenceReceived` (`pkg/daemon/daemon_ha_sync.go`) attempts
+to deactivate `rg_active` for every redundancy group. This can suppress peer
+forwarding at that instant, but does not demote the peer or release its VIPs,
+so it is not dual-primary exclusion. The handler
 (`d.fenceAllRedundancyGroups`) reads the CURRENT active config via
 `d.currentRedundancyGroups()`, NOT the startup `cfg` closure. Before #3917 the
 callback iterated the snapshot captured at `startClusterComms` time; because
@@ -707,6 +708,13 @@ attempts were recorded under, because the event history outlives a config
 change. Each attempt line is one `handlePeerTimeout` fence decision and its
 outcome.
 
+The absent `peer-fencing` leaf is the default and sends **no fence**. After any
+peer-loss takeover without a peer confirmation, both `show chassis cluster
+status` and `show chassis cluster information` render `Peer-loss takeover:
+DEGRADED`, with the reason and time; the information view also reports local
+node health as degraded. This is an operator warning, not a gate: the node
+still takes over. A later peer heartbeat clears the marker.
+
 ### `disable-rg` — best-effort, unacknowledged
 
 `SessionSync.SendFence` (`pkg/cluster/sync_failover.go`) writes `syncMsgFence`
@@ -715,6 +723,11 @@ write reached the socket, not that the peer disabled its redundancy groups.
 Local takeover is consequently NOT gated on the fence — `handlePeerTimeout`
 runs `electSingleNode()` BEFORE it attempts the fence, so a dead peer (fence
 unreachable) can never block the survivor from forwarding.
+
+Because this policy has no acknowledgement, a sent, failed, or skipped
+best-effort attempt is still reported as an unconfirmed/degraded takeover. A
+successful socket write must never be read as confirmation that the peer
+stopped forwarding.
 
 Attempt lines: `Fence disable-rg sent to peer`, `Fence failed: <err>` (the sync
 channel was down — the node still takes over on the heartbeat timeout), or
@@ -754,59 +767,52 @@ but no ack comes back. The ordinary dead-peer takeover costs nothing extra,
 because `SendFenceAwait` returns immediately when there is no active
 connection — there is nothing to wait for.
 
+Every fail-open confirmed-policy outcome is also rendered as a degraded
+peer-loss takeover, including an acknowledgement timeout. The marker clears
+when a later peer heartbeat returns.
+
 A `Confirmations: received N, timed out N, sent to peer N` line accompanies
 `Action` whenever the policy is armed or any ack traffic has occurred. Read
 `timed out` as "takeovers that proceeded without the guarantee you selected";
 it is the only place that number appears, since `Fences sent` counts a
 confirmed and an unconfirmed takeover identically.
 
-### What `disable-rg-confirmed` does NOT give you
+### What peer fencing does NOT give you
 
-**It reduces the split-brain window. It does not eliminate it, and the policy
-name overclaims slightly — read this section, not the name.**
+**Neither the default nor either configured policy excludes dual-primary
+ownership.** `disable-rg` has no acknowledgement; `disable-rg-confirmed` has a
+bounded wait and its fail-open outcomes are visibly degraded, but even a
+positive acknowledgement is only a point-in-time dataplane-suppression receipt.
+It does not demote the peer or release its VIPs. The peer can resume forwarding
+on its next reconcile, and both nodes can continue to report PRIMARY while
+heartbeats are partitioned.
 
-The residual is a partition in which the sync socket is LIVE BUT BLACKHOLED:
-packets are being dropped, TCP has not yet timed out, so the connection is not
-nil and the fence is written successfully, but no ack can come back. After
-`FenceConfirmTimeout` this node takes over anyway while the peer may still be
-alive and still forwarding. That is split-brain, and it is exactly the scenario
-a fence exists to prevent.
+With `disable-rg-confirmed`, the sync socket can remain live while its packets
+are blackholed: the fence write succeeds but no acknowledgement arrives. After
+`FenceConfirmTimeout` the node takes over anyway while the peer may still be
+alive and forwarding; status marks that takeover degraded with the timeout
+reason. The fixed bound is a fail-open policy, not a guarantee that an
+acknowledgement will arrive before promotion.
 
-**This is a deliberate trade, not an oversight.** The alternative — failing
-CLOSED, refusing to take over without a confirmation — has the worse failure
-mode for an appliance: a partition that never resolves leaves NOBODY
-forwarding, and an HA pair that will not fail over has lost the property it
-exists for. A bounded delay plus a smaller split-brain window is the trade on
-offer here; a guarantee is not.
+Failing CLOSED and refusing takeover without confirmation could leave nobody
+forwarding when a partition never resolves. The policy therefore favors
+availability, and operators must treat the degraded marker as evidence that
+fencing did not establish mutual exclusion.
 
-So an operator selecting this mode is buying:
+An operator selecting confirmed fencing gets a point-in-time suppression
+acknowledgement when it arrives in time, and local election is ordered after
+that acknowledgement. They do **not** get proof that the peer is demoted, has
+released the VIPs, or will remain dataplane-inactive.
 
-- **confirmation when confirmation was available** — which is the common case,
-  because the ack only has to arrive when the socket is genuinely healthy, and
-  there a fabric round trip is milliseconds; and
-- **ordering** in that case: this node does not claim the groups until the peer
-  says it released them.
+### Telling a confirmed fence from a fail-open
 
-They are NOT buying "the peer is always confirmed down before I take over".
-
-### Telling a confirmed fence from a fail-open — the event line is the only way
-
-**The config knob cannot express the difference.** `Action: disable-rg-confirmed`
-renders identically whether every takeover was confirmed or every one of them
-fell open, so an operator reading only the configured action will assume the
-stronger property. The `EventFence` attempt line is the discriminator, and it
-is the ONLY one:
-
-| Attempt line | What actually happened |
-|---|---|
-| `Fence confirmed by peer (peer disabled N/N redundancy groups)` | The peer reported that, at the instant it replied, it had driven `rg_active=false` for every RG in its live config. That is a DATAPLANE SUPPRESSION receipt — read the next subsection before reading it as a relinquishment. |
-| `Fence unconfirmed, took over anyway: <reason>` | **No confirmation.** Takeover proceeded regardless. The reason names which path — not connected, peer predates #7147, disconnected mid-wait, or timed out. |
-| `Fence NOT confirmed (<detail>), took over anyway` | The peer ANSWERED but reported it had not fully complied (partial, or no dataplane). |
-
-The `Confirmations: received N, timed out N, sent to peer N` line summarises the
-same thing in aggregate; `timed out` is the count of takeovers that proceeded
-without the guarantee. Neither `Fences sent` nor the configured action
-distinguishes them, which is why both surfaces exist.
+The configured action does not reveal the result. `EventFence` records the
+attempt outcome, while `Peer-loss takeover: DEGRADED` in both status views
+records that the latest peer-loss takeover proceeded without confirmation.
+The marker gives the reason (for example, fencing disabled, a best-effort
+unacknowledged send, timeout, disconnect, or incomplete peer fence), and the
+information view marks local node health degraded. The marker clears on a
+returning peer heartbeat.
 
 ### What a CONFIRMED fence does and does not give you (#9120)
 
@@ -833,14 +839,13 @@ dataplane and re-arms the RG state machine. It does NOT:
   changes one of those inputs first: the peer observing the takeover over the
   sync channel, an operator, or a real crash.
 
-What the gate genuinely buys is ORDERING — in the reachable-peer case it puts
-the local takeover strictly after the peer's suppression, which closes the
-window where both nodes forward the same flows. That is what
-`disable-rg-confirmed` should be selected for. It is not a lease, and a longer
-guarantee cannot be had without a fence that clears `clusterPri`, which needs a
-bounded self-clearing timer of its own — an unbounded one converts a lost sync
-channel into a no-primary outage. Pinned by
-`TestFenceAckProvesDataplaneSuppressionOnly9120`.
+What `disable-rg-confirmed` buys is ordering the local election after a
+point-in-time dataplane-suppression acknowledgement, when one arrives in time.
+It does not guarantee zero VIP overlap, lasting suppression, peer demotion, or
+dual-primary exclusion. It is not a lease; a stronger guarantee needs a fence
+that changes `clusterPri` with a bounded self-clearing timer, since an
+unbounded fence would turn a lost sync channel into a no-primary outage.
+Pinned by `TestFenceAckProvesDataplaneSuppressionOnly9120`.
 
 **Mixed-version clusters are safe and need no coordinated upgrade.** Both wire
 changes are additive: `syncMsgFenceAck` is a new type that an old peer skips
