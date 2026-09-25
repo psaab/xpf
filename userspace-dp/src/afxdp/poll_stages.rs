@@ -25,6 +25,7 @@
 use super::*;
 use crate::screen::{SynCookieAckVerdict, SynCookieChallenge};
 
+
 /// Generic outcome for a per-packet stage. The `RecycleAndContinue`
 /// arm signals that the caller should push `desc.addr` to
 /// `binding.scratch.scratch_recycle` and `continue` the while-let.
@@ -148,44 +149,32 @@ pub(super) fn stage_link_layer_classify(
 /// but the inline validation / neighbor-learn / rate-limit / synchronous
 /// kernel-neighbor socket work would otherwise bloat the hot stage.
 ///
-/// Behavior is byte-for-byte identical to the pre-#6261 inline block —
-/// this is a pure codegen/layout change, not a logic change:
+/// Current learning guards:
 ///
-/// - #2790: validate the advertised sender protocol address BEFORE
-///   caching it. RFC 826 — a learnable ARP reply must name a single
-///   unicast host. A reply claiming an unspecified / loopback /
-///   multicast / broadcast sender IP would otherwise pollute both the
-///   userspace `dynamic_neighbors` map and the kernel ARP table
-///   (spoofed-reply DoS / routing disruption). Fail closed: the caller
-///   recycles the ARP frame (it never transits) but this handler skips
-///   learning, mirroring the #2369 fail-closed-on-malformed-ARP posture
-///   and the cold neighbor warmer's unicast-only gate.
-/// - #2851: anti-poisoning own-IP gate, ADDITIONAL to the #2790
-///   unicast-only gate. Refuse to learn an ARP reply whose advertised
-///   sender IP equals one of the router's OWN configured interface IPs.
-///   A host on the local link could otherwise send an unsolicited /
-///   spoofed reply claiming our own interface address and teach us
-///   `(ifindex, our_ip) -> attacker_mac` in both `dynamic_neighbors` and
-///   the kernel ARP table (RFC 826 — do not install a neighbor entry for
-///   an address we own). This MUST run BEFORE the `insert_if_changed`
-///   below so a rejected own-IP learn neither inserts nor bumps
-///   `mac_change_epoch` (#3048/#3169).
-/// - #2370: learn under the LOGICAL (L3) ifindex, resolving
-///   `(parent, vlan) -> logical` so the insert key matches the
-///   forwarder's lookup key.
-/// - #3048: route the data-path learn through `insert_if_changed` so a
-///   MAC change observed directly from an ARP reply advances the
-///   neighbor `mac_change_epoch` and evicts stale cached dst_macs.
-/// - #5288: gate the kernel-neighbor program (a raw netlink
-///   socket()/sendto()/close() + Vec allocations) behind the per-worker
-///   limiter. A same-key/same-MAC repeat (`!changed`) skips the netlink
-///   work entirely; even a changed-flood is rate-capped, while a genuine
-///   MAC change is still programmed. `#[cold]` is a layout hint, NOT a
-///   rate limiter — flood bounding stays with this limiter.
+/// - #2790: validate the advertised sender protocol address BEFORE caching it.
+///   A reply claiming an unspecified / loopback / multicast / broadcast
+///   sender IP is not a learnable neighbor; skip learning, but recycle the
+///   ARP frame (it never transits the firewall).
+/// - #2851: refuse a reply whose sender IP is one of the router's own
+///   configured addresses. This runs before any map mutation or epoch bump.
+/// - #2370: learn under the LOGICAL (L3) ifindex so the key matches the
+///   forwarder's lookup key on VLAN sub-interfaces.
+/// - #10704: a successful userspace probe creates one-shot evidence that an
+///   ARP reply is solicited for five seconds. Only that solicited reply may
+///   replace a live differing MAC. An unsolicited reply gets Override=0
+///   semantics: it can create a missing neighbor or refresh the same MAC, but
+///   cannot overwrite an existing different MAC. The map performs the
+///   differing-MAC check and write under one shard lock. Refused gratuitous
+///   overwrites increment the refusal count and emit a warning at most once a
+///   minute; no kernel-neighbor program runs on a refusal.
+/// - #3048: a permitted MAC change advances the neighbor `mac_change_epoch`
+///   and evicts stale cached destination MACs.
+/// - #5288: gate kernel-neighbor programming (raw netlink socket + Vec
+///   allocations) behind the per-worker limiter. Same-MAC repeats skip the
+///   syscall; changed floods are rate-capped.
 ///
-/// The generation (`mac_change_epoch`) / limiter ordering is preserved
-/// exactly: `insert_if_changed` computes `changed` first, then
-/// `should_program` consults it, then `add_kernel_neighbor` runs.
+/// The permitted insert computes `changed` first, then `should_program`
+/// consults it, then `add_kernel_neighbor` runs.
 #[cold]
 #[inline(never)]
 fn outline_arp_reply_learn_and_program(
@@ -210,14 +199,33 @@ fn outline_arp_reply_learn_and_program(
             meta.ingress_vlan_id,
         )
         .unwrap_or(meta.ingress_ifindex as i32);
-        let changed = worker_ctx.dynamic_neighbors.insert_if_changed(
-            (ifindex, arp.sender_ip),
-            NeighborEntry {
-                mac: arp.sender_mac,
-            },
-        );
-        if neigh_limiter.should_program((ifindex, arp.sender_ip), arp.sender_mac, changed, now_ns) {
-            add_kernel_neighbor(ifindex, arp.sender_ip, arp.sender_mac);
+        let key = (ifindex, arp.sender_ip);
+        let solicited = worker_ctx
+            .dynamic_neighbors
+            .take_arp_reply_solicited(&key, now_ns);
+        let Some(changed) = worker_ctx
+            .dynamic_neighbors
+            .insert_arp_reply_if_solicited_allows(
+                key,
+                NeighborEntry {
+                    mac: arp.sender_mac,
+                },
+                solicited,
+            )
+        else {
+            if arp.gratuitous {
+                super::neighbor::report_arp_overwrite_refusal(
+                    worker_ctx.dynamic_neighbors.as_ref(),
+                    key,
+                    arp.sender_mac,
+                    now_ns,
+                    "gratuitous",
+                );
+            }
+            return;
+        };
+        if neigh_limiter.should_program(key, arp.sender_mac, changed, now_ns) {
+            add_kernel_neighbor(key.0, key.1, arp.sender_mac);
         }
     }
 }

@@ -1038,8 +1038,8 @@ fn ndp_cas_override1_same_mac_is_no_change_9893() {
 
 #[test]
 fn insert_if_changed_still_overwrites_unconditionally_9893() {
-    // The ARP/RX leg delegates with override=true: a differing MAC always
-    // overwrites, preserving pre-#9893 byte-identical behavior for non-NDP arms.
+    // The generic RX-learn leg still delegates with override=true: a differing
+    // MAC always overwrites, preserving the pre-#9893 behavior outside ARP.
     let map = ShardedNeighborMap::new();
     let k = key_v4(7, 42);
     map.insert(k, entry(0xAB));
@@ -1048,6 +1048,54 @@ fn insert_if_changed_still_overwrites_unconditionally_9893() {
         "insert_if_changed must still overwrite a differing MAC"
     );
     assert_eq!(map.get(&k), Some(entry(0xCD)));
+}
+
+#[test]
+fn arp_solicited_probe_evidence_is_one_shot_and_expires_10704() {
+    let map = ShardedNeighborMap::new();
+    let key = key_v4(7, 42);
+    let probe_at = 1_000_000;
+
+    map.record_neighbor_probe(key, probe_at);
+    assert!(
+        map.take_arp_reply_solicited(&key, probe_at + ARP_SOLICITED_WINDOW_NS),
+        "a reply at the solicited-window boundary is accepted"
+    );
+    assert!(
+        !map.take_arp_reply_solicited(&key, probe_at + ARP_SOLICITED_WINDOW_NS),
+        "one probe authorizes exactly one reply"
+    );
+
+    map.record_neighbor_probe(key, probe_at);
+    assert!(
+        !map.take_arp_reply_solicited(&key, probe_at + ARP_SOLICITED_WINDOW_NS + 1),
+        "expired solicitation evidence must not authorize an overwrite"
+    );
+}
+
+#[test]
+fn arp_reply_cas_requires_solicitation_for_mac_override_10704() {
+    let map = ShardedNeighborMap::new();
+    let key = key_v4(7, 42);
+    map.insert(key, entry(0xAB));
+    let gen_before = map.insert_generation();
+    let epoch_before = map.mac_change_epoch_for(&key);
+
+    assert_eq!(
+        map.insert_arp_reply_if_solicited_allows(key, entry(0xCD), false),
+        None,
+        "an unsolicited ARP reply must not override a live differing MAC"
+    );
+    assert_eq!(map.get(&key), Some(entry(0xAB)));
+    assert_eq!(map.insert_generation(), gen_before);
+    assert_eq!(map.mac_change_epoch_for(&key), epoch_before);
+    assert_eq!(
+        map.insert_arp_reply_if_solicited_allows(key, entry(0xCD), true),
+        Some(true),
+        "a solicited ARP reply must be able to converge a real MAC change"
+    );
+    assert_eq!(map.get(&key), Some(entry(0xCD)));
+    assert_ne!(map.mac_change_epoch_for(&key), epoch_before);
 }
 
 // ---------------------------------------------------------------------------

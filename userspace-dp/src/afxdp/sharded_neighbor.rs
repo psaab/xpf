@@ -88,6 +88,41 @@ const _: () = assert!(
     MAX_DYNAMIC_NEIGHBORS_PER_SHARD > 0,
     "per-shard dynamic-neighbor cap must be positive so a genuine learn can land"
 );
+/// #10704: solicited window for ARP-reply learns (monotonic ns).
+///
+/// An ARP reply for `(ifindex, ip)` counts as SOLICITED when this router
+/// recently asked for it — i.e. a userspace-driven probe from the neighbor
+/// warmer, MissingNeighbor path, pending-neighbor retry, or on-demand
+/// resolver recorded the key via `ShardedNeighborMap::record_neighbor_probe`
+/// within this window. Solicited replies keep the pre-#10704
+/// unconditional-learn behavior (they may create, refresh, or overwrite — a
+/// re-probed failover converges through this leg).
+///
+/// Sizing: a MissingNeighbor episode lasts `PENDING_NEIGH_TIMEOUT_NS` (2 s
+/// fallback, 800 ms fast) and the kernel runs its own ARP retransmit tail
+/// behind each triggered probe, so 5 s covers the whole episode with margin;
+/// it also matches `WARM_PER_KEY_RATE_LIMIT_NS`, so a warmer-probed key stays
+/// solicited until it becomes re-probeable. An on-segment attacker can still
+/// race a solicited reply it observes us request (inherent to any
+/// solicited-preference scheme, NDP included) — the gate removes the
+/// fire-and-forget unsolicited overwrite, not the race.
+pub(super) const ARP_SOLICITED_WINDOW_NS: u64 = 5_000_000_000;
+
+/// #10704: per-shard bound on recorded solicitation keys (see
+/// `record_neighbor_probe`). Records are created only after successful local
+/// probes; the per-shard cap and amortized pruning bound memory even when many
+/// distinct unreachable IPv4 next hops are probed over a long-lived process.
+pub(super) const MAX_SOLICITED_KEYS_PER_SHARD: usize = 1024;
+
+/// One mutex-guarded shard of ARP solicitation evidence.
+#[repr(align(64))]
+struct SolicitedShard(Mutex<FastMap<(i32, IpAddr), u64>>);
+
+impl SolicitedShard {
+    fn new() -> Self {
+        Self(Mutex::new(FastMap::default()))
+    }
+}
 
 /// One mutex-guarded shard, padded to 64 bytes so adjacent shards do
 /// not share cache lines.
@@ -164,6 +199,13 @@ pub(crate) struct ShardedNeighborMap {
     /// RX before screen/policy admission). Relaxed — observability only, and
     /// off the fast path except on an actual refusal.
     learn_cap_drops: AtomicU64,
+    /// #10704: bounded evidence that this router recently probed an ARP key.
+    /// Entries are keyed/sharded exactly like `shards`; no allocation or
+    /// extra work occurs for non-ARP packets.
+    arp_solicited_at: [SolicitedShard; NUM_SHARDS],
+    /// #10704: cumulative count of unsolicited ARP/neighbor updates refused
+    /// because they tried to replace a live differing MAC.
+    arp_overwrite_refusals: AtomicU64,
 }
 
 /// Shard index for a key. The Knuth multiplier `0x9E3779B97F4A7C15`
@@ -222,8 +264,9 @@ static SHARD_SEED: LazyLock<u64> = LazyLock::new(|| {
     h.finish()
 });
 
-/// The seeded shard computation, split out from [`shard_idx`] so the seed's
-/// contribution is testable. Reading the process seed inside the only caller
+/// The seeded shard computation is split out so its seed contribution can be
+/// tested independently; reading the process seed inside this function would
+/// make "does the seed change the mapping?" unaskable — the property
 /// would make "does the seed change the mapping?" unaskable — the property
 /// would be true by construction and unfalsifiable, which is how a guard ends
 /// up unable to notice its own subject being deleted.
@@ -245,9 +288,11 @@ impl ShardedNeighborMap {
     pub(crate) fn new() -> Self {
         Self {
             shards: std::array::from_fn(|_| PaddedShard::new()),
+            arp_solicited_at: std::array::from_fn(|_| SolicitedShard::new()),
             shard_mac_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
             learn_cap_drops: AtomicU64::new(0),
             insert_generation: AtomicU64::new(0),
+            arp_overwrite_refusals: AtomicU64::new(0),
         }
     }
 
@@ -269,6 +314,53 @@ impl ShardedNeighborMap {
     #[inline]
     pub(crate) fn note_learn_cap_drop(&self) {
         self.learn_cap_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #10704: record a successfully-issued neighbor-resolution probe so an
+    /// ARP reply can be distinguished from a fire-and-forget advert.
+    pub(crate) fn record_neighbor_probe(&self, key: (i32, IpAddr), now_ns: u64) {
+        if !matches!(key.1, IpAddr::V4(_)) {
+            return;
+        }
+        let idx = shard_idx(&key);
+        let mut shard = self.arp_solicited_at[idx]
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !shard.contains_key(&key) && shard.len() >= MAX_SOLICITED_KEYS_PER_SHARD {
+            shard.retain(|_, probed_at| {
+                now_ns.saturating_sub(*probed_at) <= ARP_SOLICITED_WINDOW_NS
+            });
+            if shard.len() >= MAX_SOLICITED_KEYS_PER_SHARD {
+                return;
+            }
+        }
+        shard.insert(key, now_ns);
+    }
+
+    /// #10704: consume the recent-probe evidence for one ARP reply.
+    pub(crate) fn take_arp_reply_solicited(&self, key: &(i32, IpAddr), now_ns: u64) -> bool {
+        let idx = shard_idx(key);
+        let mut shard = self.arp_solicited_at[idx]
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match shard.remove(key) {
+            Some(probed_at) => now_ns.saturating_sub(probed_at) <= ARP_SOLICITED_WINDOW_NS,
+            None => false,
+        }
+    }
+
+    /// #10704: count a refused unsolicited ARP overwrite for diagnostics.
+    pub(crate) fn note_arp_overwrite_refusal(&self) -> u64 {
+        self.arp_overwrite_refusals
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arp_overwrite_refusals(&self) -> u64 {
+        self.arp_overwrite_refusals.load(Ordering::Relaxed)
     }
 
     /// #5673: `get` plus whether the key's shard is at the per-shard learn
@@ -432,8 +524,8 @@ impl ShardedNeighborMap {
         key: (i32, IpAddr),
         val: NeighborEntry,
     ) -> bool {
-        // #9893: the Override-unconditional leg of the CAS below — an ARP /
-        // RX learn always overwrites, so `override=true` never refuses. The
+        // #9893: the Override-unconditional leg of the CAS below. This is
+        // used by other RX learns whose protocol allows replacement.
         // `None` arm is a defined fallback, not a panic: a future `None`
         // variant degrades to no-change (no insert happened, so `false` is
         // accurate) instead of panicking a cold worker path. The
@@ -444,6 +536,21 @@ impl ShardedNeighborMap {
             "override=true never refuses an NDP-NA-shaped insert"
         );
         result.unwrap_or(false)
+    }
+
+    /// #10704: atomic ARP-reply learn with solicited preference.
+    ///
+    /// A reply from a recent local probe may replace a differing MAC;
+    /// an unsolicited reply gets NDP Override=0 semantics and can only
+    /// create a first binding or refresh the same MAC. The check and write
+    /// share one shard lock, so an intervening update cannot be overwritten.
+    pub(crate) fn insert_arp_reply_if_solicited_allows(
+        &self,
+        key: (i32, IpAddr),
+        val: NeighborEntry,
+        solicited: bool,
+    ) -> Option<bool> {
+        self.insert_ndp_na_if_override_allows(key, val, solicited)
     }
 
     /// #9893: atomic NDP Neighbor-Advertisement learn honoring RFC 4861 §7.2.5

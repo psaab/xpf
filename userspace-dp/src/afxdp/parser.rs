@@ -114,11 +114,14 @@ pub(super) fn parse_eth_offsets(raw_frame: &[u8]) -> Option<(usize, u16)> {
     }
 }
 
-/// Parsed ARP reply (sender MAC + sender IP).
+/// Parsed ARP reply (sender/target IP + sender MAC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ArpReply {
     pub sender_mac: [u8; 6],
     pub sender_ip: IpAddr,
+    pub target_ip: IpAddr,
+    /// RFC 5227-style gratuitous reply: sender IP equals target IP.
+    pub gratuitous: bool,
 }
 
 /// Classification of an Ethernet frame as ARP-or-not.
@@ -127,11 +130,10 @@ pub(super) enum ArpClassification {
     /// Frame is not ARP (or is too short to classify).
     NotArp,
     /// Frame is ARP but not a learnable Ethernet/IPv4 reply (e.g. a
-    /// request, RARP, gratuitous announcement, or — per #2369 — an
-    /// opcode-2 ARP whose fixed header is not Ethernet/IPv4:
-    /// htype!=1, ptype!=0x0800, hlen!=6, or plen!=4). Caller should
-    /// recycle the frame — ARP does not transit the firewall — but skip
-    /// neighbor learning.
+    /// request, RARP, or — per #2369 — an opcode-2 ARP whose fixed header
+    /// is not Ethernet/IPv4: htype!=1, ptype!=0x0800, hlen!=6, or plen!=4).
+    /// Caller should recycle the frame — ARP does not transit the firewall —
+    /// but skip neighbor learning.
     OtherArp,
     /// Frame is an ARP reply with a parsed `(sender_mac, sender_ip)`.
     Reply(ArpReply),
@@ -196,9 +198,17 @@ pub(super) fn classify_arp(raw_frame: &[u8]) -> ArpClassification {
         raw_frame[l3_start + 16],
         raw_frame[l3_start + 17],
     ));
+    let target_ip = IpAddr::V4(Ipv4Addr::new(
+        raw_frame[l3_start + 24],
+        raw_frame[l3_start + 25],
+        raw_frame[l3_start + 26],
+        raw_frame[l3_start + 27],
+    ));
     ArpClassification::Reply(ArpReply {
         sender_mac,
         sender_ip,
+        target_ip,
+        gratuitous: sender_ip == target_ip,
     })
 }
 

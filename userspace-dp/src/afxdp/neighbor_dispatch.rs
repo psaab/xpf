@@ -411,7 +411,10 @@ pub(super) fn retry_pending_neigh(
             // probe_attempts in place so each schedule slot fires once.
             if probe_due(now_ns.saturating_sub(queued_ns), probe_attempts) {
                 if let Some(name) = forwarding.ifindex_to_name.get(&key.0) {
-                    trigger_kernel_arp_probe(name, key.0, key.1);
+                    if trigger_kernel_arp_probe(name, key.0, key.1) {
+                        dynamic_neighbors
+                            .record_neighbor_probe(key, super::neighbor::monotonic_nanos());
+                    }
                     if let Some(p) = binding.pending_neigh.get_mut(&key) {
                         p.probe_attempts = p.probe_attempts.saturating_add(1);
                     }

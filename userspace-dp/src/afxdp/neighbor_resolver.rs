@@ -768,7 +768,9 @@ pub(super) fn neighbor_resolver_loop(
                 // lladdr we must not forward to blindly. Force kernel
                 // revalidation; the confirmed multicast RTM_NEWNEIGH then
                 // populates the map via the monitor.
-                trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop);
+                if trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop) {
+                    dynamic_neighbors.record_neighbor_probe(key, monotonic_nanos());
+                }
                 counters.probe_on_stale.fetch_add(1, Ordering::Relaxed);
             }
             ResolveAction::RevokeAndProbe => {
@@ -778,7 +780,9 @@ pub(super) fn neighbor_resolver_loop(
                 // a probe + the next confirmed event. Also fire a probe so
                 // a genuinely-down-then-up host gets nudged.
                 dynamic_neighbors.remove(&(item.ifindex, item.hop));
-                trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop);
+                if trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop) {
+                    dynamic_neighbors.record_neighbor_probe(key, monotonic_nanos());
+                }
                 counters.get_failures.fetch_add(1, Ordering::Relaxed);
             }
             ResolveAction::ProbeOnly => {
@@ -786,7 +790,9 @@ pub(super) fn neighbor_resolver_loop(
                 // Do NOT revoke — a transient GET loss must not evict a
                 // still-good entry the monitor may have just (re)populated
                 // (Copilot). Just probe to nudge resolution.
-                trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop);
+                if trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop) {
+                    dynamic_neighbors.record_neighbor_probe(key, monotonic_nanos());
+                }
                 counters.get_failures.fetch_add(1, Ordering::Relaxed);
             }
         }

@@ -14,6 +14,44 @@ pub(in crate::afxdp) fn monotonic_nanos() -> u64 {
         .saturating_add(ts.tv_nsec as u64)
 }
 
+const ARP_OVERWRITE_ALARM_INTERVAL_NS: u64 = 60_000_000_000;
+static LAST_ARP_OVERWRITE_ALARM_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(super) fn report_arp_overwrite_refusal(
+    neighbors: &ShardedNeighborMap,
+    key: (i32, IpAddr),
+    mac: [u8; 6],
+    now_ns: u64,
+    origin: &'static str,
+) {
+    let refusals = neighbors.note_arp_overwrite_refusal();
+    let mut previous = LAST_ARP_OVERWRITE_ALARM_NS.load(Ordering::Relaxed);
+    loop {
+        if previous != 0 && now_ns.saturating_sub(previous) < ARP_OVERWRITE_ALARM_INTERVAL_NS {
+            return;
+        }
+        match LAST_ARP_OVERWRITE_ALARM_NS.compare_exchange_weak(
+            previous,
+            now_ns.max(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                eprintln!(
+                    "xpf-userspace-dp: WARNING: refused {origin} ARP overwrite for \
+                     {}/{} with MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} \
+                     (total refused={refusals})",
+                    key.0, key.1, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                );
+                return;
+            }
+            Err(observed) => previous = observed,
+        }
+    }
+}
+
+
 pub(super) fn monotonic_timestamp_to_datetime(
     last_nanos: u64,
     now_mono: u64,
@@ -155,14 +193,14 @@ pub(super) fn build_solicit_sockaddr_in6(v6: Ipv6Addr, ifindex: i32) -> libc::so
 /// in both families and a failure is logged (it fires rarely — only on a
 /// probe send error — so this does not violate the per-tick logging rules)
 /// instead of being swallowed, which previously hid a never-sent solicit.
-pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: IpAddr) {
+pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: IpAddr) -> bool {
     let name_c = std::ffi::CString::new(iface_name).unwrap_or_default();
     match target {
         IpAddr::V4(v4) => {
             let Some((fd, kind)) = select_probe_socket(|sock_type| unsafe {
                 libc::socket(libc::AF_INET, sock_type, libc::IPPROTO_ICMP)
             }) else {
-                return;
+                return false;
             };
             // Best-effort: SO_BINDTODEVICE itself needs CAP_NET_RAW, so on
             // the DGRAM fallback it is typically a no-op (EPERM, ignored).
@@ -193,9 +231,6 @@ pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: I
                 )
             };
             if sent < 0 {
-                // Fires only on a probe send error (rare) — do NOT swallow
-                // it as the pre-#2969 code did; a silent failure hid a
-                // never-sent solicit so the next-hop never resolved.
                 eprintln!(
                     "xpf-userspace-dp: ARP probe sendto({iface_name}, {v4}) failed: {}",
                     io::Error::last_os_error()
@@ -204,12 +239,13 @@ pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: I
             unsafe {
                 libc::close(fd);
             }
+            sent >= 0
         }
         IpAddr::V6(v6) => {
             let Some((fd, kind)) = select_probe_socket(|sock_type| unsafe {
                 libc::socket(libc::AF_INET6, sock_type, libc::IPPROTO_ICMPV6)
             }) else {
-                return;
+                return false;
             };
             unsafe {
                 libc::setsockopt(
@@ -251,9 +287,6 @@ pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: I
                 )
             };
             if sent < 0 {
-                // #2969: surface the NDP solicit send failure instead of
-                // swallowing it. A zero sin6_scope_id used to fail here
-                // (EINVAL/ENETUNREACH) for a link-local hop with no trace.
                 eprintln!(
                     "xpf-userspace-dp: NDP probe sendto({iface_name}, {v6}%{ifindex}) failed: {}",
                     io::Error::last_os_error()
@@ -262,6 +295,7 @@ pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: I
             unsafe {
                 libc::close(fd);
             }
+            sent >= 0
         }
     }
 }
@@ -292,6 +326,7 @@ pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: I
 pub(super) fn neighbor_warmer_loop(
     rx: Receiver<WarmItem>,
     last_probed: Arc<Mutex<FastMap<(i32, IpAddr), u64>>>,
+    dynamic_neighbors: Arc<super::sharded_neighbor::ShardedNeighborMap>,
     warm_generation: Arc<AtomicU64>,
     rg_runtime: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
     stop: Arc<AtomicBool>,
@@ -351,8 +386,8 @@ pub(super) fn neighbor_warmer_loop(
                 }
             }
         };
-        if !skip {
-            trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop);
+        if !skip && trigger_kernel_arp_probe(&item.iface_name, item.ifindex, item.hop) {
+            dynamic_neighbors.record_neighbor_probe(key, monotonic_nanos());
         }
     }
 }
@@ -368,32 +403,18 @@ const NDA_LLADDR: u16 = 2;
 pub(super) const NUD_REACHABLE: u16 = 0x02;
 pub(super) const NUD_STALE: u16 = 0x04;
 
-/// NUD state installed for a DATA-PATH neighbor learn (an ARP reply /
-/// NDP NA captured by XSK, see `poll_stages::stage_link_layer_classify`).
+/// NUD state installed when userspace programs an accepted ARP reply or NDP
+/// Neighbor Advertisement into the kernel's neighbor table.
 ///
-/// #4475 (opus-172 H-2, security hardening): this MUST be `NUD_STALE`,
-/// NEVER `NUD_REACHABLE`. A data-path learn is driven by an UNSOLICITED
-/// advertisement from the L2 segment — we did not necessarily probe for
-/// it. Installing `NUD_REACHABLE` forced the kernel to trust the learned
-/// `(ifindex, ip) -> mac` binding for the full reachable-time window with
-/// NO revalidation, so a host emitting a gratuitous ARP reply / unsolicited
-/// NA claiming a live next-hop (e.g. the WAN gateway) could silently
-/// hijack transit + originated traffic to its own MAC (on-link neighbor-
-/// cache poisoning / MITM). Installing `NUD_STALE` instead keeps the entry
-/// USABLE (STALE entries forward immediately) but makes the kernel run its
-/// normal neighbor-validation state machine — it revalidates (unicast
-/// PROBE / upper-layer reachability confirmation) before treating the entry
-/// as REACHABLE, and a fire-and-forget poison ages out on its own. This
-/// also matches Linux `arp_accept=0` gratuitous-ARP handling (an existing
-/// entry is refreshed to STALE, not blindly promoted). It preserves #3048
-/// (a legitimate upstream VRRP-failover MAC change observed on the wire
-/// still updates the binding — just as STALE, so the kernel confirms it).
+/// #4475 (opus-172 H-2): use `NUD_STALE`, never `NUD_REACHABLE`. The kernel
+/// may immediately use a learned MAC while forwarding, but it must validate
+/// reachability before promoting the entry. #10704 separately gates
+/// differing-MAC ARP learns in both the XSK parser arm and the production
+/// RTM_NEWNEIGH monitor; only a recent userspace probe or kernel NUD_PROBE
+/// event authorizes replacement of a live userspace-cache entry.
 ///
-/// Learning ONLY solicited replies (probe-driven) is the stronger fix but
-/// needs a shared pending-solicitation table plumbed from the neighbor
-/// warmer into the per-worker learn path; it is tracked as a follow-up and
-/// is NOT required — STALE + the NDP Override honor already remove the
-/// forced-REACHABLE hijack window.
+/// Keeping the installed state stale preserves #3048 failover propagation
+/// while avoiding a forced reachable-time trust window.
 pub(super) const DATA_PATH_NEIGH_STATE: u16 = NUD_STALE;
 
 /// Serialize an `RTM_NEWNEIGH` netlink request installing
@@ -401,14 +422,11 @@ pub(super) const DATA_PATH_NEIGH_STATE: u16 = NUD_STALE;
 /// `add_kernel_neighbor` (#4475) so the wire encoding — in particular the
 /// NUD state byte — is unit-testable without a privileged netlink socket.
 ///
-/// `NLM_F_CREATE | NLM_F_REPLACE` semantics are unchanged: a data-path
-/// learn that survives the `stage_link_layer_classify` gates (own-IP,
-/// hop-limit, and the #4475 NDP Override honor) is a legitimate binding to
-/// (create-or-)refresh. The anti-hijack decision — refusing to overwrite a
-/// live entry that maps to a DIFFERENT LLA from an unsolicited NDP NA — is
-/// enforced UPSTREAM at the learn site (it skips this call entirely), not
-/// by dropping `NLM_F_REPLACE` here, because ARP replies and Override=1 NAs
-/// must still update the binding (to STALE) for #3048 failover propagation.
+/// `NLM_F_CREATE | NLM_F_REPLACE` semantics are unchanged: callers reach this
+/// helper only after the ARP solicited-preference gate or NDP Override gate
+/// has admitted the update. The installed state is `NUD_STALE`, so the kernel
+/// validates reachability while #3048 MAC-change epoch handling invalidates
+/// cached forwarding descriptors.
 pub(super) fn build_newneigh_request(
     ifindex: i32,
     ip: IpAddr,
@@ -586,8 +604,8 @@ pub(super) fn remove_dynamic_neighbor(
 /// but re-adds nothing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NeighborMsgEffect {
-    /// No map mutation (unparseable body, no IP/MAC, or a redundant
-    /// update/removal that left the map unchanged).
+    /// No map mutation (unparseable body, no IP/MAC, redundant update, or an
+    /// unsolicited IPv4 MAC replacement refused by the #10704 guard).
     None,
     /// A usable RTM_NEWNEIGH inserted or updated the entry.
     Upserted,
@@ -596,6 +614,10 @@ pub(super) enum NeighborMsgEffect {
     Removed,
 }
 
+/// Parse one kernel RTM_{NEW,DEL}NEIGH message. IPv4 upserts are the
+/// production ARP learn path because the XDP shim passes ARP to the kernel;
+/// differing MACs therefore use the same solicited-preference CAS as the
+/// XSK ARP arm. IPv6 monitor behavior is unchanged.
 pub(super) fn parse_neighbor_msg(
     nlmsg_type: u16,
     body: &[u8],
@@ -656,15 +678,54 @@ pub(super) fn parse_neighbor_msg(
             // Remove a prior row too: keeping its old MAC would preserve a
             // stale forwarding path after the kernel changes the NUD state.
             const NUD_INCOMPLETE: u16 = 0x01;
+            const NUD_PROBE: u16 = 0x10;
             const NUD_FAILED: u16 = 0x20;
             const NUD_NOARP: u16 = 0x40;
+            const NUD_PERMANENT: u16 = 0x80;
             if (state & (NUD_INCOMPLETE | NUD_FAILED | NUD_NOARP)) != 0 {
                 return removal(remove_dynamic_neighbor(dynamic_neighbors, ifindex, ip));
             }
             let Some(mac) = mac else {
                 return NeighborMsgEffect::None;
             };
-            if update_dynamic_neighbor(dynamic_neighbors, ifindex, ip, NeighborEntry { mac }) {
+            let key = (ifindex, ip);
+            let changed = if family == libc::AF_INET as u8 {
+                // ARP itself reaches the kernel via the XDP shim's
+                // pass_non_ip_l2_direct arm; this RTM_NEWNEIGH monitor is the
+                // production path into dynamic_neighbors. Apply the same
+                // solicited-preference CAS as the XSK ARP arm, rather than
+                // blindly trusting a kernel-accepted gratuitous reply.
+                let now_ns = monotonic_nanos();
+                let solicited = dynamic_neighbors.take_arp_reply_solicited(&key, now_ns)
+                    || (state & NUD_PERMANENT) != 0;
+                let result = dynamic_neighbors.insert_arp_reply_if_solicited_allows(
+                    key,
+                    NeighborEntry { mac },
+                    solicited,
+                );
+                // The kernel's own NUD_PROBE notification is evidence of an
+                // actual probe for the next matching ARP update. Do not let
+                // this notification itself authorize a MAC change.
+                if (state & NUD_PROBE) != 0 {
+                    dynamic_neighbors.record_neighbor_probe(key, now_ns);
+                }
+                match result {
+                    Some(changed) => changed,
+                    None => {
+                        report_arp_overwrite_refusal(
+                            dynamic_neighbors.as_ref(),
+                            key,
+                            mac,
+                            now_ns,
+                            "unsolicited kernel-neighbor",
+                        );
+                        return NeighborMsgEffect::None;
+                    }
+                }
+            } else {
+                update_dynamic_neighbor(dynamic_neighbors, ifindex, ip, NeighborEntry { mac })
+            };
+            if changed {
                 NeighborMsgEffect::Upserted
             } else {
                 NeighborMsgEffect::None
@@ -1962,8 +2023,16 @@ mod warmer_tests {
         rg_runtime: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
         stop: Arc<AtomicBool>,
     ) -> std::thread::JoinHandle<()> {
+        let dynamic_neighbors = Arc::new(super::sharded_neighbor::ShardedNeighborMap::default());
         std::thread::spawn(move || {
-            neighbor_warmer_loop(rx, last_probed, warm_generation, rg_runtime, stop)
+            neighbor_warmer_loop(
+                rx,
+                last_probed,
+                dynamic_neighbors,
+                warm_generation,
+                rg_runtime,
+                stop,
+            )
         })
     }
 
@@ -2368,5 +2437,59 @@ mod noarp_listener_10690_tests {
                 );
             }
         }
+    }
+
+    /// #10704 fail-on-revert: the production ARP path is the kernel's
+    /// RTM_NEWNEIGH monitor (the XDP shim passes ARP to the kernel). An
+    /// unsolicited differing MAC must not replace a live binding; a
+    /// successful userspace or kernel NUD probe still permits failover.
+    #[test]
+    fn unsolicited_kernel_arp_update_preserves_live_binding_10704() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_STALE: u16 = 0x04;
+        const NUD_PROBE: u16 = 0x10;
+        let ip = Ipv4Addr::new(10, 0, 61, 50);
+        let key = (7, IpAddr::V4(ip));
+        let live_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+        let spoofed_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+        let failover_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert!(neighbors.insert_if_changed(key, NeighborEntry { mac: live_mac }));
+        let epoch = neighbors.mac_change_epoch_for(&key);
+        let refusals = neighbors.arp_overwrite_refusals();
+
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip, spoofed_mac, NUD_STALE),
+                &neighbors,
+            ),
+            NeighborMsgEffect::None,
+            "an unsolicited kernel ARP update must be refused"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(live_mac));
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch);
+        assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 1);
+
+        // NUD_PROBE is the kernel's explicit request to revalidate this
+        // neighbor. The probe notification itself cannot replace the MAC;
+        // its subsequent reply can.
+        assert_eq!(
+            parse_neighbor_msg(28, &newneigh_body(7, ip, live_mac, NUD_PROBE), &neighbors),
+            NeighborMsgEffect::None,
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(live_mac));
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip, failover_mac, NUD_REACHABLE),
+                &neighbors,
+            ),
+            NeighborMsgEffect::Upserted,
+            "a differing MAC confirmed after a kernel probe must converge"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(failover_mac));
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch + 1);
+        assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 1);
     }
 }

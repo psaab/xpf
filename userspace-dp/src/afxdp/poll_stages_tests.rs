@@ -964,6 +964,60 @@ fn neighbor_learn_ctx(
     }));
     (ctx, dynamic_neighbors)
 }
+fn with_neighbor_learn_ctx<R>(
+    forwarding: &ForwardingState,
+    run: impl for<'a> FnOnce(&WorkerContext<'a>, &Arc<ShardedNeighborMap>) -> R,
+) -> R {
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-0"),
+        ifindex: 11,
+    };
+    let binding_lookup = WorkerBindingLookup::default();
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let pptp_control = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let ctx = WorkerContext {
+        pptp_control: &pptp_control,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: None,
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+    run(&ctx, &dynamic_neighbors)
+}
 
 /// ARP reply frame (untagged) with a configurable sender IP. The
 /// stage classifies it as `Reply` and learns `(learn_ifindex,
@@ -980,6 +1034,12 @@ fn arp_reply_frame(sender_ip: Ipv4Addr, sender_mac: [u8; 6]) -> Vec<u8> {
     f.extend_from_slice(&[0x00; 6]); // target mac
     f.extend_from_slice(&[10, 0, 0, 1]); // target ip
     f
+}
+
+fn gratuitous_arp_reply_frame(sender_ip: Ipv4Addr, sender_mac: [u8; 6]) -> Vec<u8> {
+    let mut frame = arp_reply_frame(sender_ip, sender_mac);
+    frame[38..42].copy_from_slice(&sender_ip.octets());
+    frame
 }
 
 /// Meta for a frame arriving on physical ifindex `parent` with the
@@ -1076,6 +1136,70 @@ fn arp_learns_untagged_neighbor_under_same_ifindex_2370() {
         Some(sender_mac),
         "untagged ARP must learn under the (logical==physical) ifindex 24"
     );
+}
+
+/// #10704 fail-on-revert: a one-shot solicited ARP reply installs the live
+/// binding, but a later unsolicited gratuitous reply with a different MAC
+/// cannot overwrite it. A new local probe still authorizes a real failover.
+/// Reverting the ARP stage to unconditional `insert_if_changed` makes the
+/// cached MAC assert fail and does not increment the gratuitous-overwrite
+/// refusal count.
+#[test]
+fn unsolicited_gratuitous_arp_reply_preserves_solicited_binding_10704() {
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    with_neighbor_learn_ctx(&forwarding, |ctx, neighbors| {
+        let sender_ip = Ipv4Addr::new(10, 0, 61, 50);
+        let key = (24, IpAddr::V4(sender_ip));
+        let live_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+        let spoofed_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+        let meta = link_layer_meta(24, 0);
+
+        neighbors.record_neighbor_probe(key, TEST_NOW_NS - 1);
+        assert!(matches!(
+            classify(&arp_reply_frame(sender_ip, live_mac), meta, ctx),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(live_mac));
+
+        let refusals_before = neighbors.arp_overwrite_refusals();
+        assert!(matches!(
+            classify(
+                &gratuitous_arp_reply_frame(sender_ip, spoofed_mac),
+                meta,
+                ctx
+            ),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert_eq!(
+            neighbors.get(&key).map(|entry| entry.mac),
+            Some(live_mac),
+            "an unsolicited gratuitous ARP must not replace the solicited live binding"
+        );
+        assert_eq!(
+            neighbors.arp_overwrite_refusals(),
+            refusals_before + 1,
+            "the refused gratuitous overwrite must be counted for the rate-limited alarm"
+        );
+
+        // Re-resolution remains the explicit override path for a genuine
+        // link-layer failover.
+        let failover_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+        neighbors.record_neighbor_probe(key, TEST_NOW_NS);
+        assert!(matches!(
+            classify(&arp_reply_frame(sender_ip, failover_mac), meta, ctx),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert_eq!(
+            neighbors.get(&key).map(|entry| entry.mac),
+            Some(failover_mac),
+            "a newly solicited reply must retain legitimate MAC-change convergence"
+        );
+        assert_eq!(
+            neighbors.arp_overwrite_refusals(),
+            refusals_before + 1,
+            "a solicited failover must not count as a gratuitous-overwrite refusal"
+        );
+    });
 }
 
 /// #2370 multi-VLAN no-collision. Two VLAN sub-interfaces (VID 80 and

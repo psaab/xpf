@@ -37,6 +37,8 @@ fn classify_arp_reply_untagged() {
         ArpClassification::Reply(r) => {
             assert_eq!(r.sender_mac, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
             assert_eq!(r.sender_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42)));
+            assert_eq!(r.target_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+            assert!(!r.gratuitous);
         }
         other => panic!("expected Reply, got {:?}", other),
     }
@@ -50,6 +52,21 @@ fn classify_arp_reply_vlan_tagged() {
             assert_eq!(r.sender_mac, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         }
         other => panic!("expected Reply, got {:?}", other),
+    }
+}
+
+#[test]
+fn classify_arp_gratuitous_reply_is_marked() {
+    let mut f = build_eth_arp_reply(false);
+    // Untagged ARP target protocol address: Ethernet header (14) + ARP body
+    // offset 24. RFC 5227 GARP reply has SPA == TPA.
+    f[38..42].copy_from_slice(&[10, 0, 0, 42]);
+    match classify_arp(&f) {
+        ArpClassification::Reply(r) => {
+            assert!(r.gratuitous);
+            assert_eq!(r.target_ip, r.sender_ip);
+        }
+        other => panic!("expected gratuitous Reply, got {other:?}"),
     }
 }
 
