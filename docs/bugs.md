@@ -1224,6 +1224,12 @@ These bugs were discovered testing iperf3 (~4.7 Gbps reverse mode) through the c
 
 Audit doc: `docs/archived/userspace-forwarding-and-failover-gap-audit.md`
 
+### Native non-first fragments miss protocol-constrained filters (FIXED #10676)
+- **Symptom:** A native non-first fragment carrying the shim's protocol 255 sentinel could bypass input, PBR, output, or lo0 terms constrained to a real protocol.
+- **Root cause:** The shared IPv4/IPv6 protocol-bitmap matcher treated 255 as an ordinary protocol value, so it matched none of the concrete-protocol bits.
+- **Fix:** Treat 255 as unknown/fragment for protocol predicates while keeping known protocol values exact. Do not recover the inner protocol by parsing fragment payload bytes.
+- **Tests:** Native-255 and decapsulated real-protocol pairs cover input, PBR, output, and lo0 filter paths, including exact TCP/UDP controls.
+
 ### Fragmented ESP/GRE to interface-NAT split across kernel and helper (FIXED #10677)
 - **Symptom:** An ESP/GRE datagram addressed to an interface-NAT endpoint was split: the whole packet or first fragment went to the kernel, while later fragments went to the helper as protocol 255 and were refused, so neither path could reassemble the datagram.
 - **Root cause:** The shim's #304 kernel arm matched the parsed protocol. The #7494 no-L4 sentinel replaces the protocol on non-first fragments, so the tail missed the ESP/non-native-GRE interface-NAT arm and fell through to XSK.
