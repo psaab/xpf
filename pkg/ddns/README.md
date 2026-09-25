@@ -763,6 +763,17 @@ already flagged at commit for both backends by
 clobber; dyndns2: the #3738 host-level withdraw). The supported topology is one
 family per name, or a per-family backend for dual-stack same-name.
 
+FOREIGN same-name records (#10728 A10b-F04): the owned-sibling skip only
+protects records xpf itself published. DuckDNS `clear=true` and dyndns2
+`offline=YES` are host-wide BY PROVIDER DESIGN (the spec offers no
+per-family withdraw and no list/read verb), so a withdraw destroys FOREIGN
+co-resident A/AAAA records at the same name — even a single-family withdraw
+with no sibling at all. No code can prevent this: use dedicated names per
+host/family on these backends. Dual-stack same-name stays warn + stale-on-
+partial-withdraw BY DESIGN (no hard-refuse: it would imply a guarantee xpf
+cannot deliver for foreign records, and the validator's fail-open posture is
+deliberate). Dynu/EasyDNS withdraw-verb caveats pending lab confirmation.
+
 ## The package boundary (why a `LeaseParser` seam)
 
 The Kea-memfile lease parser (`parseActiveLeases`, `ddnsLease`, `identity4/6`,
