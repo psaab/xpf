@@ -428,3 +428,84 @@ fn a_synced_nat64_import_over_disjoint_pools_is_unaffected_9021() {
          proceed exactly as before"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #10706 — HA-synced NAT64 imports mis-booked under a dual SNAT reference
+// ---------------------------------------------------------------------------
+//
+// The coordinator (`afxdp/ha/session_import.rs::reserve_synced_translation`)
+// reserves SNAT first and NAT64 second. The SNAT pool arm books ANY
+// `rewrite_src` — including a NAT64 decision's — while only the interface arm
+// excludes NAT64-origin flows. The SNAT booking then trips the NAT64 leg's own
+// #9021 peer-ownership refusal (`nat64_refuse_if_peer_owns` sees the SNAT pool
+// holding the tuple and rolls the NAT64 reservation back), so a valid synced
+// NAT64 session is rejected precisely when a source-NAT pool shares the
+// prefix's `pool_v4` address.
+//
+// The worker twin (`upsert_synced.rs`) runs the same SNAT-then-NAT64 order and
+// discards both bools, so on its PASS-2 path (no peer check) the same flow
+// lands in TWO allocators instead of being refused — the two-domains-one-
+// identity split the interface arm's exclusion exists to prevent.
+//
+// The fix makes the SNAT pool arm NAT64-aware (a NAT64 decision reserves only
+// in `reserve_synced_nat64_allocation`), so this cell drives the coordinator
+// order directly and asserts the single-domain outcome: the NAT64 allocator
+// holds the tuple and the SNAT allocator holds no record.
+/// THE DEFECT: under a dual reference (source-NAT pool and NAT64 prefix
+/// sharing one `pool_v4` address), a synced NAT64 import must land ONLY in the
+/// NAT64 allocator — not book the SNAT pool and not refuse itself.
+#[test]
+fn a_synced_nat64_import_books_only_the_nat64_allocator_under_dual_reference_10706() {
+    let state = build_forwarding_state(&snapshot_with(SHARED_V4, SHARED_V4));
+    assert!(
+        state.nat64.prefixes[0].overlap_owners.is_some(),
+        "fixture: the NAT64 prefix must share {SHARED_V4} with the source-NAT \
+         pool, or this cell measures nothing"
+    );
+    let key = synced_nat64_key_9021("2001:db8::7");
+    let decision = crate::nat64::Nat64State::forward_decision(
+        SHARED_V4.parse::<Ipv4Addr>().expect("shared v4"),
+        "8.8.8.8".parse::<Ipv4Addr>().expect("v4 dst"),
+        PORT,
+    );
+    // Coordinator order: SNAT first, NAT64 second (`reserve_synced_translation`).
+    // `Some(("lan", "wan"))` is the resolved active zone pair, so PASS 1 runs
+    // as it does on a real import (the v6 flow matches no v4 source rule and
+    // falls through to the PASS-2 first-pool-match — the arm that books).
+    let snat_ok = crate::nat::reserve_synced_source_nat_allocation_untracked(
+        &state.iface_nat_allocators,
+        &state.source_nat_rules,
+        &key,
+        decision,
+        false,
+        Some(("lan", "wan")),
+        0,
+    );
+    let nat64_ok = crate::nat64::reserve_synced_nat64_allocation(&state.nat64, &key, decision, false, 0);
+    assert!(
+        snat_ok,
+        "the SNAT leg must not refuse a NAT64 decision — it has nothing to \
+         reserve for a cross-family flow"
+    );
+    assert!(
+        nat64_ok,
+        "the NAT64 leg must RESERVE its own import. On master the SNAT leg \
+         above books ({SHARED_V4}, {PORT}) in the source pool first, and the \
+         #9021 peer check then sees a peer holding the tuple and refuses — \
+         the import rejects itself (#10706)"
+    );
+    assert!(
+        state.nat64.prefixes[0]
+            .port_allocator
+            .debug_is_port_occupied(0, PORT),
+        "the NAT64 allocator must hold the synced tuple"
+    );
+    assert!(
+        !state.source_nat_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, PORT),
+        "the SNAT allocator must hold NO record for the cross-family flow — \
+         one flow in two domains is the split the interface arm's NAT64 \
+         exclusion exists to prevent (#10706)"
+    );
+}

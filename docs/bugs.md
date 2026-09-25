@@ -179,6 +179,18 @@
   sessions. `poll_descriptor/flow_cache_hit_tests.rs` verifies a consumed
   FlowCache hit is dropped before forwarding side effects.
 
+
+### NAT64 HA imports self-refuse under a dual SNAT reference (#10706)
+- A synced NAT64 decision was first booked in the source-NAT pool allocator,
+  so the NAT64 allocator's #9021 peer-ownership check saw that same import as
+  a conflicting peer and rejected it.
+- **Fix:** Keep NAT64 translated tuples exclusively in the NAT64 allocator by
+  treating NAT64 decisions as having no source-NAT reservation.
+- **Regression test:** `userspace-dp/src/afxdp/tests_nat64_overlap_8115.rs`
+  `a_synced_nat64_import_books_only_the_nat64_allocator_under_dual_reference_10706`
+  asserts that a shared source-NAT/NAT64 address is occupied only in the NAT64
+  allocator after an ordered synced reservation.
+
 ### NAT64 reverse path copies Ethernet padding into IPv6 payload (#1641)
 - **Severity:** MAJOR — reverse-path packet corruption / L4 checksum failure
 - **Symptom:** Every TCP/UDP/ICMPv6 NAT64 reply whose original IPv4
