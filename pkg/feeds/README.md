@@ -399,7 +399,7 @@ provider offers a query-string or userinfo form, prefer it — those are redacte
   `pkg/dataplane/userspace/process.go`) rather than silently rejected by the
   helper after commit.
 
-## A default-route entry is refused (#9248)
+## Whole-address-space coverage is refused (#9248, #10711)
 
 `parseFeed` refuses a line whose CANONICAL prefix -- the string that would be
 installed -- is the whole IPv4 or IPv6 address space: `0.0.0.0/0`, `::/0`, and
@@ -409,10 +409,17 @@ single default-route line in content this box does not author would turn every
 policy on that dynamic address into "match anything": a permit fails open and a
 deny drops everything.
 
-- When the response ALSO carries usable prefixes, the refused line is counted
-  and sampled exactly like a malformed line (`InvalidLines`, `InvalidSample`
-  with a `default route refused:` prefix), so the installed feed reports
-  `Degraded` instead of a clean success.
+After parsing, `parseFeed` checks the assembled, deduplicated prefix set. If its
+union covers all of IPv4 or all of IPv6 -- for example, `0.0.0.0/1` plus
+`128.0.0.0/1`, or `::/1` plus `8000::/1` -- the entire fetch fails with a
+whole-address-space refusal. This prevents a provider from splitting a
+match-anything range across entries. The existing last-good/hold-interval
+failure handling applies; the rejected set is not installed.
+
+- When a response includes usable prefixes beside an explicit `/0` entry, that
+  entry is counted and sampled like a malformed line (`InvalidLines`,
+  `InvalidSample` with a `default route refused:` prefix), so the installed
+  feed reports `Degraded` instead of a clean success.
 - A feed whose ONLY entries were refused default routes fails its fetch with a
   reason that names them ("whole-address-space entries are refused"). That is
   a fetch FAILURE, not a degraded install: it shows in `LastError`, while
@@ -421,9 +428,8 @@ deny drops everything.
   `Degraded=false`. The feed's existing failure handling applies: the last-good set stays enforced
   until that handling's own hold-interval expiry drops it, as for any failing
   feed.
-- The boundary is an accidental whole-space line, not a hostile provider: a
-  feed listing `0.0.0.0/1` and `128.0.0.0/1` covers the same space and is
-  installed.
-- Only `/0` is refused. Short but real prefixes still install -- bogon lists
-  carry `224.0.0.0/3`-shaped entries, and a higher floor would silently empty
-  them.
+- A narrower-prefix union that covers a complete address family rejects the
+  entire fetch. Large but partial unions remain valid.
+- No prefix-length floor is imposed: short real prefixes still install --
+  bogon lists carry `224.0.0.0/3`-shaped entries -- if the overall set is
+  partial.

@@ -1117,7 +1117,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // parseFeed reads CIDR/IP lines from r and returns a canonicalized set.
-// Reads io.Reader (not http.Response) so it is unit-testable in isolation.
+// It refuses both explicit default-route entries (#9248) and a canonical
+// prefix union that covers an entire address family (#10711).
 //
 // The body is bounded on TWO axes (#3934) so a huge/infinite body or a MITM on
 // a plaintext-http feed cannot OOM the daemon:
@@ -1162,9 +1163,8 @@ func parseFeed(r io.Reader) (fetchResult, error) {
 			// installed, not on the parsed mask length: `::ffff:0:0/96` is a /96
 			// mapped-IPv6 prefix that net.IPNet renders as `0.0.0.0/0`.
 			//
-			// BOUNDARY, stated: this guards an accidental whole-space line. It is
-			// not protection from a hostile provider, which can list 0.0.0.0/1
-			// and 128.0.0.0/1 and cover the same space.
+			// The assembled prefix set is also checked below: a provider must
+			// not evade this refusal by splitting the address space into ranges.
 			refusedDefaultRoutes++
 			invalidLines++
 			if len(invalidSample) < maxInvalidSample && invalidSampleBytes < maxInvalidSampleTotalBytes {
@@ -1225,6 +1225,10 @@ func parseFeed(r io.Reader) (fetchResult, error) {
 	}
 
 	canon := canonicalize(prefixes)
+	if coversWholeAddressSpace(canon) {
+		return fetchResult{}, fmt.Errorf(
+			"feed prefix union covers a whole address space (IPv4 or IPv6); refusing the feed (#10711)")
+	}
 	if len(canon) == 0 && refusedDefaultRoutes > 0 {
 		// #9248: say WHY, instead of the generic zero-prefix error below.
 		return fetchResult{}, fmt.Errorf("feed contained no usable prefixes: its %d whole-address-space "+
@@ -1301,6 +1305,92 @@ func canonicalize(prefixes []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// coversWholeAddressSpace reports whether prefixes cover all of either
+// address family. It sorts their address ranges and looks for an uninterrupted
+// run from the family's unspecified address through its maximum address.
+// Input is the canonicalized set from parseFeed.
+func coversWholeAddressSpace(prefixes []string) bool {
+	ranges := make([]netip.Prefix, 0, len(prefixes))
+	for _, text := range prefixes {
+		if prefix, err := netip.ParsePrefix(text); err == nil {
+			ranges = append(ranges, prefix.Masked())
+		}
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if cmp := ranges[i].Addr().Compare(ranges[j].Addr()); cmp != 0 {
+			return cmp < 0
+		}
+		return ranges[i].Bits() < ranges[j].Bits()
+	})
+
+	for first := 0; first < len(ranges); {
+		is4 := ranges[first].Addr().Is4()
+		last := first + 1
+		for last < len(ranges) && ranges[last].Addr().Is4() == is4 {
+			last++
+		}
+
+		var coveredThrough netip.Addr
+		coveredFromZero := false
+		for _, prefix := range ranges[first:last] {
+			start := prefix.Addr()
+			end := prefixLastAddress(prefix)
+			if !coveredFromZero {
+				if !start.IsUnspecified() {
+					break
+				}
+				coveredThrough = end
+				coveredFromZero = true
+			} else {
+				next := coveredThrough.Next()
+				if !next.IsValid() {
+					return true
+				}
+				if start.Compare(next) > 0 {
+					break
+				}
+				if end.Compare(coveredThrough) > 0 {
+					coveredThrough = end
+				}
+			}
+			if !coveredThrough.Next().IsValid() {
+				return true
+			}
+		}
+		first = last
+	}
+	return false
+}
+
+// prefixLastAddress returns the inclusive upper bound of a masked prefix.
+func prefixLastAddress(prefix netip.Prefix) netip.Addr {
+	if prefix.Addr().Is4() {
+		bytes := prefix.Addr().As4()
+		hostBits := 32 - prefix.Bits()
+		for i := len(bytes) - 1; i >= 0 && hostBits > 0; i-- {
+			setBits := hostBits
+			if setBits > 8 {
+				setBits = 8
+			}
+			bytes[i] |= byte((1 << uint(setBits)) - 1)
+			hostBits -= setBits
+		}
+		return netip.AddrFrom4(bytes)
+	}
+
+	bytes := prefix.Addr().As16()
+	hostBits := 128 - prefix.Bits()
+	for i := len(bytes) - 1; i >= 0 && hostBits > 0; i-- {
+		setBits := hostBits
+		if setBits > 8 {
+			setBits = 8
+		}
+		bytes[i] |= byte((1 << uint(setBits)) - 1)
+		hostBits -= setBits
+	}
+	return netip.AddrFrom16(bytes)
 }
 
 // hashPrefixes returns the sha256 of the canonical (sorted, deduped) set.
