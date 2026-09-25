@@ -333,7 +333,11 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		zoneNamesSorted = append(zoneNamesSorted, name)
 	}
 	sort.Strings(zoneNamesSorted)
+	quarantined := config.ZoneQuarantineExclusions(zoneNamesSorted)
 	for _, name := range zoneNamesSorted {
+		if _, drop := quarantined[name]; drop {
+			continue
+		}
 		zone := cfg.Security.Zones[name]
 		if !configured(zone) {
 			continue
@@ -341,6 +345,11 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		svc, proto := effectiveHostInboundTokens(zone, "", nil)
 		getGroup(name, svc, proto, "")
 	}
+
+	// #11011: use the same StableZoneID exclusion set as snapshot quarantine.
+	// The VIP and stable-RETH walks below read raw config identities rather than
+	// the post-quarantine interface rows, so they must explicitly skip a zone
+	// removed from the published snapshot.
 
 	// #9637: which (zone, token signature) groups claim each netdev, for the
 	// views' ingress scopes. A netdev is recorded here whether or not its
@@ -365,6 +374,9 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 			continue
 		}
 		if snap.Zone == "" {
+			continue
+		}
+		if _, drop := quarantined[snap.Zone]; drop {
 			continue
 		}
 		// #5699: a PHYSICAL (no-unit) snapshot whose unit 0 COLLAPSES onto the
@@ -472,6 +484,9 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 			if zoneName == "" {
 				continue
 			}
+			if _, drop := quarantined[zoneName]; drop {
+				continue
+			}
 			zone := cfg.Security.Zones[zoneName]
 			if !configured(zone) {
 				continue
@@ -508,6 +523,9 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		}
 		zoneName := zoneByIface[target.iface]
 		if zoneName == "" {
+			continue
+		}
+		if _, drop := quarantined[zoneName]; drop {
 			continue
 		}
 		zone := cfg.Security.Zones[zoneName]
@@ -791,6 +809,7 @@ func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
 	}
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrs(cfg)
+	quarantined := quarantinedZoneNames(cfg)
 	// Addresses already covered by a zone deny — exclude so the unzoned catch-all
 	// never duplicates or conflicts with a zone rule for the same daddr.
 	zoned := map[string]bool{}
@@ -804,51 +823,92 @@ func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
 	}
 	seen4 := map[string]bool{}
 	seen6 := map[string]bool{}
-	for _, snap := range buildInterfaceSnapshots(cfg) {
-		if snap.Zone != "" || hostInboundLifelineInterface(snap.Name, lifelines) {
-			continue
+	addUnzoned := func(host string) {
+		if host == "" || zoned[host] || lifelineShared[host] {
+			return
 		}
-		for _, a := range snap.Addresses {
-			host := hostIPFromCIDR(a.Address)
-			if host == "" || zoned[host] {
-				continue
+		if strings.Contains(host, ":") {
+			if !seen6[host] {
+				seen6[host] = true
+				v6 = append(v6, host)
 			}
-			// #7284: withhold an address VALUE that also lives on a lifeline.
-			// The snapshot check above is an INTERFACE exclusion; this is the
-			// value one. The unzoned set is pure-deny by construction — no
-			// service accept precedes an unzoned catch-all drop — so leaving a
-			// management address here denies NEW management connections and,
-			// because the same set feeds the #5566 reconcile, tears down the
-			// ESTABLISHED one on the next apply.
-			if lifelineShared[host] {
-				continue
-			}
-			if strings.Contains(host, ":") {
-				if !seen6[host] {
-					seen6[host] = true
-					v6 = append(v6, host)
-				}
-			} else if !seen4[host] {
-				seen4[host] = true
-				v4 = append(v4, host)
-			}
+		} else if !seen4[host] {
+			seen4[host] = true
+			v4 = append(v4, host)
 		}
 	}
-	// Stable RETH link-locals are config-derived too. A RETH unit with no
-	// security-zone binding is not represented by the zone views, so carry its
-	// deterministic IPv6 address into the unzoned catch-all. Zoned targets were
-	// already added above and are excluded through zoned[addr].
-	zoneByIface := buildInterfaceZoneMap(cfg)
-	for _, target := range stableRethLinkLocalTargets(cfg) {
-		if hostInboundLifelineInterface(target.iface, lifelines) ||
-			zoneByIface[target.iface] != "" ||
-			zoned[target.addr] ||
-			lifelineShared[target.addr] {
+	for _, snap := range buildInterfaceSnapshots(cfg) {
+		if hostInboundLifelineInterface(snap.Name, lifelines) {
 			continue
 		}
-		if !seen6[target.addr] {
-			seen6[target.addr] = true
-			v6 = append(v6, target.addr)
+		if snap.Zone != "" {
+			if _, drop := quarantined[snap.Zone]; !drop {
+				continue
+			}
+		}
+		for _, a := range snap.Addresses {
+			addUnzoned(hostIPFromCIDR(a.Address))
+		}
+	}
+	// Stable RETH link-locals are config-derived too. Ordinary unzoned targets
+	// and targets whose zone was quarantined are not represented by the zone
+	// views, so carry their deterministic IPv6 address into the unzoned
+	// catch-all. Surviving zoned targets were already added above.
+	zoneByIface := buildInterfaceZoneMap(cfg)
+	for _, target := range stableRethLinkLocalTargets(cfg) {
+		zoneName := zoneByIface[target.iface]
+		if hostInboundLifelineInterface(target.iface, lifelines) {
+			continue
+		}
+		if zoneName != "" {
+			if _, drop := quarantined[zoneName]; !drop {
+				continue
+			}
+		}
+		addUnzoned(target.addr)
+	}
+
+	// A quarantined zone is an unzoned interface for host-inbound purposes.
+	// Preserve its config-derived VIP in the same deny set as its interface
+	// addresses; on a backup node that VIP may not yet appear in the live
+	// snapshot and therefore cannot be recovered by the address walk above.
+	if len(quarantined) > 0 {
+		ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+		for name := range cfg.Interfaces.Interfaces {
+			ifNames = append(ifNames, name)
+		}
+		sort.Strings(ifNames)
+		for _, ifName := range ifNames {
+			iface := cfg.Interfaces.Interfaces[ifName]
+			if iface == nil {
+				continue
+			}
+			unitNums := make([]int, 0, len(iface.Units))
+			for un := range iface.Units {
+				unitNums = append(unitNums, un)
+			}
+			sort.Ints(unitNums)
+			for _, un := range unitNums {
+				unit := iface.Units[un]
+				if unit == nil {
+					continue
+				}
+				unitName := fmt.Sprintf("%s.%d", ifName, un)
+				if hostInboundLifelineInterface(unitName, lifelines) {
+					continue
+				}
+				if _, drop := quarantined[zoneByIface[unitName]]; !drop {
+					continue
+				}
+				for _, vg := range unit.VRRPGroups {
+					if vg == nil {
+						continue
+					}
+					for _, vip := range vg.VirtualAddresses {
+						addUnzoned(hostIPFromCIDR(vip))
+					}
+				}
+			}
 		}
 	}
 
