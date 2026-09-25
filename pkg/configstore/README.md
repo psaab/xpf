@@ -34,7 +34,7 @@ re-created 0600 on the next commit.
 | Unshared-commit mark (#9530) | `.configdb/unshared.json` | 0600 | `unshared_9530.go WriteUnshared` |
 | `master.key` | `.configdb/master.key` | 0600 | `crypto.go readOrCreateMasterKey` |
 | Text rollback slots | `<config>.N` (e.g. `xpf.conf.1`) | 0600 | `store_commit.go saveRollbackFiles` |
-| Rollback slot metadata (#10299) | `.configdb/rollback-meta.json` | 0600 | `store_commit.go saveRollbackFiles` |
+| Rollback slot metadata (#10299, #10723 F2) | `.configdb/rollback-meta.json` | 0600 | `store_commit.go saveRollbackFiles` |
 | Rescue config | `rescue.conf` | 0600 | `store_persist.go SaveRescueConfig` |
 | Config archives | `<archive-dir>/config-<ts>.<seq>.conf` | 0600 | `store_persist.go writeArchive` |
 | Audit journal (#4579 A4-02, migrate #5188) | `.config.journal`(+`.N`) | 0600 | `journal/journal.go Log` / `migratePermsLocked` |
@@ -275,6 +275,11 @@ inline archive-site-password warning in #651).
   the `grpc.MaxRecvMsgSize` / `http.MaxBytesReader` transport caps for the
   HA peer-sync path and any non-transport caller. Real configs are well
   under 1 MiB, so the ceiling never rejects a legitimate config.
+- **Parse diagnostics do not echo input text (#10723 F4).** `ParseError` retains
+  its detailed message for trusted programmatic inspection, but its `Error()`
+  string contains only the line and column. Parser messages can embed the
+  offending token, which may be a credential; `CheckText`, `LoadOverride`,
+  `LoadMerge`, and HA `SyncApply` therefore expose location-only parse errors.
 
   **The same ceiling bounds every tree and record the store WRITES into
   `.configdb` (#9617).** The bullet above is an INPUT bound, and a config
@@ -452,6 +457,12 @@ demotion before the reconciler re-pushes, is a false negative.
   fields dropped — an EMPTY tree — booting a committed-empty config (loss of
   policy) instead of failing closed. This restores at the inner layer the same
   no-empty-load-on-unknown property the outer envelope provides.
+- **The config envelope's version gate is distinct from its minimum-reader
+  floor (#10723 F7).** The header's `v=` marker is inspected regardless of
+  encryption, so pre-v2 readers reject v2 plaintext and encrypted envelopes
+  alike. `min-reader` is an additional compatibility floor needed by encrypted
+  v2 bodies because their header participates in AES-GCM authentication; it
+  does not replace the format gate.
 - **#4888's guard tested four of the envelope's five fields (#8288).** The two
   guards above had a GAP BETWEEN them and a `{"prf":"sha256"}` body fell through
   it. #7454's key-presence guard is consulted only inside the decode-FAILURE
@@ -903,6 +914,11 @@ per-path:
   degenerate record can no longer drive a bogus empty rollback. A
   genuinely ABSENT `confirm.json` is still the no-confirm-pending path
   (`(nil, nil)`), not an error.
+- **`confirm.json` has strict outer version and field gates (#10723 F3).** New
+  records carry a `#xpf-confirm-envelope v=1` prefix outside plaintext or
+  encrypted JSON; readers reject unsupported versions and JSON fields they do
+  not know, rather than silently accepting a partially-understood record.
+  Legacy unframed JSON remains readable for upgrades.
 - **`confirm.json` removal is ordered AFTER the resolving write is
   durable (#5473).** Resolving a pending window is a **degrade-not-fail**
   operation at three loci — the timeout auto-rollback (`PromoteRollback`),
@@ -1733,6 +1749,11 @@ owned by the `journal/` subpackage.
   oldest deleted). A pre-#1896 fat journal rotates to `.1` intact on
   the first append — old history stays readable until it ages out; no
   migration pass, and boot never reads the journal.
+- **Rotation namespace changes are synced even on append failure (#10723 F6).**
+  If creation or rotation changes directory entries before a later open/write
+  failure, `Log` still fsyncs the journal directory before returning. A failed
+  directory sync is joined with the append error so the durability debt is not
+  hidden.
 - **Rotation defers to an in-flight append (#7174 C06)** — `Log`
   releases `j.mu` before its fsync (#4829), so a writer can be parked
   between its `f.Write` and its `f.Sync` while another writer rotates.
@@ -1812,6 +1833,16 @@ owned by the `journal/` subpackage.
   so a successful commit cannot leave a rollback target as a zero-length
   or otherwise unsynced file after a power cut. A trailing `fsatomic.SyncDir`
   also makes the whole shuffle and stale-slot unlinks durable.
+- **Rollback sidecar generations prevent mixed crash history (#10723 F2).**
+  Each `rollback-meta.json` save tags the slot set and entries with one
+  generation, and binds it to the active config hash plus `active.json` device,
+  inode, and mtime. File identity catches an atomic active replacement even
+  when the config bytes are unchanged. If active and sidecar generations disagree,
+  boot refuses the stale set; otherwise each slot is verified independently,
+  so a corrupt slot stays tombstoned without hiding later matching history.
+  When `active.json` is absent, surviving rollback slots remain available for
+  the fail-closed recovery path (#10297). Generationless legacy metadata keeps
+  its prior interpretation.
 - Rollback-history degradation (#3441 L1): a rollback-slot write or the
   trailing dir-sync failing no longer just logs a warning. The commit
   still succeeds (the canonical active config already persisted via the
@@ -2035,10 +2066,11 @@ itself:
 - `io.LimitReader(max+1)` caps the allocation by the *limit*, not by what
   `Stat` claimed — closing the #4909 TOCTOU where a FUSE-backed or racing file
   under-reports its size and then streams an unbounded body.
-- The open uses `O_NONBLOCK` and the path is rejected unless it is a **regular
-  file**. Opening a FIFO for reading blocks until a writer appears, so a plain
-  `os.Open` hangs before any size check can run. That is a distinct defect from
-  the size cap and a size-only fix does not address it.
+- The open uses `O_NONBLOCK|O_NOFOLLOW` and the final path component is rejected
+  if it is a symlink; the path must resolve to a **regular file**. Opening a
+  FIFO for reading blocks until a writer appears, so a plain `os.Open` hangs
+  before any size check can run. This also refuses a last-component symlink
+  instead of silently reading through it.
 
 Identify the over-cap refusal with `errors.Is(err, ErrExceedsLimit)`, never by
 matching the message. The store's own post-materialisation rejection is a

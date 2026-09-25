@@ -66,7 +66,10 @@ func ReadBounded(r io.Reader, max int64) ([]byte, error) {
 // is unchanged; it only ensures a non-regular path can be reached, classified
 // and refused instead of hanging the process.
 func ReadBoundedFile(path string, max int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	// Authoritative config-store reads must not follow a symlink at the final
+	// path component. O_NONBLOCK keeps FIFO rejection nonblocking; both flags
+	// are no-ops for regular files.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}

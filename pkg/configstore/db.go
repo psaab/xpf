@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -325,10 +327,42 @@ type confirmRecord struct {
 	// resolution did not take effect. A tombstone write that itself fails
 	// degrades to exactly the pre-#8565 behaviour, never worse.
 	//
-	// Additive, per this file's own contract: an older reader ignores the
-	// unknown field and behaves as it does today.
+	// Unlike ordinary config fields, every confirm field changes recovery
+	// safety. The versioned outer envelope makes this record unreadable to a
+	// pre-envelope reader, while ReadConfirm refuses unknown fields rather than
+	// allowing an older reader to ignore a new safety marker.
 	Resolved bool `json:"resolved,omitempty"`
 }
+
+const (
+	confirmEnvelopeMagic   = "#xpf-confirm-envelope"
+	confirmEnvelopeVersion = 1
+)
+
+// stripConfirmEnvelope validates the safety-record format gate. Unenveloped
+// JSON remains readable for upgrades from existing builds; writes always carry
+// the magic header, which makes pre-gate readers fail closed instead of
+// silently ignoring fields they do not understand.
+func stripConfirmEnvelope(data []byte) ([]byte, error) {
+	if !bytes.HasPrefix(data, []byte(confirmEnvelopeMagic)) {
+		return data, nil
+	}
+	nl := bytes.IndexByte(data, '\n')
+	if nl < 0 {
+		return nil, fmt.Errorf("confirm envelope: header line has no terminating newline")
+	}
+	fields := strings.Fields(string(data[:nl]))
+	wantVersion := fmt.Sprintf("v=%d", confirmEnvelopeVersion)
+	if len(fields) != 2 || fields[0] != confirmEnvelopeMagic {
+		return nil, fmt.Errorf("confirm envelope: malformed header")
+	}
+	if fields[1] != wantVersion {
+		return nil, fmt.Errorf("confirm envelope version %q is unsupported; this build supports %s",
+			fields[1], wantVersion)
+	}
+	return data[nl+1:], nil
+}
+
 
 // confirmPath returns the path to the pending commit-confirmed state file.
 func (db *DB) confirmPath() string {
@@ -340,9 +374,9 @@ func (db *DB) confirmPath() string {
 // power loss. The embedded PrevTree may carry secret leaves (IKE PSK, auth
 // keys), so it is encrypted with the same master-password machinery as
 // active.json (keyed off the prev tree's master-password leaf) and written
-// owner-only 0600. No #1917 compatibility envelope is used — the file is
-// transient recovery state, not a committed config, and confirmRecord evolves
-// via additive JSON fields.
+// owner-only 0600. The safety record has its own versioned outer envelope;
+// unknown fields are refused because an older reader could otherwise ignore a
+// resolution marker and resurrect a rollback.
 func (db *DB) WriteConfirm(rec *confirmRecord) error {
 	data, err := db.encodeConfirm(rec)
 	if err != nil {
@@ -390,6 +424,10 @@ func (db *DB) ReadConfirm() (*confirmRecord, error) {
 		}
 		return nil, fmt.Errorf("read confirm state: %w", err)
 	}
+	data, err = stripConfirmEnvelope(data)
+	if err != nil {
+		return nil, fmt.Errorf("read confirm state: %w", err)
+	}
 	data, _, err = db.maybeDecryptTreeJSON(data, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt confirm state: %w", err)
@@ -403,7 +441,16 @@ func (db *DB) ReadConfirm() (*confirmRecord, error) {
 		return nil, fmt.Errorf("parse confirm state: %w", err)
 	}
 	rec := &confirmRecord{}
-	if err := json.Unmarshal(data, rec); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(rec); err != nil {
+		return nil, fmt.Errorf("parse confirm state: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
 		return nil, fmt.Errorf("parse confirm state: %w", err)
 	}
 	// A structurally-valid object can still be semantically degenerate — `{}`
@@ -646,12 +693,11 @@ func (db *DB) writeTreeMarked(path string, tree *config.ConfigTree, committed bo
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	// #7176 (C179-053): the header must exist BEFORE the seal, because it IS
-	// the AAD. Encryption-ness is known here (the same predicate
-	// maybeEncryptTreeJSON uses), which also lets min-reader be exact: only an
-	// ENCRYPTED v2 envelope is unreadable by a pre-v2 build, so only that case
-	// raises the floor. An unencrypted v2 envelope has no ciphertext to bind
-	// and stays readable by an older reader — stamping min-reader=2 on it would
-	// refuse a downgrade for no reason.
+	// the AAD. The reader's v= gate rejects every v2 envelope on a pre-v2
+	// build, encrypted or plaintext. The min-reader floor is more specific:
+	// encrypted v2 bodies use header AAD and therefore require a v2-capable
+	// reader, while an unencrypted body has no ciphertext whose authentication
+	// would be lost by reading it at a lower format floor.
 	//
 	// The alternative — leaving min-reader at 1 always — is also fail-closed,
 	// but an old build would report an opaque "decrypt config tree" failure
@@ -742,10 +788,14 @@ func (db *DB) encodeConfirm(rec *confirmRecord) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encrypt confirm state: %w", err)
 	}
-	if err := checkPersistSize(db.confirmPath(), len(data)); err != nil {
+	header := []byte(fmt.Sprintf("%s v=%d\n", confirmEnvelopeMagic, confirmEnvelopeVersion))
+	enveloped := make([]byte, 0, len(header)+len(data))
+	enveloped = append(enveloped, header...)
+	enveloped = append(enveloped, data...)
+	if err := checkPersistSize(db.confirmPath(), len(enveloped)); err != nil {
 		return nil, err
 	}
-	return data, nil
+	return enveloped, nil
 }
 
 // ErrPersistExceedsReadCeiling reports that an artifact the store is about to

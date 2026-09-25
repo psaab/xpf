@@ -36,10 +36,10 @@ func TestParserRequiresTerminator9899(t *testing.T) {
 		}
 		joined := ""
 		for _, e := range errs {
-			joined += e.Error() + "\n"
+			joined += e.Message + "\n"
 		}
 		if !strings.Contains(joined, ";") && !strings.Contains(strings.ToLower(joined), "semicolon") {
-			t.Errorf("EOF-terminator error should name the missing ';'/semicolon, got: %v", errs)
+			t.Errorf("EOF-terminator diagnostic message should name the missing ';'/semicolon, got: %v", errs)
 		}
 		// Recovery still carries the node, like the missing-brace path.
 		if tree == nil || len(tree.Children) == 0 {
