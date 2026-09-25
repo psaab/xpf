@@ -4952,6 +4952,51 @@ fn junos_host_flowless_fragment_fails_closed_on_deliver_fall_through_6465() {
     );
 }
 
+#[test]
+fn junos_host_flowless_fragment_255_wildcards_skipped_port_bearing_deny_10680() {
+    let state = parse_policy_state(
+        "permit",
+        &[
+            junos_host_frag_deny_https_snapshot(),
+            junos_host_frag_permit_any_snapshot(),
+        ],
+        &test_zone_name_to_id(),
+    );
+    let denied_src = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3));
+    let dst = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1));
+
+    for (label, protocol, expected_action, expected_policy) in [
+        (
+            "native-255",
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            PolicyAction::Deny,
+            7,
+        ),
+        ("decapped-tcp", PROTO_TCP, PolicyAction::Deny, 7),
+        ("decapped-udp", PROTO_UDP, PolicyAction::Permit, 8),
+    ] {
+        let result = evaluate_junos_host_policy_l3_aware(
+            &state,
+            TEST_TRUST_ZONE_ID,
+            denied_src,
+            dst,
+            protocol,
+            0,
+            0,
+            None,
+            64,
+            false,
+        )
+        .expect("#10680: an overlapping port-bearing deny must fail a fragment closed");
+
+        assert_eq!(
+            (result.action, result.policy_id),
+            (expected_action, expected_policy),
+            "#10680 {label}",
+        );
+    }
+}
+
 // ── #4569: fragment-association fail-closed (transit zone policy) ─────
 //
 // A trust->untrust policy that DENIES a port-bearing app (junos-https =

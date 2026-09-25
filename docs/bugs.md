@@ -1230,6 +1230,12 @@ Audit doc: `docs/archived/userspace-forwarding-and-failover-gap-audit.md`
 - **Fix:** Treat 255 as unknown/fragment for protocol predicates while keeping known protocol values exact. Do not recover the inner protocol by parsing fragment payload bytes.
 - **Tests:** Native-255 and decapsulated real-protocol pairs cover input, PBR, output, and lo0 filter paths, including exact TCP/UDP controls.
 
+### Native-255 tails bypass the junos-host port-deny override (FIXED #10680)
+- **Symptom:** A host-bound non-first fragment carrying protocol 255 bypassed an overlapping junos-host port-specific deny and could reach the host stack.
+- **Root cause:** The skipped-deny guard used an exact protocol lookup for L4-constrained application terms, so the native unknown/fragment sentinel had no bucket and the #6465 override never recorded the deny.
+- **Fix:** For protocol 255 only, consider L4-constrained terms across concrete protocol buckets when deciding whether a flowless fragment must fail closed. Known decapsulated protocol metadata stays exact.
+- **Tests:** Native-255, decapsulated TCP, and decapsulated UDP cells verify deny inheritance and exact protocol behavior; the native/decap pair folds in #10678.
+
 ### Fragmented ESP/GRE to interface-NAT split across kernel and helper (FIXED #10677)
 - **Symptom:** An ESP/GRE datagram addressed to an interface-NAT endpoint was split: the whole packet or first fragment went to the kernel, while later fragments went to the helper as protocol 255 and were refused, so neither path could reassemble the datagram.
 - **Root cause:** The shim's #304 kernel arm matched the parsed protocol. The #7494 no-L4 sentinel replaces the protocol on non-first fragments, so the tail missed the ESP/non-native-GRE interface-NAT arm and fell through to XSK.
