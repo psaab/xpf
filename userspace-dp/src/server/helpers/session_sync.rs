@@ -11,6 +11,31 @@ use crate::afxdp::{self, SyncedSessionEntry, SYNCED_IMPORT_REFUSED_PREFIX};
 use crate::ip_proto::PROTO_GRE;
 use crate::protocol::SessionSyncRequest;
 use crate::session::{TunnelDiscriminator, WireDiscriminator};
+/// Stable refusal token shared with the session-sync handler's counter.
+pub(crate) const SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX: &str =
+    "synced-import-refused:key-incomplete:";
+
+fn reject_incomplete_synced_key(
+    req: &SessionSyncRequest,
+    src_ip: std::net::IpAddr,
+    dst_ip: std::net::IpAddr,
+) -> Result<(), String> {
+    let family_matches = match req.addr_family as i32 {
+        libc::AF_INET => src_ip.is_ipv4() && dst_ip.is_ipv4(),
+        libc::AF_INET6 => src_ip.is_ipv6() && dst_ip.is_ipv6(),
+        _ => false,
+    };
+    if !family_matches {
+        return Err(format!("{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}family-mismatch"));
+    }
+    if src_ip.is_unspecified() || dst_ip.is_unspecified() {
+        return Err(format!("{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}unspecified-address"));
+    }
+    if crate::ip_proto::has_l4_ports(req.protocol) && (req.src_port == 0 || req.dst_port == 0) {
+        return Err(format!("{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}zero-port"));
+    }
+    Ok(())
+}
 
 /// #4555/#6923: the second producer of a session key, and the one the packet
 /// path cannot vouch for.
@@ -177,6 +202,7 @@ pub(crate) fn build_synced_session_key(
         .dst_ip
         .parse()
         .map_err(|e| format!("parse dst_ip {}: {e}", req.dst_ip))?;
+    reject_incomplete_synced_key(req, src_ip, dst_ip)?;
     // #7699: a PPTP handle is DERIVED from the learned call-id pair, so a
     // record carrying the handle without the pair is one the receiver can never
     // match a packet against — it cannot build the association its workers

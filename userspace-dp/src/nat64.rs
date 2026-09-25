@@ -2618,6 +2618,25 @@ pub(crate) fn write_v4_to_v6_icmp_error_into(
     write_v4_to_v6_translate(dst, packet, src_v6, dst_v6, embedded_src_port)
 }
 
+/// #10720 (N2): checked IPv6 Payload Length narrowing for the v4→v6 direction.
+///
+/// The v6→v4 twin guards every `as u16` length narrowing with an explicit
+/// `u16::MAX` fail-closed check (#10191); the two v4→v6 sites below narrowed
+/// unchecked. Both call sites sum a fragment-header allowance (0 or 8) with a
+/// length already bounded by the IPv4 16-bit Total Length field (at most
+/// 65515 + 8 = 65523), so the guard cannot fire on any input the translators
+/// accept today — it is defence-in-depth against a future input widening, and
+/// the single choke point both v4→v6 payload-length narrowings route through
+/// so that such a widening fails closed instead of wrapping the wire field.
+#[inline]
+fn checked_ipv6_payload_len(frag_hdr_len: usize, l4_len: usize) -> Option<u16> {
+    let total = frag_hdr_len.checked_add(l4_len)?;
+    if total > u16::MAX as usize {
+        return None;
+    }
+    Some(total as u16)
+}
+
 /// Shared core of [`write_v4_to_v6_into`] and
 /// [`write_v4_to_v6_icmp_error_into`]; `embedded_src_port` rides
 /// [`EmbeddedV4ToV6::mapped_embedded_src_port`] into the quoted-packet
@@ -2778,9 +2797,10 @@ fn write_v4_to_v6_translate(
         l4_payload.len()
     };
 
-    let ipv6_payload_len = frag_hdr_len + l4_len;
-    let ipv6_total_len = 40 + ipv6_payload_len;
-    dst[4..6].copy_from_slice(&(ipv6_payload_len as u16).to_be_bytes());
+    // #10720 (N2): checked narrowing — the #10191 twin for this direction.
+    let ipv6_payload_len = checked_ipv6_payload_len(frag_hdr_len, l4_len)?;
+    let ipv6_total_len = 40usize + usize::from(ipv6_payload_len);
+    dst[4..6].copy_from_slice(&ipv6_payload_len.to_be_bytes());
 
     // L4 checksum after the IPv4→IPv6 pseudo-header change. The L4 payload is
     // byte-identical across translation and the transport length + protocol
@@ -3943,14 +3963,15 @@ pub(crate) fn write_v4_to_v6_nonfirst_into(
         _ => return None,
     };
     let v4_ident = u16::from_be_bytes([packet[4], packet[5]]);
-    let ipv6_payload_len = 8usize.checked_add(payload.len())?;
-    let total_len = 40usize.checked_add(ipv6_payload_len)?;
+    // #10720 (N2): checked narrowing — same choke point as the first-fragment path.
+    let ipv6_payload_len = checked_ipv6_payload_len(8, payload.len())?;
+    let total_len = 40usize.checked_add(usize::from(ipv6_payload_len))?;
     let out = dst.get_mut(..total_len)?;
     out[0] = 0x60 | (tos >> 4); // version=6 | TC[7:4]
     out[1] = (tos & 0x0f) << 4; // TC[3:0] | flow-label high nibble (0)
     out[2] = 0; // flow label
     out[3] = 0; // flow label
-    out[4..6].copy_from_slice(&(ipv6_payload_len as u16).to_be_bytes());
+    out[4..6].copy_from_slice(&ipv6_payload_len.to_be_bytes());
     out[6] = 44; // next header = Fragment
     out[7] = ttl - 1;
     out[8..24].copy_from_slice(&src_v6.octets());

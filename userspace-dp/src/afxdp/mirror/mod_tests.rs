@@ -203,7 +203,7 @@ fn cross_worker_live_enqueue_preserves_full_frame() {
 
     assert_eq!(result, MirrorCloneResult::Enqueued);
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     let req = queued.pop_front().expect("cross-worker mirror tx");
     assert_eq!(req.bytes, frame);
     assert_eq!(req.egress_ifindex, 22);
@@ -279,8 +279,8 @@ fn live_mirror_requires_exact_queue_when_output_is_multiqueue() {
 
     assert_eq!(result, MirrorCloneResult::NoBinding);
     let mut queued = VecDeque::new();
-    target_q0.take_pending_tx_into(&mut queued);
-    target_q1.take_pending_tx_into(&mut queued);
+    unsafe { target_q0.take_pending_tx_into(&mut queued) };
+    unsafe { target_q1.take_pending_tx_into(&mut queued) };
     assert!(queued.is_empty());
 }
 
@@ -321,7 +321,7 @@ fn live_mirror_queue_full_drops_before_enqueue() {
 
     assert_eq!(result, MirrorCloneResult::QueueFullCrossWorker);
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), 1);
     assert_eq!(
         queued.pop_front().expect("original request").bytes,
@@ -369,7 +369,7 @@ fn live_mirror_admission_reserves_slot_against_interleaving_producer() {
 
     assert_eq!(result, MirrorCloneResult::Enqueued);
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), 1);
     assert_eq!(
         queued.pop_front().expect("mirror request").bytes,
@@ -416,7 +416,7 @@ fn live_mirror_queue_full_reserves_headroom_above_mirror_limit() {
 
     assert_eq!(result, MirrorCloneResult::QueueFullCrossWorker);
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), MIRROR_PENDING_LIMIT);
 }
 
@@ -460,7 +460,7 @@ fn mirror_live_enqueue_uses_output_cos_default_queue_without_rewrite() {
 
     assert_eq!(result, MirrorCloneResult::Enqueued);
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     let req = queued.pop_front().expect("mirror tx");
     assert_eq!(req.cos_queue_id, Some(7));
     assert_eq!(req.dscp_rewrite, None);
@@ -512,7 +512,7 @@ fn sampled_live_mirror_enqueue_records_flow_cache_surface() {
         frame.len() as u64
     );
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     let req = queued.pop_front().expect("mirror tx");
     assert!(
         req.mirror_clone,
@@ -563,7 +563,7 @@ fn sampled_live_mirror_sampler_denial_does_not_enqueue() {
     assert_eq!(sample_counter, 2);
     assert_eq!(ingress_live.mirrored_packets.load(Ordering::Relaxed), 0);
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert!(queued.is_empty());
 }
 
@@ -652,7 +652,7 @@ fn sampled_live_mirror_queue_full_advances_sampler_for_selected_6114() {
         "mirror backpressure must not pollute target redirect overflow counters"
     );
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert_eq!(
         queued.pop_front().expect("original request").bytes,
         vec![0x33; 64]
@@ -746,7 +746,7 @@ fn flow_cache_nonsampled_does_not_reserve_full_queue_6114() {
     // The pre-fill is the only queued request; the non-sampled packet reserved
     // nothing.
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert_eq!(
         queued.pop_front().expect("original request").bytes,
         vec![0x33; 64]
@@ -915,7 +915,7 @@ fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
 
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     let req = queued.pop_front().expect("mirror tx");
     assert_eq!(req.egress_ifindex, 200);
     assert_eq!(req.bytes, frame);
@@ -1201,7 +1201,7 @@ fn cross_worker_nonsampled_does_not_reserve_full_queue_5167() {
     );
     // Nothing was cloned: only the pre-fill remains on the target queue.
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert_eq!(
         queued.len(),
         1,
@@ -1282,7 +1282,7 @@ fn cross_worker_sampled_enqueues_clone_5167() {
 
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     let req = queued.pop_front().expect("cross-worker mirror clone");
     assert!(req.mirror_clone, "cloned request must carry mirror identity");
     assert_eq!(req.bytes, frame);
@@ -1319,7 +1319,7 @@ fn cross_worker_nonsampled_no_clone_nonfull_5167() {
 
     assert_eq!(result, None);
     let mut queued = VecDeque::new();
-    target_live.take_pending_tx_into(&mut queued);
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
     assert!(queued.is_empty(), "a non-sampled packet must not clone");
 }
 

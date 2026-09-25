@@ -476,6 +476,7 @@ pub(crate) fn run() -> Result<(), String> {
             tunnel_purge_reservations_released: 0,
             synced_import_reserve_refused: 0,
             synced_import_unknown_routing_domain: 0,
+            synced_import_incomplete_key: 0,
             synced_import_zone_unresolved: 0,
             synced_import_unpublished: 0,
             synced_reverse_rederived: 0,

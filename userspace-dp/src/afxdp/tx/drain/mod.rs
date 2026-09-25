@@ -440,7 +440,10 @@ pub(super) fn ingest_cos_pending_tx_with_provenance(
     // first pass (Err returns), and re-classifying them as owner-
     // local would double-count or mis-attribute them.
     let owner_local_count = pending.len() as u64;
-    binding.live.take_pending_tx_into(&mut pending);
+    // SAFETY: this drain runs on the binding's owner worker, the sole inbox
+    // consumer; redirects only enqueue from peers, and this call cannot overlap
+    // the other owner drain in the same worker loop.
+    unsafe { binding.live.take_pending_tx_into(&mut pending) };
     let peer_count = (pending.len() as u64).saturating_sub(owner_local_count);
     if count_pps && owner_local_count > 0 {
         binding
@@ -582,7 +585,9 @@ pub(super) fn take_pending_tx_requests(binding: &mut BindingWorker) -> VecDeque<
     // from the lock-free inbox appends into the same buffer without a
     // queue-to-queue copy.
     let mut out = core::mem::take(&mut binding.tx_pipeline.pending_tx_local);
-    binding.live.take_pending_tx_into(&mut out);
+    // SAFETY: this binding worker is mutably borrowed by the owner drain, which
+    // is the sole consumer of its redirect inbox.
+    unsafe { binding.live.take_pending_tx_into(&mut out) };
     out
 }
 

@@ -2029,6 +2029,35 @@ func TestProcessStatusUnsurfacedCounterTrioRoundTrip7398(t *testing.T) {
 	}
 }
 
+func TestProcessStatusSyncedImportIncompleteKeyRoundTrip10720(t *testing.T) {
+	in := ProcessStatus{SyncedImportIncompleteKey: 37}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal object: %v", err)
+	}
+	if _, ok := obj["synced_import_incomplete_key"]; !ok {
+		t.Fatalf("incomplete-key refusal counter missing from ProcessStatus JSON: %s", raw)
+	}
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if back.SyncedImportIncompleteKey != 37 {
+		t.Fatalf("SyncedImportIncompleteKey = %d, want 37", back.SyncedImportIncompleteKey)
+	}
+	var legacy ProcessStatus
+	if err := json.Unmarshal([]byte(`{}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	if legacy.SyncedImportIncompleteKey != 0 {
+		t.Fatalf("legacy payload counter = %d, want default 0", legacy.SyncedImportIncompleteKey)
+	}
+}
+
 // TestProcessStatusPolicyBatchTrioRoundTrip10512 covers the three #10512
 // lease-hold counters with the same distinct-value discipline as the #7398
 // trio: each field carries a value no neighbour carries, so a field wired

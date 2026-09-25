@@ -1340,7 +1340,7 @@ fn live_flow_cache_callsite_nonsampled_produces_no_clone_6304() {
 
     // --- THE #6304 DISCRIMINATOR: nothing mirror-shaped happened at all.
     let mut queued = VecDeque::new();
-    fixture.target_live.take_pending_tx_into(&mut queued);
+    unsafe { fixture.target_live.take_pending_tx_into(&mut queued) };
     assert!(
         queued.is_empty(),
         "#6304: a NON-sampled packet must not enqueue a clone on the mirror \
@@ -1533,7 +1533,7 @@ fn live_flow_cache_callsite_selected_admitted_clone_reaches_target_6304() {
     // The clone is a real full-L2 copy on the TARGET binding's queue, flagged
     // as a mirror clone and addressed to the mirror output interface.
     let mut queued = VecDeque::new();
-    fixture.target_live.take_pending_tx_into(&mut queued);
+    unsafe { fixture.target_live.take_pending_tx_into(&mut queued) };
     let clone = queued.pop_front().expect("the mirror clone must be queued");
     assert!(
         clone.mirror_clone,
@@ -1635,7 +1635,7 @@ fn live_flow_cache_callsite_rewrite_failure_rolls_back_sampler_6304() {
 
     // ...and no clone was delivered or accounted on the way out.
     let mut queued = VecDeque::new();
-    fixture.target_live.take_pending_tx_into(&mut queued);
+    unsafe { fixture.target_live.take_pending_tx_into(&mut queued) };
     assert!(
         queued.is_empty(),
         "#6304: the reserved admission is released, not spent — no clone reaches \
@@ -1917,7 +1917,7 @@ fn live_flow_cache_callsite_leaves_no_admission_stranded_on_target_6304() {
          `is_ok()` assertions above meaningful"
     );
     let mut queued = VecDeque::new();
-    admitted.target_live.take_pending_tx_into(&mut queued);
+    unsafe { admitted.target_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), 1, "control: the drained request is the clone");
     assert!(
         admitted

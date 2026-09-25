@@ -1694,6 +1694,13 @@ impl SessionDomain {
             .import_unknown_routing_domain
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// #10720 F4: count peer-synced imports refused for an incomplete key.
+    pub(crate) fn note_incomplete_synced_key_import(&self) {
+        self.sessions
+            .import_incomplete_key
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl SessionDomainView<'_> {

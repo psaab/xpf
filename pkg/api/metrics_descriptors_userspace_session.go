@@ -483,6 +483,11 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"single-instance node.",
 		nil, nil,
 	)
+	c.userspaceSyncedImportIncompleteKey = prometheus.NewDesc(
+		"xpf_userspace_synced_import_incomplete_key_total",
+		"Peer-synced session imports refused because the reconstructed packet-path key is incomplete (#10720 F4).",
+		nil, nil,
+	)
 	c.userspaceSharedSessionPoisonRecoveries = prometheus.NewDesc(
 		"xpf_userspace_shared_session_poison_recoveries_total",
 		"Shared-session mutex poison recoveries across every "+

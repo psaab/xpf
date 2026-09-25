@@ -401,11 +401,11 @@ fn redirect_local_cos_request_to_owner_binding_pushes_owner_live_queue() {
 
     assert!(redirected.is_ok());
     let mut queued = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut queued);
+    unsafe { owner_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), 1);
     assert_eq!(queued.front().map(|req| req.egress_ifindex), Some(80));
     let mut current_queued = VecDeque::new();
-    current_live.take_pending_tx_into(&mut current_queued);
+    unsafe { current_live.take_pending_tx_into(&mut current_queued) };
     assert!(current_queued.is_empty());
 }
 
@@ -496,7 +496,7 @@ fn redirect_local_cos_request_to_owner_uses_owner_live_queue_when_available() {
     assert!(redirected.is_ok());
     assert!(commands.lock().unwrap().is_empty());
     let mut queued = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut queued);
+    unsafe { owner_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), 1);
     assert_eq!(queued.front().map(|req| req.egress_ifindex), Some(80));
     assert_eq!(queued.front().map(|req| req.cos_queue_id), Some(Some(4)));
@@ -598,11 +598,11 @@ fn redirect_local_exact_cos_request_to_owner_binding_pushes_owner_live_queue() {
 
     assert!(redirected.is_ok());
     let mut queued = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut queued);
+    unsafe { owner_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), 1);
     assert_eq!(queued.front().map(|req| req.egress_ifindex), Some(80));
     let mut current_queued = VecDeque::new();
-    current_live.take_pending_tx_into(&mut current_queued);
+    unsafe { current_live.take_pending_tx_into(&mut current_queued) };
     assert!(current_queued.is_empty());
 }
 
@@ -671,7 +671,7 @@ fn redirect_prepared_cos_request_to_owner_binding_preserves_mirror_clone_on_live
 
     assert!(redirected.is_ok());
     let mut queued = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut queued);
+    unsafe { owner_live.take_pending_tx_into(&mut queued) };
     assert_eq!(queued.len(), 1);
     let req = queued.front().expect("queued local request");
     assert!(
@@ -735,7 +735,7 @@ fn cos_cross_worker_redirect_is_allocation_free_6310() {
         "warm redirect must route to the owner-live queue",
     );
     let mut warm_drained = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut warm_drained);
+    unsafe { owner_live.take_pending_tx_into(&mut warm_drained) };
     let warm_bytes = warm_drained
         .pop_front()
         .expect("warm request queued")
@@ -766,7 +766,7 @@ fn cos_cross_worker_redirect_is_allocation_free_6310() {
 
     // Byte-identity: buffer reuse must not corrupt the redirected frame.
     let mut measured_drained = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut measured_drained);
+    unsafe { owner_live.take_pending_tx_into(&mut measured_drained) };
     let measured = measured_drained
         .pop_front()
         .expect("measured request queued");
@@ -830,7 +830,7 @@ fn cos_cross_worker_redirect_to_owner_is_allocation_free_6310() {
         "warm redirect must route to the owner-live queue",
     );
     let mut warm_drained = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut warm_drained);
+    unsafe { owner_live.take_pending_tx_into(&mut warm_drained) };
     let warm_bytes = warm_drained
         .pop_front()
         .expect("warm request queued")
@@ -865,7 +865,7 @@ fn cos_cross_worker_redirect_to_owner_is_allocation_free_6310() {
     );
 
     let mut measured_drained = VecDeque::new();
-    owner_live.take_pending_tx_into(&mut measured_drained);
+    unsafe { owner_live.take_pending_tx_into(&mut measured_drained) };
     let measured = measured_drained
         .pop_front()
         .expect("measured request queued");
