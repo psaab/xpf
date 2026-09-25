@@ -147,6 +147,10 @@ out-of-range value to a warning.
   `IdleConnTimeout == 0` never expires) — leaking one fd + read-loop
   goroutine per probe to an empty health endpoint. Disabling keep-alives
   closes the connection after the single request instead.
+- **An http-get probe has bounded redirect and body work (#10726):** `probeHTTP`
+  follows at most three redirect hops and refuses a longer chain. The response
+  body drain remains capped at 1 MiB and the 10-second client timeout bounds
+  stalled reads; a large but readable body still counts as a successful reply.
 - `destination-interface` takes precedence over the routing-instance
   VRF device for `SO_BINDTODEVICE`; otherwise VRF binding uses
   `vrf-<ri-name>` — not the destination interface itself.

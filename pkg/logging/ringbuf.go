@@ -514,6 +514,30 @@ func eventTimeFromWire(wireTS uint64) time.Time {
 	return time.Now()
 }
 
+const maxCreatedNanos = 999_999_999
+
+var invalidCreatedNanos atomic.Uint64
+
+// ClampCreatedNanos enforces the SESSION_CLOSE wire contract: CreatedNanos is
+// a sub-second nanosecond remainder in [0, 999_999_999]. Malformed values are
+// clamped to the last nanosecond of the second and counted so a corrupt or
+// incompatible producer remains observable without poisoning exported times.
+func ClampCreatedNanos(nanos uint32) uint32 {
+	if nanos <= maxCreatedNanos {
+		return nanos
+	}
+	invalidCreatedNanos.Add(1)
+	return maxCreatedNanos
+}
+
+// InvalidCreatedNanos reports the process-lifetime count of out-of-range
+// SESSION_CLOSE CreatedNanos values observed by the logging decoders and flow
+// exporter.
+func InvalidCreatedNanos() uint64 {
+	return invalidCreatedNanos.Load()
+}
+
+
 func (er *EventReader) logEvent(data []byte) {
 	var evt rawEvent
 	evt.Timestamp = binary.LittleEndian.Uint64(data[0:8])
@@ -595,7 +619,7 @@ func (er *EventReader) logEvent(data []byte) {
 		// frame to carry the creation instant's sub-second nanosecond
 		// remainder. Reinterpret it as CreatedNanos so the flow exporters keep
 		// millisecond StartTime resolution.
-		rec.CreatedNanos = evt.PolicyID
+		rec.CreatedNanos = ClampCreatedNanos(evt.PolicyID)
 		// #3056: the admitting policy ID rides the trailing [136:140] slot on a
 		// SESSION_CLOSE (because #2853 took [44:48]). Resolve PolicyID from there
 		// so the RT_FLOW_SESSION_CLOSE record and the NetFlow/IPFIX close
@@ -988,7 +1012,7 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		// frame to carry the creation instant's sub-second nanosecond remainder.
 		// Reinterpret it as CreatedNanos so the flow exporters keep millisecond
 		// StartTime resolution.
-		rec.CreatedNanos = evt.PolicyID
+		rec.CreatedNanos = ClampCreatedNanos(evt.PolicyID)
 		// #3056: the admitting policy ID rides the trailing [136:140] slot on a
 		// SESSION_CLOSE (because #2853 took [44:48]). Resolve PolicyID from there
 		// so the NetFlow/IPFIX close exporters and any consumer of this decoded

@@ -1,9 +1,10 @@
 package snmp
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"net"
 	"sort"
 	"strings"
@@ -84,6 +85,28 @@ var (
 	oidIfOperStatus = []int{1, 3, 6, 1, 2, 1, 2, 2, 1, 8}
 )
 
+// trapRandRead is a seam for deterministic tests. Production always uses the
+// operating-system CSPRNG.
+var trapRandRead = rand.Read
+
+// trapRequestID draws an unpredictable SNMP trap request-ID from crypto/rand
+// (#10726 A9-F1). It was math/rand.Int31() — a deterministic sequence any
+// observer of one trap could predict, letting a spoofed trap reuse a live
+// request-ID. The range matches the old math/rand.Int31() contract ([0, 2^31))
+// so the BER INTEGER encoding stays non-negative as before.
+//
+// An entropy failure yields 0 rather than dropping the trap: the request-ID
+// is a matching hint, not a security boundary like the v3 privacy salt
+// (which fails closed in nextPrivSalt), and a trap with ID 0 is still a
+// valid, deliverable notification.
+func trapRequestID() int32 {
+	var b [4]byte
+	if _, err := trapRandRead(b[:]); err != nil {
+		return 0
+	}
+	return int32(binary.BigEndian.Uint32(b[:]) & 0x7fffffff)
+}
+
 // buildLinkTrap builds an SNMPv2c trap PDU for a link up/down event.
 func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname string) []byte {
 	// sysUpTime in hundredths of a second.
@@ -136,7 +159,7 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 	vbListEncoded := berEncodeTLV(tagSequence, vbList)
 
 	// PDU body: request-id, error-status(0), error-index(0), varbinds
-	requestID := rand.Int31()
+	requestID := trapRequestID()
 	pduBody := berEncodeIntegerTLV(int(requestID))
 	pduBody = append(pduBody, berEncodeIntegerTLV(0)...)
 	pduBody = append(pduBody, berEncodeIntegerTLV(0)...)
