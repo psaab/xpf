@@ -387,12 +387,15 @@ changed to 0 in `cd4dbe9`, a bodyless commit with no recorded rationale.
 
 Two things the gate deliberately does NOT do, both still open:
 
-- **`electSingleNode` bypasses the gate when the peer is not alive**
-  (`election.go`) — a lone node promotes on `Weight > 0` regardless of
-  readiness. This is fail-open on purpose: a survivor that refuses to take over
-  is a total outage. It does mean #103's "peer-loss event does not force
-  takeover when readiness is false" is not satisfied, and a cold boot with no
-  peer ever seen promotes an RG whose interfaces are still missing.
+- **`electSingleNode` fails open on genuine peer loss** (`election.go`): an
+  established cluster whose peer was heard and then timed out promotes without
+  waiting on local readiness, because refusing takeover can leave the entire
+  cluster out of service.
+- **A confirmed-absent cold boot remains readiness-gated**: the startup grace
+  releases the non-preempt hold but does not change `peerEverSeen`. An unready
+  RG stays secondary until it becomes ready or the degraded fallback expires.
+  This avoids claiming VIPs while local interfaces, VRRP, fabric or dataplane
+  readiness is still missing (#10697).
 - **Session-sync readiness is not an input** to the gate — that is #110.
 
 ## Peer-liveness cold-boot grace (#4386)
@@ -418,10 +421,12 @@ down/up — can disrupt the control-link UDP receive path for 10-15+ seconds:
 
 The floor DELAYS the never-seen decision; it never blocks it. A genuinely
 absent peer — a single-node deployment, or a peer that will never come up —
-still promotes once the grace elapses (`neverSeenConfirmed` returns true at
-`sinceStart >= grace`), so there is no permanent no-master. `handlePeerNeverSeen`
-sets `peerEverSeen` and runs `electSingleNode`; `election.go` bypasses the
-readiness gate when `!peerAlive`, so the surviving node takes over.
+is confirmed once the grace elapses (`neverSeenConfirmed` returns true at
+`sinceStart >= grace`). The manager records `peerConfirmedAbsent` separately
+from `peerEverSeen`: this releases the non-preempt hold while keeping the
+cold-boot readiness gate armed. A ready node promotes normally; an unready node
+stays secondary until the degraded fallback, which marks and warns on the
+degraded promotion. A peer heartbeat clears the confirmed-absent state.
 
 ### A heartbeat RESTART is not a cold boot (#9722)
 

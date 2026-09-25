@@ -654,6 +654,7 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	wasAlive := m.peerAlive
 	m.peerAlive = true
 	m.peerEverSeen = true
+	m.peerConfirmedAbsent = false
 	m.peerNodeID = int(pkt.NodeID)
 	m.peerSoftwareVersion = pkt.SoftwareVersion
 	m.peerHAProtocolVersion = normalizeHAProtocolVersion(pkt.HAProtocolVersion)
@@ -877,16 +878,17 @@ func (m *Manager) handlePeerTimeout() {
 
 // handlePeerNeverSeen is called when the heartbeat timeout expires and no
 // peer heartbeat has ever been received. This confirms the peer is truly
-// absent (not just a fresh boot race). Sets peerEverSeen so non-preempt
-// nodes can claim primary via electSingleNode.
+// absent (not just a fresh boot race), releasing the non-preempt election hold
+// without marking the peer as ever seen. That preserves the cold-boot readiness
+// gate while keeping genuine peer loss fail-open (#10697).
 func (m *Manager) handlePeerNeverSeen() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.peerEverSeen {
-		return // already handled
+	if m.peerEverSeen || m.peerConfirmedAbsent {
+		return // a heartbeat arrived or absence was already confirmed
 	}
-	m.peerEverSeen = true // no longer "never seen" — now "confirmed absent"
+	m.peerConfirmedAbsent = true
 	slog.Info("cluster: peer never seen after heartbeat timeout, proceeding with election")
 	m.history.Record(EventHeartbeat, -1, "Peer never seen (timeout)")
 	m.electSingleNode()

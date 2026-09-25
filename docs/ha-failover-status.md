@@ -45,16 +45,17 @@ yet. Here is what is true today:
 - The takeover readiness gate applies on COLD BOOT, not only when the peer is
   alive (#7161). `electSingleNode` previously gated on `m.peerAlive`, so the
   gate was fully enforced on the peer-alive path and fully bypassed on the
-  peer-dead path — which is the path both a cold boot and a peer loss take. The
-  condition is now `(m.peerAlive || !m.peerEverSeen)`:
+  peer-dead path. The condition is `(m.peerAlive || !m.peerEverSeen)`:
   - **peer LOSS** (`peerEverSeen && !peerAlive`) keeps the fail-open. An
     established cluster had a working primary and it died; a survivor that
     refuses takeover is a TOTAL OUTAGE and may be the only node that can
     forward.
-  - **cold BOOT** (`!peerEverSeen`) applies the gate. There is no established
-    forwarding to preserve, and a not-ready node that promotes forwards nothing
-    anyway — it claims the VIPs and the RG while unable to serve them, and
-    denies the peer a clean takeover. This is #103 acceptance criterion 1.
+  - **cold BOOT** (`!peerEverSeen`) applies the gate. `handlePeerNeverSeen`
+    records `peerConfirmedAbsent` separately, releasing the non-preempt hold
+    without changing `peerEverSeen`. There is no established forwarding to
+    preserve, and an unready node that promotes forwards nothing anyway — it
+    claims the VIPs and the RG while unable to serve them, and denies the peer
+    a clean takeover (#10697; #103 acceptance criterion 1).
 
   **POLICY CHANGE, declared:** a userspace-configured data RG with no published
   dataplane fail-closes in `checkUserspaceTakeoverReadinessFor`, so on a cold

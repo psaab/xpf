@@ -181,10 +181,16 @@ type Manager struct {
 	kernelUpgradeHoldReason string
 
 	// Peer state tracking (heartbeat).
-	peerAlive    bool
-	peerEverSeen bool // true once first heartbeat received; distinguishes "never heard" from "lost"
-	peerNodeID   int
-	peerGroups   map[int]PeerGroupState
+	peerAlive           bool
+	peerEverSeen        bool // true once first heartbeat received; distinguishes "never heard" from "lost"
+	// peerConfirmedAbsent is set by handlePeerNeverSeen once the cold-boot
+	// grace elapses with no heartbeat ever received. It releases the
+	// non-preempt hold WITHOUT rewriting peerEverSeen, so the #7161
+	// readiness gate still sees a cold boot (gated) rather than a peer
+	// loss (fail-open). Cleared when a peer heartbeat arrives. See #10697.
+	peerConfirmedAbsent bool
+	peerNodeID          int
+	peerGroups          map[int]PeerGroupState
 	// Optional software version metadata advertised via heartbeat.
 	localSoftwareVersion string
 	peerSoftwareVersion  string
