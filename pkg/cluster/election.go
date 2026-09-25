@@ -118,7 +118,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			// Non-preempt in cluster mode: don't claim primary on fresh
 			// boot before hearing from the peer. Wait for heartbeat
 			// timeout to confirm peer is truly down.
-			if !rg.Preempt && !m.peerEverSeen && rg.State == StateSecondary && m.controlInterface != "" {
+			if !rg.Preempt && !m.peerEverSeen && !m.peerConfirmedAbsent && rg.State == StateSecondary && m.controlInterface != "" {
 				return electNoChange, ""
 			}
 			// Peer lost (was alive, now timed out) or preempt mode.
@@ -469,7 +469,7 @@ func (m *Manager) electSingleNode() {
 		// primary — wait for heartbeat timeout to confirm it's truly
 		// down. controlInterface != "" indicates cluster mode (heartbeat
 		// configured); standalone nodes always elect immediately.
-		if !rg.Preempt && !m.peerEverSeen && rg.State == StateSecondary && m.controlInterface != "" {
+		if !rg.Preempt && !m.peerEverSeen && !m.peerConfirmedAbsent && rg.State == StateSecondary && m.controlInterface != "" {
 			continue
 		}
 		// Readiness gate: block new promotions in cluster mode until
@@ -496,9 +496,9 @@ func (m *Manager) electSingleNode() {
 		// (checkUserspaceTakeoverReadinessFor) — all determinable with no peer —
 		// and `fabricReady` is already forced true when the peer is down.
 		//
-		// `peerEverSeen` introduces no new state: the non-preempt guard two
-		// blocks above already draws the same cold-boot/loss distinction with
-		// it, so this makes the two consistent.
+		// peerEverSeen remains false on a confirmed-absent cold boot, so this
+		// gate still applies after the non-preempt hold is released. Only a
+		// genuine peer loss (ever seen, now dead) bypasses readiness.
 		degradedReason := ""
 		if rg.State != StatePrimary && rg.Weight > 0 && m.controlInterface != "" &&
 			(m.peerAlive || !m.peerEverSeen) {
