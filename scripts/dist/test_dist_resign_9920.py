@@ -584,8 +584,9 @@ class HelperPinTests(unittest.TestCase):
         self.assertIn("not usable", r.stderr)
 
     def test_all_cargo_recipes_use_pinned_toolchain(self):
-        # kill: drop +$$pinned from any of the five cargo lines (or add a
-        # sixth unpinned cargo run to these recipes).
+        # kill: drop +$$pinned from a direct cargo run, add an unpinned cargo
+        # run, or stop passing the resolved pin to the census wrapper (which
+        # invokes cargo +<pin> internally and refuses live mode without it).
         text = (_ROOT / "Makefile").read_text()
         in_recipe = False
         cargo_lines = []
@@ -597,13 +598,15 @@ class HelperPinTests(unittest.TestCase):
             if in_recipe and line and not line[0].isspace() \
                     and not line.startswith("#"):
                 in_recipe = False
-            if in_recipe and line.startswith("\t") and "$(CARGO)" in line:
+            if in_recipe and line.startswith("\t") and "cargo" in line.lower():
                 cargo_lines.append(line)
-        self.assertEqual(len(cargo_lines), 5,
-                         f"expected 5 cargo lines, found {len(cargo_lines)}: "
-                         f"{cargo_lines}")
+        self.assertTrue(cargo_lines, "no cargo commands found in pinned recipes")
         for line in cargo_lines:
-            self.assertIn("+$$pinned", line)
+            self.assertIn("dp-toolchain.sh", line)
+            if "debug-leg-census.py" in line:
+                self.assertIn('--toolchain "$$pinned"', line)
+            else:
+                self.assertIn("+$$pinned", line)
 
     def test_debian_rules_names_pin_file(self):
         # Tripwire only (comment text, weakest cell by design): the claim must
