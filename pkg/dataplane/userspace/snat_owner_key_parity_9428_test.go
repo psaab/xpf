@@ -139,7 +139,7 @@ var (
 	rustRuleLitRe9428    = regexp.MustCompile(`let\s+mut\s+rule\s*=\s*SourceNatRule\s*\{`)
 	rustSnapFieldRe9428  = regexp.MustCompile(`(?m)^\s*([a-z_][a-z0-9_]*)\s*:\s*snap\.([a-z_][a-z0-9_]*)\s*(?:\.clone\(\))?\s*,`)
 	rustForSnapRe9428    = regexp.MustCompile(`for\s+(\w+)\s+in\s+&snap\.(\w+)\s*\{`)
-	rustExpandRe9428     = regexp.MustCompile(`expand_pool_address\(\s*(\w+)\s*,\s*&mut\s+rule\.(\w+)\s*,\s*&mut\s+rule\.(\w+)\s*,?\s*\)`)
+	rustExpandRe9428     = regexp.MustCompile(`expand_pool_address\(\s*(\w+)\s*,\s*&mut\s+rule\.(\w+)\s*,\s*&mut\s+rule\.(\w+)(?:\s*,\s*[^)]*)?\s*\)`)
 	rustRuleAssignRe9428 = regexp.MustCompile(`rule\.(\w+)\s*=\s*(\w+)\s*;`)
 	rustLetIfSnapRe9428  = regexp.MustCompile(`let\s+(\w+)\s*=\s*if\s+snap\.(\w+)\s*>\s*0`)
 	rustSelfOrRuleRe9428 = regexp.MustCompile(`^(?:self|rule)\.(\w+)(?:\.clone\(\))?$`)

@@ -40,7 +40,7 @@ use super::destination::PROTO_TCP;
 use super::source::{SourceNatFlowKey, SourceNatRule};
 use super::*;
 use crate::SourceNATRuleSnapshot;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 const SHARED: &str = "203.0.113.1";
 const OTHER: &str = "203.0.113.9";
@@ -580,84 +580,6 @@ fn a_deterministic_collision_refuses_the_subscriber_6979() {
     }
 }
 
-/// A peer pool whose configured members put ONE address at several positions
-/// must be checked at EVERY position, not just the first.
-///
-/// Fires on: recording the peer index with `.position()` (the first version of
-/// this fix). `expand_pool_address` does not deduplicate, and
-/// `PortAllocator::new` gives each vector POSITION its own bitmap, so a peer
-/// holding the tuple at its SECOND position reports free at its first, and the
-/// duplicate is published. Raised by Codex round 1 on PR #8111, finding 3.
-///
-/// The fixture has to leave position 0 FREE and position 1 HELD, or the cell is
-/// vacuous — measured: a first draft let the peer hold the tuple at BOTH
-/// positions, and the `.position()` mutation escaped it.
-#[test]
-fn a_peer_holding_the_identity_at_a_duplicate_position_is_still_seen_6979() {
-    fn dup_rule(name: &str, pool: &str, source: &str, addrs: &[&str]) -> SourceNATRuleSnapshot {
-        SourceNATRuleSnapshot {
-            name: name.to_string(),
-            from_zone: "lan".to_string(),
-            to_zone: "wan".to_string(),
-            source_addresses: vec![source.to_string()],
-            pool_name: pool.to_string(),
-            pool_addresses: addrs.iter().map(|a| format!("{a}/32")).collect(),
-            port_low: 20000,
-            port_high: 20000,
-            ..SourceNATRuleSnapshot::default()
-        }
-    }
-
-    // Pool b lists the shared address TWICE, so its allocator holds two
-    // independent bitmaps for it. Round-robin alternates positions.
-    let rules = parse_source_nat_rules(&[
-        dup_rule("r1", "a", "10.0.0.0/24", &[SHARED]),
-        dup_rule("r2", "b", "10.1.0.0/24", &[SHARED, SHARED]),
-    ]);
-    assert_eq!(
-        rules[1].pool_addresses_v4.len(),
-        2,
-        "fixture: the peer pool must carry the address at TWO positions — if \
-         expansion ever deduplicates, this cell stops testing what it says"
-    );
-
-    // One flow per position, then release the FIRST one. That is what leaves
-    // position 0 free and position 1 held.
-    assert!(identity(&mint(&rules, "10.1.0.7", 2222)).is_some(), "fixture: peer flow 1");
-    assert!(identity(&mint(&rules, "10.1.0.8", 3333)).is_some(), "fixture: peer flow 2");
-    assert!(
-        rules[1].pool_allocator.release_flow(
-            flow("10.1.0.7", 2222),
-            shared_tuple(20000),
-            0,
-            NatHolder::Untracked,
-        ),
-        "fixture: the peer's first flow must release"
-    );
-    assert!(
-        !rules[1].pool_allocator.debug_is_port_occupied(0, 20000),
-        "fixture: position 0 must be FREE — otherwise a first-position-only index \
-         would see the tuple held and this cell could not distinguish the two"
-    );
-    assert!(
-        rules[1].pool_allocator.debug_is_port_occupied(1, 20000),
-        "fixture: position 1 must still HOLD the tuple"
-    );
-
-    let attempt = mint(&rules, "10.0.0.7", 1111);
-    assert_eq!(
-        identity(&attempt),
-        None,
-        "pool a published 203.0.113.1:20000, which pool b is holding at its SECOND \
-         position. Each POSITION gets its own bitmap, so an index recorded with \
-         `.position()` reports the address free while its twin owns the tuple \
-         (#6979 F6)"
-    );
-    assert_eq!(
-        failure_reason(&attempt),
-        Some(SourceNatFailureReason::PoolPeerAddressOverlap),
-    );
-}
 
 /// MIXED FAMILY. A peer pool whose shared address is v6 while it ALSO carries a
 /// v4 address must be probed at `v4_len + position`, not at `position`.
@@ -730,51 +652,72 @@ fn a_mixed_family_peers_v6_index_is_offset_past_its_v4_addresses_6979() {
     );
 }
 
-/// A pool whose OWN configured members repeat one address must not be reported
-/// as overlapping ITSELF.
+/// #10700: duplicate and overlapping source-pool members expand only once.
 ///
-/// Fires on: counting owners per address OCCURRENCE rather than per distinct
-/// ALLOCATOR. `[X, X]` then counts 2, the rule receives the shared-address
-/// index, and every one of its mints pays the `SeqCst` fence and a map probe
-/// for a pool that has no peer. The runtime still answers correctly — the
-/// same-allocator skip catches it — so only the WIRING can be asserted, and
-/// that is what this cell asserts. Codex round 2 on PR #8111, finding 2.
+/// Duplicate positions each had a distinct occupancy bitmap, allowing two
+/// same-remote flows to mint the identical `(address, port_low)` reverse tuple.
+/// Expansion now keeps the first occurrence of each address, so the allocator
+/// has one slot and allocates distinct ports for the two flows. Rust's reported
+/// address count is checked here too because Go's pool alarm uses it as the
+/// capacity denominator.
+///
+/// Fires on revert: restoring append-only expansion produces two pool positions
+/// and both flows receive `(203.0.113.1, 20000)`.
 #[test]
-fn a_pool_with_duplicate_members_is_not_its_own_peer_6979() {
-    fn rule_addrs(name: &str, pool: &str, source: &str, addrs: &[&str]) -> SourceNATRuleSnapshot {
+fn duplicate_pool_members_mint_distinct_ports_10700() {
+    fn dup_rule() -> SourceNATRuleSnapshot {
         SourceNATRuleSnapshot {
-            name: name.to_string(),
+            name: "r1".to_string(),
             from_zone: "lan".to_string(),
             to_zone: "wan".to_string(),
-            source_addresses: vec![source.to_string()],
-            pool_name: pool.to_string(),
-            pool_addresses: addrs.iter().map(|a| format!("{a}/32")).collect(),
+            source_addresses: vec!["10.0.0.0/24".to_string()],
+            pool_name: "a".to_string(),
+            pool_addresses: vec![format!("{SHARED}/32"), format!("{SHARED}/32")],
             port_low: 20000,
             port_high: 20001,
             ..SourceNATRuleSnapshot::default()
         }
     }
 
-    let rules = parse_source_nat_rules(&[
-        rule_addrs("r1", "a", "10.0.0.0/24", &[SHARED, SHARED]),
-        rule_addrs("r2", "b", "10.1.0.0/24", &[OTHER]),
-    ]);
+    let rules = parse_source_nat_rules(&[dup_rule()]);
     assert_eq!(
-        rules[0].pool_addresses_v4.len(),
-        2,
-        "fixture: pool a must carry the address at TWO positions"
+        rules[0].pool_addresses_v4,
+        vec![SHARED.parse::<Ipv4Addr>().unwrap()]
     );
     assert!(
-        rules[0].overlap_owners.is_none(),
-        "pool a repeats one of its OWN addresses and shares nothing with pool b, so \
-         it must keep the `Option::is_none` fast path. Counting per occurrence \
-         instead reports it as shared with itself and puts a SeqCst fence and a map \
-         probe on every one of its mints (#6979 F6)"
+        rules[0].pool_failure.is_none(),
+        "a duplicated member must not fail the pool"
     );
-    assert!(rules[1].overlap_owners.is_none());
-    assert!(
-        identity(&mint(&rules, "10.0.0.7", 1111)).is_some(),
-        "and it must still translate normally"
+    assert_eq!(
+        source_nat_pool_statuses(&rules)[0].address_count,
+        1,
+        "the Go AppliedNATView/alarm capacity denominator must use the same deduped count"
+    );
+
+    // Same remote (REMOTE:443/TCP), distinct inside ports — the #10700 probe.
+    let t1 = identity(&mint(&rules, "10.0.0.7", 1111)).expect("the first flow must mint");
+    let t2 = identity(&mint(&rules, "10.0.0.8", 2222)).expect("the second flow must mint");
+    assert_eq!(t1.0, t2.0, "both flows translate from the pool's one address");
+    assert_eq!(t1.1, Some(20000), "first occurrence keeps pool order and gets port_low");
+    assert_eq!(
+        t2.1,
+        Some(20001),
+        "the second flow must get a distinct reverse tuple"
+    );
+
+    // Nested and repeated prefixes dedupe across members while preserving
+    // network enumeration and first-occurrence order.
+    let mut overlapping_snapshot = dup_rule();
+    overlapping_snapshot.pool_addresses = vec![
+        "203.0.113.0/31".to_string(),
+        "203.0.113.1/32".to_string(),
+        "203.0.113.0/31".to_string(),
+    ];
+    let overlapping = parse_source_nat_rules(&[overlapping_snapshot]);
+    assert_eq!(
+        overlapping[0].pool_addresses_v4,
+        vec![Ipv4Addr::new(203, 0, 113, 0), Ipv4Addr::new(203, 0, 113, 1)],
+        "contained and repeated CIDR members must retain first-seen address order (#10700)"
     );
 }
 

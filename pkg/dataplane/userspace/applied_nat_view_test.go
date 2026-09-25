@@ -190,8 +190,10 @@ func TestAppliedNATViewDedup(t *testing.T) {
 	m.lastStatus = ProcessStatus{
 		LastSnapshotGeneration: 3,
 		SourceNATPools: []SourceNATPoolStatus{
-			{RuleName: "r1", PoolName: "p1", AddressCount: 1, PortLow: 1, PortHigh: 100, UsedPorts: 50},
-			{RuleName: "r2", PoolName: "p1", AddressCount: 1, PortLow: 1, PortHigh: 100, UsedPorts: 50},
+			// AddressCount is the Rust expander's unique expanded cardinality
+			// and the Go alarm's capacity denominator (#10700).
+			{RuleName: "r1", PoolName: "p1", AddressCount: 2, PortLow: 1, PortHigh: 100, UsedPorts: 50},
+			{RuleName: "r2", PoolName: "p1", AddressCount: 2, PortLow: 1, PortHigh: 100, UsedPorts: 50},
 		},
 	}
 	v := m.AppliedNATView()
@@ -200,5 +202,8 @@ func TestAppliedNATViewDedup(t *testing.T) {
 	}
 	if v.Pools["p1"].UsedPorts != 50 {
 		t.Fatalf("deduped pool must keep one value (50), got %d", v.Pools["p1"].UsedPorts)
+	}
+	if v.Pools["p1"].AddressCount != 2 {
+		t.Fatalf("view must preserve helper's unique address count (2), got %d", v.Pools["p1"].AddressCount)
 	}
 }

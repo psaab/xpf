@@ -1,29 +1,34 @@
 package config
 
 import (
+	"bytes"
+	"encoding/binary"
 	"net/netip"
+	"sort"
 )
 
 // Reportable source-NAT pool capacity (#7000).
 //
 // THE DEFECT THIS REPLACES. Six operator-facing surfaces each derived a pool's
 // address cardinality as `len(pool.Addresses)` and multiplied it by the port
-// range. That single expression is wrong in THREE directions at once:
+// range. That single expression is wrong in FOUR directions at once:
 //
 //  1. It reports capacity for a pool the dataplane REFUSED. A pool whose member
 //     the Rust expander cannot honour installs no allocator at all, so any
 //     non-zero figure is confidently wrong — including on the
 //     `natPoolTotalPorts` Prometheus gauge, where it becomes the denominator of
 //     a utilisation alert for a pool that can allocate nothing.
-//  2. It UNDER-reports a prefix member. The expander enumerates every address
-//     in the prefix (`for i in 0..count` in `expand_pool_address`, network and
-//     broadcast included), so a healthy `203.0.113.0/24` installs 256 addresses
-//     and was reported as 1.
+//  2. It UNDER-reports a prefix member. The expander enumerates every unique
+//     address in the prefix (network and broadcast included), so a healthy
+//     `203.0.113.0/24` installs 256 addresses and was reported as 1.
 //  3. It MISSES the singular `address` field entirely. `SourceNATPoolMembers`
 //     — the one answer to "what is in this pool", shared by the snapshot
 //     builder and the unusable verdict — is `pool.Address` PLUS
 //     `pool.Addresses`, so a pool configured with only the singular form
 //     reported 0.
+//  4. It OVER-reports duplicate or overlapping members. The dataplane keeps
+//     only the first occurrence of each expanded address within a pool, so
+//     capacity must count the union rather than each configured member.
 //
 // WHY A SINGLE SOURCE RATHER THAN AN AGREEMENT TEST. Two derivations of "how
 // many addresses does this pool have" can never legitimately differ: there is
@@ -40,12 +45,13 @@ import (
 // callers that can render it do. That is the same three-states discipline
 // #6982 applied to the NAT64 budget, one layer out.
 
-// SourceNATPoolReportableAddresses returns the address cardinality an operator
-// surface should report for a source-NAT pool, and the reason it is zero.
+// SourceNATPoolReportableAddresses returns the unique expanded address
+// cardinality an operator surface should report for a source-NAT pool, and the
+// reason it is zero.
 //
 // A non-empty reason means the dataplane installs NO allocator for this pool,
 // so the reportable capacity is 0 whatever its members say. An empty reason
-// means the count is the EXPANDED cardinality the dataplane actually installs.
+// means the count is the unique expanded cardinality the dataplane installs.
 //
 // `overBudget` is `SourceNATAggregateOverBudgetPools(cfg)`; pass nil when the
 // caller has no config-wide view, which degrades to the definition verdict
@@ -54,11 +60,12 @@ func SourceNATPoolReportableAddresses(pool *NATPool, poolName string, overBudget
 	if reason := SourceNATPoolDisarmedReason(pool, poolName, overBudget); reason != "" {
 		return 0, reason
 	}
-	total := 0
-	for _, m := range SourceNATPoolMembers(pool) {
-		total += sourceNATPoolMemberHosts(m)
+	total := sourceNATPoolUniqueAddressCount(SourceNATPoolMembers(pool))
+	maxInt := uint64(^uint(0) >> 1)
+	if total > maxInt {
+		return int(maxInt), ""
 	}
-	return total, ""
+	return int(total), ""
 }
 
 // SourceNATPoolReportablePorts is the port-capacity form of the same verdict:
@@ -73,6 +80,130 @@ func SourceNATPoolReportablePorts(pool *NATPool, poolName string, portLow, portH
 		return 0, reason
 	}
 	return NATPoolTotalPorts(portLow, portHigh, addrs), ""
+}
+
+// sourceNATPoolAddressInterval is one member's inclusive address range after
+// the same prefix expansion the dataplane performs. Merging these intervals
+// counts overlap without materializing every address in a large pool.
+type sourceNATPoolAddressInterval struct {
+	width int
+	lo    [16]byte
+	hi    [16]byte
+}
+
+func sourceNATPoolAddressIntervalOf(member string) (sourceNATPoolAddressInterval, bool) {
+	prefix, err := netip.ParsePrefix(member)
+	if err != nil {
+		addr, addrErr := netip.ParseAddr(member)
+		if addrErr != nil {
+			return sourceNATPoolAddressInterval{}, false
+		}
+		prefix = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	prefix = prefix.Masked()
+	addr := prefix.Addr()
+	hostBits := addr.BitLen() - prefix.Bits()
+	if hostBits >= 64 || (uint64(1)<<uint(hostBits)) > MaxSourceNATPoolPrefixHosts {
+		return sourceNATPoolAddressInterval{}, false
+	}
+
+	var interval sourceNATPoolAddressInterval
+	var addrBits int
+	if addr.Is4() {
+		raw := addr.As4()
+		interval.width = 4
+		addrBits = 32
+		copy(interval.lo[:4], raw[:])
+	} else {
+		raw := addr.As16()
+		interval.width = 16
+		addrBits = 128
+		copy(interval.lo[:16], raw[:])
+	}
+	interval.hi = interval.lo
+	for bit := prefix.Bits(); bit < addrBits; bit++ {
+		interval.hi[bit/8] |= byte(1 << (7 - bit%8))
+	}
+	return interval, true
+}
+
+// sourceNATPoolUniqueAddressCount returns the union cardinality of the member
+// ranges, saturating at MaxUint64 for a union too large to represent.
+func sourceNATPoolUniqueAddressCount(members []string) uint64 {
+	intervals := make([]sourceNATPoolAddressInterval, 0, len(members))
+	for _, member := range members {
+		if interval, ok := sourceNATPoolAddressIntervalOf(member); ok {
+			intervals = append(intervals, interval)
+		}
+	}
+	if len(intervals) == 0 {
+		return 0
+	}
+	sort.Slice(intervals, func(i, j int) bool {
+		a, b := intervals[i], intervals[j]
+		if a.width != b.width {
+			return a.width < b.width
+		}
+		if cmp := bytes.Compare(a.lo[:a.width], b.lo[:b.width]); cmp != 0 {
+			return cmp < 0
+		}
+		return bytes.Compare(a.hi[:a.width], b.hi[:b.width]) < 0
+	})
+
+	total := uint64(0)
+	current := intervals[0]
+	for _, next := range intervals[1:] {
+		if current.width == next.width &&
+			bytes.Compare(next.lo[:next.width], current.hi[:current.width]) <= 0 {
+			if bytes.Compare(next.hi[:next.width], current.hi[:current.width]) > 0 {
+				current.hi = next.hi
+			}
+			continue
+		}
+		total = checkedAddU64(total, sourceNATPoolIntervalSize(current))
+		current = next
+	}
+	return checkedAddU64(total, sourceNATPoolIntervalSize(current))
+}
+
+func sourceNATPoolIntervalSize(interval sourceNATPoolAddressInterval) uint64 {
+	var difference [16]byte
+	borrow := 0
+	for i := interval.width - 1; i >= 0; i-- {
+		d := int(interval.hi[i]) - int(interval.lo[i]) - borrow
+		if d < 0 {
+			d += 256
+			borrow = 1
+		} else {
+			borrow = 0
+		}
+		difference[i] = byte(d)
+	}
+	carry := 1
+	for i := interval.width - 1; i >= 0 && carry != 0; i-- {
+		sum := int(difference[i]) + carry
+		difference[i] = byte(sum)
+		carry = sum >> 8
+	}
+	if carry != 0 {
+		if interval.width < 8 {
+			return uint64(1) << uint(interval.width*8)
+		}
+		return ^uint64(0)
+	}
+
+	start := interval.width - 8
+	if start < 0 {
+		start = 0
+	}
+	for _, high := range difference[:start] {
+		if high != 0 {
+			return ^uint64(0)
+		}
+	}
+	var low [8]byte
+	copy(low[8-(interval.width-start):], difference[start:interval.width])
+	return binary.BigEndian.Uint64(low[:])
 }
 
 // sourceNATPoolMemberHosts is the host count one pool member expands to,
