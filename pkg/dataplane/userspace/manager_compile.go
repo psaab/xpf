@@ -745,25 +745,25 @@ func (m *Manager) applyCompiledSnapshot(
 // and it may be enforcing the NEW snapshot. The uniform ctrl-disable was
 // correct precisely because it never relied on that sentence.
 //
-//   - IN-BAND REFUSAL (errHelperRejected): the helper decoded the request, ran
-//     its non-mutating integrity preflight and answered {"ok":false}. Only here
-//     is the helper's state known to be unchanged by the request. That is not
-//     "the helper holds m.lastSnapshot": after a republish whose response was
-//     lost, it holds that republish (#9520). Rolling the maps back to
-//     m.lastSnapshot is safe for a separate reason: every republish path copies
-//     m.lastSnapshot's classifier plan and changes only routes, scheduler bits
-//     or DeferWorkers. The maps are rolled
-//     BACK to m.lastSnapshot, which restores the exact plan the retained
-//     snapshot expects, so ctrl stays enabled and there is no window in which
-//     neither snapshot forwards transit (#6707 acceptance criterion 1). If the
-//     rollback itself fails the ctrl-disable is the fallback.
-//   - ANY OTHER ERROR: helper state unknown, so the pre-#7468 behaviour stands
-//     — disable ctrl (failClosedUserspaceCtrlMapLocked) and drop transit to the
-//     kernel-only fail-closed posture. The attempted snapshot is retained as
-//     retry debt (#9642: adopted as m.lastSnapshot below with publishedSnapshot
-//     held back) and the status tick republishes it — no operator commit needed
-//     — while snapshotRetryDebtLocked holds ctrl disabled until a full apply
-//     succeeds.
+//   - PRE-TEARDOWN IN-BAND REFUSAL (errHelperRejected): the helper decoded the
+//     request, ran its non-mutating integrity preflight and answered
+//     {"ok":false}. Only this class proves the helper state is unchanged by the
+//     request. That is not necessarily "the helper holds m.lastSnapshot": after
+//     a republish whose response was lost, it holds that republish (#9520).
+//     Rolling the maps back to m.lastSnapshot is safe for a separate reason:
+//     every republish path copies m.lastSnapshot's classifier plan and changes
+//     only routes, scheduler bits or DeferWorkers. The maps are rolled BACK to
+//     m.lastSnapshot, which restores the exact plan the retained snapshot
+//     expects, so ctrl stays enabled and there is no window in which neither
+//     snapshot forwards transit (#6707 acceptance criterion 1). If the rollback
+//     itself fails the ctrl-disable is the fallback.
+//   - ANY OTHER ERROR, including the #10702 post-teardown refusal: helper state
+//     is unknown/down, so disable ctrl (failClosedUserspaceCtrlMapLocked) and
+//     drop transit to the kernel-only fail-closed posture. Retain the attempted
+//     snapshot as retry debt (#9642: adopted as m.lastSnapshot below with
+//     publishedSnapshot held back) and let the status tick republish it — no
+//     operator commit needed — while snapshotRetryDebtLocked holds ctrl disabled
+//     until a full apply succeeds.
 //
 // When mapsMutatedInPlace is false the caller took the full bootstrap path,
 // which already programmed ctrl.Enabled=0 before this publish, so a publish
@@ -904,11 +904,11 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 //     rollback against nil would clear the classifier maps and, with ctrl left
 //     enabled, hand transit to the kernel — the fail-open this whole path
 //     exists to prevent.
-//   - errors.Is(cause, errHelperRejected): ONLY an in-band {"ok":false} proves
-//     the helper still holds THE SNAPSHOT IT HELD BEFORE THE REQUEST. On a
-//     transport error it may already be enforcing the new snapshot, and rolling
-//     the maps back would put them a generation BEHIND — the same fail-open
-//     with the sign flipped.
+//   - errors.Is(cause, errHelperRejected): ONLY a pre-teardown in-band
+//     integrity refusal proves the helper still holds THE SNAPSHOT IT HELD
+//     BEFORE THE REQUEST. The #10702 post-teardown kind does not satisfy this
+//     predicate: the old workers are gone, so rolling back maps would target
+//     dead workers and leave the dataplane down.
 //   - publishedGeneration == retained.Generation (and non-zero): the snapshot
 //     the helper held before the request is m.publishedSnapshot, NOT
 //     m.lastSnapshot. Everywhere those two move together the distinction is

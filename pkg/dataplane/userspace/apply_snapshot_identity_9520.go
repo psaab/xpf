@@ -117,14 +117,15 @@ func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *Proce
 
 // recordApplySnapshotOutcomeLocked tracks whether the helper may hold content
 // this Manager never saw it accept. Only a failure whose outcome is UNKNOWN
-// sets it (anything but an in-band refusal: a deadline after the helper applied
-// the request is the #4036 case), and only a successful apply clears it. An
-// in-band refusal changes nothing, because the helper kept whatever it held,
-// which is exactly as known or unknown as before. A deterministic-local
-// failure (isKnownUnsentFailure: digest, marshal, size, unconfigured socket)
-// likewise changes nothing — the helper provably received nothing, so there is
-// no new uncertainty. That distinction is load-bearing for retry debt (#9642):
-// a deferred-but-unpublished snapshot plus a deterministic failure must keep
+// sets it (anything but a normal pre-teardown in-band refusal: a deadline after
+// the helper applied the request is the #4036 case, and a post-teardown refusal
+// is #10702), and only a successful apply clears it. Normal in-band refusals
+// change nothing, because the helper kept whatever it held, which is exactly as
+// known or unknown as before. A deterministic-local failure
+// (isKnownUnsentFailure: digest, marshal, size, unconfigured socket) likewise
+// changes nothing — the helper provably received nothing, so there is no new
+// uncertainty. That distinction is load-bearing for retry debt (#9642): a
+// deferred-but-unpublished snapshot plus a deterministic failure must keep
 // today's revert-to-old behavior, not open a latch no transport failure backs.
 //
 // While it is set, the publish shortcuts that infer the helper's content from

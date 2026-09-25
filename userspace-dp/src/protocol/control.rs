@@ -201,7 +201,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v31 -> v32 (#10683): bind-less policy-based IPsec selector pairs are
 // mandatory independent of current SA state. A v31 helper would ignore those
 // rows and resume forwarding cleartext for matching transit traffic.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 32;
+// v32 -> v33 (#10702): apply refusals after teardown carry a machine-readable
+// kind. A v32 Go manager treats that response as proof the prior snapshot is
+// retained and may keep ctrl enabled after the workers are gone; exact version
+// equality refuses the unsafe mixed pairing before teardown.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 33;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -211,6 +215,25 @@ pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 32;
 /// file, so rename both sides together.
 pub(crate) const SNAPSHOT_CONTENT_CONFLICT_PREFIX: &str =
     "snapshot content conflict at reused generation:";
+
+/// #10702: the machine-readable prefix of the refusal `apply` sends when
+/// worker bring-up fails AFTER teardown (spawn failure, incomplete bind, or
+/// SA monitor not ready). The old workers are already gone and the dataplane
+/// is DOWN, so unlike the pre-teardown `snapshot integrity error` refusals —
+/// where the prior workers are still live — this refusal proves the opposite
+/// of retention. The Go control plane matches it
+/// (`snapshotPostTeardownPrefix` in `pkg/dataplane/userspace`) and treats the
+/// publish as unknown-outcome (ctrl-disable, no classifier rollback, retry
+/// debt) instead of rolling the maps back onto dead workers. A Go test reads
+/// this constant from this file, so rename both sides together.
+pub(crate) const SNAPSHOT_POST_TEARDOWN_PREFIX: &str = "snapshot post-teardown refusal:";
+
+/// #10702: format post-teardown worker-bring-up refusals on both `apply` legs.
+pub(crate) fn snapshot_post_teardown_refusal(verb: &str, stage: &impl std::fmt::Display) -> String {
+    format!(
+        "{SNAPSHOT_POST_TEARDOWN_PREFIX} {verb} after teardown ({stage}); dataplane down — snapshot not persisted"
+    )
+}
 
 /// #9344/#9856: the owner-RG session export paging contract this helper
 /// implements.

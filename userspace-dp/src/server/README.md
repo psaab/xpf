@@ -159,6 +159,13 @@ plural `match_from_zones`/`match_to_zones` scope became authoritative in #4626
 while the version stayed at 3, so a pre-#4626 helper at the same advertised
 version read only the singular field and NARROWED a multi-zone global deny (a
 rolling-upgrade fail-open).
+The v32 -> v33 bump (#10702) is semantic, not a snapshot-shape change. An
+`apply_snapshot` refusal after worker teardown carries
+`SNAPSHOT_POST_TEARDOWN_PREFIX`; Go classifies it as unknown outcome, disables
+ctrl, and retries instead of treating `{"ok":false}` as proof that the prior
+workers still exist. A v32 Go manager does not recognize the kind and could
+leave ctrl enabled after the helper stopped its workers, so exact version
+equality refuses mixed v32/v33 snapshots before teardown.
 
 `ConfigSnapshot.content_digest` (#9520, v15) binds a generation to its content.
 The Go control plane stamps its content hash on every `apply_snapshot`, and
@@ -851,13 +858,16 @@ queues. See PR #1243's kill record for why i40e doesn't reshape.
   per-worker startup readiness barrier (HEARTBEAT != READINESS). Both
   `apply_snapshot` legs handle it IDENTICALLY to `WorkerSpawn` (the shared
   three-way `WorkerSpawn(stage) | WorkerBindIncomplete(stage) |
-  IpsecSaNotReady(stage)` arm): `ok=false`, roll
-  the in-memory baseline back, refresh status to the REAL post-teardown
-  per-binding state, and return BEFORE `persist_state=true`. Only the error
-  verb differs — "`worker bind incomplete after teardown (...)`" vs "`worker
-  spawn failed after teardown (...)`" vs "`ipsec SA monitor not ready after
-  teardown (...)`" — so the #4952/#6140 assertions that
-  pin the "worker spawn failed" wording stay green.
+  `IpsecSaNotReady(stage)` arm): `ok=false`, roll the in-memory baseline
+  back, refresh status to the REAL post-teardown per-binding state, and return
+  BEFORE `persist_state=true`. The response starts with
+  `SNAPSHOT_POST_TEARDOWN_PREFIX` (`protocol/control.rs`), which Go reads as a
+  distinct unknown-outcome kind: ctrl is disabled, the attempted snapshot is
+  retained as retry debt, and classifier maps are NOT rolled back onto workers
+  that no longer exist. The diagnostic verb remains distinct — "`worker bind
+  incomplete after teardown (...)`" vs "`worker spawn failed after teardown
+  (...)`" vs "`ipsec SA monitor not ready after teardown (...)`" — so the
+  #4952/#6140 assertions that pin the "worker spawn failed" wording stay green.
   Regression-tested (full-
   apply leg) by
   `full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143`.
