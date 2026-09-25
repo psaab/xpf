@@ -561,10 +561,10 @@ func writeLinkFile(target, originalName string) (bool, error) {
 	// (#5842 positional errs, #4956 device-map renameErrs); the rename still
 	// proceeds without a .link rather than stranding the NIC mid-pass.
 	if !rendersafe.SafeInterfaceName(target) {
-		return false, fmt.Errorf("linksetup: refusing .link target name %q: it is not exactly one pattern or it carries control bytes — no file written (#9886)", target)
+		return false, fmt.Errorf("linksetup: refusing .link target name %q: it is not exactly one pattern, carries control bytes, or ends in a line-continuation backslash — no file written (#9886/#10718)", target)
 	}
 	if !rendersafe.SafeInterfaceName(originalName) {
-		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: it is not exactly one [Match] OriginalName= pattern or it carries control bytes — no file written (#9886)", originalName, target)
+		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: it is not exactly one [Match] OriginalName= pattern, carries control bytes, or ends in a line-continuation backslash — no file written (#9886/#10718)", originalName, target)
 	}
 	if glob := rendersafe.FirstGlobMetacharacter(originalName); glob != "" {
 		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: glob metacharacter %q in [Match] OriginalName= would claim every matching interface — no file written (#10089)", originalName, target, glob)

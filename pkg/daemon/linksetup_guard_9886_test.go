@@ -19,9 +19,11 @@ func TestWriteLinkFileRefusesUnsafeNames_9886(t *testing.T) {
 		{"space target", "ge 0", "enp9s0", "refusing .link target name"},
 		{"tab target", "ge\t0", "enp9s0", "refusing .link target name"},
 		{"control target", "ge\x010", "enp9s0", "refusing .link target name"},
+		{"line-continuation target", "ge-0-0-3\\", "enp9s0", "line-continuation backslash"},
 		{"empty target", "", "enp9s0", "refusing .link target name"},
 		{"space original", "ge-0-0-3", "enp 9s0", "refusing .link OriginalName"},
 		{"control original", "ge-0-0-3", "enp\x019s0", "refusing .link OriginalName"},
+		{"line-continuation original", "ge-0-0-3", "enp9s0\\", "line-continuation backslash"},
 		{"empty original", "ge-0-0-3", "", "refusing .link OriginalName"},
 	} {
 		wrote, err := writeLinkFile(tc.target, tc.original)

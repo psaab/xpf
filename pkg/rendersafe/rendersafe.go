@@ -147,8 +147,9 @@ func containsControlBytes(s string) bool {
 
 // SafeInterfaceName is the RENDER contract for a name interpolated into a
 // systemd unit's Name=/OriginalName= slot (#9886): exactly one match-list
-// pattern AND free of control bytes. Render callers (the networkd belt, the
-// linksetup .link guard) check this, not RendersAsOnePattern alone.
+// pattern, free of control bytes, and not ending in systemd's line-continuation
+// backslash. Render callers (the networkd belt, the linksetup .link guard)
+// check this, not RendersAsOnePattern alone.
 //
 // WHY CONTROLS ARE REFUSED AT RENDER EVEN THOUGH THE KERNEL ALLOWS MOST OF
 // THEM. dev_valid_name forbids only '/', ':' and ASCII whitespace, so a
@@ -163,5 +164,37 @@ func containsControlBytes(s string) bool {
 // What this predicate does NOT check: glob metacharacters (*?[]) PASS — they
 // are one pattern and control-free. Render-side glob refusal is #10089.
 func SafeInterfaceName(name string) bool {
-	return RendersAsOnePattern(name) && !containsControlBytes(name)
+	return SafeUnitToken(name)
+}
+// SafeUnitToken is the RENDER contract for a value interpolated into a
+// single-token slot of a generated systemd unit (#10718): exactly one
+// whitespace-free token, free of control bytes, and not ending in a
+// line-continuation backslash.
+//
+// WHY BOTH HALVES. A systemd unit is `Key=Value` one per line, and the keys
+// this guards (Name=, OriginalName=, VRF=, Bond=, Bridge=, Duplex=,
+// MACAddress=, Address=, Mode=, LACPTransmitRate=, BitsPerSecond=) each take a
+// single token — an interface or device name, an enum word, a MAC, a CIDR, or a
+// number — in which no ASCII whitespace is ever legitimate. A space would
+// split the value or claim a second match slot, and a newline would end the
+// directive and inject a new one. The remaining C0 bytes and DEL are refused
+// alongside for the same reason SafeInterfaceName refuses them: what systemd
+// makes of a raw control byte in a unit file is version-dependent and
+// unanalyzed, and a root-written unit file is no place for unanalyzed bytes.
+// Refusal is fail-closed: no file, loud error.
+//
+// A trailing backslash is also refused: systemd.syntax(7) concatenates a line
+// ending in `\` with the following line, replacing the backslash and newline
+// with a space. Since the renderer appends `\n` immediately after the token,
+// accepting that byte would merge the next directive into this value.
+//
+// What this predicate does NOT check: whether the token is a VALID value for
+// its key — a well-formed-but-unknown Duplex= word passes. Key-specific
+// semantics and enum validity are outside this predicate; this belt only
+// keeps one value on one line. Empty fails: an unset field renders nothing and
+// must skip the check at the call site, not pass it. Unicode spaces PASS, as in
+// RendersAsOnePattern: systemd treats them atomically, so they cannot split or
+// inject; at worst the value is invalid and inert.
+func SafeUnitToken(s string) bool {
+	return RendersAsOnePattern(s) && !containsControlBytes(s) && !strings.HasSuffix(s, "\\")
 }

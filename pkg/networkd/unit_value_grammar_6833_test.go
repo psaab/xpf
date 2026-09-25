@@ -7,18 +7,11 @@ import (
 	"testing"
 )
 
-// unit_value_grammar_6833_test.go -- #6833.
-//
-// sanitizeUnitValue replaces control bytes with a SPACE. That is safe only
-// because it is applied to `Description=` and ONLY to `Description=`, which
-// systemd treats as free text. It would NOT be safe on several `[Match]` keys,
-// which are WHITESPACE-SEPARATED LISTS: `OriginalName=` takes a list of
-// patterns, so a space inside one value makes a single .link file match several
-// kernel interfaces -- the substitution manufacturing the very delimiter the
-// belt exists to prevent.
-//
-// So the risk is not today's call sites; it is a FUTURE one. These cells pin the
-// justification so it cannot be quietly invalidated.
+// unit_value_grammar_6833_test.go pins the consumer grammar behind the
+// Description= control-byte sanitizer and the complete networkd interpolation
+// inventory. #10718 structured fields use refusal rather than substitution:
+// a space or control byte cannot be made safe by replacing it with another
+// systemd token.
 
 // TestUnitValueSanitizerReplacesTheNewline pins the byte the belt is actually
 // for. Its failure message says why, so a relaxation that keeps "no control
@@ -35,49 +28,62 @@ func TestUnitValueSanitizerReplacesTheNewline_6833(t *testing.T) {
 	}
 }
 
-// TestUnitValueSanitizerIsAppliedOnlyToDescription_6833 is the INVENTORY guard,
-// and it is the load-bearing cell of the pair.
+// TestNetworkdUnitInterpolationInventory_10718 inventories every string sink
+// in generated unit key=value lines. A new raw sink or a bypass around the
+// Description sanitizer must update this inventory instead of silently
+// extending the set of unguarded fields.
 //
-// The space substitution is correct only for a free-text key. Applying this
-// function to a whitespace-separated `[Match]` key would silently widen a .link
-// file to match interfaces it was never meant to -- and nothing about that change
-// would look wrong at the call site, because the function name does not say
-// "free text only".
-//
-// So this asserts the inventory: every call is to `Description=`. Adding a call
-// on any other key REDS, which forces whoever adds it to re-derive whether a
-// space is ordinary text for that key's grammar. That is the whole point -- not
-// to forbid new call sites, but to make the derivation unavoidable.
-//
-// FAIL-ON-REVERT: apply sanitizeUnitValue to any other Fprintf key and this reds.
-func TestUnitValueSanitizerIsAppliedOnlyToDescription_6833(t *testing.T) {
+// The field checks themselves are pinned by behavior in
+// TestApplyRefusesUnsafeUnitFieldsAndSweeps_10718; this census prevents a new
+// interpolation field from escaping that coverage.
+func TestNetworkdUnitInterpolationInventory_10718(t *testing.T) {
 	src := stripLineComments6833(readNetworkdSource6833(t, "networkd.go"))
-
-	// Every call, with the format string it is interpolated into.
-	call := regexp.MustCompile(`"([A-Za-z]+)=%s\\n", sanitizeUnitValue\(`)
+	call := regexp.MustCompile(`fmt\.Fprintf\(&b,\s*"([A-Za-z]+)=%s\\n",\s*([^\n]+)\)`)
 	calls := call.FindAllStringSubmatch(src, -1)
 	if len(calls) == 0 {
-		t.Fatal("found no sanitizeUnitValue call sites; the inventory guard is " +
-			"matching nothing and would pass over any change at all")
-	}
-	for _, m := range calls {
-		if m[1] != "Description" {
-			t.Errorf("sanitizeUnitValue is applied to %q=. A SPACE is only ordinary "+
-				"text for a free-text key; on a whitespace-separated [Match] key "+
-				"(OriginalName=, Path=, Driver=, Type=) the substitution splits one "+
-				"value into several and widens what the unit matches. Re-derive the "+
-				"safe substitute for %q's grammar before using this belt there "+
-				"(#6833).", m[1], m[1])
-		}
+		t.Fatal("found no generated key/value unit sinks; inventory would be vacuous")
 	}
 
-	// And no bare sanitizeUnitValue call outside that shape, which would evade
-	// the check above entirely.
-	total := strings.Count(src, "sanitizeUnitValue(")
-	if total != len(calls)+1 { // +1 for the definition itself
-		t.Errorf("found %d sanitizeUnitValue( occurrences but only %d matched the "+
-			"Key=%%s call shape (+1 definition); an unrecognised call site is "+
-			"invisible to this guard", total, len(calls))
+	// Counts distinguish every renderer branch that emits a sink. Expression
+	// checks make the allowed boundary explicit: descriptions are sanitized;
+	// single-token fields are validated in renderedUnitTokenError.
+	want := map[string]map[string]int{
+		"Name":             {"ifc.Name": 4},
+		"Description":      {"sanitizeUnitValue(ifc.Description)": 3},
+		"Mode":             {"mode": 1},
+		"LACPTransmitRate": {"rate": 1},
+		"OriginalName":     {"ifc.OriginalName": 1},
+		"MACAddress":       {"ifc.MACAddress": 1},
+		"BitsPerSecond":    {"junosSpeedToNetworkd(ifc.Speed)": 1},
+		"Duplex":           {"ifc.Duplex": 1},
+		"VRF":              {"ifc.VRFName": 1},
+		"Bond":             {"ifc.BondMaster": 1},
+		"Bridge":           {"ifc.BridgeMaster": 1},
+		"Address":          {"addr": 3},
+	}
+	got := make(map[string]map[string]int)
+	for _, m := range calls {
+		key, expr := m[1], strings.TrimSpace(m[2])
+		expected, ok := want[key]
+		if !ok {
+			t.Errorf("unrecorded generated systemd unit sink %s= with expression %q (#10718)", key, expr)
+			continue
+		}
+		if _, ok := expected[expr]; !ok {
+			t.Errorf("generated systemd unit sink %s= interpolates unrecorded expression %q (#10718)", key, expr)
+		}
+		if got[key] == nil {
+			got[key] = make(map[string]int)
+		}
+		got[key][expr]++
+	}
+	for key, expressions := range want {
+		for expr, count := range expressions {
+			if got[key][expr] != count {
+				t.Errorf("generated systemd unit sink %s=%s occurs %d times, want %d (#10718)",
+					key, expr, got[key][expr], count)
+			}
+		}
 	}
 }
 

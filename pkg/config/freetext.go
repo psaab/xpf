@@ -32,9 +32,10 @@ import (
 //     already-persisted bad value can neither fail boot nor make the
 //     operator's next unrelated commit fail mysteriously.
 //
-// The render-side belt (sanitizers in pkg/networkd, pkg/frr, pkg/ipsec
-// at each free-text file interpolation) is the third, independent
-// layer.
+// The RENDER-SIDE layer is independent of both: networkd sanitizes controls
+// and trailing-backslash continuations only in free-text Description= fields,
+// and refuses unsafe single-token structured values (#10718); FRR and IPsec
+// apply their own consumer-grammar sanitizers and guards at render time.
 //
 // #3900: a second, annotation-only injection class rides the same two
 // layers. Node annotations (the `annotate` command) are emitted VERBATIM
