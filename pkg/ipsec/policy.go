@@ -687,6 +687,16 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 	}
 	return children
 }
+// ChildSelector is an exported view of the renderer's resolved selector pair.
+// Its fields are the exact values rendered as swanctl local_ts/remote_ts.
+type ChildSelector = childSelector
+
+// EffectiveTrafficSelectors exposes the renderer's selector expansion to
+// snapshot producers so the dataplane fence cannot drift from rendered
+// bind-less selectors.
+func EffectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []ChildSelector {
+	return effectiveTrafficSelectors(connName, vpn)
+}
 
 // SANameIndex maps every SA name `swanctl --list-sas` can report for a config to
 // the configured VPNs whose render produces it (#9511): each rendered connection

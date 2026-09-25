@@ -179,6 +179,25 @@ pub(super) fn stage_flow_cache_hit(
         let cached_decision = cached.decision;
         let cached_descriptor = &cached.descriptor;
         let cached_metadata = &cached.metadata;
+        // #10683: cached transit decisions still require the immutable
+        // bind-less selector fence; an SA-up transition never authorizes
+        // bypassing policy-based XFRM through AF_XDP.
+        if matches!(
+            cached_decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+        ) && ForwardPacketMeta::from(meta)
+            .l3_addrs_unfiltered()
+            .is_some_and(|(source, destination)| {
+                worker_ctx
+                    .forwarding
+                    .bindless_ipsec_selector_fence
+                    .matches_with_nat(source, destination, cached_decision.nat)
+            }) {
+            scratch.scratch_recycle.push(desc.addr);
+            telemetry.dbg.policy_deny += 1;
+            telemetry.counters.touched = true;
+            return FlowCacheOutcome::Consumed;
+        }
         // #9991/#10670: a cached descriptor requires a live backing session.
         // The stamped-fabric preflight above checked liveness and zone together;
         // other arrivals check the idle deadline here before TTL, filters,

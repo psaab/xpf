@@ -93,6 +93,7 @@ mod gre;
 mod logical_ingress;
 pub(crate) mod ipsec_inner;
 pub(crate) mod ipsec_inner_queue;
+mod ipsec_selector_fence;
 pub(crate) mod wg_uncovered_forward;
 mod gre_discriminator;
 mod ha;
@@ -733,6 +734,9 @@ mod tests_session_delta_json;
 #[cfg(test)]
 #[path = "tests_9950.rs"]
 mod tests_9950;
+#[cfg(test)]
+#[path = "tests_ipsec_selector_fence_10683.rs"]
+mod tests_ipsec_selector_fence_10683;
 #[path = "worker/mod.rs"]
 mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /

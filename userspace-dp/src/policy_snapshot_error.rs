@@ -793,6 +793,14 @@ pub(crate) enum SnapshotIntegrityError {
         first: String,
         second: String,
     },
+    /// #10683: the bind-less selector-fence marker disagrees with whether
+    /// selector rows are present. Ignoring mismatched rows would silently
+    /// disable the cleartext fence.
+    BindlessSelectorFenceMarkerMismatch { enabled: bool, rows: usize },
+    /// #10683: a published traffic-selector pair cannot be represented by the
+    /// helper's exact IP-prefix/range matcher. Reject the snapshot rather than
+    /// silently omitting a selector and forwarding matching cleartext.
+    InvalidBindlessSelector { local_ts: String, remote_ts: String },
 }
 
 impl std::fmt::Display for SnapshotIntegrityError {
@@ -1122,6 +1130,16 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "security zones {:?} and {:?} share numeric zone id {} — publishing both would merge two zones; rename one zone (#3719)",
                 first, second, id
+            ),
+            Self::BindlessSelectorFenceMarkerMismatch { enabled, rows } => write!(
+                f,
+                "bind-less selector-fence marker enabled={} disagrees with {} selector rows — refusing to publish an unenforced cleartext selector set (#10683)",
+                enabled, rows
+            ),
+            Self::InvalidBindlessSelector { local_ts, remote_ts } => write!(
+                f,
+                "bind-less IPsec selector pair local_ts={:?} remote_ts={:?} cannot be represented by the dataplane matcher — refusing to publish it without a cleartext fence (#10683)",
+                local_ts, remote_ts
             ),
         }
     }

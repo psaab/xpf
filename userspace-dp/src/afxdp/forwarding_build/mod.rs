@@ -567,6 +567,8 @@ fn build_fallible_forwarding_state(
     previous: Option<&ForwardingState>,
 ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
     let mut state = ForwardingState::default();
+    state.bindless_ipsec_selector_fence =
+        crate::afxdp::ipsec_selector_fence::BindlessIpsecSelectorFence::from_snapshot(snapshot)?;
     let (excluded_local_v4, excluded_local_v6) = nat_translated_local_exclusions(snapshot);
 
     // #3719 (H03): fail CLOSED if two security zones share a numeric id before

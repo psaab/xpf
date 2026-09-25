@@ -466,6 +466,25 @@ pub(super) fn retry_pending_neigh(
             .remove(&key)
             .expect("key from this map");
         let mut decision = pkt.decision;
+        // #10683: a packet may have been buffered before this forwarding
+        // snapshot was published. Recheck the immutable selector fence after
+        // neighbor resolution and before any rewrite/TX, including its saved
+        // post-NAT decision.
+        let pending_meta: ForwardPacketMeta = pkt.meta.into();
+        if matches!(
+            decision.resolution.disposition,
+            ForwardingDisposition::MissingNeighbor
+                | ForwardingDisposition::ForwardCandidate
+                | ForwardingDisposition::FabricRedirect
+        ) && pending_meta.l3_addrs_unfiltered().is_some_and(|(source, destination)| {
+            forwarding
+                .bindless_ipsec_selector_fence
+                .matches_with_nat(source, destination, decision.nat)
+        }) {
+            counters.touched = true;
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
+        }
         // #1873 R-E defense-in-depth: tunnel-marked entries are excluded
         // at admission (poll_descriptor), so this should be unreachable —
         // but an in-place rewrite of a tunnel inner packet transmits it
@@ -1106,6 +1125,9 @@ mod mirror_tests;
 #[cfg(test)]
 #[path = "neighbor_dispatch_deferred_verdict_tests.rs"]
 mod deferred_verdict_tests;
+#[cfg(test)]
+#[path = "neighbor_dispatch_ipsec_selector_fence_10683_tests.rs"]
+mod ipsec_selector_fence_10683_tests;
 #[cfg(test)]
 #[path = "neighbor_dispatch_seed_timeout_10267_tests.rs"]
 mod seed_timeout_10267_tests;

@@ -198,7 +198,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // collision-free zone identity set before removed-zone purge. A v30 helper
 // cannot distinguish a quarantined/legacy partial map from a real disappearance;
 // exact equality refuses the mixed pair rather than retaining stale sessions.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 31;
+// v31 -> v32 (#10683): bind-less policy-based IPsec selector pairs are
+// mandatory independent of current SA state. A v31 helper would ignore those
+// rows and resume forwarding cleartext for matching transit traffic.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 32;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
