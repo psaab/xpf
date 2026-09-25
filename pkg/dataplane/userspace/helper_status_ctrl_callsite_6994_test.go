@@ -1,6 +1,9 @@
 package userspace
 
 import (
+	"os"
+	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -168,5 +171,49 @@ func TestApplyHelperStatusKeepsCtrlDisabledDuringLinkCycle6994(t *testing.T) {
 	if m.ctrlWasEnabled {
 		t.Fatal("m.ctrlWasEnabled is true after an apply that ran during a link cycle: " +
 			"the enable half of the ctrl branch executed despite the gate (#6871/#6994)")
+	}
+}
+
+// RED on revert: a 30-second value in the published userspace_ctrl map would
+// let the shim redirect transit for six times its enforced 5-second stale
+// window. Read the value actually written by applyHelperStatusLocked and
+// compare it with the shim's constant so the publisher and consumer cannot
+// silently drift.
+func TestApplyHelperStatusPublishesShimHeartbeatTimeout10710(t *testing.T) {
+	m, ctrl := seamedManager(t)
+	if err := m.applyHelperStatusLocked(readyHelperStatus()); err != nil {
+		t.Fatalf("applyHelperStatusLocked: %v", err)
+	}
+	if !ctrl.haveStored {
+		t.Fatal("applyHelperStatusLocked wrote nothing to the userspace_ctrl map")
+	}
+	if ctrl.stored.Enabled != 1 {
+		t.Fatalf("userspace_ctrl.Enabled = %d, want 1 so the shim consumes this row", ctrl.stored.Enabled)
+	}
+
+	const shimPath = "../../../userspace-xdp/src/lib.rs"
+	shimSource, err := os.ReadFile(shimPath)
+	if err != nil {
+		t.Fatalf("read shim source %s: %v", shimPath, err)
+	}
+	timeoutDecl := regexp.MustCompile(
+		`(?m)^const USERSPACE_DEFAULT_HEARTBEAT_TIMEOUT_MS: u32 = ([0-9]+);$`,
+	).FindAllSubmatch(shimSource, -1)
+	if len(timeoutDecl) != 1 {
+		t.Fatalf("found %d USERSPACE_DEFAULT_HEARTBEAT_TIMEOUT_MS declarations in shim, want exactly 1",
+			len(timeoutDecl))
+	}
+	shimTimeout, err := strconv.ParseUint(string(timeoutDecl[0][1]), 10, 32)
+	if err != nil {
+		t.Fatalf("parse shim heartbeat timeout %q: %v", timeoutDecl[0][1], err)
+	}
+	const wantTimeoutMS = uint32(5_000)
+	if shimTimeout != uint64(wantTimeoutMS) {
+		t.Fatalf("shim stale-heartbeat timeout = %d ms, want 5 seconds (%d ms)",
+			shimTimeout, wantTimeoutMS)
+	}
+	if ctrl.stored.HeartbeatTimeoutMS != uint32(shimTimeout) {
+		t.Fatalf("shim-visible userspace_ctrl.HeartbeatTimeoutMS = %d ms, want shim timeout %d ms",
+			ctrl.stored.HeartbeatTimeoutMS, shimTimeout)
 	}
 }

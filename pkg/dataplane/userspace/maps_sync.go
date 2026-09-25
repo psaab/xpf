@@ -42,6 +42,9 @@ type userspaceCtrlValue struct {
 }
 
 const userspaceMetadataVersion = 4
+// userspaceHeartbeatTimeoutMS matches USERSPACE_DEFAULT_HEARTBEAT_TIMEOUT_MS
+// in userspace-xdp/src/lib.rs, the timeout the shim enforces for stale workers.
+const userspaceHeartbeatTimeoutMS = 5_000
 const userspaceCtrlFlagCPUMap = 1
 const userspaceCtrlFlagTrace = 2
 const userspaceCtrlFlagNativeGRE = 4
@@ -187,7 +190,7 @@ func (m *Manager) programBootstrapMapsLocked(snapshot *ConfigSnapshot, cfg confi
 		WgPorts:            wgPorts,
 		ConfigGeneration:   0,
 		FIBGeneration:      0,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	}
 	if err := ctrlMap.Update(zero, ctrl, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update userspace_ctrl: %w", err)
@@ -398,7 +401,7 @@ func (m *Manager) blindFailClosedUserspaceCtrlLocked(
 		MetadataVersion:    userspaceMetadataVersion,
 		Workers:            1,
 		QueueCount:         1,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	}
 	if snapshot != nil {
 		workers := maxInt(snapshot.Userspace.Workers, 1)
@@ -562,7 +565,7 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 		WgPorts:            wgPorts,
 		ConfigGeneration:   status.LastSnapshotGeneration,
 		FIBGeneration:      status.LastFIBGeneration,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	}
 	m.resolveCtrlEnableLocked(status, &ctrl)
 

@@ -31,7 +31,7 @@ func TestPrepareLinkCycleDisablesCtrlBeforeStopWorkers(t *testing.T) {
 		Flags:              userspaceCtrlFlagStrict,
 		ConfigGeneration:   41,
 		FIBGeneration:      7,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 
 	events := startLinkCycleControlServer(t, controlSock, ctrlMap, []ProcessStatus{{
@@ -75,7 +75,7 @@ func TestNotifyLinkCycleRebindsAndAppliesHelperStatusCompat(t *testing.T) {
 		QueueCount:         2,
 		ConfigGeneration:   11,
 		FIBGeneration:      3,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	m.configuredMode = ModeUserspaceCompat
 	m.neighborsPrewarmed = true
@@ -168,7 +168,7 @@ func TestNotifyLinkCycleStrictModePublishesFailClosedCtrlFlags(t *testing.T) {
 		QueueCount:         1,
 		ConfigGeneration:   4,
 		FIBGeneration:      2,
-		HeartbeatTimeoutMS: 30000,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	m.configuredMode = ModeUserspaceStrict
 	m.mode = ModeUserspaceCompat
