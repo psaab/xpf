@@ -201,7 +201,7 @@ func TestRouteDropAdvisoryForConnectedDirectedBroadcast11004(t *testing.T) {
 			!strings.Contains(note, "directed-broadcast") ||
 			!strings.Contains(note, "policy is evaluated on its egress before neighbor resolution") ||
 			!strings.Contains(note, "not a pre-policy route drop") ||
-			!strings.Contains(note, "NOARP") ||
+			!strings.Contains(note, "even if snapshot or runtime neighbor state contains a usable-looking entry") ||
 			!strings.Contains(note, "targeted-broadcast") {
 			t.Fatalf("directed-broadcast RouteDropNote %q omits its policy/neighbor caveat", note)
 		}

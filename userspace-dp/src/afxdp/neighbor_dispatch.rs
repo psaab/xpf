@@ -183,6 +183,21 @@ pub(super) fn pending_neigh_flow_key(
     })
 }
 
+fn pending_neighbor_mac(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    key: (i32, IpAddr),
+) -> Option<[u8; 6]> {
+    if is_connected_v4_directed_broadcast(forwarding, key.0, key.1) {
+        return None;
+    }
+    forwarding
+        .neighbors
+        .get(&key)
+        .map(|entry| entry.mac)
+        .or_else(|| dynamic_neighbors.get(&key).map(|entry| entry.mac))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn retry_pending_neigh(
     binding: &mut BindingWorker,
@@ -398,11 +413,8 @@ pub(super) fn retry_pending_neigh(
         // Check if neighbor MAC is now available, mirroring the lookup
         // order from lookup_neighbor_entry(): static/permanent neighbors
         // first, then dynamic_neighbors. The map key IS the neighbor key.
-        let mac = forwarding
-            .neighbors
-            .get(&key)
-            .map(|e| e.mac)
-            .or_else(|| dynamic_neighbors.get(&key).map(|e| e.mac));
+        let mac = pending_neighbor_mac(forwarding, dynamic_neighbors, key);
+
         let Some(neighbor_mac) = mac else {
             // Still pending — re-fire the ARP/NDP probe if the next slot in
             // the exponential schedule is due (GEMINI-NEXT.md Section 3
@@ -1501,6 +1513,78 @@ mod pending_neigh_flow_key_tests {
             pending_neigh_flow_key(None, &frame, meta),
             None,
             "slack TCP must buffer no metadata-derived pending flow key"
+        );
+    }
+}
+
+#[cfg(test)]
+mod directed_broadcast_pending_neighbor_tests_11033 {
+    use super::*;
+
+    // RED-on-revert: remove the egress-scoped gate and a pending packet resumes
+    // from either the static snapshot map or the dynamic neighbor cache.
+
+    #[test]
+    fn pending_directed_broadcast_stays_unresolved_with_static_or_dynamic_entry() {
+        let mut forwarding = ForwardingState::default();
+        let broadcast = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 255));
+        let unicast = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
+        forwarding
+            .connected_v4_directed_broadcast_neighbor_keys
+            .insert((7, Ipv4Addr::new(192, 0, 2, 255)));
+        forwarding.neighbors.insert(
+            (7, broadcast),
+            NeighborEntry {
+                mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01],
+            },
+        );
+        let dynamic = Arc::new(ShardedNeighborMap::new());
+        dynamic.insert_if_changed(
+            (7, broadcast),
+            NeighborEntry {
+                mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02],
+            },
+        );
+
+        assert_eq!(
+            pending_neighbor_mac(&forwarding, &dynamic, (7, broadcast)),
+            None,
+            "a connected directed broadcast must not resume from a snapshot/static neighbor"
+        );
+        forwarding.neighbors.remove(&(7, broadcast));
+        assert_eq!(
+            pending_neighbor_mac(&forwarding, &dynamic, (7, broadcast)),
+            None,
+            "a connected directed broadcast must not resume from a runtime/dynamic neighbor"
+        );
+
+        let other_egress_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x05];
+        forwarding.neighbors.insert(
+            (8, broadcast),
+            NeighborEntry {
+                mac: other_egress_mac,
+            },
+        );
+        assert_eq!(
+            pending_neighbor_mac(&forwarding, &dynamic, (8, broadcast)),
+            Some(other_egress_mac),
+            "the same address remains usable on an egress where it is not a directed broadcast"
+        );
+
+        let unicast_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x03];
+        forwarding
+            .neighbors
+            .insert((7, unicast), NeighborEntry { mac: unicast_mac });
+        dynamic.insert_if_changed(
+            (7, unicast),
+            NeighborEntry {
+                mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x04],
+            },
+        );
+        assert_eq!(
+            pending_neighbor_mac(&forwarding, &dynamic, (7, unicast)),
+            Some(unicast_mac),
+            "an ordinary connected unicast must still resolve static-first"
         );
     }
 }

@@ -848,6 +848,22 @@ impl Coordinator {
         {
             return false;
         }
+        // #11033: do not import connected subnet-directed broadcasts from the
+        // kernel neighbor snapshot on their matching connected egress. The
+        // route can still reach policy, but no neighbor entry may forward it.
+        let accepted: Vec<_> = neighbors
+            .iter()
+            .filter(|(ifindex, ip, _)| {
+                !crate::afxdp::forwarding::is_connected_v4_directed_broadcast(
+                    &self.forwarding,
+                    *ifindex,
+                    *ip,
+                )
+            })
+            .copied()
+            .collect();
+        let neighbors = accepted.as_slice();
+
         let old_manager_keys = if replace {
             self.neighbors
                 .manager_keys

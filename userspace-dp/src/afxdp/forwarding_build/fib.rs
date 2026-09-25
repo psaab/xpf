@@ -311,6 +311,16 @@ pub(super) fn populate_neighbors(
                 family: neigh.family.clone(),
             });
         }
+        // #11033: a usable NUD row must not make a connected subnet
+        // directed-broadcast destination forwardable on its own egress.
+        if crate::afxdp::forwarding::is_connected_v4_directed_broadcast(
+            state,
+            neigh.ifindex,
+            ip,
+        ) {
+            continue;
+        }
+
         // #3771 (M12): allowlist neighbor states — skip a known-unusable state
         // (failed/incomplete) silently and COUNT an unknown/future state
         // (none/empty/corrupt), instead of the pre-fix denylist that installed

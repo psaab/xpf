@@ -4868,6 +4868,86 @@ fn neighbor_family_matching_or_empty_installs() {
     assert_eq!(state.neighbors.len(), 2, "both neighbors install");
 }
 
+/// #11033: a usable-looking snapshot row for a connected subnet broadcast
+/// must not turn the connected route into a forward candidate, and a runtime
+/// neighbor row must not bypass that same destination gate.
+/// RED-on-revert: removing import leaves the stale snapshot row installed;
+/// removing lookup lets a runtime row become a ForwardCandidate.
+#[test]
+fn connected_directed_broadcast_snapshot_neighbor_is_not_installed_or_used_11033() {
+    let broadcast = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 255));
+    let unicast = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42));
+    let mac = "aa:bb:cc:dd:ee:ff";
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0-0-0".into(),
+            ifindex: 10,
+            addresses: vec![crate::protocol::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "192.168.1.1/24".into(),
+                scope: 0,
+            }],
+            ..Default::default()
+        }],
+        neighbors: vec![
+            crate::NeighborSnapshot {
+                interface: "ge-0-0-0".into(),
+                ifindex: 10,
+                family: "inet".into(),
+                ip: broadcast.to_string(),
+                mac: mac.into(),
+                state: "stale".into(),
+                ..Default::default()
+            },
+            crate::NeighborSnapshot {
+                interface: "ge-0-0-0".into(),
+                ifindex: 10,
+                family: "inet".into(),
+                ip: unicast.to_string(),
+                mac: mac.into(),
+                state: "stale".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        !state.neighbors.contains_key(&(10, broadcast)),
+        "snapshot import must reject a connected directed-broadcast neighbor"
+    );
+    assert!(
+        state.neighbors.contains_key(&(10, unicast)),
+        "ordinary stale unicast snapshot neighbors remain usable"
+    );
+
+    // Defense in depth for a preexisting/dynamic neighbor: neither neighbor
+    // map may resolve a connected directed broadcast into a transmit candidate.
+    let dynamic = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+    dynamic.insert_if_changed(
+        (10, broadcast),
+        crate::afxdp::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
+            &state, &dynamic, broadcast
+        )
+        .disposition,
+        crate::afxdp::ForwardingDisposition::MissingNeighbor,
+        "directed broadcast must stay unresolved even when dynamic neighbor state contains it"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
+            &state, &dynamic, unicast
+        )
+        .disposition,
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        "ordinary connected unicast neighbor remains forwardable"
+    );
+}
+
 /// #3771 (M12): a neighbor with an UNKNOWN state (`none`) is NOT installed and
 /// the diagnostic counter bumps. fail-on-revert: the denylist treats `none` as
 /// usable and installs it, so the `is_empty` assertion (race-free) goes red.

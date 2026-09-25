@@ -123,6 +123,12 @@ pub(in crate::afxdp) fn lookup_neighbor_entry(
     ifindex: i32,
     target: IpAddr,
 ) -> Option<NeighborEntry> {
+    // The neighbor may be static, kernel-imported, or packet-learned; none
+    // may resolve a directed broadcast on this connected egress.
+    if super::is_connected_v4_directed_broadcast(state, ifindex, target) {
+        return None;
+    }
+
     if let Some(entry) = state.neighbors.get(&(ifindex, target)).copied() {
         return Some(entry);
     }

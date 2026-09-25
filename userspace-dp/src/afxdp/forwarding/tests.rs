@@ -816,6 +816,131 @@ fn zone_encoded_fabric_ingress_skips_dynamic_neighbor_learning() {
 }
 
 #[test]
+fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
+    let mut coordinator = Coordinator::new();
+    let broadcast = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 255));
+    let unicast = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42));
+    let entry = NeighborEntry {
+        mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    };
+    coordinator
+        .refresh_runtime_snapshot(&ConfigSnapshot {
+            interfaces: vec![
+                InterfaceSnapshot {
+                    name: "ge-0-0-0".into(),
+                    ifindex: 13,
+                    addresses: vec![crate::protocol::InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: "192.168.1.1/24".into(),
+                        scope: 0,
+                    }],
+                    ..Default::default()
+                },
+                InterfaceSnapshot {
+                    name: "ge-0-0-1".into(),
+                    ifindex: 99,
+                    addresses: vec![crate::protocol::InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: "203.0.113.1/24".into(),
+                        scope: 0,
+                    }],
+                    ..Default::default()
+                },
+            ],
+            neighbors: vec![
+                NeighborSnapshot {
+                    interface: "ge-0-0-0".into(),
+                    ifindex: 13,
+                    family: "inet".into(),
+                    ip: broadcast.to_string(),
+                    mac: "aa:bb:cc:dd:ee:ff".into(),
+                    state: "stale".into(),
+                    ..Default::default()
+                },
+                NeighborSnapshot {
+                    interface: "ge-0-0-1".into(),
+                    ifindex: 99,
+                    family: "inet".into(),
+                    ip: broadcast.to_string(),
+                    mac: "aa:bb:cc:dd:ee:ff".into(),
+                    state: "stale".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .expect("connected interface snapshot must apply");
+    assert!(
+        !coordinator.forwarding.neighbors.contains_key(&(13, broadcast)),
+        "full snapshot must not import a connected directed-broadcast neighbor"
+    );
+    assert!(
+        !coordinator
+            .neighbors
+            .manager_keys
+            .lock()
+            .expect("manager keys")
+            .contains(&(13, broadcast)),
+        "full snapshot must not retain a manager key for the rejected neighbor"
+    );
+    assert!(
+        coordinator.forwarding.neighbors.contains_key(&(99, broadcast)),
+        "the same address remains importable as a neighbor on another egress"
+    );
+    assert!(
+        coordinator
+            .neighbors
+            .manager_keys
+            .lock()
+            .expect("manager keys")
+            .contains(&(99, broadcast)),
+        "snapshot refresh must retain the neighbor key on the unrelated egress"
+    );
+    assert!(coordinator.apply_manager_neighbors(
+        true,
+        0,
+        &[
+            (13, broadcast, entry),
+            (13, unicast, entry),
+            (99, broadcast, entry),
+        ],
+    ));
+
+    assert!(
+        !coordinator.forwarding.neighbors.contains_key(&(13, broadcast)),
+        "manager replace must not import connected directed-broadcast snapshot rows"
+    );
+    assert!(
+        coordinator.dynamic_neighbors_ref().get(&(13, broadcast)).is_none(),
+        "rejected manager row must not leak into runtime neighbor state"
+    );
+    assert!(
+        coordinator.dynamic_neighbors_ref().get(&(99, broadcast)).is_some(),
+        "manager replace must keep the address usable on an unrelated egress"
+    );
+    assert!(
+        lookup_neighbor_entry(
+            &coordinator.forwarding,
+            Some(coordinator.dynamic_neighbors_ref()),
+            99,
+            broadcast,
+        )
+        .is_some(),
+        "the same address remains resolvable on a non-broadcast egress"
+    );
+    assert!(
+        lookup_neighbor_entry(
+            &coordinator.forwarding,
+            Some(coordinator.dynamic_neighbors_ref()),
+            13,
+            unicast,
+        )
+        .is_some(),
+        "the replace must retain the ordinary unicast control neighbor"
+    );
+}
+
+#[test]
 fn manager_neighbor_replace_preserves_packet_learned_entries() {
     let mut coordinator = Coordinator::new();
     coordinator.dynamic_neighbors_ref().insert(

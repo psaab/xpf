@@ -896,9 +896,13 @@ pub(super) fn populate_interfaces(
                     }
                     let prefix = PrefixV4::from_net(v4);
                     if prefix.prefix_len() < 31 {
+                        let directed_broadcast = prefix.directed_broadcast();
                         state
                             .connected_v4_directed_broadcasts
-                            .insert(prefix.directed_broadcast());
+                            .insert(directed_broadcast);
+                        state
+                            .connected_v4_directed_broadcast_neighbor_keys
+                            .insert((iface.ifindex, directed_broadcast));
                     }
                     state.connected_v4.push(ConnectedRouteV4 {
                         prefix,

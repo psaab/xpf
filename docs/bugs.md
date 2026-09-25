@@ -160,19 +160,20 @@
   drives the actual poll path with a v4-keyed deny and controls that ordinary
   NAT64 transit continues to translate and forward.
 
-### Directed-broadcast forwarding accepts NOARP neighbor (#10690)
-- Go neighbor publication/listener and Rust netlink/FIB state handling treated
-  `NUD_NOARP` as a resolved peer. A directed-broadcast destination on the selected
-  connected subnet could therefore reuse the all-ones Ethernet MAC and bypass
-  the intended unicast-only forwarding boundary.
-- **Fix:** Reject NOARP neighbor states at Go publication/listener and Rust
-  netlink/FIB admission, and remove a prior dynamic row on NOARP transitions.
-  A NOARP row cannot supply the all-ones MAC for a unicast-shaped permit.
-  No TX policy guard was added; explicit broadcast-rule behavior remains
-  outside this neighbor-state fix.
-- **Regression tests:** Rust netlink transition and FIB-state classification;
-  Go listener and snapshot publication, including NOARP-only and composite
-  NUD states.
+### Directed-broadcast neighbor handling (#10690/#11033)
+- #10690 rejects `NUD_NOARP` kernel-neighbor events, but that state gate did
+  not make directed-broadcast neighbors impossible. The ARP-reply learn path
+  accepts IPv4 addresses that are not limited broadcast, and programs accepted
+  entries into the kernel as `NUD_STALE`; Go snapshots and Rust snapshot install
+  accept stale entries. Thus a usable directed-broadcast neighbor could arise
+  without operator static ARP.
+- **Fix:** Reject a directed-broadcast neighbor on its matching connected
+  egress during snapshot import and lookup. Pending-neighbor retries also ignore
+  both static and dynamic entries for that egress, so an existing row cannot
+  resume a packet into transmission. Connected-egress policy evaluation is unchanged.
+- **Regression tests:** `connected_directed_broadcast_snapshot_neighbor_is_not_installed_or_used_11033`,
+  `manager_neighbor_replace_filters_connected_directed_broadcast_11033`, and
+  `pending_directed_broadcast_stays_unresolved_with_static_or_dynamic_entry`.
 
 
 

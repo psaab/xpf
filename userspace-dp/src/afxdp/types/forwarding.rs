@@ -112,6 +112,10 @@ pub(in crate::afxdp) struct ForwardingState {
     /// broadcasts. Transit source classification uses one set lookup instead
     /// of scanning every connected route on each packet.
     pub(in crate::afxdp) connected_v4_directed_broadcasts: FastSet<Ipv4Addr>,
+    /// #11033: egress-scoped index for rejecting neighbor resolution of a
+    /// connected subnet-directed broadcast on its own interface. Unlike the
+    /// address-only source martian index above, this key includes ifindex.
+    pub(in crate::afxdp) connected_v4_directed_broadcast_neighbor_keys: FastSet<(i32, Ipv4Addr)>,
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
     pub(in crate::afxdp) routes_v4: FastMap<String, Vec<RouteEntryV4>>,
     pub(in crate::afxdp) routes_v6: FastMap<String, Vec<RouteEntryV6>>,
