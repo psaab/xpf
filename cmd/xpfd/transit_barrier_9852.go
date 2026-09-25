@@ -46,38 +46,42 @@ import (
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
-// transitBarrierInstall performs the single kernel mutation of
-// `xpfd transit-barrier close`. It is a package var (the runNetworkctl /
-// vlanLinkAddSeam pattern) so tests inject install failures without a kernel.
+// transitBarrierInstall performs the kernel mutation of
+// `xpfd transit-barrier close`. It is a package var so tests inject install
+// failures without a kernel.
 var transitBarrierInstall = func() error {
 	return xnft.NewNetlinkInstaller().InstallTransitBarrier()
 }
 
-// parseTransitBarrierArgs validates the operands of `xpfd transit-barrier`.
-// The verb takes exactly one operand, `close`, and no flags; like #5322's
-// `xpfd cleanup` guard, anything else is a hard usage error rather than a
-// silently reinterpreted barrier operation. Extracted so the rejection is
-// unit-testable without the os.Exit side effect of the dispatch.
+// transitBarrierRemove performs the postrm cleanup mutation of
+// `xpfd transit-barrier remove`.
+var transitBarrierRemove = func() error {
+	return xnft.NewNetlinkInstaller().RemoveTransitBarrier()
+}
+
+// parseTransitBarrierArgs validates the operand of `xpfd transit-barrier`.
 func parseTransitBarrierArgs(args []string) error {
-	if len(args) != 1 || args[0] != "close" {
-		return fmt.Errorf("usage: xpfd transit-barrier close")
+	if len(args) != 1 || (args[0] != "close" && args[0] != "remove") {
+		return fmt.Errorf("usage: xpfd transit-barrier {close|remove}")
 	}
 	return nil
 }
 
-// runTransitBarrierSubcommand executes `xpfd transit-barrier close` and
-// returns the process exit code: 0 when the inet barrier is installed, 1 on
-// usage, inet, or real bridge-family failure. A kernel without bridge
-// nf_tables support is a documented degraded-success case: the inet barrier
-// remains active and the warning makes the missing L2 coverage explicit.
-// The install is idempotent, so a re-run converges. Diagnostics go to stderr;
-// success lines go to stdout (captured to the journal by the boot unit).
-// Writers are parameters so tests capture both without redirecting
-// os.Stdout/os.Stderr.
+// runTransitBarrierSubcommand executes the boot fence or its package-removal
+// cleanup and returns a process exit code. Writers are parameters so tests
+// capture diagnostics without redirecting os.Stdout/os.Stderr.
 func runTransitBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 	if err := parseTransitBarrierArgs(args); err != nil {
 		fmt.Fprintf(stderr, "transit-barrier: %v\n", err)
 		return 1
+	}
+	if args[0] == "remove" {
+		if err := transitBarrierRemove(); err != nil {
+			fmt.Fprintf(stderr, "transit-barrier: remove transit barrier: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "transit barrier removed")
+		return 0
 	}
 	if err := transitBarrierInstall(); err != nil {
 		if xnft.IsTransitBarrierBridgeUnsupportedOnly(err) {

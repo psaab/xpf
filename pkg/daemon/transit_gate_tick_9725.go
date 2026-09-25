@@ -93,7 +93,7 @@ func (d *Daemon) writeTransitGateLocked(stage string, open bool) bool {
 // transitGateMu, then drives the transit gate and RG weight from that same
 // ready-to-serve verdict.
 func (d *Daemon) reassertTransitGate(stage string) {
-	if d == nil {
+	if d == nil || !d.shouldManageTransitGate() {
 		return
 	}
 	d.transitGateMu.Lock()
@@ -107,7 +107,7 @@ func (d *Daemon) reassertTransitGate(stage string) {
 // dataplane arm bit or redundancy-group arm tracking. A successful Start still
 // leaves this fence in place until a fresh kernel count proves an XDP link.
 func (d *Daemon) closeTransitUntilAttached(stage string) {
-	if d == nil {
+	if d == nil || !d.shouldManageTransitGate() {
 		return
 	}
 	d.transitGateMu.Lock()

@@ -64,7 +64,6 @@ type Options struct {
 	// `cold_path_sample_mask` field on ConfigSnapshot.
 	ColdPathSampleMask *uint64
 }
-
 // nodeIDFile is the path to the cluster node ID file.
 // If this file exists and contains a valid integer (0 or 1), the daemon
 // runs in cluster mode with ${node} variable expansion. If the file does
@@ -134,6 +133,11 @@ type Daemon struct {
 	// torn-down backend published on purpose (#6741), so a non-nil cell is
 	// not proof of an armed forwarding path.
 	dataplaneArmed atomic.Bool
+	// transitGateOwned latches kernel-transit ownership once the appliance
+	// marker, committed config, or a successful dataplane arm establishes it.
+	// It stays true for this daemon lifetime so a first-commit rollback that
+	// clears EverCommitted still closes transit before detaching the dataplane.
+	transitGateOwned atomic.Bool
 	// transitGateMu serializes every sysctl/barrier actuation with the periodic
 	// kernel-truth census. A wake callback can arrive from any dataplane writer,
 	// while the tick is the completeness guarantee for writers no observer sees.

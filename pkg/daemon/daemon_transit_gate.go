@@ -195,6 +195,34 @@ var (
 func transitForwardSysctlPaths() []string {
 	return []string{ipv4ForwardSysctlPath, ipv6ForwardSysctlPath}
 }
+// shouldManageTransitGate limits the persistent kernel forwarding fence to
+// appliance images and hosts with a committed xpf configuration. A package
+// install on a foreign, never-committed host must leave its existing kernel
+// forwarding posture alone. Once ownership is established it remains latched
+// for this daemon lifetime so a first-commit rollback cannot re-open transit.
+func (d *Daemon) shouldManageTransitGate() bool {
+	if d == nil {
+		return false
+	}
+	if d.transitGateOwned.Load() {
+		return true
+	}
+	if _, err := os.Stat(applianceMarkerFile); err == nil {
+		d.transitGateOwned.Store(true)
+		return true
+	}
+	if d.store != nil && d.store.EverCommitted() {
+		d.transitGateOwned.Store(true)
+		return true
+	}
+	if d.dataplaneArmed.Load() {
+		d.transitGateOwned.Store(true)
+		return true
+	}
+	return false
+}
+
+ 
 
 // writeTransitForwardSysctls drives both transit knobs to on/off.
 //
@@ -243,6 +271,9 @@ func (d *Daemon) DataplaneArmed() bool { return d.dataplaneArmed.Load() }
 // link; first ApplyConfig or the periodic tick opens both once the kernel
 // reports one.
 func (d *Daemon) markDataplaneArmed(stage string) {
+	if d == nil || !d.shouldManageTransitGate() {
+		return
+	}
 	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(true)
 	ready := d.attachedXDPLinks() > 0
@@ -303,6 +334,9 @@ func (d *Daemon) applyDataplaneReadyTrack(ready bool) {
 // The daemon deliberately does NOT exit — management/CLI/gRPC must stay
 // reachable so the operator can correct the config in-band (#1960 no-brick).
 func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
+	if d == nil || !d.shouldManageTransitGate() {
+		return
+	}
 	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(false)
 	// #7191: install the nft barrier FIRST on the closing path. Both legs
@@ -317,32 +351,25 @@ func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
 }
 
 // markDataplaneNotArmed records a DELIBERATE not-armed state and closes
-// kernel transit forwarding. Distinct from markDataplaneArmFailed: nothing
-// went wrong, the daemon is in a mode where it never arms, so this is Info.
+// kernel transit forwarding only when xpf owns the host's transit posture.
+// A foreign host with no committed configuration is not an appliance and
+// the package install must preserve the host's existing forwarding state.
 //
-// BOOTSTRAP IS FORWARDING-OFF, ON PURPOSE. Bootstrap mode exists so a box
-// with no known-good config still answers management; it has no policy to
-// enforce, so it must not carry transit. #1922 already SUPPRESSED
-// enableForwarding there — but suppression is not closure: a daemon RESTART
-// into bootstrap (or into the #1960 compile-failed boot, which forces
-// bootstrap) inherits `ip_forward=1` from the previous armed run's sysctl
-// writes, which survive the process. pkg/daemon/README.md already asserts
-// "Transit is still fail-closed ... the daemon itself forwards no transit in
-// this state"; the explicit close is what makes that assertion true.
-//
-// The same reasoning covers --no-dataplane: bring-up already declines to
-// enable forwarding in that mode, so closing the knob makes the apply tail
-// agree with bring-up instead of contradicting it.
+// Appliance factory bootstrap and any previously committed host still close:
+// neither has a policy it can currently enforce, and sysctls outlive the
+// daemon process. Once marked by the appliance marker or a committed config,
+// ownership remains latched for this daemon lifetime so a first-commit
+// rollback can close before detaching the dataplane.
 func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
+	if d == nil || !d.shouldManageTransitGate() {
+		return
+	}
 	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(false)
 	d.writeTransitGateLocked(stage, false)
 	// #7178: DELIBERATE and FAILED are the same fact to a peer — this node
 	// forwards no transit either way, so it must not outbid one that does. The
-	// distinction is why this logs at Info while the failure path logs at Error;
-	// it is not a reason to keep mastership. On a bootstrap boot there is no
-	// cluster yet and applyDataplaneReadyTrack is a no-op; the case this covers
-	// is config-only mode on a node that already has a cluster configured.
+	// distinction is why this logs at Info while the failure path logs at Error.
 	d.applyDataplaneReadyTrack(false)
 	d.transitGateMu.Unlock()
 	slog.Info("dataplane not armed; kernel transit forwarding disabled (fail-closed)",

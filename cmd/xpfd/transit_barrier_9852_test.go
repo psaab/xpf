@@ -18,13 +18,48 @@ func TestTransitBarrierCommand9852(t *testing.T) {
 	if got := classifyCommand([]string{"xpfd", "transit-barrier"}); got != cmdTransitBarrier {
 		t.Fatalf("classifyCommand transit-barrier = %d, want %d", got, cmdTransitBarrier)
 	}
-	for _, args := range [][]string{{}, {"open"}, {"close", "extra"}, {"--close"}} {
+	for _, args := range [][]string{{}, {"open"}, {"close", "extra"}, {"remove", "extra"}, {"--close"}} {
 		if err := parseTransitBarrierArgs(args); err == nil {
-			t.Fatalf("parseTransitBarrierArgs(%q) accepted invalid operands", args)
+			t.Errorf("parseTransitBarrierArgs(%q) unexpectedly succeeded", args)
 		}
 	}
-	if err := parseTransitBarrierArgs([]string{"close"}); err != nil {
-		t.Fatalf("parseTransitBarrierArgs(close): %v", err)
+	for _, args := range [][]string{{"close"}, {"remove"}} {
+		if err := parseTransitBarrierArgs(args); err != nil {
+			t.Errorf("parseTransitBarrierArgs(%q): %v", args, err)
+		}
+	}
+}
+
+func TestTransitBarrierRemoveCommand10733(t *testing.T) {
+	orig := transitBarrierRemove
+	t.Cleanup(func() { transitBarrierRemove = orig })
+
+	var stdout, stderr bytes.Buffer
+	calls := 0
+	transitBarrierRemove = func() error {
+		calls++
+		return nil
+	}
+	if code := runTransitBarrierSubcommand([]string{"remove"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("successful barrier removal exit code = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if calls != 1 || !strings.Contains(stdout.String(), "transit barrier removed") || stderr.Len() != 0 {
+		t.Fatalf("successful barrier removal: calls=%d stdout=%q stderr=%q", calls, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	calls = 0
+	injected := errors.New("netlink permission denied")
+	transitBarrierRemove = func() error {
+		calls++
+		return injected
+	}
+	if code := runTransitBarrierSubcommand([]string{"remove"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("failed barrier removal exit code = %d, want 1", code)
+	}
+	if calls != 1 || !strings.Contains(stderr.String(), injected.Error()) || stdout.Len() != 0 {
+		t.Fatalf("failed barrier removal: calls=%d stdout=%q stderr=%q", calls, stdout.String(), stderr.String())
 	}
 }
 
