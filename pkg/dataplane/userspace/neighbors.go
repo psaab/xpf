@@ -66,16 +66,16 @@ func neighborsEqualForwarding(a, b []NeighborSnapshot) bool {
 //
 //	pub(super) fn neighbor_state_usable(state: &str) -> bool {
 //	    let normalized = state.to_ascii_lowercase();
-//	    !(normalized.contains("failed") || normalized.contains("incomplete"))
+//	    !(normalized.contains("failed") || normalized.contains("incomplete")
+//	      || normalized.contains("noarp"))
 //	}
 //
 // Codex code-review #3: Rust uses SUBSTRING match after
 // lowercasing; previous Go did EXACT match — drift. Fixed to
 // match Rust's substring semantics.
 //
-// "none" is rejected here even though Rust treats it as usable,
-// because state-0 entries have no learned MAC info — Rust would
-// drop them at later parse-MAC anyway, but rejecting here
+// "none" is rejected here even though Rust classifies it as unknown,
+// because state-0 entries have no learned MAC info — rejecting here
 // prevents a useless publish round-trip.
 //
 // Drift here is a silent forwarding bug — keep in sync if
@@ -91,7 +91,9 @@ func neighborSnapshotPublishable(n NeighborSnapshot) bool {
 		return false
 	}
 	lower := strings.ToLower(n.State)
-	if strings.Contains(lower, "failed") || strings.Contains(lower, "incomplete") {
+	if strings.Contains(lower, "failed") ||
+		strings.Contains(lower, "incomplete") ||
+		strings.Contains(lower, "noarp") {
 		return false
 	}
 	if lower == "none" {

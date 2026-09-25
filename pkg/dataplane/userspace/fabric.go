@@ -298,28 +298,18 @@ var fabricNeighListFn = netlink.NeighList
 
 // FabricNeighValidStates is the NUD mask of neighbour states whose hardware
 // address is usable for forwarding. INCOMPLETE/FAILED/NONE carry no address, or
-// retain a stale one, and are excluded. NUD_NOARP is excluded too -- an earlier
-// revision of this comment enumerated only the first three, which read as though
-// NOARP were accepted (#7443).
+// retain a stale one, and are excluded. NUD_NOARP is excluded because it does
+// not establish a resolved unicast peer.
 //
-// This is deliberately NOT the same mask as usableNUD
-// (pkg/daemon/daemon_neighbor_listener.go), which does accept NUD_NOARP. The
-// two answer different questions and a difference between them is therefore
-// permissible, unlike the pkg/daemon duplication #6598 removed:
+// The state bits match usableNUD
+// (pkg/daemon/daemon_neighbor_listener.go); both reject NUD_NOARP. The fabric
+// predicate additionally requires a six-byte Ethernet address because it
+// installs one specific peer MAC, while the general listener publishes
+// resolved neighbors to the forwarding snapshot.
 //
-//   - usableNUD governs the GENERAL host-neighbour snapshot and is
-//     contractually pinned to the Rust dataplane's accept rules
-//     (userspace-dp/src/server/handlers.rs, .../afxdp/forwarding/mod.rs).
-//   - this mask governs which single entry may be adopted as the fabric PEER'S
-//     forwarding identity, and answers it more strictly.
-//
-// Do not unify them in a future single-sourcing pass. Widening this one would
-// let a NOARP entry stand in for the peer; narrowing usableNUD would change
-// which neighbours the listener publishes and break its stated mirror of the
-// Rust rules. docs/fabric-cross-chassis-fwd.md records keeping the two apart as
-// deliberate; what it does not record is a rationale for excluding NOARP from
-// THIS mask specifically, so treat that exclusion as the mask's behaviour
-// rather than as a decision this comment can justify for you.
+// Keep both masks in sync when the Rust neighbor-state accept rules change.
+// Their separate definitions reflect the package boundary and different
+// surrounding validation, not a policy difference in which NUD states resolve.
 //
 // It lives here, in the package that owns the LIVE fabric peer-MAC resolver,
 // and pkg/daemon consumes it. Both packages resolve the same thing -- which MAC

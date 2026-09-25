@@ -11,7 +11,7 @@ use super::*;
 /// #3771 (M12): count of neighbors skipped because their kernel state string
 /// classified as UNKNOWN (empty / `none` / a future or corrupt token) rather
 /// than a recognized usable state (`reachable`/`stale`/`delay`/`probe`/
-/// `permanent`/`noarp`) or a known-unusable state (`failed`/`incomplete`). The
+/// `permanent`) or a known-unusable state (`failed`/`incomplete`/`noarp`). The
 /// pre-#3771 denylist (`!(contains("failed") || contains("incomplete"))`)
 /// treated EVERY unrecognized state as usable, so a `none` / empty / future
 /// state with a parseable IP+MAC was installed into the FIB. This diagnostic
@@ -128,15 +128,15 @@ pub(in crate::afxdp) fn build_fabric_link_or_skip(
 /// FIB installation.
 ///
 /// - `Usable` — a recognized forwarding-usable NUD state; install the entry.
-/// - `KnownUnusable` — `failed` / `incomplete`; an EXPECTED transient/failed
-///   state, skipped silently (the pre-fix denylist already rejected these).
+/// - `KnownUnusable` — `failed` / `incomplete` / `noarp`; an expected transient
+///   or non-resolved state, skipped silently.
 /// - `Unknown` — empty / `none` / a future or corrupt token; skipped AND
 ///   counted (`NEIGHBOR_UNKNOWN_STATE_SKIPPED`).
 ///
 /// The Go producer (`neighborStateString`, pkg/dataplane/userspace/neighbors.go)
 /// joins multiple NUD bits with `|`, so a pipe-joined state is `Usable` only
-/// when EVERY token is in the allowlist; any unrecognized token makes the whole
-/// state `Unknown`.
+/// when every token is allowed; any known-unusable token rejects the row and
+/// any unrecognized token makes the whole state `Unknown`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::afxdp) enum NeighborStateClass {
     Usable,
@@ -152,8 +152,8 @@ pub(in crate::afxdp) fn classify_neighbor_state(state: &str) -> NeighborStateCla
     let mut saw_known_unusable = false;
     for token in trimmed.split('|') {
         match token.trim().to_ascii_lowercase().as_str() {
-            "reachable" | "stale" | "delay" | "probe" | "permanent" | "noarp" => {}
-            "failed" | "incomplete" => saw_known_unusable = true,
+            "reachable" | "stale" | "delay" | "probe" | "permanent" => {}
+            "failed" | "incomplete" | "noarp" => saw_known_unusable = true,
             // #3771 (M12): an empty / `none` / future / corrupt token is NOT in
             // the allowlist — reject the whole state as Unknown (was silently
             // treated as usable by the pre-fix denylist).

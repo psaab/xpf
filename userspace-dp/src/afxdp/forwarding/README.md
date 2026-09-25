@@ -232,9 +232,9 @@ next-hops, preference 0). The wire specimen lives in
       contradicting family.
     - **Neighbor state allowlist (M12).** `neighbor_state_usable` /
       `classify_neighbor_state` are an ALLOWLIST
-      (`reachable`/`stale`/`delay`/`probe`/`permanent`/`noarp`), NOT the
-      pre-fix denylist. `failed`/`incomplete` are known-unusable (skipped
-      silently); an empty / `none` / future / corrupt state is UNKNOWN —
+      (`reachable`/`stale`/`delay`/`probe`/`permanent`), NOT the
+      pre-fix denylist. `failed`/`incomplete`/`noarp` are known-unusable
+      (skipped silently); an empty / `none` / future / corrupt state is UNKNOWN —
       skipped AND counted by the `NEIGHBOR_UNKNOWN_STATE_SKIPPED`
       diagnostic atomic (the pre-fix denylist installed every
       unrecognized state that carried a parseable IP+MAC). The

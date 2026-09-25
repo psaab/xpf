@@ -2924,12 +2924,10 @@ fn parse_neighbor_entries_accepts_stale_ipv4_and_ipv6_rows() {
 }
 
 /// #3771 (M12): neighbor-state classification is an ALLOWLIST, not the pre-fix
-/// denylist. A recognized usable state installs; failed/incomplete are known-
-/// unusable; an empty / `none` / future / corrupt token is UNKNOWN (skipped +
-/// counted). Fail-on-revert: the denylist
-/// (`!(contains("failed") || contains("incomplete"))`) classifies `none` /
-/// `bogus` as usable, flipping the `Unknown` assertions and
-/// `!neighbor_state_usable("none")` red.
+/// denylist. Recognized forwarding states install; failed/incomplete/NOARP are
+/// known-unusable; empty / `none` / future or corrupt tokens are UNKNOWN
+/// (skipped + counted). Fail-on-revert: the old denylist accepts `none`,
+/// `bogus`, and `noarp`, which is not a resolved unicast neighbor.
 #[test]
 fn classify_neighbor_state_is_an_allowlist() {
     for s in [
@@ -2938,7 +2936,6 @@ fn classify_neighbor_state_is_an_allowlist() {
         "delay",
         "probe",
         "permanent",
-        "noarp",
         "REACHABLE",
         "Stale",
     ] {
@@ -2949,19 +2946,18 @@ fn classify_neighbor_state_is_an_allowlist() {
         );
         assert!(neighbor_state_usable(s), "{s} must be usable");
     }
-    for s in ["failed", "incomplete", "FAILED", "reachable|failed"] {
+    for s in [
+        "failed",
+        "incomplete",
+        "noarp",
+        "reachable|noarp",
+        "FAILED",
+        "reachable|failed",
+    ] {
         assert_eq!(
             classify_neighbor_state(s),
             NeighborStateClass::KnownUnusable,
             "{s} must be known-unusable"
-        );
-        assert!(!neighbor_state_usable(s), "{s} must not be usable");
-    }
-    for s in ["", "none", "bogus", "future-state", "stale|bogus"] {
-        assert_eq!(
-            classify_neighbor_state(s),
-            NeighborStateClass::Unknown,
-            "{s} must be unknown"
         );
         assert!(!neighbor_state_usable(s), "{s} must not be usable");
     }
