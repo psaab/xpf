@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -83,6 +84,12 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	}
 
 	// Update the cached snapshot's FIB generation without rebuilding.
+	// #10724: this bookkeeping is speculative until the helper round-trip
+	// below confirms it — snapshot it so a refusal restores rather than
+	// strands the generation allocator on an unpublished bump.
+	prevFIB := m.lastSnapshot.FIBGeneration
+	prevSnapGen := m.lastSnapshot.Generation
+	prevAlloc := m.generation
 	m.lastSnapshot.FIBGeneration = newGen
 	m.incGenerationSaturatingLocked()
 	m.lastSnapshot.Generation = m.generation
@@ -154,7 +161,16 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			FIBGeneration: newGen,
 		},
 	}, &status); err != nil {
-		slog.Warn("userspace: failed to bump FIB generation", "err", err)
+		// #10724: restore only when the helper's in-band refusal proves that
+		// it kept its prior snapshot, or when the request is known not to
+		// have been sent. A timeout/EOF/decode error has unknown outcome: the
+		// helper may already have applied this bump, so retaining the proposed
+		// generation prevents a later full snapshot from rolling it back.
+		if errors.Is(err, errHelperRejected) || isKnownUnsentFailure(err) {
+			m.lastSnapshot.FIBGeneration = prevFIB
+			m.lastSnapshot.Generation = prevSnapGen
+			m.generation = prevAlloc
+		}
 		return newGen, fmt.Errorf("bump fib generation: %w", err)
 	}
 	if committer := m.captureAuthorityCommitter; committer != nil && m.appliedSnapshot.Generation != 0 {

@@ -6,10 +6,43 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 )
+
+// malformedRecordWarnDetector bounds the "dropping malformed session record"
+// warnings (v4/v6 arms in handleMessage, #10724 DR-26:A5-F5). Shape mirrors
+// monitorTruncationDetector: the per-record count advances on every occurrence
+// via stats.MalformedRecordsDropped, while the log emits once per family per
+// SessionSync lifetime — the receive path runs per record, so an unguarded
+// Warn lets a corrupt or hostile peer flood the log (CLAUDE.md logging rules).
+// Separate Once guards per family so a v4 flood cannot silence the first v6
+// occurrence and vice versa.
+type malformedRecordWarnDetector struct {
+	v4 sync.Once
+	v6 sync.Once
+}
+
+// observeV4 records one malformed v4 session record of nbytes, emitting the
+// warning only for the first occurrence. droppedTotal is the running
+// MalformedRecordsDropped count, reported so the single emission still shows
+// the volume behind it.
+func (d *malformedRecordWarnDetector) observeV4(nbytes int, droppedTotal uint64) {
+	d.v4.Do(func() {
+		slog.Warn("cluster sync: dropping malformed v4 session record — no session installed",
+			"bytes", nbytes, "dropped_total", droppedTotal)
+	})
+}
+
+// observeV6 is the v6 twin of observeV4.
+func (d *malformedRecordWarnDetector) observeV6(nbytes int, droppedTotal uint64) {
+	d.v6.Do(func() {
+		slog.Warn("cluster sync: dropping malformed v6 session record — no session installed",
+			"bytes", nbytes, "dropped_total", droppedTotal)
+	})
+}
 
 func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 	defer func() {
@@ -113,9 +146,11 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				// both zone ids and the NAT fields left at zero. It is now
 				// rejected — and counted, because a silently skipped install is
 				// how fabric corruption or a version-skewed peer hides.
-				s.stats.MalformedRecordsDropped.Add(1)
-				slog.Warn("cluster sync: dropping malformed v4 session record — no session installed",
-					"bytes", len(payload))
+				// #10724: count every occurrence; the log emits once per
+				// family (detector above) so a malformed-record flood cannot
+				// emit one Warn per record.
+				n := s.stats.MalformedRecordsDropped.Add(1)
+				s.malformedRecordWarn.observeV4(len(payload), n)
 			} else {
 				if val.IsReverse == 0 {
 					s.bulkMu.Lock()
@@ -161,9 +196,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				// both zone ids and the NAT fields left at zero. It is now
 				// rejected — and counted, because a silently skipped install is
 				// how fabric corruption or a version-skewed peer hides.
-				s.stats.MalformedRecordsDropped.Add(1)
-				slog.Warn("cluster sync: dropping malformed v6 session record — no session installed",
-					"bytes", len(payload))
+				// #10724: see the v4 twin — count every occurrence, log once.
+				n := s.stats.MalformedRecordsDropped.Add(1)
+				s.malformedRecordWarn.observeV6(len(payload), n)
 			} else {
 				if val.IsReverse == 0 {
 					s.bulkMu.Lock()

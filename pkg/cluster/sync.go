@@ -724,9 +724,19 @@ type SessionSync struct {
 	sessions  dataplane.SessionStore
 	telemetry dataplane.Telemetry
 	stats     SyncStats
-	mu        sync.Mutex
-	conn0     net.Conn
-	conn1     net.Conn
+
+	// malformedRecordWarn is the #10724 detector bounding the "dropping
+	// malformed session record" warnings (v4/v6 arms in sync_conn_read.go).
+	// The receive path runs per record, so an unguarded Warn lets a corrupt
+	// or hostile peer flood the log (CLAUDE.md logging rules). Shape mirrors
+	// monitorTruncationDetector: the per-record count advances on every
+	// occurrence via stats.MalformedRecordsDropped, while the log emits once
+	// per family per SessionSync lifetime. Zero value ready; SessionSync is
+	// never copied (it already holds a Mutex and atomics).
+	malformedRecordWarn malformedRecordWarnDetector
+	mu                  sync.Mutex
+	conn0               net.Conn
+	conn1               net.Conn
 	// configCrypto0/configCrypto1 hold the per-connection ephemeral X25519
 	// state that encrypts the config-sync payload (#6629). They sit here,
 	// beside the conn they belong to and under the same mu, because their

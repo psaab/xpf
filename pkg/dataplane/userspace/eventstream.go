@@ -1593,8 +1593,28 @@ func (es *EventStream) sendAckIfNeeded() {
 		slog.Debug("event stream: ack write error", "err", err)
 		return
 	}
-	es.lastAckSeq.Store(applied)
-	es.ackBatch.Store(0)
+	es.recordAck(applied)
+}
+
+// recordAck advances the cumulative ACK watermark to seq.
+//
+// #10724 (DR-26:A6-F3): the advance is MONOTONIC, mirroring markFrameApplied
+// (#6558). It was a bare Store, which let a sendAckIfNeeded racing a newer
+// ack REWIND the watermark: the loser loaded `applied` before the winner
+// advanced, wrote a stale duplicate ACK, then stored its stale value over the
+// newer one. The ackBatch reset rides on the advance — a loser that did not
+// move the watermark must not zero a batch counted toward the newer ack.
+func (es *EventStream) recordAck(seq uint64) {
+	for {
+		cur := es.lastAckSeq.Load()
+		if seq <= cur {
+			return
+		}
+		if es.lastAckSeq.CompareAndSwap(cur, seq) {
+			es.ackBatch.Store(0)
+			return
+		}
+	}
 }
 
 // writeFrame writes a single binary frame to the helper connection.
