@@ -140,18 +140,19 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	if err != nil {
 		return nil, err
 	}
-	// #3261: compute the class-(i) content-rejection diagnostic from the ACTUAL
-	// built rules (feed-aware), then stamp it onto the capabilities below. The
-	// cfg-only deriveUserspaceCapabilities cannot see the feed overlay, so this
-	// is the single accurate source for "the helper integrity preflight will
-	// reject this snapshot" (drives the diagnostic + the narrow old-helper
-	// disarm). Class (ii) — genuine semantic gaps — comes from the cfg gate.
-	caps := deriveUserspaceCapabilities(cfg)
-	caps.PolicyContentRejected = collectPolicyContentRejections(policies)
+	// #1606: build the same address-book rows that will be published before
+	// computing the family-integrity diagnostic below.
 	addressBooks, _, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
 	if err != nil {
 		return nil, err
 	}
+	// #3261 / #10688: compute the fail-closed content diagnostic from the
+	// actual built policy rules and address-book rows (feed-aware), then stamp
+	// it onto capabilities below. The cfg-only deriveUserspaceCapabilities
+	// cannot see the feed overlay.
+	caps := deriveUserspaceCapabilities(cfg)
+	caps.PolicyContentRejected = append(collectPolicyContentRejections(policies),
+		collectAddressBookFamilyRejections(addressBooks)...)
 	// #3438: a BuildCatalog fault (overflow / malformed application-set) fails
 	// the snapshot closed rather than shipping an empty catalog that would
 	// silently degrade all session naming to UNKNOWN.

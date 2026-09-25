@@ -558,6 +558,17 @@ such a policy, so a leniently-loaded bad config is no worse off, now flagged. Th
 lenient path and for unreferenced sets (which never reach the runtime gate, so
 they stay warn-only). Same fail-closed-on-load doctrine as #3144/#3146.
 
+**IPv4-mapped IPv6 address-book prefixes are rejected before commit (#10688):**
+Go's `net.IP.To4()` files `::ffff:a.b.c.d/nn` into `prefixes_v4`, but the
+userspace helper parses the colon-bearing prefix as IPv6 and rejects the entire
+snapshot as a wrong-family address-book prefix. The strict gate
+(`validateAddressBookMappedPrefixesStrict`) rejects global and zone-local
+entries with a diagnostic naming the entry and the snapshot consequence. The
+tolerant load / peer-sync path keeps the persisted entry but warns; the shared
+`PolicyContentRejectionReasons` mirror names the wrong-family wire row so the
+publish diagnostic and policy simulator do not silently treat the snapshot as
+healthy.
+
 **Warn pass must agree with strict on the valid address-reference forms
 (#3958):** the non-fatal `ValidateConfig` warn pass
 (`compiler_validate_warn.go`) emits a `policy … source/destination-address …

@@ -29,6 +29,9 @@ import (
 //     zone-local). Same pristine-book ordering constraint as (2): runs before
 //     the fold so a global vs a different-zone name are not misreported as a
 //     collision. Strict on commit; downgraded on lenientAddressBookNameCollision.
+//     2c. validateAddressBookMappedPrefixesStrict (#10688) — rejects mapped
+//     IPv6 values that Go would file in prefixes_v4 while Rust parses as v6.
+//     Runs on the pristine books before the fold; tolerant load warns instead.
 //  3. resolveZoneLocalAddressBooks (MUT cfg.Security) — folds zone-local books
 //     into the global book under zone-qualified internal names. Output consumed
 //     non-locally by the P6b policy match-address validators.
@@ -124,6 +127,19 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 		if opts.lenientAddressBookNameCollision {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("address-book name collision (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+	// #10688 — an IPv4-mapped IPv6 address-book prefix is currently folded into
+	// prefixes_v4 by Go, but parsed as IPv6 by the helper. Reject it before the
+	// zone-local fold so the error names the authored entry; tolerant loads keep
+	// the old config and warn, while the userspace rejection mirror reports the
+	// wrong-family prefix at publish time.
+	if err := validateAddressBookMappedPrefixesStrict(cfg); err != nil {
+		if opts.lenientAddressBookMappedPrefixes {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("mapped address-book prefix (downgraded to warning on tolerant path; the userspace helper rejects the policy snapshot): %v", err))
 		} else {
 			return err
 		}
