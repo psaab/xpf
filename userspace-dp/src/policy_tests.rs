@@ -5153,6 +5153,90 @@ fn flowless_fragment_fails_closed_against_skipped_port_bearing_deny_4569() {
     );
 }
 
+// ── #11009: one app + one L3 evaluation per rule per flowless fragment ──
+//
+// A tier miss used to evaluate a deny rule's app/L3 predicates TWICE for a
+// flowless non-first fragment: once in `try_match_rule` and again in the #4569
+// ambiguity check (`rule_is_skipped_frag_ambiguous_deny`). The structured miss
+// reason returned by the first match is now reused, so every walked rule costs
+// exactly one app evaluation and at most one L3 evaluation. RED ON REVERT: the
+// pre-fix walker evaluates each deny twice (7 app / 7 L3 calls below, not 4/4).
+fn frag_deny_snapshot_11009(policy_id: u32, name: &str, src_cidr: &str) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        policy_id,
+        name: name.to_string(),
+        from_zone: "trust".to_string(),
+        to_zone: "untrust".to_string(),
+        source_addresses: vec![src_cidr.to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["junos-https".to_string()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: "junos-https".to_string(),
+            protocol: "tcp".to_string(),
+            source_port: String::new(),
+            destination_port: "443".to_string(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: "deny".to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn flowless_fragment_evaluates_app_and_l3_once_per_deny_rule_11009() {
+    let state = parse_policy_state(
+        "deny",
+        &[
+            frag_deny_snapshot_11009(11, "deny-443-rfc1918-a", "192.168.0.0/16"),
+            frag_deny_snapshot_11009(12, "deny-443-rfc1918-b", "172.16.0.0/12"),
+            frag_deny_snapshot_11009(13, "deny-443-ten", "10.0.0.0/8"),
+            frag_permit_any_snapshot(),
+        ],
+        &test_zone_name_to_id(),
+    );
+    let frag_src = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 9, 9, 9));
+    let dst = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5));
+
+    // First-match + #4569 outcomes are preserved: only the third deny overlaps
+    // the fragment's L3, so it is the remembered skip and the later permit-any
+    // is overridden to its DROP (policy_id 13).
+    test_match_counters::reset();
+    let frag = evaluate_policy_result_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        frag_src,
+        dst,
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
+    );
+    assert_eq!(
+        frag.action,
+        PolicyAction::Deny,
+        "a flowless fragment overlapping the third port-bearing deny must fail closed",
+    );
+    assert_eq!(
+        frag.policy_id, 13,
+        "the fragment drop must be attributed to the first overlapping deny (first-match)",
+    );
+    assert_eq!(
+        test_match_counters::app_calls(),
+        4,
+        "one app evaluation per walked rule (3 denies + permit)",
+    );
+    assert_eq!(
+        test_match_counters::l3_calls(),
+        4,
+        "one L3 evaluation per walked rule (3 denies + permit)",
+    );
+}
+
 // ── #3073: established-session policy hit-count (per-packet) ──────────
 //
 // Before #3073 the per-rule packet/byte hit counter was incremented

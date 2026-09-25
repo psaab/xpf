@@ -456,6 +456,18 @@ here exactly as it did on the wire, and the simulator agreed with the narrowed
 enforcement instead of flagging it. Name-before-literal is unchanged for every
 other token.
 
+`Match` also retains config-derived query state in a bounded cache keyed by the
+immutable compiled-config generation and a deterministic digest of the feed
+overlay. The cached rejection reasons and runtime policy IDs are reused across
+queries; returned rejection-reason slices are copied so callers cannot mutate
+the cached state. Each query has its own address-expansion memo, shared across
+policy rules and tiers, so a nested address-book closure referenced by multiple
+rules is expanded only once for that query.
+
+The #11010 fail-on-revert cells in `cache_11010_test.go` pin repeated-query
+verdict stability, config/feed invalidation, nested shared address sets, and
+isolation of cached rejection reasons from caller mutation.
+
 ## Content-rejected verdict (#3727, #4394)
 
 A policy that references content the userspace matcher cannot represent makes the
@@ -569,11 +581,22 @@ override EXACTLY:
 - while walking the tiers in first-match precedence order — the transit tiers in
   `Match` and, since #6576, the three host tiers in `matchJunosHost`, both
   driving the shared `fragDenyTracker` —
-  `isSkippedFragDeny` (the mirror of `rule_is_skipped_frag_ambiguous_deny`)
+  `isSkippedFragDenyWithMemo` (the Go mirror of Rust's structured
+  `try_match_rule` → `FragmentDenyOverlap` → `note_skipped_frag_deny` flow)
   remembers the FIRST port-bearing DENY/REJECT whose L4-constrained term is
   inapplicable to the fragment (`hasL4ConstrainedTerm`), that does NOT match
   flowlessly, and whose source+destination ADDRESS overlaps the fragment (the
   zone is fixed by the tier);
+
+- separately, the Rust dataplane's rule walk carries structured miss reasons
+  into the fragment tracker (#11009). When the first application check proves a
+  flowless fragment cannot satisfy a port-bearing deny, the same rule evaluation
+  performs its single L3 overlap check and returns that outcome to the tracker;
+  the ambiguity path does not repeat either predicate.
+  `userspace-dp/src/policy_tests.rs`
+  (`flowless_fragment_evaluates_app_and_l3_once_per_deny_rule_11009`) pins one
+  application and one L3 evaluation per walked rule while preserving the #4569
+  first-match attribution.
 - if the walk then lands on a PERMIT — a matched permit, a transit
   default-permit, or (host path, #6576) the permit-like unmatched
   fall-through — `fragDenyTracker.override` /
@@ -616,8 +639,9 @@ The fail-on-revert artifacts are in `fragment_5572_test.go` (the fixture is the
 issue's `deny junos-https` then `permit any`, IPv4 + IPv6): reverting the
 discriminator makes the fragment query report `permit-all` and fails the
 want-deny assertion, catching the exact simulator-vs-dataplane divergence. The
-dataplane reference is `userspace-dp/src/policy.rs` (`note_skipped_frag_deny` /
-`apply_frag_deny_override` / `rule_is_skipped_frag_ambiguous_deny` /
+dataplane reference is `userspace-dp/src/policy.rs` (`try_match_rule`'s
+`RuleMatchOutcome::Miss(RuleMissReason::FragmentDenyOverlap)`,
+`note_skipped_frag_deny`, `apply_frag_deny_override`, and
 `has_l4_constrained_term`) pinned in `userspace-dp/src/policy_tests.rs` (#4569).
 
 ## Unsupported tuple family (V4 src / V6 dst) — codex-182 A10-b02-C1
