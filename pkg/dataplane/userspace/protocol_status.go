@@ -741,6 +741,47 @@ type ProcessStatus struct {
 	// xpf_userspace_gre_decap_unsupported_version_refusals_total. Omitempty
 	// for wire compat with older helpers (defaults to 0).
 	GreDecapUnsupportedVersionRefusalsTotal uint64 `json:"gre_decap_unsupported_version_refusals_total,omitempty"`
+	// #10695 (#9506 counter slice): D14 zone-gate refusals — IPsec-inner
+	// frames refused before zone admission because no zone claimed the
+	// ingress (unzoned), the STN/ifid resolution was unknown or ambiguous,
+	// the generation was stale, or no generation was published. Each key is
+	// byte-identical to its Rust static in protocol/status.rs. Surfaced as
+	// xpf_userspace_zone_gate_unzoned_total,
+	// xpf_userspace_zone_gate_ambiguous_total,
+	// xpf_userspace_zone_gate_stale_total, and
+	// xpf_userspace_zone_gate_no_generation_total. Omitempty for wire compat
+	// with older helpers (defaults to 0).
+	ZoneGateUnzonedTotal      uint64 `json:"zone_gate_unzoned_total,omitempty"`
+	ZoneGateAmbiguousTotal    uint64 `json:"zone_gate_ambiguous_total,omitempty"`
+	ZoneGateStaleTotal        uint64 `json:"zone_gate_stale_total,omitempty"`
+	ZoneGateNoGenerationTotal uint64 `json:"zone_gate_no_generation_total,omitempty"`
+	// #10695 (#9506 counter slice): D13/D11 logical-frame build failures
+	// (including ECN-combine refusals), and D13 RFC 6040 §4.2 illegal
+	// inner-ECN refusals. Surfaced as
+	// xpf_userspace_ipsec_inner_parse_drops_total and
+	// xpf_userspace_ipsec_inner_ecn_illegal_drops_total (the wire key
+	// carries no _total suffix; Prometheus appends it, as with
+	// worker_command_queue_drops). Omitempty for wire compat with older
+	// helpers (defaults to 0).
+	IpsecInnerParseDropsTotal uint64 `json:"ipsec_inner_parse_drops_total,omitempty"`
+	IpsecInnerEcnIllegalDrops uint64 `json:"ipsec_inner_ecn_illegal_drops,omitempty"`
+	// #10695 (#9506 counter slice): D11 queue/slab/verdict/orphan
+	// accounting — ingress-enqueue refusals (contended/closed/full/per-flow
+	// cap), verdict-post refusals, slab exhaustion, worker-set retirements,
+	// post-mortem slot reclaims, and provisional-journal reaps. Surfaced as
+	// xpf_userspace_ipsec_inner_worker_queue_full_total,
+	// xpf_userspace_ipsec_inner_verdict_queue_full_total,
+	// xpf_userspace_ipsec_inner_slab_exhausted_total,
+	// xpf_userspace_ipsec_inner_worker_retired_total,
+	// xpf_userspace_ipsec_inner_worker_orphan_reaped_total, and
+	// xpf_userspace_ipsec_inner_orphan_provisional_total. Omitempty for
+	// wire compat with older helpers (defaults to 0).
+	IpsecInnerWorkerQueueFullTotal    uint64 `json:"ipsec_inner_worker_queue_full_total,omitempty"`
+	IpsecInnerVerdictQueueFullTotal   uint64 `json:"ipsec_inner_verdict_queue_full_total,omitempty"`
+	IpsecInnerSlabExhaustedTotal      uint64 `json:"ipsec_inner_slab_exhausted_total,omitempty"`
+	IpsecInnerWorkerRetiredTotal      uint64 `json:"ipsec_inner_worker_retired_total,omitempty"`
+	IpsecInnerWorkerOrphanReapedTotal uint64 `json:"ipsec_inner_worker_orphan_reaped_total,omitempty"`
+	IpsecInnerOrphanProvisionalTotal  uint64 `json:"ipsec_inner_orphan_provisional_total,omitempty"`
 	// #2472: locally-generated ICMP Time Exceeded / PTB / `reject` error
 	// replies dropped because the per-reason token bucket was empty. Each
 	// reason has an independent global-per-reason bucket (Linux

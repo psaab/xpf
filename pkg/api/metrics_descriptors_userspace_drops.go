@@ -265,4 +265,67 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"session (forged PTB/TE as a PMTUD / throughput weapon).",
 		nil, nil,
 	)
+	// #10695 (#9506): IPsec-inner zone-gate, parse, ECN, and D11
+	// queue/slab/orphan counters. Emitted unconditionally so zero means
+	// a reporting helper observed no refusals rather than no series.
+	c.userspaceZoneGateUnzoned = prometheus.NewDesc(
+		"xpf_userspace_zone_gate_unzoned_total",
+		"IPsec-inner frames refused because ingress had no zone (#9506).",
+		nil, nil,
+	)
+	c.userspaceZoneGateAmbiguous = prometheus.NewDesc(
+		"xpf_userspace_zone_gate_ambiguous_total",
+		"IPsec-inner frames refused because zone or STN/ifid resolution was ambiguous (#9506).",
+		nil, nil,
+	)
+	c.userspaceZoneGateStale = prometheus.NewDesc(
+		"xpf_userspace_zone_gate_stale_total",
+		"IPsec-inner frames refused because their zone generation was stale (#9506).",
+		nil, nil,
+	)
+	c.userspaceZoneGateNoGeneration = prometheus.NewDesc(
+		"xpf_userspace_zone_gate_no_generation_total",
+		"IPsec-inner frames refused because no zone generation was published (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerParseDrops = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_parse_drops_total",
+		"IPsec-inner logical-frame build failures, including ECN-combine refusals (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerEcnIllegalDrops = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_ecn_illegal_drops_total",
+		"IPsec-inner packets dropped for an RFC 6040 illegal ECN combination (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerWorkerQueueFull = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_worker_queue_full_total",
+		"IPsec-inner worker ingress enqueues refused by a full, closed, contended, or capped queue (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerVerdictQueueFull = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_verdict_queue_full_total",
+		"IPsec-inner verdict posts refused by a full queue (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerSlabExhausted = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_slab_exhausted_total",
+		"IPsec-inner frames refused because the worker slab was exhausted (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerWorkerRetired = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_worker_retired_total",
+		"IPsec-inner worker sets retired (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerWorkerOrphanReaped = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_worker_orphan_reaped_total",
+		"IPsec-inner orphaned worker slots reclaimed post-mortem (#9506).",
+		nil, nil,
+	)
+	c.userspaceIpsecInnerOrphanProvisional = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_orphan_provisional_total",
+		"IPsec-inner provisional journal entries reaped as orphans (#9506).",
+		nil, nil,
+	)
 }

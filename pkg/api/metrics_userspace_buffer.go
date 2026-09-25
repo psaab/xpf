@@ -394,6 +394,70 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		float64(status.GreDecapEcnIllegalDropsTotal),
 	)
 
+	// #10695: Rust's IPsec-inner status counters, including the four D14
+	// zone-gate refusals, are exported independently so each cause remains
+	// distinguishable. Emit zeros too: absence must not look like a healthy
+	// helper that reported zero activity.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceZoneGateUnzoned,
+		prometheus.CounterValue,
+		float64(status.ZoneGateUnzonedTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceZoneGateAmbiguous,
+		prometheus.CounterValue,
+		float64(status.ZoneGateAmbiguousTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceZoneGateStale,
+		prometheus.CounterValue,
+		float64(status.ZoneGateStaleTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceZoneGateNoGeneration,
+		prometheus.CounterValue,
+		float64(status.ZoneGateNoGenerationTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerParseDrops,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerParseDropsTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerEcnIllegalDrops,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerEcnIllegalDrops),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerWorkerQueueFull,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerWorkerQueueFullTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerVerdictQueueFull,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerVerdictQueueFullTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerSlabExhausted,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerSlabExhaustedTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerWorkerRetired,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerWorkerRetiredTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerWorkerOrphanReaped,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerWorkerOrphanReapedTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerOrphanProvisional,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerOrphanProvisionalTotal),
+	)
 	// #2317: WG-decap RFC 6040 4.2 illegal-combination drops (outer CE,
 	// recvmsg-captured, over a Not-ECT inner). Emitted unconditionally so
 	// a 0 is a real "no illegal combinations seen" signal rather than an
