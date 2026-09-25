@@ -37,7 +37,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 | `routing.go` | `Manager` façade | sole `*netlink.Handle`, domain refs |
 | `vrf.go` | `vrfManager` | VRF lifecycle + `BindInterfaceToVRF`; own `mu` + tracked set |
 | `vrf_miss_terminator_9819.go` + `rule_l3mdev_linux.go` | (part of `vrfManager`) | the #9819 VRF miss terminator (`l3mdev unreachable`, pref 2000), installed before any VRF device exists; the raw FRA_L3MDEV request |
-| `routes.go` | `routeReader` | kernel routing-table reads (`routeLister`) |
+| `routes.go` | `routeReader` | incremental and buffered kernel routing-table reads (`routeLister`) |
 | `routeformat.go` | free fns | Junos `show route` formatters |
 | `tunnel.go` | `tunnelManager` | GRE/IPIP + AnchorOnly TUN reconcile, VRF-claim, address, `Clear`/`GetStatus`; own `mu`. WireGuard and the keepalive runner are split into siblings below (#5661) |
 | `tunnel_wireguard.go` | (part of `tunnelManager`) | WireGuard persistent-TUN lifecycle: `applyWireguardTunLocked`, inner-MTU cap (`wgTunMTUForEndpoint`, WG overhead consts), `errWGIncompatibleLinkRetained` sentinel, `closeTuntapFiles` |
@@ -714,6 +714,23 @@ table during a transient backend hiccup.
   `routes_perfamily_5125_test.go` (backend), `pkg/frr/route_detail_perfamily_5125_test.go`
   (FRR backend), `pkg/grpcapi/server_show_routes_perfamily_5125_test.go`
   (caller renders partial + warns, RPC returns partial).
+
+### Bounded structured unary route RPC (#10708)
+
+`routeReader.StreamRoutes` visits the main IPv4 and IPv6 tables through
+`RouteListFilteredIter` rather than materializing either family first. The
+gRPC `GetRoutes` handler stops after 100000 `RouteInfo` rows; each ECMP
+next-hop is a row and consumes one slot. It probes one additional row to set
+`GetRoutesResponse.truncated` only when data was omitted. Per-family failures
+still follow the partial-result contract above when the stream completes.
+
+The production netlink iterator holds its socket lock while invoking the
+callback, so route conversion must not call `LinkByIndex` from inside it.
+`StreamRoutes` snapshots link names before opening the iterator and uses that
+in-memory map for both single-path and ECMP interface names. Guards include
+synthetic cap/boundary/ECMP tables and
+`TestStreamRoutesResolvesLinksOutsideNetlinkCallback10708`, which exercises a
+linked route through a real `netlink.Handle`.
 
 ## Tunnel reconcile-in-place (#1884)
 

@@ -22,6 +22,9 @@ func (f *fakeRouteLister) RouteListFiltered(int, *netlink.Route, uint64) ([]netl
 func (f *fakeRouteLister) RouteList(netlink.Link, int) ([]netlink.Route, error) {
 	return nil, nil
 }
+func (*fakeRouteLister) RouteListFilteredIter(int, *netlink.Route, uint64, func(netlink.Route) bool) error {
+	return nil
+}
 func (f *fakeRouteLister) LinkByIndex(index int) (netlink.Link, error) {
 	name, ok := f.byIndex[index]
 	if !ok {

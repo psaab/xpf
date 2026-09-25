@@ -2,17 +2,34 @@ package grpcapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/diagcmd"
+	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/routing"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/termsafe"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+const (
+	maxGRPCRoutes = frr.MaxBGPRoutes
+	maxGRPCBGPOutputBytes = 8 << 20
+	maxConcurrentGRPCRIBStreams = 2
+	bgpGRPCStreamBudget = 10 * time.Minute
+)
+
+var (
+	grpcBGPStreamLimiter = diagcmd.NewLimiter(maxConcurrentGRPCRIBStreams)
+	errGRPCBGPOutputLimit = errors.New("gRPC BGP routes response byte limit reached")
 )
 
 // #6468 D2: the routing show RPCs return captured `vtysh` stdout, and the
@@ -35,43 +52,51 @@ func (s *Server) GetRoutes(ctx context.Context, _ *pb.GetRoutesRequest) (*pb.Get
 		return &pb.GetRoutesResponse{}, nil
 	}
 
-	entries, err := s.routing.GetRoutes()
-	if err != nil {
-		// A total failure (no entries: every family's dump failed) stays a
-		// hard gRPC error. A partial per-family failure still has usable
-		// routes; the GetRoutesResponse proto carries no warning field, so
-		// surface the failure via logging and still return the family that
-		// succeeded rather than dropping the partial (#5125).
-		if len(entries) == 0 {
-			return nil, frrStatusErr("get routes", err)
-		}
-		slog.Warn("GetRoutes returning partial route dump", "error", err)
-	}
-
 	resp := &pb.GetRoutesResponse{}
-	for _, e := range entries {
+	appendRoute := func(route *pb.RouteInfo) bool {
+		if len(resp.Routes) == maxGRPCRoutes {
+			resp.Truncated = true
+			return false
+		}
+		resp.Routes = append(resp.Routes, route)
+		return true
+	}
+	stopped, err := s.routing.StreamRoutes(func(e routing.RouteEntry) bool {
 		// ECMP route: emit one RouteInfo per equal-cost next-hop so the
-		// structured view lists all of them (same idiom as the REST
-		// static-route handler), instead of a single bare next-hop.
+		// structured view lists all of them, while counting each leg against
+		// the response cap.
 		if len(e.NextHops) > 0 {
 			for _, nh := range e.NextHops {
-				resp.Routes = append(resp.Routes, &pb.RouteInfo{
+				if !appendRoute(&pb.RouteInfo{
 					Destination: e.Destination,
 					NextHop:     nh.Gateway,
 					Interface:   nh.Interface,
 					Preference:  int32(e.Preference),
 					Protocol:    e.Protocol,
-				})
+				}) {
+					return false
+				}
 			}
-			continue
+			return true
 		}
-		resp.Routes = append(resp.Routes, &pb.RouteInfo{
+		return appendRoute(&pb.RouteInfo{
 			Destination: e.Destination,
 			NextHop:     e.NextHop,
 			Interface:   e.Interface,
 			Preference:  int32(e.Preference),
 			Protocol:    e.Protocol,
 		})
+	})
+	resp.Truncated = resp.Truncated || stopped
+	if err != nil {
+		// A total failure (no routes: every family's dump failed) stays a
+		// hard gRPC error. A partial per-family failure still has usable
+		// routes; the response now marks only cap truncation, so surface the
+		// family failure via logging and return its successful routes (#5125).
+		if len(resp.Routes) == 0 {
+			return nil, frrStatusErr("get routes", err)
+		}
+		slog.Warn("GetRoutes returning partial route dump", "error", err)
 	}
 	return resp, nil
 }
@@ -117,14 +142,7 @@ func (s *Server) GetBGPStatus(ctx context.Context, req *pb.GetBGPStatusRequest) 
 	var b strings.Builder
 	switch req.Type {
 	case "routes":
-		routes, err := s.frr.GetBGPRoutes(ctx)
-		if err != nil {
-			return nil, frrStatusErr("", err)
-		}
-		for _, r := range routes {
-			fmt.Fprintf(&b, "%-24s %-20s %s\n",
-				termsafe.SanitizeRowForDisplay(r.Network, r.NextHop, r.Path)...)
-		}
+		return s.getBGPStatusRoutes(ctx)
 	case "groups":
 		cfg := s.store.ActiveConfig()
 		if cfg == nil || cfg.Protocols.BGP == nil || len(cfg.Protocols.BGP.Neighbors) == 0 {
@@ -224,6 +242,57 @@ func (s *Server) GetBGPStatus(ctx context.Context, req *pb.GetBGPStatusRequest) 
 				termsafe.SanitizeRowForDisplay(
 					p.Neighbor, p.AddressFamily, p.AS, p.MsgRcvd, p.MsgSent, p.UpDown, p.State, p.PfxRcd)...)
 		}
+	}
+	return &pb.GetBGPStatusResponse{Output: termsafe.SanitizeBlockForDisplay(b.String())}, nil
+}
+
+func (s *Server) getBGPStatusRoutes(ctx context.Context) (*pb.GetBGPStatusResponse, error) {
+	release, err := grpcBGPStreamLimiter.Acquire()
+	if err != nil {
+		return nil, status.Errorf(codes.ResourceExhausted, "BGP route stream admission refused: %v", err)
+	}
+	defer release()
+
+	streamCtx, cancel := context.WithTimeout(ctx, bgpGRPCStreamBudget)
+	defer cancel()
+	if err := streamCtx.Err(); err != nil {
+		return nil, frrStatusErr("", err)
+	}
+
+	notice := fmt.Sprintf("... table truncated at %d routes or %d response bytes; use the CLI 'show route protocol bgp' for the full table\n",
+		maxGRPCRoutes, maxGRPCBGPOutputBytes)
+	var b strings.Builder
+	b.Grow(64 << 10)
+	byteTruncated := false
+	routeTruncated, err := s.frr.StreamBGPRoutes(streamCtx, maxGRPCRoutes, func(r frr.BGPRoute) error {
+		cells := termsafe.SanitizeRowForDisplay(r.Network, r.NextHop, r.Path)
+		networkWidth := len(cells[0].(string))
+		if networkWidth < 24 {
+			networkWidth = 24
+		}
+		nextHopWidth := len(cells[1].(string))
+		if nextHopWidth < 20 {
+			nextHopWidth = 20
+		}
+		// Include the two separators and trailing newline. Byte lengths may
+		// overestimate Unicode display width, which only truncates earlier.
+		lineBytes := networkWidth + nextHopWidth + len(cells[2].(string)) + 3
+		if b.Len()+lineBytes > maxGRPCBGPOutputBytes-len(notice) {
+			byteTruncated = true
+			return errGRPCBGPOutputLimit
+		}
+		fmt.Fprintf(&b, "%-24s %-20s %s\n", cells...)
+		return nil
+	})
+	if errors.Is(err, errGRPCBGPOutputLimit) {
+		err = nil
+		routeTruncated = true
+	}
+	if err != nil {
+		return nil, frrStatusErr("", err)
+	}
+	if routeTruncated || byteTruncated {
+		b.WriteString(notice)
 	}
 	return &pb.GetBGPStatusResponse{Output: termsafe.SanitizeBlockForDisplay(b.String())}, nil
 }

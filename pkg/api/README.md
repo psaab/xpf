@@ -1913,13 +1913,15 @@ the drop fails loudly instead of going quietly vacuous.
   line at a time (bounded `bufio.Scanner`), delivers each route to the
   callback, and cancels the vtysh process on `r.Context()` cancellation or a
   downstream write failure, so peak memory is O(1) in table size regardless of
-  RIB size. The rendered output is capped at `maxBGPRoutes` (100000); when the
-  cap trips a trailing `... table truncated at N routes` notice is appended to
-  the `output` string (envelope shape unchanged) and the client is pointed at
-  the CLI for the complete table. Operators needing the full RIB use
-  `show route protocol bgp`. The cap/truncation contract is pinned by
-  `bgp_routes_cap_5056_test.go`; the streaming/non-buffering + wire-format
-  invariants by `bgp_routes_stream_4708_test.go`.
+  RIB size. The rendered output is capped at `maxBGPRoutes` (100000), shared
+  with the gRPC RIB endpoints through `frr.MaxBGPRoutes`; when the cap trips a
+  trailing `... table truncated at N routes` notice is appended to the `output`
+  string (envelope shape unchanged) and the client is pointed at the CLI for
+  the complete table. The gRPC unary BGP response also has an 8 MiB byte cap.
+  Operators needing the full RIB use `show route protocol bgp`. The
+  cap/truncation contract is pinned by `bgp_routes_cap_5056_test.go`; the
+  streaming/non-buffering + wire-format invariants by
+  `bgp_routes_stream_4708_test.go`.
 
   **SSE streams carry the same bound, on a different axis (#7632).**
   `writeSSEEvent` wrote straight to the `ResponseWriter` and **discarded every

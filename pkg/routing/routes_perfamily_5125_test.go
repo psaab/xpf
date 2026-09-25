@@ -62,6 +62,18 @@ func (f *perFamilyFailLister) RouteListFiltered(family int, _ *netlink.Route, _ 
 func (f *perFamilyFailLister) RouteList(_ netlink.Link, family int) ([]netlink.Route, error) {
 	return f.routesFor(family)
 }
+func (f *perFamilyFailLister) RouteListFilteredIter(family int, _ *netlink.Route, _ uint64, fn func(netlink.Route) bool) error {
+	routes, err := f.routesFor(family)
+	if err != nil {
+		return err
+	}
+	for _, route := range routes {
+		if !fn(route) {
+			break
+		}
+	}
+	return nil
+}
 
 func (f *perFamilyFailLister) LinkByIndex(index int) (netlink.Link, error) {
 	name, ok := f.byIndex[index]

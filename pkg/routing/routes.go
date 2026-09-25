@@ -57,10 +57,18 @@ type TableRoutes struct {
 // routeLister is the minimal netlink read surface the route reader
 // needs. Satisfied by *netlink.Handle in production.
 type routeLister interface {
+	RouteListFilteredIter(family int, filter *netlink.Route, filterMask uint64, fn func(netlink.Route) bool) error
 	RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error)
 	RouteList(link netlink.Link, family int) ([]netlink.Route, error)
 	LinkByIndex(index int) (netlink.Link, error)
 	LinkByName(name string) (netlink.Link, error)
+}
+
+// routeLinkLister supplies a link-name snapshot before a streaming route dump.
+// The production netlink iterator holds its socket lock during callbacks, so
+// route conversion must not call LinkByIndex from inside one.
+type routeLinkLister interface {
+	LinkList() ([]netlink.Link, error)
 }
 
 // routeReader reads kernel routing tables and converts them to
@@ -118,6 +126,58 @@ func (rr *routeReader) GetRoutes() ([]RouteEntry, error) {
 	}
 
 	return entries, errs
+}
+
+// StreamRoutes visits main-table routes without materializing either address
+// family. Returning false from fn stops the dump; the netlink implementation
+// drains the outstanding multipart reply without decoding more route records.
+// Per-family errors retain GetRoutes' partial-result contract.
+func (rr *routeReader) StreamRoutes(fn func(RouteEntry) bool) (stopped bool, err error) {
+	var linkNames map[int]string
+	hasLinkSnapshot := false
+	if lister, ok := rr.ops.(routeLinkLister); ok {
+		hasLinkSnapshot = true
+		if links, err := lister.LinkList(); err == nil {
+			linkNames = make(map[int]string, len(links))
+			for _, link := range links {
+				if link != nil && link.Attrs() != nil {
+					linkNames[link.Attrs().Index] = link.Attrs().Name
+				}
+			}
+		}
+	}
+	linkName := func(index int) string {
+		if index <= 0 {
+			return ""
+		}
+		if hasLinkSnapshot {
+			if name := linkNames[index]; name != "" {
+				return name
+			}
+			return strconv.Itoa(index)
+		}
+		return rr.linkNameByIndex(index)
+	}
+
+	var errs error
+	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		familyStopped := false
+		familyErr := rr.ops.RouteListFilteredIter(family, &netlink.Route{}, 0, func(route netlink.Route) bool {
+			entry := rr.routeToEntryWithLinkName(route, family, linkName)
+			if !fn(entry) {
+				familyStopped = true
+				return false
+			}
+			return true
+		})
+		if familyStopped {
+			return true, errs
+		}
+		if familyErr != nil {
+			errs = errors.Join(errs, fmt.Errorf("%s route dump failed (main table): %w", familyName(family), familyErr))
+		}
+	}
+	return false, errs
 }
 
 // GetVRFRoutes reads routes from a VRF's routing table by VRF device name.
@@ -218,6 +278,10 @@ func (rr *routeReader) GetAllTableRoutes(instances []*config.RoutingInstanceConf
 
 // routeToEntry converts a netlink route to a RouteEntry.
 func (rr *routeReader) routeToEntry(r netlink.Route, family int) RouteEntry {
+	return rr.routeToEntryWithLinkName(r, family, rr.linkNameByIndex)
+}
+
+func (rr *routeReader) routeToEntryWithLinkName(r netlink.Route, family int, linkName func(int) string) RouteEntry {
 	entry := RouteEntry{
 		Preference: r.Priority,
 		Protocol:   rtProtoName(r.Protocol),
@@ -249,12 +313,7 @@ func (rr *routeReader) routeToEntry(r netlink.Route, family int) RouteEntry {
 	}
 
 	if r.LinkIndex > 0 {
-		link, err := rr.ops.LinkByIndex(r.LinkIndex)
-		if err == nil {
-			entry.Interface = link.Attrs().Name
-		} else {
-			entry.Interface = strconv.Itoa(r.LinkIndex)
-		}
+		entry.Interface = linkName(r.LinkIndex)
 	}
 
 	// ECMP / multipath: the kernel carries the per-path next-hops in the
@@ -263,7 +322,7 @@ func (rr *routeReader) routeToEntry(r netlink.Route, family int) RouteEntry {
 	// fill the single NextHop/Interface fields from the first leg so
 	// single-field consumers show a real next-hop rather than "direct".
 	if len(r.MultiPath) > 0 {
-		entry.NextHops = rr.multiPathNextHops(r.MultiPath)
+		entry.NextHops = rr.multiPathNextHops(r.MultiPath, linkName)
 		if len(entry.NextHops) > 0 {
 			first := entry.NextHops[0]
 			if first.Gateway != "" {
@@ -278,9 +337,17 @@ func (rr *routeReader) routeToEntry(r netlink.Route, family int) RouteEntry {
 	return entry
 }
 
+func (rr *routeReader) linkNameByIndex(index int) string {
+	link, err := rr.ops.LinkByIndex(index)
+	if err == nil && link != nil && link.Attrs() != nil {
+		return link.Attrs().Name
+	}
+	return strconv.Itoa(index)
+}
+
 // multiPathNextHops converts a netlink RTA_MULTIPATH next-hop list into
-// the display NextHop slice, resolving each leg's ifindex to a name.
-func (rr *routeReader) multiPathNextHops(mp []*netlink.NexthopInfo) []NextHop {
+// the display NextHop slice, resolving each leg's ifindex through linkName.
+func (rr *routeReader) multiPathNextHops(mp []*netlink.NexthopInfo, linkName func(int) string) []NextHop {
 	nhs := make([]NextHop, 0, len(mp))
 	for _, nh := range mp {
 		if nh == nil {
@@ -292,11 +359,7 @@ func (rr *routeReader) multiPathNextHops(mp []*netlink.NexthopInfo) []NextHop {
 		}
 		iface := ""
 		if nh.LinkIndex > 0 {
-			if link, err := rr.ops.LinkByIndex(nh.LinkIndex); err == nil {
-				iface = link.Attrs().Name
-			} else {
-				iface = strconv.Itoa(nh.LinkIndex)
-			}
+			iface = linkName(nh.LinkIndex)
 		}
 		nhs = append(nhs, NextHop{
 			Gateway:   gw,
@@ -306,6 +369,7 @@ func (rr *routeReader) multiPathNextHops(mp []*netlink.NexthopInfo) []NextHop {
 	}
 	return nhs
 }
+
 
 // rtprotZStatic is FRR's private rtnetlink protocol value for staticd-
 // installed routes (RTPROT_ZSTATIC). It is NOT a Linux UAPI constant, so

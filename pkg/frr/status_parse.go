@@ -4,11 +4,10 @@
 // tests can inject a fake executor and exercise the parsers without a
 // real vtysh binary.
 //
-// #9755: StreamBGPRoutes is the ONE exception and this used to say "All". It
-// calls the executor's VtyshStream directly, taking no VtyshLimiter slot and no
-// 15s vtyshTimeout, because a full-RIB stream is allowed a 10-minute progress
-// budget. It is bounded by pkg/api's ribStreamLimiter instead. See
-// Manager.vtysh for the full contract.
+// #9755: StreamBGPRoutes calls the executor's VtyshStream directly, taking no
+// VtyshLimiter slot or 15s vtyshTimeout. REST and gRPC callers each provide a
+// dedicated concurrency limiter and a 10-minute elapsed budget. See
+// Manager.vtysh for the buffered-read contract and the per-caller census test.
 //
 // Symbols (public types + methods):
 //   - RIPRouteEntry, GetRIPRoutes
@@ -400,6 +399,11 @@ type BGPRoute struct {
 	Path    string
 }
 
+// MaxBGPRoutes is the shared production route-count ceiling for BGP diagnostics.
+// REST keeps a package-local variable initialized from it for cap-path tests;
+// gRPC uses the constant directly.
+const MaxBGPRoutes = 100000
+
 // bgpRoutesCommand is the vtysh query behind both GetBGPRoutes and
 // StreamBGPRoutes; keep the two paths reading the same table.
 const bgpRoutesCommand = "show bgp ipv4 unicast"
@@ -433,12 +437,9 @@ func parseBGPRouteLine(line string) (BGPRoute, bool) {
 	return r, true
 }
 
-// GetBGPRoutes queries FRR for BGP routes and returns them as a slice.
-//
-// This buffers the entire table (vtysh stdout string + the parsed slice) and
-// is used by the CLI and gRPC show paths, where the caller already renders the
-// whole result. The REST endpoint uses StreamBGPRoutes instead so a full
-// internet table is never materialized whole in the HTTP handler (#5056).
+// GetBGPRoutes queries FRR for BGP routes and returns them as a slice. It
+// buffers the entire table and remains for the local CLI; REST and gRPC use
+// StreamBGPRoutes so large tables are not materialized in their handlers.
 func (m *Manager) GetBGPRoutes(ctx context.Context) ([]BGPRoute, error) {
 	output, err := m.vtysh(ctx, bgpRoutesCommand)
 	if err != nil {

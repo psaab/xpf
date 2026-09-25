@@ -18,17 +18,9 @@ import (
 
 // maxBGPRoutes bounds how many BGP routes the REST
 // /api/routing/bgp?type=routes endpoint renders into a single JSON response.
-// StreamBGPRoutes already bounds the per-request memory (it scans vtysh stdout
-// one route at a time — the #5056 upstream-materialization fix), but a full
-// internet table (~1M IPv4 routes) still renders to a ~100 MB JSON string on
-// the wire; capping the count bounds the response body (and the total
-// format/escape work for a slow or hostile client) while still returning a
-// large diagnostic sample. Operators who need the complete table use the CLI
-// / vtysh. When the cap trips, a trailing truncation notice line is appended
-// to the output so the client can tell the table was cut. It is a var (not a
-// const) only so tests can drive the truncation path without synthesizing a
-// million-route fixture.
-var maxBGPRoutes = 100000
+// The FRR package owns the shared REST/gRPC route-count ceiling. Keep this
+// variable so tests can exercise truncation without a million-route fixture.
+var maxBGPRoutes = frr.MaxBGPRoutes
 
 // --- #6809: bounding a SLOW READER, not a large table ------------------------
 //

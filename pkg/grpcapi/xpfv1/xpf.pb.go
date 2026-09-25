@@ -5979,6 +5979,7 @@ func (*GetRoutesRequest) Descriptor() ([]byte, []int) {
 type GetRoutesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Routes        []*RouteInfo           `protobuf:"bytes,1,rep,name=routes,proto3" json:"routes,omitempty"`
+	Truncated     bool                   `protobuf:"varint,2,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6018,6 +6019,13 @@ func (x *GetRoutesResponse) GetRoutes() []*RouteInfo {
 		return x.Routes
 	}
 	return nil
+}
+
+func (x *GetRoutesResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
 }
 
 type RouteInfo struct {
@@ -9834,9 +9842,10 @@ const file_xpf_proto_rawDesc = "" +
 	"\tinterface\x18\x01 \x01(\tR\tinterface\"=\n" +
 	"!ClearDHCPClientIdentifierResponse\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"\x12\n" +
-	"\x10GetRoutesRequest\">\n" +
+	"\x10GetRoutesRequest\"\\\n" +
 	"\x11GetRoutesResponse\x12)\n" +
-	"\x06routes\x18\x01 \x03(\v2\x11.xpf.v1.RouteInfoR\x06routes\"\xa2\x01\n" +
+	"\x06routes\x18\x01 \x03(\v2\x11.xpf.v1.RouteInfoR\x06routes\x12\x1c\n" +
+	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"\xa2\x01\n" +
 	"\tRouteInfo\x12 \n" +
 	"\vdestination\x18\x01 \x01(\tR\vdestination\x12\x19\n" +
 	"\bnext_hop\x18\x02 \x01(\tR\anextHop\x12\x1c\n" +

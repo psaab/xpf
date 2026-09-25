@@ -164,6 +164,12 @@ func (m *Manager) GetRoutesForTable(tableID int) ([]RouteEntry, error) {
 // GetRoutes reads the main kernel routing table.
 func (m *Manager) GetRoutes() ([]RouteEntry, error) { return m.routes.GetRoutes() }
 
+// StreamRoutes visits the main routing table incrementally. Returning false
+// stops the kernel dump without decoding or retaining later route records.
+func (m *Manager) StreamRoutes(fn func(RouteEntry) bool) (stopped bool, err error) {
+	return m.routes.StreamRoutes(fn)
+}
+
 // GetVRFRoutes reads routes from a VRF's routing table by VRF device name.
 func (m *Manager) GetVRFRoutes(vrfName string) ([]RouteEntry, error) {
 	return m.routes.GetVRFRoutes(vrfName)

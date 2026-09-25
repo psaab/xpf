@@ -97,6 +97,18 @@ func (f fakeRouteLister) RouteList(_ netlink.Link, family int) ([]netlink.Route,
 	}
 	return f.v4, nil
 }
+func (f fakeRouteLister) RouteListFilteredIter(family int, _ *netlink.Route, _ uint64, fn func(netlink.Route) bool) error {
+	routes, err := f.RouteList(nil, family)
+	if err != nil {
+		return err
+	}
+	for _, route := range routes {
+		if !fn(route) {
+			break
+		}
+	}
+	return nil
+}
 
 func (f fakeRouteLister) RouteListFiltered(family int, _ *netlink.Route, _ uint64) ([]netlink.Route, error) {
 	if family == netlink.FAMILY_V6 {
