@@ -1664,6 +1664,9 @@ class Harness:
                         'systemctl show -p ConditionResult xpf-grow-root | grep -q '
                         '"ConditionResult=no"'):
             fail("second boot did not condition-skip xpf-grow-root (stamp ineffective)")
+        part2 = self._root_part_gib(d)
+        if abs(part2 - part) > 0.1:
+            fail(f"root partition changed across reboot ({part:.1f} -> {part2:.1f}GiB)")
         partition_count2 = self._root_partition_count(d)
         if partition_count2 != partition_count:
             fail("partition count changed across reboot "

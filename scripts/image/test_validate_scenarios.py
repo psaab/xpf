@@ -132,6 +132,8 @@ class ScenarioDPartitionCountTests(unittest.TestCase):
         self.assertIn("partition_count = self._root_partition_count(d)", body)
         self.assertIn("partition_count2 = self._root_partition_count(d)", body)
         self.assertIn("control_partition_count = self._root_partition_count(d2)", body)
+        self.assertIn("part2 = self._root_part_gib(d)", body)
+        self.assertIn("abs(part2 - part) > 0.1", body)
         self.assertIn("control_partition_count != partition_count", body)
 
 
