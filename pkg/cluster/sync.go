@@ -843,9 +843,13 @@ type SessionSync struct {
 	// been queued before discovery.
 	OnPeerCapabilitiesChanged func()
 	// OnConfigReceivedWithAncestry is the additive callback for config payloads
-	// carrying rename provenance. It is preferred when wired; legacy peers and
-	// tests continue through OnConfigReceived.
+	// carrying rename provenance. It is preferred over the legacy text-only
+	// callback; OnConfigReceivedWithProvenance takes precedence when wired.
 	OnConfigReceivedWithAncestry func(configText string, ancestry []configstore.RenameDescriptor) error
+	// OnConfigReceivedWithProvenance receives the per-frame authentication state
+	// captured from the connection whose verified config frame carried the
+	// payload. It takes precedence over the legacy callbacks when wired.
+	OnConfigReceivedWithProvenance func(configText string, ancestry []configstore.RenameDescriptor, authenticated bool) error
 	// OnConfigReceived is called when a config sync message arrives from the
 	// peer. It returns nil ONLY when the config was actually applied (or is
 	// already the active config); a non-nil error means the apply did not take
@@ -1770,6 +1774,9 @@ type configApplyItem struct {
 	gen      uint64
 	text     string
 	ancestry []configstore.RenameDescriptor
+	// authenticated is true only when the frame arrived with a verified
+	// session-sync authentication trailer.
+	authenticated bool
 	// incarnation is the peer boot the payload arrived under (#5084), taken
 	// from the connection that carried it. Zero = un-incarnated: the payload
 	// is never dropped on incarnation grounds (plan §6 rule 4).

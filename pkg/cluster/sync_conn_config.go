@@ -578,7 +578,8 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text))
 				continue
 			}
-			if s.OnConfigReceivedWithAncestry == nil && s.OnConfigReceived == nil {
+			if s.OnConfigReceivedWithProvenance == nil &&
+				s.OnConfigReceivedWithAncestry == nil && s.OnConfigReceived == nil {
 				// No apply handler wired — the config cannot be applied, so the
 				// high-water must NOT advance (M-2/#4151). A later wired handler
 				// re-applies on the primary's next push of this generation.
@@ -591,7 +592,9 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 			// refused now.
 			s.beginConfigApply(item.gen)
 			var applyErr error
-			if s.OnConfigReceivedWithAncestry != nil {
+			if s.OnConfigReceivedWithProvenance != nil {
+				applyErr = s.OnConfigReceivedWithProvenance(item.text, item.ancestry, item.authenticated)
+			} else if s.OnConfigReceivedWithAncestry != nil {
 				applyErr = s.OnConfigReceivedWithAncestry(item.text, item.ancestry)
 			} else {
 				applyErr = s.OnConfigReceived(item.text)

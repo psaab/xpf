@@ -1253,7 +1253,14 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
 	// payload that was already QUEUED when the re-prime landed, which is the
 	// reported defect ("resetRecvGen does not drain items already queued from
 	// the prior boot"). Neither site subsumes the other.
-	item := configApplyItem{gen: gen, text: configText, ancestry: ancestry, incarnation: s.connBootIncarnation(conn)}
+	authenticated := false
+	if ac, ok := conn.(*authConn); ok {
+		authenticated = ac.readAuthed()
+	}
+	item := configApplyItem{
+		gen: gen, text: configText, ancestry: ancestry,
+		incarnation: s.connBootIncarnation(conn), authenticated: authenticated,
+	}
 	if s.configItemIncarnationStale(item) {
 		s.stats.ConfigsDeadIncarnationDropped.Add(1)
 		slog.Warn("cluster sync: dropping config received under a replaced peer boot "+
