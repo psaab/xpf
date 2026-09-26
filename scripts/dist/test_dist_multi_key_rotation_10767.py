@@ -75,6 +75,16 @@ class MultiKeyRotation10767(unittest.TestCase):
                                      [str(self.old_sec), str(self.new_sec)])
         return manifest
 
+    def test_legacy_singular_public_key_stays_first_in_overlap(self):
+        os.environ["XPF_IMAGE_PUBKEY"] = str(self.old_pub)
+        os.environ["XPF_IMAGE_PUBKEYS"] = str(self.new_pub)
+        self.assertEqual(sign.resolve_image_pubkeys(),
+                         [str(self.old_pub), str(self.new_pub)])
+        versions, pubkeys = publish.gate_images(
+            str(self.dist), require_installer=False)
+        self.assertIn(self.VER, versions)
+        self.assertEqual(pubkeys[0], str(self.old_pub))
+
     def test_image_and_latest_gates_accept_key_addressed_overlap_signatures(self):
         publish.make_latest(str(self.dist), "stable", self.VER)
         latest = self.dist / "stable" / "latest.json"
@@ -90,7 +100,7 @@ class MultiKeyRotation10767(unittest.TestCase):
             [str(self.new_pub)]).keys(), set(sign.bake_set_basenames(self.VER)))
         publish.gate_latest(str(self.dist), "stable", versions, pubkeys)
 
-    def test_direct_file_cli_signs_and_verifies_with_new_key_only(self):
+    def test_direct_file_cli_preserves_legacy_and_new_key_verification(self):
         target = self.tmp / "install.sh"
         target.write_text("#!/bin/sh\necho verified\n")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -98,11 +108,58 @@ class MultiKeyRotation10767(unittest.TestCase):
                 "sign-file", "--seckey", str(self.old_sec),
                 "--seckey", str(self.new_sec), str(target)])
         self.assertEqual(rc, 0)
+        canonical = str(target) + ".minisig"
+        self.assertEqual(sign.minisign_key_id(canonical),
+                         sign.minisign_key_id(str(self.old_pub)))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = sign._main([
+                "verify-file", "--pubkey", str(self.old_pub),
+                "--sig", canonical, str(target)])
+        self.assertEqual(rc, 0, "old-key-only checkout must verify canonical signature")
         with contextlib.redirect_stdout(io.StringIO()):
             rc = sign._main([
                 "verify-file", "--pubkey", str(self.new_pub),
-                "--sig", str(target) + ".minisig", str(target)])
-        self.assertEqual(rc, 0)
+                "--sig", canonical, str(target)])
+        self.assertEqual(rc, 0, "new-key-only checkout must discover key-addressed sidecar")
+
+    def _write_installer(self):
+        path = self.dist / "install.sh"
+        path.write_text(
+            "XPF_APT_BASE_URL_BAKED='https://apt.example.invalid'\n"
+            "XPF_CHANNEL_BAKED='stable'\n"
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+            "fake real archive key for gate fixture\n"
+            "-----END PGP PUBLIC KEY BLOCK-----\n")
+        sign.sign_manifest(str(path), [str(self.old_sec), str(self.new_sec)])
+        return path
+
+    def test_publish_manifest_gate_requires_each_configured_key(self):
+        sidecar = Path(sign.signature_paths(
+            str(self.manifest), [str(self.new_pub)])[-1])
+        sidecar.unlink()
+        with self.assertRaises(SystemExit) as caught:
+            publish.gate_images(str(self.dist), require_installer=False)
+        self.assertIn("new.pub", str(caught.exception))
+
+    def test_publish_installer_gate_requires_each_configured_key(self):
+        installer = self._write_installer()
+        sidecar = Path(sign.signature_paths(
+            str(installer), [str(self.new_pub)])[-1])
+        sidecar.unlink()
+        with self.assertRaises(SystemExit) as caught:
+            publish.gate_images(str(self.dist))
+        self.assertIn("new.pub", str(caught.exception))
+
+    def test_latest_gate_requires_each_configured_key(self):
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        sidecar = Path(sign.signature_paths(
+            str(latest), [str(self.new_pub)])[-1])
+        sidecar.unlink()
+        with self.assertRaises(SystemExit) as caught:
+            publish.gate_latest(str(self.dist), "stable", {self.VER: self.manifest},
+                                [str(self.old_pub), str(self.new_pub)])
+        self.assertIn("new.pub", str(caught.exception))
 
 
 if __name__ == "__main__":

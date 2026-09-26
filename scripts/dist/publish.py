@@ -471,7 +471,8 @@ def gate_images(dist, require_installer=True):
             # Verify + parse from the VERIFIED bytes (Codex-L6 + AGY-r3-F3
             # TOCTOU): never parse a live manifest that could be swapped after
             # the signature check.
-            checks = sign.verify_manifest_map(manifest, sig, pub)
+            checks = sign.verify_manifest_map(
+                manifest, sig, pub, require_all=True)
         except sign.SignError as e:
             die(f"image manifest {os.path.basename(manifest)} failed verify: {e}")
         # #9920 F-063: the SIGNED SET must be exactly the bake's four-file set
@@ -575,8 +576,15 @@ def gate_images(dist, require_installer=True):
                 "without the one-liner.")
         info("install.sh absent (--no-installer) — Tier-A one-liner unavailable")
         return versions, pub
-    with open(installsh) as f:
-        content = f.read()
+    isig = installsh + ".minisig"
+    if not os.path.isfile(isig):
+        die("install.sh is in the publish set but install.sh.minisig is "
+            "missing — sign it before publishing.")
+    try:
+        content = sign.verify_and_read(
+            installsh, isig, pub, require_all=True).decode("utf-8")
+    except sign.SignError as e:
+        die(f"install.sh signature failed verify: {e}")
     # Inspect the KEY BLOCK, not the whole file: the placeholder token also
     # appears in the is_placeholder_key grep pattern (which correctly stays in
     # a stamped installer), so a whole-file substring scan would reject even a
@@ -599,15 +607,7 @@ def gate_images(dist, require_installer=True):
                 f"{marker} marker — the piped one-liner cannot receive it via "
                 "env. Run `publish.py stamp-installer` to bake the apt base URL "
                 "+ channel before signing/publishing.")
-    isig = installsh + ".minisig"
-    if not os.path.isfile(isig):
-        die("install.sh is in the publish set but install.sh.minisig is "
-            "missing — sign it before publishing.")
-    try:
-        sign.verify_signature(installsh, isig, pub)
-        info("install.sh signature OK")
-    except sign.SignError as e:
-        die(f"install.sh signature failed verify: {e}")
+    info("install.sh signature OK (all configured image keys)")
     return versions, pub
 
 
@@ -758,7 +758,8 @@ def _gate_one_latest(dist, channel, pub, require_present):
     # Verify + parse from the VERIFIED bytes (AGY-r3-F1 TOCTOU): do not re-open
     # the live latest.json after the signature check.
     try:
-        data = json.loads(sign.verify_and_read(latest, sig, pub).decode())
+        data = json.loads(sign.verify_and_read(
+            latest, sig, pub, require_all=True).decode())
     except sign.SignError as e:
         die(f"{channel}/latest.json signature failed verify: {e}")
     except (ValueError, UnicodeDecodeError) as e:

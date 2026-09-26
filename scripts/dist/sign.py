@@ -78,14 +78,14 @@ def _key_paths(value):
 def resolve_image_pubkeys(pubkey_path=None):
     """Resolve the trusted image-key set; legacy singular configuration remains valid.
 
-    XPF_IMAGE_PUBKEYS is an os.pathsep-separated set. XPF_IMAGE_PUBKEY may
-    still be used alone, and is included when both variables are set.
+    XPF_IMAGE_PUBKEYS is an os.pathsep-separated ordered set. XPF_IMAGE_PUBKEY
+    may still be used alone and is placed first when both variables are set,
+    preserving the legacy canonical signer during overlap.
     """
     if pubkey_path is None:
-        keys = _key_paths(os.environ.get("XPF_IMAGE_PUBKEYS"))
         singular = os.environ.get("XPF_IMAGE_PUBKEY")
-        if singular:
-            keys.extend(_key_paths(singular))
+        keys = _key_paths(singular)
+        keys.extend(_key_paths(os.environ.get("XPF_IMAGE_PUBKEYS")))
         if not keys:
             keys = [DEFAULT_IMAGE_PUBKEY]
     else:
@@ -398,11 +398,12 @@ def _seckey_paths(value):
 
 
 def sign_manifest(manifest_path, seckey_path, comment=None, sig_path=None):
-    """Sign with one or more minisign keys, preserving the legacy first sidecar.
+    """Sign with ordered minisign keys, preserving the legacy first sidecar.
 
     The first key writes `<file>.minisig`; later keys write
-    `<file>.minisig.<key-id>`. Returns the legacy path for a single key and
-    every generated path for multiple keys.
+    `<file>.minisig.<key-id>`. During overlap, keep the old key first so
+    legacy clients that read only .minisig continue to verify. Returns the legacy
+    path for a single key and every generated path for multiple keys.
     """
     exe = require_minisign()
     if sig_path is None:
@@ -586,14 +587,18 @@ def _resolve_pubkey(pubkey_path):
     return _resolve_pubkeys(pubkey_path)[0]
 
 
-def verify_and_read(signed_path, sig_path, pubkey_path=None):
-    """Verify signed bytes against any configured key and return those bytes.
+def verify_and_read(signed_path, sig_path, pubkey_path=None,
+                    require_all=False):
+    """Verify signed bytes and return the privately staged content.
 
-    The manifest, canonical signature, and key-addressed rotation signatures
-    are copied into private staging before verification, preserving the
-    existing verify-then-read TOCTOU boundary.
+    By default, any configured key is sufficient for consumers. Publisher
+    gates set require_all=True to require a signature from every configured
+    key, and require the canonical .minisig to belong to the first key so
+    legacy clients continue to verify during overlap. The signed file and all
+    signatures are copied into private staging before verification.
     """
     pubkeys = _resolve_pubkeys(pubkey_path)
+    exe = require_minisign()
     import shutil as _sh
     import tempfile as _tf
     tmp = _tf.mkdtemp(prefix="xpf-verify-")
@@ -619,6 +624,42 @@ def verify_and_read(signed_path, sig_path, pubkey_path=None):
             copied.append(dest)
         if not copied:
             raise SignError(f"no minisign signature found for {os.path.basename(signed_path)}")
+        if require_all:
+            canonical = os.path.abspath(signed_path + ".minisig")
+            if os.path.abspath(sig_path) == canonical:
+                canonical_copy = f_copy + ".minisig"
+                if not os.path.isfile(canonical_copy):
+                    raise SignError(
+                        f"canonical signature missing for {os.path.basename(signed_path)}")
+                result = subprocess.run(
+                    [exe, "-V", "-p", pubkeys[0], "-m", f_copy,
+                     "-x", canonical_copy], capture_output=True, text=True)
+                if result.returncode != 0:
+                    detail = result.stderr.strip() or result.stdout.strip()
+                    raise SignError(
+                        "canonical .minisig must verify with the first configured "
+                        f"key {os.path.basename(pubkeys[0])}: {detail}")
+            failures = []
+            for pub in pubkeys:
+                verified = False
+                details = []
+                for signature in copied:
+                    result = subprocess.run(
+                        [exe, "-V", "-p", pub, "-m", f_copy, "-x", signature],
+                        capture_output=True, text=True)
+                    if result.returncode == 0:
+                        verified = True
+                        break
+                    details.append(result.stderr.strip() or result.stdout.strip())
+                if not verified:
+                    failures.append(
+                        f"{os.path.basename(pub)}: " + "; ".join(details))
+            if failures:
+                raise SignError(
+                    "signature missing or invalid for configured key(s): " +
+                    "; ".join(failures))
+            with open(f_copy, "rb") as fh:
+                return fh.read()
         errors = []
         for signature in copied:
             try:
@@ -631,10 +672,11 @@ def verify_and_read(signed_path, sig_path, pubkey_path=None):
     finally:
         _sh.rmtree(tmp, ignore_errors=True)
 
-def verify_manifest_map(manifest_path, sig_path, pubkey_path=None):
-    """Verify a signed manifest and return its {basename: hash} map, parsed
-    from the VERIFIED bytes (TOCTOU-safe)."""
-    data = verify_and_read(manifest_path, sig_path, pubkey_path)
+def verify_manifest_map(manifest_path, sig_path, pubkey_path=None,
+                        require_all=False):
+    """Verify a signed manifest and parse its verified basename/hash map."""
+    data = verify_and_read(manifest_path, sig_path, pubkey_path,
+                           require_all=require_all)
     import tempfile as _tf
     tmp = _tf.mkdtemp(prefix="xpf-manifest-")
     try:

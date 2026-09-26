@@ -663,7 +663,8 @@ image:
 
 # ── signed, hosted distribution (#1924) ───────────────────────────────────
 # Hosting URL + signing key are CONFIG INPUTS, never hardcoded:
-#   XPF_SIGN_SECKEYS   optional os.pathsep-separated additional image keys
+#   XPF_SIGN_SECKEY    canonical signer; keep the old key here during overlap
+#   XPF_SIGN_SECKEYS   os.pathsep-separated additional keys, in signing order
 #   XPF_GPG_KEY        OpenPGP key id that signs the apt Release
 #   XPF_IMAGE_BASE_URL / XPF_APT_BASE_URL   publish destinations
 #   XPF_PUBLISH_CMD    backend shim: $CMD <local-dir> <dest-base-url>

@@ -1768,6 +1768,53 @@ def _download_optional_to(url, dst, workdir):
     return True
 
 
+def _replace_incus_alias(import_alias, alias):
+    """Switch the requested alias only after a separate image import succeeds.
+
+    Move the previous alias aside before assigning the imported image. If that
+    final rename fails, restore the old alias before reporting the failure.
+    """
+    backup = "xpf-old-" + secrets.token_hex(12)
+    moved = subprocess.run(
+        ["incus", "image", "alias", "rename", alias, backup],
+        capture_output=True, text=True)
+    has_previous = moved.returncode == 0
+
+    switched = subprocess.run(
+        ["incus", "image", "alias", "rename", import_alias, alias],
+        capture_output=True, text=True)
+    if switched.returncode != 0:
+        detail = switched.stderr.strip() or switched.stdout.strip()
+        if has_previous:
+            restored = subprocess.run(
+                ["incus", "image", "alias", "rename", backup, alias],
+                capture_output=True, text=True)
+            if restored.returncode != 0:
+                die("could not switch the Incus alias and could not restore the "
+                    f"previous image; it remains available as '{backup}'. "
+                    f"New image remains available as '{import_alias}'. {detail}")
+        cleanup = subprocess.run(
+            ["incus", "image", "alias", "delete", import_alias],
+            capture_output=True, text=True)
+        cleanup_note = (" " if cleanup.returncode == 0 else
+                        f" Temporary alias '{import_alias}' remains: " +
+                        (cleanup.stderr.strip() or cleanup.stdout.strip()))
+        if has_previous:
+            die("could not switch the Incus image alias; the previous alias was "
+                f"restored. {detail}{cleanup_note}")
+        die("could not assign the imported image to the requested Incus alias. "
+            f"{detail}{cleanup_note}")
+
+    if has_previous:
+        removed = subprocess.run(
+            ["incus", "image", "alias", "delete", backup],
+            capture_output=True, text=True)
+        if removed.returncode != 0:
+            print("WARNING: replacement succeeded but the previous image alias "
+                  f"'{backup}' could not be cleaned up: " +
+                  (removed.stderr.strip() or removed.stdout.strip()), file=sys.stderr)
+
+
 @contextlib.contextmanager
 def _verified_private_artifacts(sign_mod, out, names, keys, manifest, sig,
                                 pubkey_path=None):
@@ -2126,18 +2173,19 @@ def cmd_fetch(args):
 
         alias = img_name
         print(f"==> importing verified image as incus alias '{alias}'")
-        # Stage and re-verify all bytes BEFORE deleting the existing alias.
-        # Capacity exhaustion or swap detection therefore preserves the last
-        # verified image and leaves new deploys usable.
+        # Stage and re-verify all bytes before asking Incus to replace the
+        # alias. --reuse only replaces it after the new image has imported, so
+        # staging or image-store failures leave the previous alias usable.
+        import_alias = "xpf-fetch-" + secrets.token_hex(12)
         with _verified_private_artifacts(
                 sign, out, names, ["metadata", "qcow2"], manifest, sig,
                 pubkeys) as staged:
-            subprocess.run(["incus", "image", "delete", alias],
-                           capture_output=True, text=True)
             r = subprocess.run(["incus", "image", "import",
-                                staged["metadata"], staged["qcow2"], "--alias", alias])
+                                staged["metadata"], staged["qcow2"],
+                                "--alias", import_alias])
         if r.returncode != 0:
-            die("incus image import failed")
+            die("incus image import failed; the previous alias was preserved")
+        _replace_incus_alias(import_alias, alias)
         print(f"==> done. Deploy with: xpf-deploy.py deploy <appliance.yaml> "
               f"(image: {alias})")
         return 0
