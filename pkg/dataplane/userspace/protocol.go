@@ -736,12 +736,12 @@ type ConfigSnapshot struct {
 	// omitempty on the Go side + #[serde(default)] on the Rust side, so an old
 	// helper decodes a missing field as false and an old Go binary that does not
 	// emit it leaves the Rust flag false.
-	// LearnedRouteImportCapped says this build shed one or more complete
-	// (table, protocol) learned-route groups to stay within the publish budget
-	// (#10824). It is diagnostic state, not a disposition override: #9522 makes
-	// the NoRoute policy predicate identical above and below the cap. A denied
-	// result becomes PolicyDenied and is dropped/counted as a policy denial;
-	// only a policy Permit result keeps ordinary slow-path delegation.
+	// LearnedRouteImportCapped says the #8355 learned-route cap DECLINED this
+	// build's kernel-route import (#9054). It is diagnostic state, not a
+	// disposition override: #9522 makes the NoRoute policy predicate identical
+	// above and below the cap. A denied result becomes PolicyDenied and is
+	// dropped/counts as a policy denial; only a policy Permit result keeps the
+	// ordinary slow-path delegation.
 	//
 	// WHY IT STAYS ON THE WIRE. The helper status and Prometheus gauge need to
 	// report the published capped state, and the NoRoute diagnostics need to

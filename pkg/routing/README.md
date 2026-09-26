@@ -1165,6 +1165,6 @@ frames exactly as uncapped ones. A deny is downgraded to `PolicyDenied` and
 dropped; only a policy `Permit` result keeps the ordinary slow-path
 delegation. `xpf_learned_route_import_capped` reports the live diagnostic
 state, `xpf_learned_route_cap_hits_total` counts capped builds, and
-`LearnedRouteCapHitsByProtocol` reports per-protocol group sheds. Snapshot
-protocol **27** refuses a v26 helper that would still restore the old
-delegation.
+`xpf_learned_route_cap_group_sheds_total{protocol=...}` reports group sheds
+per protocol via `LearnedRouteCapHitsByProtocol`. Snapshot protocol **27**
+refuses a v26 helper that would still restore the old delegation.

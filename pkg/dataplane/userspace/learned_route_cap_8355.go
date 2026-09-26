@@ -85,7 +85,7 @@ var learnedRouteCapHits atomic.Uint64
 func LearnedRouteCapHits() uint64 { return learnedRouteCapHits.Load() }
 
 // learnedRouteCapProtocolHits records cap-triggered protocol/table groups.
-// Known protocols are present at zero in accessor snapshots.
+// Known protocols start at zero so the metric emits stable series.
 var learnedRouteCapProtocolHits = struct {
 	sync.Mutex
 	counts map[string]uint64
@@ -240,7 +240,7 @@ func learnedRouteCapExceeded(count int) bool {
 		"security_note", "the capped state does not delegate NoRoute to the kernel: the #7480 policy adjudication applies above and below the cap, and only a PolicyAction::Permit result keeps normal slow-path delegation",
 		"why_not_partial", "a whole (table, protocol) group is shed, never a prefix chosen by route sort order",
 		"remedy", "reduce the imported table (filter what FRR installs into the kernel), or raise the publish budget if holding the control socket that long is acceptable",
-		"observability", "xpf_learned_route_cap_hits_total counts capped builds; LearnedRouteCapHitsByProtocol reports group sheds by protocol; xpf_learned_route_import_capped reports the live capped state; xpf_policy_denies_total advances for denied capped NoRoute frames",
+		"observability", "xpf_learned_route_cap_hits_total counts capped builds; xpf_learned_route_cap_group_sheds_total counts group sheds by protocol; LearnedRouteCapHitsByProtocol exposes those counts to Go callers; xpf_learned_route_import_capped reports the live capped state; xpf_policy_denies_total advances for denied capped NoRoute frames",
 	)
 	return true
 }

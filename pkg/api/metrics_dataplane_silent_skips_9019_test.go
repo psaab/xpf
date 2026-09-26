@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	napiSkipMetric9019 = "xpf_napi_probe_target_skips_total"
-	routeCapMetric9019 = "xpf_learned_route_cap_hits_total"
+	napiSkipMetric9019          = "xpf_napi_probe_target_skips_total"
+	routeCapMetric9019          = "xpf_learned_route_cap_hits_total"
+	protocolRouteCapMetric10824 = "xpf_learned_route_cap_group_sheds_total"
 )
 
 // collectAll9019 drives the collector's REAL Collect, not emitDataplaneSilentSkips.
@@ -72,8 +73,8 @@ func TestDataplaneSilentSkipsAreScrapable9019(t *testing.T) {
 	}
 }
 
-// Describe must advertise both, or a strict registry rejects the collector at
-// registration and every metric on it disappears -- including the ones that
+// Describe must advertise every emitted counter, or a strict registry rejects
+// the collector and every metric on it disappears -- including the ones that
 // work.
 func TestDataplaneSilentSkipsAreDescribed9019(t *testing.T) {
 	c := newCollector(nil)
@@ -81,15 +82,49 @@ func TestDataplaneSilentSkipsAreDescribed9019(t *testing.T) {
 	go func() { c.Describe(ch); close(ch) }()
 	seen := map[string]bool{}
 	for d := range ch {
-		for _, name := range []string{napiSkipMetric9019, routeCapMetric9019} {
+		for _, name := range []string{napiSkipMetric9019, routeCapMetric9019, protocolRouteCapMetric10824} {
 			if strings.Contains(d.String(), name) {
 				seen[name] = true
 			}
 		}
 	}
-	for _, name := range []string{napiSkipMetric9019, routeCapMetric9019} {
+	for _, name := range []string{napiSkipMetric9019, routeCapMetric9019, protocolRouteCapMetric10824} {
 		if !seen[name] {
 			t.Errorf("%s is collected but not described", name)
+		}
+	}
+}
+func TestLearnedRouteCapGroupShedsScrapableByProtocol10824(t *testing.T) {
+	c := newCollector(&Server{store: newDescriptorCoverageStore(t), startTime: time.Now()})
+	ch := make(chan prometheus.Metric, 512)
+	done := make(chan struct{})
+	got := make(map[string]float64)
+	go func() {
+		defer close(done)
+		for metric := range ch {
+			if !strings.Contains(metric.Desc().String(), protocolRouteCapMetric10824) {
+				continue
+			}
+			var pbm dto.Metric
+			if err := metric.Write(&pbm); err != nil {
+				continue
+			}
+			for _, label := range pbm.GetLabel() {
+				if label.GetName() == "protocol" {
+					got[label.GetValue()] = pbm.GetCounter().GetValue()
+				}
+			}
+		}
+	}()
+	c.Collect(ch)
+	close(ch)
+	<-done
+
+	for protocol, count := range userspace.LearnedRouteCapHitsByProtocol() {
+		value, ok := got[protocol]
+		if !ok || value != float64(count) {
+			t.Errorf("%s{protocol=%q} = %v (present=%t), accessor says %d",
+				protocolRouteCapMetric10824, protocol, value, ok, count)
 		}
 	}
 }
