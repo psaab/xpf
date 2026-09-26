@@ -21,9 +21,9 @@
 # (re)creating ONLY what is missing — a firmware reset / VM redefinition that
 # wiped NVRAM self-heals, and repeated boots never duplicate slots.
 #
-# It does NOT change which slot is the DEFAULT beyond an initial seeding: if
-# neither slot is in BootOrder yet (fresh box), it puts xpf-A first; once the
-# kernel channel has promoted a slot, that ordering is preserved.
+# It seeds xpf-A first only when neither slot is yet in BootOrder (fresh box).
+# Once either slot is present, it preserves the current front — including an
+# operator-selected non-xpf entry — instead of mistaking it for a fresh box.
 
 set -u
 
@@ -133,20 +133,27 @@ register_slot() {
     return 0
 }
 
-# Record WHICH xpf slot (if any) led BootOrder BEFORE we (re)register. If an xpf
-# slot already led, that is the PROMOTED default and MUST be preserved — even if
-# the OTHER slot is currently missing (e.g. B was promoted and A's entry was
-# lost). Only when NO xpf slot leads do we seed a deterministic order (because
-# efibootmgr --create PREPENDS each new entry, creating A then B would otherwise
-# leave B in front — caught live, #1930; the self-heal-undoes-promotion case was
-# r1 Codex High).
+# Capture BootOrder and its lead before registration: efibootmgr --create
+# prepends new entries and could otherwise steal an operator-selected default.
+# If an xpf slot already led, that is the PROMOTED default and MUST be preserved
+# even if the other slot is missing. If an xpf slot was present later in the
+# order, preserve the non-xpf entry that the operator chose to lead it. Only
+# when neither xpf slot was in BootOrder do we seed a deterministic default.
 slot_id() { efibootmgr | sed -nE "s/^Boot([0-9A-Fa-f]{4})\*?[[:space:]]+$1[[:space:]].*/\\1/p" | head -1; }
-PRE_FRONT=$(efibootmgr | sed -nE 's/^BootOrder: ([^,]*).*$/\1/p')
+PRE_ORDER=$(efibootmgr | sed -nE 's/^BootOrder: (.*)$/\1/p')
+PRE_FRONT=${PRE_ORDER%%,*}
 PRE_A=$(slot_id xpf-A)
 PRE_B=$(slot_id xpf-B)
 LED_SLOT=""   # which xpf slot label led before this run, if any
 [ -n "$PRE_A" ] && [ "$PRE_FRONT" = "$PRE_A" ] && LED_SLOT=xpf-A
 [ -n "$PRE_B" ] && [ "$PRE_FRONT" = "$PRE_B" ] && LED_SLOT=xpf-B
+PRE_HAS_XPF=""
+for pre_id in "$PRE_A" "$PRE_B"; do
+    [ -n "$pre_id" ] || continue
+    case ",$PRE_ORDER," in
+        *,"$pre_id",*) PRE_HAS_XPF=1 ;;
+    esac
+done
 
 register_slot xpf-A || true
 register_slot xpf-B || true
@@ -179,10 +186,25 @@ elif [ -n "$LED_SLOT" ]; then
             log "promoted slot $LED_SLOT already leads BootOrder; preserving"
         fi
     fi
+elif [ -n "$PRE_HAS_XPF" ]; then
+    # A non-xpf entry was already the default while an xpf slot remained
+    # reachable. Preserve that operator choice; re-assert it only if creating a
+    # missing slot caused efibootmgr to prepend the new entry.
+    REST=$(echo "$ORDER" | tr ',' '\n' | grep -vxF "$PRE_FRONT" | paste -sd, -)
+    NEW="$PRE_FRONT"
+    [ -n "$REST" ] && NEW="$NEW,$REST"
+    if [ "$NEW" != "$ORDER" ]; then
+        log "preserving non-xpf BootOrder front $PRE_FRONT: $NEW (was: $ORDER)"
+        efibootmgr --quiet --bootorder "$NEW" 2>/dev/null \
+            || log "WARNING: failed to re-assert non-xpf default (non-fatal)"
+    else
+        log "non-xpf entry $PRE_FRONT already leads BootOrder; preserving"
+    fi
 elif [ -n "$A_ID" ]; then
-    # No xpf slot led (fresh box) — deterministic seed: xpf-A first, xpf-B
-    # second, then every other entry in its existing order (non-destructive).
+    # Neither xpf slot was present in the pre-run BootOrder (fresh box) —
+    # deterministic seed: xpf-A first, xpf-B second, then other entries.
     REST=$(echo "$ORDER" | tr ',' '\n' | grep -vxF "$A_ID" | grep -vxF "${B_ID:-__none__}" | paste -sd, -)
+    # This remains non-destructive except for the intentional initial default.
     NEW="$A_ID"
     [ -n "$B_ID" ] && NEW="$NEW,$B_ID"
     [ -n "$REST" ] && NEW="$NEW,$REST"
