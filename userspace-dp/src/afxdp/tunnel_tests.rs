@@ -399,6 +399,38 @@ fn gre_encap_copies_inner_dscp_ecn_to_outer_ipv6_traffic_class() {
     assert_ne!(outer_tc, 0, "stripped DSCP/ECN regression");
 }
 
+/// #10865: even if the GRE caller carries a stale IPv4 stamp, an IPv6 inner
+/// must not be emitted with PT=IPv4. This fixture is long enough and has an
+/// IPv4-shaped length field so metadata-only trimming would previously have
+/// built the mismatched GRE packet.
+#[test]
+fn gre_encap_refuses_metadata_family_that_disagrees_with_inner_nibble_10865() {
+    let mut inner = vec![0u8; 80];
+    inner[0] = 0x60; // bytes are IPv6
+    inner[2..4].copy_from_slice(&40u16.to_be_bytes()); // IPv4-shaped total length
+    inner[4..6].copy_from_slice(&40u16.to_be_bytes()); // IPv6 payload length
+    inner[6] = PROTO_TCP;
+    inner[7] = 64;
+    let inner_frame = wrap_raw_ip_packet_for_tunnel(&inner, libc::AF_INET6 as u8);
+
+    let state = gre1881_state();
+    let decision = SessionDecision {
+        resolution: gre_encap_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut meta = ForwardPacketMeta::default();
+    meta.addr_family = libc::AF_INET as u8;
+    meta.protocol = PROTO_TCP;
+    meta.l3_offset = 14;
+
+    assert!(
+        encapsulate_native_gre_frame(&inner_frame, meta, &decision, &state).is_none(),
+        "a stale IPv4 metadata stamp must not encode IPv6 bytes as PT=IPv4"
+    );
+}
+
 /// Build a valid IPv4 inner packet of exactly `total` bytes (>= 20),
 /// with the IPv4 total-length field set to `total` so
 /// `packet_trimmed_len` keeps the whole buffer (no trim).

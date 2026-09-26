@@ -12,6 +12,14 @@
 // tests leak to ordinary edits (the ext-parity record). The verdict lives
 // in the `core`-only `gre_classify` module the shim calls; this file pulls
 // that file in by source and runs the full truth table.
+//
+// #10865 scoped redirect-only note: the shim's
+// `classify_native_gre_inner` currently reads only the 4-byte, unflagged GRE
+// header and returns a classifier miss when C/K/S flags are present. Those
+// keyed / checksummed / sequenced packets are therefore NOT shim-classified
+// for kernel delivery; the native-GRE arm's miss path continues to XSK for
+// userspace decap and policy. The following executed truth table pins that
+// all non-PASS results (including that flag-induced miss) stay userspace.
 #[path = "../../../../userspace-xdp/src/gre_classify.rs"]
 mod shim_gre;
 
@@ -41,7 +49,7 @@ fn native_gre_kernel_pass_requires_a_local_outer_10651() {
             true,
             false,
             false,
-            "local outer + inner REDIRECT/miss: userspace owns the inner",
+            "local outer + keyed-GRE classifier miss: stays on XSK redirect path",
         ),
         (
             false,
