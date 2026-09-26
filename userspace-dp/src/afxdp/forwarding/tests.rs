@@ -2080,6 +2080,79 @@ fn local_delivery_resolves_real_ifindex_for_non_slash32_interface_address_10645(
     );
 }
 
+/// #10867: duplicate v4/v6 host addresses in one routing table resolve to the
+/// lowest-ifindex owner, independent of interface snapshot order. The owners
+/// deliberately have different zones and redundancy groups so an accidental
+/// first-match changes the consumer-visible local-delivery attribution.
+#[test]
+fn duplicate_interface_host_uses_lowest_ifindex_owner_10867() {
+    let mut snapshot = nat_snapshot();
+    let wan = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.name == "reth0.80")
+        .expect("wan interface");
+    wan.addresses[0].address = "10.0.61.1/24".to_string();
+    wan.addresses[1].address = "2001:559:8585:ef00::1/64".to_string();
+    snapshot.source_nat_rules.clear();
+
+    let state = build_forwarding_state(&snapshot);
+    let host = "10.0.61.1".parse().expect("duplicate host");
+    assert_eq!(
+        state
+            .connected_v4
+            .iter()
+            .filter(|entry| entry.table == "inet.0" && entry.host == host)
+            .count(),
+        2,
+        "both same-table interface addresses must reach the FIB"
+    );
+    let host_v6: std::net::Ipv6Addr = "2001:559:8585:ef00::1".parse().expect("duplicate v6 host");
+    assert_eq!(
+        state
+            .connected_v6
+            .iter()
+            .filter(|entry| entry.table == "inet6.0" && entry.host == host_v6)
+            .count(),
+        2,
+        "both same-table v6 interface addresses must reach the FIB"
+    );
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&24),
+        Some(&TEST_LAN_ZONE_ID),
+        "first snapshot row belongs to lan"
+    );
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&12),
+        Some(&TEST_WAN_ZONE_ID),
+        "lowest-ifindex owner belongs to wan"
+    );
+    assert_eq!(owner_rg_for_flow(&state, 24), 2);
+    assert_eq!(owner_rg_for_flow(&state, 12), 1);
+
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(host));
+    assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(resolved.local_ifindex, 12);
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&resolved.local_ifindex),
+        Some(&TEST_WAN_ZONE_ID),
+        "local-delivery zone attribution must follow the selected owner"
+    );
+    assert_eq!(owner_rg_for_resolution(&state, resolved), 1);
+    let resolved_v6 = lookup_forwarding_resolution(&state, IpAddr::V6(host_v6));
+    assert_eq!(
+        resolved_v6.disposition,
+        ForwardingDisposition::LocalDelivery
+    );
+    assert_eq!(resolved_v6.local_ifindex, 12);
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&resolved_v6.local_ifindex),
+        Some(&TEST_WAN_ZONE_ID),
+        "v6 local-delivery zone attribution must follow the selected owner"
+    );
+    assert_eq!(owner_rg_for_resolution(&state, resolved_v6), 1);
+}
+
 #[test]
 fn icmp_session_miss_resolution_prefers_frame_destination_for_interface_nat_local_delivery() {
     let state = build_forwarding_state(&nat_snapshot());

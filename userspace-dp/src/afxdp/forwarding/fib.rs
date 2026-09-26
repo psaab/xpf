@@ -466,11 +466,15 @@ fn local_delivery_resolution_v4(
     // `prefix.addr()` network (equal to the host only for a /32 — every
     // wider interface address previously fell through to ifindex 0,
     // collapsing owner-RG attribution and stripping fabric zone stamps).
+    // Duplicate host addresses can be shared by interfaces in one table.
+    // Pick the lowest ifindex explicitly so local-delivery ownership does not
+    // depend on interface snapshot / connected-route insertion order.
     let local_ifindex = state
         .connected_v4
         .iter()
-        .find(|entry| entry.table == table && entry.host == ip)
+        .filter(|entry| entry.table == table && entry.host == ip)
         .map(|entry| entry.ifindex)
+        .min()
         .unwrap_or(0);
     if local_ifindex == 0 {
         LOCAL_DELIVERY_IFINDEX0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -496,11 +500,14 @@ fn local_delivery_resolution_v6(
 ) -> Option<ForwardingResolution> {
     let local_ifindex = if local_v6_owned_by_table(state, ip, table) {
         // #10645: match the row's unmasked HOST address (see the v4 arm).
+        // As with v4, make duplicate-host ownership deterministic rather than
+        // depending on interface snapshot order.
         state
             .connected_v6
             .iter()
-            .find(|entry| entry.table == table && entry.host == ip)
+            .filter(|entry| entry.table == table && entry.host == ip)
             .map(|entry| entry.ifindex)
+            .min()
             .unwrap_or(0)
     } else {
         // #10692: Linux puts the subnet-router anycast address of an assigned
