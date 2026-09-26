@@ -4,8 +4,9 @@
 // target (a local route-existence check) and fell back to a UDP
 // connect() that also put no packet on the wire, so icmp-ping "always
 // passed" while the path was dead. This file replaces it with a genuine
-// ICMP echo request/reply exchange with id/seq matching and a per-probe
-// timeout. xpfd runs as root, so raw ICMP sockets are available.
+// ICMP echo request/reply exchange with a fresh unpredictable token, id/seq
+// matching, and a per-probe timeout. The token rejects blind static replies
+// but is not authentication against an on-path observer.
 //
 // The socket is opened through an injectable seam (icmpListenFunc) so
 // unit tests can exercise the echo build/match/timeout logic without
@@ -13,13 +14,13 @@
 package rpm
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -97,27 +98,24 @@ func realICMPListen(network, laddr string, opts probeSockOpts) (net.PacketConn, 
 	return lc.ListenPacket(context.Background(), network, laddr)
 }
 
-// echoIDCounter feeds per-exchange echo identifiers so concurrent tests
-// on the same raw socket family never cross-match replies.
-var echoIDCounter atomic.Uint32
-
 // ErrProbeSetup marks ENVIRONMENT/capability failures — the probe
 // never reached the wire (raw socket open denied, e.g. CAP_NET_RAW
-// dropped; message marshal). These are NOT path-health signals: the
-// probe loop holds the test's current state (no SuccFail counting, no
-// status change, no events, no Transition callback), so ip-monitoring
+// dropped; random challenge generation or message marshal). These are NOT
+// path-health signals: the probe loop holds the test's current state
+// (no SuccFail counting, no status change, no events, no Transition
+// callback), so ip-monitoring
 // can never inject or withdraw preferred routes off a capability
 // regression (AGY review on PR #1843, finding F2). A sustained setup
 // failure surfaces via the rate-limited Warn log and the stalled
 // LastProbeAt/TotalSent in `show services rpm`, never via route
 // actuation. Send/receive/timeout errors stay genuine probe failures.
 //
-// Covers all three probe types: raw-socket open + marshal for
-// icmp-ping (here), and probeDialer socket-control failures
-// (SO_BINDTODEVICE / SO_MARK) for tcp-ping and http-get (Codex PR
-// #1843 HIGH-2). Genuine dial outcomes — refused, timeout,
-// unreachable — stay path signals; ambiguous dial errnos deliberately
-// default to PATH (conservative for detection).
+// Covers all three probe types: raw-socket open, random challenge generation,
+// and marshal for icmp-ping (here); probeDialer socket-control failures
+// (SO_BINDTODEVICE / SO_MARK) for tcp-ping/http-get (Codex PR #1843
+// HIGH-2). Genuine dial outcomes — refused, timeout, unreachable — stay
+// path signals; ambiguous dial errnos deliberately default to PATH
+// (conservative for detection).
 var ErrProbeSetup = errors.New("probe setup failed")
 
 // probeICMP sends one ICMP (or ICMPv6) echo request to the test target
@@ -182,13 +180,16 @@ func (m *Manager) probeICMP(ctx context.Context, test *config.RPMTest, opts prob
 		return 0, fmt.Errorf("%w: icmp socket: %v", ErrProbeSetup, err)
 	}
 	defer conn.Close()
-
-	id := int(uint16(os.Getpid()) ^ uint16(echoIDCounter.Add(1)))
-	const seq = 1
+	var challenge [16]byte
+	if _, err := rand.Read(challenge[:]); err != nil {
+		return 0, fmt.Errorf("%w: generate icmp challenge: %v", ErrProbeSetup, err)
+	}
+	id := int(challenge[0])<<8 | int(challenge[1])
+	seq := int(challenge[2])<<8 | int(challenge[3])
 	msg := icmp.Message{
 		Type: echoType,
 		Code: 0,
-		Body: &icmp.Echo{ID: id, Seq: seq, Data: []byte("xpf-rpm-probe")},
+		Body: &icmp.Echo{ID: id, Seq: seq, Data: challenge[:]},
 	}
 	// Marshal computes the IPv4 ICMP checksum; for ICMPv6 the kernel
 	// fills the checksum on raw IPPROTO_ICMPV6 sockets.
@@ -234,10 +235,16 @@ func (m *Manager) probeICMP(ctx context.Context, test *config.RPMTest, opts prob
 		if !ok || echo.ID != id || echo.Seq != seq {
 			continue
 		}
+		// The unpredictable per-exchange token rejects static replies
+		// and blind guesses. It does not authenticate the peer: an
+		// on-path observer can copy the request token into a forged reply.
+		if !bytes.Equal(echo.Data, challenge[:]) {
+			continue
+		}
 		// Reply-match compares the peer IP only, not the zone (#2494):
 		// the kernel may or may not populate the reply's IPAddr.Zone, and
-		// id/seq already disambiguate this exchange. The send-side zone is
-		// the correctness fix (the echo leaves the right link); the
+		// id/seq and the challenge token identify this exchange. The send-side
+		// zone is the correctness fix (the echo leaves the right link); the
 		// reply-match stays zone-agnostic by design.
 		if peerIP, ok := peer.(*net.IPAddr); ok && !peerIP.IP.Equal(dst) {
 			continue

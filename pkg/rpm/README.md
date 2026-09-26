@@ -97,6 +97,12 @@ out-of-range value to a warning.
   the wire (raw-IP dial + UDP connect fallback — a route-existence
   check), so icmp-ping tests that "always passed" can now fail and can
   now trigger event-options policies. Release-noted behavior change.
+- **Probe replies are not authenticated (#10872; accepted risk).** ICMP's
+  fresh random token rejects static blind replies but an on-path attacker
+  can observe and echo it; tcp-ping only confirms a TCP handshake; and
+  schemeless http-get targets default to plaintext HTTP. See [the multi-WAN
+  deployment guide](../../docs/multi-wan.md) for the explicit threat boundary
+  and deployment guidance.
 - **Setup errors hold state** (AGY PR #1843 F2 + Codex HIGH-2): a
   raw-socket open failure (capability/permission) AND socket-control
   failures on the tcp-ping/http-get dial path (SO_BINDTODEVICE /
