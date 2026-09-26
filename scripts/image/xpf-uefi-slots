@@ -34,17 +34,20 @@ export LC_ALL=C LANG=C
 
 log() { echo "xpf-uefi-slots: $*" >&2; }
 
-# The efivars directory and the ESP mountpoint are overridable for the
-# self-test (scripts/image/test_uefi_slots_6499.py) only; in production they
-# are the real kernel/ESP paths. This script MUTATES firmware NVRAM and can
-# delete boot entries, so its destructive paths need hermetic coverage — and
-# they cannot be reached at all without pointing these two roots at a
-# synthetic tree (same pattern as xpf-grow-root's XPF_GROW_ROOT_SYSFS /
-# XPF_GROW_ROOT_STAMP). Everything else — efibootmgr, findmnt — is resolved
-# from PATH, which the self-test shadows with mocks, and the `-b "$ESP_DISK"`
-# sanity check below is NOT relaxed: the self-test hands the parse a REAL host
-# block device so that check is exercised rather than bypassed.
-#
+# The efivars directory, ESP mountpoint, and block-device check root are
+# overridable for the self-test (scripts/image/test_uefi_slots_6499.py) only;
+# in production they are the real kernel/ESP paths. This script MUTATES
+# firmware NVRAM and can delete boot entries, so its destructive paths need
+# hermetic coverage — and they cannot be reached at all without pointing these
+# roots at a synthetic tree (same pattern as xpf-grow-root's XPF_GROW_ROOT_SYSFS
+# / XPF_GROW_ROOT_STAMP). Everything else — efibootmgr, findmnt, lsblk — is
+# resolved from PATH, which the self-test shadows with mocks. The `-b` sanity
+# check below is NOT relaxed: the self-test maps the resolved disk name to a
+# REAL host block device so the check is exercised rather than bypassed.
+
+# Only the validation root is overridable: efibootmgr must always receive the
+# real /dev path in production (and the matching path in the test).
+ESP_DEV_ROOT="${XPF_UEFI_SLOTS_DEV_ROOT:-/dev}"
 # The UEFI LOADER path (\EFI\<slot>\shimx64.efi) is deliberately NOT derived
 # from these: it is a firmware path interpreted by the firmware, not a mount.
 EFIVARS_DIR="${XPF_UEFI_SLOTS_EFIVARS:-/sys/firmware/efi/efivars}"
@@ -70,10 +73,14 @@ if [ -z "$ESP_SRC" ]; then
     log "no ESP mounted at $ESP_ROOT; skipping"
     exit 0
 fi
-# /dev/sda1 -> disk=/dev/sda part=1 ; /dev/nvme0n1p1 -> disk=/dev/nvme0n1 part=1
-ESP_PART=$(echo "$ESP_SRC" | grep -oE '[0-9]+$' || true)
-ESP_DISK=$(echo "$ESP_SRC" | sed -E 's/p?[0-9]+$//')
-if [ -z "$ESP_PART" ] || [ -z "$ESP_DISK" ] || [ ! -b "$ESP_DISK" ]; then
+# Resolve the partition number and its parent disk independently of device
+# naming conventions (for example, /dev/sdap1 belongs to /dev/sdap, not
+# /dev/sda). lsblk's PARTN and PKNAME are authoritative for the mounted source.
+ESP_DISK_NAME=$(lsblk -no PKNAME "$ESP_SRC" 2>/dev/null | head -n1)
+ESP_PART=$(lsblk -no PARTN "$ESP_SRC" 2>/dev/null | head -n1)
+ESP_DISK="/dev/$ESP_DISK_NAME"
+if [ -z "$ESP_PART" ] || [ -z "$ESP_DISK_NAME" ] || \
+        [ ! -b "$ESP_DEV_ROOT/$ESP_DISK_NAME" ]; then
     log "could not parse ESP disk/part from '$ESP_SRC'; skipping"
     exit 0
 fi

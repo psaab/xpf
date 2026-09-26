@@ -144,6 +144,40 @@ class EfibootmgrSlotVerdictTests(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class BootCurrentSlotVerdictTests(unittest.TestCase):
+    def test_bootcurrent_for_xpf_slot_passes(self):
+        ok, reason = validate._efibootmgr_bootcurrent_slot_verdict(
+            _efibootmgr(), "xpf-A")
+        self.assertTrue(ok, reason)
+
+    def test_bootcurrent_for_fallback_entry_fails(self):
+        out = _efibootmgr().replace("BootCurrent: 0003", "BootCurrent: 0000")
+        ok, reason = validate._efibootmgr_bootcurrent_slot_verdict(out, "xpf-A")
+        self.assertFalse(ok)
+        self.assertIn("firmware did not boot through", reason)
+
+    def test_missing_bootcurrent_fails(self):
+        out = _efibootmgr().replace("BootCurrent: 0003\n", "")
+        ok, reason = validate._efibootmgr_bootcurrent_slot_verdict(out, "xpf-A")
+        self.assertFalse(ok)
+        self.assertIn("no valid BootCurrent", reason)
+
+    def test_multiline_bootcurrent_value_is_not_accepted(self):
+        out = _efibootmgr().replace("BootCurrent: 0003", "BootCurrent:\n0003")
+        ok, reason = validate._efibootmgr_bootcurrent_slot_verdict(out, "xpf-A")
+        self.assertFalse(ok)
+        self.assertIn("no valid BootCurrent", reason)
+
+    def test_wrong_slot_label_or_loader_cannot_match_bootcurrent(self):
+        out = _efibootmgr(entries=[
+            "Boot0003* xpf-A\tHD(1,GPT,1234)/File(\\EFI\\ubuntu\\shimx64.efi)",
+            "Boot0004* xpf-B\tHD(1,GPT,1234)/File(\\EFI\\xpf-B\\shimx64.efi)",
+        ])
+        ok, reason = validate._efibootmgr_bootcurrent_slot_verdict(out, "xpf-A")
+        self.assertFalse(ok)
+        self.assertIn("no unique entry", reason)
+
+
 class OneshotCleanVerdictTests(unittest.TestCase):
     def test_clean_run_passes(self):
         ok, reason = validate._oneshot_clean_verdict("u", "0", "active", "success")
@@ -184,8 +218,16 @@ class ScenarioWiringTests(unittest.TestCase):
                       "— the Tier-1 gate would sign a manifest for an image "
                       "whose kernel can never be upgraded in place (#6494)")
 
+        self.assertIn("self.assert_ab_slot_boot(", body,
+                      "scenario A never boots through an xpf UEFI entry")
+        self.assertLess(body.index("self.assert_ab_kernel_channel("),
+                        body.index("self.assert_ab_slot_boot("))
+
     def test_harness_exposes_the_assertion(self):
         self.assertTrue(hasattr(validate.Harness, "assert_ab_kernel_channel"))
+
+    def test_harness_exposes_the_slot_boot_assertion(self):
+        self.assertTrue(hasattr(validate.Harness, "assert_ab_slot_boot"))
 
 
 if __name__ == "__main__":
