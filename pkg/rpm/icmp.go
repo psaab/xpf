@@ -101,8 +101,9 @@ func realICMPListen(network, laddr string, opts probeSockOpts) (net.PacketConn, 
 // ErrProbeSetup marks ENVIRONMENT/capability failures — the probe
 // never reached the wire (raw socket open denied, e.g. CAP_NET_RAW
 // dropped; random challenge generation or message marshal). These are NOT
-// path-health signals: the probe loop holds the test's current state (no
-// status change, no events, no Transition callback), so ip-monitoring
+// path-health signals: the probe loop holds the test's current state
+// (no SuccFail counting, no status change, no events, no Transition
+// callback), so ip-monitoring
 // can never inject or withdraw preferred routes off a capability
 // regression (AGY review on PR #1843, finding F2). A sustained setup
 // failure surfaces via the rate-limited Warn log and the stalled
