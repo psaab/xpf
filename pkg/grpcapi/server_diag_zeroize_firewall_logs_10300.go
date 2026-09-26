@@ -338,19 +338,22 @@ func zeroizeFirewallLogs(inv ZeroizeLogInventory) error {
 	}
 }
 
-// PerformZeroizeWipeWithLogInventory is the shared factory-reset primitive
-// entry point for callers that can snapshot the configured log names before
-// the config leg erases them. The legacy PerformZeroizeWipe wrapper below
-// supplies an empty inventory for callers that do not have a config store.
+// PerformZeroizeWipeWithLogInventory is the shared, crash-aware factory-reset
+// primitive. It snapshots the inventory durably before erasing any leg,
+// completes every external secret/log leg before removing the config state,
+// and removes the marker only after every leg is durable.
 func PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
 	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, inv)
 }
 
-// performZeroizeWipeWithLogInventory keeps the existing three-argument wipe
-// seam intact for older tests/callers while adding the log leg after it. The
-// production gRPC and console paths call this four-argument entry point with
-// the pre-wipe inventory.
 var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
+	record, err := beginZeroize(configDir, configBase, archiveDir, inv)
+	if err != nil {
+		return err
+	}
+	configDir, configBase, archiveDir, inv =
+		record.ConfigDir, record.ConfigBase, record.ArchiveDir, record.LogInventory
+
 	var errs []error
 	if err := performZeroizeWipe(configDir, configBase, archiveDir); err != nil {
 		errs = append(errs, err)
@@ -358,9 +361,15 @@ var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir 
 	if err := zeroizeFirewallLogs(inv); err != nil {
 		errs = append(errs, err)
 	}
+	// Config state is last. A crash before or during this leg leaves the
+	// pending marker intact, and every external credential/log surface has
+	// already been attempted.
+	if err := zeroizeConfigDir(configDir, configBase); err != nil {
+		errs = append(errs, err)
+	}
 	switch len(errs) {
 	case 0:
-		return nil
+		return completeZeroize(record)
 	case 1:
 		return errs[0]
 	default:

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -228,7 +230,8 @@ func TestZeroizeSnapshotsFirewallInventoryInsideGate10300(t *testing.T) {
 }
 
 // seamZeroizeFirewallLogPaths keeps direct PerformZeroizeWipe tests hermetic
-// now that the exported primitive includes the static firewall-log leg.
+// now that the exported primitive includes the static firewall-log leg and
+// the day-0 loader gate.
 func seamZeroizeFirewallLogPaths(t *testing.T, root string) {
 	t.Helper()
 	varLog := filepath.Join(root, "var", "log")
@@ -237,10 +240,200 @@ func seamZeroizeFirewallLogPaths(t *testing.T, root string) {
 	rsyslogDir := filepath.Join(root, "etc", "rsyslog.d")
 	origVarLog, origSecurityDir, origFlowDir, origRsyslogDir :=
 		zeroizeVarLogDir, zeroizeSecurityLogDir, zeroizeFlowTraceDir, zeroizeRsyslogConfDir
+	origPendingPath := configstore.FactoryResetPendingPath
+	configstore.FactoryResetPendingPath = filepath.Join(root, "etc", "xpf", configstore.Day0ConfigAppliedBase)
+	t.Cleanup(func() { configstore.FactoryResetPendingPath = origPendingPath })
 	t.Cleanup(func() {
 		zeroizeVarLogDir, zeroizeSecurityLogDir, zeroizeFlowTraceDir, zeroizeRsyslogConfDir =
 			origVarLog, origSecurityDir, origFlowDir, origRsyslogDir
 	})
 	zeroizeVarLogDir, zeroizeSecurityLogDir, zeroizeFlowTraceDir, zeroizeRsyslogConfDir =
 		varLog, securityDir, flowDir, rsyslogDir
+}
+func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "custom-config")
+	loaderDir := filepath.Join(root, "etc", "xpf")
+	configFile := filepath.Join(configDir, "xpf.conf")
+	activeDB := filepath.Join(configDir, ".configdb", "active.json")
+	mustWriteFile(t, activeDB, []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, configFile, []byte("system { host-name prior-tenant; }\n"))
+	mustWriteFile(t, filepath.Join(configDir, ".config.journal"), []byte("zeroize record\n"))
+	hermeticWipe10100(t, root)
+
+	const secret = "prior-tenant-secret-10742"
+	rendered := filepath.Join(root, "rendered", "frr", "frr.conf")
+	mustWriteFile(t, rendered, []byte("! BEGIN BPFRX MANAGED CONFIG - do not edit this section\n"+secret+"\n! END BPFRX MANAGED CONFIG\n"))
+
+	varLog := filepath.Join(root, "var", "log")
+	mustWriteFile(t, filepath.Join(varLog, "trace-10742.log"), []byte("trace"))
+	mustWriteFile(t, filepath.Join(varLog, "syslog-10742.log"), []byte("syslog"))
+	inventory := ZeroizeLogInventory{
+		TraceFile:   "trace-10742.log",
+		SyslogFiles: []string{"syslog-10742.log"},
+	}
+	customArchive := filepath.Join(root, "custom-archive")
+	archiveSecret := filepath.Join(customArchive, "config.conf")
+	mustWriteFile(t, archiveSecret, []byte(secret))
+
+	// Stop after the durable marker replacement and before any wipe leg. The
+	// existing loader gate must skip medium probing, and Store.Load must
+	// classify the versioned stamp as an interrupted reset.
+	record, err := beginZeroize(configDir, "xpf.conf", customArchive, inventory)
+	if err != nil {
+		t.Fatalf("write zeroize intent: %v", err)
+	}
+	loaderMarker := configstore.FactoryResetPendingPath
+	configMarker := filepath.Join(configDir, configstore.FactoryResetPendingBase)
+	if record.ArchiveDir != customArchive {
+		t.Fatalf("pending record archive dir = %q, want %q", record.ArchiveDir, customArchive)
+	}
+	assertPresent(t, loaderMarker)
+	assertPresent(t, configMarker)
+	if _, err := beginZeroize(filepath.Join(root, "other-config"), "xpf.conf", "", ZeroizeLogInventory{}); err == nil {
+		t.Fatal("pending reset replayed against a different config root")
+	}
+	assertDay0LoaderSkipsMedia(t, loaderDir)
+	store, err := configstore.New(configFile)
+	if err != nil {
+		t.Fatalf("create config store before wipe: %v", err)
+	}
+	loadErr := store.Load()
+	if !errors.Is(loadErr, configstore.ErrFactoryResetPending) ||
+		!errors.Is(loadErr, configstore.ErrConfigAbsentWithHistory) {
+		t.Fatalf("pre-wipe Load error = %v, want fail-closed reset marker", loadErr)
+	}
+	assertPresent(t, activeDB)
+	assertPresent(t, configFile)
+
+	originalSync := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = originalSync })
+	interrupt := errors.New("simulated interruption after config-state unlink")
+	configSyncFailed := false
+	zeroizeSyncDir = func(dir string) error {
+		if filepath.Clean(dir) == filepath.Clean(configDir) && !configSyncFailed {
+			configSyncFailed = true
+			if data, err := os.ReadFile(rendered); err != nil || strings.Contains(string(data), secret) {
+				t.Errorf("rendered credential leg had not run before the config leg: err=%v content=%q", err, data)
+			}
+			return interrupt
+		}
+		return originalSync(dir)
+	}
+
+	err = performZeroizeWipeWithLogInventory(configDir, "xpf.conf", customArchive, inventory)
+	if !errors.Is(err, interrupt) || !configSyncFailed {
+		t.Fatalf("wipe error = %v, want simulated post-config interruption", err)
+	}
+	assertAbsent(t, activeDB)
+	assertAbsent(t, configFile)
+	if data, err := os.ReadFile(rendered); err != nil || strings.Contains(string(data), secret) {
+		t.Fatalf("rendered credential survived the interrupted wipe: err=%v content=%q", err, data)
+	}
+	assertAbsent(t, filepath.Join(varLog, "trace-10742.log"))
+	assertAbsent(t, filepath.Join(varLog, "syslog-10742.log"))
+
+	// A fresh Store.Load must refuse the apparent empty/factory state instead
+	// of permitting day-0 import or normal takeover.
+	store, err = configstore.New(configFile)
+	if err != nil {
+		t.Fatalf("create config store: %v", err)
+	}
+	loadErr = store.Load()
+	if !errors.Is(loadErr, configstore.ErrFactoryResetPending) ||
+		!errors.Is(loadErr, configstore.ErrConfigAbsentWithHistory) {
+		t.Fatalf("Load error = %v, want fail-closed interrupted-reset marker", loadErr)
+	}
+
+	// The retry deliberately supplies the empty values a post-wipe Store would
+	// have. The pending record must restore the original archive path and log
+	// inventory; the custom archive remains an explicit incomplete-reset error.
+	mustWriteFile(t, filepath.Join(varLog, "trace-10742.log"), []byte("late trace generation"))
+	mustWriteFile(t, filepath.Join(varLog, "syslog-10742.log"), []byte("late syslog generation"))
+	retryErr := performZeroizeWipeWithLogInventory(configDir, "xpf.conf", "", ZeroizeLogInventory{})
+	var archiveSkipped *configstore.ArchiveDirSkippedError
+	if !errors.As(retryErr, &archiveSkipped) {
+		t.Fatalf("retry error = %v, want persisted custom archive ownership failure", retryErr)
+	}
+	if archiveSkipped.Dir != customArchive {
+		t.Fatalf("retry skipped archive %q, want persisted path %q", archiveSkipped.Dir, customArchive)
+	}
+	assertAbsent(t, filepath.Join(varLog, "trace-10742.log"))
+	assertAbsent(t, filepath.Join(varLog, "syslog-10742.log"))
+	assertPresent(t, archiveSecret)
+	if _, err := os.Stat(loaderMarker); err != nil {
+		t.Fatalf("incomplete retry removed loader marker: %v", err)
+	}
+	if _, err := os.Stat(configMarker); err != nil {
+		t.Fatalf("incomplete retry removed config-root marker: %v", err)
+	}
+
+	t.Run("successful reset clears loader gate", func(t *testing.T) {
+		root := t.TempDir()
+		configDir := filepath.Join(root, "custom-config")
+		loaderDir := filepath.Join(root, "etc", "xpf")
+		configFile := filepath.Join(configDir, "xpf.conf")
+		mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+		mustWriteFile(t, configFile, []byte("system { host-name prior-tenant; }\n"))
+		mustWriteFile(t, filepath.Join(loaderDir, configstore.Day0ConfigAppliedBase),
+			[]byte("applied xpf.conf from /dev/test at 2026-09-25T00:00:00Z\n"))
+		hermeticWipe10100(t, root)
+
+		if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+			t.Fatalf("complete factory reset: %v", err)
+		}
+		assertAbsent(t, configstore.FactoryResetPendingPath)
+		assertAbsent(t, filepath.Join(configDir, configstore.FactoryResetPendingBase))
+
+		store, err := configstore.New(configFile)
+		if err != nil {
+			t.Fatalf("create post-reset config store: %v", err)
+		}
+		if err := store.Load(); errors.Is(err, configstore.ErrFactoryResetPending) {
+			t.Fatalf("post-reset Load still sees pending marker: %v", err)
+		}
+		assertDay0LoaderProbesMedia(t, loaderDir)
+	})
+}
+
+func assertDay0LoaderSkipsMedia(t *testing.T, loaderDir string) {
+	t.Helper()
+	output := runDay0Loader(t, loaderDir)
+	if !strings.Contains(output, "day-0 config already applied") || strings.Contains(output, "DAY0_PROBED") {
+		t.Fatalf("day-0 loader did not honor the pending reset stamp: %s", output)
+	}
+}
+
+func assertDay0LoaderProbesMedia(t *testing.T, loaderDir string) {
+	t.Helper()
+	output := runDay0Loader(t, loaderDir)
+	if !strings.Contains(output, "DAY0_PROBED") {
+		t.Fatalf("day-0 loader did not resume probing after completed reset: %s", output)
+	}
+}
+
+func runDay0Loader(t *testing.T, loaderDir string) string {
+	t.Helper()
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve regression-test source path")
+	}
+	loader := filepath.Join(filepath.Dir(sourceFile), "..", "..", "scripts", "image", "xpf-day0-config")
+	script := `export XPF_DAY0_SOURCE_ONLY=1
+source "$1" || exit 99
+XPF_DIR="$2"
+STAMP="$XPF_DIR/.day0-config-applied"
+XPFD=/bin/true
+regen_ssh_host_keys() { :; }
+probe_devices() { printf 'fake-device\n'; echo DAY0_PROBED >&2; }
+try_device() { return 1; }
+main
+`
+	cmd := exec.Command("bash", "-c", script, "loader-test", loader, loaderDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run day-0 loader: %v: %s", err, output)
+	}
+	return string(output)
 }

@@ -2,11 +2,14 @@ package grpcapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -65,8 +68,9 @@ const (
 //     broad `*.conf` glob no longer catches unowned siblings
 //   - rescue.conf               — the rescue config (configstore.RescueConfigBase
 //     / rescuePath): full active-config TEXT with cleartext secret leaves (#4056)
-//   - .day0-config-applied      — the day-0 loader's successful-config stamp;
-//     removing it lets a factory-default appliance accept a new medium (#10740)
+//   - .day0-config-applied      — the day-0 loader gate; a normal stamp is
+//     removed after a reset, but a prefixed zeroize-pending record is held
+//     through every wipe leg and removed only after the complete reset.
 //   - <configBase>.<N>          — the CANONICAL text rollback slots
 //     (saveRollbackFiles / loadRollbackHistory), full config TEXT with
 //     cleartext secret leaves; loadRollbackHistory reloads them at boot, so
@@ -306,9 +310,18 @@ func zeroizeConfigDir(configDir, configBase string) error {
 	// artifact. isFsatomicTemp stays a shape match: under-scoping a temp risks
 	// stranding an owned secret-bearing temp (#5475), the worse failure.
 	entries, err := os.ReadDir(configDir)
+	pendingMarker, markerErr := configstore.IsFactoryResetPending(configDir)
+	if markerErr != nil {
+		fail(fmt.Errorf("zeroize: inspect config-root pending marker: %w", markerErr))
+		pendingMarker = true // preserve the loader gate when marker state is unknown
+	}
 	fail(err)
 	for _, f := range entries {
 		name := f.Name()
+		full := filepath.Join(configDir, name)
+		if name == configstore.Day0ConfigAppliedBase && pendingMarker {
+			continue
+		}
 		if name == configBase || // the live config file (exact name, any extension)
 			name == configstore.RescueConfigBase || // the rescue config (configstore.RescueConfigBase / rescuePath)
 			name == configstore.Day0ConfigAppliedBase || // allow day-0 configuration after reset (#10740)
@@ -316,7 +329,6 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			strings.HasPrefix(name, ".config.journal.") ||
 			isTextRollbackFile(name, configBase) || // <configBase>.<N> text slots
 			isFsatomicTemp(name) {
-			full := filepath.Join(configDir, name)
 			found, herr := configstore.CollectHardlinkedFiles(full, "")
 			hardlinks = append(hardlinks, found...)
 			fail(herr)
@@ -1360,6 +1372,128 @@ var (
 	zeroizeNetworkdDir = "/etc/systemd/network"
 )
 
+// zeroizePendingRecord persists the pre-wipe inputs in both the configured
+// config root and the day-0 loader's fixed stamp path. The prefixed atomic
+// replacement gates media probing; the config-root copy keeps Store.Load
+// fail-closed when xpfd uses a non-default config directory.
+type zeroizePendingRecord struct {
+	Version      int                 `json:"version"`
+	ConfigDir    string              `json:"config_dir"`
+	ConfigBase   string              `json:"config_base"`
+	ArchiveDir   string              `json:"archive_dir"`
+	LogInventory ZeroizeLogInventory `json:"log_inventory"`
+}
+
+func readZeroizePendingRecord(marker, configDir, configBase string) (zeroizePendingRecord, bool, error) {
+	var empty zeroizePendingRecord
+	info, err := os.Lstat(marker)
+	if errors.Is(err, os.ErrNotExist) {
+		return empty, false, nil
+	}
+	if err != nil {
+		return empty, false, fmt.Errorf("inspect marker %s: %w", marker, err)
+	}
+	if !info.Mode().IsRegular() {
+		return empty, false, fmt.Errorf("pending marker %s is not a regular file", marker)
+	}
+	pending, err := configstore.IsFactoryResetPending(filepath.Dir(marker))
+	if err != nil {
+		return empty, false, fmt.Errorf("read pending marker %s: %w", marker, err)
+	}
+	if !pending {
+		return empty, false, nil
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return empty, false, fmt.Errorf("read pending marker %s: %w", marker, err)
+	}
+	body := strings.TrimPrefix(string(data), configstore.FactoryResetPendingPrefix)
+	var record zeroizePendingRecord
+	if err := json.Unmarshal([]byte(body), &record); err != nil {
+		return empty, false, fmt.Errorf("parse pending marker %s: %w", marker, err)
+	}
+	if record.Version != 1 || filepath.Clean(record.ConfigDir) != configDir ||
+		record.ConfigBase != configBase {
+		return empty, false, fmt.Errorf("pending marker %s does not match the configured config root", marker)
+	}
+	return record, true, nil
+}
+
+func beginZeroize(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) (zeroizePendingRecord, error) {
+	resolved, err := configstore.ResolveFactoryResetRoot(configDir)
+	if err != nil {
+		return zeroizePendingRecord{}, err
+	}
+	configDir = resolved
+	loaderMarker := configstore.FactoryResetPendingPath
+	configMarker := filepath.Join(configDir, configstore.FactoryResetPendingBase)
+	loaderRecord, loaderPending, err := readZeroizePendingRecord(loaderMarker, configDir, configBase)
+	if err != nil {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: %w", err)
+	}
+	configRecord, configPending, err := readZeroizePendingRecord(configMarker, configDir, configBase)
+	if err != nil {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: %w", err)
+	}
+	if loaderPending && configPending && !reflect.DeepEqual(loaderRecord, configRecord) {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: loader and config-root pending records differ")
+	}
+
+	record := zeroizePendingRecord{
+		Version:      1,
+		ConfigDir:    configDir,
+		ConfigBase:   configBase,
+		ArchiveDir:   archiveDir,
+		LogInventory: inv,
+	}
+	if configPending {
+		record = configRecord
+	} else if loaderPending {
+		record = loaderRecord
+	}
+	if err := fsatomic.MkdirAllDurable(configDir, 0o700); err != nil {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: create config root for pending marker: %w", err)
+	}
+	if err := fsatomic.MkdirAllDurable(filepath.Dir(loaderMarker), 0o700); err != nil {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: create loader root for pending marker: %w", err)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: encode pending marker: %w", err)
+	}
+	markerData := append([]byte(configstore.FactoryResetPendingPrefix), data...)
+	if err := fsatomic.WriteFileDurable(loaderMarker, markerData, 0o600); err != nil {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: persist loader pending marker: %w", err)
+	}
+	if filepath.Clean(configMarker) != filepath.Clean(loaderMarker) {
+		if err := fsatomic.WriteFileDurable(configMarker, markerData, 0o600); err != nil {
+			return zeroizePendingRecord{}, fmt.Errorf("zeroize: persist config-root pending marker: %w", err)
+		}
+	}
+	return record, nil
+}
+
+func completeZeroize(record zeroizePendingRecord) error {
+	loaderMarker := configstore.FactoryResetPendingPath
+	if err := os.Remove(loaderMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("zeroize: remove loader marker for %s: %w", record.ConfigDir, err)
+	}
+	if err := zeroizeSyncDir(filepath.Dir(loaderMarker)); err != nil {
+		return fmt.Errorf("zeroize: sync loader-marker removal: %w", err)
+	}
+	configMarker := filepath.Join(record.ConfigDir, configstore.FactoryResetPendingBase)
+	if filepath.Clean(configMarker) == filepath.Clean(loaderMarker) {
+		return nil
+	}
+	if err := os.Remove(configMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("zeroize: remove config-root marker for %s: %w", record.ConfigDir, err)
+	}
+	if err := zeroizeSyncDir(record.ConfigDir); err != nil {
+		return fmt.Errorf("zeroize: sync config-root marker removal: %w", err)
+	}
+	return nil
+}
+
 // PerformZeroizeWipe is the exported entry to the shared factory-reset wipe so
 // the in-process interactive console (pkg/cli `request system zeroize`)
 // DELEGATES to the SAME primitive the gRPC path uses (#5890). Both paths then
@@ -1386,22 +1520,11 @@ func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
 }
 
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
-	// #10100 GPT-2: every security-critical leg runs unconditionally and
-	// EVERY leg error is kept — the legs are errors.Join'ed, never
-	// first-wins. Dropping a later leg's FactoryResetSymlinkError when an
-	// earlier leg already failed loses diagnostics that are UNDISCOVERABLE
-	// on re-run: for report-and-unlink legs (R-1 interior, snapshots) the
-	// discovery link is already unlinked, so the surviving target is
-	// log-only after the first pass. Leg order is preserved (config state
-	// first), so errors.As still finds the earliest failure first; a
-	// single failing leg returns its error unwrapped, exactly as before.
+	// Wipe every security-critical artifact outside the config root first. The
+	// durable pending marker lets boot fail closed if any later leg is
+	// interrupted; the config root is erased last by the shared wrapper.
+	// Every leg error is retained and joined so later diagnostics are not lost.
 	var legErrs []error
-	// Config state FIRST — the security-critical erasure. A failure here can
-	// leave prior-tenant config/secrets on disk, so it is surfaced to the
-	// caller (#4576).
-	if e := zeroizeConfigDir(configDir, configBase); e != nil {
-		legErrs = append(legErrs, e)
-	}
 
 	// Rendered service configs (#4585): also security-critical — routing-auth
 	// keys in a world-readable frr.conf, IKE PSKs, Kea configs. A post-zeroize
