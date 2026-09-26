@@ -206,7 +206,7 @@ func (r *Runner) validateEnvelopeCompatibility(plan rollbackPlan) error {
 	if err != nil {
 		return fmt.Errorf("refusing rollback from current %s to target %s: cannot prove target envelope reader (snapshot v=%d min-reader=%d): %w; roll forward or re-stage an envelope-compatible rollback target", plan.fromVersion, plan.toVersion, compat.FormatVersion, compat.MinReader, err)
 	}
-	if compat.FormatVersion > reader || compat.MinReader > reader {
+	if !envelopeCompatibleWithReader(compat, reader) {
 		return fmt.Errorf("refusing rollback from current %s to target %s: snapshot envelope v=%d min-reader=%d exceeds target reader v=%d; booting the target would fail closed; roll forward or re-stage an envelope-compatible rollback target", plan.fromVersion, plan.toVersion, compat.FormatVersion, compat.MinReader, reader)
 	}
 	return nil

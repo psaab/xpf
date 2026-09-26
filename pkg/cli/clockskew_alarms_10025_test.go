@@ -14,15 +14,6 @@ import (
 // counted in the aggregate. Mirrors alarms_config_divergence_9530_test.go.
 func TestShowSystemAlarmsListsClockSkew10025(t *testing.T) {
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
-	if err := store.EnterConfigure(); err != nil {
-		t.Fatalf("EnterConfigure: %v", err)
-	}
-	if err := store.SetFromInput("system host-name skewtest"); err != nil {
-		t.Fatalf("SetFromInput: %v", err)
-	}
-	if _, err := store.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
 	c := &CLI{store: store}
 	c.SetClockSkewAlarmsFn(func() []clockskew.ActiveAlarm {
 		return []clockskew.ActiveAlarm{{Kind: clockskew.KindOffset, OffsetSecs: 20.5}}
