@@ -1118,3 +1118,180 @@ func TestElection_DualActiveWin_NormalPathDelivers(t *testing.T) {
 		t.Errorf("onDualActiveWinDrop must not fire on the non-full path, got %d", reaffirmDrops)
 	}
 }
+
+func heartbeatPacketRoundTrip10775(t *testing.T, m *Manager) *HeartbeatPacket {
+	t.Helper()
+	wire := MarshalHeartbeat(m.buildHeartbeat())
+	if len(wire) > maxHeartbeatSize {
+		t.Fatalf("heartbeat size %d exceeds %d-byte frame limit", len(wire), maxHeartbeatSize)
+	}
+	pkt, err := UnmarshalHeartbeat(wire)
+	if err != nil {
+		t.Fatalf("round-trip heartbeat: %v", err)
+	}
+	if pkt.HeartbeatSession == 0 || pkt.HeartbeatSequence == 0 {
+		t.Fatalf("heartbeat lost its fresh identity: session=%d sequence=%d",
+			pkt.HeartbeatSession, pkt.HeartbeatSequence)
+	}
+	return pkt
+}
+
+func setEchoLeaseTiming10775(m *Manager) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hbInterval = 50 * time.Millisecond
+	m.hbThreshold = 5
+	return m.hbInterval * time.Duration(m.hbThreshold)
+}
+
+// TestOneWayHeartbeatLossYieldsHearingWinner10775 exercises the actual heartbeat
+// encode/decode and Manager election paths. The lower-priority node becomes
+// deaf while the winner continues to hear it; the winner must yield once the
+// peer's incarnation-bound echo lease expires. The opposite orientation is the
+// control: a deaf winner remains the sole owner while the hearing loser yields.
+func TestOneWayHeartbeatLossYieldsHearingWinner10775(t *testing.T) {
+	for _, preempt := range []bool{false, true} {
+		preemptName := "non-preempt"
+		if preempt {
+			preemptName = "preempt"
+		}
+		for _, deafNode := range []int{0, 1} {
+			orientation := "winner-deaf control"
+			if deafNode == 1 {
+				orientation = "loser-deaf"
+			}
+			t.Run(preemptName+"/"+orientation, func(t *testing.T) {
+				cfg := makeConfig(makeRG(1, preempt, map[int]int{0: 200, 1: 100}))
+				node0, node1 := NewManager(0, 1), NewManager(1, 1)
+				node0.UpdateConfig(cfg)
+				node1.UpdateConfig(cfg)
+				drainEvents(node0, 100)
+				drainEvents(node1, 100)
+				lease := setEchoLeaseTiming10775(node0)
+				setEchoLeaseTiming10775(node1)
+
+				exchange := func() {
+					node1.handlePeerHeartbeat(heartbeatPacketRoundTrip10775(t, node0))
+					node0.handlePeerHeartbeat(heartbeatPacketRoundTrip10775(t, node1))
+					drainEvents(node0, 100)
+					drainEvents(node1, 100)
+				}
+				for range 4 {
+					exchange()
+				}
+				if !node0.IsLocalPrimary(1) || node1.IsLocalPrimary(1) {
+					t.Fatalf("fixture did not settle on the higher-priority node: node0=%v node1=%v",
+						node0.IsLocalPrimary(1), node1.IsLocalPrimary(1))
+				}
+
+				deaf, hearing := node1, node0
+				if deafNode == 0 {
+					deaf, hearing = node0, node1
+				}
+				deaf.handlePeerTimeout()
+				for range 3 {
+					_ = heartbeatPacketRoundTrip10775(t, hearing) // heartbeat lost toward the deaf node
+					peerPacket := heartbeatPacketRoundTrip10775(t, deaf)
+					if peerPacket.PeerHeartbeatSession != 0 || peerPacket.PeerHeartbeatSequence != 0 {
+						t.Fatalf("deaf peer continued echoing a heartbeat after timeout: session=%d sequence=%d",
+							peerPacket.PeerHeartbeatSession, peerPacket.PeerHeartbeatSequence)
+					}
+					hearing.handlePeerHeartbeat(peerPacket)
+					drainEvents(hearing, 100)
+				}
+				time.Sleep(lease + 20*time.Millisecond)
+				for range 4 {
+					_ = heartbeatPacketRoundTrip10775(t, hearing) // advance the local challenge while its reply is lost
+					peerPacket := heartbeatPacketRoundTrip10775(t, deaf)
+					if peerPacket.PeerHeartbeatSession != 0 || peerPacket.PeerHeartbeatSequence != 0 {
+						t.Fatalf("deaf peer continued echoing a heartbeat after timeout: session=%d sequence=%d",
+							peerPacket.PeerHeartbeatSession, peerPacket.PeerHeartbeatSequence)
+					}
+					hearing.handlePeerHeartbeat(peerPacket)
+					drainEvents(hearing, 100)
+					if deafNode == 1 && hearing.IsLocalPrimary(1) {
+						t.Fatalf("hearing winner reclaimed PRIMARY while only receiving stale deaf-peer heartbeats")
+					}
+				}
+
+				node0Primary, node1Primary := node0.IsLocalPrimary(1), node1.IsLocalPrimary(1)
+				if node0Primary == node1Primary {
+					t.Fatalf("one-way heartbeat loss did not leave exactly one primary: node0=%v node1=%v",
+						node0Primary, node1Primary)
+				}
+				if deafNode == 1 && (node0Primary || !node1Primary) {
+					t.Fatalf("hearing winner did not yield to the deaf loser: node0=%v node1=%v",
+						node0Primary, node1Primary)
+				}
+
+				// Heal both directions. Echoes must become fresh for the current
+				// peer incarnation again, with exactly one owner after recovery.
+				for range 4 {
+					exchange()
+				}
+				node0Primary, node1Primary = node0.IsLocalPrimary(1), node1.IsLocalPrimary(1)
+				if node0Primary == node1Primary {
+					t.Fatalf("heartbeat recovery did not converge to one primary: node0=%v node1=%v",
+						node0Primary, node1Primary)
+				}
+				if preempt && !node0Primary {
+					t.Fatalf("preempt recovery did not return ownership to the higher-priority node: node0=%v node1=%v",
+						node0Primary, node1Primary)
+				}
+			})
+		}
+	}
+}
+
+func TestHeartbeatEchoFitsAuthenticatedFrameLimit10775(t *testing.T) {
+	pkt := &HeartbeatPacket{
+		NodeID:                0,
+		ClusterID:             1,
+		Groups:                []HeartbeatGroup{{GroupID: 1, Priority: 200, Weight: 255, State: uint8(StatePrimary)}},
+		HAProtocolVersion:     CurrentHAProtocolVersion,
+		HeartbeatSession:      0x10775001,
+		HeartbeatSequence:     57,
+		PeerHeartbeatSession:  0x10775002,
+		PeerHeartbeatSequence: 56,
+	}
+	for range 80 {
+		pkt.Monitors = append(pkt.Monitors, HeartbeatMonitor{
+			RGID:      1,
+			Weight:    255,
+			Up:        true,
+			Interface: strings.Repeat("i", 20),
+		})
+	}
+
+	key := []byte("echo-frame-limit-key")
+	const epoch = uint64(12345)
+	wire := marshalHeartbeatAuthEpoch(pkt, key, pkt.HeartbeatSession, pkt.HeartbeatSequence, epoch)
+	if len(wire) > maxHeartbeatSize {
+		t.Fatalf("echo heartbeat size %d exceeds %d-byte frame limit", len(wire), maxHeartbeatSize)
+	}
+	if !verifyHeartbeatMAC(wire, key) {
+		t.Fatal("authenticated frame with an echo trailer does not verify")
+	}
+	got, err := UnmarshalHeartbeat(wire)
+	if err != nil {
+		t.Fatalf("decode authenticated echo heartbeat: %v", err)
+	}
+	if got.HeartbeatSession != pkt.HeartbeatSession ||
+		got.HeartbeatSequence != pkt.HeartbeatSequence ||
+		got.PeerHeartbeatSession != pkt.PeerHeartbeatSession ||
+		got.PeerHeartbeatSequence != pkt.PeerHeartbeatSequence {
+		t.Fatalf("decoded echo = sender(%d,%d) peer(%d,%d), want sender(%d,%d) peer(%d,%d)",
+			got.HeartbeatSession, got.HeartbeatSequence,
+			got.PeerHeartbeatSession, got.PeerHeartbeatSequence,
+			pkt.HeartbeatSession, pkt.HeartbeatSequence,
+			pkt.PeerHeartbeatSession, pkt.PeerHeartbeatSequence)
+	}
+	if len(got.Monitors) >= len(pkt.Monitors) {
+		t.Fatalf("frame-limit fixture did not truncate monitors: got %d of %d",
+			len(got.Monitors), len(pkt.Monitors))
+	}
+	gotEpoch, epochPresent := heartbeatFrameEpoch(wire, key)
+	if !epochPresent || gotEpoch != epoch {
+		t.Fatalf("authenticated epoch = (%d,%v), want (%d,true)", gotEpoch, epochPresent, epoch)
+	}
+}

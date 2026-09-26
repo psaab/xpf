@@ -488,6 +488,8 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		localStatuses = mon.LocalInterfaceStatuses()
 	}
 
+	session, sequence := m.heartbeatNonce()
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -496,6 +498,15 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		ClusterID:         uint16(m.clusterID),
 		SoftwareVersion:   m.localSoftwareVersion,
 		HAProtocolVersion: m.localHAProtocolVersion,
+		HeartbeatSession:  session,
+		HeartbeatSequence: sequence,
+	}
+	for _, peerGroup := range m.peerGroups {
+		if peerGroup.heartbeatSession != 0 && peerGroup.heartbeatSequence != 0 {
+			pkt.PeerHeartbeatSession = peerGroup.heartbeatSession
+			pkt.PeerHeartbeatSequence = peerGroup.heartbeatSequence
+			break
+		}
 	}
 	for _, rg := range m.groups {
 		pkt.Groups = append(pkt.Groups, HeartbeatGroup{
@@ -665,15 +676,54 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	// Rebuild peer group states from scratch — prunes stale RGs that
 	// the peer no longer reports (fix #92).
 	newPeerGroups := make(map[int]PeerGroupState, len(pkt.Groups))
+	interval, threshold := m.liveHeartbeatTimingLocked()
+	echoLease := interval * time.Duration(threshold)
+	if echoLease <= 0 {
+		echoLease = DefaultHeartbeatInterval * DefaultHeartbeatThreshold
+	}
+	echoSupported := m.peerHAProtocolVersion >= heartbeatEchoProtocolVersion &&
+		pkt.HeartbeatSession != 0 && pkt.HeartbeatSequence != 0
+	localSession, localSequence := uint64(0), uint64(0)
+	if echoSupported {
+		localSession = m.LocalProcessToken()
+		localSequence = m.hbCounter.Load()
+	}
 	for _, g := range pkt.Groups {
 		// #8337: key by the LOCAL config id the wire byte resolves to, which is
 		// how every reader of m.peerGroups indexes it.
 		localID := m.localRGIDForWireByte(g.GroupID)
+		peerSession, peerSequence := uint64(0), uint64(0)
+		peerEchoSession, peerEchoSequence := uint64(0), uint64(0)
+		if echoSupported {
+			peerSession, peerSequence = pkt.HeartbeatSession, pkt.HeartbeatSequence
+			peerEchoSession, peerEchoSequence = pkt.PeerHeartbeatSession, pkt.PeerHeartbeatSequence
+		}
+		previous, hadPrevious := m.peerGroups[localID]
+		leaseUntil := now.Add(echoLease)
+		if hadPrevious && previous.heartbeatSession == peerSession {
+			leaseUntil = previous.heartbeatEchoLeaseUntil
+		}
+		freshPeerFrame := !hadPrevious || previous.heartbeatSession != peerSession ||
+			peerSequence > previous.heartbeatSequence
+		freshPeerEcho := echoSupported && freshPeerFrame && localSession != 0 &&
+			peerEchoSession == localSession && peerEchoSequence != 0 &&
+			peerEchoSequence <= localSequence &&
+			(!hadPrevious || previous.heartbeatSession != peerSession ||
+				previous.heartbeatEchoSession != peerEchoSession ||
+				peerEchoSequence > previous.heartbeatEchoSequence)
+		if freshPeerEcho {
+			leaseUntil = now.Add(echoLease)
+		}
 		newPeerGroups[localID] = PeerGroupState{
-			GroupID:  localID,
-			Priority: int(g.Priority),
-			Weight:   int(g.Weight),
-			State:    NodeState(g.State),
+			GroupID:                 localID,
+			Priority:                int(g.Priority),
+			Weight:                  int(g.Weight),
+			State:                   NodeState(g.State),
+			heartbeatSession:        peerSession,
+			heartbeatSequence:       peerSequence,
+			heartbeatEchoSession:    peerEchoSession,
+			heartbeatEchoSequence:   peerEchoSequence,
+			heartbeatEchoLeaseUntil: leaseUntil,
 		}
 	}
 	// Apply pending transfer-commit overrides + expire transfer-grace

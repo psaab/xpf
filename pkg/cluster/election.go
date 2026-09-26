@@ -158,6 +158,18 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		}
 		return electNoChange, ""
 	}
+	// Once the peer's echo lease expires, its PRIMARY reports are not proof
+	// of bidirectional reachability. Keep yielding (or stay secondary) until a
+	// fresh echo arrives; otherwise preempt mode would re-promote the winner on
+	// the next stale PRIMARY heartbeat.
+	if peerGroup.State == StatePrimary &&
+		!peerGroup.heartbeatEchoLeaseUntil.IsZero() &&
+		!time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
+		if rg.State != StateSecondary {
+			return electLocalSecondary, "Dual-active: peer heartbeat echo expired"
+		}
+		return electNoChange, ""
+	}
 
 	// An explicit peer transfer-out should hand ownership to us without
 	// mutating the peer's monitor-derived weight. If both sides had been in

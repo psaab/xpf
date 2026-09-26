@@ -428,6 +428,24 @@ cold-boot readiness gate armed. A ready node promotes normally; an unready node
 stays secondary until the degraded fallback, which marks and warns on the
 degraded promotion. A peer heartbeat clears the confirmed-absent state.
 
+### Asymmetric peer visibility (#10775)
+
+Every current heartbeat carries a per-Manager session and increasing sequence,
+plus the peer session/sequence most recently received. The optional `XPFE`
+trailer is placed before the fixed-tail epoch and auth trailers, so older
+readers can ignore it without shifting or invalidating those sections. Its
+session binding means a restarted peer cannot reuse a prior incarnation's echo.
+
+When both nodes report PRIMARY but the peer's echo lease expires, the hearing
+node yields instead of repeating “winner stays.” A fresh echo renews the lease
+only when its sequence advances; the lease duration uses the running heartbeat
+timeout. A peer that predates the extension supplies no echo and receives one
+bounded initial lease; absence of this optional trailer is not a version error.
+
+The extension is gated by the advertised HA protocol version and does not bump
+that version: its optional encoding is backward-compatible, and the lease
+fallback preserves election behavior with older peers.
+
 ### A heartbeat RESTART is not a cold boot (#9722)
 
 `RestartHeartbeat` replaces the receiver on every config apply that rebinds the
