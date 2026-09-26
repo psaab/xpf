@@ -172,6 +172,14 @@ impl SessionTable {
         // session's SESSION_CREATE and SESSION_CLOSE RT_FLOW records share one
         // correlatable id, and a reused 5-tuple gets a distinct id.
         let session_id = self.alloc_session_id();
+        // #3152/#10889: TCP bare SYNs and app-managed datagrams both begin in
+        // their conservative timeout class until their respective promotion
+        // evidence arrives.
+        let established = if matches!(protocol, PROTO_TCP) {
+            !is_initial_syn(tcp_flags)
+        } else {
+            metadata.inactivity_timeout_ns.is_none()
+        };
         let record = SessionRecord {
             key: key.clone(),
             entry: SessionEntry {
@@ -183,13 +191,10 @@ impl SessionTable {
                 // #2465: stamp the creation instant once at install. Never
                 // re-stamped, so the close delta reports the true session age.
                 created_ns: now_ns,
-                // #3152: a TCP session created by a bare SYN (SYN set, ACK
-                // clear) starts OPENING (`established=false`); every other
-                // first packet (non-TCP, or a TCP mid-stream pickup such as a
-                // SYN-ACK or data segment) starts ESTABLISHED, preserving the
-                // pre-#3152 full-established-timeout behaviour. Computed once
-                // here and reused for the initial timeout selection.
-                established: !(matches!(protocol, PROTO_TCP) && is_initial_syn(tcp_flags)),
+                // #3152: bare-SYN TCP sessions start OPENING. #10889:
+                // non-TCP sessions with an application timeout stay on the
+                // global window until a genuine reverse packet promotes them.
+                established,
                 // #6752: a fresh install has seen no SYN-ACK, so nothing is pending.
                 handshake_pending: false,
                 // #7212: no static input-filter verdict has been derived for
@@ -218,9 +223,9 @@ impl SessionTable {
                 expires_after_ns: session_timeout_ns(
                     protocol,
                     tcp_flags,
-                    // #3152: OPENING half-open sessions take the short opening
-                    // window; mirror the `established` seed computed above.
-                    !(matches!(protocol, PROTO_TCP) && is_initial_syn(tcp_flags)),
+                    // #3152/#10889: use the same timeout class as the
+                    // established state seeded above.
+                    established,
                     &self.timeouts,
                     // #3227: per-application idle timeout override (None = global).
                     metadata.inactivity_timeout_ns,
@@ -480,6 +485,9 @@ impl SessionTable {
         } else {
             self.alloc_session_id()
         };
+        // #10889: a synced datagram has no carried reply-promotion bit, so an
+        // app override stays gated until this node observes reverse traffic.
+        let established = matches!(protocol, PROTO_TCP) || metadata.inactivity_timeout_ns.is_none();
         let record = SessionRecord {
             key: key.clone(),
             entry: SessionEntry {
@@ -494,12 +502,10 @@ impl SessionTable {
                 // stamp is the local re-import time; the local close that
                 // follows reports age from here.
                 created_ns: now_ns,
-                // #3152: a peer-synced entry is imported as ESTABLISHED, NOT
-                // re-derived as OPENING from the carried `tcp_flags`. The
-                // short opening window is a FORWARDING-NODE protection against
-                // a locally-received bare-SYN flood; the standby never
-                // receives that flood directly (it receives synced sessions),
-                // so it must not apply the short window.
+                // #3152: peer-synced TCP entries remain ESTABLISHED, not
+                // re-derived as OPENING from carried `tcp_flags`. The short
+                // opening window protects against locally received bare-SYN
+                // floods; a standby never sees that flood directly.
                 //
                 // #9412 CORRECTION. This comment used to continue "Crucially, the
                 // synced `tcp_flags` are the install-time flags (the opening SYN
@@ -525,17 +531,18 @@ impl SessionTable {
                 // OPENING from them could misclassify a LIVE established flow on
                 // the standby and reap its synced copy at the short stale-synced
                 // ceiling (`STALE_SYNCED_CEILING_MULT × opening`), breaking failover
-                // for any flow older than that ceiling. Importing as
+                // for any flow older than that ceiling. Importing TCP as
                 // ESTABLISHED preserves the exact pre-#3152 standby behaviour
                 // (full established timeout + #2120 standby retention). The
                 // half-open table-exhaustion mitigation still holds end to end:
                 // the primary (the flood target) reaps its half-opens at
                 // `tcp_opening_ns` and emits a Close delta (session/expire.rs)
                 // that propagates to the standby, so the standby copy is
-                // removed promptly without needing its own OPENING window. The
-                // `established` field is node-local and never crosses the HA
-                // wire, so this is a pure import-side decision (no wire change).
-                established: true,
+                // removed promptly without needing its own OPENING window.
+                // #10889: no reply-evidence bit crosses HA; custom non-TCP
+                // imports stay on the global window until this node sees a
+                // reverse packet. TCP imports keep their established behavior.
+                established,
                 // #6752: a mid-stream pickup is seeded ESTABLISHED with no handshake
                 // to wait for — pending must stay false or it would be held on the
                 // opening window forever.
@@ -558,24 +565,23 @@ impl SessionTable {
                 policy_revalidation_kind: PolicyRevalidationKind::Unvalidated,
                 // #9412: a peer-stated close class puts the copy on its close
                 // window, through the same formula the owning node used. Without
-                // one, it imports ESTABLISHED exactly as before (#3152).
+                // one, TCP imports remain ESTABLISHED as before; custom
+                // non-TCP overrides stay on the global window until reply.
                 expires_after_ns: match wire_close {
                     Some(class) => tcp_close_window_ns(class, &self.timeouts),
                     None => session_timeout_ns(
                         protocol,
                         tcp_flags,
-                        // #3152: imported ESTABLISHED (see above).
-                        true,
+                        // #3152/#10889: TCP imports remain established; an
+                        // app-managed datagram import has no local reply proof.
+                        established,
                         &self.timeouts,
                         // #3227: per-application idle timeout override (None = global).
                         metadata.inactivity_timeout_ns,
-                        // #3527: a peer-synced session is imported ESTABLISHED, so
-                        // the OPENING branch is never taken and the per-zone
-                        // half-open override is irrelevant here. Passing `None`
-                        // (rather than re-deriving from this node's config) makes
-                        // explicit that the override never crosses the HA wire — it
-                        // is re-derived per node and only governs locally-received
-                        // bare-SYN floods (§11.1 of the #3315 plan).
+                        // #3527: TCP imports are established, while non-TCP
+                        // protocols never consult the TCP-only opening override.
+                        // Passing None avoids deriving a local zone override on
+                        // HA import; locally received bare SYNs still use it.
                         None,
                     ),
                 },

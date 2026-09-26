@@ -740,25 +740,17 @@ struct SessionEntry {
     /// set together with `closing`, the timeout selection uses the short
     /// `TCP_RST_TIMEOUT_NS` instead of the FIN close timeout.
     reset: bool,
-    /// #3152: TCP three-way-handshake completion state. `false` = OPENING
-    /// (half-open) — the session was created by a bare SYN and its handshake
-    /// has not yet completed, so it is reaped on the short
-    /// `SessionTimeouts.tcp_opening_ns` window instead of the full
-    /// established idle window. Set `true` once a handshake-completing
-    /// segment is observed (the first ACK-bearing segment after the opening
-    /// SYN — the reverse SYN-ACK and the forward completing ACK both carry
-    /// ACK), at which point the per-app / established timeout applies.
-    /// Initialised `true` for every non-TCP session and for any TCP session
-    /// whose creating packet is NOT a bare SYN (a mid-stream pickup, e.g. a
-    /// SYN-ACK or data segment), preserving the pre-#3152 established-timeout
-    /// behaviour for those. Sticky once set — a later segment never demotes
-    /// an established session back to OPENING. Node-local derived state: it
-    /// is NOT carried on the HA session-sync wire. A peer-synced session is
-    /// imported as ESTABLISHED (see `upsert_synced_with_origin`) rather than
-    /// re-derived as OPENING — the short window is a forwarding-node
-    /// protection, and the standby relies on the primary's fast reap +
-    /// Close-delta propagation, not its own OPENING window. No wire-format
-    /// change.
+    /// #3152/#10889: per-entry promotion state used to derive the idle class.
+    /// For TCP, false means a bare SYN is OPENING; a reverse SYN-ACK sets this
+    /// true while `handshake_pending` keeps the entry on `tcp_opening_ns` until
+    /// the handshake completes. For non-TCP sessions with a custom app timeout,
+    /// false keeps the global protocol timeout until a genuine reverse packet
+    /// promotes both halves. Non-TCP sessions without an app override start
+    /// true because both states use the same global window.
+    ///
+    /// Node-local derived state: this is not serialized. TCP peer-synced
+    /// entries remain established; a non-TCP app-timeout entry imports gated
+    /// because reply evidence is not carried on the HA wire.
     established: bool,
     /// #6752: `established` was set by the reverse SYN-ACK, so it does NOT mean
     /// the three-way handshake COMPLETED. This bit is the gap: true from the
@@ -2812,28 +2804,34 @@ impl SessionTable {
         // Copy the windows out before the `&mut self.entries` borrow below:
         // `SessionTimeouts` is `Copy`, so this is a register move, not a clone.
         let timeouts = self.timeouts;
-        let mut shortened = false;
+        let mut rebucket = false;
         if let Some(entry) = self.entry_by_key_mut(&companion_key) {
-            if established {
-                // F16: a real reverse SYN-ACK promoted the matched (reverse)
-                // half — promote the forward companion too. Sticky and flag-only:
-                // the companion's own next segment (the handshake-completing
-                // forward ACK) re-stamps the established idle window via
-                // `session_timeout_ns(established=true)`.
+            if established && matches!(companion_key.protocol, PROTO_TCP) {
+                // F16: mirror a genuine reverse SYN-ACK promotion onto the TCP
+                // forward companion. Its handshake-completing segment will
+                // stamp the established idle window later.
                 //
-                // #6752: the expiry is still not extended here, and #4109's
-                // comment used to justify that with "so a handshake the client
-                // never completes still reaps on the short opening window".
-                // THAT STOPPED BEING TRUE three days after it was written.
-                // #4380's companion probe is handshake-agnostic: it saw the
-                // reverse half alive on the 300s window the SYN-ACK had just
-                // stamped, kept this half, and re-stamped it — so both halves
-                // held for ~300s. Not extending here was never sufficient on its
-                // own; `handshake_pending` is what makes the claim true again,
-                // by keeping BOTH halves in the opening class and by stopping
-                // the probe from extending either.
+                // #6752: keep both halves in the opening class until the
+                // handshake completes, so a client that never ACKs the SYN-ACK
+                // cannot hold the pair on the full established window.
                 entry.established = true;
                 entry.handshake_pending = true;
+            } else if established {
+                // #10889: the reverse datagram is real activity for the whole
+                // bidirectional session. Start both halves' application idle
+                // clocks together and schedule the forward half on its new
+                // window.
+                entry.established = true;
+                entry.last_seen_ns = now_ns;
+                entry.expires_after_ns = session_timeout_ns(
+                    companion_key.protocol,
+                    0,
+                    true,
+                    &timeouts,
+                    entry.metadata.inactivity_timeout_ns,
+                    None,
+                );
+                rebucket = true;
             }
             if handshake_completed {
                 // #6752: the matched (forward) half saw the completing segment;
@@ -2862,13 +2860,12 @@ impl SessionTable {
                 entry.fin_peer |= fin;
                 entry.last_seen_ns = now_ns;
                 entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
-                shortened = true;
+                rebucket = true;
             }
         }
-        if shortened {
-            // The companion's expiry just shortened; re-bucket it in the timer
-            // wheel so the GC checks it at the new (short) close tick rather than
-            // the old established-window tick it was scheduled at.
+        if rebucket {
+            // The companion's lifetime changed; re-bucket it so GC checks the
+            // new deadline instead of its install-time or prior deadline.
             self.push_to_wheel(&companion_key, now_ns);
         }
     }
@@ -3062,23 +3059,14 @@ impl SessionTable {
             // Junos default, so the failure direction is a session reaped early
             // rather than one held past its close.
             record.entry.fin_own |= matches!(protocol, PROTO_TCP) && has_fin(tcp_flags);
-            // #3152/#4109: promote OPENING -> ESTABLISHED only on a genuine
-            // reverse SYN-ACK (sticky, mirrors lookup.rs). Only a SYN-ACK
-            // (`is_syn_ack`, not merely any ACK) on the REVERSE half (the
-            // server's handshake response) promotes; a client-only forward ACK
-            // never does. Before #4109 any ACK promoted here, so a bare SYN +
-            // bare ACK could pin a 300s established entry with no peer ever
-            // replying, bypassing the #3152 half-open reap. `metadata` was just
-            // assigned onto the record above, so `metadata.is_reverse` is this
-            // entry's direction. Set BEFORE the timeout selection so an
-            // established refresh uses the established window. (This path's live
-            // reach is the one-shot HA promote of a peer-synced session, which is
-            // imported ESTABLISHED already — see `upsert_synced_with_origin` — so
-            // the gate is a no-op there and only defends a hypothetical OPENING
-            // promote; the cross-companion propagation lives on the read path in
-            // lookup.rs.)
+            // #3152/#4109: TCP promotes on a genuine reverse SYN-ACK. #10889:
+            // a non-TCP app-managed session promotes on a genuine reverse
+            // packet; a forward-only refresh cannot open the long idle window.
             record.entry.established |=
-                matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && metadata.is_reverse;
+                (matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && metadata.is_reverse)
+                    || (!matches!(protocol, PROTO_TCP)
+                        && metadata.is_reverse
+                        && metadata.inactivity_timeout_ns.is_some());
             record.entry.expires_after_ns = if record.entry.closing {
                 tcp_close_window_ns(record.entry.tcp_close_class(), &self.timeouts)
             } else {
@@ -4057,23 +4045,20 @@ fn l3_reverse_bucket_remove(map: &mut SeededL3ReverseIndex, key: &L3ReverseKey, 
 
 /// Select the idle expiry for a session.
 ///
-/// #3227: `app_override_ns` is the admitting application term's per-application
-/// inactivity (idle) timeout in nanoseconds, or `None` to use the global
-/// per-protocol `SessionTimeouts`. When `Some`, it replaces the ESTABLISHED /
-/// active idle window (TCP-established, UDP, ICMP, and the OTHER-protocol
-/// fallback) — mirroring Junos `inactivity-timeout`, the idle timeout of an
-/// established session. It deliberately does NOT override the short TCP
-/// closing/RST reap windows: a FIN/RST close still reaps on the short timeout
-/// so a closed session is not held open for a long custom idle value. When
-/// `None` the result is byte-identical to pre-#3227.
+/// #3227/#10889: `app_override_ns` is the admitting application's per-app
+/// inactivity timeout in nanoseconds, or `None` to use the global per-protocol
+/// `SessionTimeouts`. When `Some`, it replaces the idle window only after the
+/// protocol's promotion gate opens: TCP requires its handshake to complete;
+/// UDP, ICMP, and other non-TCP sessions require a genuine reverse packet.
+/// That first reply opens the app timeout for both halves. An unreplied
+/// datagram remains on its global per-protocol window. The app timeout never
+/// extends TCP closing/RST reap windows.
 ///
-/// #3152: `established` is the TCP three-way-handshake completion state. A
-/// non-closing TCP session that has NOT completed its handshake (`false`,
-/// OPENING / half-open) is reaped on the short `tcp_opening_ns` window so a
-/// bare-SYN flood cannot pin half-open entries for the full established
-/// idle window. The per-app override and the established timeout apply only
-/// once the session is established. `established` is ignored for non-TCP
-/// protocols and for the closing branch.
+/// #3152: for TCP, `established=false` means a non-closing bare-SYN
+/// half-open and selects the short `tcp_opening_ns` window. For non-TCP,
+/// `established=false` suppresses only the custom app timeout; it selects the
+/// global protocol window. A TCP close returns its close window before either
+/// established-class decision.
 ///
 /// #3527: `opening_override_ns` is the ingress zone's `syn-flood timeout`
 /// mapped to the half-open window (ns), or `None` for the global
@@ -4114,9 +4099,27 @@ fn session_timeout_ns(
                 app_override_ns.unwrap_or(timeouts.tcp_established_ns)
             }
         }
-        PROTO_UDP => app_override_ns.unwrap_or(timeouts.udp_ns),
-        PROTO_ICMP | PROTO_ICMPV6 => app_override_ns.unwrap_or(timeouts.icmp_ns),
-        _ => app_override_ns.unwrap_or(OTHER_SESSION_TIMEOUT_NS),
+        PROTO_UDP => {
+            if established {
+                app_override_ns.unwrap_or(timeouts.udp_ns)
+            } else {
+                timeouts.udp_ns
+            }
+        }
+        PROTO_ICMP | PROTO_ICMPV6 => {
+            if established {
+                app_override_ns.unwrap_or(timeouts.icmp_ns)
+            } else {
+                timeouts.icmp_ns
+            }
+        }
+        _ => {
+            if established {
+                app_override_ns.unwrap_or(OTHER_SESSION_TIMEOUT_NS)
+            } else {
+                OTHER_SESSION_TIMEOUT_NS
+            }
+        }
     }
 }
 
@@ -4176,3 +4179,7 @@ mod reverse_domain_9895_tests;
 #[cfg(test)]
 #[path = "session_lifetime_9990_9991_tests.rs"]
 mod session_lifetime_9990_9991_tests;
+// #10889: datagram app inactivity timeout requires a genuine reverse packet.
+#[cfg(test)]
+#[path = "datagram_reply_promotion_10889_tests.rs"]
+mod datagram_reply_promotion_10889_tests;
