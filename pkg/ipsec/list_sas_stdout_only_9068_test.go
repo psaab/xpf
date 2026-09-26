@@ -21,11 +21,9 @@ import (
 // connection (`vpn-corp` -> `vpn-cowarning`).
 //
 // A lost name is a FAIL-OPEN, not a cosmetic error. `terminateRemovedConns`
-// iterates `for name := range live`, so a removed connection absent from `live`
-// is neither terminated NOR entered into `pendingTerminate` — and
-// `prevConnNames` has already advanced past it, so the debt record #6542 exists
-// to keep is never created. A deleted VPN's SA keeps forwarding under an
-// unloaded configuration, with no retry.
+// iterates `for name := range live`, so an affected connection absent from
+// `live` is neither terminated nor entered into teardown debt — and its stale
+// SA keeps forwarding with no retry.
 //
 // Whether swanctl can splice mid-line on a SUCCESSFUL listing is not
 // established. These cells do not try to answer that: they pin the CHANNEL, so

@@ -1,6 +1,8 @@
 package ipsec
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -687,6 +689,7 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 	}
 	return children
 }
+
 // ChildSelector is an exported view of the renderer's resolved selector pair.
 // Its fields are the exact values rendered as swanctl local_ts/remote_ts.
 type ChildSelector = childSelector
@@ -920,4 +923,59 @@ func authMethodToSwan(method string) (string, error) {
 func xfrmiIfID(bindIface string) uint32 {
 	_, ifID := config.XFRMIfNameAndID(bindIface)
 	return ifID
+}
+
+// renderedConnectionHashes fingerprints each emitted connection's effective
+// swanctl connection and secret blocks. Hashing rendered output includes
+// resolved proposals, authentication/PSK, selectors, endpoints, identities,
+// and lifetimes while excluding non-rendered cosmetic fields and source-map
+// ordering. Connection and secret blocks are selected separately because
+// swanctl stores PSKs outside connections{}.
+func renderedConnectionHashes(cfg string, rendered map[string]bool) (map[string]string, error) {
+	hashes := make(map[string]string, len(rendered))
+	if len(rendered) == 0 {
+		return hashes, nil
+	}
+
+	const connectionsHeader = "connections {\n"
+	const secretsHeader = "\nsecrets {\n"
+	connectionsStart := strings.Index(cfg, connectionsHeader)
+	secretsStart := strings.Index(cfg, secretsHeader)
+	if connectionsStart < 0 || secretsStart < 0 || secretsStart < connectionsStart {
+		return nil, fmt.Errorf("rendered IPsec config is missing connections or secrets section")
+	}
+	connections := cfg[connectionsStart+len(connectionsHeader) : secretsStart]
+	secrets := cfg[secretsStart+len(secretsHeader):]
+
+	for name := range rendered {
+		connection, ok := renderedSectionEntry(connections, name)
+		if !ok {
+			return nil, fmt.Errorf("rendered IPsec connection %q has no connection block", name)
+		}
+		secret, _ := renderedSectionEntry(secrets, "ike-"+name)
+		content := make([]byte, 0, len(connection)+1+len(secret))
+		content = append(content, connection...)
+		content = append(content, 0)
+		content = append(content, secret...)
+		hash := sha256.Sum256(content)
+		hashes[name] = hex.EncodeToString(hash[:])
+	}
+	return hashes, nil
+}
+
+// renderedSectionEntry returns one top-level, two-space-indented section
+// block. Rendered values are single-line, so the exact top-level closing
+// indentation cannot occur inside a value or nested child block.
+func renderedSectionEntry(section, name string) (string, bool) {
+	marker := "  " + name + " {\n"
+	start := strings.Index(section, marker)
+	if start < 0 {
+		return "", false
+	}
+	closeOffset := strings.Index(section[start+len(marker):], "\n  }\n")
+	if closeOffset < 0 {
+		return "", false
+	}
+	end := start + len(marker) + closeOffset + len("\n  }\n")
+	return section[start:end], true
 }
