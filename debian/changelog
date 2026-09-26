@@ -22,5 +22,7 @@ xpf (0.0.0) unstable; urgency=medium
   * Include responder node identity in chassis-forwarding RPC responses and
     flag divergence between peer response identity and heartbeat belief
     (#10841).
+  * Show config-sync divergence alarms without active configuration and report
+    remote flow-monitor state as unknown (#10846).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
