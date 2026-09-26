@@ -132,11 +132,11 @@ func enumerateAndRenameInterfaces(nodeID int, clusterMode bool, userspaceWorkers
 	applyRSSIndirection(rssEnabled, userspaceWorkers, rssAllowedInterfaces, realRSSExecutor{})
 
 	// #5842: surface any rename / .link-write / reload failure, mirroring the
-	// device-map path (#4956). This is what stops maybeReapplyConfigArrivalNaming
-	// from consuming its one-shot emptyHANamingPending marker on a boot where
-	// naming did NOT converge: positional mode always returned nil, so a
-	// config-less HA node whose renames all failed burned its single retry and
-	// stayed on standalone names until a restart.
+	// device-map path (#4956). This preserves maybeReapplyConfigArrivalNaming's
+	// one-shot emptyHANamingPending marker after a failed accepted standalone
+	// config apply, so another accepted standalone config can retry naming.
+	// Before #5842 positional mode always returned nil and consumed the marker on
+	// failure, leaving no config-arrival retry owner for standalone naming.
 	//
 	// RSS indirection runs first and unconditionally: it is best-effort tuning
 	// keyed on interface names that either did or did not change, and skipping
