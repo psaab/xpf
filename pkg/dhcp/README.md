@@ -399,8 +399,11 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   routes are programmed through the same paths as the default route:
   `collectDHCPRoutes` emits one `frr.DHCPRoute` per route (with a non-empty
   `Destination`), and `renderDHCPDefaults` writes
-  `ip route <dest> <gw> [<iface>] 200`. Before emission, a rendered static
-  route in the same FRR table suppresses a learned classless prefix it
+  `ip route <dest> <gw> [<iface>] 200`. Before emission, a connected prefix
+  in the same FRR routing context suppresses an equal or more-specific
+  learned prefix: otherwise its longer-prefix match could divert traffic from
+  the connected network through the DHCP gateway (#10762). A rendered static
+  route in the same FRR table also suppresses a learned classless prefix it
   contains, with a visible security warning; this containment rule is what
   makes a static `0.0.0.0/0` defeat a rogue `/1` pair while leaving
   non-overlapping learned routes usable. The management-VRF twin applies the
@@ -410,9 +413,9 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   becoming static precedence authority. An option-121 `0.0.0.0/0` follows the
   normal DHCP-default suppression behavior. `/1` and non-forwardable martian
   classless prefixes are refused by default. `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1`
-  is an explicit, unset-by-default escape hatch that permits covered/broad/
-  martian classless routes in both paths and emits a loud security warning at
-  each use.
+  is an explicit, unset-by-default escape hatch that permits connected-covered,
+  static-covered, broad, or martian classless routes and emits a loud security
+  warning at each use.
   `leaseContentChanged` diffs `ClasslessRoutes`, so routes are withdrawn/re-installed in lock-step with
   the lease on renew/expiry, like the default route. For the management VRF
   the withdrawal is enforced by a full RECONCILE, not an append-only apply

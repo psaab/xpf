@@ -176,6 +176,12 @@ func (d *Daemon) dhcpRouteVRFMap() map[string]string {
 // collectDHCPRoutes builds FRR DHCPRoute entries from active DHCP leases.
 // Interfaces bound to the management VRF are excluded — their routes are
 // programmed directly via netlink into the VRF table by applyMgmtVRFRoutes.
+//
+// A classless route whose destination falls inside a connected prefix of the
+// SAME routing context is suppressed (#10762): the learned more-specific
+// would otherwise win longest-prefix-match over the connected route, so a
+// DHCP server on a day-0 DHCP data interface could divert internal traffic
+// to its gateway. The default route is never filtered.
 func (d *Daemon) collectDHCPRoutes() []frr.DHCPRoute {
 	if d.dhcp == nil {
 		return nil
@@ -187,8 +193,23 @@ func (d *Daemon) collectDHCPRoutes() []frr.DHCPRoute {
 	// get the route it learned and the default context got one it should not
 	// have. Static routes have carried a `vrf <name>` clause since #5557.
 	ifaceVRF := d.dhcpRouteVRFMap()
+	// #10762: collect connected prefixes before filtering so the outcome does
+	// not depend on lease iteration order. Interface addresses are sourced
+	// from the active config, and dynamic interface addresses from the in-scope
+	// leases themselves.
+	connected := dhcpConnectedPrefixesByVRF(d.store.ActiveConfig(), mgmtSet)
+	leases := d.dhcp.Leases()
+	for _, lease := range leases {
+		if mgmtSet[lease.Interface] || !lease.Address.IsValid() {
+			continue
+		}
+		vrf := ifaceVRF[lease.Interface]
+		connected[vrf] = append(connected[vrf], lease.Address.Masked())
+	}
+
+	trustClassless := os.Getenv(dhcpClasslessTrustOverrideEnv) == "1"
 	var routes []frr.DHCPRoute
-	for _, lease := range d.dhcp.Leases() {
+	for _, lease := range leases {
 		if mgmtSet[lease.Interface] {
 			continue
 		}
@@ -206,6 +227,25 @@ func (d *Daemon) collectDHCPRoutes() []frr.DHCPRoute {
 		// RFC 3442 classless static routes (option 121 / legacy 249). A
 		// lease may carry these with or without a default gateway.
 		for _, cr := range lease.ClasslessRoutes {
+			// Suppress only a connected prefix at least as broad as the
+			// learned route. A learned route covering a connected prefix is
+			// harmless: longest-prefix match still selects the connected one.
+			if covering := dhcpConnectedCoveringPrefix(connected[vrf], cr.Destination); covering.IsValid() {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+						"inside a connected subnet (#10762)",
+						"destination", cr.Destination.String(), "connected", covering.String(),
+						"gateway", cr.Gateway.String(), "interface", lease.Interface,
+						"env", dhcpClasslessTrustOverrideEnv, "vrf", vrf)
+				} else {
+					slog.Warn("SECURITY: suppressing DHCP classless route inside "+
+						"a connected subnet (#10762)",
+						"destination", cr.Destination.String(), "connected", covering.String(),
+						"gateway", cr.Gateway.String(), "interface", lease.Interface,
+						"vrf", vrf)
+					continue
+				}
+			}
 			routes = append(routes, frr.DHCPRoute{
 				Destination: cr.Destination.String(),
 				Gateway:     cr.Gateway.String(),
@@ -216,6 +256,61 @@ func (d *Daemon) collectDHCPRoutes() []frr.DHCPRoute {
 		}
 	}
 	return routes
+}
+
+// dhcpConnectedPrefixesByVRF inventories the active config's interface
+// addresses as connected prefixes, keyed by routing context (#10762). VRF
+// ownership uses dhcpLeaseRoutingInstances and lease interface keys so it
+// follows the same name conversion as collectDHCPRoutes (#9135).
+//
+// Management-VRF-bound interfaces are excluded: their addresses are connected
+// in table 999, not in any FRR routing context.
+func dhcpConnectedPrefixesByVRF(cfg *config.Config, mgmtSet map[string]bool) map[string][]netip.Prefix {
+	out := map[string][]netip.Prefix{}
+	if cfg == nil {
+		return out
+	}
+	vrfByLeaseKey := dhcpLeaseRoutingInstances(cfg)
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil || len(unit.Addresses) == 0 {
+				continue
+			}
+			key := config.DHCPLeaseIfName(name, unit)
+			if mgmtSet[key] {
+				continue
+			}
+			vrf := vrfByLeaseKey[key]
+			for _, raw := range unit.Addresses {
+				prefix, err := netip.ParsePrefix(raw)
+				if err == nil {
+					out[vrf] = append(out[vrf], prefix.Masked())
+				}
+			}
+		}
+	}
+	return out
+}
+
+// dhcpConnectedCoveringPrefix reports a connected prefix that contains a
+// DHCP-learned destination, or an invalid prefix if none does. A connected
+// prefix only suppresses when it is at least as broad as the learned prefix.
+func dhcpConnectedCoveringPrefix(connected []netip.Prefix, learned netip.Prefix) netip.Prefix {
+	if !learned.IsValid() {
+		return netip.Prefix{}
+	}
+	for _, prefix := range connected {
+		if !prefix.IsValid() || prefix.Addr().BitLen() != learned.Addr().BitLen() {
+			continue
+		}
+		if prefix.Bits() <= learned.Bits() && prefix.Contains(learned.Addr()) {
+			return prefix
+		}
+	}
+	return netip.Prefix{}
 }
 
 // mgmtVRFTableID is the kernel routing table backing the management VRF, for
