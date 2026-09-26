@@ -348,4 +348,3 @@ system login user xpfarg uid	empty
 system no-redirects	empty
 system services dns	empty
 system services web-management api-auth user xpfname password	empty
-system services web-management https system-generated-certificate	empty

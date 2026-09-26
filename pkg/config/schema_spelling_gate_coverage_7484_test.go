@@ -393,7 +393,9 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // #10327 models the compiler-read direct IPsec VPN references and source-NAT
 // pool alarm thresholds. Their four value leaves become comparable, so the
 // measured floor tightens 771 -> 775.
-const gateCoverageFloor = 775
+// #10827 adds the two custom HTTPS credential paths; both become comparable.
+// Tighten the measured floor 775 -> 777 rather than leave coverage slack.
+const gateCoverageFloor = 777
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent

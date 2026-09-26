@@ -122,6 +122,26 @@ func validateWebManagementAuthStrict(cfg *Config) error {
 		strings.Join(binds, ", "))
 }
 
+// validateWebManagementTLSCertificateStrict keeps custom TLS credentials an
+// all-or-nothing, unambiguous web-management setting. The tolerant config-load
+// path reports the same error as a warning so an older committed config does
+// not prevent the management lifeline from starting.
+func validateWebManagementTLSCertificateStrict(cfg *Config) error {
+	if cfg == nil || cfg.System.Services == nil || cfg.System.Services.WebManagement == nil {
+		return nil
+	}
+	wm := cfg.System.Services.WebManagement
+	certSet := strings.TrimSpace(wm.TLSCertificate) != ""
+	keySet := strings.TrimSpace(wm.TLSPrivateKey) != ""
+	if certSet != keySet {
+		return fmt.Errorf("system services web-management https requires both certificate and private-key paths")
+	}
+	if certSet && wm.SystemGeneratedCert {
+		return fmt.Errorf("system services web-management https must choose either a custom certificate/private-key pair or system-generated-certificate")
+	}
+	return nil
+}
+
 // apiAuthHasUsableCredential reports whether an api-auth stanza carries at
 // least one NON-EMPTY credential: a user with a non-empty password, or a
 // non-empty api-key. An empty Basic password or empty api-key is never a valid

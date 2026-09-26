@@ -931,11 +931,18 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			}
 			if httpsNode := wmNode.FindChild("https"); httpsNode != nil {
 				sys.Services.WebManagement.HTTPS = true
-				if httpsNode.FindChild("system-generated-certificate") != nil {
-					sys.Services.WebManagement.SystemGeneratedCert = true
-				}
-				if ifNode := httpsNode.FindChild("interface"); ifNode != nil {
-					sys.Services.WebManagement.HTTPSInterface = nodeVal(ifNode)
+				httpsSchema := schemaForPath("system", "services", "web-management", "https")
+				for _, prop := range expandFlatRun(packedBodyChildren(httpsNode, httpsSchema), httpsSchema) {
+					switch prop.Name() {
+					case "system-generated-certificate":
+						sys.Services.WebManagement.SystemGeneratedCert = true
+					case "certificate":
+						sys.Services.WebManagement.TLSCertificate = nodeVal(prop)
+					case "private-key":
+						sys.Services.WebManagement.TLSPrivateKey = nodeVal(prop)
+					case "interface":
+						sys.Services.WebManagement.HTTPSInterface = nodeVal(prop)
+					}
 				}
 			}
 			if authNode := wmNode.FindChild("api-auth"); authNode != nil {

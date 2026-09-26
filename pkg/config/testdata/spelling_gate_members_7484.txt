@@ -1201,7 +1201,9 @@ COMPARED	system services ssh root-login
 COMPARED	system services web-management api-auth api-key
 COMPARED	system services web-management api-auth user <*> password
 COMPARED	system services web-management http interface
+COMPARED	system services web-management https certificate
 COMPARED	system services web-management https interface
+COMPARED	system services web-management https private-key
 flag (read, but value-less)	system services web-management https system-generated-certificate
 advisory (read, value ignored, warning says so)	system syslog file <*> allow-duplicates
 flag (read, but value-less)	system syslog file <*> archive archive-sites

@@ -635,6 +635,10 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// moves from 385/140 to 386/141 as the schema population is admitted.
 	// This is a measured population-count ratchet update, not a loser-set
 	// relaxation.
+	// #10827's new HTTPS certificate leaves make the two-leaf
+	// certificate/interface candidate fail the required certificate/key-pair
+	// gate, moving one row to unmeasured (83 -> 84). The measured loser set,
+	// walked/vacuous counts, and collector reach stay unchanged.
 	//
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability
