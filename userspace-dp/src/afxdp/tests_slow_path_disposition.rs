@@ -1745,6 +1745,21 @@ fn run_stage11_frame_poll_with_options_10516(
         remove_after_seed,
     )
 }
+#[derive(Clone, Copy, Debug)]
+struct Stage11PendingNeighWitness10516 {
+    key: (i32, IpAddr),
+    addr: u64,
+    desc: crate::xsk_ffi::XdpDesc,
+    meta: UserspaceDpMeta,
+    resolution: crate::afxdp::ForwardingResolution,
+    queued_ns: u64,
+    probe_attempts: u8,
+    pending_len: usize,
+    schedule_len: usize,
+    next_due_ns: Option<u64>,
+    frame_matches: bool,
+}
+
 fn run_stage11_frame_poll_on_snapshot_with_options_10516(
     snapshot: &ConfigSnapshot,
     frame: &[u8],
@@ -1760,8 +1775,8 @@ fn run_stage11_frame_poll_on_snapshot_with_options_10516(
     Vec<bool>,
     u64,
 ) {
-    let (trusted, delegated, counters, recycled, queues, forwarded, _pending) =
-        run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
+    let (trusted, delegated, counters, recycled, queues, forwarded, _parked) =
+        run_stage11_frame_poll_on_snapshot_with_options_and_park_witness_10516(
             snapshot,
             frame,
             meta,
@@ -1771,7 +1786,7 @@ fn run_stage11_frame_poll_on_snapshot_with_options_10516(
         );
     (trusted, delegated, counters, recycled, queues, forwarded)
 }
-fn run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
+fn run_stage11_frame_poll_on_snapshot_with_options_and_park_witness_10516(
     snapshot: &ConfigSnapshot,
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -1785,7 +1800,7 @@ fn run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
     usize,
     Vec<bool>,
     u64,
-    usize,
+    Option<Stage11PendingNeighWitness10516>,
 ) {
     let mut forwarding = build_forwarding_state(snapshot);
     forwarding.ipsec_sa.publish_empty_dump_for_test();
@@ -1849,6 +1864,28 @@ fn run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
         batch.validated_packets, 1,
         "stage11 frame must pass descriptor validation"
     );
+    let parked =
+        binding
+            .pending_neigh
+            .iter()
+            .next()
+            .map(|(key, pending)| Stage11PendingNeighWitness10516 {
+                key: *key,
+                addr: pending.addr,
+                desc: pending.desc,
+                meta: pending.meta,
+                resolution: pending.decision.resolution,
+                queued_ns: pending.queued_ns,
+                probe_attempts: pending.probe_attempts,
+                pending_len: binding.pending_neigh.len(),
+                schedule_len: binding.pending_neigh_schedule.len(),
+                next_due_ns: binding.pending_neigh_schedule.next_due_ns(),
+                frame_matches: binding
+                    .umem
+                    .area()
+                    .slice(pending.desc.addr as usize, pending.desc.len as usize)
+                    == Some(frame),
+            });
     (
         reinjector.status(),
         reinjector.delegated_status(),
@@ -1856,7 +1893,7 @@ fn run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
         binding.scratch.scratch_recycle.len(),
         reinjector.test_enqueued_delegated(),
         dbg.tx,
-        binding.pending_neigh.len(),
+        parked,
     )
 }
 fn run_stage11_frame_poll_with_seeded_ike_10516(
@@ -2168,9 +2205,11 @@ fn stage11_raw_protocol_arm_is_fail_closed_10516() {
 /// those shapes through the real descriptor poll to pin the §6.1 cell-7
 /// NotClaimed verdict and no SA telemetry. Whole host-bound packets recycle
 /// exactly once; transit non-first fragments PARK in neighbor-resolution
-/// buffering (recycled 0, forwarded 0, pending 1) — held for the unresolved
-/// on-link neighbor, not dropped and not forwarded. This is the MissingNeighbor
-/// `pending_neigh` buffer, not IP reassembly: the dataplane holds no reassembly
+/// buffering, held by a `pending_neigh` entry containing the input UMEM
+/// descriptor and bytes, with a retry/expiry schedule. The entry is the
+/// positive parking evidence; `recycled == 0` and `forwarded == 0` alone
+/// cannot distinguish a park from a leak or drop without recycle. This is the
+/// MissingNeighbor buffer, not IP reassembly: the dataplane holds no reassembly
 /// state. Flowless transit may still use an unrelated slow-path outlet after
 /// Stage 11 falls through; the SA counters are the observable proof that Stage
 /// 11 did not claim the packet.
@@ -2186,8 +2225,9 @@ fn stage11_raw_protocol_arm_is_fail_closed_10516() {
 /// host-bound packet even though its frame had a WAN-subnet destination.
 /// Transit tails use consistent frame + meta addresses now; both families
 /// take MissingNeighbor and park uniformly.
-/// #10679: the same-family flowless NAT fence leaves raw IPsec non-first
-/// fragments on this established park path.
+/// #10869: each park witness returns the binding-local pending entry and
+/// schedule. A drop/leak-without-recycle mutant has the same negative counter
+/// signature but no entry holding the actual descriptor bytes, so it reds.
 #[test]
 fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
     let v4_esp = build_stage11_raw_v4_frame_10516(PROTO_ESP);
@@ -2311,8 +2351,8 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 "{label}: non-first fragment metadata must keep the unknown-protocol sentinel"
             );
         }
-        let (_trusted, delegated, counters, recycled, _queues, forwarded, pending) =
-            run_stage11_frame_poll_on_snapshot_with_options_and_pending_10516(
+        let (trusted, delegated, counters, recycled, queues, forwarded, parked_state) =
+            run_stage11_frame_poll_on_snapshot_with_options_and_park_witness_10516(
                 &nat_snapshot(),
                 &frame,
                 meta,
@@ -2321,9 +2361,23 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 false,
             );
         assert_eq!(delegated.queued_packets, 0, "{label}: raw packet minted q1");
-        assert_eq!(counters.sa_miss_dropped_packets, 0, "{label}: SA gate consulted");
-        assert_eq!(counters.sa_snapshot_stale_deny, 0, "{label}: stale gate consulted");
+        assert_eq!(
+            counters.sa_miss_dropped_packets, 0,
+            "{label}: SA gate consulted"
+        );
+        assert_eq!(
+            counters.sa_snapshot_stale_deny, 0,
+            "{label}: stale gate consulted"
+        );
         if parked {
+            assert_eq!(
+                trusted.queued_packets, 0,
+                "{label}: parked raw packet minted trusted q0"
+            );
+            assert!(
+                queues.is_empty(),
+                "{label}: parked raw packet was enqueued to a slow-path outlet"
+            );
             assert_eq!(
                 recycled, 0,
                 "{label}: a parked non-first fragment holds its descriptor (a recycle here \
@@ -2334,21 +2388,94 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 "{label}: a parked non-first fragment must not forward (a forward here \
                  means it bypassed the neighbor-resolution hold)"
             );
+            let parked_state = parked_state.expect(
+                "{label}: non-recycled, non-forwarded packet must be held in pending_neigh",
+            );
             assert_eq!(
-                pending, 1,
-                "{label}: blanket-only source NAT must preserve the raw non-first \
-                 pending-neighbor hold path"
+                parked_state.pending_len, 1,
+                "{label}: parked packet must be the sole pending-neighbor entry"
+            );
+            assert_eq!(
+                parked_state.addr, parked_state.desc.addr,
+                "{label}: pending entry must retain its UMEM descriptor"
+            );
+            assert_eq!(
+                parked_state.desc.addr, 128,
+                "{label}: pending entry must retain this poll's input descriptor"
+            );
+            assert_eq!(
+                parked_state.desc.len as usize,
+                frame.len(),
+                "{label}: parked descriptor length must match the input frame"
+            );
+            assert_eq!(
+                parked_state.meta.pkt_len as usize,
+                frame.len(),
+                "{label}: parked metadata must still describe the input frame"
+            );
+            assert_eq!(parked_state.meta.addr_family, meta.addr_family);
+            assert_eq!(parked_state.meta.protocol, u8::MAX);
+            assert_eq!(parked_state.meta.flow_src_addr, meta.flow_src_addr);
+            assert_eq!(parked_state.meta.flow_dst_addr, meta.flow_dst_addr);
+            assert!(
+                parked_state.frame_matches,
+                "{label}: pending descriptor must still reference the original frame bytes",
+            );
+            assert_eq!(
+                parked_state.resolution.disposition,
+                ForwardingDisposition::MissingNeighbor,
+                "{label}: park witness must carry MissingNeighbor disposition"
+            );
+            assert_eq!(parked_state.resolution.egress_ifindex, 12);
+            assert_eq!(
+                parked_state.key.0, parked_state.resolution.egress_ifindex,
+                "{label}: pending key must use the route egress interface"
+            );
+            assert_eq!(
+                parked_state.key.1,
+                parked_state
+                    .resolution
+                    .next_hop
+                    .expect("pending neighbor next hop"),
+                "{label}: pending key must name the unresolved route next hop"
+            );
+            assert_eq!(
+                parked_state.key.1,
+                match meta.addr_family as i32 {
+                    libc::AF_INET => IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+                    libc::AF_INET6 => IpAddr::V6(
+                        "2001:559:8585:80::200"
+                            .parse::<Ipv6Addr>()
+                            .expect("v6 pending-neighbor destination"),
+                    ),
+                    family => panic!("{label}: unexpected address family {family}"),
+                },
+                "{label}: park witness must be keyed to the unresolved on-link destination"
+            );
+            assert_eq!(parked_state.probe_attempts, 0);
+            assert_eq!(
+                parked_state.schedule_len, parked_state.pending_len,
+                "{label}: parked entry must have a corresponding retry/expiry schedule"
+            );
+            let next_due_ns = parked_state
+                .next_due_ns
+                .expect("parked entry must have a scheduled retry/expiry");
+            assert!(
+                next_due_ns > parked_state.queued_ns,
+                "{label}: park schedule must advance beyond the enqueue time"
             );
         } else {
-            assert_eq!(recycled, 1, "{label}: descriptor was not recycled exactly once");
             assert_eq!(
-                pending, 0,
-                "{label}: only non-first fragments are parked in this pinned behavior"
+                recycled, 1,
+                "{label}: descriptor was not recycled exactly once"
+            );
+            assert!(
+                parked_state.is_none(),
+                "{label}: a recycled whole packet must not leave a pending-neighbor park"
             );
         }
     }
 }
-
 
 /// The Stage-11 SA decision must be observable through the actual descriptor
 /// poll arm: a NAT-T packet with no matching SA is recycled without queueing,
