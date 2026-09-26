@@ -4,6 +4,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/cluster"
 )
 
 // #2081: ReconcileVIPs (called after programRethMAC link DOWN/UP changes the
@@ -318,26 +320,77 @@ func TestSendGARPForcedAdvancesStateWithinWindow(t *testing.T) {
 	}
 }
 
-// TestBecomeMasterGARPAfterAbdicationBypassesDampener covers the sub-500ms
-// failback case: while this node was BACKUP, the peer advertised its own MAC,
-// so the old routine GARP is no longer a duplicate from the neighbors' view.
+// TestBecomeMasterGARPAfterAbdicationBypassesDampener covers sub-500ms
+// failback while an older burst is still in flight. The old completion must
+// retain its captured owner generation; otherwise it re-arms the dampener for
+// the new tenure and suppresses the corrective GARP.
 func TestBecomeMasterGARPAfterAbdicationBypassesDampener(t *testing.T) {
-	vi := masterInstanceNoVIPs(t)
+	oldBurstFn, oldProbeFn := garpBurstFn, arpProbeFn
+	var burstCalls int
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	sendStarted := false
+	sendDone := make(chan struct{})
+	unblock := func() {
+		if !released {
+			close(release)
+			released = true
+		}
+	}
+	t.Cleanup(func() {
+		unblock()
+		if sendStarted {
+			<-sendDone
+		}
+		garpBurstFn, arpProbeFn = oldBurstFn, oldProbeFn
+	})
+	garpBurstFn = func(_ string, _ net.IP, _ int, _ cluster.BurstStillValid) error {
+		burstCalls++
+		if burstCalls == 2 {
+			close(blocked)
+			<-release
+		}
+		return nil
+	}
+	arpProbeFn = func(_ string, _, _ net.IP) error { return nil }
+
+	vi := masterInstanceWithVIP(t, "10.0.0.100/24")
 	vi.garpEpoch.Store(1)
 	vi.sendGARP(false)
-	if got := vi.lastGARPEpoch.Load(); got != 1 {
-		t.Fatalf("initial MASTER GARP epoch = %d, want 1", got)
+	if burstCalls != 1 {
+		t.Fatalf("initial MASTER GARP emitted %d bursts, want 1", burstCalls)
 	}
 
-	// The first burst just completed; force an unambiguous 150ms dampening gap.
+	// Stamp the prior burst as 150ms old. The second forced burst enters its
+	// sender, then remains in flight across ownership loss and rapid failback.
 	vi.lastGARPTime.Store(time.Now().Add(-150 * time.Millisecond).UnixNano())
-	vi.setState(StateBackup) // peer takes mastership and advertises its MAC
-	vi.setState(StateMaster) // this node fails back before 500ms
 	vi.garpEpoch.Store(2)
-	vi.sendGARP(false)
+	go func() {
+		defer close(sendDone)
+		vi.sendGARP(true)
+	}()
+	sendStarted = true
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("forced GARP did not reach the burst sender")
+	}
 
-	if got := vi.lastGARPEpoch.Load(); got != 2 {
-		t.Fatalf("failback MASTER GARP was dampened inside 500ms: lastGARPEpoch = %d, want 2",
-			got)
+	vi.setState(StateBackup) // peer takes mastership and advertises its MAC
+	vi.setState(StateMaster) // this node fails back inside the 500ms window
+	vi.garpEpoch.Store(3)
+	unblock()
+	<-sendDone
+
+	// The old burst's completion wrote its captured owner generation. A normal
+	// failback send must still emit a corrective burst within 500ms.
+	vi.sendGARP(false)
+	if burstCalls != 3 {
+		t.Fatalf("GARP burst callbacks = %d, want 3 (initial, in-flight, failback)",
+			burstCalls)
+	}
+	if got := vi.lastGARPEpoch.Load(); got != 3 {
+		t.Fatalf("failback GARP completion epoch = %d, want 3", got)
 	}
 }
