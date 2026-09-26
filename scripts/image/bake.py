@@ -487,8 +487,24 @@ def discover_base_release():
         return PINNED_BASE_RELEASE
     url = os.environ.get("XPF_UBUNTU_RELEASES_URL",
                          "https://cloud-images.ubuntu.com/releases")
+    # #10853: validate the operator-controlled origin before curl; this
+    # rejects plain HTTP outside loopback as well as malformed/credentialed
+    # URLs. The listing itself has small-file and wall-clock ceilings.
+    try:
+        sign.validate_fetch_url(
+            url, "Ubuntu releases URL (XPF_UBUNTU_RELEASES_URL)")
+    except sign.SignError as e:
+        die(f"invalid Ubuntu releases URL: {e}")
     import re
-    html = out_text(["curl", "-fsSL", url + "/"])
+    cap = sign.FETCH_MAX_BYTES_SMALL
+    with tempfile.TemporaryDirectory(prefix="xpf-releases-") as tmp:
+        listing = os.path.join(tmp, "releases.html")
+        run(sign.curl_fetch_argv(
+            url + "/", listing, max_bytes=cap,
+            max_time=sign.FETCH_MAX_TIME_SMALL_S),
+            preexec_fn=sign.fetch_file_limit(cap))
+        with open(listing, encoding="utf-8") as f:
+            html = f.read()
     rels = sorted(set(re.findall(r'href="(\d{2}\.\d{2})/"', html)),
                   key=lambda v: tuple(int(x) for x in v.split(".")))
     if not rels:
@@ -513,12 +529,32 @@ def fetch_base(cache_dir, work_dir):
     serial = PINNED_BASE_SERIAL.get(rel, "release")
     base_url = os.environ.get(
         "XPF_BASE_URL", f"{releases_url}/{rel}/{serial}")
+    # #10853: both operator-controlled origins must be structurally valid and
+    # HTTPS (except loopback/file development fixtures) before any download.
+    try:
+        sign.validate_fetch_url(
+            releases_url, "Ubuntu releases URL (XPF_UBUNTU_RELEASES_URL)")
+        sign.validate_fetch_url(base_url, "base image URL (XPF_BASE_URL)")
+    except sign.SignError as e:
+        die(f"invalid base image URL: {e}")
     img = f"ubuntu-{rel}-server-cloudimg-amd64.img"
     info(f"fetching Ubuntu {rel} server cloud image base ({base_url})")
     cached = os.path.join(cache_dir, img)
     if not os.path.isfile(cached):
-        run(["curl", "-fsSL", "-o", cached + ".tmp", f"{base_url}/{img}"])
-        os.replace(cached + ".tmp", cached)
+        temp_cached = cached + ".tmp"
+        try:
+            run(sign.curl_fetch_argv(
+                f"{base_url}/{img}", temp_cached,
+                max_bytes=sign.FETCH_MAX_BYTES_BASE_IMAGE,
+                max_time=sign.FETCH_MAX_TIME_LARGE_S),
+                preexec_fn=sign.fetch_file_limit(
+                    sign.FETCH_MAX_BYTES_BASE_IMAGE))
+            os.replace(temp_cached, cached)
+        finally:
+            try:
+                os.unlink(temp_cached)
+            except OSError:
+                pass
 
     # Authenticate cached bytes BEFORE consulting the same-endpoint checksum.
     # The pin is the trust anchor; a moving or stale mirror checksum must not
@@ -528,9 +564,13 @@ def fetch_base(cache_dir, work_dir):
 
     # This same-endpoint SHA256SUMS only catches transport corruption; it is
     # fetched from the SAME mirror as the image and is NOT an authenticator
-    # against a malicious mirror.
+    # against a malicious mirror. Its download is small-file and time bounded.
     sums = os.path.join(work_dir, "SHA256SUMS.upstream")
-    run(["curl", "-fsSL", "-o", sums, f"{base_url}/SHA256SUMS"])
+    run(sign.curl_fetch_argv(
+        f"{base_url}/SHA256SUMS", sums,
+        max_bytes=sign.FETCH_MAX_BYTES_SMALL,
+        max_time=sign.FETCH_MAX_TIME_SMALL_S),
+        preexec_fn=sign.fetch_file_limit(sign.FETCH_MAX_BYTES_SMALL))
     expected = None
     with open(sums) as f:
         for line in f:
@@ -874,7 +914,8 @@ def validation_gate_step(skip_validate, qcow_out, meta_out):
     return True
 
 
-def record_validation_success(manifest, sums, manifest_inputs, snapshot):
+def record_validation_success(manifest, sums, manifest_inputs, snapshot,
+                              sizes=None):
     """Mark provenance validated only after the gate passes, then refresh the
     checksum manifest using the original hash-time snapshot for image bytes.
 
@@ -892,6 +933,12 @@ def record_validation_success(manifest, sums, manifest_inputs, snapshot):
         with open(manifest, "rb") as f:
             original = f.read()
         pre_gate_sums = sign.parse_manifest(sums)
+        if sizes is not None:
+            pre_gate_sizes = sign.parse_manifest_sizes(sums)
+            if {base: item[1] for base, item in pre_gate_sizes.items()} != sizes:
+                die(f"pre-gate checksum sizes in {sums} drifted from their "
+                    "hash-time snapshot — refusing to record validation "
+                    "success (#10853)")
     except (OSError, sign.SignError) as e:
         die(f"cannot verify hash-time bake snapshot before recording "
             f"validation success: {e}")
@@ -913,22 +960,34 @@ def record_validation_success(manifest, sums, manifest_inputs, snapshot):
     with open(manifest, "wb") as f:
         f.write(validated_bytes)
     snapshot[name] = hashlib.sha256(validated_bytes).hexdigest()
-    sign.write_manifest(sums, manifest_inputs, recorded_hashes=snapshot)
+    if sizes is None:
+        sign.write_manifest(sums, manifest_inputs, recorded_hashes=snapshot)
+    else:
+        sizes[name] = len(validated_bytes)
+        sign.write_manifest(sums, manifest_inputs, recorded_hashes=snapshot,
+                            recorded_sizes=sizes)
 
 
+def render_snapshot_manifest(snapshot, sizes=None):
+    """Render hash-time metadata as sha256sum-style signed manifest lines.
 
-def render_snapshot_manifest(snapshot):
-    """Render sha256sum-format manifest text from the in-memory `snapshot`
-    (#9921 F-068). Line format matches sign.write_manifest
-    (`<hex>  <basename>`, two spaces); order is the snapshot's insertion
-    order, which snapshot_manifest_inputs sets to the hashed-files order —
-    so these bytes are identical to a hash-time write_manifest over the same
-    inputs.
+    When supplied, `sizes` adds a following signed `# size <name> <bytes>`
+    comment to each checksum line (#10853); a missing size fails closed
+    rather than producing a partial bound.
     """
-    return "".join(f"{digest}  {base}\n" for base, digest in snapshot.items())
+    if sizes is None:
+        return "".join(f"{digest}  {base}\n"
+                       for base, digest in snapshot.items())
+    try:
+        return "".join(
+            f"{digest}  {base}\n# size {base} {sizes[base]}\n"
+            for base, digest in snapshot.items())
+    except KeyError as e:
+        die(f"cannot render manifest: missing snapshot size for {e} (#10853)")
 
 
-def sign_manifest_step_from_snapshot(out_dir, sums, ver, snapshot, work):
+def sign_manifest_step_from_snapshot(out_dir, sums, ver, snapshot, work,
+                                     sizes=None):
     """Sign the in-memory `snapshot` via a PRIVATE manifest file (#1924 §5.1).
 
     #4017 ordering and #9920: validation runs before signing, and the same bake
@@ -970,7 +1029,7 @@ def sign_manifest_step_from_snapshot(out_dir, sums, ver, snapshot, work):
         os.chmod(stage, 0o700)
         priv = os.path.join(stage, os.path.basename(sums))
         with open(priv, "w") as f:
-            f.write(render_snapshot_manifest(snapshot))
+            f.write(render_snapshot_manifest(snapshot, sizes))
         sig = sign.sign_manifest(priv, seckey,
                                  comment=f"xpf image {ver} sha256sums")
         os.replace(priv, sums)
@@ -1027,21 +1086,27 @@ def stage_artifacts_for_gate(work, qcow_out, meta_out):
     return mapping
 
 
-def snapshot_manifest_inputs(files):
-    """Snapshot {basename: sha256} for `files` IN MEMORY (#9921 F-068).
+def snapshot_manifest_inputs(files, sizes=None):
+    """Snapshot each file's basename, SHA256 and optional byte size.
 
-    This is the ground truth assert_live_matches_manifest compares against:
-    capturing it from bytes already in hand (staged copies plus just-written
-    sidecars) — rather than re-reading the live tree later — is what binds
-    the signed manifest to the validated bytes even if a concurrent writer
-    rewrites the live sums file itself between hashing and signing.
+    The hashes and sizes are captured in one streaming read of the frozen
+    gate inputs (#9921 F-068, #10853), so the size placed in the signed
+    manifest describes the exact same bytes as its digest.
     """
     snap = {}
     for path in files:
         base = os.path.basename(path)
         if base in snap:
             die(f"duplicate basename in manifest set: {base}")
-        snap[base] = sign.sha256_file(path)
+        digest = hashlib.sha256()
+        size = 0
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        snap[base] = digest.hexdigest()
+        if sizes is not None:
+            sizes[base] = size
     return snap
 
 
@@ -1358,8 +1423,10 @@ def main():
         live_inputs = [os.path.join(a.out, n)
                        for n in sign.bake_set_basenames(ver)]
         manifest_inputs = [staged_map.get(p, p) for p in live_inputs]
-        snapshot = snapshot_manifest_inputs(manifest_inputs)
-        sign.write_manifest(sums, manifest_inputs)
+        sizes = {}
+        snapshot = snapshot_manifest_inputs(manifest_inputs, sizes)
+        sign.write_manifest(sums, manifest_inputs, recorded_hashes=snapshot,
+                            recorded_sizes=sizes)
 
         # 7. validation gate, THEN sign (#4017). The manifest signature is a
         # TRUST artifact — downstream publish (scripts/dist/publish.py) and
@@ -1373,10 +1440,11 @@ def main():
                 a.skip_validate, staged_map[qcow_out], staged_map[meta_out])
             if passed:
                 record_validation_success(
-                    manifest, sums, manifest_inputs, snapshot)
+                    manifest, sums, manifest_inputs, snapshot, sizes)
 
         def sign_step():
-            sign_manifest_step_from_snapshot(a.out, sums, ver, snapshot, work)
+            sign_manifest_step_from_snapshot(
+                a.out, sums, ver, snapshot, work, sizes)
 
         finalize_artifacts(
             validate_step=validate_step,

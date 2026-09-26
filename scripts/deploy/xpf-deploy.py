@@ -1730,19 +1730,46 @@ def _resolve_channel_version(base, channel, sign_mod, dry_run=False,
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _download_to(url, dst, workdir):
-    """Download `url` to `dst` via an EXCLUSIVELY-created, unpredictable temp in
-    `workdir`, then publish atomically with os.replace (#5817).
 
-    mkstemp opens with O_CREAT|O_EXCL and a random name, so a concurrent fetch
-    to the same --out, or a pre-planted predictable `<dst>.tmp`, cannot collide
-    with or clobber the in-flight download (the old shared `<dst>.tmp` had no
-    exclusive create — two fetches raced onto the same path). The temp is
-    unlinked on download failure and consumed by the atomic rename on success."""
+def _download_sign():
+    """Load the distribution helper that owns bounded curl policy (#10853)."""
+    here_d = os.path.dirname(os.path.abspath(__file__))
+    dist = os.path.join(os.path.dirname(here_d), "dist")
+    if dist not in sys.path:
+        sys.path.insert(0, dist)
+    import sign  # noqa: E402
+    return sign
+
+
+def _download_to(url, dst, workdir, max_bytes=None, max_time=None):
+    """Download to an exclusive temp with protocol, time and size bounds.
+
+    Atomic publication preserves #5817's unpredictable-temp guarantee. #10853
+    applies --proto/--proto-redir, --max-time and --max-filesize to every curl;
+    callers pass the signed size when available, otherwise a per-kind static
+    ceiling bounds the transfer before any signature/hash verification.
+    """
+    sign = _download_sign()
+    if max_bytes is None or max_time is None:
+        default_bytes, default_time = sign.fetch_caps_for(os.path.basename(dst))
+        if max_bytes is None:
+            max_bytes = default_bytes
+        if max_time is None:
+            max_time = default_time
     fd, tmp = tempfile.mkstemp(
         prefix="." + os.path.basename(dst) + ".", suffix=".tmp", dir=workdir)
     os.close(fd)
-    r = subprocess.run(["curl", "-fsSL", "-o", tmp, url])
+    try:
+        argv = sign.curl_fetch_argv(
+            url, tmp, max_bytes=max_bytes, max_time=max_time)
+    except (sign.SignError, ValueError) as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        die(f"refusing to fetch {url}: {e}")
+    r = subprocess.run(
+        argv, preexec_fn=sign.fetch_file_limit(max_bytes))
     if r.returncode != 0:
         try:
             os.unlink(tmp)
@@ -1752,17 +1779,34 @@ def _download_to(url, dst, workdir):
     os.replace(tmp, dst)
 
 
-def _download_optional_to(url, dst, workdir):
-    """Fetch an optional key-addressed signature sidecar atomically."""
+def _download_optional_to(url, dst, workdir, max_bytes=None, max_time=None):
+    """Fetch an optional key-addressed signature sidecar with bounded curl."""
     try:
         os.unlink(dst)
     except FileNotFoundError:
         pass
+    sign = _download_sign()
+    if max_bytes is None or max_time is None:
+        default_bytes, default_time = sign.fetch_caps_for(os.path.basename(dst))
+        if max_bytes is None:
+            max_bytes = default_bytes
+        if max_time is None:
+            max_time = default_time
     fd, tmp = tempfile.mkstemp(
         prefix="." + os.path.basename(dst) + ".", suffix=".tmp", dir=workdir)
     os.close(fd)
-    r = subprocess.run(["curl", "-fsSL", "-o", tmp, url],
-                       capture_output=True)
+    try:
+        argv = sign.curl_fetch_argv(
+            url, tmp, max_bytes=max_bytes, max_time=max_time)
+    except (sign.SignError, ValueError):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    r = subprocess.run(
+        argv, capture_output=True,
+        preexec_fn=sign.fetch_file_limit(max_bytes))
     if r.returncode != 0:
         try:
             os.unlink(tmp)
@@ -1945,9 +1989,16 @@ def cmd_fetch(args):
     base = args.image_url or os.environ.get("XPF_IMAGE_BASE_URL")
     if not base:
         die("fetch needs --image-url or XPF_IMAGE_BASE_URL (the image host).")
+    # #10853: validate the operator-controlled base before normalization or
+    # fetching it. Only HTTPS is accepted outside loopback/file test URLs.
+    try:
+        sign.validate_fetch_url(
+            base, "image base URL (--image-url/XPF_IMAGE_BASE_URL)")
+    except sign.SignError as e:
+        die(f"invalid image base URL: {e}")
     base = base.rstrip("/")
-    # The channel is both a URL path segment (the #6504 pointer fetch) and the
-    # watermark bucket key, so validate it whether or not a version was given.
+    # The channel is the watermark bucket key, so validate it whether or not an
+    # explicit version was given.
     validate_channel(args.channel)
     # #6504: no --version means "give me this channel's current release" —
     # resolve it from the SIGNED latest.json publish.py already produces and
@@ -2003,6 +2054,8 @@ def cmd_fetch(args):
         "sig": f"xpf-{ver}.SHA256SUMS.minisig",
     }
 
+    want = ["qcow2"] if args.qcow2_only else ["qcow2", "metadata"]
+
     def fetch_one(name):
         # #5992 defense-in-depth: even with the validated version above, refuse
         # a write target that resolves outside `out`.
@@ -2012,13 +2065,18 @@ def cmd_fetch(args):
             print(f"  (dry-run) curl -fsSL {url} -> {dst}")
             return dst
         print(f"==> fetching {url}")
-        # #5817: exclusive-create unpredictable temp + atomic publish (no shared
-        # predictable `<dst>.tmp` a concurrent fetch could collide/overwrite).
-        _download_to(url, dst, out)
+        # #10853: an authenticated size field from SHA256SUMS tightens the
+        # static per-kind ceiling to the exact expected bytes before download.
+        entry = size_map.get(name)
+        cap, _ = sign.fetch_caps_for(name)
+        size = entry[1] if entry is not None else None
+        if size is not None and size > cap:
+            die(f"refusing to fetch {name}: signed size {size} exceeds "
+                f"the {cap}-byte ceiling.")
+        _download_to(url, dst, out, max_bytes=size or cap)
         return dst
 
-    # Need at least the manifest + sig + the artifact(s) the operator wants.
-    want = ["qcow2"] if args.qcow2_only else ["qcow2", "metadata"]
+    size_map = {}
     fetch_one(names["manifest"])
     fetch_one(names["sig"])
     pubkeys = None
@@ -2038,6 +2096,14 @@ def cmd_fetch(args):
             _download_optional_to(
                 f"{base}/{signature_name}",
                 contained_join(out, signature_name, "signature"), out)
+        # #10853: sizes are read only from minisign-authenticated manifest
+        # bytes. A present size is the exact curl --max-filesize cap; old
+        # manifests without sizes use the static per-kind backstops below.
+        try:
+            size_map = sign.verify_manifest_map_with_sizes(
+                manifest_path, os.path.join(out, names["sig"]), pubkeys)
+        except sign.SignError as e:
+            die(f"VERIFICATION FAILED for {names['manifest']}: {e}")
         _require_validated_fetch(
             sign, out, names, ver, fetch_one,
             getattr(args, "allow_unvalidated", False), pubkeys)
