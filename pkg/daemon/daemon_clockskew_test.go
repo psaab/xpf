@@ -190,6 +190,57 @@ func TestClockSkewLifecycle10025(t *testing.T) {
 	d.stopAndDiscardClockSkewAlarm() // idempotent
 }
 
+// TestNewWiresClockSkewAlarmIntoConfirmRecovery10875 exercises the real
+// daemon-to-Store callback: a skewed chrony sample at boot must roll back a
+// still-live confirm.json deadline rather than re-arm it.
+func TestNewWiresClockSkewAlarmIntoConfirmRecovery10875(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	store := newConfigStore(t, path)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, line := range []string{
+		"system host-name Base",
+		"chassis cluster cluster-id 1",
+		"chassis cluster authentication-key test-only-clockskew-10875",
+		"system ntp server 10.0.0.1",
+	} {
+		if err := store.SetFromInput(line); err != nil {
+			t.Fatalf("SetFromInput(%q): %v", line, err)
+		}
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit base: %v", err)
+	}
+	if err := store.SetFromInput("system host-name Confirmed"); err != nil {
+		t.Fatalf("SetFromInput confirmed: %v", err)
+	}
+	if _, err := store.CommitConfirmed(10); err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	store.CancelConfirmTimerForTesting()
+
+	offsetTracking := strings.Replace(clockSkewSyncedTracking10025,
+		"0.000123456", "20.000000", 1)
+	seen := stubClockSkewExec10025(t, []byte(offsetTracking), nil, nil, nil)
+	d, err := New(Options{ConfigFile: path, NoDataplane: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.store.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := d.store.ActiveConfig().System.HostName; got != "Base" {
+		t.Fatalf("active config after alarm recovery = %q, want rollback target Base", got)
+	}
+	if d.store.IsConfirmPending() {
+		t.Fatal("clock-skew recovery must not re-arm the pending confirm window")
+	}
+	if len(*seen) != 1 || (*seen)[0] != "chronyc tracking" {
+		t.Fatalf("recovery must sample chrony once, calls = %v", *seen)
+	}
+}
+
 // TestClockSkewWiring10025 pins the daemonube wiring by source: the monitor
 // must be started at boot, stopped at shutdown, and surfaced to both the
 // in-process CLI and the gRPC server. No test crosses those call sites, so a

@@ -257,6 +257,16 @@ func (s *Store) absentActiveHasRecoveryMarkers() bool {
 	return false
 }
 
+// SetConfirmRecoveryClockSkewCheck installs the daemon's pre-recovery clock
+// alarm check. Set it before Load. The callback runs under the Store lock with
+// the just-loaded compiled config, and must not call back into Store.
+func (s *Store) SetConfirmRecoveryClockSkewCheck(check func(*config.Config) bool) {
+	if s == nil || s.db == nil {
+		return
+	}
+	s.db.confirmRecoveryClockSkewCheck = check
+}
+
 // recoverPendingConfirmLocked restores a commit-confirmed window that was
 // still pending when the daemon last stopped (#4577). The in-memory
 // time.AfterFunc rollback timer does not survive a process restart, so without
@@ -269,13 +279,12 @@ func (s *Store) absentActiveHasRecoveryMarkers() bool {
 //
 // Runs at the tail of Load once active.json is read — on the success path
 // and on the compile-failed path (#9884) — under s.mu. Two outcomes:
-//   - deadline already passed during downtime -> roll back to the persisted
-//     prev tree NOW (the operator never confirmed) exactly as the in-memory
-//     PromoteRollback would have, including the #1922 Item 1b first-commit
+//   - an expired deadline OR active clock-skew alarm -> roll back to the
+//     persisted prev tree NOW, including the #1922 Item 1b first-commit
 //     never-committed marker, then clear the state.
-//   - deadline still in the future -> re-arm the timer for the REMAINING
-//     duration so the original auto-rollback still fires; a clean restart
-//     inside the window therefore also keeps the hatch.
+//   - a future deadline with no active clock-skew alarm -> re-arm the timer
+//     for the REMAINING duration; a clean restart inside the window keeps
+//     the hatch.
 //
 // #6538: it returns an error so Load can FAIL CLOSED when the recovery leaves
 // no compiled config. The rollback target here is a previously-committed
@@ -396,10 +405,13 @@ func (s *Store) recoverPendingConfirmLocked() error {
 		prevTree = &config.ConfigTree{}
 	}
 
-	if time.Now().After(deadline) {
-		// Expired during downtime: the operator never confirmed, so the
-		// unconfirmed config on disk must NOT stand. Revert to the prev tree
-		// with the same persistence semantics as PromoteRollback.
+	deadlineExpired := confirmWallNow().After(deadline)
+	clockSkewAlarm := !deadlineExpired && s.db.confirmRecoveryClockSkewCheck != nil &&
+		s.db.confirmRecoveryClockSkewCheck(s.compiled)
+	if deadlineExpired || clockSkewAlarm {
+		// The operator never confirmed, so the unconfirmed config on disk
+		// must NOT stand. Revert to the prev tree with the same persistence
+		// semantics as PromoteRollback.
 		s.active = prevTree
 		var perr error
 		// recoverErr is the #6538 fail-closed signal, returned at the end of
@@ -466,14 +478,27 @@ func (s *Store) recoverPendingConfirmLocked() error {
 			// than silently swallowing the failure.
 			s.resolveConfirmRemovalLocked("confirm_recovery_remove")
 		}
+		detail := "commit-confirmed window expired during daemon downtime; reverted on boot (#4577)"
+		principal := "system:commit-confirmed-timeout"
+		if clockSkewAlarm {
+			detail = "clock-skew alarm active during confirm recovery; rolled back pending config on boot (#10875)"
+			principal = "system:commit-confirmed-clock-skew"
+		}
 		s.journalLog(&JournalEntry{
 			Action:     "auto_rollback",
-			Detail:     "commit-confirmed window expired during daemon downtime; reverted on boot (#4577)",
+			Detail:     detail,
 			ConfigHash: journalConfigHash(s.active),
-			Principal:  "system:commit-confirmed-timeout",
+			Principal:  principal,
 		})
-		slog.Warn("commit-confirmed window expired while the daemon was down; configuration "+
-			"rolled back to the pre-confirm state on boot", "issue", "#4577")
+		if clockSkewAlarm {
+			slog.Warn("clock-skew alarm active while recovering a pending commit-confirmed window; "+
+				"configuration rolled back to the pre-confirm state on boot",
+				"armed_at", rec.ArmedAt, "armed_boot_id", rec.ArmedBootID,
+				"current_boot_id", confirmBootID(), "issue", "#10875")
+		} else {
+			slog.Warn("commit-confirmed window expired while the daemon was down; configuration "+
+				"rolled back to the pre-confirm state on boot", "issue", "#4577")
+		}
 		return recoverErr
 	}
 
@@ -483,7 +508,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	// rollback target) are restored so a subsequent expiry / plain-commit /
 	// sync resolves correctly. confirm.json is left in place until the window
 	// is resolved.
-	remaining := time.Until(deadline)
+	remaining := deadline.Sub(confirmWallNow())
 	s.confirmPrevTree = prevTree
 	// #6538: first-commit-ness comes from the PERSISTED record, which is the
 	// only authority on whether PrevTree is the empty bootstrap tree. It must

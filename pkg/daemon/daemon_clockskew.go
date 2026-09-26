@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"math"
 	"os/exec"
 	"time"
 
 	"github.com/psaab/xpf/pkg/clockskew"
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // clockSkewRunCmd is the bounded command seam for the clock monitor. It is
@@ -27,63 +29,88 @@ func (d *Daemon) clockSkewAlarmSampler() clockskew.Sampler {
 		if d == nil || d.store == nil {
 			return clockskew.Sample{}
 		}
-		if parent == nil {
-			parent = context.Background()
-		}
-		if parent.Err() != nil {
-			return clockskew.Sample{}
-		}
-		cfg := d.store.ActiveConfig()
-		if cfg == nil {
-			return clockskew.Sample{}
-		}
-		sample := clockskew.Sample{Available: true, Cluster: cfg.Chassis.Cluster != nil}
-		if !sample.Cluster {
-			// A standalone node has no cross-node fabric RPC to protect and
-			// should not fork a clock tool on every tick.
-			return sample
-		}
-		sample.NTPConfigured = len(cfg.System.NTPServers) > 0
-		if !sample.NTPConfigured {
-			// No source is itself the actionable condition. Avoid a command
-			// fork that cannot add information.
-			return sample
-		}
+		return d.clockSkewAlarmSample(parent, d.store.ActiveConfig())
+	}
+}
 
-		// Share one deadline across chronyc and the qualitative fallback. This
-		// keeps a pair of unavailable commands from serially consuming two
-		// command timeouts during ordered daemon shutdown.
-		ctx, cancel := context.WithTimeout(parent, clockskew.CommandTimeout)
-		defer cancel()
-		out, err := clockSkewRunCmd(ctx, "chronyc", "tracking")
-		if err == nil {
-			tracking, ok := clockskew.ParseChronyTracking(string(out))
-			if ok {
-				sample.ReferenceKnown = true
-				sample.Synced = tracking.Synced
-				sample.HaveOffset = tracking.HaveOffset
-				sample.OffsetSecs = tracking.OffsetSecs
-				return sample
-			}
-		}
-
-		// `timedatectl` is a fixed-property fallback: it can still tell us
-		// whether synchronization is established, but it cannot provide the
-		// numeric offset, so a synced/yes result HOLDs the offset alarm rather
-		// than inventing a value.
-		out, err = clockSkewRunCmd(ctx, "timedatectl", "show", "--property=NTPSynchronized", "--value")
-		if err == nil {
-			if synced, ok := clockskew.ParseTimedatectlSync(string(out)); ok {
-				sample.ReferenceKnown = true
-				sample.Synced = synced
-				return sample
-			}
-		}
-		// Both commands failed or produced unusable text. Available remains
-		// true (the daemon and config exist), while ReferenceKnown=false makes
-		// the monitor HOLD an existing alarm and avoid a false clear.
+func (d *Daemon) clockSkewAlarmSample(parent context.Context, cfg *config.Config) clockskew.Sample {
+	if d == nil || cfg == nil {
+		return clockskew.Sample{}
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	if parent.Err() != nil {
+		return clockskew.Sample{}
+	}
+	sample := clockskew.Sample{Available: true, Cluster: cfg.Chassis.Cluster != nil}
+	if !sample.Cluster {
+		// A standalone node has no cross-node fabric RPC to protect and
+		// should not fork a clock tool on every tick.
 		return sample
 	}
+	sample.NTPConfigured = len(cfg.System.NTPServers) > 0
+	if !sample.NTPConfigured {
+		// No source is itself the actionable condition. Avoid a command
+		// fork that cannot add information.
+		return sample
+	}
+
+	// Share one deadline across chronyc and the qualitative fallback. This
+	// keeps a pair of unavailable commands from serially consuming two
+	// command timeouts during ordered daemon shutdown.
+	ctx, cancel := context.WithTimeout(parent, clockskew.CommandTimeout)
+	defer cancel()
+	out, err := clockSkewRunCmd(ctx, "chronyc", "tracking")
+	if err == nil {
+		tracking, ok := clockskew.ParseChronyTracking(string(out))
+		if ok {
+			sample.ReferenceKnown = true
+			sample.Synced = tracking.Synced
+			sample.HaveOffset = tracking.HaveOffset
+			sample.OffsetSecs = tracking.OffsetSecs
+			return sample
+		}
+	}
+
+	// `timedatectl` is a fixed-property fallback: it can still tell us
+	// whether synchronization is established, but it cannot provide the
+	// numeric offset, so a synced/yes result HOLDs the offset alarm rather
+	// than inventing a value.
+	out, err = clockSkewRunCmd(ctx, "timedatectl", "show", "--property=NTPSynchronized", "--value")
+	if err == nil {
+		if synced, ok := clockskew.ParseTimedatectlSync(string(out)); ok {
+			sample.ReferenceKnown = true
+			sample.Synced = synced
+			return sample
+		}
+	}
+	// Both commands failed or produced unusable text. Available remains
+	// true (the daemon and config exist), while ReferenceKnown=false makes
+	// the monitor HOLD an existing alarm and avoid a false clear.
+	return sample
+}
+
+// confirmRecoveryClockSkewActive samples the just-loaded config while
+// configstore is recovering confirm.json. Load holds the Store lock, so this
+// path intentionally uses cfg directly instead of calling ActiveConfig.
+func (d *Daemon) confirmRecoveryClockSkewActive(cfg *config.Config) bool {
+	sample := d.clockSkewAlarmSample(context.Background(), cfg)
+	if !sample.Available || !sample.Cluster {
+		return false
+	}
+	if !sample.NTPConfigured {
+		return true
+	}
+	if !sample.ReferenceKnown {
+		return false
+	}
+	if !sample.Synced {
+		return true
+	}
+	return sample.HaveOffset && !math.IsNaN(sample.OffsetSecs) &&
+		!math.IsInf(sample.OffsetSecs, 0) &&
+		math.Abs(sample.OffsetSecs) >= clockskew.RaiseAtSecs
 }
 
 // clockSkewAlarms returns the active reference-clock alarms for the local CLI
