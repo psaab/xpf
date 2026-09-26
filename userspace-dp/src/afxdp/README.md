@@ -760,14 +760,18 @@ sync.
     (HA/fabric finalizer, CoS classify with `flow_key = None`, prebuilt
     forward, never seeds a session).
 
-  - **#10666 — NAT/NAT64 PMTUD is RELATED only on the quoted session's
+  - **#10666 — NAT/NAT64 PMTUD is RELATED only on the quoted packet's
     actual arrival side:** the flowless error builders mark IPv4
     Fragmentation-Needed and IPv6 Packet-Too-Big errors as RELATED only when
-    the resolved ingress zone matches the forward session's egress zone
-    (same-family inbound / NAT64 v4→v6) or ingress zone (outbound SNAT /
-    NAT64 v6→v4). The queued policy gate skips reverse-zone policy only for
-    that validated PMTUD disposition and only when resolution is
-    `ForwardCandidate`; route, HA, and fabric dispositions remain
+    the resolved ingress zone matches the zone dictated by the quoted
+    packet's direction: a forward quote expects the forward egress zone,
+    while a reply quote expects the forward ingress zone. The same-family
+    NAT matcher carries this normalized `related_expected_zone` on every
+    match arm (`via_reply_key XOR is_reverse`), including as-is reverse-half
+    reply quotes (#10671/#10929); NAT64 applies the same direction rule at
+    the translation boundary. The queued policy gate skips reverse-zone
+    policy only for that validated PMTUD disposition and only when resolution
+    is `ForwardCandidate`; route, HA, and fabric dispositions remain
     authoritative. Matching NAT'd Time-Exceeded and other non-PMTUD errors
     still use the #9948 policy gate, and a wrong-zone PTB still follows zone
     policy. The untranslated #10286 path is type-scoped by #10684: v4 types

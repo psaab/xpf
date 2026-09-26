@@ -157,33 +157,27 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     );
     // #10666: a NAT'd PMTUD error (v4 Frag-Needed / v6 Packet-Too-Big)
     // quoting a live session rides the RELATED bypass iff it arrives from
-    // the side the quoted flow travels toward (inbound) or from (outbound
-    // re-NAT) — the #7169 arrival rule applied as an admission check, not
-    // a match constraint. The match stays Unconstrained on purpose: an
-    // intermediate router's error still ingresses on the egress link, so
-    // the zone check keeps PMTUD working while a wrong-zone forgery falls
-    // to the gate below. Non-PMTUD NAT'd errors retain the gate
-    // unconditionally, so the #9948 Time-Exceeded cell keeps proving it.
+    // the side the quoted packet travels toward (inbound, a forward quote)
+    // or from (outbound, a reply quote) — the #7169 arrival rule applied
+    // as an admission check, not a match constraint. The match stays
+    // Unconstrained on purpose: an intermediate router's error still
+    // ingresses on the egress link, so the zone check keeps PMTUD working
+    // while a wrong-zone forgery falls to the gate below. Non-PMTUD NAT'd
+    // errors retain the gate unconditionally, so the #9948 Time-Exceeded
+    // cell keeps proving it.
     // #10671: the matcher resolves whether this quote names the forward or
-    // reply packet and carries its expected arrival zone. Use that direction
-    // for untranslated errors; NAT PMTUD retains the session-forward rule.
+    // reply packet (`via_reply_key XOR is_reverse`) and carries its
+    // expected arrival zone on every arm. NAT'd PMTUD uses that same
+    // direction-derived zone: the former `outbound_snat` branch only
+    // identified reply-key hits and missed as-is hits on reverse halves,
+    // which also quote a reply and must expect the forward ingress zone.
     // #10684: scope the untranslated RELATED bypass to genuine path errors
     // (v4 3/11/12, all v6 errors). Source Quench (4, deprecated by RFC 6633)
     // and Redirect (5, link-scoped) quoting a live un-NAT'd session still
     // face arrival-to-egress policy. Keep `is_icmp_error`'s broader 4/5 set
     // for NAT reversal (#2393); only policy-less admission is scoped. This
     // matches the host path, which already excludes 4/5.
-    let expected_arrival_zone = if untranslated_related {
-        icmp_match.related_expected_zone
-    } else {
-        let (fwd_ingress_zone, fwd_egress_zone) =
-            related_forward_zones(&icmp_match.metadata);
-        if icmp_match.outbound_snat {
-            fwd_ingress_zone
-        } else {
-            fwd_egress_zone
-        }
-    };
+    let expected_arrival_zone = icmp_match.related_expected_zone;
     let related_admit = expected_arrival_zone != 0
         && arrival_zone == expected_arrival_zone
         && (if untranslated_related {
