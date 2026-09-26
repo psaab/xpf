@@ -338,7 +338,13 @@ func TestTransitionCallbackFires(t *testing.T) {
 		t.Fatalf("transition = %+v", got[0])
 	}
 	if len(got[0].Results) == 0 {
-		t.Fatalf("transition carries no results snapshot")
+		t.Fatal("transition carries no results snapshot")
+	}
+	if got[0].Generation != 1 {
+		t.Fatalf("first transition generation = %d, want 1", got[0].Generation)
+	}
+	if got[0].Results[0].LastStatus != "fail" {
+		t.Fatalf("first transition snapshot status = %q, want fail", got[0].Results[0].LastStatus)
 	}
 
 	// Now a success → one "pass" transition.
@@ -353,6 +359,12 @@ func TestTransitionCallbackFires(t *testing.T) {
 	mu.Unlock()
 	if len(got) != 2 || got[1].Status != "pass" {
 		t.Fatalf("transitions = %+v, want fail then pass", got)
+	}
+	if got[1].Generation <= got[0].Generation {
+		t.Fatalf("transition generations = %d, %d, want strictly increasing", got[0].Generation, got[1].Generation)
+	}
+	if len(got[1].Results) == 0 || got[1].Results[0].LastStatus != "pass" {
+		t.Fatalf("second transition results = %+v, want pass snapshot", got[1].Results)
 	}
 }
 

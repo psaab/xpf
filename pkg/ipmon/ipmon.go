@@ -158,9 +158,10 @@ type policyState struct {
 // Engine evaluates ip-monitoring policies against RPM test state and
 // triggers the route-overlay actuator through debounce + throttle.
 type Engine struct {
-	mu          sync.Mutex
-	policies    map[string]*policyState
-	failedTests map[string]map[string]bool // probe → test → failed
+	mu                       sync.Mutex
+	policies                 map[string]*policyState
+	failedTests              map[string]map[string]bool // probe → test → failed
+	lastTransitionGeneration uint64                     // latest ordered RPM snapshot accepted
 
 	// publishEnabled implements HA primary-only overlay publication
 	// (§4.4): when false (standby), ActiveOverlay returns nil so the
@@ -515,9 +516,18 @@ func (e *Engine) Apply(cfg *config.IPMonitoringConfig, results []*rpm.ProbeResul
 	}
 }
 
-// HandleTransition is the rpm.TransitionCallback sensor input.
+// HandleTransition is the rpm.TransitionCallback sensor input. Manager-stamped
+// generations suppress stale snapshots when sibling callbacks arrive out of
+// order; a zero generation remains accepted for unversioned callers.
 func (e *Engine) HandleTransition(t rpm.Transition) {
 	e.mu.Lock()
+	if t.Generation != 0 {
+		if t.Generation <= e.lastTransitionGeneration {
+			e.mu.Unlock()
+			return
+		}
+		e.lastTransitionGeneration = t.Generation
+	}
 	// The transition carries a full current-state snapshot — seed from
 	// it (authoritative) and overlay the transition itself (the
 	// snapshot already reflects it, but be explicit).

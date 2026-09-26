@@ -131,10 +131,11 @@ type EventCallback func(Event)
 // item 6). It is the sensor input for the ip-monitoring engine; the
 // coarser Event/EventCallback surface stays intact for eventengine.
 type Transition struct {
-	ProbeName string
-	TestName  string
-	Status    string // new status: "pass" or "fail"
-	Results   []*ProbeResult
+	ProbeName  string
+	TestName   string
+	Status     string // new status: "pass" or "fail"
+	Generation uint64 // manager-local transition order; zero means unspecified
+	Results    []*ProbeResult
 }
 
 // TransitionCallback is called on per-test status transitions.
@@ -148,6 +149,10 @@ type Manager struct {
 	wg           sync.WaitGroup
 	onEvent      EventCallback
 	onTransition TransitionCallback
+	// transitionGeneration orders snapshots from concurrent probe goroutines.
+	// Guarded by mu and incremented atomically with the corresponding result
+	// status and snapshot.
+	transitionGeneration uint64
 
 	// bufferedEvents holds events fired BEFORE an event-options callback was
 	// registered (#3755). The first probe cycle runs immediately when Apply
@@ -345,18 +350,24 @@ func (m *Manager) fireEvent(name, owner string, test *config.RPMTest) {
 	fn(ev)
 }
 
-func (m *Manager) fireTransition(owner, testName, status string) {
-	m.mu.RLock()
-	fn := m.onTransition
-	m.mu.RUnlock()
-	if fn != nil {
-		fn(Transition{
-			ProbeName: owner,
-			TestName:  testName,
-			Status:    status,
-			Results:   m.Results(),
-		})
+func (m *Manager) prepareTransition(owner, testName, status string) (Transition, TransitionCallback) {
+	m.mu.Lock()
+	if r := m.results[owner+"/"+testName]; r != nil {
+		r.LastStatus = status
 	}
+	m.transitionGeneration++
+	tr := Transition{
+		ProbeName:  owner,
+		TestName:   testName,
+		Status:     status,
+		Generation: m.transitionGeneration,
+	}
+	fn := m.onTransition
+	if fn != nil {
+		tr.Results = m.resultsLocked()
+	}
+	m.mu.Unlock()
+	return tr, fn
 }
 
 // New creates a new RPM manager.
@@ -460,7 +471,12 @@ func (m *Manager) StopAll() {
 func (m *Manager) Results() []*ProbeResult {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.resultsLocked()
+}
 
+// resultsLocked returns a sorted deep-enough snapshot. The caller must hold
+// m.mu (for reading or writing).
+func (m *Manager) resultsLocked() []*ProbeResult {
 	keys := make([]string, 0, len(m.results))
 	for k := range m.results {
 		keys = append(keys, k)
@@ -469,8 +485,7 @@ func (m *Manager) Results() []*ProbeResult {
 
 	out := make([]*ProbeResult, 0, len(keys))
 	for _, k := range keys {
-		r := m.results[k]
-		cp := *r
+		cp := *m.results[k]
 		out = append(out, &cp)
 	}
 	return out
@@ -622,7 +637,7 @@ func (m *Manager) runSingleTest(ctx context.Context, probeName string, test *con
 			m.mu.Unlock()
 			// Probe-level failure event stays per-probe — it is an
 			// eventengine signal and does not drive ip-monitoring
-			// routes (which key off fireTransition only).
+			// routes (which key off per-test transition callbacks only).
 			m.fireEvent("ping_probe_failed", probeName, test)
 			if hitLimit {
 				break
@@ -670,15 +685,13 @@ func (m *Manager) runSingleTest(ctx context.Context, probeName string, test *con
 	// and saw no success leaves `status == prevStatus` (e.g. the
 	// initial "unknown" state holds), so no spurious transition fires.
 	if status != prevStatus {
-		m.mu.Lock()
-		if r := m.results[key]; r != nil {
-			r.LastStatus = status
-		}
-		m.mu.Unlock()
+		tr, transition := m.prepareTransition(probeName, test.Name, status)
 		if status == "fail" {
 			m.fireEvent("ping_test_failed", probeName, test)
 		}
-		m.fireTransition(probeName, test.Name, status)
+		if transition != nil {
+			transition(tr)
+		}
 	}
 
 	// Fire test completed if all probes passed

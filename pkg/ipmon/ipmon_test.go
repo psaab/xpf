@@ -123,6 +123,44 @@ func TestAnyTestFailedKeepsPolicyFailed(t *testing.T) {
 	}
 }
 
+// TestOutOfOrderSiblingSnapshotsCannotWithdrawFailure10876 models two
+// concurrent RPM test goroutines: generation 2's fail callback is delivered
+// before generation 1's stale pass snapshot. The stale sibling snapshot must
+// not clear the newer FAIL state.
+func TestOutOfOrderSiblingSnapshotsCannotWithdrawFailure10876(t *testing.T) {
+	e, _ := newTestEngine(nil)
+	e.Apply(testPolicyConfig(), passResults())
+
+	newer := transition("WAN", "wan-b", "fail", passResults())
+	newer.Generation = 2
+	older := transition("WAN", "wan-a", "pass", passResults())
+	older.Generation = 1
+
+	releaseOlder := make(chan struct{})
+	olderDone := make(chan struct{})
+	go func() {
+		<-releaseOlder
+		e.HandleTransition(older)
+		close(olderDone)
+	}()
+
+	e.HandleTransition(newer)
+	if got := e.ActiveOverlay(); len(got) == 0 {
+		t.Fatal("newer sibling FAIL did not inject preferred routes")
+	}
+
+	close(releaseOlder)
+	<-olderDone
+	if got := e.ActiveOverlay(); len(got) == 0 {
+		t.Fatal("stale sibling snapshot withdrew the newer FAIL overlay")
+	}
+	status := e.Status()
+	if len(status) != 1 || !status[0].Failed ||
+		len(status[0].FailingTests) != 1 || status[0].FailingTests[0] != "wan-b" {
+		t.Fatalf("status after stale snapshot = %+v, want WAN/wan-b still failing", status)
+	}
+}
+
 // TestRecoveryHoldDown verifies hold-down damps recovery (and ONLY
 // recovery: failure re-arms instantly).
 func TestRecoveryHoldDown(t *testing.T) {
