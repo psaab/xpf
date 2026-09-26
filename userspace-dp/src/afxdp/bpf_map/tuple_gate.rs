@@ -624,6 +624,18 @@ mod tests {
     }
 
     #[test]
+    fn clear_fence_rejects_new_tuple_lease() {
+        let gate = Arc::new(TupleGate::new());
+        let fence = gate.begin_clear().unwrap();
+        assert!(matches!(
+            gate.acquire_lease([key(1000, 7)]),
+            Err("clear_in_progress")
+        ));
+        drop(fence);
+        assert!(gate.acquire_lease([key(1000, 7)]).is_ok());
+    }
+
+    #[test]
     fn clear_waits_for_active_permit() {
         let gate = Arc::new(TupleGate::new());
         let (started_tx, started_rx) = mpsc::channel();

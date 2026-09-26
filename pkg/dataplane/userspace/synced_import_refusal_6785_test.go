@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
@@ -64,6 +65,44 @@ func newAnsweringManager6785(t *testing.T, resp ControlResponse) *Manager {
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	injectSessionMaps(t, m)
 	return m
+}
+
+func newScriptedSessionManager10788(
+	t *testing.T,
+	responses []ControlResponse,
+) (*Manager, <-chan SessionSyncRequest) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "x10788")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sessionSock := filepath.Join(dir, "userspace-dp-sessions.sock")
+	ln, err := net.Listen("unix", sessionSock)
+	if err != nil {
+		t.Fatalf("listen session socket: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	requests := make(chan SessionSyncRequest, len(responses))
+	go func() {
+		for _, response := range responses {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req ControlRequest
+			if err := json.NewDecoder(conn).Decode(&req); err == nil && req.SessionSync != nil {
+				requests <- *req.SessionSync
+			}
+			_ = json.NewEncoder(conn).Encode(response)
+			_ = conn.Close()
+		}
+		_ = ln.Close()
+	}()
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
+	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
+	return m, requests
 }
 
 // TestSyncedImportRefusalRollsBackWithoutGatingTakeover6785 is the #6785
@@ -228,21 +267,22 @@ func TestSyncedImportRefusedPrefixMatchesTheHelper6785(t *testing.T) {
 // real mirror failure stops gating HA takeover; get it wrong in the strict
 // direction and every capacity refusal permanently disarms a healthy standby.
 //
-// The table's middle row is the load-bearing one: an `ok=false` answer whose
-// message merely CONTAINS the token, without starting with it, must NOT
-// classify. A `strings.Contains` implementation passes the other two rows.
+// The token-not-at-the-start row is load-bearing: an error containing the
+// refusal prefix away from byte zero must not change helper-health classification.
 func TestHelperErrorClassification6785(t *testing.T) {
 	cases := []struct {
-		name        string
-		helperError string
-		wantRefusal bool
+		name         string
+		helperError  string
+		wantRefusal  bool
+		wantGateBusy bool
 	}{
-		{"refusal-capacity", syncedImportRefusedPrefix + "capacity", true},
-		{"refusal-stale", syncedImportRefusedPrefix + "stale-generation", true},
-		{"refusal-reserve", syncedImportRefusedPrefix + "reserve", true},
-		{"token-not-at-the-start", "write failed while handling " + syncedImportRefusedPrefix + "capacity", false},
-		{"plain-helper-error", "session table write failed", false},
-		{"unknown-operation", "unknown session sync operation frobnicate", false},
+		{"refusal-capacity", syncedImportRefusedPrefix + "capacity", true, false},
+		{"refusal-stale", syncedImportRefusedPrefix + "stale-generation", true, false},
+		{"refusal-reserve", syncedImportRefusedPrefix + "reserve", true, false},
+		{"retryable-gate-busy", syncedImportRefusedPrefix + "gate-busy", false, true},
+		{"token-not-at-the-start", "write failed while handling " + syncedImportRefusedPrefix + "capacity", false, false},
+		{"plain-helper-error", "session table write failed", false, false},
+		{"unknown-operation", "unknown session sync operation frobnicate", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,12 +323,16 @@ func TestHelperErrorClassification6785(t *testing.T) {
 				t.Fatal("requestSessionSync() = nil on an ok=false answer")
 			}
 			if got := errors.Is(err, dataplane.ErrSyncedImportRefused); got != tc.wantRefusal {
-				t.Fatalf("classified as a semantic refusal = %v, want %v (err %v)",
+				t.Fatalf("classified as a terminal semantic refusal = %v, want %v (err %v)",
 					got, tc.wantRefusal, err)
+			}
+			if got := errors.Is(err, errSyncedImportGateBusy); got != tc.wantGateBusy {
+				t.Fatalf("classified as retryable gate-busy = %v, want %v (err %v)",
+					got, tc.wantGateBusy, err)
 			}
 			// A refusal must keep its reason readable; dropping it would leave
 			// an operator unable to tell a capacity problem from a stale peer.
-			if tc.wantRefusal {
+			if tc.wantRefusal || tc.wantGateBusy {
 				reason := strings.TrimPrefix(tc.helperError, syncedImportRefusedPrefix)
 				if !strings.Contains(err.Error(), reason) {
 					t.Fatalf("refusal error %q lost the reason %q", err, reason)
@@ -296,6 +340,133 @@ func TestHelperErrorClassification6785(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSyncedImportGateBusyRetriesWithFreshOperationID_10788(t *testing.T) {
+	tests := []struct {
+		name string
+		send func(*Manager) error
+	}{
+		{
+			name: "v4",
+			send: func(m *Manager) error {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				return m.syncSessionV4Locked("mirror_upsert", rollbackKeyV4(),
+					&dataplane.SessionValue{Generation: 7, RTFlowSessionID: 0x10788})
+			},
+		},
+		{
+			name: "v6",
+			send: func(m *Manager) error {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				return m.syncSessionV6Locked("mirror_upsert", rollbackKeyV6(),
+					&dataplane.SessionValueV6{Generation: 7, RTFlowSessionID: 0x10788})
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, requests := newScriptedSessionManager10788(t, []ControlResponse{
+				{Error: syncedImportRefusedPrefix + "gate-busy"},
+				{OK: true},
+			})
+			if err := tc.send(m); err != nil {
+				t.Fatalf("synced import did not succeed after the gate became available: %v", err)
+			}
+			var got [2]SessionSyncRequest
+			for i := range got {
+				select {
+				case got[i] = <-requests:
+				case <-time.After(time.Second):
+					t.Fatalf("helper received only %d requests; want initial refusal and retry", i)
+				}
+			}
+			if got[0].Operation != "mirror_upsert" || got[1].Operation != "mirror_upsert" {
+				t.Fatalf("operations = %q, %q; want mirror_upsert for both attempts",
+					got[0].Operation, got[1].Operation)
+			}
+			if got[0].OperationID == got[1].OperationID {
+				t.Fatalf("retry reused OperationID %q; helper would replay its cached gate-busy response",
+					got[1].OperationID)
+			}
+			if got[0].MutationID == "" || got[0].MutationID != got[1].MutationID {
+				t.Fatalf("MutationID changed across retry: %q then %q",
+					got[0].MutationID, got[1].MutationID)
+			}
+			if len(requests) != 0 {
+				t.Fatal("helper received more requests after the successful retry")
+			}
+		})
+	}
+}
+
+func TestSyncedImportGateBusyRetryIsBoundedAndSkipsTerminalRefusal_10788(t *testing.T) {
+	t.Run("bounded-retries", func(t *testing.T) {
+		const wantAttempts = 5
+		responses := make([]ControlResponse, wantAttempts)
+		for i := range responses {
+			responses[i] = ControlResponse{Error: syncedImportRefusedPrefix + "gate-busy"}
+		}
+		m, requests := newScriptedSessionManager10788(t, responses)
+		m.mu.Lock()
+		err := m.syncSessionV4Locked("mirror_upsert", rollbackKeyV4(),
+			&dataplane.SessionValue{Generation: 8, RTFlowSessionID: 0x10789})
+		m.mu.Unlock()
+		if !errors.Is(err, errSyncedImportGateBusy) {
+			t.Fatalf("exhausted gate-busy result = %v, want retryable gate-busy", err)
+		}
+		var first SessionSyncRequest
+		for i := range wantAttempts {
+			select {
+			case req := <-requests:
+				if i == 0 {
+					first = req
+				} else {
+					if req.OperationID == first.OperationID {
+						t.Fatalf("attempt %d reused OperationID %q", i+1, req.OperationID)
+					}
+					if req.MutationID != first.MutationID {
+						t.Fatalf("attempt %d MutationID = %q, want original %q",
+							i+1, req.MutationID, first.MutationID)
+					}
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("helper received %d requests; want exactly %d", i, wantAttempts)
+			}
+		}
+		if len(requests) != 0 {
+			t.Fatalf("helper received %d requests beyond the bounded retry limit", len(requests))
+		}
+	})
+
+	t.Run("capacity-refusal-is-terminal", func(t *testing.T) {
+		m, requests := newScriptedSessionManager10788(t, []ControlResponse{
+			{Error: syncedImportRefusedPrefix + "capacity"},
+		})
+		m.mu.Lock()
+		err := m.syncSessionV4Locked("mirror_upsert", rollbackKeyV4(),
+			&dataplane.SessionValue{Generation: 9, RTFlowSessionID: 0x10790})
+		m.mu.Unlock()
+		if !errors.Is(err, dataplane.ErrSyncedImportRefused) {
+			t.Fatalf("capacity result = %v, want terminal semantic refusal", err)
+		}
+		if errors.Is(err, errSyncedImportGateBusy) {
+			t.Fatalf("capacity refusal was misclassified as retryable: %v", err)
+		}
+		select {
+		case req := <-requests:
+			if req.Operation != "mirror_upsert" {
+				t.Fatalf("operation = %q, want mirror_upsert", req.Operation)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("helper did not receive the terminal refusal request")
+		}
+		if len(requests) != 0 {
+			t.Fatalf("terminal capacity refusal triggered %d retries", len(requests))
+		}
+	})
 }
 
 // TestUnreachableHelperIsNotARefusal6785 is the transport half of the same
@@ -363,6 +534,12 @@ func TestSyncedMirrorFailureAccounting6785(t *testing.T) {
 		{
 			name:            "plain-helper-error",
 			err:             errors.New("session table write failed"),
+			wantMirrorFail:  true,
+			wantRefusalsAdd: 0,
+		},
+		{
+			name:            "gate-busy-after-retries-exhausted",
+			err:             errSyncedImportGateBusy,
 			wantMirrorFail:  true,
 			wantRefusalsAdd: 0,
 		},
