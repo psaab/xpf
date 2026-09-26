@@ -187,11 +187,13 @@ rm -f "$APT/dists/$SUITE/Release" "$APT/dists/$SUITE/Release.gpg" \
 
 # DEBS holds paths this script controls (built debs / explicit --debs). Guard
 # the word-split loop against pathname globbing with `set -f` (A5); paths must
-# not contain whitespace (asserted below).
+# not contain whitespace (asserted below). `+` is allowed: `make deb` names
+# every package `0.0.N+g<sha>` (Makefile DEB_VERSION), so refusing it breaks
+# the documented flat path on the project's own artifacts (#10767 F3).
 set -f
 for d in $DEBS; do
     set +f
-    case "$d" in *[!-./_A-Za-z0-9]*) die "deb path contains an unsupported char: $d";; esac
+    case "$d" in *[!-./+_A-Za-z0-9]*) die "deb path contains an unsupported char: $d";; esac
     cp -f "$d" "$POOL/"
     info "pooled $(basename "$d")"
     set -f

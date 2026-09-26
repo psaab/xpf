@@ -19,7 +19,8 @@
 #      with a clear message (use the appliance image instead).
 #   2. Install the pinned apt archive keyring to /usr/share/keyrings (inline).
 #   3. Write /etc/apt/sources.list.d/xpf.sources (deb822, Signed-By).
-#   4. apt-get update && apt-get install -y xpf-appliance.
+#   4. apt-get update, bind the signed Release Suite/Codename to CHANNEL, and
+#      apt-get install -y xpf-appliance.
 #   5. Print next steps + the interface-takeover caveat (#1879).
 #
 # Config inputs (the operator decisions — NOT hardcoded):
@@ -288,14 +289,59 @@ EOF
     fi
 }
 
-# ── 4. install ─────────────────────────────────────────────────────────────
+# ── 4. bind apt metadata to the selected channel ────────────────────────────
+# APT verifies the archive signature, but normally only warns when the signed
+# Release at dists/$CHANNEL advertises another Suite; it still makes those
+# packages candidates. Inspect apt's post-update index targets for THIS source
+# entry and require both signed Release identity fields to match the requested
+# channel before installing anything.
+verify_channel() {
+    _targets=$(apt-get indextargets) \
+        || die "cannot inspect apt index targets after update; refusing install."
+    printf '%s\n' "$_targets" | awk -v source="$SRC:1" -v channel="$CHANNEL" '
+        BEGIN { RS = ""; FS = "\n"; found = 0; mismatch = 0 }
+        {
+            entry = suite = codename = ""
+            for (i = 1; i <= NF; i++) {
+                if (index($i, "Sourcesentry: ") == 1)
+                    entry = substr($i, 15)
+                else if (index($i, "Suite: ") == 1)
+                    suite = substr($i, 8)
+                else if (index($i, "Codename: ") == 1)
+                    codename = substr($i, 11)
+            }
+            if (entry == source) {
+                found++
+                if (suite != channel || codename != channel)
+                    mismatch = 1
+            }
+        }
+        END {
+            if (!found) {
+                print "xpf-install ERROR: apt reported no index targets for the xpf source."
+                exit 1
+            }
+            if (mismatch) {
+                print "xpf-install ERROR: signed apt Release Suite/Codename does not match selected channel."
+                exit 1
+            }
+        }' || die "apt repository is not bound to selected channel '$CHANNEL'; refusing install."
+    info "apt Release Suite/Codename match selected channel '$CHANNEL'"
+}
+
+# ── 5. install ─────────────────────────────────────────────────────────────
 do_install() {
     info "apt-get update && install xpf-appliance"
     run "apt-get update"
+    if [ "$DRY" = "1" ]; then
+        info "dry-run: skipping post-update apt channel binding check"
+    else
+        verify_channel
+    fi
     run "DEBIAN_FRONTEND=noninteractive apt-get install -y xpf-appliance"
 }
 
-# ── 5. next steps ──────────────────────────────────────────────────────────
+# ── 6. next steps ──────────────────────────────────────────────────────────
 next_steps() {
     cat <<'EOF'
 

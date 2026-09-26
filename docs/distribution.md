@@ -65,6 +65,8 @@ XPF_SIGN_SECKEY=/secure/xpf-image.sec make image
 # 2. Build the signed apt repo (flat default; reprepro opt-in).
 XPF_GPG_KEY=<keyid> make dist-repo
 #    or: XPF_APT_TOOL=reprepro XPF_GPG_KEY=<keyid> make dist-repo
+# `make deb` names packages `0.0.N+g<sha>`; the flat builder accepts `+` in
+# those package paths.
 
 # 3. Write + sign the per-channel freshness pointer.
 XPF_SIGN_SECKEY=/secure/xpf-image.sec \
@@ -113,6 +115,13 @@ shared component-only pool would have let a signed edge build appear in
 is the operator's only blast-radius control for the package path. The reprepro
 publisher isolates suites in its own database and is unaffected. `selftest.sh`
 (§5c) asserts the isolation.
+
+The installer does not rely on APT's warning for a Release whose Suite differs
+from the requested source suite. After `apt-get update`, it checks the xpf
+source's signed index-target metadata and refuses to install unless both
+`Suite` and `Codename` match the selected `stable` or `edge` channel. A valid
+archive signature alone does not bind the host to the operator-selected
+channel.
 
 ### Freshness / anti-rollback
 
