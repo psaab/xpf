@@ -302,9 +302,16 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	}
 	deadline := rec.Deadline
 	// A provisional record carries distinct expiries for its candidate and
-	// previous active generation. When only the alias matches, preserve that
-	// generation's original timeout; the candidate uses the new arm's deadline.
-	if rec.GuardedHash != activeHash && rec.PreviousHash == activeHash && !rec.PreviousDeadline.IsZero() {
+	// previous active generation. When the previous generation matches the
+	// active file, preserve that generation's original timeout; the candidate
+	// uses the new arm's deadline only when the record binds nothing older.
+	// #10967: no GuardedHash conjunct here. A nested no-op re-arm (candidate
+	// identical to active) writes GuardedHash == PreviousHash, so requiring
+	// GuardedHash != activeHash deselected the alias exactly when the prior
+	// window's (possibly expired) deadline must govern — crash recovery then
+	// re-armed an expired window on the candidate's future deadline instead
+	// of rolling back to Base.
+	if rec.PreviousHash == activeHash && !rec.PreviousDeadline.IsZero() {
 		deadline = rec.PreviousDeadline
 	}
 	prevTree := rec.PrevTree
