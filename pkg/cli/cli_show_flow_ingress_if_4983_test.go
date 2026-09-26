@@ -57,6 +57,8 @@ type ingressIfColumnCLIDP struct {
 	ifindex     uint32
 	vlanID      uint16
 	ingressZone uint16
+	v4State     uint8
+	v6State     uint8
 	// The FIB egress identity, zero for every caller that only exercises the
 	// ingress column (#6928). A non-zero value gives the session a NAMEABLE
 	// egress interface, which is what the egress arm of the interface filter
@@ -74,6 +76,7 @@ func (d *ingressIfColumnCLIDP) IterateSessions(fn func(dataplane.SessionKey, dat
 	copy(key.SrcIP[:], net.IPv4(10, 0, 62, 102).To4())
 	copy(key.DstIP[:], net.IPv4(8, 8, 8, 8).To4())
 	val := dataplane.SessionValue{
+		State:       d.v4State,
 		IngressZone: d.ingressZone,
 		EgressZone:  ingressIfColumnUntrustZoneID,
 		// FibIfindex is 0 for every caller that asserts on the ingress column,
@@ -94,6 +97,7 @@ func (d *ingressIfColumnCLIDP) IterateSessionsV6(fn func(dataplane.SessionKeyV6,
 	copy(key.SrcIP[:], net.ParseIP("2001:559:8585:bf01::102").To16())
 	copy(key.DstIP[:], net.ParseIP("2001:4860:4860::8888").To16())
 	val := dataplane.SessionValueV6{
+		State:          d.v6State,
 		IngressZone:    d.ingressZone,
 		EgressZone:     ingressIfColumnUntrustZoneID,
 		FibIfindex:     d.fibIfindex,
@@ -538,4 +542,27 @@ func TestInterfaceFilterEgressArmMakesColumnNameAnotherInterface6928(t *testing.
 			}
 		}
 	})
+}
+
+func TestShowFlowSessionReportsValidityUnknown10835(t *testing.T) {
+	c := ingressIfColumnCLI(t)
+	dp := c.dp.(*ingressIfColumnCLIDP)
+	dp.v4State = dataplane.SessStateFINWait
+	dp.v6State = dataplane.SessStateEstablished
+
+	out := captureStdout(t, func() {
+		if err := c.showFlowSession(nil); err != nil {
+			t.Fatalf("showFlowSession: %v", err)
+		}
+	})
+
+	const unknown = "Session State: Unknown (validity not tracked)"
+	if got := strings.Count(out, unknown); got != 2 {
+		t.Fatalf("v4/v6 session rows report validity %d times, want twice:\n%s", got, out)
+	}
+	if strings.Contains(out, "Session State: Valid") ||
+		strings.Contains(out, "Session State: Established") ||
+		strings.Contains(out, "Session State: FIN_WAIT") {
+		t.Fatalf("session validity must be explicit and must not substitute TCP FSM state:\n%s", out)
+	}
 }

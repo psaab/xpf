@@ -87,6 +87,17 @@ func TestLocalFlowSessionSummaryUnknownMax(t *testing.T) {
 	if !strings.Contains(out, "Maximum-sessions: unknown") {
 		t.Fatalf("local summary missing unknown fallback:\n%s", out)
 	}
+	if !strings.Contains(out, "  Valid sessions: unknown") ||
+		!strings.Contains(out, "  Pending sessions: unknown") ||
+		!strings.Contains(out, "  Invalidated sessions: unknown") ||
+		!strings.Contains(out, "  Sessions in other states: unknown") {
+		t.Fatalf("local summary must not fabricate session-state counts:\n%s", out)
+	}
+	if strings.Contains(out, "  Valid sessions: 0") ||
+		strings.Contains(out, "  Pending sessions: 0") ||
+		strings.Contains(out, "  Invalidated sessions: 0") {
+		t.Fatalf("local summary reports unmeasured session-state buckets as zero:\n%s", out)
+	}
 }
 
 type quarantineSummaryCLIDP10530 struct {

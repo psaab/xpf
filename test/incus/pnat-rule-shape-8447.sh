@@ -110,7 +110,7 @@ EOF
 	incus exec "$LAN_CLIENT" -- bash -c \
 		"nohup iperf3 --forceflush --connect-timeout 5000 -B ${POOL_SRC} -t 20 -c ${TARGET} -p ${POOL_PORT} -P 2 >/tmp/shape-iperf.log 2>&1 &" || true
 	sleep 8
-	n="$(fw_cli "$PRIMARY" "show security flow session source-prefix ${POOL_SRC}" | grep -c "Session State: Valid" || true)"
+	n="$(fw_cli "$PRIMARY" "show security flow session source-prefix ${POOL_SRC}" | grep -c "^Session ID:" || true)"
 	pn="$(fw_cli "$PRIMARY" "show security flow session source-prefix ${POOL_SRC}" | grep -c "${POOL_ADDR}" || true)"
 	incus exec "$LAN_CLIENT" -- pkill -9 -f "iperf3.*-B ${POOL_SRC}" 2>/dev/null || true
 	echo "OK ${n:-0} ${pn:-0}"

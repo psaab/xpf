@@ -70,7 +70,7 @@ V6_RECHECK_DELAY=30     # #6934: seconds between the two post-failover samples
 # "3 of 5 because the author was not sure", and only the first has an expiry.
 IPERF_DURATION=120      # seconds — long enough to span retries + reboot + failback
 IPERF_STREAMS=8
-MIN_SESSIONS=4          # minimum established sessions (control + some data streams)
+MIN_SESSIONS=4          # minimum observed session entries (control + some data streams)
 SYNC_WAIT=5             # seconds to wait for session sync sweep
 REBOOT_WAIT=60          # max WALL-CLOCK seconds to wait for fw0 to come back (#1880)
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
@@ -424,7 +424,7 @@ for attempt in 1 2 3; do
 	fi
 
 	fw0_sessions=$(incus exec "$FW0" -- cli -c \
-		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 	if [[ "$fw0_sessions" -ge "$IPERF_STREAMS" ]]; then
 		iperf_started=true
 		break
@@ -464,15 +464,15 @@ fi
 #
 # #4052: the 8 TCP streams take a sub-second to finish their 3-way
 # handshakes, so a single immediate assert here can catch the
-# establishment window with only 0-3 Valid sessions and FALSE-FAIL a
-# healthy cluster (a settled cluster shows ~25 Valid sessions at
+# establishment window with only 0-3 session entries and FALSE-FAIL a
+# healthy cluster (a settled cluster shows ~25 session entries at
 # 23.4 Gbps / 0 retr). Poll up to 10s (20 × 0.5s), breaking as soon as
-# the count reaches MIN_SESSIONS; only fail if the streams genuinely
-# never establish within the timeout — a real establishment failure.
+# the count reaches MIN_SESSIONS; only fail if enough session entries never
+# appear within the timeout.
 fw0_sessions=0
 for _ in $(seq 1 20); do
 	fw0_sessions=$(incus exec "$FW0" -- cli -c \
-		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 	[[ "$fw0_sessions" -ge "$MIN_SESSIONS" ]] && break
 	sleep 0.5
 done
@@ -482,25 +482,25 @@ done
 # Primacy is read from `show chassis cluster status` — a field the node reports
 # about itself, with no oracle. The session count is a real measurement. They
 # were never compared, so #6656's divergence (node0 primary with 1 session,
-# node1 carrying 33) surfaced here as "streams did not establish" — a shortfall
+# node1 carrying 33) surfaced as a session-count shortfall
 # attributed to whatever change was under test, when the actual failure was
 # that ownership and forwarding disagreed.
 #
 # The peer count is read ONLY on the shortfall path, so the healthy run pays
 # nothing. failover_ownership_verdict is pure and selftested.
 if [[ "$fw0_sessions" -ge "$MIN_SESSIONS" ]]; then
-	pass "fw0 has $fw0_sessions established sessions"
+	pass "fw0 has $fw0_sessions session entries"
 else
 	fw1_probe=$(incus exec "$FW1" -- cli -c \
-		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 	case "$(failover_ownership_verdict "$fw0_sessions" "$fw1_probe" "$MIN_SESSIONS")" in
 	diverged)
-		die_divergence "OWNERSHIP AND FORWARDING DISAGREE. fw0 reports PRIMARY for every redundancy group but carries only $fw0_sessions session(s), while fw1 — reported secondary — carries $fw1_probe. The cluster-state field and the traffic disagree, so neither 'failover is broken' nor 'the streams did not establish' is the right reading; see #6656. Read both nodes directly before re-running:
+		die_divergence "OWNERSHIP AND FORWARDING DISAGREE. fw0 reports PRIMARY for every redundancy group but carries only $fw0_sessions session(s), while fw1 — reported secondary — carries $fw1_probe. The cluster-state field and the session counts disagree, so neither 'failover is broken' nor 'too few session entries' is the right reading; see #6656. Read both nodes directly before re-running:
   incus exec $FW0 -- cli -c 'show chassis cluster status'
   incus exec $FW1 -- cli -c 'show chassis cluster status'"
 		;;
 	*)
-		fail "fw0 has only $fw0_sessions established sessions (expected >= $MIN_SESSIONS); fw1 carries $fw1_probe, so this is an establishment failure rather than an ownership/forwarding divergence"
+		fail "fw0 has only $fw0_sessions session entries (expected >= $MIN_SESSIONS); fw1 carries $fw1_probe, so this is a session-count shortfall rather than an ownership/forwarding divergence"
 		;;
 	esac
 fi
@@ -522,7 +522,7 @@ info "Waiting ${SYNC_WAIT}s for session sync to fw1"
 sleep "$SYNC_WAIT"
 
 fw1_sessions=$(incus exec "$FW1" -- cli -c \
-	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 if [[ "$fw1_sessions" -ge "$MIN_SESSIONS" ]]; then
 	pass "fw1 has $fw1_sessions synced sessions"
 else

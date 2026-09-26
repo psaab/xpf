@@ -83,7 +83,7 @@ if [[ "$MODE" == selftest ]]; then
     else
         echo "  FAIL  leaked expired tuple is stale"; fail=$((fail + 1))
     fi
-    RENDERER_LIST='Session ID: 4343, Policy name: allow-all/1, HA State: Active, Timeout: 300, Session State: Valid
+    RENDERER_LIST='Session ID: 4343, Policy name: allow-all/1, HA State: Active, Timeout: 300, Session State: Unknown (validity not tracked)
   In: 10.0.61.102/24001 --> 172.16.80.201/54921;tcp, Conn Tag: 0x0, If: ge-0/0/0, Zone: lan, Pkts: 1, Bytes: 64,
 Total sessions: 1'
     if [[ "$(wire_conntrack_pick_sid "$RENDERER_LIST" 172.16.80.201 54921)" == "4343 300" ]]; then

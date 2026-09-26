@@ -47,6 +47,21 @@ func TestPeerSessionSummaryRendersThePeersOwnMax7422(t *testing.T) {
 	if !strings.Contains(out, "node1:") || !strings.Contains(out, "Unicast-sessions: 42") {
 		t.Fatalf("peer summary lost the peer's own identity/counts:\n%s", out)
 	}
+	for _, state := range []string{
+		"Valid sessions: unknown",
+		"Pending sessions: unknown",
+		"Invalidated sessions: unknown",
+		"Sessions in other states: unknown",
+	} {
+		if !strings.Contains(out, state) {
+			t.Errorf("peer summary must mark unmeasured %q as unknown:\n%s", state, out)
+		}
+	}
+	if strings.Contains(out, "Valid sessions: 42") ||
+		strings.Contains(out, "Pending sessions: 0") ||
+		strings.Contains(out, "Invalidated sessions: 0") {
+		t.Fatalf("peer summary fabricates session-state distribution:\n%s", out)
+	}
 }
 
 // TestPeerSessionSummaryUnknownMax7422 pins the honest answer for a peer that
