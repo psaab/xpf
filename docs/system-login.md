@@ -405,6 +405,12 @@ All four — `allow-commands`, `deny-commands`, `allow-configuration`,
 operational and configuration paths, the gRPC listener the remote `cli` speaks
 to, and the REST API.
 
+The long-lived REST SSE routes `/api/v1/events/stream` and
+`/api/v1/logs/stream` re-run their full read authorization while connected.
+For example, committing `deny-commands "show log"` closes either feed on the
+next re-authorization check; opening the stream does not preserve an obsolete
+command-policy verdict.
+
 > **This sentence was an overclaim a SECOND time, and #9952 closed the second
 > half.** After #9154 the REST surface enforced the coarse permission bits and
 > the `*-configuration` pair — and *nothing else*. The operational pair had no

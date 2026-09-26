@@ -4,8 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // authzTestConfigRevoked9051 is authzTestConfig with the read-only user's class
@@ -15,6 +19,24 @@ const authzTestConfigRevoked9051 = `
 system {
     host-name authz-test;
     login {
+        user adminuser {
+            class super-user;
+        }
+    }
+}
+`
+
+const authzTestConfigDenyShowLog10829 = `
+system {
+    host-name authz-test;
+    login {
+        class no-logs {
+            permissions [ view ];
+            deny-commands "show log";
+        }
+        user opsuser {
+            class no-logs;
+        }
         user adminuser {
             class super-user;
         }
@@ -127,5 +149,63 @@ func TestAnAuthorizedSSEReadIsNotTerminated9051(t *testing.T) {
 		t.Fatalf("an authorized read was terminated within %v; the watcher is "+
 			"cancelling streams it should leave alone", 20*readReauthInterval9051)
 	case <-time.After(20 * readReauthInterval9051):
+	}
+}
+
+// TestSSEReadIsTerminatedWhenShowLogIsDenied10829 covers the residual after
+// #9051: coarse permission remains intact, but the committed command regex now
+// denies the canonical command for both SSE routes.
+func TestSSEReadIsTerminatedWhenShowLogIsDenied10829(t *testing.T) {
+	usePasswdFixture(t)
+	shortenReadReauth9051(t)
+	store := authzStore(t, authzTestConfig)
+	s, _ := authzServer(t, Config{
+		Addr: "127.0.0.1:0", Store: store, PeerLookupFn: fixedPeerUID(4242),
+	})
+
+	entered, finished := runGuardedRead9051(t, s)
+	select {
+	case <-entered:
+	case <-finished:
+		t.Fatal("the read was refused at entry, so nothing below is being measured")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never ran")
+	}
+
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadOverride(authzTestConfigDenyShowLog10829); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	store.ExitConfigure()
+	committedAt := time.Now()
+
+	// PREMISE: this commit tightens only the command regex. The class still
+	// holds PermView, while the exact stream command is denied.
+	connCtx := s.connContext(context.Background(), slotConn{
+		client: tcpAddr6974("127.0.0.1", 40051),
+		server: tcpAddr6974("127.0.0.1", 8080),
+	})
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", nil).WithContext(connCtx)
+	cfg, p, _ := s.authorizeInputs(r)
+	if err := authz.Authorize(cfg, p, config.PermView); err != nil {
+		t.Fatalf("fixture removed coarse view permission; this would not isolate the regex revocation: %v", err)
+	}
+	if err := s.authorizeRESTCommand(r, cfg, p); err == nil || !strings.Contains(err.Error(), `denies "show log"`) {
+		t.Fatalf("fixture does not deny the stream's canonical command: %v", err)
+	}
+
+	select {
+	case <-finished:
+		if elapsed := time.Since(committedAt); elapsed > 10*readReauthInterval9051 {
+			t.Fatalf("SSE stream closed after %v, more than 10 re-auth ticks", elapsed)
+		}
+	case <-time.After(10 * readReauthInterval9051):
+		t.Fatal("the SSE stream outlived the deny-commands revocation: the " +
+			"watcher must re-run the command regex gate (#10829)")
 	}
 }

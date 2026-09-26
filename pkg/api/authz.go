@@ -16,6 +16,7 @@ import (
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 )
+
 type authorizedMutationPrincipalKey struct{}
 
 func authorizedMutationPrincipal(r *http.Request) (authz.Principal, bool) {
@@ -900,6 +901,20 @@ func candidateConfigReadPermission(r *http.Request) (config.LoginClassPermission
 	return 0, false
 }
 
+// authorizeRESTRead applies the complete predicate for a guarded REST read.
+// SSE re-authorization calls the same function as entry so coarse permissions
+// and command regexes cannot diverge while a stream is open.
+func (s *Server) authorizeRESTRead(r *http.Request, required config.LoginClassPermission) (authz.Principal, error) {
+	cfg, p, _ := s.authorizeInputs(r)
+	if err := authz.Authorize(cfg, p, required); err != nil {
+		return p, err
+	}
+	if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
 func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	required, known := readPermissionFor(r.Method, r.URL.Path)
 	if !known {
@@ -928,28 +943,15 @@ func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Han
 	if candidatePerm, isCandidateRead := candidateConfigReadPermission(r); isCandidateRead {
 		required = candidatePerm
 	}
-	cfg, p, _ := s.authorizeInputs(r)
-	if err := authz.Authorize(cfg, p, required); err != nil {
+	p, err := s.authorizeRESTRead(r, required)
+	if err != nil {
 		// Debug, not Warn: caller-driven and reachable unauthenticated, so a
-		// Warn here is a log-amplification lever -- the same reasoning the
+		// Warn here is a log-amplification lever -- the same reasoning as the
 		// mutation denial states.
 		slog.Debug("api: refused unauthorized read",
 			"method", r.Method, "path", r.URL.Path,
 			"principal", p.String(), "source", p.Source.String(),
 			"required", authz.PermissionName(required), "err", err)
-		writeError(w, http.StatusForbidden, err.Error())
-		return
-	}
-	// #9952: the class's `deny-commands` / `allow-commands` regexes. This
-	// surface consulted NONE of them — the coarse bit and the
-	// `*-configuration` pair were the whole of REST authorization, while
-	// docs/system-login.md claimed all four were enforced. See
-	// authz_command_regex_9952.go for the route -> canonical command table and
-	// why an unmapped route denies.
-	if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
-		slog.Debug("api: refused read denied by the class's command regexes",
-			"method", r.Method, "path", r.URL.Path,
-			"principal", p.String(), "err", err)
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
