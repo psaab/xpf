@@ -125,10 +125,7 @@ func (c *CLI) showInterfacesExtensiveFiltered(filterName string) error {
 		if speed := readLinkSpeed(attrs.Name); speed > 0 {
 			linkExtras = append(linkExtras, "Speed: "+formatSpeed(speed))
 		}
-		duplexStr := "Full-duplex"
-		if duplex := readLinkDuplex(attrs.Name); duplex != "" {
-			duplexStr = formatDuplex(duplex)
-		}
+		duplexStr := formatDuplex(readLinkDuplex(attrs.Name))
 		linkExtras = append(linkExtras, "Link-mode: "+duplexStr)
 		fmt.Printf("  Link-level type: %s, MTU: %d, %s\n",
 			linkType, attrs.MTU, strings.Join(linkExtras, ", "))
@@ -177,7 +174,10 @@ func (c *CLI) showInterfacesExtensiveFiltered(filterName string) error {
 
 		// BPF traffic counters (XDP/TC level)
 		if c.dp != nil && c.dp.IsLoaded() {
-			if ctrs, err := c.dp.ReadInterfaceCounters(attrs.Index); err == nil && (ctrs.RxPackets > 0 || ctrs.TxPackets > 0) {
+			ctrs, err := c.dp.ReadInterfaceCounters(attrs.Index)
+			if err != nil {
+				fmt.Printf("  warning: BPF interface counter read failed for %s: %v\n", dispName, err)
+			} else {
 				fmt.Println("  BPF statistics:")
 				fmt.Printf("    Input:  %d packets, %d bytes\n", ctrs.RxPackets, ctrs.RxBytes)
 				fmt.Printf("    Output: %d packets, %d bytes\n", ctrs.TxPackets, ctrs.TxBytes)
@@ -185,40 +185,55 @@ func (c *CLI) showInterfacesExtensiveFiltered(filterName string) error {
 		}
 
 		// Addresses
-		addrs, _ := netlink.AddrList(link, netlink.FAMILY_ALL)
-		if len(addrs) > 0 {
-			var v4, v6 []string
-			for _, a := range addrs {
-				if a.IP.To4() != nil {
-					v4 = append(v4, a.IPNet.String())
-				} else {
-					v6 = append(v6, a.IPNet.String())
-				}
-			}
-			if len(v4) > 0 {
-				fmt.Printf("  Protocol inet, MTU: %d\n", attrs.MTU)
-				for _, a := range v4 {
-					fmt.Printf("    Local: %s\n", a)
-				}
-			}
-			if len(v6) > 0 {
-				fmt.Printf("  Protocol inet6, MTU: %d\n", attrs.MTU)
-				for _, a := range v6 {
-					flags := "Is-Preferred Is-Primary"
-					if strings.HasPrefix(a, "fe80:") {
-						flags = "Is-Preferred"
-					}
-					fmt.Printf("    Local: %s, Flags: %s\n", a, flags)
-				}
-			}
-		}
+		addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+		printExtensiveAddresses(addrs, err, attrs.MTU)
 		fmt.Println()
 	}
 
 	// #4328: bondless reth aggregates + absent-device members (see the detail
 	// path). The extensive view reuses the same synthesized block.
 	if cfg != nil {
-		c.showInterfacesRethDetail(cfg, rethMaps, filterName, found)
+		if c.showInterfacesRethDetail(cfg, rethMaps, filterName, found) {
+			found = true
+		}
+	}
+	if filterName != "" && !found {
+		fmt.Printf("Interface %s not found\n", filterName)
 	}
 	return nil
+}
+
+func printExtensiveAddresses(addrs []netlink.Addr, err error, mtu int) {
+	if err != nil {
+		fmt.Printf("  Addresses unavailable: %v\n", err)
+		return
+	}
+	if len(addrs) == 0 {
+		return
+	}
+
+	var v4, v6 []string
+	for _, a := range addrs {
+		if a.IP.To4() != nil {
+			v4 = append(v4, a.IPNet.String())
+		} else {
+			v6 = append(v6, a.IPNet.String())
+		}
+	}
+	if len(v4) > 0 {
+		fmt.Printf("  Protocol inet, MTU: %d\n", mtu)
+		for _, a := range v4 {
+			fmt.Printf("    Local: %s\n", a)
+		}
+	}
+	if len(v6) > 0 {
+		fmt.Printf("  Protocol inet6, MTU: %d\n", mtu)
+		for _, a := range v6 {
+			flags := "Is-Preferred Is-Primary"
+			if strings.HasPrefix(a, "fe80:") {
+				flags = "Is-Preferred"
+			}
+			fmt.Printf("    Local: %s, Flags: %s\n", a, flags)
+		}
+	}
 }

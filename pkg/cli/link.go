@@ -47,12 +47,12 @@ func formatSpeed(mbps int) string {
 
 // formatDuplex formats a sysfs duplex string to display form.
 func formatDuplex(duplex string) string {
-	switch strings.ToLower(duplex) {
+	switch strings.ToLower(strings.TrimSpace(duplex)) {
 	case "full":
 		return "Full-duplex"
 	case "half":
 		return "Half-duplex"
 	default:
-		return duplex
+		return "Unknown"
 	}
 }

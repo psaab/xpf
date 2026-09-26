@@ -17,6 +17,8 @@ xpf (0.0.0) unstable; urgency=medium
     `make selftest` and census both test locations (#10747).
   * Mark subscriber-overrun gaps in CLI flow and packet-drop, gRPC packet-drop,
     and SSE streams, and expose flow-trace drop totals (#10834).
+  * Report unknown interface duplex and surface counter/address read failures
+    and unmatched interface filters in extensive interface output (#10843).
   * Include responder node identity in chassis-forwarding RPC responses and
     flag divergence between peer response identity and heartbeat belief
     (#10841).
