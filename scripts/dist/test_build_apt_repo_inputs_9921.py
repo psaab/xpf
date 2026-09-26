@@ -51,13 +51,13 @@ def _build(outdir, debs, extra_env):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
-def _make_deb(path):
+def _make_deb(path, version="0.0.0-9921"):
     """Build a minimal VALID .deb (selftest.sh pattern) for positive legs."""
     pkgdir = os.path.join(os.path.dirname(path), "pkg")
     debdir = os.path.join(pkgdir, "DEBIAN")
     os.makedirs(debdir, exist_ok=True)
     Path(os.path.join(debdir, "control")).write_text(
-        "Package: xpf-appliance\nVersion: 0.0.0-9921\nArchitecture: amd64\n"
+        f"Package: xpf-appliance\nVersion: {version}\nArchitecture: amd64\n"
         "Maintainer: t <t@x.invalid>\nDescription: 9921 fixture\n")
     subprocess.run(["dpkg-deb", "--build", pkgdir, path], check=True,
                    capture_output=True, timeout=60)
@@ -225,6 +225,22 @@ class PositiveBuildTests(unittest.TestCase):
         text = self._release(outdir)
         self.assertEqual(sum(1 for ln in text.splitlines()
                              if ln.startswith("Valid-Until:")), 1)
+
+    def test_plus_version_filename_is_accepted_and_indexed(self):
+        version = "0.0.123+gabcdef"
+        deb = os.path.join(self.dir, f"xpf-appliance_{version}_amd64.deb")
+        _make_deb(deb, version=version)
+        outdir = os.path.join(self.dir, "out-plus")
+        rc, out = _build(outdir, deb, {})
+        self.assertEqual(rc, 0, out[-800:])
+        pooled_name = f"xpf-appliance_{version}_amd64.deb"
+        pooled = (Path(outdir) / "apt" / "pool" / "stable" / "main" /
+                  "x" / "xpf" / pooled_name)
+        self.assertTrue(pooled.is_file(), "plus-version deb was not pooled")
+        packages = (Path(outdir) / "apt" / "dists" / "stable" / "main" /
+                    "binary-amd64" / "Packages").read_text()
+        self.assertIn(f"Filename: pool/stable/main/x/xpf/{pooled_name}",
+                      packages)
 
     def test_zero_horizon_refused_by_singleton_assert(self):
         # VALID_DAYS=0 passes the digit gate; apt then emits NO Valid-Until
