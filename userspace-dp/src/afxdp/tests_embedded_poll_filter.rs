@@ -1057,8 +1057,6 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         return;
     }
 
-
-
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
     let mut dbg = DebugPollCounters::default();
