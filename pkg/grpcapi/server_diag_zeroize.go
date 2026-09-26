@@ -42,7 +42,9 @@ const (
 // text rollback slots, the top-level .conf files, and the audit journal — the
 // artifacts that persist the prior tenant's committed policy, IKE PSKs,
 // WireGuard private keys, and SNMP communities and would otherwise be reloaded
-// on the next boot.
+// on the next boot. It also removes the day-0 success stamp, which would prevent
+// the loader from accepting a new medium after the configuration is erased
+// (#10740).
 //
 // NOTE (scope): this erases the SSOT and rollback/journal state under
 // configDir. The RENDERED service configs xpfd writes OUTSIDE configDir —
@@ -63,6 +65,8 @@ const (
 //     broad `*.conf` glob no longer catches unowned siblings
 //   - rescue.conf               — the rescue config (configstore.RescueConfigBase
 //     / rescuePath): full active-config TEXT with cleartext secret leaves (#4056)
+//   - .day0-config-applied      — the day-0 loader's successful-config stamp;
+//     removing it lets a factory-default appliance accept a new medium (#10740)
 //   - <configBase>.<N>          — the CANONICAL text rollback slots
 //     (saveRollbackFiles / loadRollbackHistory), full config TEXT with
 //     cleartext secret leaves; loadRollbackHistory reloads them at boot, so
@@ -306,7 +310,8 @@ func zeroizeConfigDir(configDir, configBase string) error {
 	for _, f := range entries {
 		name := f.Name()
 		if name == configBase || // the live config file (exact name, any extension)
-			name == configstore.RescueConfigBase || // the rescue config (rescuePath)
+			name == configstore.RescueConfigBase || // the rescue config (configstore.RescueConfigBase / rescuePath)
+			name == configstore.Day0ConfigAppliedBase || // allow day-0 configuration after reset (#10740)
 			name == ".config.journal" ||
 			strings.HasPrefix(name, ".config.journal.") ||
 			isTextRollbackFile(name, configBase) || // <configBase>.<N> text slots

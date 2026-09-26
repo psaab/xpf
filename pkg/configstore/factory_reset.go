@@ -40,6 +40,11 @@ var DefaultArchiveDir = "/var/lib/xpf/archive"
 // SYNC with Store.rescuePath; the grpcapi wipe mirror references this const.
 const RescueConfigBase = "rescue.conf"
 
+// Day0ConfigAppliedBase is the loader's successful-configuration stamp
+// (scripts/image/xpf-day0-config and xpf-day0-config.service). A factory reset
+// removes it so the loader can accept a new medium after reboot.
+const Day0ConfigAppliedBase = ".day0-config-applied"
+
 // FactoryResetArchiveDir erases the LOCAL configuration archive as part of a
 // factory reset (#5186) — but ONLY when archiveDir is the xpf-owned default.
 //
@@ -690,8 +695,8 @@ func canonicalForbiddenAlias(resolved string) string {
 // configBase is the config file's base name (e.g. "xpf.conf"), used to
 // recognize the numbered text rollback slots "<configBase>.<N>".
 //
-// The artifacts removed — every file that persists the prior tenant's committed
-// policy, IKE PSKs, WireGuard private keys, and SNMP communities:
+// The artifacts removed — state that could restore the prior tenant's config
+// or prevent a factory-default appliance from provisioning:
 //
 //   - .configdb/master.key  — the AES-GCM key that decrypts an encrypted DB.
 //     Removed FIRST (key-first) and that removal is fsynced (.configdb) BEFORE
@@ -710,6 +715,9 @@ func canonicalForbiddenAlias(resolved string) string {
 //     `*.conf` glob no longer catches unowned siblings.
 //   - rescue.conf           — the rescue config (RescueConfigBase / rescuePath):
 //     the full active-config TEXT with cleartext secret leaves (#4056).
+//   - .day0-config-applied — the day-0 loader's successful-config stamp;
+//     removing it permits provisioning from a new medium after factory reset
+//     (#10740).
 //   - <configBase>.<N>      — the canonical text rollback slots (full config
 //     text with cleartext secret leaves; loadRollbackHistory reads them at
 //     boot, so leaving them behind allows a rollback to the prior config).
@@ -817,6 +825,7 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 		name := f.Name()
 		if name == configBase || // the live config file (exact name, any extension)
 			name == RescueConfigBase || // the rescue config (rescuePath)
+			name == Day0ConfigAppliedBase || // allow day-0 configuration after reset (#10740)
 			name == ".config.journal" ||
 			strings.HasPrefix(name, ".config.journal.") ||
 			isTextRollbackSlot(name, configBase) || // <configBase>.<N> text slots
