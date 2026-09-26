@@ -82,8 +82,8 @@ use binding_index::{
     BINDING_QUEUES_PER_IFACE, BINDING_SLOT_MAP_MAX_ENTRIES, RawRxQueue, binding_slot,
 };
 use gre_classify::{
-    native_gre_inner_pass_steers_to_kernel_typed, InnerSessionAction, OuterDestinationLocal,
-    USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
+    InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
+    native_gre_inner_pass_steers_to_kernel_typed,
 };
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
 use ipv6_ext_walk::{

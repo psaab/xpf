@@ -52,7 +52,7 @@
     },
     {
       "path": "userspace-xdp/src/gre_classify.rs",
-      "sha256": "62f7d5c1542979d0486851fb3e24458b679948962ceea34396173ab50db9c423"
+      "sha256": "6c88ca481737c7ca0b033ab21ba03ebacd21b7a776d93df5980898e76c5aa92a"
     },
     {
       "path": "userspace-xdp/src/ipv4_len_gate.rs",
@@ -68,7 +68,7 @@
     },
     {
       "path": "userspace-xdp/src/lib.rs",
-      "sha256": "2dc1dc88d53adac2f3390380b0b76a549b767cd0cd0018acb39d2aee9b05e8de"
+      "sha256": "ab41ed2f0d2b12307546daa65a0c4f356c08f9d046e51b5d02ec2fdbfdbb07f8"
     },
     {
       "path": "userspace-xdp/src/tunnel_frag.rs",

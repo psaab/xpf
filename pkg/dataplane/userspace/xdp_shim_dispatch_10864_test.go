@@ -39,19 +39,21 @@ func TestUserspaceXDPDispatchUsesLibWiring10864(t *testing.T) {
 	localV6 := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10}
 	globalV6Source := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 	multicastV6 := [16]byte{0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	ipv4Multicast := [4]byte{224, 0, 0, 1}
 	broadcastV4 := [4]byte{255, 255, 255, 255}
 
 	cases := []struct {
-		name        string
-		packet      []byte
-		seed        func(*testing.T, *ebpf.Collection)
-		wantAction  uint32
-		wantStats   []string
-		absentStats []string
+		name             string
+		packet           []byte
+		seed             func(*testing.T, *ebpf.Collection)
+		disableNativeGRE bool
+		wantAction       uint32
+		wantStats        []string
+		absentStats      []string
 	}{
 		{
 			name: "GRE local outer and inner PASS reach kernel",
-			packet: xdpDispatchGREIPv4Packet10864(localOuter, remoteOuter, innerSource, innerTransit,
+			packet: xdpDispatchGREIPv4Packet10864(remoteOuter, localOuter, innerSource, innerTransit,
 				12345, 443),
 			seed: func(t *testing.T, coll *ebpf.Collection) {
 				updateUserspaceXDPTestLocalV4(t, coll, localOuter)
@@ -63,13 +65,46 @@ func TestUserspaceXDPDispatchUsesLibWiring10864(t *testing.T) {
 			absentStats: []string{"redirect_err", "transit_drop"},
 		},
 		{
+			name: "inner PASS session fixture matches a direct IPv4 tuple",
+			packet: xdpDispatchIPv4TCPPacket10864(innerSource, innerTransit,
+				12345, 443),
+			seed: func(t *testing.T, coll *ebpf.Collection) {
+				seedXDPDispatchInnerSession10864(t, coll, innerSource, innerTransit,
+					12345, 443, xdpDispatchSessionPass10864)
+			},
+			wantAction:  xdpActionPass,
+			wantStats:   []string{"pass_to_kernel"},
+			absentStats: []string{"redirect_err", "transit_drop"},
+		},
+		{
+			name:             "non-native GRE honors an outer PASS session",
+			packet:           xdpDispatchGREIPv4Packet10864(localOuter, remoteOuter, innerSource, innerTransit, 12345, 443),
+			disableNativeGRE: true,
+			seed: func(t *testing.T, coll *ebpf.Collection) {
+				seedXDPDispatchOuterGREPassSession10864(t, coll, localOuter, remoteOuter)
+			},
+			wantAction:  xdpActionPass,
+			wantStats:   []string{"pass_to_kernel"},
+			absentStats: []string{"redirect_err", "transit_drop"},
+		},
+		{
+			name:   "healthy IPv4 local destination reaches kernel",
+			packet: xdpDispatchIPv4TCPPacket10864(innerSource, localOuter, 12345, 443),
+			seed: func(t *testing.T, coll *ebpf.Collection) {
+				updateUserspaceXDPTestLocalV4(t, coll, localOuter)
+			},
+			wantAction:  xdpActionPass,
+			absentStats: []string{"redirect_err", "transit_drop", "pass_to_kernel"},
+		},
+		{
 			name: "GRE inner-local PASS cannot authorize a remote outer",
-			packet: xdpDispatchGREIPv4Packet10864(remoteOuter, localOuter, innerSource, innerLocal,
+			packet: xdpDispatchGREIPv4Packet10864(localOuter, remoteOuter, innerSource, innerLocal,
 				12345, 443),
 			seed: func(t *testing.T, coll *ebpf.Collection) {
 				updateUserspaceXDPTestLocalV4(t, coll, innerLocal)
 				seedXDPDispatchInnerSession10864(t, coll, innerSource, innerLocal,
 					12345, 443, xdpDispatchSessionPass10864)
+				seedXDPDispatchOuterGREPassSession10864(t, coll, localOuter, remoteOuter)
 			},
 			wantAction:  xdpActionDrop,
 			wantStats:   []string{"redirect_err", "transit_drop"},
@@ -77,7 +112,7 @@ func TestUserspaceXDPDispatchUsesLibWiring10864(t *testing.T) {
 		},
 		{
 			name: "GRE inner REDIRECT stays on userspace path",
-			packet: xdpDispatchGREIPv4Packet10864(localOuter, remoteOuter, innerSource, innerTransit,
+			packet: xdpDispatchGREIPv4Packet10864(remoteOuter, localOuter, innerSource, innerTransit,
 				12345, 443),
 			seed: func(t *testing.T, coll *ebpf.Collection) {
 				updateUserspaceXDPTestLocalV4(t, coll, localOuter)
@@ -112,7 +147,14 @@ func TestUserspaceXDPDispatchUsesLibWiring10864(t *testing.T) {
 			absentStats: []string{"early_filter", "redirect_err"},
 		},
 		{
-			name:        "IPv4 limited broadcast dispatch remains distinct from IPv6",
+			name:        "IPv4 multicast selects the IPv4 early filter",
+			packet:      ipv4TestPacket([4]byte{198, 51, 100, 1}, ipv4Multicast, 17, 8),
+			wantAction:  xdpActionPass,
+			wantStats:   []string{"early_filter", "pass_to_kernel"},
+			absentStats: []string{"redirect_err", "transit_drop"},
+		},
+		{
+			name:        "IPv4 limited broadcast still passes early",
 			packet:      ipv4TestPacket([4]byte{198, 51, 100, 1}, broadcastV4, 17, 8),
 			wantAction:  xdpActionPass,
 			wantStats:   []string{"early_filter", "pass_to_kernel"},
@@ -123,12 +165,16 @@ func TestUserspaceXDPDispatchUsesLibWiring10864(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			coll := loadUserspaceXDPTestCollection(t)
+			flags := xdpDispatchNativeGREFlag10864
+			if tc.disableNativeGRE {
+				flags = 0
+			}
 			updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
 				Enabled:            1,
 				MetadataVersion:    userspaceMetadataVersion,
 				Workers:            1,
 				QueueCount:         1,
-				Flags:              xdpDispatchNativeGREFlag10864,
+				Flags:              flags,
 				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
 			ifindex := userspaceXDPTestRunIfindex(t)
@@ -142,14 +188,15 @@ func TestUserspaceXDPDispatchUsesLibWiring10864(t *testing.T) {
 				tc.seed(t, coll)
 			}
 
-			if got := runUserspaceXDPTestPacket(t, coll, tc.packet); got != tc.wantAction {
-				t.Fatalf("XDP action = %d, want %d", got, tc.wantAction)
-			}
+			got := runUserspaceXDPTestPacket(t, coll, tc.packet)
 			for _, stat := range tc.wantStats {
 				assertUserspaceXDPDegradedPathStat(t, coll, stat)
 			}
 			for _, stat := range tc.absentStats {
 				assertUserspaceXDPDegradedPathStatAbsent(t, coll, stat)
+			}
+			if got != tc.wantAction {
+				t.Fatalf("XDP action = %d, want %d", got, tc.wantAction)
 			}
 		})
 	}
@@ -172,6 +219,20 @@ func seedXDPDispatchInnerSession10864(
 	copy(key.SrcAddr[:4], src[:])
 	copy(key.DstAddr[:4], dst[:])
 	updateUserspaceXDPTestMap(t, coll, "userspace_sessions", key, action)
+}
+func seedXDPDispatchOuterGREPassSession10864(
+	t *testing.T,
+	coll *ebpf.Collection,
+	src, dst [4]byte,
+) {
+	t.Helper()
+	key := xdpDispatchSessionKey10864{
+		AddrFamily: 2,
+		Protocol:   47,
+	}
+	copy(key.SrcAddr[:4], src[:])
+	copy(key.DstAddr[:4], dst[:])
+	updateUserspaceXDPTestMap(t, coll, "userspace_sessions", key, xdpDispatchSessionPass10864)
 }
 
 func xdpDispatchGREIPv4Packet10864(
@@ -204,6 +265,18 @@ func xdpDispatchGREIPv4Packet10864(
 	copy(inner[16:20], innerDst[:])
 
 	tcp := packet[innerOffset+ipv4Len:]
+	binary.BigEndian.PutUint16(tcp[0:2], srcPort)
+	binary.BigEndian.PutUint16(tcp[2:4], dstPort)
+	tcp[12] = 0x50
+	tcp[13] = 0x02
+	return packet
+}
+func xdpDispatchIPv4TCPPacket10864(
+	src, dst [4]byte,
+	srcPort, dstPort uint16,
+) []byte {
+	packet := ipv4TestPacket(src, dst, 6, 20)
+	tcp := packet[34:]
 	binary.BigEndian.PutUint16(tcp[0:2], srcPort)
 	binary.BigEndian.PutUint16(tcp[2:4], dstPort)
 	tcp[12] = 0x50
