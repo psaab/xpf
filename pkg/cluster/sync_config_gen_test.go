@@ -1025,3 +1025,31 @@ func TestThisBuildAdvertisesConfigAncestry10511(t *testing.T) {
 		}
 	}
 }
+func TestConfigPayloadAuthenticationProvenance10870(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	authenticated := make(chan bool, 2)
+	s.OnConfigReceivedWithProvenance = func(_ string, _ []configstore.RenameDescriptor, peerAuthenticated bool) error {
+		authenticated <- peerAuthenticated
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.configApplyLoop(ctx)
+
+	s.handleMessage(&authConn{readKey: []byte("verified-read-key")},
+		syncMsgConfig, encodeConfigPayload("authenticated", 1))
+	s.handleMessage(&authConn{},
+		syncMsgConfig, encodeConfigPayload("legacy-unkeyed", 2))
+
+	for _, want := range []bool{true, false} {
+		select {
+		case got := <-authenticated:
+			if got != want {
+				t.Fatalf("config callback authentication=%v, want %v", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("config apply callback did not receive the queued payload")
+		}
+	}
+}

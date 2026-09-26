@@ -180,6 +180,24 @@ func (d *Daemon) startFabricGRPCListeners(commsCtx context.Context, syncIP, sync
 	}()
 }
 
+// handleConfigSyncWithProvenance binds event-policy super-user attribution to
+// the authentication on the config frame that carried it.
+func (d *Daemon) handleConfigSyncWithProvenance(
+	configText string,
+	ancestry []configstore.RenameDescriptor,
+	peerAuthenticated bool,
+) error {
+	if !peerAuthenticated {
+		tree, errs := config.NewParser(configText).Parse()
+		if len(errs) != 0 {
+			return fmt.Errorf("sync config parse error: %v", errs[0])
+		}
+		config.QuarantineUntrustedEventPlantClasses(tree)
+		configText = tree.Format()
+	}
+	return d.handleConfigSyncWithAncestry(configText, ancestry)
+}
+
 // wireSessionSyncConfigCallbacks wires the config-sync receive and
 // config-apply-health callbacks. Extracted verbatim from startClusterComms
 // (#6428) — pure code motion.
@@ -199,6 +217,14 @@ func (d *Daemon) wireSessionSyncConfigCallbacks(ss *cluster.SessionSync) {
 	ss.OnConfigReceivedWithAncestry = func(configText string, ancestry []configstore.RenameDescriptor) error {
 		d.cluster.RecordEvent(cluster.EventConfigSync, -1, fmt.Sprintf("Config received (%d bytes)", len(configText)))
 		return d.handleConfigSyncWithAncestry(configText, ancestry)
+	}
+	ss.OnConfigReceivedWithProvenance = func(
+		configText string,
+		ancestry []configstore.RenameDescriptor,
+		authenticated bool,
+	) error {
+		d.cluster.RecordEvent(cluster.EventConfigSync, -1, fmt.Sprintf("Config received (%d bytes)", len(configText)))
+		return d.handleConfigSyncWithProvenance(configText, ancestry, authenticated)
 	}
 	ss.OnPeerCapabilitiesChanged = func() {
 		d.invalidateConfigSyncPushed()

@@ -33,5 +33,7 @@ xpf (0.0.0) unstable; urgency=medium
     committed predecessor history, excluding failed cuts (#10851).
   * Drop NAT64 IPv6 fragments whose Fragment Header names an extension header,
     preserving translated reassembly geometry (#10860).
+  * Quarantine super-user event planting received over unauthenticated
+    session-sync; preserve it for verified peers (#10870).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

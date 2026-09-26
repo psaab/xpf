@@ -239,7 +239,11 @@ func clearEventPlantClass9984(tree *ConfigTree, name string) {
 	if tree == nil || name == "" {
 		return
 	}
-	for _, policy := range eventPolicyNodes9984(tree)[name] {
+	clearEventPlantClassNodes9984(eventPolicyNodes9984(tree)[name])
+}
+
+func clearEventPlantClassNodes9984(policies []*Node) {
+	for _, policy := range policies {
 		if policy == nil {
 			continue
 		}
@@ -296,4 +300,31 @@ func setEventPlantClass9984(tree *ConfigTree, name, class string) {
 		eventOptions.Children = append(eventOptions.Children, policy)
 	}
 	policy.Children = append(policy.Children, &Node{Keys: []string{"plant-class", class}, IsLeaf: true})
+}
+
+// QuarantineUntrustedEventPlantClasses clears super-user attribution from
+// untrusted synchronized event policies. It leaves commands intact but removes
+// their fire-time authority; the engine then quarantines the empty marker.
+func QuarantineUntrustedEventPlantClasses(tree *ConfigTree) {
+	for _, policies := range eventPolicyNodes9984(tree) {
+		hasSuperuserMarker := false
+		for _, policy := range policies {
+			if policy == nil {
+				continue
+			}
+			for _, child := range policy.Children {
+				if child != nil && child.Name() == "plant-class" &&
+					nodeVal(child) == EventPlantClassSuperuser {
+					hasSuperuserMarker = true
+					break
+				}
+			}
+			if hasSuperuserMarker {
+				break
+			}
+		}
+		if hasSuperuserMarker {
+			clearEventPlantClassNodes9984(policies)
+		}
+	}
 }
