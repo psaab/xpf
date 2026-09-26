@@ -26,6 +26,8 @@ func TestEveryRecordableStatusIsRenderable(t *testing.T) {
 		bootstrapImportOK,
 		bootstrapImportLoadedDB,
 		bootstrapImportNoConfig,
+		bootstrapImportPending,
+		bootstrapImportCredentialFailed,
 		bootstrapImportFailed,
 	}
 	for _, st := range recordable {
@@ -39,15 +41,15 @@ func TestEveryRecordableStatusIsRenderable(t *testing.T) {
 	}
 }
 
-// The Failed flag and the failure STATUS must agree. /health keys
-// bootstrap_import_failed off Status == bootstrapImportFailed, and the
-// renderer keys its remediation block off Snapshot.Failed; if a caller ever
-// sets one without the other, one surface calls the box healthy while the
-// other calls it broken.
+// The Failed flag and failure states must agree. /health keys
+// bootstrap_import_failed off the snapshot's Failed field, and the renderer
+// keys its remediation block off the same value; a split would make one
+// surface call the box healthy while the other calls it broken.
 func TestFailedFlagTracksTheFailedStatusOnly(t *testing.T) {
 	d := &Daemon{}
 	for _, st := range []string{
 		bootstrapImportOK, bootstrapImportLoadedDB, bootstrapImportNoConfig,
+		bootstrapImportPending,
 	} {
 		d.recordBootstrapImport(st, "")
 		if got := d.BootstrapImportSnapshot(); got.Failed {
@@ -61,6 +63,10 @@ func TestFailedFlagTracksTheFailedStatusOnly(t *testing.T) {
 	}
 	if got.Error != "boom" {
 		t.Errorf("Error = %q, want the recorded detail", got.Error)
+	}
+	d.recordBootstrapImport(bootstrapImportCredentialFailed, "credential failure")
+	if got := d.BootstrapImportSnapshot(); !got.Failed {
+		t.Error("credential-apply-failed must report Failed")
 	}
 }
 

@@ -24,9 +24,10 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   can carry file paths, config internals, or a secret echoed by a schema
   validator). The failure is still signalled by `compile_failure_count` /
   `compile_last_error_unix` and `bootstrap_import_status` /
-  `bootstrap_import_failed` / `bootstrap_import_unix`; the full detail
-  stays in the journal (compile WARN/ERROR) and the authenticated in-band
-  `BOOTSTRAP_IMPORT_FAILED` event (event stream / ring buffer).
+  `bootstrap_import_failed` / `bootstrap_import_unix`. Compile and credential-
+  reconcile details stay in the journal; actual bootstrap-import failures also
+  emit the authenticated `BOOTSTRAP_IMPORT_FAILED` event (event stream / ring
+  buffer).
   `ConfigPersistDegradedFn` (#1799, same injection pattern) downgrades
   `/health` to 503 while the running active config failed to persist to
   disk (HA config-sync or commit-confirmed auto-rollback hit a write

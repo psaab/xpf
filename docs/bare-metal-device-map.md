@@ -361,21 +361,22 @@ The SAME pre-flight now runs on the **day-0 / bootstrap paths** (#4183):
 
 ## Day-0 import visibility
 
-A day-0 / bootstrap config-import outcome is recorded at boot and surfaced both
-in the CLI as `show system bootstrap-import` (#6496 — including the failure
-REASON, which `/health` cannot carry) and on `/health` (#4184), so "why didn't
-my config apply" has an in-band answer beyond a single journald line. The full
-day-0 triage walkthrough is in `docs/install-images.md`. The `/health` fields:
+A day-0 / bootstrap status is recorded at boot and surfaced both in the CLI as
+`show system bootstrap-import` (#6496) and on `/health` (#4184), so the operator
+has an in-band answer beyond a single journald line. `ok` means the text config
+was imported and the initial host-credential reconcile completed.
+`loaded-from-db` means an active config was already present; `no-config` is the
+expected factory/fresh-boot state. `credential-apply-pending` means import
+succeeded but the initial account/key/sshd reconciliation has not finished;
+`credential-apply-failed` means import succeeded but that reconcile did not
+converge. `import-failed` means the file could not be read/parsed/committed or
+was rejected by the device-map preflight.
 
-- `bootstrap_import_status`: `ok` (imported + committed), `loaded-from-db`
-  (an active config was already present), `no-config` (no text config present —
-  the expected factory/fresh-boot state), or `import-failed` (the file was
-  present but could not be read/parsed/committed, incl. a device-map strand
-  rejection).
-- `bootstrap_import_failed` is true ONLY for a real `import-failed`; it does
-  NOT force a 503 (the box is in the lifeline-safe bootstrap state — surfacing
-  the cause is the goal, not pulling a still-reachable box from rotation). A
-  failed import also emits a `BOOTSTRAP_IMPORT_FAILED` event.
+`bootstrap_import_failed` is true for `import-failed` and
+`credential-apply-failed`. Neither state forces a 503: the box remains
+reachable, and surfacing the cause is the goal. A real import failure emits a
+`BOOTSTRAP_IMPORT_FAILED` event; credential-apply detail remains in the
+daemon journal.
 
 `show system bootstrap-import` renders the same recorded snapshot through
 `pkg/bootstrapshow`, shared by the in-process console CLI and the gRPC

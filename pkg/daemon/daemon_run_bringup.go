@@ -388,7 +388,7 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 				d.recordBootstrapImport(bootstrapImportFailed, err.Error())
 			}
 		} else {
-			d.recordBootstrapImport(bootstrapImportOK, "")
+			d.recordBootstrapImport(bootstrapImportPending, "")
 		}
 	} else if d.store.ActiveConfig() != nil {
 		slog.Info("configuration loaded from db")

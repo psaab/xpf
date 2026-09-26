@@ -1610,14 +1610,14 @@ type Daemon struct {
 	compileLastError        string // text of the most recent compile error
 	compileLastErrorUnixSec int64  // timestamp of the most recent compile error
 
-	// #4184: the day-0 / bootstrap config-import outcome, recorded once at
-	// boot so a FAILED import is visible beyond a single journald WARN.
-	// Surfaced via /health (bootstrap_import_status) and an event. See
-	// recordBootstrapImport / BootstrapImportSnapshot (daemon_health.go).
+	// #4184: the day-0 / bootstrap config-import outcome. A successful text
+	// import remains pending until the initial host-credential reconciliation
+	// completes; import and credential failures are surfaced via /health and
+	// `show system bootstrap-import`.
 	bootstrapMu            sync.Mutex
 	bootstrapImportStatus  string // "" until recorded; then a bootstrapImport* constant
-	bootstrapImportError   string // error detail when status == bootstrapImportFailed
-	bootstrapImportUnixSec int64  // Unix seconds the outcome was recorded
+	bootstrapImportError   string // safe failure detail
+	bootstrapImportUnixSec int64  // Unix seconds the latest outcome transition was recorded
 
 	// priorTunables stores the pre-xpfd values of every host-scope
 	// tunable xpfd has touched, so that restore-on-disable (B2) can

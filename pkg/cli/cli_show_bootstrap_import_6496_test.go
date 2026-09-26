@@ -52,7 +52,10 @@ func TestHandleShowSystemDispatchesBootstrapImport(t *testing.T) {
 func TestConsoleBootstrapImportMatchesTheSharedRenderer(t *testing.T) {
 	for _, snap := range []bootstrapshow.Snapshot{
 		{Status: bootstrapshow.StatusOK, UnixSec: 1755792000},
+		{Status: bootstrapshow.StatusLoadedDB, UnixSec: 1755792000},
 		{Status: bootstrapshow.StatusNoConfig, UnixSec: 1755792000},
+		{Status: bootstrapshow.StatusPending, UnixSec: 1755792000},
+		{Status: bootstrapshow.StatusCredentialFailed, Error: "credential failure", UnixSec: 1755792000, Failed: true},
 		{Status: bootstrapshow.StatusFailed, Error: "boom", UnixSec: 1755792000, Failed: true},
 		{},
 	} {

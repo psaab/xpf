@@ -21,7 +21,7 @@ import (
 // "unrecognized status". Defining them as aliases makes that unreachable: the
 // value written and the value rendered are the same constant.
 const (
-	// bootstrapImportOK: the text config file was imported and committed.
+	// bootstrapImportOK: the text config and initial host credentials applied.
 	bootstrapImportOK = bootstrapshow.StatusOK
 	// bootstrapImportLoadedDB: an active config was already present in the DB;
 	// no file import was attempted (normal steady-state boot).
@@ -29,21 +29,25 @@ const (
 	// bootstrapImportNoConfig: no text config file present (factory/fresh
 	// boot). Expected — NOT a failure and NOT health-degrading.
 	bootstrapImportNoConfig = bootstrapshow.StatusNoConfig
+	// bootstrapImportPending: text import succeeded; initial host-credential
+	// reconciliation has not completed yet.
+	bootstrapImportPending = bootstrapshow.StatusPending
+	// bootstrapImportCredentialFailed: the text import succeeded, but
+	// configured host credentials did not converge during the initial apply.
+	bootstrapImportCredentialFailed = bootstrapshow.StatusCredentialFailed
 	// bootstrapImportFailed: a text config file was present but could not be
 	// read/parsed/committed (or was rejected by the device-map preflight).
 	bootstrapImportFailed = bootstrapshow.StatusFailed
 )
 
 // BootstrapImport is a snapshot of the day-0 / bootstrap config-import
-// outcome (#4184). Consumed by /health so a FAILED import is visible beyond
-// the single boot-time journald WARN it used to be.
+// outcome (#4184). Consumed by /health and `show system bootstrap-import`.
 type BootstrapImport struct {
-	Status  string // a bootstrapImport* constant ("" if not yet recorded)
-	Error   string // detail when Status == bootstrapImportFailed
-	UnixSec int64  // when the outcome was recorded
-	// Failed is true only for bootstrapImportFailed — a real read/parse/
-	// commit/preflight failure. The expected factory no-config state is NOT
-	// failed, so a health probe does not flap on a fresh box.
+	Status  string // a bootstrapImport* constant ("" until recorded)
+	Error   string // safe detail for a failed outcome
+	UnixSec int64  // when the latest outcome transition was recorded
+	// Failed is true for import or initial credential-apply failure. The
+	// expected factory no-config state is NOT failed, so health stays healthy.
 	Failed bool
 }
 
@@ -71,6 +75,26 @@ func (d *Daemon) recordBootstrapImport(status, detail string) {
 	}
 }
 
+// completeBootstrapCredentialApply finishes the day-0 status only while it is
+// pending. The initial apply runs the same credential reconcilers used for
+// later commits; retain a generic, secret-free error rather than copying their
+// details (which can include submitted config text) into the status surface.
+func (d *Daemon) completeBootstrapCredentialApply(err error) {
+	d.bootstrapMu.Lock()
+	defer d.bootstrapMu.Unlock()
+	if d.bootstrapImportStatus != bootstrapImportPending {
+		return
+	}
+	d.bootstrapImportUnixSec = time.Now().Unix()
+	if err != nil {
+		d.bootstrapImportStatus = bootstrapImportCredentialFailed
+		d.bootstrapImportError = "host credential reconciliation failed; inspect the daemon journal"
+		return
+	}
+	d.bootstrapImportStatus = bootstrapImportOK
+	d.bootstrapImportError = ""
+}
+
 // BootstrapImportSnapshot returns the recorded day-0 / bootstrap import
 // outcome for /health and operator-facing surfaces. Safe to call
 // concurrently.
@@ -81,7 +105,8 @@ func (d *Daemon) BootstrapImportSnapshot() BootstrapImport {
 		Status:  d.bootstrapImportStatus,
 		Error:   d.bootstrapImportError,
 		UnixSec: d.bootstrapImportUnixSec,
-		Failed:  d.bootstrapImportStatus == bootstrapImportFailed,
+		Failed: d.bootstrapImportStatus == bootstrapImportFailed ||
+			d.bootstrapImportStatus == bootstrapImportCredentialFailed,
 	}
 }
 

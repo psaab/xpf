@@ -49,14 +49,15 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 		if b.Status != "" {
 			payload["bootstrap_import_status"] = b.Status
 			payload["bootstrap_import_failed"] = b.Failed
-			// #5031: b.Error is the raw import failure string — a parse/commit
-			// error that quotes the offending day-0 config, which can include a
-			// submitted secret (e.g. a `system login` password echoed by a
-			// schema validator). Do NOT emit it on the unauthenticated /health
-			// surface. The status enum, failed flag, and timestamp are the
-			// stable signal; the full detail stays in the journal and in the
-			// in-band BOOTSTRAP_IMPORT_FAILED event (authenticated event stream
-			// / ring buffer, daemon_health.go recordBootstrapImport).
+			// #5031: b.Error can be a raw import failure that quotes the
+			// offending day-0 config, which can include a submitted secret
+			// (e.g. a `system login` password echoed by a schema validator).
+			// Do NOT emit it on the unauthenticated /health surface. Credential
+			// apply failures use a generic safe detail here; their specific
+			// reconcile error remains in the journal.
+			// The status enum, failed flag, and timestamp are the stable signal;
+			// import-failure details also reach the authenticated
+			// BOOTSTRAP_IMPORT_FAILED event stream / ring buffer.
 			if b.UnixSec != 0 {
 				payload["bootstrap_import_unix"] = b.UnixSec
 			}

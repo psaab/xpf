@@ -155,10 +155,10 @@ type HostInboundAppliedSnapshot struct {
 }
 
 type BootstrapImportSnapshot struct {
-	Status  string // "ok" | "loaded-from-db" | "no-config" | "import-failed" | ""
-	Error   string // detail when Status == "import-failed"
+	Status  string // "ok" | "loaded-from-db" | "no-config" | "credential-apply-pending" | "credential-apply-failed" | "import-failed" | ""
+	Error   string // detail when Status reports an apply failure
 	UnixSec int64
-	Failed  bool // true only for a real import failure (not the factory no-config state)
+	Failed  bool // true for an import or initial credential-apply failure
 }
 
 // Config configures the API server.
