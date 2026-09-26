@@ -64,6 +64,8 @@ exit 0
 # install: the loader passes -o root -g root, which a non-root test cannot
 # honour. Drop ONLY the ownership flags and forward everything else to the
 # real install (6502 pattern).
+# #10735's ordering cell also requires node-id to exist before xpf.conf is
+# staged, and the success stamp to remain absent until afterward.
 MOCK_INSTALL = """#!/usr/bin/env bash
 args=()
 while (( $# )); do
@@ -72,6 +74,17 @@ while (( $# )); do
     *) args+=("$1"); shift ;;
   esac
 done
+if [ "$MOCK_REQUIRE_NODE_ID" = "1" ] &&
+   [[ "${args[-1]}" == "$MOCK_XPF_DIR"/.xpf.conf.* ]]; then
+  [ -s "$MOCK_XPF_DIR/node-id" ] || {
+    echo "xpf.conf staged before durable node-id" >&2
+    exit 1
+  }
+  [ ! -e "$MOCK_XPF_DIR/.day0-config-applied" ] || {
+    echo "day-0 stamp written before xpf.conf" >&2
+    exit 1
+  }
+fi
 printf '%s\\n' "${args[-1]}" >> "$MOCK_INSTALLLOG"
 exec /usr/bin/install "${args[@]}"
 """
@@ -207,6 +220,7 @@ class TryDeviceTests(unittest.TestCase):
         self.xpfd.chmod(0o755)
         self.args_file = self.tmp / "xpfd-args.txt"
         self.installlog = self.tmp / "install.log"
+        self.require_node_id_before_config = False
 
     def _medium(self, dev, files):
         """Create fixture medium for `dev`: {name: bytes} plus {'link:NAME':
@@ -228,6 +242,8 @@ class TryDeviceTests(unittest.TestCase):
             "MOCK_MEDIA": str(self.media),
             "MOCK_RUN": str(self.run),
             "MOCK_INSTALLLOG": str(self.installlog),
+            "MOCK_XPF_DIR": str(self.xpf_dir),
+            "MOCK_REQUIRE_NODE_ID": "1" if self.require_node_id_before_config else "0",
             "XPF_DAY0_SOURCE_ONLY": "1",
         })
         return env
@@ -265,6 +281,34 @@ class TryDeviceTests(unittest.TestCase):
         self.assertRegex(staged.name, r"\.xpf\.conf\.[^/]+")
         self.assertFalse(staged.exists(),
                          "successful install did not rename its staged file")
+        stamp = (self.xpf_dir / ".day0-config-applied").read_text()
+        self.assertIn("/dev/fake0", stamp)
+
+    def test_node_id_is_durable_before_config_is_exposed(self):
+        body = b"""chassis {
+    cluster {
+        cluster-id 1;
+        node 1;
+        reth-count 2;
+        authentication-key "bootstrap-psk-10735-long-enough";
+        redundancy-group 1 {
+            node 0 priority 200;
+            node 1 priority 100;
+        }
+    }
+}
+"""
+        self.require_node_id_before_config = True
+        self._medium("/dev/fake0", {
+            "xpf.conf": body,
+            "node-id": b"1\n",
+        })
+        rc, out, _dt = self._try_device()
+        self.assertEqual(rc, 0, out[-600:])
+        self.assertEqual(
+            (self.xpf_dir / "node-id").read_text(), "1\n"
+        )
+        self.assertEqual(self._installed(), body)
         stamp = (self.xpf_dir / ".day0-config-applied").read_text()
         self.assertIn("/dev/fake0", stamp)
 
