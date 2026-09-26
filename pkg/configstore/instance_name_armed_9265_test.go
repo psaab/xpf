@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -84,9 +85,9 @@ func instanceNameArmed9265Rows() []instanceNameArmed9265Row {
 	const cl = `authentication-key "xpfpsk0123456789"; `
 	return []instanceNameArmed9265Row{
 		{path: "/system/login/class", verdict: armedClosed,
-			packed: "set system login class c1 idle-timeout 30",
-			clean:  "system { login { class c1 { idle-timeout 30; } } }",
-			bogus:  "system { login { class c1 { idle-timeout 30; xpfbogus 5; } } }"},
+			packed: "set system login class c1 permissions view",
+			clean:  "system { login { class c1 { permissions view; } } }",
+			bogus:  "system { login { class c1 { permissions view; xpfbogus 5; } } }"},
 
 		{path: "/system/backup-router", verdict: armedClosed,
 			packed: "set system backup-router 10.0.0.1 destination 10.9.0.0/16",
@@ -257,6 +258,79 @@ func TestInstanceNameArmedRefusesUnknownKeywords9265(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #10828: a login-class idle timeout has no runtime consumer on any supported
+// session surface, so strict commits must reject the leaf rather than promise
+// an unenforced deadline. The flat chained spelling exercises the shape whose
+// compiler-visible leaf must be checked even if schema validation cannot name
+// the unsupported setting directly.
+func TestCommitCheck_RejectsLoginClassIdleTimeout10828(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{"flat chained after allow-commands", `system login class ops allow-commands "show .*" idle-timeout 1`, "idle-timeout"},
+		{"positive timeout", "system login class ops idle-timeout 1", "idle-timeout is not enforced by xpf"},
+		{"explicit zero", "system login class ops idle-timeout 0", "idle-timeout is not enforced by xpf"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+			if err := s.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			if err := s.SetFromInput(tc.input); err != nil {
+				t.Fatalf("SetFromInput: %v", err)
+			}
+			_, err := s.CommitCheck()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CommitCheck error = %v, want strict idle-timeout refusal containing %q", err, tc.want)
+			}
+			if _, err := s.Commit(); err == nil {
+				t.Fatal("Commit accepted an unenforced login-class idle-timeout")
+			} else if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Commit error = %v, want explicit idle-timeout refusal containing %q", err, tc.want)
+			}
+		})
+	}
+
+	// A class without the unsupported leaf remains committable.
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("control EnterConfigure: %v", err)
+	}
+	if err := s.SetFromInput("system login class ops permissions view"); err != nil {
+		t.Fatalf("control SetFromInput: %v", err)
+	}
+	if _, err := s.CommitCheck(); err != nil {
+		t.Fatalf("control CommitCheck: %v", err)
+	}
+}
+
+func TestLoad_ToleratesLegacyLoginClassIdleTimeout10828(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config")
+	writeStoredConfig(t, cfgPath, "set system login class ops idle-timeout 0")
+
+	s := newTestStoreAt(t, cfgPath)
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load must tolerate legacy idle-timeout, got %v", err)
+	}
+	active := s.ActiveConfig()
+	if active == nil || active.System.Login == nil || len(active.System.Login.Classes) != 1 {
+		t.Fatalf("legacy idle-timeout did not load into the active config: %+v", active)
+	}
+	class := active.System.Login.Classes[0]
+	if !class.IdleTimeoutSet || class.IdleTimeout != 0 {
+		t.Fatalf("legacy explicit zero was not retained: %+v", class)
+	}
+	found := false
+	for _, warning := range active.Warnings {
+		if strings.Contains(warning, "idle-timeout") && strings.Contains(warning, "NOT enforced") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("legacy load must warn that idle-timeout is not enforced, warnings=%v", active.Warnings)
 	}
 }
 

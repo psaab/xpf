@@ -726,34 +726,39 @@ func crossCheckNodeID(compiled *config.Config, nodeID int) error {
 	return nil
 }
 
-// crossCheckRAIntervals enforces the one RFC 4861 §6.2.1 constraint the
-// per-leaf schema validators cannot express: when a router-advertisement
-// interface configures BOTH min- and max-advertisement-interval,
-// MinRtrAdvInterval MUST be <= 0.75 * MaxRtrAdvInterval (#4525). The
-// per-leaf gate (schema_routing.go) already bounds each leaf on its own —
-// max in [4,1800], min in [3,1350] per RFC 4861 §6.2.1 — but only the
-// compiled view sees both siblings together, so the ratio check lives here
-// (mirroring crossCheckNodeID's strict-only placement). An inverted or
-// over-narrowed window (min > 0.75*max) is the config that motivated #4525:
-// max-advertisement-interval 1|2 let the sender draw a 0-second periodic
-// delay and hot-loop; even within the new per-leaf floors an operator could
-// still author min close to max, which RFC 4861 forbids because it defeats
-// the desynchronizing jitter.
+// crossCheckRAIntervals enforces compiled-state constraints that cannot be
+// expressed as single per-leaf schema validators. For router advertisements,
+// when both min- and max-advertisement-interval are configured, the compiled
+// values must satisfy MinRtrAdvInterval <= 0.75 * MaxRtrAdvInterval (RFC 4861
+// §6.2.1, #4525). The per-leaf gate (schema_routing.go) bounds max in
+// [4,1800] and min in [3,1350], but only the compiled view sees both siblings.
+// An inverted or over-narrowed window (min > 0.75*max) can make the sender
+// hot-loop or defeat the desynchronizing jitter.
 //
-// Absent leaves (value 0 = "use default") never cross-check: a lone max or a
-// lone min is completed by the RA sender's own derivation (pkg/ra
-// randomAdvInterval), which is safe. Only an explicit min > 0.75*max pairing
-// is rejected.
+// Absent RA values (0 = "use default") never cross-check: a lone max or min is
+// completed by the sender's own derivation (pkg/ra randomAdvInterval), which is
+// safe. Only an explicit min > 0.75*max pairing is rejected.
 //
-// Strict on the operator commit / commit-check path (compileTreeStrict);
-// downgraded to a warning on the tolerant Store.Load / Store.SyncApply
-// ingress (compileTreeLenient) so a legacy or peer-synced config cannot
-// blackout-boot the node or alarm-loop HA config sync (#1960 doctrine). The
-// runtime floor in pkg/ra randomAdvInterval is the belt for anything that
-// reaches the sender through the lenient path.
+// Strict commits reject these constraints; the tolerant load/sync path invokes
+// the same check only to warn and continues so legacy configs still boot
+// (#1960). #10828: the compiled-state pass also refuses login-class
+// `idle-timeout`. Schema validation can miss it in some flat chained leaves,
+// while the compiler still consumes it; compiled leaf-presence (including
+// explicit zero) therefore must be checked before a candidate is promoted.
+// No supported session surface applies the class deadline.
 func crossCheckRAIntervals(compiled *config.Config) error {
 	if compiled == nil {
 		return nil
+	}
+	if compiled.System.Login != nil {
+		for _, class := range compiled.System.Login.Classes {
+			if class != nil && class.IdleTimeoutSet {
+				return fmt.Errorf("system login class %q: idle-timeout is not enforced by xpf "+
+					"(configured value %d minutes) on CLI, REST/gRPC, or SSH; refusing commit "+
+					"rather than silently accepting it",
+					class.Name, class.IdleTimeout)
+			}
+		}
 	}
 	for _, ra := range compiled.Protocols.RouterAdvertisement {
 		if ra == nil || ra.MinAdvInterval <= 0 || ra.MaxAdvInterval <= 0 {
@@ -841,10 +846,10 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 				"reject this) — heartbeat identity and FPC naming may diverge from ${node} expansion",
 				"err", mismatch, "issue", "#4185")
 		}
-		if raErr := crossCheckRAIntervals(compiled); raErr != nil {
-			slog.Warn("router-advertisement interval violation in tolerated config; continuing "+
-				"(a strict commit would reject this) — the RA sender floors the periodic timer at 1s",
-				"err", raErr, "issue", "#4525")
+		if compiledErr := crossCheckRAIntervals(compiled); compiledErr != nil {
+			slog.Warn("compiled-state constraint violation in tolerated config; continuing "+
+				"(a strict commit would reject this)",
+				"err", compiledErr, "issue", "#4525/#10828")
 		}
 	}
 	return compiled, err

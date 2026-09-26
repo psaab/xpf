@@ -346,7 +346,6 @@ Real vSRX configs define their own RBAC classes:
 
 ```
 set system login class noc-admin permissions all
-set system login class noc-admin idle-timeout 30
 set system login user bob class noc-admin
 ```
 
@@ -363,17 +362,17 @@ compile (`LoginClass.MappedPermissions`, consulted at runtime by
 The `permissions` tokens are validated at commit (#9490) against the Junos
 login-class permission flag set, plus xpf's `super-user` alias. A misspelled
 flag used to commit and silently fold to view-only, so the class was not the
-one written. A config persisted before the gate still loads, because the
-tolerant path does not run the schema validators.
+one written. Schema violations on strict commits are errors; the tolerant
+load/sync path downgrades them to warnings so older configurations still boot.
 
 Because xpf's runtime RBAC is **coarse** (view/clear/control/config/maintenance/
 all) it cannot faithfully represent every fine-grained Junos permission or the
 per-command allow/deny regexes. The **permission mapping** is therefore
 **accept-with-advisory** — the commit succeeds and the compiler emits a
 per-class advisory (`show system commit` / warnings) describing exactly what
-maps and what does not. That is the treatment for everything below EXCEPT the
-restrictive `deny-commands` / `deny-configuration` regexes, which are refused
-outright (#5831, see the next section):
+maps and what does not. This policy applies only to permission mapping;
+`idle-timeout` is refused, and the allow/deny regexes are handled separately as
+described below:
 
 - `all` / `super-user` → `super-user` (PermAll); `maintenance` → maintenance;
   `clear` → clear; `control` / `reset` → control; `configure` → configure;
@@ -390,9 +389,10 @@ outright (#5831, see the next section):
   `secret`, …) folds **down** to a **view-only floor**. Under-granting is
   deliberate: the coarse model must never silently grant config / control /
   maintenance from a narrow subsystem token.
-- `idle-timeout` is **recognized but NOT enforced** by the coarse gate
-  (dropping a session-lifetime knob cannot make the class more permissive); the
-  advisory names it.
+- `idle-timeout` is refused at commit because xpf does not enforce a login-class
+  session deadline on the CLI, REST/gRPC, or SSH. Existing saved configs may
+  still contain it; tolerant load/sync reports it as inactive. Remove the leaf
+  rather than relying on a timeout that never takes effect.
 - **All four regex sub-statements are ENFORCED** since #7172 — `allow-commands`
   and `allow-configuration` as ALLOWLISTS, `deny-commands` and
   `deny-configuration` as denials, on both the CLI and the gRPC surface. Both
