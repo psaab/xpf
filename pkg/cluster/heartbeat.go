@@ -49,6 +49,10 @@ const (
 	// leaves this window intact for the heartbeat/failover semantics that did not
 	// change. Re-evaluate this floor only on a CurrentHAProtocolVersion bump.
 	MinCompatHAProtocolVersion = CurrentHAProtocolVersion
+	// heartbeatEchoProtocolVersion gates the additive, optional peer-heard
+	// echo trailer. The trailer is backward-compatible; peers without it use a
+	// bounded local lease rather than being rejected.
+	heartbeatEchoProtocolVersion = CurrentHAProtocolVersion
 
 	// maxHeartbeatSize is the max packet size we'll read/write.
 	// 1472 = 1500 MTU - 20 IP header - 8 UDP header.
@@ -93,6 +97,13 @@ const (
 	// not armed, so it IS a cold start.
 	heartbeatRestartGrace = 5 * time.Second
 
+	// heartbeatEchoMagic marks the optional peer-heard echo section. It is
+	// placed before the fixed-tail epoch/auth trailers so old readers may ignore
+	// it without changing their trailer offsets.
+	heartbeatEchoMagic = "XPFE"
+	// heartbeatEchoTrailerSize is magic(4) plus sender and echoed peer
+	// session/sequence pairs (four uint64 values).
+	heartbeatEchoTrailerSize = 4 + 8*4
 	// heartbeatAuthMagic marks the optional #4107 PSK/HMAC auth trailer.
 	// Distinct from heartbeatMagic ("BPFX") so a reader can unambiguously
 	// detect a trailer at the tail of a frame. The trailer is appended AFTER
@@ -136,6 +147,12 @@ const (
 //	    [0] VersionLen
 //	    [1..1+VersionLen] SoftwareVersion bytes
 //	    [..] uint16 little-endian HAProtocolVersion
+//	  Optional "XPFE" echo trailer: sender session/sequence and the last
+//	  peer session/sequence received by the sender.
+//
+// The echo trailer is additive and appears before optional fixed-tail
+// authentication/epoch trailers. Older readers ignore it after the version
+// section.
 //
 // The trailing version trailer is optional; packets may end after the monitor
 // section. When present, the trailer always starts with a length byte, even if
@@ -144,12 +161,16 @@ const (
 // software-version field, and newer readers treat a missing trailer as the
 // legacy protocol version.
 type HeartbeatPacket struct {
-	NodeID            uint8
-	ClusterID         uint16
-	Groups            []HeartbeatGroup
-	Monitors          []HeartbeatMonitor
-	SoftwareVersion   string
-	HAProtocolVersion uint16
+	NodeID                uint8
+	ClusterID             uint16
+	Groups                []HeartbeatGroup
+	Monitors              []HeartbeatMonitor
+	SoftwareVersion       string
+	HAProtocolVersion     uint16
+	HeartbeatSession      uint64
+	HeartbeatSequence     uint64
+	PeerHeartbeatSession  uint64
+	PeerHeartbeatSequence uint64
 }
 
 // HeartbeatGroup is a per-RG entry in the heartbeat.
@@ -268,15 +289,14 @@ func MarshalHeartbeat(pkt *HeartbeatPacket) []byte {
 }
 
 // marshalHeartbeatBody encodes the heartbeat wire body, keeping tailReserve
-// bytes free at the tail of the frame for a trailer the caller appends (the
-// #4107 auth trailer). tailReserve==0 is the plain legacy encoding, byte-for-
-// byte what MarshalHeartbeat always produced. The election-critical header +
-// RG groups are always written and the SOFTWARE version is reserved next; only
-// the best-effort monitor section is truncated to fit within
-// maxHeartbeatSize-tailReserve. Because the reserve is honored WHILE building
-// the body, a keyed frame ALWAYS has room for its HMAC — a heartbeat is never
-// silently downgraded to unsigned (the #4107 invariant; see
-// MarshalHeartbeatAuth).
+// bytes free at the tail of the frame for fixed-tail trailers (epoch and auth).
+// Packets without echo fields retain the legacy body encoding; the optional
+// `XPFE` section is included only when a sender session and sequence are set.
+// The election-critical header + RG groups are always written and the SOFTWARE
+// version and echo section are reserved before best-effort monitors are
+// truncated to fit. Because the reserve is honored WHILE building the body, a
+// keyed frame ALWAYS has room for its HMAC — a heartbeat is never silently
+// downgraded to unsigned (the #4107 invariant; see MarshalHeartbeatAuth).
 func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 	buf := make([]byte, maxHeartbeatSize)
 	copy(buf[0:4], heartbeatMagic)
@@ -312,14 +332,19 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 
 	var version []byte
 	const heartbeatVersionTrailerSize = 1 + 2 // version length byte + HA protocol version
-	versionReserve := heartbeatVersionTrailerSize
+	echoTrailerSize := 0
+	if normalizeHAProtocolVersion(pkt.HAProtocolVersion) >= heartbeatEchoProtocolVersion &&
+		pkt.HeartbeatSession != 0 && pkt.HeartbeatSequence != 0 {
+		echoTrailerSize = heartbeatEchoTrailerSize
+	}
+	versionReserve := heartbeatVersionTrailerSize + echoTrailerSize
 	if pkt.SoftwareVersion != "" {
 		version = []byte(pkt.SoftwareVersion)
 		if len(version) > maxHeartbeatSoftwareVersionSize {
 			version = version[:maxHeartbeatSoftwareVersionSize]
 		}
-		if off+heartbeatVersionTrailerSize+len(version) <= maxHeartbeatSize-tailReserve {
-			versionReserve = heartbeatVersionTrailerSize + len(version)
+		if off+heartbeatVersionTrailerSize+len(version)+echoTrailerSize <= maxHeartbeatSize-tailReserve {
+			versionReserve = heartbeatVersionTrailerSize + len(version) + echoTrailerSize
 		} else {
 			version = nil
 		}
@@ -360,6 +385,18 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 		}
 		binary.LittleEndian.PutUint16(buf[off:off+2], normalizeHAProtocolVersion(pkt.HAProtocolVersion))
 		off += 2
+		if echoTrailerSize != 0 {
+			copy(buf[off:off+len(heartbeatEchoMagic)], heartbeatEchoMagic)
+			off += len(heartbeatEchoMagic)
+			binary.LittleEndian.PutUint64(buf[off:off+8], pkt.HeartbeatSession)
+			off += 8
+			binary.LittleEndian.PutUint64(buf[off:off+8], pkt.HeartbeatSequence)
+			off += 8
+			binary.LittleEndian.PutUint64(buf[off:off+8], pkt.PeerHeartbeatSession)
+			off += 8
+			binary.LittleEndian.PutUint64(buf[off:off+8], pkt.PeerHeartbeatSequence)
+			off += 8
+		}
 	}
 	return buf[:off]
 }
@@ -447,6 +484,19 @@ func UnmarshalHeartbeat(data []byte) (*HeartbeatPacket, error) {
 	}
 	if monitorSectionComplete && versionSectionComplete && off+2 <= len(data) {
 		pkt.HAProtocolVersion = normalizeHAProtocolVersion(binary.LittleEndian.Uint16(data[off : off+2]))
+		off += 2
+		if pkt.HAProtocolVersion >= heartbeatEchoProtocolVersion &&
+			off+heartbeatEchoTrailerSize <= len(data) &&
+			string(data[off:off+len(heartbeatEchoMagic)]) == heartbeatEchoMagic {
+			off += len(heartbeatEchoMagic)
+			pkt.HeartbeatSession = binary.LittleEndian.Uint64(data[off : off+8])
+			off += 8
+			pkt.HeartbeatSequence = binary.LittleEndian.Uint64(data[off : off+8])
+			off += 8
+			pkt.PeerHeartbeatSession = binary.LittleEndian.Uint64(data[off : off+8])
+			off += 8
+			pkt.PeerHeartbeatSequence = binary.LittleEndian.Uint64(data[off : off+8])
+		}
 	}
 
 	return pkt, nil
@@ -475,8 +525,8 @@ func UnmarshalHeartbeat(data []byte) (*HeartbeatPacket, error) {
 // is a per-session monotonic send counter; together they are the anti-replay
 // nonce (a new session re-anchors the receiver after a restart/reboot; a
 // strictly increasing counter rejects intra-session replays). When authKey is
-// empty the output is byte-identical to MarshalHeartbeat — a node without a key
-// emits legacy frames (dual-accept). The key is never logged.
+// empty the output is byte-identical to MarshalHeartbeat — it omits the auth
+// trailer. The key is never logged.
 //
 // INVARIANT: once a key is configured, the returned frame is ALWAYS signed. The
 // trailer space is reserved WHILE building the body (marshalHeartbeatBody drops
@@ -1326,6 +1376,14 @@ type PeerGroupState struct {
 	Priority int
 	Weight   int
 	State    NodeState
+	// Per-heartbeat identity and the bounded lease proving this peer has
+	// received our current incarnation's frames. The lease is renewed only
+	// when a fresh echoed sequence advances.
+	heartbeatSession        uint64
+	heartbeatSequence       uint64
+	heartbeatEchoSession    uint64
+	heartbeatEchoSequence   uint64
+	heartbeatEchoLeaseUntil time.Time
 	// StateOverriddenLocally records that `State` above is NOT what the peer
 	// reported — this node substituted it (#7367).
 	//
@@ -1475,17 +1533,18 @@ func (s *heartbeatSender) run() {
 
 func (s *heartbeatSender) send() {
 	pkt := s.mgr.buildHeartbeat()
+	// The per-Manager heartbeat sequence is also the keyed anti-replay counter,
+	// so sender restarts preserve both echo identity and the auth watermark.
 	// #4107: sign the frame when a control-channel PSK is configured. The key
 	// is fetched fresh each tick so a commit that sets/clears it takes effect
 	// without a heartbeat restart. Never logged.
 	var data []byte
 	if key := s.mgr.controlLinkAuthKey(); len(key) > 0 {
-		session, counter := s.mgr.heartbeatNonce()
+		data = marshalHeartbeatAuthEpoch(pkt, key, pkt.HeartbeatSession, pkt.HeartbeatSequence, s.mgr.heartbeatBootEpoch())
 		// #6169: ALWAYS carry a boot epoch. heartbeatBootEpoch publishes a
 		// wall-clock value before any I/O and never returns 0 once called, so
 		// this cannot silently degrade to a legacy frame under a storage fault —
 		// which a latched peer would read as a rollback and refuse.
-		data = marshalHeartbeatAuthEpoch(pkt, key, session, counter, s.mgr.heartbeatBootEpoch())
 	} else {
 		data = MarshalHeartbeat(pkt)
 	}
