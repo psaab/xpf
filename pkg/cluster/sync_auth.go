@@ -145,6 +145,22 @@ type SyncAuthProvider interface {
 	ControlLinkAuthKey() []byte
 }
 
+// syncPeerAuthRecorder is an optional capability for auth providers that retain
+// the process-lifetime proof that the peer holds the shared key. The Manager
+// uses the same sticky signal for the fabric gRPC downgrade guard when a keyed
+// fabric-transport cluster has no heartbeat.
+type syncPeerAuthRecorder interface {
+	noteSyncPeerAuthenticated()
+}
+
+func (s *SessionSync) recordAuthenticatedPeer() {
+	if box := s.authProvider.Load(); box != nil && box.p != nil {
+		if recorder, ok := box.p.(syncPeerAuthRecorder); ok {
+			recorder.noteSyncPeerAuthenticated()
+		}
+	}
+}
+
 type syncAuthProviderBox struct{ p SyncAuthProvider }
 
 // SetAuthProvider wires the shared-PSK source used to authenticate the
@@ -257,7 +273,6 @@ type authConn struct {
 	// instead of one per prime.
 	bootIncarnation    bootIncarnation
 	unincarnatedWarned bool
-
 
 	// authPSK is the control-link PSK this connection's authentication was
 	// established under — the staleness test the #6628 reconciler uses. Nil on
@@ -438,6 +453,10 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 	if err != nil {
 		return syncAuthUnauthenticated, syncNoiseKeys{}, err
 	}
+	// The Noise handshake proves that the peer holds the same control-link
+	// PSK. This also arms the fabric gRPC downgrade guard when the selected
+	// transport is fabric and no control-link heartbeat is running.
+	s.recordAuthenticatedPeer()
 	return syncAuthAuthenticated, keys, nil
 }
 

@@ -689,6 +689,11 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 			"err", err, "remote", connRemoteAddrString(conn))
 		return
 	}
+	// The verified Noise msg1 proves that the peer holds the shared PSK,
+	// independently of whether the remainder of this connection upgrade
+	// succeeds.
+	s.recordAuthenticatedPeer()
+
 	msg2, csI2R, csR2I, err := hs.WriteMessage(nil, nil)
 	if err != nil || csI2R == nil || csR2I == nil {
 		slog.Warn("cluster sync: auth-upgrade responder could not complete the handshake; "+
@@ -774,6 +779,9 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) {
 			"err", err, "remote", connRemoteAddrString(conn))
 		return
 	}
+	// The verified Noise msg2 proves that the peer holds the shared PSK.
+	s.recordAuthenticatedPeer()
+
 	st.keys = syncNoiseSplitKeys(true, csI2R, csR2I)
 	st.haveKeys = true
 	st.binding = append([]byte(nil), st.hs.ChannelBinding()...)

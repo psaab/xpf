@@ -26,13 +26,11 @@ func (m *Manager) peerHeartbeatFreshLocked() bool {
 	return false
 }
 
-// HeartbeatPeerAuthSeen reports whether the heartbeat receiver has ever
-// accepted a valid HMAC-authenticated heartbeat from the peer (#4107). It is
-// the fast-arming signal the gRPC fabric listener reuses for its PSK
-// downgrade-guard: heartbeats flow continuously (~200ms), so this arms within
-// one interval of a keyed peer coming up — closing the post-restart window
-// where nothing had yet dialed the fabric listener on-demand to arm its own
-// sticky flag. Returns false when the peer has never authenticated.
+// HeartbeatPeerAuthSeen reports whether the peer has proved it holds the shared
+// control-link key, either through an authenticated heartbeat or the
+// authenticated session-sync handshake (#4107). The fabric gRPC listener uses
+// this process-lifetime signal for its PSK downgrade guard. Session sync also
+// arms it in fabric-transport mode, where no control-link heartbeat is running.
 //
 // Heartbeat admission itself does NOT use this process-lifetime flag. A node
 // with a local ControlLinkAuthKey rejects an unsigned heartbeat from the first
@@ -49,6 +47,14 @@ func (m *Manager) peerHeartbeatFreshLocked() bool {
 // the socket, so the guard cannot be reset by restarting the heartbeat.
 func (m *Manager) HeartbeatPeerAuthSeen() bool {
 	return m.heartbeatAuthState().peerAuthenticated()
+}
+
+// noteSyncPeerAuthenticated records the peer's proof of the shared PSK from
+// the authenticated session-sync handshake. The same process-lifetime proof is
+// used by the fabric gRPC downgrade guard whether it arrives on heartbeat or
+// session sync.
+func (m *Manager) noteSyncPeerAuthenticated() {
+	m.heartbeatAuthState().notePeerAuthenticated()
 }
 
 // PeerNodeID returns the peer's node ID (valid only when PeerAlive is true).
