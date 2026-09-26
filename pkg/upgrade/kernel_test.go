@@ -31,6 +31,8 @@ type fakeKernelSystem struct {
 	bootNext  string
 	wdArmed   bool
 
+	entriesErr error
+
 	bootCurrent       string
 	bootCurrentErr    error
 	getBootNextErr    error  // #5847: force a readback error (stay ARMING)
@@ -77,6 +79,9 @@ func (f *fakeKernelSystem) log(s string) { f.calls = append(f.calls, s) }
 func (f *fakeKernelSystem) IsUEFI() bool       { return f.uefi }
 func (f *fakeKernelSystem) EfibootmgrOK() bool { return f.efibootmgr }
 func (f *fakeKernelSystem) BootEntries() (map[string]string, error) {
+	if f.entriesErr != nil {
+		return nil, f.entriesErr
+	}
 	cp := map[string]string{}
 	for k, v := range f.entries {
 		cp[k] = v
@@ -382,6 +387,49 @@ func TestKernelPromoteRevertOnBeaconFail(t *testing.T) {
 	}
 	if contains(f.calls, "bootorder-front:0004") {
 		t.Fatal("promoted despite forward-beacon failure")
+	}
+}
+
+// TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761 pins the caller side of
+// the bounded efibootmgr command: a timed-out first BootEntries read must enter
+// revert(), persist the attempt before cleanup, and request the controlled
+// exit-3 reboot rather than surfacing an infra error for systemd's uncounted
+// OnFailure reboot.
+func TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761(t *testing.T) {
+	f := newFakeKernelSystem()
+	r := newKernelRunner(t, f)
+	if err := r.Arm("6.18.5-12-generic"); err != nil {
+		t.Fatalf("Arm: %v", err)
+	}
+	attemptLogged := false
+	r.cfg.Logf = func(_ string, args ...any) {
+		if len(args) >= 3 && args[1] == 1 && args[2] == maxPromoteAttempts {
+			attemptLogged = true
+		}
+	}
+
+	f.entriesErr = fmt.Errorf("efibootmgr timed out: context deadline exceeded")
+
+	err := r.Promote()
+	if !errorsIsReverted(err) {
+		t.Fatalf("Promote error = %v, want a controlled revert for the timed-out NVRAM read", err)
+	}
+	if !attemptLogged {
+		t.Fatal("timed-out NVRAM read did not persist/count attempt 1 before cleanup")
+	}
+
+	if f.lastRoll.Outcome != RollOutcomeReverted {
+		t.Fatalf("last-roll outcome = %q, want %q", f.lastRoll.Outcome, RollOutcomeReverted)
+	}
+	if !contains(f.calls, "prune:"+SlotB) {
+		t.Fatal("timed-out NVRAM read did not enter revert cleanup")
+	}
+	j, err := r.loadKernelJournal()
+	if err != nil {
+		t.Fatalf("load journal after counted revert: %v", err)
+	}
+	if j.State != KernelStateInit {
+		t.Fatalf("journal state after controlled reboot request = %s, want cleared INIT", j.State)
 	}
 }
 

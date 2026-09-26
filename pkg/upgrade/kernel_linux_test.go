@@ -1,7 +1,12 @@
 package upgrade
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestBootEntryRegex locks the efibootmgr line parse against the two bugs found
@@ -62,5 +67,27 @@ func TestDefaultGatewayParseLogic(t *testing.T) {
 		if got, _ := parseDefaultRoute(c.out); got != c.want {
 			t.Errorf("parseDefaultRoute(%q) = %q, want %q", c.out, got, c.want)
 		}
+	}
+}
+
+// TestBootEntriesBoundsFirmwareNVRAMRead10761 drives the production BootEntries
+// path through a fake efibootmgr that does not respond before the short deadline.
+// The kernel-promote unit must get a timeout error soon enough to persist the
+// revert attempt before systemd's TimeoutStartSec / uncounted OnFailure reboot.
+func TestBootEntriesBoundsFirmwareNVRAMRead10761(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "efibootmgr")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec /bin/sleep 0.5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldTimeout := kernelNVRAMTimeout
+	kernelNVRAMTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { kernelNVRAMTimeout = oldTimeout })
+
+	_, err := (&realKernelSystem{}).BootEntries()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("BootEntries error = %v, want bounded NVRAM timeout", err)
 	}
 }

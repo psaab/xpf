@@ -16,6 +16,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// efibootmgr can block indefinitely while firmware services NVRAM. Keep each
+// operation well inside xpf-kernel-promote.service's 120-second start timeout,
+// leaving time for Promote to persist a counted revert instead of letting
+// systemd take its uncounted OnFailure reboot path.
+var kernelNVRAMTimeout = 10 * time.Second
+
 var (
 	// An efibootmgr entry line is "BootXXXX*<sp>LABEL<TAB>loader-path"
 	// (active entries have the '*', inactive do not). The LABEL is the field
@@ -167,11 +173,11 @@ func (s *realKernelSystem) IsUEFI() bool {
 }
 
 func (s *realKernelSystem) EfibootmgrOK() bool {
-	return runCmd("efibootmgr") == nil
+	return runCmdTimeout(kernelNVRAMTimeout, "efibootmgr") == nil
 }
 
 func (s *realKernelSystem) BootEntries() (map[string]string, error) {
-	out, err := captureCmd("efibootmgr")
+	out, err := captureCmdTimeout(kernelNVRAMTimeout, "efibootmgr")
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +193,7 @@ func (s *realKernelSystem) BootEntries() (map[string]string, error) {
 }
 
 func (s *realKernelSystem) BootOrder() ([]string, error) {
-	out, err := captureCmd("efibootmgr")
+	out, err := captureCmdTimeout(kernelNVRAMTimeout, "efibootmgr")
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +438,7 @@ func (s *realKernelSystem) ReadSlotSelector(slot string) (string, error) {
 }
 
 func (s *realKernelSystem) SetBootNext(bootID string) error {
-	return runCmd("efibootmgr", "--bootnext", bootID)
+	return runCmdTimeout(kernelNVRAMTimeout, "efibootmgr", "--bootnext", bootID)
 }
 
 // ClearBootNext deletes the one-shot BootNext variable (#6758).
@@ -442,7 +448,7 @@ func (s *realKernelSystem) SetBootNext(bootID string) error {
 // so there is no read-then-delete window and no special case for "the firmware
 // silently dropped it already".
 func (s *realKernelSystem) ClearBootNext() error {
-	return runCmd("efibootmgr", "--delete-bootnext")
+	return runCmdTimeout(kernelNVRAMTimeout, "efibootmgr", "--delete-bootnext")
 }
 
 // GetBootNext parses the one-shot BootNext id out of efibootmgr's output (the
@@ -451,7 +457,7 @@ func (s *realKernelSystem) ClearBootNext() error {
 // SetBootNext write before recording the verified ARMED journal. A missing
 // BootNext line is NOT an error — it is the legitimate "no one-shot set" state.
 func (s *realKernelSystem) GetBootNext() (string, error) {
-	out, err := captureCmd("efibootmgr")
+	out, err := captureCmdTimeout(kernelNVRAMTimeout, "efibootmgr")
 	if err != nil {
 		return "", err
 	}
@@ -553,7 +559,7 @@ func (s *realKernelSystem) ClearRollLease() error {
 }
 
 func (s *realKernelSystem) BootCurrent() (string, error) {
-	out, err := captureCmd("efibootmgr")
+	out, err := captureCmdTimeout(kernelNVRAMTimeout, "efibootmgr")
 	if err != nil {
 		return "", err
 	}
@@ -917,7 +923,7 @@ func (s *realKernelSystem) SetBootOrderFront(bootID string) error {
 			next = append(next, id)
 		}
 	}
-	return runCmd("efibootmgr", "--bootorder", strings.Join(next, ","))
+	return runCmdTimeout(kernelNVRAMTimeout, "efibootmgr", "--bootorder", strings.Join(next, ","))
 }
 
 func (s *realKernelSystem) DisarmWatchdog() error {
