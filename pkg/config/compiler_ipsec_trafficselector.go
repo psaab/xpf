@@ -151,12 +151,12 @@ func validateIPsecTrafficSelectorsStrict(nodes []*Node, lenient bool) ([]string,
 					}
 				}
 
-				// #8003: `local-identity` / `remote-identity` under the VPN are
-				// rendered as swanctl selectors too. effectiveTrafficSelectors
-				// falls back to them verbatim when the VPN declares no
-				// traffic-selector, so they reach `local_ts = <value>` by exactly
-				// the path gated above — but nothing examined them, because this
-				// walk only ever descended into `traffic-selector` children.
+				// #8003: `local-identity` / `remote-identity` can become
+				// swanctl selectors. effectiveTrafficSelectors uses them when
+				// there are no explicit selectors and as per-side fallbacks
+				// for explicit children missing local-ip / remote-ip. These
+				// VPN-level leaves are not under a traffic-selector node, so
+				// validate them separately below.
 				//
 				// Measured on strongSwan 6.0.5: a non-selector value here does not
 				// degrade, it takes the WHOLE connection with it.
@@ -183,12 +183,13 @@ func validateIPsecTrafficSelectorsStrict(nodes []*Node, lenient bool) ([]string,
 								continue
 							}
 							if err := emit(
-								"security ipsec vpn %q %s %q %s — this value is rendered as "+
-									"the swanctl local_ts/remote_ts when the VPN declares no "+
-									"traffic-selector, and strongSwan DISCARDS THE WHOLE "+
-									"CONNECTION for a non-selector value, so the tunnel "+
-									"silently never establishes; use a CIDR prefix, host "+
-									"address, or IP range (#8003)",
+								"security ipsec vpn %q %s %q %s — the renderer can use this as "+
+									"the swanctl local_ts/remote_ts when the VPN has no "+
+									"traffic-selector or an explicit child omits that side; "+
+									"strongSwan DISCARDS THE WHOLE CONNECTION for a "+
+									"non-selector value, so the tunnel silently never "+
+									"establishes; use a CIDR prefix, host address, or IP range "+
+									"(#8003)",
 								vpnInst.name, leafName, val, reason,
 							); err != nil {
 								return err
@@ -248,10 +249,10 @@ func trafficSelectorValueReject(v string) string {
 }
 
 // IsTrafficSelectorShape is the exported form of isTrafficSelectorShape, for
-// the render-side belt in pkg/ipsec (#8003). That belt and this commit gate
+// the render-side belts in pkg/ipsec (#8003/#10884). They and this commit gate
 // MUST apply the SAME rule: two surfaces enforcing one rule from two
 // predicates is how they drift, which is the exact defect diagcmd.MaxArgLen
-// was created to end (#6904). One predicate, both callers.
+// was created to end (#6904). One predicate, both surfaces.
 func IsTrafficSelectorShape(v string) bool { return isTrafficSelectorShape(v) }
 
 // isTrafficSelectorShape reports whether v is a CIDR prefix (v4/v6), a bare
