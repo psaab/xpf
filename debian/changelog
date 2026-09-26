@@ -45,5 +45,7 @@ xpf (0.0.0) unstable; urgency=medium
     (#10904).
   * Refuse MAC-pinned PCI bindings when a known-absent permanent MAC prevents
     identity verification (#10905).
+  * Carry the validated fabric zone stamp into parked-fragment retries so
+    overlap checks use the encoded zone's routing domain (#10917).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

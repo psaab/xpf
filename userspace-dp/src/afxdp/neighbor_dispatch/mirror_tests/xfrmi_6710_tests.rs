@@ -61,6 +61,7 @@ fn lan_to_xfrmi_timeout_does_not_arm_the_dead_host_cache_6710() {
                     options: 0,
                 },
                 meta,
+                fabric_ingress_zone: None,
                 decision: resolved_neighbor_decision(next_hop),
                 flow_key: Some(test_session_key(12345, 443)),
                 queued_ns: 0,

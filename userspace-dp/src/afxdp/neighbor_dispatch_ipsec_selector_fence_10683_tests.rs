@@ -92,6 +92,7 @@ fn retry_pending_neighbor_rechecks_selector_after_nat_10683() {
                 options: 0,
             },
             meta,
+            fabric_ingress_zone: None,
             decision,
             flow_key: None,
             queued_ns,

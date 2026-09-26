@@ -577,19 +577,14 @@ pub(super) fn retry_pending_neigh(
             // is every fragment (#2344). The buffered `flow_key` is NOT a safe
             // substitute: a parked first fragment carries the meta-fallback key
             // (`parse_session_flow_from_meta`), which stamps `routing_domain: 0`,
-            // while its inline sibling keys under the tenant's domain — preferring
-            // the buffered value would miss the overlap in any multi-domain
-            // deployment. Real flows need no preference either: stage 9b stamped
-            // their domain from this same expression. No fabric zone override is
-            // available at retry (`PendingNeighPacket` carries no fabric stamp):
-            // a fabric-ingress fragment that parks keys here under the fabric
-            // link's domain rather than its encoded zone's, a known residual for
-            // that corner only.
+            // while its inline sibling may key under the ingress domain. The
+            // validated fabric stamp is carried separately from stage 9 so this
+            // retry derives the encoded zone's domain instead of the fabric link's.
             okey.routing_domain = crate::afxdp::forwarding::ingress_routing_domain(
                 forwarding,
                 pkt.meta.ingress_ifindex as i32,
                 pkt.meta.ingress_vlan_id,
-                None,
+                pkt.fabric_ingress_zone,
             );
             let mut pre_overlap = forwarding
                 .nat64
