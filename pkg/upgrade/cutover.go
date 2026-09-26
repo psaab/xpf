@@ -367,6 +367,11 @@ func (r *Runner) Run(opts Options) (err error) {
 				// re-enter fresh for the new staged version.
 				j = &Journal{State: StateInit}
 			} else {
+				// The stale cut reached a verified healthy start; persist its
+				// predecessor before GC and journal cleanup.
+				if err := r.stampCommittedVersion(j); err != nil {
+					return fmt.Errorf("commit stale version %s: %w", j.TargetVersion, err)
+				}
 				// Stale cut healthy: commit it (GC) then start fresh.
 				if err := r.gc(j); err != nil {
 					r.logf("upgrade: WARN gc of finished stale cut failed: %v", err)
@@ -536,9 +541,13 @@ func (r *Runner) Run(opts Options) (err error) {
 		}
 	}
 
-	// Idempotent no-op: target already live and committed.
+	// Idempotent no-op: target already live and committed. Backfill the
+	// commit record too, covering a crash from a pre-record COMMITTED journal.
 	if j.State == StateCommitted {
 		r.logf("upgrade: version %s already committed; nothing to do", j.TargetVersion)
+		if err := r.stampCommittedVersion(j); err != nil {
+			return fmt.Errorf("persist commit record for resumed version %s: %w", j.TargetVersion, err)
+		}
 		return r.clearJournal()
 	}
 
@@ -810,7 +819,12 @@ func (r *Runner) Run(opts Options) (err error) {
 		}
 	}
 
-	// ---- COMMIT (GC) ----
+	// ---- COMMIT ----
+	// Persist the commit/predecessor record before GC so retention ranks
+	// versions by committed history rather than mutable directory mtimes.
+	if err := r.stampCommittedVersion(j); err != nil {
+		return fmt.Errorf("commit version %s: %w", j.TargetVersion, err)
+	}
 	if err := r.gc(j); err != nil {
 		// GC failure is non-fatal to the cut-over (the new version is live
 		// and healthy); log and proceed.
@@ -1092,6 +1106,16 @@ func (r *Runner) copyStaged(j *Journal) error {
 		}
 	}
 
+	// An existing non-live target is no longer a committed rollback candidate
+	// once a new cut starts using its version tag. Persist this before either
+	// accepting an identical-source resume or replacing the tree, so a failed
+	// cut cannot inherit the old commit stamp.
+	if _, err := os.Stat(dst); err == nil && ver != j.PreviousVersion {
+		if err := r.stampInFlightVersion(ver); err != nil {
+			return fmt.Errorf("mark version %s non-committed before copy: %w", ver, err)
+		}
+	}
+
 	// Resume / same-version replacement decision (B-P3b OPT1).
 	if _, err := os.Stat(dst); err == nil {
 		existingGen, gerr := r.readSrcGen(ver)
@@ -1161,10 +1185,19 @@ func (r *Runner) copyStaged(j *Journal) error {
 		_ = os.RemoveAll(partial)
 		return fmt.Errorf("partial checksum mismatch (copy corrupted)")
 	}
+	// Include a non-committed marker in the atomic directory rename. A crash
+	// after COPY but before COMMIT must never make this target eligible for a
+	// later default rollback.
+	if ver != j.PreviousVersion {
+		if werr := r.writeCommitStampTo(partial, committedStamp{Version: ver}); werr != nil {
+			_ = os.RemoveAll(partial)
+			return fmt.Errorf("mark copied version %s non-committed: %w", ver, werr)
+		}
+	}
 	// Stamp the source generation INSIDE the partial (B-P3b OPT1) so it lands
-	// atomically with the version dir and GC removes it with the dir. Skip the
-	// stamp on the legacy path (empty SourceGeneration) so a pre-B dir stays
-	// stamp-free and is recognized as legacy on a later resume.
+	// atomically with the version dir. Skip the stamp on the legacy path (empty
+	// SourceGeneration) so a pre-B dir stays stamp-free and is recognized as
+	// legacy on a later resume.
 	if j.SourceGeneration != "" {
 		stampPath := filepath.Join(partial, stagedgen.SrcGenFile)
 		if werr := fsatomic.WriteFileDurable(stampPath, []byte(j.SourceGeneration+"\n"), 0o644); werr != nil {

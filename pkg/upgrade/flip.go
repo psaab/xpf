@@ -485,8 +485,10 @@ func (r *Runner) gc(j *Journal) error {
 	}
 
 	type vdir struct {
-		name string
-		mod  int64
+		name   string
+		mod    int64
+		stamp  *committedStamp
+		record bool
 	}
 	var versions []vdir
 	for _, e := range entries {
@@ -505,10 +507,47 @@ func (r *Runner) gc(j *Journal) error {
 		if ierr != nil {
 			continue
 		}
-		versions = append(versions, vdir{name: n, mod: info.ModTime().UnixNano()})
+		stamp, record := r.readCommittedStamp(n)
+		versions = append(versions, vdir{name: n, mod: info.ModTime().UnixNano(), stamp: stamp, record: record})
 	}
-	// Newest first.
-	sort.Slice(versions, func(i, j int) bool { return versions[i].mod > versions[j].mod })
+	// Committed history is authoritative; mutable directory mtime is only a
+	// tie-break among records (or the explicitly warned legacy/failed groups).
+	rank := func(v vdir) int {
+		if v.record && v.stamp != nil && v.stamp.Committed {
+			return 2
+		}
+		if !v.record {
+			return 1 // legacy version with no history record
+		}
+		return 0 // known in-flight/failed or unreadable/corrupt record
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		ri, rj := rank(versions[i]), rank(versions[j])
+		if ri != rj {
+			return ri > rj
+		}
+		if ri == 2 && versions[i].stamp.CommittedAtUnixNano != versions[j].stamp.CommittedAtUnixNano {
+			return versions[i].stamp.CommittedAtUnixNano > versions[j].stamp.CommittedAtUnixNano
+		}
+		if versions[i].mod != versions[j].mod {
+			return versions[i].mod > versions[j].mod
+		}
+		return versions[i].name < versions[j].name
+	})
+	var ordering []string
+	for _, v := range versions {
+		switch rank(v) {
+		case 2:
+			ordering = append(ordering, fmt.Sprintf("%s(commit=%d mtime=%d)", v.name, v.stamp.CommittedAtUnixNano, v.mod))
+		case 1:
+			ordering = append(ordering, fmt.Sprintf("%s(legacy mtime=%d)", v.name, v.mod))
+		default:
+			ordering = append(ordering, fmt.Sprintf("%s(non-committed mtime=%d)", v.name, v.mod))
+		}
+	}
+	if len(versions) > 0 {
+		r.logf("upgrade: gc version order (committed time first; mtime tie-break/legacy fallback): %s", strings.Join(ordering, ", "))
+	}
 
 	kept := 0
 	for _, v := range versions {
