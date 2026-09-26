@@ -8700,10 +8700,12 @@ func (x *ShowTextRequest) GetFilter() string {
 }
 
 type ShowTextResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Output        string                 `protobuf:"bytes,1,opt,name=output,proto3" json:"output,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Output string                 `protobuf:"bytes,1,opt,name=output,proto3" json:"output,omitempty"`
+	// Present for "chassis-forwarding" when the responder has a cluster node ID.
+	ResponderNodeId *int32 `protobuf:"varint,2,opt,name=responder_node_id,json=responderNodeId,proto3,oneof" json:"responder_node_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ShowTextResponse) Reset() {
@@ -8741,6 +8743,13 @@ func (x *ShowTextResponse) GetOutput() string {
 		return x.Output
 	}
 	return ""
+}
+
+func (x *ShowTextResponse) GetResponderNodeId() int32 {
+	if x != nil && x.ResponderNodeId != nil {
+		return *x.ResponderNodeId
+	}
+	return 0
 }
 
 type GetSystemInfoRequest struct {
@@ -10046,9 +10055,11 @@ const file_xpf_proto_rawDesc = "" +
 	"\fdescriptions\x18\x02 \x03(\tR\fdescriptions\"?\n" +
 	"\x0fShowTextRequest\x12\x14\n" +
 	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x16\n" +
-	"\x06filter\x18\x02 \x01(\tR\x06filter\"*\n" +
+	"\x06filter\x18\x02 \x01(\tR\x06filter\"q\n" +
 	"\x10ShowTextResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"*\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\x12/\n" +
+	"\x11responder_node_id\x18\x02 \x01(\x05H\x00R\x0fresponderNodeId\x88\x01\x01B\x14\n" +
+	"\x12_responder_node_id\"*\n" +
 	"\x14GetSystemInfoRequest\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\"/\n" +
 	"\x15GetSystemInfoResponse\x12\x16\n" +
@@ -10511,6 +10522,7 @@ func file_xpf_proto_init() {
 	file_xpf_proto_msgTypes[46].OneofWrappers = []any{}
 	file_xpf_proto_msgTypes[106].OneofWrappers = []any{}
 	file_xpf_proto_msgTypes[107].OneofWrappers = []any{}
+	file_xpf_proto_msgTypes[117].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

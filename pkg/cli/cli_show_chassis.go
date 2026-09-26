@@ -34,18 +34,35 @@ func (c *CLI) showChassisForwarding() error {
 	fmt.Printf("node%d:\n%s\n%s",
 		localNodeID, chassisForwardingSeparator, localBuf)
 
-	peerBuf, peerErr := c.dialAndShowForwarding()
-	peerLabel := "node?"
-	if c.cluster.PeerAlive() {
-		peerLabel = fmt.Sprintf("node%d", c.cluster.PeerNodeID())
+	peerResp, peerErr := c.dialAndShowForwarding()
+	peerAlive := c.cluster.PeerAlive()
+	expectedPeerNodeID := 0
+	if peerAlive {
+		expectedPeerNodeID = c.cluster.PeerNodeID()
 	}
+	var responderNodeID *int32
+	if peerResp != nil {
+		responderNodeID = peerResp.ResponderNodeId
+	}
+	peerLabel := chassisForwardingPeerLabel(responderNodeID, peerAlive, expectedPeerNodeID)
 	fmt.Printf("\n%s:\n%s\n", peerLabel, chassisForwardingSeparator)
 	if peerErr != nil {
 		fmt.Printf("FWDD status:\n  (peer unreachable: %s)\n", peerErr)
-	} else {
-		fmt.Print(peerBuf)
+	} else if peerResp != nil {
+		fmt.Print(peerResp.Output)
 	}
 	return nil
+}
+
+func chassisForwardingPeerLabel(responderNodeID *int32, peerAlive bool, expectedPeerNodeID int) string {
+	if responderNodeID == nil {
+		return "node?"
+	}
+	label := fmt.Sprintf("node%d", *responderNodeID)
+	if peerAlive && int(*responderNodeID) != expectedPeerNodeID {
+		return fmt.Sprintf("%s (identity mismatch: expected node%d)", label, expectedPeerNodeID)
+	}
+	return label
 }
 
 const chassisForwardingSeparator = "--------------------------------------------------------------------------"
@@ -152,10 +169,10 @@ func (c *CLI) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 
 // dialAndShowForwarding queries the cluster peer for its single-node
 // FWDD-status block.  Injects xpf-no-peer:1 to prevent recursion.
-func (c *CLI) dialAndShowForwarding() (string, error) {
+func (c *CLI) dialAndShowForwarding() (*pb.ShowTextResponse, error) {
 	conn := c.dialPeer()
 	if conn == nil {
-		return "", fmt.Errorf("cluster peer not reachable")
+		return nil, fmt.Errorf("cluster peer not reachable")
 	}
 	defer conn.Close()
 	client := pb.NewBpfrxServiceClient(conn)
@@ -164,7 +181,7 @@ func (c *CLI) dialAndShowForwarding() (string, error) {
 	ctx = metadata.AppendToOutgoingContext(ctx, "xpf-no-peer", "1")
 	resp, err := client.ShowText(ctx, &pb.ShowTextRequest{Topic: "chassis-forwarding"})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resp.Output, nil
+	return resp, nil
 }
