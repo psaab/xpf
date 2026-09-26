@@ -23,8 +23,9 @@ out-of-range value to a warning.
   success/fail counters).
 - `Event` — `rpm.go`. `test_failed`, `probe_failed`, `test_completed`.
 - `Transition` — `rpm.go`. Per-test pass/fail status transition with a
-  current-state results snapshot (#1827 — sensor input for
-  `pkg/ipmon`).
+  current-state results snapshot and manager-local increasing generation
+  (#1827). The generation orders snapshots from concurrent test goroutines
+  for `pkg/ipmon`, which ignores callbacks older than one already accepted.
 - `New()` — `rpm.go`.
 - `Apply(ctx context.Context, cfg *config.RPMConfig)` — `rpm.go`.
 - `StopAll()` — `rpm.go`.
@@ -75,9 +76,15 @@ out-of-range value to a warning.
   test's runtime state forward when `probeMeasurementIdentity` — probe
   type, target, source, routing-instance, next-hop, and the destination
   interface AFTER RETH translation — is unchanged. A new test, a
-  retargeted one, or one whose path moved correctly keeps `"unknown"`;
+  retargeted one, or one whose path moved correctly starts as `"unknown"`;
   a key the config dropped stays ABSENT, which ip-monitoring needs to
   keep distinct so it can clear a stale FAIL (#4423 M8).
+  **Operator tradeoff:** a changed measurement identity is a revalidation
+  boundary: the prior FAIL is deliberately not carried onto a different path.
+  With `hold-down` 0, ip-monitoring can withdraw the old failover overlay while
+  the new path is being probed; a fresh FAIL on that path reinjects it. This
+  favors avoiding a stale FAIL on an unmeasured path over preserving failover
+  until the new measurement is validated.
 - The identity is a resolved PATH, deliberately not the fwmark:
   `routing.BuildProbePins` assigns `ProbeFwmarkBase + idx` over sorted
   probe/test names, so the mark is a POSITION in the pin band — it does
@@ -123,7 +130,7 @@ out-of-range value to a warning.
   (`Apply` builds it as `context.WithCancel`; `m.cancel()` cancels it).
   A probe interrupted mid-flight by that cancel is NEUTRAL to path
   health — `runSingleTest` returns before touching counters, the
-  successive-loss threshold, events, or `fireTransition`, so
+  successive-loss threshold, events, or the per-test transition callback, so
   ip-monitoring never remediates routes DURING teardown/reconfigure. The
   discriminator is the SHARED `ctx.Err()`, NOT the returned error's type:
   a genuine probe TIMEOUT is a per-probe SOCKET deadline (icmp

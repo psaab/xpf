@@ -2,7 +2,7 @@
 // probe context (StopAll / config replacement / daemon shutdown) that interrupts
 // an in-flight probe must be NEUTRAL to path health — no counters, no
 // successive-loss advance, no ping_probe_failed / ping_test_failed event, no
-// fireTransition — so services ip-monitoring never remediates routes during
+// per-test transition callback — so services ip-monitoring never remediates routes during
 // teardown/reconfigure. A GENUINE probe timeout/failure (the shared context NOT
 // cancelled) must still count as path loss, so real remediation is unaffected.
 package rpm
@@ -37,7 +37,7 @@ func seedPassingResult(m *Manager) {
 // Fail-on-revert: remove the `ctx.Err() != nil` neutral check and the cancelled
 // probe is counted as a failure — TotalSent/SuccFail advance, ping_probe_failed
 // fires, and (threshold 1, probeCount 1) the loss threshold trips → status flips
-// pass→fail → ping_test_failed + fireTransition (route remediation at teardown).
+// pass→fail → ping_test_failed + the transition callback (route remediation at teardown).
 func TestRunSingleTestLifecycleCancelIsNeutral5852(t *testing.T) {
 	m := New()
 
