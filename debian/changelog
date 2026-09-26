@@ -31,5 +31,7 @@ xpf (0.0.0) unstable; urgency=medium
     gRPC cluster status (#10844).
   * Resolve default upgrade rollback targets and version GC from persisted
     committed predecessor history, excluding failed cuts (#10851).
+  * Drop NAT64 IPv6 fragments whose Fragment Header names an extension header,
+    preserving translated reassembly geometry (#10860).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
