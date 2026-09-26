@@ -256,13 +256,14 @@ FRR DHCP default route; see the RFC 2131 coupling rule in
   The actuator returns `true` on a consistent, converged actuation and
   `false` to keep the state dirty for an autonomous retry (#3757).
 - `Apply(cfg, results)` — install committed policies, preserving FAIL
-  state for surviving (name, probe) pairs. `results` is a full
-  authoritative snapshot; a nil snapshot is treated identically to an
-  empty one — it resets known test state to UNKNOWN rather than carrying
-  a stale FAIL forward (#4423 M8). The daemon always passes a non-nil
-  slice (`rpm.Results()`), so nil only reaches a direct package caller.
+  state for surviving (name, probe) pairs. A non-nil `results` slice is a
+  full authoritative snapshot, including a non-nil empty slice that clears
+  known test state. A nil slice means no snapshot is available and preserves
+  the last known state; it must not be used to represent authoritative-empty.
 - `HandleTransition(rpm.Transition)` — the sensor input (wired to
-  `rpm.Manager.SetTransitionCallback`).
+  `rpm.Manager.SetTransitionCallback`). RPM supplies an authoritative,
+  non-nil results snapshot; the transition itself is still applied if a
+  caller omits that snapshot.
 - `SetNextHopResolver(NextHopResolver)` (before `Start`; mu-guarded so a
   late call cannot race the run loop's resolver read, #4423 L) and
   `NotifyNextHopChange()` — the #1844 DHCP next-hop seam (above).

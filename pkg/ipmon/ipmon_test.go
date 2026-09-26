@@ -766,14 +766,10 @@ func TestApplyPreservesFailedStateAcrossCommit(t *testing.T) {
 	}
 }
 
-// TestApplyNilResultsClearsStaleFailState is the #4423 M8 regression:
-// seedResultsLocked must treat a nil results snapshot as an EMPTY one
-// (clear all test state) rather than preserving a stale FAIL. A caller
-// with no probe data must not keep a policy FAILED — and its failover
-// route injected — off results it no longer has. On revert (the
-// `if results == nil { return }` early-return) the FAIL and the overlay
-// survive the nil-results apply and all three assertions go RED.
-func TestApplyNilResultsClearsStaleFailState(t *testing.T) {
+// TestApplyNilResultsPreservesFailedStateButEmptyClears verifies the
+// distinction between an unavailable snapshot (nil) and an authoritative
+// empty snapshot. Lost results must not silently recover a live FAILED policy.
+func TestApplyNilResultsPreservesFailedStateButEmptyClears(t *testing.T) {
 	e, _ := newTestEngine(nil)
 	e.Apply(testPolicyConfig(), passResults())
 	e.HandleTransition(transition("WAN", "wan-a", "fail", passResults()))
@@ -784,28 +780,30 @@ func TestApplyNilResultsClearsStaleFailState(t *testing.T) {
 		t.Fatal("setup: no overlay after failure")
 	}
 
-	// Re-apply the same policy set with NO results snapshot (nil).
+	// Missing results are not an authoritative statement that all probes
+	// recovered; preserve the known failure and its failover route.
 	e.Apply(testPolicyConfig(), nil)
-	if e.Status()[0].Failed {
-		t.Fatal("stale FAIL preserved across Apply(cfg, nil) — M8 regression")
+	if !e.Status()[0].Failed {
+		t.Fatal("nil results cleared the live FAILED state")
 	}
-	if got := e.ActiveOverlay(); got != nil {
-		t.Fatalf("overlay = %+v after nil-results apply, want withdrawn", got)
+	if got := e.ActiveOverlay(); len(got) == 0 {
+		t.Fatal("nil results withdrew the failover overlay")
 	}
-	if e.Status()[0].Known {
-		t.Fatal("policy still reported Known after results reset to nil/empty")
+	if !e.Status()[0].Known {
+		t.Fatal("policy became UNKNOWN despite its preserved failed test")
 	}
 
-	// nil and empty-slice snapshots are equivalent: an empty snapshot
-	// already cleared today, and nil must match.
-	e.Apply(testPolicyConfig(), passResults())
-	e.HandleTransition(transition("WAN", "wan-a", "fail", passResults()))
-	if !e.Status()[0].Failed {
-		t.Fatal("setup: re-fail did not take")
-	}
+	// A non-nil empty slice explicitly says there are no current results,
+	// so it clears the old test state and recovers the policy.
 	e.Apply(testPolicyConfig(), []*rpm.ProbeResult{})
 	if e.Status()[0].Failed {
-		t.Fatal("empty-slice snapshot did not clear FAIL")
+		t.Fatal("authoritative empty results did not clear FAIL")
+	}
+	if got := e.ActiveOverlay(); got != nil {
+		t.Fatalf("overlay = %+v after authoritative empty results, want withdrawn", got)
+	}
+	if e.Status()[0].Known {
+		t.Fatal("policy still reported Known after authoritative empty results")
 	}
 }
 
