@@ -548,15 +548,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         continue;
                     }
                 }
-                // #946 Phase 1 stage 7+8: parse session flow and
-                // learn the source-side dynamic neighbor.
+                // #946 Phase 1 stage 7+8: parse session flow and perform the
+                // pre-policy source-side neighbor learn. That learn is
+                // create-only for an existing binding; the overwrite-capable
+                // source-MAC update runs only after the packet's admission
+                // path succeeds below.
                 // `learn_from_live_frame` MUST be
                 // `owned_packet_frame.is_none()` — preserves the
-                // GRE guard at the original line 113 (neighbor
-                // learning uses the live UMEM Ethernet frame so
-                // the source MAC is the outer host's, not the
-                // GRE tunnel egress).
-                // #10597: `!is_injected &&` — injected frames reuse the synthetic slice.
+                // GRE guard at the original line 113 (neighbor learning uses
+                // the live UMEM Ethernet frame, so the source MAC is the
+                // outer host's and not the GRE tunnel egress).
                 let mut flow = stage_parse_flow_and_learn(
                     // SAFETY: per the `area` contract in this
                     // function's header comment.
@@ -1239,6 +1240,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         now_ns,
                         now_secs,
                         worker_ctx,
+                        &mut binding.last_learned_neighbor,
                         telemetry,
                     ) {
                         FlowCacheOutcome::Consumed => continue,
@@ -6576,6 +6578,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     if decision.nat.nat64 {
                         telemetry.counters.nat64_translations += 1;
                     }
+                    let packet_source_mac: Option<[u8; 6]> = packet_frame
+                        .get(6..12)
+                        .and_then(|bytes| bytes.try_into().ok());
                     if let Some(mut request) = build_live_forward_request_from_frame(
                         worker_ctx.binding_lookup,
                         binding_index,
@@ -6624,6 +6629,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let filter_match_extra =
                             crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta)
                                 .to_static();
+                        // The request exists only after the admitted flow passed
+                        // policy and output-filter checks. Learn from the live
+                        // source frame here, before an owned tunnel frame can
+                        // replace it in the pending request.
+                        if !is_injected
+                            && owned_packet_frame.is_none()
+                            && let Some(flow) = flow.as_ref()
+                            && let Some(src_mac) = packet_source_mac
+                        {
+                            learn_dynamic_neighbor_after_admission(
+                                meta,
+                                flow.src_ip,
+                                src_mac,
+                                &mut binding.last_learned_neighbor,
+                                worker_ctx.forwarding,
+                                worker_ctx.dynamic_neighbors,
+                            );
+                        }
                         request.frame = owned_packet_frame
                             .take()
                             .map(PendingForwardFrame::Owned)

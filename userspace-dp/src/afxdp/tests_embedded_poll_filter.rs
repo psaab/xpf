@@ -9295,3 +9295,170 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
     assert_eq!(telemetry.dbg.policy_deny, 0);
     assert!(event_rx.try_recv().is_err(), "RELATED admission emits no deny");
 }
+/// #10854: a transit-source RX learn runs before screen/policy and may not
+/// overwrite a live IPv6 neighbor. A denied spoof stays unchanged; an
+/// otherwise identical permitted packet moves the MAC after admission.
+#[test]
+fn rx_source_learn_cannot_pre_policy_overwrite_live_v6_neighbor() {
+    let source: Ipv6Addr = "2001:559:8585:ef00::100".parse().expect("source");
+    let destination: Ipv6Addr = "2606:4700:4700::1111".parse().expect("destination");
+    let old_mac = [0x02, 0, 0, 0, 0, 1];
+    let packet_mac = [0x02, 0, 0, 0, 0, 2];
+
+    for (policy_action, admitted) in [("deny", false), ("permit", true)] {
+        let mut snapshot = nat_snapshot();
+        snapshot.default_policy = "deny".to_string();
+        snapshot.policies[0].action = policy_action.to_string();
+        for interface in &mut snapshot.interfaces {
+            interface.redundancy_group = 0;
+        }
+        let forwarding = build_forwarding_state(&snapshot);
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut frame = build_txn_tcp_frame_v6(
+            source,
+            destination,
+            12345,
+            443,
+            TCP_FLAG_SYN,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        frame[6..12].copy_from_slice(&packet_mac);
+        let meta = txn_meta_v6(24, frame.len());
+        let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+        let frame_offset = 128;
+        let meta_offset = frame_offset - meta_len;
+        let meta_bytes = unsafe {
+            std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+        };
+        unsafe {
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(meta_offset, meta_len)
+                .expect("meta slice")
+                .copy_from_slice(meta_bytes);
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(frame_offset, frame.len())
+                .expect("frame slice")
+                .copy_from_slice(&frame);
+        }
+        binding.xsk.rx.push_for_test(XdpDesc {
+            addr: frame_offset as u64,
+            len: frame.len() as u32,
+            options: 0,
+        });
+
+        let ident = binding.identity();
+        let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
+        let mirror_targets = MirrorTargetMap::default();
+        let ha_state = BTreeMap::new();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+        let neighbor_key = (24, IpAddr::V6(source));
+        dynamic_neighbors.insert(neighbor_key, NeighborEntry { mac: old_mac });
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+        let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+        let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+        let last_resolution = Arc::new(Mutex::new(None));
+        let peer_worker_commands = Vec::new();
+        let dnat_fds = DnatTableFds::default();
+        let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+        let pptp_control = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+        let worker_ctx = WorkerContext {
+            pptp_control: &pptp_control,
+            ident: &ident,
+            binding_lookup: &binding_lookup,
+            mirror_targets: &mirror_targets,
+            forwarding: &forwarding,
+            ha_state: &ha_state,
+            dynamic_neighbors: &dynamic_neighbors,
+            neighbor_resolver: None,
+            shared_sessions: &shared_sessions,
+            shared_nat_sessions: &shared_nat_sessions,
+            shared_forward_wire_sessions: &shared_forward_wire_sessions,
+            shared_owner_rg_indexes: &shared_owner_rg_indexes,
+            ike_exchanges: &ike_exchanges,
+            slow_path: None,
+            event_stream: None,
+            local_tunnel_deliveries: &local_tunnel_deliveries,
+            recent_exceptions: &recent_exceptions,
+            last_resolution: &last_resolution,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+            dnat_fds: &dnat_fds,
+            rg_epochs: &rg_epochs,
+            cold_path_sample_mask: 0xff,
+        };
+        let mut sessions = SessionTable::new();
+        let mut screen = ScreenState::new();
+        let mut batch = BatchCounters::default();
+        let mut dbg = DebugPollCounters::default();
+        let mut telemetry = TelemetryContext {
+            dbg: &mut dbg,
+            counters: &mut batch,
+        };
+        let area_ptr = binding.umem.area() as *const MmapArea;
+
+        poll_binding_process_descriptor(
+            &mut binding,
+            0,
+            area_ptr,
+            1,
+            &mut sessions,
+            &mut screen,
+            ValidationState {
+                snapshot_installed: true,
+                config_generation: 7,
+                fib_generation: 9,
+            },
+            123_000_000_000,
+            123,
+            0,
+            0,
+            -1,
+            -1,
+            &worker_ctx,
+            &mut telemetry,
+        );
+
+        assert_eq!(
+            dynamic_neighbors.get(&neighbor_key).map(|entry| entry.mac),
+            Some(if admitted { packet_mac } else { old_mac }),
+            "{policy_action} policy rule must determine whether the live IPv6 \
+             neighbor can move from the packet's source MAC",
+        );
+        assert_eq!(
+            dynamic_neighbors.rx_learn_overwrite_refusals(),
+            1,
+            "the pre-policy source learn must refuse and count the live-MAC \
+             overwrite in both verdict cells",
+        );
+        assert_eq!(
+            dynamic_neighbors.mac_change_epoch_for(&neighbor_key),
+            if admitted { 1 } else { 0 },
+            "only an admitted post-policy MAC move invalidates cached neighbors",
+        );
+        if admitted {
+            assert_eq!(
+                binding.scratch.scratch_forwards.len(),
+                1,
+                "permitted packet must reach the forwarding admission path",
+            );
+        } else {
+            assert!(
+                binding.scratch.scratch_forwards.is_empty(),
+                "policy-denied spoof must not enqueue a forwarded packet",
+            );
+            assert!(
+                telemetry.dbg.policy_deny > 0,
+                "denied cell must exercise the actual zone-policy denial",
+            );
+        }
+    }
+}

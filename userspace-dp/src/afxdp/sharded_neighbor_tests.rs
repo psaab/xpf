@@ -568,6 +568,30 @@ fn mac_change_epoch_rx_learn_bumps_on_mac_change() {
 }
 
 #[test]
+fn pre_policy_rx_learn_refuses_live_mac_and_counts_overwrite() {
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    map.learn_pair_if_changed(&[k], entry(0xAB));
+    let epoch = map.mac_change_epoch_for(&k);
+    let generation = map.insert_generation();
+
+    assert!(
+        !map.learn_pair_if_absent_or_same(&[k], entry(0xCD)),
+        "pre-policy source learn must refuse a live differing MAC",
+    );
+    assert_eq!(map.get(&k), Some(entry(0xAB)));
+    assert_eq!(map.mac_change_epoch_for(&k), epoch);
+    assert_eq!(map.insert_generation(), generation);
+    assert_eq!(map.rx_learn_overwrite_refusals(), 1);
+
+    // The post-admission learn keeps failover convergence: a permitted
+    // source MAC move still uses the existing overwrite-capable pair writer.
+    map.learn_pair_if_changed(&[k], entry(0xCD));
+    assert_eq!(map.get(&k), Some(entry(0xCD)));
+    assert_eq!(map.mac_change_epoch_for(&k), epoch + 1);
+}
+
+#[test]
 fn mac_change_epoch_rx_learn_pair_bumps_each_key_shard() {
     let map = ShardedNeighborMap::new();
     // #5147: the #949 pair-write installs the same MAC under the physical

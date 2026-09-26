@@ -890,30 +890,92 @@ pub(super) fn learn_dynamic_neighbor_from_packet(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
 ) {
+    learn_dynamic_neighbor_from_frame(
+        area,
+        desc,
+        meta,
+        src_ip,
+        last_learned_neighbor,
+        forwarding,
+        dynamic_neighbors,
+        false,
+    );
+}
+
+/// Learn a packet's source MAC after its packet has passed screen, zone
+/// policy, and the forwarding-request admission path. Unlike the pre-policy
+/// RX learn, this leg may replace an existing MAC so an admitted genuine host
+/// move converges without waiting for the kernel neighbor monitor.
+pub(super) fn learn_dynamic_neighbor_after_admission(
+    meta: UserspaceDpMeta,
+    src_ip: IpAddr,
+    src_mac: [u8; 6],
+    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+) {
+    learn_dynamic_neighbor_with_mac(
+        meta,
+        src_ip,
+        src_mac,
+        last_learned_neighbor,
+        forwarding,
+        dynamic_neighbors,
+        true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn learn_dynamic_neighbor_from_frame(
+    area: &MmapArea,
+    desc: XdpDesc,
+    meta: UserspaceDpMeta,
+    src_ip: IpAddr,
+    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    allow_mac_change: bool,
+) {
     let Some(frame) = area.slice(desc.addr as usize, desc.len as usize) else {
         return;
     };
     if frame.len() < 12 {
         return;
     }
-    // #3075: skip learning xpf's own synthetic fabric-zone-encoded src MAC
-    // (02:bf:72:fe:HI:LO, where HI:LO is the big-endian u16 zone id). The
-    // discriminator is the 02:bf:72 OUI + the FABRIC_ZONE_MAC_MAGIC byte; the
-    // former frame[10]==0x00 guard is dropped because the zone-id high byte may
-    // now be nonzero (ids > 255).
-    if frame[6] == 0x02
-        && frame[7] == 0xbf
-        && frame[8] == 0x72
-        && frame[9] == FABRIC_ZONE_MAC_MAGIC
+    let mut src_mac = [0u8; 6];
+    src_mac.copy_from_slice(&frame[6..12]);
+    learn_dynamic_neighbor_with_mac(
+        meta,
+        src_ip,
+        src_mac,
+        last_learned_neighbor,
+        forwarding,
+        dynamic_neighbors,
+        allow_mac_change,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn learn_dynamic_neighbor_with_mac(
+    meta: UserspaceDpMeta,
+    src_ip: IpAddr,
+    src_mac: [u8; 6],
+    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    allow_mac_change: bool,
+) {
+    // #3075: skip xpf's own synthetic fabric-zone-encoded source MAC
+    // (02:bf:72:fe:HI:LO). A forwarded, admitted fabric frame reaches this
+    // leg too, so keep the guard in the shared MAC path rather than only the
+    // pre-policy frame extractor.
+    if src_mac[0] == 0x02
+        && src_mac[1] == 0xbf
+        && src_mac[2] == 0x72
+        && src_mac[3] == FABRIC_ZONE_MAC_MAGIC
     {
         return;
     }
-    let mut src_mac = [0u8; 6];
-    src_mac.copy_from_slice(&frame[6..12]);
-    // #9115: routed through the shared predicate rather than spelled inline.
-    // This test existed HERE and nowhere else, while the ARP-reply and NDP-NA
-    // learn arms in poll_stages.rs had none — a shared name is what keeps the
-    // three from drifting again.
     if !crate::afxdp::frame::neighbor_mac_is_learnable(src_mac) {
         return;
     }
@@ -926,16 +988,39 @@ pub(super) fn learn_dynamic_neighbor_from_packet(
     if last_learned_neighbor.as_ref() == Some(&learned) {
         return;
     }
-    learn_dynamic_neighbor(
+    if learn_dynamic_neighbor_with_mode(
         forwarding,
         dynamic_neighbors,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
         src_ip,
         src_mac,
-    );
-    *last_learned_neighbor = Some(learned);
+        allow_mac_change,
+    ) {
+        *last_learned_neighbor = Some(learned);
+    }
 }
+
+
+pub(super) fn learn_dynamic_neighbor(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    src_ip: IpAddr,
+    src_mac: [u8; 6],
+) {
+    let _ = learn_dynamic_neighbor_with_mode(
+        forwarding,
+        dynamic_neighbors,
+        ingress_ifindex,
+        ingress_vlan_id,
+        src_ip,
+        src_mac,
+        true,
+    );
+}
+
 
 /// #1787: pure decision helper for the cheap-first RX learn pre-check.
 /// `current` holds the pre-read MAC (or `None` on miss) for each
@@ -948,14 +1033,15 @@ pub(super) fn pair_write_needed(current: &[Option<[u8; 6]>], src_mac: [u8; 6]) -
     current.iter().any(|mac| *mac != Some(src_mac))
 }
 
-pub(super) fn learn_dynamic_neighbor(
+fn learn_dynamic_neighbor_with_mode(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
     src_ip: IpAddr,
     src_mac: [u8; 6],
-) {
+    allow_mac_change: bool,
+) -> bool {
     // #4889: illegitimate source-IP CLASS gate on the #1787 RX source-MAC
     // learn path, mirroring the #2790 unicast-only gate the ARP-reply and
     // NDP-NA learn arms already apply in poll_stages.rs. Unlike those L2
@@ -976,7 +1062,7 @@ pub(super) fn learn_dynamic_neighbor(
     // do-not-learn only — the packet still forwards; this is a learn-path
     // guard, not a packet filter.
     if !neighbor_ip_is_learnable(src_ip) {
-        return;
+        return false;
     }
     // #3182: anti-poisoning own-IP gate on the #1787 RX source-MAC learn
     // path, mirroring the #2851 ARP/NDP gate in poll_stages.rs. An attacker
@@ -990,7 +1076,7 @@ pub(super) fn learn_dynamic_neighbor(
     // neither caches nor bumps `mac_change_epoch` (#3048/#3169). Genuine
     // non-own neighbors are unaffected.
     if forwarding.owns_configured_ip(src_ip) {
-        return;
+        return false;
     }
     // #1787: stack array, no per-packet heap alloc. At most 2 keys:
     // the physical ingress ifindex plus the resolved logical (VLAN
@@ -1019,16 +1105,14 @@ pub(super) fn learn_dynamic_neighbor(
     // that REACHES this function pre-check-misses and re-learns via
     // the bulk path below.
     //
-    // Dedup window: the caller sets the per-binding
-    // last_learned_neighbor dedup after this returns (including after
-    // an elided no-op), so identical follow-up packets may not reach
-    // this function until the dedup key changes. That dedup-delayed
-    // re-learn is PRE-EXISTING behavior — a write also set the dedup,
-    // so a remove landing after the write was equally suppressed.
-    // Recovery comes from the same paths as before: a second source
-    // key evicting the 1-entry dedup, the ARP/NDP learn stage
-    // (poll_stages.rs), and the #1769 resolver probe on forwarding
-    // miss.
+    // Dedup window: successful or idempotent learns set the per-binding
+    // `last_learned_neighbor` key, so identical follow-up packets may not reach
+    // this function until the dedup key changes. A create-only refusal leaves
+    // the key untouched, allowing a policy-admitted MAC move to retry in the
+    // post-admission path. After a successful learn, a remove landing behind
+    // this dedup remains suppressed as before; recovery comes from a second
+    // source key evicting the 1-entry dedup, the ARP/NDP learn stage
+    // (poll_stages.rs), and the #1769 resolver probe on forwarding miss.
     let mut current: [Option<[u8; 6]>; 2] = [None, None];
     // #5673: track whether EVERY candidate key is a NEW learn whose shard is
     // already at the per-shard cap. `get_with_capacity` reads the MAC and the
@@ -1045,7 +1129,19 @@ pub(super) fn learn_dynamic_neighbor(
         }
     }
     if !pair_write_needed(&current[..n], src_mac) {
-        return;
+        return true;
+    }
+    // #10854: pre-policy source learning may create a missing entry or
+    // refresh the same MAC, but a transit packet must not replace a live
+    // binding before its screen and policy verdict. The all-shard method
+    // below repeats this guard atomically to close the precheck/write race.
+    if !allow_mac_change
+        && current[..n]
+            .iter()
+            .any(|mac| mac.is_some_and(|mac| mac != src_mac))
+    {
+        dynamic_neighbors.note_rx_learn_overwrite_refusal();
+        return false;
     }
     // #5673: pure spoofed-source flood — every candidate key is a NEW learn
     // whose shard is at the per-shard cap, so `learn_pair_if_changed` would
@@ -1057,7 +1153,7 @@ pub(super) fn learn_dynamic_neighbor(
     // cases where a shard fills between this pre-check and the bulk lock).
     if all_new_at_cap {
         dynamic_neighbors.note_learn_cap_drop();
-        return;
+        return false;
     }
     // #949: multi-ifindex insert atomically vs readers — both
     // ingress_ifindex and the resolved logical (VLAN sub-) ifindex
@@ -1072,7 +1168,12 @@ pub(super) fn learn_dynamic_neighbor(
     // until session expiry, the #3048 blackhole class. The bump fires
     // only on an actual MAC change; a first sighting or same-MAC re-learn
     // adds a single Relaxed read per key and no bump.
-    dynamic_neighbors.learn_pair_if_changed(&keys[..n], NeighborEntry { mac: src_mac });
+    if allow_mac_change {
+        dynamic_neighbors.learn_pair_if_changed(&keys[..n], NeighborEntry { mac: src_mac });
+        true
+    } else {
+        dynamic_neighbors.learn_pair_if_absent_or_same(&keys[..n], NeighborEntry { mac: src_mac })
+    }
 }
 
 pub(super) fn build_missing_neighbor_session_metadata(
