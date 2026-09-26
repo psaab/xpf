@@ -69,7 +69,9 @@ class FetchKeyRotation10767(unittest.TestCase):
         self.real_copyfile = shutil.copyfile
         self.incu_calls = []
         self.staged_names = []
+        self.aliases = {"xpf-appliance": "old-fingerprint"}
         self.alias_present = True
+        self.fail_switch = False
 
     def _keypair(self, name):
         pub, sec = self.tmp / f"{name}.pub", self.tmp / f"{name}.sec"
@@ -84,24 +86,38 @@ class FetchKeyRotation10767(unittest.TestCase):
             else:
                 os.environ[name] = value
 
-    def _args(self):
+    def _args(self, pubkey=None):
         self.out.mkdir(exist_ok=True)
         return argparse.Namespace(
             version=self.VER, image_url=self.host.as_uri(), out=str(self.out),
             alias="xpf-appliance", channel="stable", allow_rollback=False,
             allow_unvalidated=False, qcow2_only=False, install_libvirt=False,
-            no_import=False, dry_run=False, pubkey=[str(self.new_pub)])
+            no_import=False, dry_run=False,
+            pubkey=pubkey or [str(self.new_pub)])
 
     def _run(self, argv, *args, **kwargs):
         if argv and argv[0] == "incus":
             self.incu_calls.append(list(argv))
-            if argv[2] == "delete":
+            if argv[1] == "image" and argv[2] == "import":
                 self.assertCountEqual(self.staged_names,
                                       [self.names["metadata"], self.names["qcow2"]],
-                                      "existing alias was deleted before both private copies staged")
-                self.alias_present = False
-            elif argv[2] == "import":
-                self.alias_present = True
+                                      "Incus import ran before both private copies staged")
+                self.assertIn("xpf-appliance", self.aliases,
+                              "the old alias must remain during image import")
+                if self.fail_import:
+                    return subprocess.CompletedProcess(argv, 1, "", "import failed")
+                imported = argv[argv.index("--alias") + 1]
+                self.aliases[imported] = "new-fingerprint"
+            elif argv[1] == "image" and argv[2] == "alias" and argv[3] == "rename":
+                source, destination = argv[4], argv[5]
+                if (source not in self.aliases or destination in self.aliases
+                        or (self.fail_switch and source.startswith("xpf-fetch-"))):
+                    return subprocess.CompletedProcess(argv, 1, "", "alias rename failed")
+                self.aliases[destination] = self.aliases.pop(source)
+                self.alias_present = "xpf-appliance" in self.aliases
+            elif argv[1] == "image" and argv[2] == "alias" and argv[3] == "delete":
+                self.aliases.pop(argv[4], None)
+                self.alias_present = "xpf-appliance" in self.aliases
             return subprocess.CompletedProcess(argv, 0, "", "")
         return self.real_run(argv, *args, **kwargs)
 
@@ -114,9 +130,12 @@ class FetchKeyRotation10767(unittest.TestCase):
                 raise OSError(errno.ENOSPC, "No space left on device", str(dst))
         return self.real_copyfile(src, dst, *args, **kwargs)
 
-    def _fetch(self, fail_qcow_stage=False, no_import=False):
+    def _fetch(self, fail_qcow_stage=False, no_import=False, fail_import=False,
+               fail_switch=False, pubkey=None):
         self.fail_qcow_stage = fail_qcow_stage
-        args = self._args()
+        self.fail_import = fail_import
+        self.fail_switch = fail_switch
+        args = self._args(pubkey)
         args.no_import = no_import
         buf = io.StringIO()
         with mock.patch.object(subprocess, "run", side_effect=self._run), \
@@ -131,13 +150,30 @@ class FetchKeyRotation10767(unittest.TestCase):
         self.assertEqual(caught.exception.errno, errno.ENOSPC)
         self.assertTrue(self.alias_present)
         self.assertFalse(self.incu_calls,
-                         "Incus alias deletion/import must not run before staging succeeds")
+                         "Incus must not replace the alias before staging succeeds")
         self.assertEqual(self.staged_names, [self.names["metadata"], self.names["qcow2"]])
 
-    def test_successful_import_deletes_only_after_all_private_staging(self):
+    def test_successful_import_switches_alias_after_staging(self):
         rc, _ = self._fetch()
         self.assertEqual(rc, 0)
-        self.assertEqual([call[2] for call in self.incu_calls], ["delete", "import"])
+        self.assertEqual([(call[2] if call[2] == "import" else call[3])
+                         for call in self.incu_calls],
+                         ["import", "rename", "rename", "delete"])
+        self.assertEqual(self.aliases, {"xpf-appliance": "new-fingerprint"})
+        self.assertTrue(self.alias_present)
+
+    def test_import_failure_keeps_the_previous_alias(self):
+        with self.assertRaises(SystemExit):
+            self._fetch(fail_import=True)
+        self.assertEqual([call[2] if call[2] == "import" else call[3]
+                         for call in self.incu_calls], ["import"])
+        self.assertEqual(self.aliases, {"xpf-appliance": "old-fingerprint"})
+        self.assertTrue(self.alias_present)
+
+    def test_alias_switch_failure_restores_the_previous_alias(self):
+        with self.assertRaises(SystemExit):
+            self._fetch(fail_switch=True)
+        self.assertEqual(self.aliases, {"xpf-appliance": "old-fingerprint"})
         self.assertTrue(self.alias_present)
 
     def test_fetch_accepts_manifest_signed_by_new_key_only(self):
@@ -145,6 +181,11 @@ class FetchKeyRotation10767(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue((self.out / self.names["qcow2"]).is_file())
         self.assertFalse(self.incu_calls)
+
+    def test_legacy_fetch_accepts_old_key_from_canonical_signature(self):
+        rc, _ = self._fetch(no_import=True, pubkey=[str(self.old_pub)])
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.out / self.names["qcow2"]).is_file())
 
     def test_latest_pointer_is_downloaded_with_the_key_addressed_signature(self):
         channel = self.host / "stable"
@@ -155,6 +196,10 @@ class FetchKeyRotation10767(unittest.TestCase):
         resolved = deploy._resolve_channel_version(
             self.host.as_uri(), "stable", sign, pubkey_path=[str(self.new_pub)])
         self.assertEqual(resolved, self.VER)
+        legacy_resolved = deploy._resolve_channel_version(
+            self.host.as_uri(), "stable", sign, pubkey_path=[str(self.old_pub)])
+        self.assertEqual(legacy_resolved, self.VER,
+                         "old-key-only checkout must verify canonical latest signature")
 
 
 if __name__ == "__main__":

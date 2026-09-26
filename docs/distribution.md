@@ -57,8 +57,8 @@ placeholder in place, verification FAILS — the correct fail-safe. See
 ## Publisher runbook
 
 ```bash
-# 1. Build a signed image (XPF_SIGN_SECKEY signs inline).
-# For overlap signing, run make dist-sign with both secret keys (see below).
+# 1. Build a signed image; XPF_SIGN_SECKEY is the legacy/canonical signer.
+# For overlap, add new keys with XPF_SIGN_SECKEYS via make dist-sign (see below).
 XPF_SIGN_SECKEY=/secure/xpf-image.sec make image
 #    -> dist/xpf-<ver>.qcow2, .incus-metadata.tar.gz,
 #       .SHA256SUMS, .SHA256SUMS.minisig[.<key-id>], xpf-image.pub
@@ -197,16 +197,19 @@ Image-key rotation supports overlap instead of a flag day. Keep both the old
 and new public keys in the source-repo trust set. Consumers accept any trusted
 key from repeatable `--pubkey` options or `XPF_IMAGE_PUBKEYS` (an
 `os.pathsep`-separated list); the singular `XPF_IMAGE_PUBKEY` remains valid.
-The publisher signs with both secret keys. The first signature keeps the
-legacy `.minisig` name; each additional signature is published beside it as
-`.minisig.<minisign-key-id>`. Fetch downloads the matching key-addressed
-sidecar, so a checkout trusting only the new key can verify it too. Publish
-gates verify the same signatures against any key in their configured trust set.
+
+Keep the OLD signing key first through the overlap: use it as
+`XPF_SIGN_SECKEY` and list new keys in `XPF_SIGN_SECKEYS`, or put the old
+key first in a repeated `--seckey` sequence. This preserves the legacy
+`.minisig` signature for old-key-only checkouts. Each additional signature is
+published as `.minisig.<minisign-key-id>` so new-key-only checkouts can find it.
+Fetch consumers accept any one trusted signature; publish gates require valid
+signatures from every configured key, including each `latest.json` pointer.
 
 For example, keep the keys out of the repository and make an overlap release:
 
 ```bash
-# Sign all already-baked manifests with both keys.
+# Keep the old key canonical; add the new key for overlap sidecars.
 XPF_SIGN_SECKEY=/secure/old.sec XPF_SIGN_SECKEYS=/secure/new.sec make dist-sign
 
 # Sign a directly-signed file such as install.sh with both keys.
@@ -226,10 +229,9 @@ python3 scripts/dist/sign.py verify-file --pubkey scripts/dist/xpf-image.pub \
 
 Set `XPF_IMAGE_PUBKEYS=/path/old.pub:/path/new.pub` on `publish.py` and
 operators' fetch/image-roll commands during overlap, or repeat `--pubkey` on
-those commands. A signature accepted by one configured key is sufficient for
-verification; signing with both is the publisher's overlap step. After every
-operator checkout trusts the new key, stop signing with the old key and remove
-it from the trust set.
+those commands. Fetch consumers accept any one configured key; publish gates
+require signatures from every configured key. After every operator checkout
+trusts the new key, stop signing with the old key and remove it from the trust set.
 
 `publish.py gate_apt` cross-checks that these three key sources AGREE by
 fingerprint (#4203) — previously each was only checked for placeholder-ness

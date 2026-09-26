@@ -48,8 +48,9 @@ To go live (engineer/release time, after OQ-2 is decided):
    These public files are the pinned trust roots; their authenticity comes
    from the in-repo git copy, NOT from any hosting URL. During image-key
    rotation, commit both active public keys and retain both in the trust set
-   until operators have updated; keep both signing secrets outside the repo and
-   publish key-addressed `.minisig.<key-id>` sidecars for the overlap signatures.
+   until operators have updated; keep both signing secrets outside the repo.
+   Keep the old signer first so the canonical `.minisig` stays valid for
+   legacy checkouts; publish later keys as `.minisig.<key-id>` sidecars.
 4. Point signing at the secret key by PATH: `XPF_SIGN_SECKEY=/secure/xpf-image.sec`
    for the bake, and the OpenPGP key id for `build-apt-repo.sh`.
 
