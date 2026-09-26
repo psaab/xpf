@@ -14,21 +14,23 @@ import (
 // #9042 acceptance: no unbounded per-request Warn remains on an authorization
 // path, and every known denial site still routes through this package.
 //
-// SOURCE-LEVEL BY NECESSITY. Driving all five behaviourally needs a live
+// SOURCE-LEVEL BY NECESSITY. Driving all seven behaviorally needs a live
 // fabric listener with a real PSK, a peer UID that resolves to an empty-Class
-// principal, and a cross-site HTTP request -- and the property is about the
-// SHAPE of the call, which a behavioural test cannot distinguish from a lucky
-// quiet log. So the wiring is bound instead.
+// principal, cross-site HTTP, REST authorization, and REST credential failures
+// -- and the property is about the SHAPE of the call, which a behavioural test
+// cannot distinguish from a lucky quiet log. So the wiring is bound instead.
 //
 // RED means either a site stopped routing through denyaudit (the flood is
 // back) or a new one appeared unguarded.
 func TestEveryDenialSiteIsBounded9042(t *testing.T) {
 	sites := []struct{ file, fn string }{
 		{"../grpcapi/authz.go", "denyRPC"},
-		{"../grpcapi/fabric_auth.go", "checkFabricAuth"},
+		{"../grpcapi/fabric_auth.go", "checkFabricAuthRequest"},
 		{"../grpcapi/server.go", "fabricAllowlistUnaryInterceptor"},
 		{"../grpcapi/server.go", "fabricAllowlistStreamInterceptor"},
 		{"../api/crosssite.go", "mutationCrossSiteGuard"},
+		{"../api/authz.go", "logRESTLoginDenial"},
+		{"../api/auth.go", "logRESTAPIAuthFailure"},
 	}
 	for _, s := range sites {
 		src, err := os.ReadFile(s.file)
@@ -52,7 +54,7 @@ func TestEveryDenialSiteIsBounded9042(t *testing.T) {
 	}
 }
 
-// The five are the WHOLE set. A sixth unguarded site is the same defect
+// The seven are the WHOLE set. A new unguarded site is the same defect
 // arriving somewhere new, and a site quietly dropped is the fix being undone.
 func TestDenialSiteCountIsPinned9042(t *testing.T) {
 	var found []string
@@ -76,7 +78,7 @@ func TestDenialSiteCountIsPinned9042(t *testing.T) {
 		}
 	}
 	sort.Strings(found)
-	const want = 5
+	const want = 7
 	if len(found) != want {
 		t.Errorf("#9042: %d denyaudit.Note call sites, want %d:\n  %s\n\n"+
 			"GREW: a new denial site was added — confirm it is on a per-request path and "+

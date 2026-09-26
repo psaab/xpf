@@ -15,6 +15,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/denyaudit"
 )
 
 type authorizedMutationPrincipalKey struct{}
@@ -914,6 +915,23 @@ func (s *Server) authorizeRESTRead(r *http.Request, required config.LoginClassPe
 	}
 	return p, nil
 }
+func logRESTLoginDenial(r *http.Request, p authz.Principal, required, decision string) {
+	if emit, suppressed := denyaudit.Note(denyaudit.SurfaceRESTLoginClass, "rest-login-class"); emit {
+		slog.Warn("api: REST request denied by authorization",
+			"method", r.Method, "path", r.URL.Path,
+			"principal", p.String(), "source", p.Source.String(),
+			"required", required, "decision", decision,
+			"suppressed_since_last", suppressed,
+			"denials_total", denyaudit.Total(denyaudit.SurfaceRESTLoginClass))
+		return
+	}
+	// The caller controls denial rate. Count every decision, but bound WARNs to
+	// the fixed REST-login-class bucket rather than emitting one per request.
+	slog.Debug("api: REST request denied by authorization",
+		"method", r.Method, "path", r.URL.Path,
+		"principal", p.String(), "source", p.Source.String(),
+		"required", required, "decision", decision)
+}
 
 func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	required, known := readPermissionFor(r.Method, r.URL.Path)
@@ -928,8 +946,9 @@ func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Han
 		// cleaned — cleaning can only widen what matches, per the
 		// mutation guard below), so `/api/v1evil` is untouched.
 		if r.URL.Path == "/api/v1" || strings.HasPrefix(r.URL.Path, "/api/v1/") {
-			slog.Debug("api: refused unguarded read",
-				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+			logRESTLoginDenial(r,
+				authz.Unauthenticated("no authorization policy is defined"),
+				"none", "missing-policy")
 			writeError(w, http.StatusForbidden,
 				"permission denied: no authorization policy is defined for this read endpoint")
 			return
@@ -945,13 +964,7 @@ func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Han
 	}
 	p, err := s.authorizeRESTRead(r, required)
 	if err != nil {
-		// Debug, not Warn: caller-driven and reachable unauthenticated, so a
-		// Warn here is a log-amplification lever -- the same reasoning as the
-		// mutation denial states.
-		slog.Debug("api: refused unauthorized read",
-			"method", r.Method, "path", r.URL.Path,
-			"principal", p.String(), "source", p.Source.String(),
-			"required", authz.PermissionName(required), "err", err)
+		logRESTLoginDenial(r, p, authz.PermissionName(required), "read-policy")
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -978,10 +991,10 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 		route := r.Method + " " + r.URL.Path
 		required, known := restMutationPermissions[route]
 		if !known {
-			// Debug for the same reason as the denial below: caller-driven and
-			// unauthenticated, so a Warn here is a log-amplification lever.
-			slog.Debug("api: refused unguarded mutating request",
-				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+			// Missing policy is audited without attempting identity resolution.
+			logRESTLoginDenial(r,
+				authz.Unauthenticated("no authorization policy is defined"),
+				"none", "missing-policy")
 			writeError(w, http.StatusForbidden,
 				"permission denied: no authorization policy is defined for this mutating endpoint")
 			return
@@ -1057,14 +1070,7 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 		// today decodes once, up front, through decodeJSONBody (or the equivalent
 		// MaxBytesReader+Decode in dhcp.go) before it acts.
 		deny := func(p authz.Principal, err error) {
-			// Debug, not Warn: this fires once per DENIED request, and a
-			// keep-alive loop from an unauthenticated caller is exactly the
-			// cheapest way to drive it. The project's logging rule forbids
-			// per-request Info/Warn on a caller-driven path (CLAUDE.md).
-			slog.Debug("api: denied mutating request",
-				"method", r.Method, "path", r.URL.Path,
-				"principal", p.String(), "source", p.Source.String(),
-				"required", authz.PermissionName(required), "err", err)
+			logRESTLoginDenial(r, p, authz.PermissionName(required), "mutation-policy")
 			writeError(w, http.StatusForbidden, err.Error())
 		}
 
@@ -1118,9 +1124,18 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 			deny(p, err)
 			return
 		}
-		slog.Debug("api: authorized mutating request",
-			"method", r.Method, "path", r.URL.Path,
-			"principal", p.String(), "required", authz.PermissionName(required))
+		if required == config.PermConfig || required == config.PermMaint {
+			// Do not include the request body or credentials: config edits can
+			// carry secrets, while the principal and source identify the actor.
+			slog.Info("api: authorized mutating request",
+				"method", r.Method, "path", r.URL.Path,
+				"principal", p.String(), "source", p.Source.String(),
+				"required", authz.PermissionName(required))
+		} else {
+			slog.Debug("api: authorized mutating request",
+				"method", r.Method, "path", r.URL.Path,
+				"principal", p.String(), "required", authz.PermissionName(required))
+		}
 		r = r.WithContext(context.WithValue(r.Context(), authorizedMutationPrincipalKey{}, p))
 		next.ServeHTTP(w, r)
 	})

@@ -1372,6 +1372,7 @@ func (s *Server) dynamicAuthMiddleware(metricsRequireAuth bool, slot *authSlot, 
 			next.ServeHTTP(w, r)
 			return
 		}
+		logRESTAPIAuthFailure(r)
 		writeAuthChallenge(w)
 	})
 }
