@@ -346,12 +346,10 @@ func TestParseTLVs_ValidShutdownTTL(t *testing.T) {
 	}
 }
 
-// TestSanitizeTLVString unit-tests the LLDP-receive control-char sanitizer
-// (#4043): every C0/C1/DEL control character is replaced by a space, a normal
-// ASCII or multi-byte UTF-8 string is returned unchanged, and no control byte
-// survives. LLDP TLV strings are untrusted L2 input; leaving ESC/CR/LF raw
-// would let a crafted neighbor inject ANSI sequences into an operator's
-// terminal or forge/split a syslog line.
+// TestSanitizeTLVString checks that LLDP-received controls, format runes, and
+// line separators are neutralized while ordinary UTF-8 is preserved. TLV
+// strings are untrusted L2 input; bidi overrides can reorder displayed text,
+// while controls and separators can inject terminal sequences or log lines.
 func TestSanitizeTLVString(t *testing.T) {
 	cases := []struct {
 		name string
@@ -364,8 +362,11 @@ func TestSanitizeTLVString(t *testing.T) {
 		{"crlf log injection", "a\r\nDROP", "a  DROP"},
 		{"nul and c0", "x\x00y\x07z", "x y z"},
 		{"del stripped", "a\x7fb", "a b"},
-		{"c1 stripped", "aC", "a C"},
+		{"c1 stripped", "a\u0080C", "a C"},
 		{"trailing newline", "port0\n", "port0 "},
+		{"bidi override", "switch\u202e-core", "switch -core"},
+		{"zero-width format", "port\u200b0", "port 0"},
+		{"unicode line separators", "a\u2028\u2029DROP", "a  DROP"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -373,8 +374,8 @@ func TestSanitizeTLVString(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("sanitizeTLVString(%q) = %q, want %q", tc.in, got, tc.want)
 			}
-			if i := strings.IndexFunc(got, unicode.IsControl); i >= 0 {
-				t.Errorf("sanitizeTLVString(%q) retained a control char at byte %d: %q", tc.in, i, got)
+			if i := strings.IndexFunc(got, isUnsafeTLVStringRune); i >= 0 {
+				t.Errorf("sanitizeTLVString(%q) retained a display control at byte %d: %q", tc.in, i, got)
 			}
 		})
 	}
@@ -424,18 +425,16 @@ func TestSanitizeTLVString_RawInvalidUTF8(t *testing.T) {
 }
 
 // TestParseTLVs_SanitizesControlChars asserts the end-to-end store boundary:
-// a received LLDP frame whose free-text TLVs (system-name, system-desc,
-// port-desc, port-id, non-MAC chassis-id) carry ESC + CRLF + C0/DEL control
-// characters is parsed into a neighbor whose stored strings are control-char
-// free, so neither expiryLoop's log line nor the `show lldp neighbors` table
-// can be poisoned by a hostile neighbor (#4043). Readable payload survives.
+// hostile free-text TLVs cannot leave terminal controls, bidi/Cf characters,
+// or Unicode line separators in values later used by logs and both LLDP
+// renderers (#4043, #10899).
 func TestParseTLVs_SanitizesControlChars(t *testing.T) {
-	sysName := "\x1b[31mroot\r\nfake-log-line"
-	sysDesc := "desc\x1b]0;title\x07"
-	portDesc := "port\x00\x0bdesc"
-	portID := "eth\x1b[2J0\n"
-	// Non-MAC chassis-id subtype (7 = locally assigned) carrying a CRLF.
-	chassisRaw := append([]byte{7}, []byte("host\r\nA")...)
+	sysName := "\x1b[31mroot\u202e\r\nfake-log-line\u2028"
+	sysDesc := "desc\x1b]0;title\u200b\x07"
+	portDesc := "port\x00\u2029\x0bdesc"
+	portID := "eth\x1b[2J0\n\u2028"
+	// Non-MAC chassis-id subtype (7 = locally assigned) carrying hostile text.
+	chassisRaw := append([]byte{7}, []byte("host\r\nA\u2066")...)
 
 	data := concat(
 		rawTLV(tlvChassisID, chassisRaw),
@@ -459,12 +458,12 @@ func TestParseTLVs_SanitizesControlChars(t *testing.T) {
 		"PortID":     n.PortID,
 		"ChassisID":  n.ChassisID,
 	} {
-		if i := strings.IndexFunc(got, unicode.IsControl); i >= 0 {
-			t.Errorf("%s retained a control char at byte %d: %q", name, i, got)
+		if i := strings.IndexFunc(got, isUnsafeTLVStringRune); i >= 0 {
+			t.Errorf("%s retained a display control at byte %d: %q", name, i, got)
 		}
 	}
 
-	// The printable payload survives (control chars become spaces, not drops).
+	// The printable payload survives (hostile display runes become spaces).
 	if !strings.Contains(n.SystemName, "root") || !strings.Contains(n.SystemName, "fake-log-line") {
 		t.Errorf("SystemName lost readable text: %q", n.SystemName)
 	}

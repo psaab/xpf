@@ -910,40 +910,34 @@ func encodeTTL(seconds int) []byte {
 	return val
 }
 
-// sanitizeTLVString neutralizes control characters in an LLDP TLV string
+// sanitizeTLVString neutralizes display controls in an LLDP TLV string
 // received from the wire before it is stored in the neighbor table — and so
-// before expiryLoop logs it or `show lldp neighbors` displays it. LLDP is an
-// unauthenticated L2 protocol: any device on the segment can send a frame
-// whose system-name / system-description / port-description / port-id /
-// chassis-id TLV carries ANSI escape sequences, CR/LF, or other control
-// characters. Left raw, those bytes reach an operator's terminal (cursor
-// moves, screen clears, spoofed output via `show lldp neighbors`) or forge /
-// split a syslog line (log injection). Every Unicode control character — the
-// C0 set (0x00-0x1F, which includes ESC 0x1B, CR and LF), DEL (0x7F), and the
-// C1 set (0x80-0x9F) — is replaced by a single space. This is the
-// LLDP-receive counterpart of the #1798/#3900 free-text control-char
-// sanitizer. strings.Map is rune-aware, so a legitimate multi-byte UTF-8
-// system name passes through unchanged and only control runes are
-// neutralized; a raw invalid UTF-8 byte (e.g. a bare 0x9B, the 8-bit CSI
-// introducer) is folded to U+FFFD by strings.Map so no raw byte escapes.
+// before expiryLoop logs it or a `show lldp neighbors` renderer displays it.
+// LLDP is unauthenticated L2 input: any device on the segment can send a frame
+// whose free-text identifier carries ANSI escapes, line breaks, bidi overrides,
+// or zero-width format characters. C0/C1 controls, DEL, Unicode format runes
+// (Cf), and U+2028/U+2029 are replaced by spaces. A legitimate multi-byte UTF-8
+// name otherwise passes through unchanged; invalid UTF-8 bytes become U+FFFD.
 //
-// The fast path returns s verbatim ONLY when it holds no control rune AND is
-// already valid UTF-8. A bare 0x9B is NOT a control rune — it decodes to
-// U+FFFD — so an IsControl-only guard would return it unchanged and let the
-// 8-bit CSI reach the operator's terminal via `show lldp neighbors` (#6482);
-// the utf8.ValidString check forces the strings.Map slow path for any
-// invalid-UTF-8 input. Replacing rather than deleting keeps adjacent words
-// readable.
+// The fast path returns s verbatim only when it has none of those display
+// controls and is valid UTF-8. A bare 0x9B is NOT a control rune — it decodes to
+// U+FFFD — so the utf8.ValidString check ensures an invalid byte cannot reach
+// a terminal or log unmodified (#6482, #10899).
 func sanitizeTLVString(s string) string {
-	if strings.IndexFunc(s, unicode.IsControl) < 0 && utf8.ValidString(s) {
+	if strings.IndexFunc(s, isUnsafeTLVStringRune) < 0 && utf8.ValidString(s) {
 		return s
 	}
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if isUnsafeTLVStringRune(r) {
 			return ' '
 		}
 		return r
 	}, s)
+}
+
+func isUnsafeTLVStringRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) ||
+		r == '\u2028' || r == '\u2029'
 }
 
 // ParseTLVs parses LLDP TLVs from raw payload (after Ethernet header).
@@ -987,7 +981,7 @@ func ParseTLVs(data []byte) *Neighbor {
 				// do not accept it.
 			} else if len(value) >= 2 {
 				// Non-MAC chassis-id subtypes carry a free-text identifier
-				// straight off the wire — sanitize control chars (#4043).
+				// straight off the wire — sanitize display controls (#4043, #10899).
 				n.ChassisID = sanitizeTLVString(string(value[1:]))
 				hasChassis = true
 			}
@@ -995,9 +989,9 @@ func ParseTLVs(data []byte) *Neighbor {
 			// Same gating as Chassis ID: a subtype byte with no identifier
 			// (len < 2) is truncated, so leave hasPort false (#2551).
 			if len(value) >= 2 {
-				// Port-id is untrusted L2 input — sanitize control chars so a
-				// crafted TLV can't inject ANSI/CRLF into the log or the
-				// `show lldp neighbors` table (#4043).
+				// Port-id is untrusted L2 input — sanitize display controls so a
+				// crafted TLV can't inject ANSI/CRLF or bidi/format controls into
+				// the log or `show lldp neighbors` table (#4043, #10899).
 				n.PortID = sanitizeTLVString(string(value[1:]))
 				hasPort = true
 			}
@@ -1012,7 +1006,7 @@ func ParseTLVs(data []byte) *Neighbor {
 			}
 		case tlvSystemName:
 			// Operator-visible free-text TLVs from an untrusted neighbor —
-			// sanitize control chars before storing (#4043).
+			// sanitize display controls before storing (#4043, #10899).
 			n.SystemName = sanitizeTLVString(string(value))
 		case tlvSystemDesc:
 			n.SystemDesc = sanitizeTLVString(string(value))

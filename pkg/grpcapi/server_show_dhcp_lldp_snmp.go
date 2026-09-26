@@ -518,6 +518,9 @@ func (s *Server) showLLDPNeighbors(buf *strings.Builder) {
 	for _, n := range neighbors {
 		age := time.Since(n.LastSeen).Truncate(time.Second)
 		fmt.Fprintf(buf, "%-12s %-20s %-16s %-20s %-6d %s\n",
-			n.Interface, n.ChassisID, n.PortID, n.SystemName, n.TTL, age)
+			termsafe.QuoteFieldForDisplay(n.Interface, 12),
+			termsafe.QuoteFieldForDisplay(n.ChassisID, 20),
+			termsafe.QuoteFieldForDisplay(n.PortID, 16),
+			termsafe.QuoteFieldForDisplay(n.SystemName, 20), n.TTL, age)
 	}
 }

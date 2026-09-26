@@ -99,3 +99,18 @@ func TestSanitizeForDisplayPreservesLegitimate(t *testing.T) {
 		t.Errorf("DisplaySafe(%q) = true, want false", "x\x1by")
 	}
 }
+
+func TestQuoteFieldForDisplayBoundsAndKeepsEscapesWhole(t *testing.T) {
+	got := QuoteFieldForDisplay("123456789\u2029long", 20)
+	want := `"123456789\u2029..."`
+	if got != want {
+		t.Fatalf("QuoteFieldForDisplay() = %q, want %q", got, want)
+	}
+	if len(got) > 20 {
+		t.Errorf("QuoteFieldForDisplay() produced %d columns for width 20: %q", len(got), got)
+	}
+
+	if got := QuoteFieldForDisplay("界", 8); got != `"\u754c"` {
+		t.Errorf("QuoteFieldForDisplay() did not bound wide Unicode as ASCII: %q", got)
+	}
+}
