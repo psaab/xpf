@@ -290,3 +290,113 @@ func TestDHCPLeaseSetFingerprint(t *testing.T) {
 		t.Error("empty set fingerprint must be empty")
 	}
 }
+
+// TestDHCPLeaseSetFingerprintSeedConsumedFields10894 pins #10894: the change
+// fingerprint covered IdentityKey+ValidLife+Hostname only, so seed-consumed
+// field changes (SubnetID, PrefixLen, FQDN flags, a v4 HWAddress move under a
+// stable ClientID) produced identical fingerprints and the ~2s change push
+// never fired — the standby held stale bindings until the 30s forced
+// heartbeat, and a failover inside that window seeded them. Every
+// seed-consumed field flip MUST change the fingerprint (triggering the push);
+// the per-second countdowns MUST NOT (else every poll looks like a change).
+func TestDHCPLeaseSetFingerprintSeedConsumedFields10894(t *testing.T) {
+	baseV4 := dhcpserver.SyncLease{Family: 4, Address: "10.0.0.1", SubnetID: 1,
+		HWAddress: "aa:bb:cc:dd:ee:01", ClientID: "01:aa:bb:cc:dd:ee:01",
+		Hostname: "h", ValidLife: 3600, Remaining: 3000, PreferredRemaining: 3000}
+	baseV6 := dhcpserver.SyncLease{Family: 6, Address: "2001:db8::1", SubnetID: 2,
+		DUID: "00:01:02:03", IAID: 7, LeaseType: "IA_PD", PrefixLen: 56,
+		HWAddress: "aa:bb:cc:dd:ee:02", Hostname: "h6",
+		ValidLife: 3600, Remaining: 3000, PreferredRemaining: 3000}
+
+	ss := cluster.NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	changePushTriggered := func(base, mutated dhcpserver.SyncLease) bool {
+		d := &Daemon{sessionSync: ss, dhcpLeaseSync: dhcpLeaseSyncState{}}
+		family := base.Family
+		snapshot := func(lease dhcpserver.SyncLease) dhcpserver.LeaseSyncSnapshot {
+			return dhcpserver.LeaseSyncSnapshot{Leases: []dhcpserver.SyncLease{lease}, Received: true}
+		}
+		d.maybePushFamily(family, snapshot(base), false)
+		lastBefore := d.dhcpLeaseSync.lastSent4
+		if family == 6 {
+			lastBefore = d.dhcpLeaseSync.lastSent6
+		}
+		d.maybePushFamily(family, snapshot(mutated), false)
+		lastAfter := d.dhcpLeaseSync.lastSent4
+		if family == 6 {
+			lastAfter = d.dhcpLeaseSync.lastSent6
+		}
+		return lastBefore != lastAfter
+	}
+
+	mustChange := []struct {
+		name   string
+		v6     bool
+		mutate func(*dhcpserver.SyncLease)
+	}{
+		{"Family", false, func(l *dhcpserver.SyncLease) { l.Family = 6 }},
+		{"v4 Address", false, func(l *dhcpserver.SyncLease) { l.Address = "10.0.0.2" }},
+		{"v4 SubnetID", false, func(l *dhcpserver.SyncLease) { l.SubnetID = 2 }},
+		{"v4 HWAddress under stable ClientID", false, func(l *dhcpserver.SyncLease) {
+			l.HWAddress = "aa:bb:cc:dd:ee:ff"
+		}},
+		{"v4 ClientID under stable HWAddress", false, func(l *dhcpserver.SyncLease) {
+			l.ClientID = "01:aa:bb:cc:dd:ee:ff"
+		}},
+		{"v4 Hostname", false, func(l *dhcpserver.SyncLease) { l.Hostname = "h2" }},
+		{"v4 FQDNFwd", false, func(l *dhcpserver.SyncLease) { l.FQDNFwd = true }},
+		{"v4 FQDNRev", false, func(l *dhcpserver.SyncLease) { l.FQDNRev = true }},
+		{"v4 ValidLife", false, func(l *dhcpserver.SyncLease) { l.ValidLife = 7200 }},
+		{"v6 Address", true, func(l *dhcpserver.SyncLease) { l.Address = "2001:db8::2" }},
+		{"v6 SubnetID", true, func(l *dhcpserver.SyncLease) { l.SubnetID = 3 }},
+		{"v6 HWAddress", true, func(l *dhcpserver.SyncLease) {
+			l.HWAddress = "aa:bb:cc:dd:ee:ff"
+		}},
+		{"v6 DUID", true, func(l *dhcpserver.SyncLease) { l.DUID = "00:01:02:04" }},
+		{"v6 IAID", true, func(l *dhcpserver.SyncLease) { l.IAID = 8 }},
+		{"v6 LeaseType", true, func(l *dhcpserver.SyncLease) { l.LeaseType = "IA_NA" }},
+		{"v6 PrefixLen", true, func(l *dhcpserver.SyncLease) { l.PrefixLen = 60 }},
+		{"v6 Hostname", true, func(l *dhcpserver.SyncLease) { l.Hostname = "h6-2" }},
+		{"v6 FQDNFwd", true, func(l *dhcpserver.SyncLease) { l.FQDNFwd = true }},
+		{"v6 FQDNRev", true, func(l *dhcpserver.SyncLease) { l.FQDNRev = true }},
+		{"v6 ValidLife", true, func(l *dhcpserver.SyncLease) { l.ValidLife = 7200 }},
+	}
+	for _, tc := range mustChange {
+		base := baseV4
+		if tc.v6 {
+			base = baseV6
+		}
+		mutated := base
+		tc.mutate(&mutated)
+		if !changePushTriggered(base, mutated) {
+			t.Errorf("%s flip MUST trigger the change-push decision", tc.name)
+		}
+	}
+
+	mustNotChange := []struct {
+		name   string
+		mutate func(*dhcpserver.SyncLease)
+	}{
+		{"Remaining countdown", func(l *dhcpserver.SyncLease) { l.Remaining = 2999 }},
+		{"PreferredRemaining countdown", func(l *dhcpserver.SyncLease) { l.PreferredRemaining = 2999 }},
+		// State is not seed-consumed: the read path only yields active leases
+		// and the seed always writes default, so it stays out of the fingerprint.
+		{"State", func(l *dhcpserver.SyncLease) { l.State = 1 }},
+	}
+	for _, tc := range mustNotChange {
+		for _, base := range []dhcpserver.SyncLease{baseV4, baseV6} {
+			mutated := base
+			tc.mutate(&mutated)
+			if changePushTriggered(base, mutated) {
+				t.Errorf("%s MUST NOT trigger a change push (family %d)", tc.name, base.Family)
+			}
+		}
+	}
+
+	// Order-stability control: the fingerprint is a SET digest, so row order
+	// must not matter (else a Kea get-all reorder would fake a change).
+	fwd := dhcpLeaseSetFingerprint([]dhcpserver.SyncLease{baseV4, baseV6})
+	rev := dhcpLeaseSetFingerprint([]dhcpserver.SyncLease{baseV6, baseV4})
+	if fwd != rev {
+		t.Error("lease order MUST NOT change the fingerprint")
+	}
+}

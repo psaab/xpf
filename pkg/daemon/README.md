@@ -522,6 +522,12 @@ tracker issue #4407 carries the remaining increments.
   bounded to that one file — the explicit `d.dhcpLeaseSync.` qualifier is
   clearer than field promotion. `ipsecSANudgeCh` stayed a flat `Daemon`
   field (it is IPsec-SA-sync state, not lease-sync).
+
+  The two-second lease change-detect fingerprint includes every seed-relevant
+  lease field (including subnet, prefix length, FQDN flags, and both v4 identity
+  fields), while excluding only `Remaining` and `PreferredRemaining`, which are
+  lifetime countdowns. A change to a failover-critical binding therefore pushes
+  before the 30-second heartbeat (#10894).
 - **Increment 2 — periodic neighbor-resolution guards (#1780 Path A):** the
   nine flat supervision fields for `runPeriodicNeighborResolution` (the
   per-phase in-flight overlap guards, the per-phase last-success UnixNano
