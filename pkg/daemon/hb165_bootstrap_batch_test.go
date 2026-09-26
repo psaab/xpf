@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,25 @@ chassis {
         unmapped-interface-policy leave-alone;
         interface fxp0 {
             pci 0000:05:00.0;
+        }
+    }
+}
+`
+
+const allUnboundDeviceMapConfig = `
+system {
+    host-name day0-unbound;
+}
+interfaces {
+    fxp0 {
+        unit 0 { family inet { dhcp; } }
+    }
+}
+chassis {
+    device-map {
+        unmapped-interface-policy leave-alone;
+        interface fxp0 {
+            pci 0000:ff:00.0;
         }
     }
 }
@@ -148,6 +168,51 @@ func TestCheckDeviceMapStrandsManagementOffTargetSkips(t *testing.T) {
 	strand := compileText(t, strandDeviceMapConfig)
 	if reason, offTarget, err := CheckDeviceMapStrandsManagement(strand); err != nil || !offTarget || reason != "" {
 		t.Fatalf("off-target strand config: reason=%q offTarget=%v err=%v, want empty/true/nil", reason, offTarget, err)
+	}
+}
+
+// TestCheckDeviceMapStrandsManagementOnTargetAllUnboundFailsClosed10766F4
+// distinguishes a target import from build/deploy-host validation. On a
+// build/deploy host this map remains an off-target skip; on the target, the
+// same all-unbound map must be evaluated and rejected just like bootstrap's
+// import preflight.
+func TestCheckDeviceMapStrandsManagementOnTargetAllUnboundFailsClosed10766F4(t *testing.T) {
+	oldLifelineRecord := lifelineRecordFileForTest
+	lifelineRecordFileForTest = filepath.Join(t.TempDir(), "no-lifeline")
+	t.Cleanup(func() { lifelineRecordFileForTest = oldLifelineRecord })
+	withInjectedNICs(t, offTargetNICs)
+	typo := compileText(t, allUnboundDeviceMapConfig)
+
+	reason, offTarget, err := CheckDeviceMapStrandsManagement(typo)
+	if err != nil || !offTarget || reason != "" {
+		t.Fatalf("build/deploy-host check: reason=%q offTarget=%v err=%v, want empty/true/nil",
+			reason, offTarget, err)
+	}
+
+	reason, offTarget, err = CheckDeviceMapStrandsManagementOnTarget(typo)
+	if err != nil || offTarget || reason == "" {
+		t.Fatalf("on-target check: reason=%q offTarget=%v err=%v, want strand rejection",
+			reason, offTarget, err)
+	}
+	if err := (&Daemon{}).deviceMapCommitPreflight(typo, nil); err == nil {
+		t.Fatal("bootstrap/import preflight accepted the same all-unbound map")
+	}
+}
+
+// TestCheckDeviceMapStrandsManagementOnTargetEnumErrorFailsClosed10766F4
+// pins the on-target counterpart to bootstrap's #5490 fail-closed behavior.
+func TestCheckDeviceMapStrandsManagementOnTargetEnumErrorFailsClosed10766F4(t *testing.T) {
+	inventoryErr := errors.New("simulated NIC enumeration failure")
+	withInjectedNICs(t, func() ([]devicemap.PresentNIC, error) {
+		return nil, inventoryErr
+	})
+	typo := compileText(t, allUnboundDeviceMapConfig)
+
+	if _, _, err := CheckDeviceMapStrandsManagementOnTarget(typo); !errors.Is(err, inventoryErr) {
+		t.Fatalf("on-target check error = %v, want NIC enumeration error", err)
+	}
+	if err := (&Daemon{}).deviceMapCommitPreflight(typo, nil); err == nil {
+		t.Fatal("bootstrap/import preflight accepted a config when NIC enumeration failed")
 	}
 }
 

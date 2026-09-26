@@ -217,7 +217,7 @@ probe_devices() {
 
 # try_device <dev> — returns 0 if a config was validated and installed.
 try_device() {
-	local dev="$1" conf="" nodeid="" nodearg=() out rc tmpconf="" nodeid_raw=""
+	local dev="$1" conf="" nodeid="" nodearg=() targetarg=(-on-target) out rc tmpconf="" nodeid_raw=""
 	log "probing config medium $dev"
 	mkdir -p "$MNT"
 	# timeout: a hung backing device (e.g. a host-side network share
@@ -288,7 +288,7 @@ try_device() {
 	fi
 
 	log "validating $(basename "$conf") from $dev with the strict commit-check gate"
-	out=$(timeout "$CHECK_TIMEOUT" "$XPFD" check-config "${nodearg[@]}" "$tmpconf" 2>&1)
+	out=$(timeout "$CHECK_TIMEOUT" "$XPFD" check-config "${nodearg[@]}" "${targetarg[@]}" "$tmpconf" 2>&1)
 	rc=$?
 	if [ $rc -ne 0 ]; then
 		case $rc in
