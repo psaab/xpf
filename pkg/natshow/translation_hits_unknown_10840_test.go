@@ -56,7 +56,7 @@ func TestTranslationHitsUnknownWhenCounterIDMissing_10840(t *testing.T) {
 					var b strings.Builder
 					tc.render(context.Background(), &b, natFixtureConfig(), dp, func() *dataplane.ApplyResult { return cr })
 					out := b.String()
-					if !strings.Contains(out, "Translation hits:        "+natCounterNoID) {
+					if !strings.Contains(out, "Translation hits:        unknown (no counter assigned)") {
 						t.Errorf("armed rule with missing counter ID omits its hits state:\n%s", out)
 					}
 					if strings.Contains(out, "Translation hits:        0 packets") {
