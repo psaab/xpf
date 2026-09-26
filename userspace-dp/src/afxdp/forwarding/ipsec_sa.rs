@@ -757,12 +757,16 @@ const XFRM_MSG_GETSA: u16 = 0x12;
 const XFRM_MSG_EXPIRE: u16 = 0x18;
 const XFRM_MSG_UPDSA: u16 = 0x1a;
 const XFRM_MSG_FLUSHSA: u16 = 0x1c;
+const XFRMA_ADDRESS_FILTER: u16 = 26;
 const XFRMA_SA_DIR: u16 = 33;
 const XFRM_SA_DIR_IN: u8 = 1;
 const XFRMGRP_EXPIRE: u32 = 2;
 const XFRMGRP_SA: u32 = 4;
 const XFRM_INFO_LEN: usize = 224;
 const XFRM_MSG_ID_LEN: usize = 24;
+const GETSA_DUMP_NLA_LEN: u16 = 40;
+const XFRM_ADDRESS_FILTER_LEN: usize = 36;
+const GETSA_DUMP_REQUEST_LEN: usize = NLMSG_HDR_LEN + 4 + XFRM_ADDRESS_FILTER_LEN;
 
 enum XfrmEventResult {
     Idle,
@@ -989,15 +993,27 @@ fn xfrm_lifecycle_must_run_gate_runs_with_xfrm_10868() {
     ));
 }
 
-fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
-    let mut request = [0u8; NLMSG_HDR_LEN + XFRM_MSG_ID_LEN];
-    let request_len = request.len() as u32;
-    put_u32(&mut request[0..4], request_len);
+/// #11225: build the GETSA dump request in the exact iproute2 shape.
+/// nlmsghdr (len 56) + NLA(XFRMA_ADDRESS_FILTER, len 40) carrying a zeroed
+/// 36-byte `struct xfrm_address_filter`. A zeroed filter is match-all, so
+/// dump semantics are unchanged; the bare 24-byte `xfrm_usersa_id` this
+/// replaces parsed as a zero-length pseudo-attribute and left 24 leftover
+/// bytes on every poll (`netlink: 24 bytes leftover ... xfrm-sa-monitor`).
+fn build_getsa_dump_request(seq: u32) -> [u8; GETSA_DUMP_REQUEST_LEN] {
+    let mut request = [0u8; GETSA_DUMP_REQUEST_LEN];
+    put_u32(&mut request[0..4], GETSA_DUMP_REQUEST_LEN as u32);
     put_u16(&mut request[4..6], XFRM_MSG_GETSA);
     put_u16(&mut request[6..8], NLM_F_REQUEST | NLM_F_ROOT | NLM_F_MATCH);
     put_u32(&mut request[8..12], seq);
     put_u32(&mut request[12..16], 0);
-    // The all-zero xfrm_usersa_id is the kernel's dump selector.
+    put_u16(&mut request[16..18], GETSA_DUMP_NLA_LEN);
+    put_u16(&mut request[18..20], XFRMA_ADDRESS_FILTER);
+    // request[20..56] stays zero: the zeroed address filter selects all SAs.
+    request
+}
+
+fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
+    let request = build_getsa_dump_request(seq);
     let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
     addr.nl_family = libc::AF_NETLINK as u16;
     addr.nl_pid = 0;
@@ -2010,5 +2026,43 @@ mod tests {
         );
         store.publish_full_dump(entries);
         assert_eq!(store.lookup(key(7)), IpsecSaLookup::Hit);
+    }
+
+    #[test]
+    fn getsa_dump_request_matches_iproute2_shape_11225() {
+        let seq = 0x1234_5678u32;
+        let request = build_getsa_dump_request(seq);
+        assert_eq!(GETSA_DUMP_REQUEST_LEN, 56);
+        assert_eq!(request.len(), 56);
+        assert_eq!(
+            u32::from_ne_bytes(request[0..4].try_into().unwrap()),
+            56
+        );
+        assert_eq!(
+            u16::from_ne_bytes(request[4..6].try_into().unwrap()),
+            XFRM_MSG_GETSA
+        );
+        assert_eq!(
+            u16::from_ne_bytes(request[6..8].try_into().unwrap()),
+            NLM_F_REQUEST | NLM_F_ROOT | NLM_F_MATCH
+        );
+        assert_eq!(
+            u32::from_ne_bytes(request[8..12].try_into().unwrap()),
+            seq
+        );
+        assert_eq!(
+            u32::from_ne_bytes(request[12..16].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u16::from_ne_bytes(request[16..18].try_into().unwrap()),
+            40
+        );
+        assert_eq!(
+            u16::from_ne_bytes(request[18..20].try_into().unwrap()),
+            XFRMA_ADDRESS_FILTER
+        );
+        assert_eq!(XFRMA_ADDRESS_FILTER, 26);
+        assert!(request[20..56].iter().all(|&byte| byte == 0));
     }
 }
