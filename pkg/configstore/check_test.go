@@ -34,6 +34,50 @@ func TestCheckTextValid(t *testing.T) {
 	}
 }
 
+// CheckText must parse exactly the same representation as the real
+// load-override bootstrap import (#10734): a Junos comment mentioning a flat
+// verb must not reroute a hierarchical file, and display-set output must be
+// accepted by the check-config gate.
+func TestCheckTextMatchesLoadOverrideFormat10734(t *testing.T) {
+	tree, errs := config.NewParser(checkValidConfig).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("fixture parse: %v", errs[0])
+	}
+	flat := "/* saved from show configuration | display set */\n" + tree.FormatSet()
+	cases := []struct {
+		name, content string
+	}{
+		{
+			name: "hierarchical comment contains delete prose",
+			content: checkValidConfig + "\n/*\n" +
+				"delete after the maintenance window, not before.\n*/\n",
+		},
+		{name: "flat display-set file", content: flat},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			compiled, err := CheckText(tc.content, -1)
+			if err != nil {
+				t.Fatalf("CheckText = %v, want importer-compatible parse and compile", err)
+			}
+			if compiled == nil || compiled.System.HostName != "day0-test" {
+				t.Fatalf("CheckText compiled wrong configuration: %+v", compiled)
+			}
+
+			store := newTestStore(t)
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.LoadOverride(tc.content); err != nil {
+				t.Fatalf("LoadOverride = %v, want same accepted input as CheckText", err)
+			}
+			if got := store.ShowCandidateSet(); !strings.Contains(got, "set system host-name day0-test") {
+				t.Fatalf("imported candidate lost host-name:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestCheckTextParseError(t *testing.T) {
 	if _, err := CheckText("system { host-name {{{", -1); err == nil {
 		t.Fatal("CheckText(garbage) = nil, want parse error")

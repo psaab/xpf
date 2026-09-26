@@ -497,13 +497,9 @@ func (s *Store) LoadOverrideAsPlantClass(sessionID, plantClass, content string) 
 // applied override is a config nobody authored, and a partial DELETE of deny
 // terms fails open.
 func parseOverrideContent(content string) (*config.ConfigTree, error) {
-	lines := strings.Split(content, "\n")
-	isSetFormat := false
-	for _, line := range lines {
-		if hasFlatVerb(strings.TrimSpace(line)) {
-			isSetFormat = true
-			break
-		}
+	isSetFormat, flatContent, err := config.ClassifyLoadContent(content)
+	if err != nil {
+		return nil, fmt.Errorf("parse error: %w", err)
 	}
 	if !isSetFormat {
 		tree, errs := config.NewParser(content).Parse()
@@ -512,6 +508,7 @@ func parseOverrideContent(content string) (*config.ConfigTree, error) {
 		}
 		return tree, nil
 	}
+	lines := strings.Split(flatContent, "\n")
 
 	// Flat: replay onto an EMPTY tree. Starting from the candidate would make
 	// this a merge, which is the other verb.
@@ -566,14 +563,11 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 
 	// Detect format: if content has set/delete/deactivate/activate lines,
 	// process as flat command lines.
-	lines := strings.Split(content, "\n")
-	isSetFormat := false
-	for _, line := range lines {
-		if hasFlatVerb(strings.TrimSpace(line)) {
-			isSetFormat = true
-			break
-		}
+	isSetFormat, flatContent, err := config.ClassifyLoadContent(content)
+	if err != nil {
+		return fmt.Errorf("parse error: %w", err)
 	}
+	lines := strings.Split(flatContent, "\n")
 
 	// #5187: merge into a deep clone of the candidate and swap it in only on
 	// complete success. Both branches below previously applied each line

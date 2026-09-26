@@ -61,6 +61,91 @@ func IsFlatLoadLine(line string) bool {
 	}
 }
 
+// ClassifyLoadContent returns whether a load body routes to flat replay and the
+// input with lexer-recognized comments replaced by whitespace. Comment removal
+// is shared with authorization so a verb in comment prose cannot change which
+// representation the store applies. An unterminated block comment is rejected
+// instead of allowing a partial import.
+func ClassifyLoadContent(content string) (flat bool, uncommented string, err error) {
+	var b strings.Builder
+	b.Grow(len(content))
+	inBlock, inQuote, escaped, inToken := false, false, false, false
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		if ch == '\n' {
+			b.WriteByte(ch)
+			if !inQuote {
+				inToken = false
+			}
+			continue
+		}
+		if inBlock {
+			if ch == '*' && i+1 < len(content) && content[i+1] == '/' {
+				b.WriteString("  ")
+				i++
+				inBlock = false
+				inToken = false
+				continue
+			}
+			b.WriteByte(' ')
+			continue
+		}
+		if inQuote {
+			b.WriteByte(ch)
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inQuote = false
+				inToken = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inToken = false
+			inQuote = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '#' || (!inToken && ch == '/' && i+1 < len(content) && content[i+1] == '/') {
+			for i < len(content) && content[i] != '\n' {
+				b.WriteByte(' ')
+				i++
+			}
+			if i < len(content) {
+				b.WriteByte('\n')
+			}
+			inToken = false
+			continue
+		}
+		if !inToken && ch == '/' && i+1 < len(content) && content[i+1] == '*' {
+			b.WriteString("  ")
+			i++
+			inBlock = true
+			continue
+		}
+		b.WriteByte(ch)
+		switch ch {
+		case ' ', '\t', '\r', '{', '}', ';', '|', '[', ']':
+			inToken = false
+		default:
+			inToken = true
+		}
+	}
+	uncommented = b.String()
+	if inBlock {
+		return false, uncommented, fmt.Errorf("unterminated block comment")
+	}
+	for _, line := range strings.Split(uncommented, "\n") {
+		if IsFlatLoadLine(strings.TrimSpace(line)) {
+			flat = true
+			break
+		}
+	}
+	return flat, uncommented, nil
+}
+
 // LoadMutationLines returns the set-form mutation lines a load body writes.
 //
 // Set-format content is taken line by line. Hierarchical content is parsed and
@@ -69,24 +154,25 @@ func IsFlatLoadLine(line string) bool {
 // cannot parse, and adjudicating the parsable part is strictly better than
 // adjudicating nothing.
 func LoadMutationLines(content string) []string {
-	var lines []string
-	flat := false
-	for _, raw := range strings.Split(content, "\n") {
-		line := strings.TrimSpace(raw)
-		if IsFlatLoadLine(line) {
-			flat = true
-		}
-		if f := strings.Fields(line); len(f) > 0 && loadMutationVerbs[f[0]] {
-			lines = append(lines, line)
-		}
+	flat, uncommented, err := ClassifyLoadContent(content)
+	if err != nil {
+		return nil
 	}
 	if flat {
+		var lines []string
+		for _, raw := range strings.Split(uncommented, "\n") {
+			line := strings.TrimSpace(raw)
+			if fields := strings.Fields(line); len(fields) > 0 && loadMutationVerbs[fields[0]] {
+				lines = append(lines, line)
+			}
+		}
 		return lines
 	}
 	tree, _ := NewParser(content).Parse()
 	if tree == nil {
 		return nil
 	}
+	var lines []string
 	for _, line := range strings.Split(tree.FormatSet(), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			lines = append(lines, line)
