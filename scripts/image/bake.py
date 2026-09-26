@@ -38,6 +38,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import re
 import resource
@@ -699,22 +700,65 @@ def virt_customize(work_qcow, xpf_deb):
 def validation_gate_step(skip_validate, qcow_out, meta_out):
     """Run the in-guest verify-dataplane validation gate (validate.py).
 
-    Aborts the bake (via die(), exit non-zero) if the gate FAILS, so a
-    validation failure stops BEFORE signing (#4017). --skip-validate
-    downgrades to a loud warning and skips the gate — the resulting
-    artifacts are marked non-publishable by the signed `validated: false`
-    provenance field in the manifest (#4904 A), which publish.py refuses.
+    Returns true only when the gate completed successfully. --skip-validate
+    downgrades to a loud warning and returns false; a failed gate aborts the
+    bake. The provenance sidecar starts as validated:false and is changed to
+    true only after this function returns true.
     """
     if skip_validate:
         print("WARNING: --skip-validate — artifacts have NOT passed the in-guest "
               "verify-dataplane gate; do not publish them.", file=sys.stderr)
-        return
+        return False
     info("running validation gate (factory boot + in-guest verify-dataplane + "
          "valid/invalid day-0 drives)...")
     if subprocess.run([sys.executable, os.path.join(HERE, "validate.py"),
                        "--qcow2", qcow_out, "--metadata", meta_out,
                        "all"]).returncode != 0:
         die("validation gate FAILED — artifacts are NOT publishable")
+    return True
+
+
+def record_validation_success(manifest, sums, manifest_inputs, snapshot):
+    """Mark provenance validated only after the gate passes, then refresh the
+    checksum manifest using the original hash-time snapshot for image bytes.
+
+    Recheck both gate-window inputs before changing provenance: the current
+    sidecar bytes must still match their pre-gate snapshot, and the live sums
+    must still describe that snapshot. Only then is the sidecar's validated
+    field flipped. The qcow2 and metadata hashes remain the snapshots of the
+    exact staged bytes consumed by the validation gate.
+    """
+    name = os.path.basename(manifest)
+    if name not in snapshot:
+        die(f"cannot record validation success in {manifest}: no hash-time "
+            "snapshot exists")
+    try:
+        with open(manifest, "rb") as f:
+            original = f.read()
+        pre_gate_sums = sign.parse_manifest(sums)
+    except (OSError, sign.SignError) as e:
+        die(f"cannot verify hash-time bake snapshot before recording "
+            f"validation success: {e}")
+    if hashlib.sha256(original).hexdigest() != snapshot[name]:
+        die(f"provenance sidecar {manifest} drifted during validation — "
+            "refusing to record validation success (#9921)")
+    if pre_gate_sums != snapshot:
+        die(f"pre-gate checksum manifest {sums} drifted from its hash-time "
+            "snapshot — refusing to record validation success (#9921)")
+
+    lines = original.decode("utf-8").splitlines(keepends=True)
+    matches = [i for i, line in enumerate(lines)
+               if line.rstrip("\r\n") == "validated: false"]
+    if len(matches) != 1:
+        die(f"cannot record validation success in {manifest}: expected one "
+            "'validated: false' field")
+    lines[matches[0]] = "validated: true\n"
+    validated_bytes = "".join(lines).encode("utf-8")
+    with open(manifest, "wb") as f:
+        f.write(validated_bytes)
+    snapshot[name] = hashlib.sha256(validated_bytes).hexdigest()
+    sign.write_manifest(sums, manifest_inputs, recorded_hashes=snapshot)
+
 
 
 def render_snapshot_manifest(snapshot):
@@ -878,10 +922,11 @@ def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
 
     Pure + unit-testable so the supply-chain PROVENANCE fields are asserted
     without a full bake:
-      - `validated` (#4904 A): true only when the in-guest verify-dataplane gate
-        runs (a --skip-validate bake binds false). The publish gate REQUIRES
-        validated: true, so a signed-but-unvalidated dev/emergency image is no
-        longer indistinguishable from a release.
+      - `validated` (#4904 A): true only after the in-guest verify-dataplane
+        gate passes. A --skip-validate bake binds false. The publish gate
+        REQUIRES validated: true, so a signed-but-unvalidated dev/emergency
+        image is no longer indistinguishable from a release.
+
       - `base_image_pinned` (#4904 B): whether the Ubuntu base was authenticated
         against the repo-pinned trust-anchor digest (bound alongside the base
         digest + source URL already recorded here).
@@ -1098,18 +1143,17 @@ def main():
                   f"(re-bake, or roll with --allow-session-drop).", file=sys.stderr)
 
         manifest = os.path.join(a.out, f"xpf-{ver}.manifest")
+        manifest_fields = dict(
+            ver=ver, commit=commit, base_url=base_url, base_img=base_img,
+            rel=rel, base_sha=base_sha, base_pinned=base_pinned,
+            bake_date=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            kernel=os.uname().release, guest_kernel=guest_kernel,
+            proto_lines=proto_lines)
         with open(manifest, "w") as f:
-            # #4904 A+B: bind the validated-provenance flag and the base-image
-            # pin-provenance flag into the sidecar (covered by the signed
-            # SHA256SUMS below). A --skip-validate bake records validated:false,
-            # which publish.py's fail-closed gate refuses.
+            # Start fail-closed: the sidecar can claim validation only after
+            # validation_gate_step succeeds below.
             f.write(build_manifest_text(
-                ver=ver, commit=commit, base_url=base_url, base_img=base_img,
-                rel=rel, base_sha=base_sha, base_pinned=base_pinned,
-                validated=not a.skip_validate,
-                bake_date=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                kernel=os.uname().release, guest_kernel=guest_kernel,
-                proto_lines=proto_lines))
+                **manifest_fields, validated=False))
         info(f"manifest: {manifest}")
 
         # Per-version, version-named checksum manifest (#1924 §5.1): each bake
@@ -1147,8 +1191,6 @@ def main():
         manifest_inputs = [staged_map.get(p, p) for p in live_inputs]
         snapshot = snapshot_manifest_inputs(manifest_inputs)
         sign.write_manifest(sums, manifest_inputs)
-        info("checksums:")
-        print(open(sums).read(), end="")
 
         # 7. validation gate, THEN sign (#4017). The manifest signature is a
         # TRUST artifact — downstream publish (scripts/dist/publish.py) and
@@ -1157,15 +1199,26 @@ def main():
         # finalize_artifacts enforces validate-before-sign: the gate runs
         # first and signing happens ONLY on success. A gate failure aborts
         # (die(), exit non-zero) BEFORE any .minisig is written.
+        def validate_step():
+            passed = validation_gate_step(
+                a.skip_validate, staged_map[qcow_out], staged_map[meta_out])
+            if passed:
+                record_validation_success(
+                    manifest, sums, manifest_inputs, snapshot)
+
         def sign_step():
             assert_live_matches_manifest(live_inputs, sums, snapshot)
             sign_manifest_step_from_snapshot(a.out, sums, ver, snapshot, work)
 
         finalize_artifacts(
-            validate_step=lambda: validation_gate_step(
-                a.skip_validate, staged_map[qcow_out], staged_map[meta_out]),
+            validate_step=validate_step,
             sign_step=sign_step,
         )
+
+
+        info("checksums:")
+        with open(sums) as f:
+            print(f.read(), end="")
 
         info(f"bake complete: {qcow_out}")
         info("deploy quickstarts: docs/install-images.md")

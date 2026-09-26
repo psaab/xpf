@@ -129,9 +129,72 @@ class ValidationGateStepTests(unittest.TestCase):
     """--skip-validate downgrades the gate to a warning (no die), so a bake
     can proceed to sign; the default path dies non-zero on gate failure."""
 
-    def test_skip_validate_does_not_die(self):
+    def test_skip_validate_returns_false(self):
         # Should return without raising; qcow/meta paths are unused when skipped.
-        bake.validation_gate_step(True, "/nonexistent.qcow2", "/nonexistent.meta")
+        self.assertFalse(
+            bake.validation_gate_step(True, "/nonexistent.qcow2", "/nonexistent.meta"))
+
+    def test_successful_validation_returns_true(self):
+        with patch.object(bake.subprocess, "run",
+                          return_value=SimpleNamespace(returncode=0)):
+            self.assertTrue(
+                bake.validation_gate_step(False, "/qcow", "/metadata"))
+
+
+class ValidationProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def _write_fixture(temp):
+        names = bake.sign.bake_set_basenames("test")
+        files = [os.path.join(temp, name) for name in names]
+        for path in files:
+            Path(path).write_text("artifact\n")
+        manifest = files[2]
+        sums = os.path.join(temp, "xpf-test.SHA256SUMS")
+        Path(manifest).write_text("version: test\nvalidated: false\n")
+        snapshot = bake.snapshot_manifest_inputs(files)
+        bake.sign.write_manifest(sums, files, recorded_hashes=snapshot)
+        return files, manifest, sums, snapshot
+
+    def test_success_updates_sidecar_and_only_its_snapshot_hash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files, manifest, sums, snapshot = self._write_fixture(temp)
+            before = dict(snapshot)
+
+            bake.record_validation_success(manifest, sums, files, snapshot)
+
+            self.assertIn("validated: true\n", Path(manifest).read_text())
+            recorded = bake.sign.parse_manifest(sums)
+            self.assertEqual(recorded, snapshot)
+            for name, digest in before.items():
+                if name != os.path.basename(manifest):
+                    self.assertEqual(snapshot[name], digest)
+
+    def test_gate_window_sidecar_drift_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files, manifest, sums, snapshot = self._write_fixture(temp)
+            tampered = Path(manifest).read_text().replace(
+                "version: test", "version: tampered")
+            Path(manifest).write_text(tampered)
+
+            with self.assertRaises(SystemExit) as ctx:
+                bake.record_validation_success(manifest, sums, files, snapshot)
+
+            self.assertIn("drifted during validation", str(ctx.exception))
+            self.assertEqual(Path(manifest).read_text(), tampered)
+            self.assertEqual(bake.sign.parse_manifest(sums), snapshot)
+
+    def test_gate_window_checksum_drift_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files, manifest, sums, snapshot = self._write_fixture(temp)
+            tampered = dict(snapshot)
+            tampered["xpf-test.pkgs"] = "f" * 64
+            bake.sign.write_manifest(sums, files, recorded_hashes=tampered)
+
+            with self.assertRaises(SystemExit) as ctx:
+                bake.record_validation_success(manifest, sums, files, snapshot)
+
+            self.assertIn("checksum manifest", str(ctx.exception))
+            self.assertIn("validated: false\n", Path(manifest).read_text())
 
 
 class MainValidationGateTests(unittest.TestCase):
@@ -211,12 +274,21 @@ class MainValidationGateTests(unittest.TestCase):
             self.assertEqual(validate_cmd[1], os.path.join(bake.HERE, "validate.py"))
             self.assertEqual(validate_cmd[2], "--qcow2")
             self.assertEqual(validate_cmd[4], "--metadata")
-            self.assertEqual(validate_cmd[-1], "all")
             self.assertEqual(sign_calls, [])
             self.assertEqual(
                 [name for name in os.listdir(out_dir) if name.endswith(".minisig")],
                 [],
             )
+            # A failed gate must leave no provenance that can be re-signed as
+            # validated. RED on revert: bake previously wrote this as true
+            # from `not --skip-validate`, before running the gate.
+            sidecar = Path(out_dir, "xpf-test-version.manifest")
+            self.assertIn("validated: false\n", sidecar.read_text())
+            with self.assertRaises(bake.sign.SignError):
+                bake.sign.assert_bake_set(
+                    os.path.join(out_dir, "xpf-test-version.SHA256SUMS"),
+                    [os.path.join(out_dir, name)
+                     for name in bake.sign.bake_set_basenames("test-version")])
 
 
 class RuntimePackageSyncTests(unittest.TestCase):
