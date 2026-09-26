@@ -139,11 +139,15 @@ fn atomic_then_real_nonfirst_tracker_records_fragment_10661() {
         &tcp20(),
     );
     match overlap_parse(&pkt, libc::AF_INET6) {
-        OverlapParse::Fragment(k, s, e, is_last) => {
+        OverlapParse::Fragment(k, next_header, s, e, is_last) => {
             assert_eq!((s, e), (8, 28));
             assert!(is_last, "M=0 with full wire bytes is the last fragment");
             assert_eq!(k.ident, IDENT_REAL);
             assert_eq!(k.protocol, 0, "v6 overlap key drops Next Header");
+            assert_eq!(
+                next_header, PROTO_TCP,
+                "parse preserves the Fragment Header's Next Header"
+            );
             assert_eq!(k.routing_domain, 0, "the caller stamps the domain");
         }
         other => panic!("#10661: tracker must track the real header, got {other:?}"),
@@ -280,7 +284,7 @@ fn atomic_then_real_first_agreement_10661() {
         &tcp20(),
     );
     match overlap_parse(&pkt, libc::AF_INET6) {
-        OverlapParse::Fragment(k, s, e, is_last) => {
+        OverlapParse::Fragment(k, _, s, e, is_last) => {
             assert_eq!((s, e), (0, 20));
             assert!(!is_last, "M=1 is never the last fragment");
             assert_eq!(k.ident, IDENT_REAL);
@@ -329,7 +333,7 @@ fn real_first_then_atomic_residual_10661() {
     assert!(
         matches!(
             overlap_parse(&pkt, libc::AF_INET6),
-            OverlapParse::Fragment(_, 0, _, false)
+            OverlapParse::Fragment(_, _, 0, _, false)
         ),
         "#10661: tracker keys the first real (M=1) header"
     );
@@ -358,7 +362,7 @@ fn real_first_then_real_nonfirst_tracker_first_record_10661() {
         &tcp20(),
     );
     match overlap_parse(&pkt, libc::AF_INET6) {
-        OverlapParse::Fragment(_, s, e, _) => assert_eq!((s, e), (0, 28)),
+        OverlapParse::Fragment(_, _, s, e, _) => assert_eq!((s, e), (0, 28)),
         other => panic!("#10661: tracker must record the first real header, got {other:?}"),
     }
     assert!(
@@ -386,7 +390,7 @@ fn real_nonfirst_then_atomic_agreement_10661() {
     assert!(
         matches!(
             overlap_parse(&pkt, libc::AF_INET6),
-            OverlapParse::Fragment(_, 8, _, _)
+            OverlapParse::Fragment(_, _, 8, _, _)
         ),
         "#10661: tracker keys the non-first header"
     );
@@ -460,7 +464,7 @@ fn overlap_tail_dropped_like_plain_control_10661() {
     // NonFragment, nothing was recorded, the tail forwarded.
     let control = v6_frag_chain(&[(WORD_NONFIRST_O8, IDENT_REAL)], &tcp20());
     let (ck, cs, ce) = match overlap_parse(&control, libc::AF_INET6) {
-        OverlapParse::Fragment(k, s, e, _) => (k, s, e),
+        OverlapParse::Fragment(k, _, s, e, _) => (k, s, e),
         other => panic!("#10661: control must parse, got {other:?}"),
     };
     let chain = v6_frag_chain(
@@ -468,7 +472,7 @@ fn overlap_tail_dropped_like_plain_control_10661() {
         &tcp20(),
     );
     let (k, s, e) = match overlap_parse(&chain, libc::AF_INET6) {
-        OverlapParse::Fragment(k, s, e, _) => (k, s, e),
+        OverlapParse::Fragment(k, _, s, e, _) => (k, s, e),
         other => panic!("#10661: chain must parse like the control, got {other:?}"),
     };
     assert_eq!((k, s, e), (ck, cs, ce), "#10661: chain == control");

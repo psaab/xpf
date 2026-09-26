@@ -726,6 +726,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     crate::fragment_overlap::OverlapParse::Unreadable => (None, true),
                     crate::fragment_overlap::OverlapParse::Fragment(
                         mut okey,
+                        fragment_next_header,
                         start,
                         end,
                         is_last,
@@ -766,7 +767,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        (Some((okey, start, end, is_last)), true)
+                        (Some((okey, fragment_next_header, start, end, is_last)), true)
                     }
                 };
                 // #946 Phase 1 stage 11: IPsec passthrough. ESP
@@ -808,7 +809,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // the frame to XFRM. A terminal fragment must never be
                         // reinjected before the late overlap check can reject it.
                         let mut admission_to_commit = None;
-                        if let Some((okey, start, end, is_last)) = overlap_pre_9950 {
+                        if let Some((okey, _, start, end, is_last)) = overlap_pre_9950 {
                             let mut overlap = worker_ctx
                                 .forwarding
                                 .nat64
@@ -6220,7 +6221,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // this before forward/session/zone accounting so shard-full and
                 // overlap drops are not counted as forwarded candidates.
                 if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
-                    && let Some((pre_key, start, end, is_last)) = overlap_pre_9950
+                    && let Some((pre_key, fragment_next_header, start, end, is_last)) =
+                        overlap_pre_9950
                 {
                     let mut pre_overlap = worker_ctx
                         .forwarding
@@ -6236,7 +6238,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         );
                     let mut pre_admission = pre_overlap.admission.take();
                     let pre_overlap_dropped = pre_overlap.dropped;
-                    telemetry.counters.record_frag_overlap_result(pre_overlap, false);
+                    telemetry
+                        .counters
+                        .record_frag_overlap_result(pre_overlap, false);
                     if pre_overlap_dropped {
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
@@ -6252,18 +6256,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         0
                     };
                     let frag_overlap = worker_ctx.forwarding.nat64.frag_overlap.clone();
-                    let mut admissions =
-                        crate::fragment_overlap::OverlapAdmissionTokens::new(
-                            frag_overlap.clone(),
-                            pre_admission,
-                            None,
-                        );
-                    if let Some(post_key) = crate::fragment_overlap::translated_overlap_key(
+                    let mut admissions = crate::fragment_overlap::OverlapAdmissionTokens::new(
+                        frag_overlap.clone(),
+                        pre_admission,
+                        None,
+                    );
+                    match crate::fragment_overlap::translated_overlap_key(
                         &pre_key,
+                        fragment_next_header,
                         &decision.nat,
                         egress_domain,
                     ) {
-                        if post_key != pre_key {
+                        crate::fragment_overlap::TranslatedOverlapKey::Key(post_key)
+                            if post_key != pre_key =>
+                        {
                             let mut post_overlap = worker_ctx
                                 .forwarding
                                 .nat64
@@ -6278,15 +6284,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 );
                             admissions.post = post_overlap.admission.take();
                             let post_overlap_dropped = post_overlap.dropped;
-                            telemetry.counters.record_frag_overlap_result(
-                                post_overlap,
-                                true,
-                            );
+                            telemetry
+                                .counters
+                                .record_frag_overlap_result(post_overlap, true);
                             if post_overlap_dropped {
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
                         }
+                        crate::fragment_overlap::TranslatedOverlapKey::DropMissingNat64Rewrite => {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        _ => {}
                     }
                     overlap_admission_9950 = Some(admissions);
                 }

@@ -561,17 +561,16 @@ pub(super) fn retry_pending_neigh(
         let mut retry_overlap_admissions_10659: Option<
             crate::fragment_overlap::OverlapAdmissionTokens,
         > = None;
-        if let crate::fragment_overlap::OverlapParse::Fragment(mut okey, start, end, is_last) =
-            source_frame
-                .get(verified_l3_or_stamp(
-                    source_frame,
-                    pkt.meta.l3_offset,
-                    pkt.meta.addr_family,
-                )..)
-                .map(|l3| {
-                    crate::fragment_overlap::overlap_parse(l3, pkt.meta.addr_family as i32)
-                })
-                .unwrap_or(crate::fragment_overlap::OverlapParse::Unreadable)
+        if let crate::fragment_overlap::OverlapParse::Fragment(
+            mut okey,
+            fragment_next_header,
+            start,
+            end,
+            is_last,
+        ) = source_frame
+            .get(verified_l3_or_stamp(source_frame, pkt.meta.l3_offset, pkt.meta.addr_family)..)
+            .map(|l3| crate::fragment_overlap::overlap_parse(l3, pkt.meta.addr_family as i32))
+            .unwrap_or(crate::fragment_overlap::OverlapParse::Unreadable)
         {
             // Routing domain from the ingress SSOT unconditionally — the same
             // expression the inline hook falls back to when `flow` is None, which
@@ -625,12 +624,15 @@ pub(super) fn retry_pending_neigh(
                 pre_admission,
                 None,
             );
-            if let Some(post_key) = crate::fragment_overlap::translated_overlap_key(
+            match crate::fragment_overlap::translated_overlap_key(
                 &okey,
+                fragment_next_header,
                 &decision.nat,
                 egress_domain,
             ) {
-                if post_key != okey {
+                crate::fragment_overlap::TranslatedOverlapKey::Key(post_key)
+                    if post_key != okey =>
+                {
                     let mut post_overlap = forwarding
                         .nat64
                         .frag_overlap
@@ -650,6 +652,11 @@ pub(super) fn retry_pending_neigh(
                         continue;
                     }
                 }
+                crate::fragment_overlap::TranslatedOverlapKey::DropMissingNat64Rewrite => {
+                    binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                    continue;
+                }
+                _ => {}
             }
             retry_overlap_admissions_10659 = Some(admissions);
         }
