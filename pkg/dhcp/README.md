@@ -108,6 +108,13 @@ the debounced `onAddressChange` callback when content changed.
   abandoning the cycle and re-acquiring, paced by `reacquireBackstop` so a
   server that keeps granting a 0-second lease cannot become a tight
   DISCOVER/SOLICIT loop. v4 and v6 share this one definition.
+- **DHCPv6 acquisition validation (#10858)**: acquisition and stateless replies
+  must match the client DUID and successful message status; IA_NA / IA_PD
+  contents are accepted only for the requested IAID and successful IA status.
+  A non-rapid-commit acquisition collects Advertises for one second and
+  Requests the highest-Preference offer (Preference 255 is immediate), then
+  accepts the Reply only from that selected server. Stateless Information
+  Replies require a server DUID and cannot commit DNS on an error status.
 - **DHCPv6 explicit valid-lifetime-0 invalidation (RFC 8415 §18.2.10.1,
   #5927)**: a Reply that carries an IA_NA whose IAADDR(s) are **all
   valid-lifetime 0** is the server's directive to STOP using the held

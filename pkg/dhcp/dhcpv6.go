@@ -15,6 +15,7 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
+	"github.com/insomniacslk/dhcp/iana"
 )
 
 // errV6AddrInvalidated signals that a DHCPv6 Reply EXPLICITLY invalidated the
@@ -276,13 +277,9 @@ type dhcpv6Result struct {
 	withdrawnPDs []DelegatedPrefix
 }
 
-// doDHCPv6 performs a single DHCPv6 exchange for the given mode.
-// exchangeAcquire runs a Rapid-Solicit (or Information-Request in
-// stateless mode); exchangeRenew sends an RFC 8415 §18.2.4 RENEW to the
-// granting server (server DUID echoed) and exchangeRebind an §18.2.5
-// REBIND (no server DUID), both echoing the assigned IA_NA / IA_PD from
-// prev / prevPDs (#2994). Stateless mode ignores the mode (no binding to
-// renew — every refresh is an Information-Request).
+// doDHCPv6 performs one DHCPv6 exchange. Acquisition attempts rapid commit
+// and otherwise collects Advertises before Requesting the highest-preference
+// server. Renew/rebind retain their RFC 8415 binding behavior.
 func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExchangeMode, prev *Lease, prevPDs []DelegatedPrefix) (*dhcpv6Result, error) {
 	if mode != exchangeAcquire && !leaseInterfaceMatches(ifaceName, prev) {
 		if prev == nil {
@@ -334,7 +331,7 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 			dhcpv6.WithRequestedOptions(dhcpv6.OptionDNSRecursiveNameServer)(msg)
 		}
 
-		resp, err := client.SendAndRead(exCtx, nclient6.AllDHCPRelayAgentsAndServers, msg, nil)
+		resp, err := client.SendAndRead(exCtx, nclient6.AllDHCPRelayAgentsAndServers, msg, v6StatelessMatcher(msg))
 		if err != nil {
 			return nil, fmt.Errorf("DHCPv6 information-request: %w", err)
 		}
@@ -373,13 +370,182 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 			return nil, fmt.Errorf("DHCPv6 %s: %w", mode, err)
 		}
 	default:
-		adv, err = client.RapidSolicit(exCtx, mods...)
+		adv, err = v6Acquire(exCtx, client, mods)
 		if err != nil {
 			return nil, fmt.Errorf("DHCPv6 solicit: %w", err)
 		}
 	}
 
-	return m.parseV6Reply(ctx, ifaceName, adv, v6opts)
+	// Every path — acquire, renew, rebind — commits only IAs whose IAIDs
+	// match what this client solicited, and only on message+IA Success
+	// status; anything else is a rejection, never a partial commit (#10858).
+	wantNA := v6IANAIAID(client.InterfaceAddr())
+	return m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, &wantNA, &v6IAPDIAID)
+}
+
+const v6AdvertiseCollectionTime = time.Second
+
+var v6IAPDIAID = [4]byte{0, 0, 0, 1}
+
+func v6IANAIAID(hwaddr net.HardwareAddr) [4]byte {
+	var iaid [4]byte
+	if len(hwaddr) >= len(iaid) {
+		copy(iaid[:], hwaddr[len(hwaddr)-len(iaid):])
+	}
+	return iaid
+}
+
+func v6StatusOK(status *dhcpv6.OptStatusCode) bool {
+	return status == nil || status.StatusCode == iana.StatusSuccess
+}
+
+func v6MessageStatusOK(msg *dhcpv6.Message) bool {
+	return msg != nil && v6StatusOK(msg.Options.Status())
+}
+
+func v6MessageStatusError(msg *dhcpv6.Message) error {
+	if msg == nil {
+		return errors.New("nil DHCPv6 message")
+	}
+	if status := msg.Options.Status(); status != nil && status.StatusCode != iana.StatusSuccess {
+		return fmt.Errorf("DHCPv6 %s message status %s: %s", msg.MessageType, status.StatusCode, status.StatusMessage)
+	}
+	return nil
+}
+
+// v6HasSuccessfulRequestedIA requires a successful IA matching at least one
+// of the requested IAIDs. An unsuccessful IA cannot carry usable sub-options.
+func v6HasSuccessfulRequestedIA(req, resp *dhcpv6.Message) bool {
+	if req == nil || resp == nil {
+		return false
+	}
+	found := false
+	for _, expected := range req.Options.IANA() {
+		for _, got := range resp.Options.IANA() {
+			if got.IaId == expected.IaId && v6StatusOK(got.Options.Status()) {
+				found = true
+			}
+		}
+	}
+	for _, expected := range req.Options.IAPD() {
+		for _, got := range resp.Options.IAPD() {
+			if got.IaId == expected.IaId && v6StatusOK(got.Options.Status()) {
+				found = true
+			}
+		}
+	}
+	return found
+}
+
+func v6ReplyMatches(req, resp *dhcpv6.Message, expectedServer dhcpv6.DUID) bool {
+	if req == nil || resp == nil ||
+		resp.MessageType != dhcpv6.MessageTypeReply ||
+		resp.TransactionID != req.TransactionID ||
+		req.Options.ClientID() == nil ||
+		!sameDUID(resp.Options.ClientID(), req.Options.ClientID()) ||
+		!v6MessageStatusOK(resp) ||
+		!v6HasSuccessfulRequestedIA(req, resp) {
+		return false
+	}
+	serverID := resp.Options.ServerID()
+	if serverID == nil {
+		return false
+	}
+	return expectedServer == nil || sameDUID(serverID, expectedServer)
+}
+
+func v6StatelessMatcher(req *dhcpv6.Message) nclient6.Matcher {
+	return func(resp *dhcpv6.Message) bool {
+		return req != nil && resp != nil &&
+			resp.MessageType == dhcpv6.MessageTypeReply &&
+			resp.TransactionID == req.TransactionID &&
+			req.Options.ClientID() != nil &&
+			sameDUID(resp.Options.ClientID(), req.Options.ClientID()) &&
+			resp.Options.ServerID() != nil &&
+			v6MessageStatusOK(resp)
+	}
+}
+
+func v6AdvertiseMatches(req, adv *dhcpv6.Message) bool {
+	if req == nil || adv == nil ||
+		adv.MessageType != dhcpv6.MessageTypeAdvertise ||
+		adv.TransactionID != req.TransactionID ||
+		req.Options.ClientID() == nil ||
+		!sameDUID(adv.Options.ClientID(), req.Options.ClientID()) ||
+		adv.Options.ServerID() == nil ||
+		!v6MessageStatusOK(adv) {
+		return false
+	}
+	return v6HasSuccessfulRequestedIA(req, adv)
+}
+
+func v6AdvertisePreference(adv *dhcpv6.Message) uint8 {
+	if adv == nil {
+		return 0
+	}
+	opt, ok := adv.Options.GetOne(dhcpv6.OptionPreference).(*dhcpv6.OptionGeneric)
+	if !ok || len(opt.OptionData) != 1 {
+		return 0
+	}
+	return opt.OptionData[0]
+}
+
+func v6SelectAdvertise(advertises []*dhcpv6.Message) *dhcpv6.Message {
+	var best *dhcpv6.Message
+	var bestPreference uint8
+	for _, adv := range advertises {
+		preference := v6AdvertisePreference(adv)
+		if best == nil || preference > bestPreference {
+			best, bestPreference = adv, preference
+		}
+	}
+	return best
+}
+
+// v6Acquire attempts rapid commit first, then collects ordinary Advertises
+// for RFC 8415 Preference selection. Preference 255 is an immediate choice;
+// otherwise the one-second collection window lets slower servers compete.
+func v6Acquire(ctx context.Context, client *nclient6.Client, modifiers []dhcpv6.Modifier) (*dhcpv6.Message, error) {
+	solicit, err := dhcpv6.NewSolicit(client.InterfaceAddr(), modifiers...)
+	if err != nil {
+		return nil, fmt.Errorf("build SOLICIT: %w", err)
+	}
+	dhcpv6.WithRapidCommit(solicit)
+	var advertises []*dhcpv6.Message
+	matcher := func(resp *dhcpv6.Message) bool {
+		if v6ReplyMatches(solicit, resp, nil) {
+			return true
+		}
+		if !v6AdvertiseMatches(solicit, resp) {
+			return false
+		}
+		advertises = append(advertises, resp)
+		return v6AdvertisePreference(resp) == 255
+	}
+	collectCtx, cancel := context.WithTimeout(ctx, v6AdvertiseCollectionTime)
+	adv, err := client.SendAndRead(collectCtx, nclient6.AllDHCPRelayAgentsAndServers, solicit, matcher)
+	cancel()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err == nil && adv.MessageType == dhcpv6.MessageTypeReply {
+		return adv, nil
+	}
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
+	best := v6SelectAdvertise(advertises)
+	if best == nil {
+		return nil, nclient6.ErrNoResponse
+	}
+	request, err := dhcpv6.NewRequestFromAdvertise(best, modifiers...)
+	if err != nil {
+		return nil, fmt.Errorf("build REQUEST from selected ADVERTISE: %w", err)
+	}
+	return client.SendAndRead(ctx, nclient6.AllDHCPRelayAgentsAndServers, request,
+		func(resp *dhcpv6.Message) bool {
+			return v6ReplyMatches(request, resp, best.Options.ServerID())
+		})
 }
 
 // selectIANAAddress chooses a single, deterministic IA_NA address from a
@@ -409,7 +575,7 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 // (present-but-0 → discard the held address) from an ABSENT IA_NA (no IAADDR
 // at all → keep + retry). A reply with both a 0-lifetime and a positive IAADDR
 // still selects the positive one (valid Addr) — not an invalidation. (#5927)
-func selectIANAAddress(adv *dhcpv6.Message) (addr netip.Addr, validLT time.Duration, sawZeroLifetime bool) {
+func selectIANAAddress(adv *dhcpv6.Message, expectedIAID ...*[4]byte) (addr netip.Addr, validLT time.Duration, sawZeroLifetime bool) {
 	var (
 		best      netip.Addr
 		bestValid time.Duration
@@ -420,6 +586,12 @@ func selectIANAAddress(adv *dhcpv6.Message) (addr netip.Addr, validLT time.Durat
 	for _, opt := range adv.Options.Options {
 		ianaOpt, ok := opt.(*dhcpv6.OptIANA)
 		if !ok {
+			continue
+		}
+		if len(expectedIAID) > 0 && expectedIAID[0] != nil && ianaOpt.IaId != *expectedIAID[0] {
+			continue
+		}
+		if !v6StatusOK(ianaOpt.Options.Status()) {
 			continue
 		}
 		for _, subOpt := range ianaOpt.Options.Options {
@@ -451,11 +623,16 @@ func selectIANAAddress(adv *dhcpv6.Message) (addr netip.Addr, validLT time.Durat
 	return best, bestValid, sawZero
 }
 
-// parseV6Reply extracts the lease (IA_NA address, lifetime, DNS, gateway)
-// and any delegated prefixes (IA_PD) from a DHCPv6 Reply/Advertise. It is
-// shared by the solicit, renew, and rebind paths (#2994); the server DUID
-// is captured so the next RENEW can echo it.
+// parseV6Reply extracts DHCPv6 options for unit callers that do not have an
+// interface IAID. Production exchanges use parseV6ReplyChecked below.
 func (m *Manager) parseV6Reply(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options) (*dhcpv6Result, error) {
+	return m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, nil, nil)
+}
+func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options, expectedNA, expectedPD *[4]byte) (*dhcpv6Result, error) {
+	if err := v6MessageStatusError(adv); err != nil {
+		return nil, err
+	}
+
 	result := &dhcpv6Result{}
 	now := time.Now()
 
@@ -490,14 +667,14 @@ func (m *Manager) parseV6Reply(ctx context.Context, ifaceName string, adv *dhcpv
 
 	if wantNA {
 		var sawZeroLifetime bool
-		addr, validLT, sawZeroLifetime = selectIANAAddress(adv)
+		addr, validLT, sawZeroLifetime = selectIANAAddress(adv, expectedNA)
 		iaNAExplicitlyInvalidated = !addr.IsValid() && sawZeroLifetime
 	}
 
 	// Extract IA_PD delegated prefixes, split into live and (RFC 8415
 	// §12.1) explicitly-withdrawn valid-lifetime-0 prefixes (#4874 B).
 	if wantPD {
-		result.prefixes, result.withdrawnPDs = extractDelegatedPrefixes(adv, ifaceName, now)
+		result.prefixes, result.withdrawnPDs = extractDelegatedPrefixes(adv, ifaceName, now, expectedPD)
 		for _, dp := range result.prefixes {
 			slog.Info("DHCPv6: received delegated prefix",
 				"interface", ifaceName,
@@ -731,10 +908,16 @@ func (m *Manager) buildDHCPv6Modifiers(ifaceName string, opts *DHCPv6Options) []
 // > 128, or a non-contiguous mask) is dropped and enters NEITHER set — a
 // > 128 length otherwise decodes to a /0 that would be advertised on-link
 // to the LAN (#6531).
-func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Time) (live, withdrawn []DelegatedPrefix) {
+func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Time, expectedIAID ...*[4]byte) (live, withdrawn []DelegatedPrefix) {
 	for _, opt := range msg.Options.Options {
 		iapdOpt, ok := opt.(*dhcpv6.OptIAPD)
 		if !ok {
+			continue
+		}
+		if len(expectedIAID) > 0 && expectedIAID[0] != nil && iapdOpt.IaId != *expectedIAID[0] {
+			continue
+		}
+		if !v6StatusOK(iapdOpt.Options.Status()) {
 			continue
 		}
 		for _, prefix := range iapdOpt.Options.Prefixes() {
