@@ -1664,8 +1664,8 @@ def _resolve_channel_version(base, channel, sign_mod, dry_run=False,
     exactly what was signed.
 
     Fail-CLOSED at every step. A missing pointer, a missing signature, a
-    signature that does not verify against any pinned/overlap key, unparseable
-    JSON, or a version that is not filename-safe all abort.
+    signature that does not verify against any pinned/overlap key, invalid JSON,
+    a missing/expired/future date, or an unsafe version all abort.
     """
     url = f"{base}/{channel}/latest.json"
     if dry_run:
@@ -1705,6 +1705,11 @@ def _resolve_channel_version(base, channel, sign_mod, dry_run=False,
                 f"valid JSON: {e}")
         if not isinstance(doc, dict):
             die(f"channel pointer {channel}/latest.json is not a JSON object")
+        try:
+            sign_mod.validate_latest_date(doc.get("date"))
+        except sign_mod.SignError as e:
+            die(f"channel pointer {channel}/latest.json has a stale or "
+                f"invalid date: {e}")
         ver = doc.get("version")
         if not ver:
             die(f"channel pointer {channel}/latest.json names no version "

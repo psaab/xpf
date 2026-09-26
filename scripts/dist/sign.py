@@ -34,6 +34,7 @@ Design contract (docs/research/1924-signed-hosted-dist/plan.md §5.1/§5.2):
 #full downstream gate.
 
 import base64
+import datetime
 import hashlib
 import os
 import re
@@ -41,7 +42,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
+LATEST_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
+LATEST_FUTURE_SKEW_SECONDS = 5 * 60
 # Checked-in default public key for image artifacts. XPF_IMAGE_PUBKEY keeps
 # its legacy singular override; XPF_IMAGE_PUBKEYS supplies a rotation set.
 # Until OQ-2 supplies a real key, only `xpf-image.pub.placeholder` ships (its
@@ -206,6 +210,31 @@ def validate_version(value, field):
             "shell metacharacters), so it cannot escape the artifact output "
             "directory (#5992)")
     return value
+
+
+def parse_latest_date(value):
+    """Parse the canonical UTC timestamp in a signed latest.json pointer."""
+    if not isinstance(value, str):
+        raise SignError("date is missing or is not a string")
+    try:
+        parsed = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise SignError(
+            "date must use YYYY-MM-DDTHH:MM:SSZ format") from exc
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise SignError("date must use canonical YYYY-MM-DDTHH:MM:SSZ format")
+    return parsed.replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
+def validate_latest_date(value, now=None):
+    """Require a latest.json date no more than 90 days old or 5 minutes ahead."""
+    issued = parse_latest_date(value)
+    now = time.time() if now is None else now
+    if issued > now + LATEST_FUTURE_SKEW_SECONDS:
+        raise SignError("date is more than 5 minutes in the future")
+    if now - issued > LATEST_MAX_AGE_SECONDS:
+        raise SignError("date is older than the 90-day freshness window")
+    return issued
 
 
 def parse_sidecar_fields(text):

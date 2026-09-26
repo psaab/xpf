@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parents[1]
@@ -160,6 +162,60 @@ class MultiKeyRotation10767(unittest.TestCase):
             publish.gate_latest(str(self.dist), "stable", {self.VER: self.manifest},
                                 [str(self.old_pub), str(self.new_pub)])
         self.assertIn("new.pub", str(caught.exception))
+
+    def test_make_latest_rejects_channel_version_rollback(self):
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        original = latest.read_bytes()
+        (self.dist / "xpf-1.2.2.SHA256SUMS").touch()
+        with self.assertRaises(SystemExit) as caught:
+            publish.make_latest(str(self.dist), "stable", "1.2.2")
+        self.assertIn("refusing to roll stable/latest.json back",
+                      str(caught.exception))
+        self.assertEqual(latest.read_bytes(), original,
+                         "a refused rollback must not replace the pointer")
+
+    def test_make_latest_rejects_a_nonadvancing_date(self):
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        original = latest.read_bytes()
+        issued = sign.parse_latest_date(json.loads(original)["date"])
+        with mock.patch.object(publish.time, "time", return_value=issued):
+            with self.assertRaises(SystemExit) as caught:
+                publish.make_latest(str(self.dist), "stable", self.VER)
+        self.assertIn("non-advancing date", str(caught.exception))
+        self.assertEqual(latest.read_bytes(), original,
+                         "a refused timestamp must not replace the pointer")
+
+    def test_make_latest_advances_an_old_key_signed_pointer(self):
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        old_date = sign.parse_latest_date(
+            json.loads(latest.read_text())["date"])
+        new_key_signature = Path(sign.signature_paths(
+            str(latest), [str(self.new_pub)])[-1])
+        new_key_signature.unlink()
+        with mock.patch.object(publish.time, "time", return_value=old_date + 1):
+            publish.make_latest(str(self.dist), "stable", self.VER)
+        self.assertGreater(
+            sign.parse_latest_date(json.loads(latest.read_text())["date"]),
+            old_date)
+        self.assertTrue(new_key_signature.is_file(),
+                        "the update must sign with every configured secret key")
+
+    def test_latest_gate_rejects_stale_signed_date(self):
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        data = json.loads(latest.read_text())
+        data["date"] = "1999-01-01T00:00:00Z"
+        latest.write_text(json.dumps(data) + "\n")
+        sign.sign_manifest(str(latest), [str(self.old_sec), str(self.new_sec)])
+        with self.assertRaises(SystemExit) as caught:
+            publish.gate_latest(
+                str(self.dist), "stable", {self.VER: self.manifest},
+                [str(self.old_pub), str(self.new_pub)])
+        self.assertIn("older than the 90-day freshness window",
+                      str(caught.exception))
 
 
 if __name__ == "__main__":
