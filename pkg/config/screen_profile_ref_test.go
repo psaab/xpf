@@ -72,3 +72,65 @@ func TestZoneUndefinedScreenProfileLenientDowngradesToWarning(t *testing.T) {
 		t.Fatalf("expected a downgraded screen-profile-reference warning, got warnings: %v", cfg.Warnings)
 	}
 }
+
+// TestZoneQuotedEmptyScreenProfileFailsCommit distinguishes `screen ""` from a
+// zone with no screen statement at all (#10973). The token-present scalar leaf
+// passes schema arity, so the compiled reference gate must reject it explicitly.
+func TestZoneQuotedEmptyScreenProfileFailsCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tree func(*testing.T) *ConfigTree
+	}{
+		{
+			name: "hierarchical",
+			tree: func(t *testing.T) *ConfigTree {
+				t.Helper()
+				p := NewParser(`security { zones { security-zone trust { screen ""; } } }`)
+				tree, parseErrs := p.Parse()
+				if len(parseErrs) != 0 {
+					t.Fatalf("parse: %v", parseErrs)
+				}
+				return tree
+			},
+		},
+		{
+			name: "flat-set",
+			tree: func(t *testing.T) *ConfigTree {
+				t.Helper()
+				path, quoted, grouped, err := ParseSetCommandGrouped(`set security zones security-zone trust screen ""`)
+				if err != nil {
+					t.Fatalf("parse set command: %v", err)
+				}
+				tree := &ConfigTree{}
+				if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+					t.Fatalf("SetPathQuotedGrouped: %v", err)
+				}
+				return tree
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := tc.tree(t)
+			if err := SchemaValidate(tree, nil); err != nil {
+				t.Fatalf("the quoted empty value is present and satisfies scalar arity: %v", err)
+			}
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatal("strict commit accepted a quoted-empty screen profile")
+			} else if !strings.Contains(err.Error(), `security zone "trust"`) ||
+				!strings.Contains(err.Error(), "empty screen profile") {
+				t.Fatalf("strict error must name the zone and empty profile binding, got %v", err)
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile must retain this existing config: %v", err)
+			}
+			zone := cfg.Security.Zones["trust"]
+			if zone == nil || !zone.ScreenProfileConfigured || zone.ScreenProfile != "" {
+				t.Fatalf("lenient compile lost the authored empty binding: %+v", zone)
+			}
+			if !strings.Contains(strings.Join(cfg.Warnings, "\n"), `security zone "trust" has an empty screen profile reference`) {
+				t.Fatalf("lenient compile must warn with the zone name, got %v", cfg.Warnings)
+			}
+		})
+	}
+}
