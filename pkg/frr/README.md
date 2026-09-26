@@ -1348,10 +1348,17 @@ step. Both are required — neither sees the other's case:
   `validatePolicyCommunityReferencesStrict` (`pkg/config`) hard-rejects an
   undefined `from community` / `then community delete` reference at
   commit/commit-check, naming the policy, term, and missing community; lenient
-  (warn) on load/HA-sync (#1960). Only NAME references are checked — `then
-  community (set|add) <value>` carries a community VALUE (e.g. `65000:100`),
-  not a list reference, and is not validated. Same fail-closed-the-whole-reload
-  class as the community-list definition gate above.
+  (warn) on load/HA-sync (#1960). The community-member render belt (#8449)
+  omits a definition if any member is unrenderable. On tolerant paths,
+  `from community` references with no emitted list are handled by #10822:
+  reject terms emit a bare deny-all sequence; accept and non-terminating terms
+  skip the dangling OR branch. This avoids relying on FRR's admission versus
+  evaluation behavior for a missing match list. The guard is specific to
+  `from community`; `then community delete` is a separate `set comm-list ...
+  delete` operation. Only NAME references are checked — `then community
+  (set|add) <value>` carries a community VALUE (e.g. `65000:100`), not a list
+  reference, and is not validated. Same fail-closed-the-whole-reload class as
+  the community-list definition gate above.
 - **`GetBGPSummary` parses JSON, not the text table (#3942).**
   `GetBGPSummary` runs `show bgp summary json` and decodes it via
   `parseBGPSummaryJSON` (`status_parse.go`), mirroring the `parseRouteJSON`

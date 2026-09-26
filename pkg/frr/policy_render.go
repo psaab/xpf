@@ -298,10 +298,11 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 		// the tolerant Load / peer-sync paths only warn (#1960 no-brick), so the
 		// renderer must keep a leniently-loaded definition out of frr.conf.
 		//
-		// Omitting the list is strictly better than poisoning the reload: FRR
-		// resolves a `match community <name>` with no such list to NO MATCH,
-		// which confines the damage to the terms that reference it instead of
-		// stalling all of routing.
+		// Omitting the list avoids poisoning the entire reload with a member
+		// FRR cannot compile, but omission alone does not settle how a dangling
+		// match behaves at each FRR stage. #10822 completes this belt below:
+		// reject terms over an absent community list render deny-all, while
+		// accept/non-terminating terms skip the dangling OR-branch.
 		//
 		// The omission is per-DEFINITION, not per-member, because FRR does not
 		// allow one list name to be both standard and expanded — a half-rendered
@@ -497,6 +498,24 @@ func asPathListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool
 	return config.ValidASPathRegex(ap.Regex) != nil
 }
 
+// communityListMissingAtRender reports whether `match community <name>` would
+// dangle: no such definition, or one the community-list loop omits because it
+// has no members or contains a member that fails ValidCommunityMember.
+// Keeping this predicate in step with the emission loop ensures every name
+// reported missing has no `bgp community-list` line in the render.
+func communityListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool {
+	cd := po.Communities[name]
+	if cd == nil || len(cd.Members) == 0 {
+		return true
+	}
+	for _, member := range cd.Members {
+		if err := config.ValidCommunityMember(member); err != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, routeMapName, plPrefix string, ps *config.PolicyStatement, startSeq int) (string, int) {
 	var b strings.Builder
 	seq := startSeq
@@ -583,6 +602,40 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 				continue
 			}
 			slog.Warn("frr: term matches on as-path list absent from frr.conf; skipping dangling match",
+				"route_map", routeMapName, "term", term.Name)
+		}
+		// #10822 fail-closed term rule, the community sibling of #9881: the
+		// community-list loop omits definitions with unrenderable members,
+		// while undefined names have no definition at all. A `match community`
+		// reference to either absent list dangles, so reject terms over any
+		// such OR-branch render deny-all; other terms skip the dangling branch
+		// in the dispatch below. Never emit a dangling community match.
+		danglingCommunity := make(map[string]bool, len(term.FromCommunity))
+		for _, community := range term.FromCommunity {
+			if community == "" {
+				continue
+			}
+			if _, seen := danglingCommunity[community]; !seen {
+				danglingCommunity[community] = communityListMissingAtRender(po, community)
+			}
+		}
+		anyDanglingCommunity := false
+		for _, dangling := range danglingCommunity {
+			if dangling {
+				anyDanglingCommunity = true
+				break
+			}
+		}
+		if anyDanglingCommunity {
+			if term.Action == "reject" {
+				slog.Warn("frr: reject term matches on community list absent from frr.conf; rendering deny-all",
+					"route_map", routeMapName, "term", term.Name)
+				fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(routeMapName), seq)
+				b.WriteString("exit\n")
+				seq += 10
+				continue
+			}
+			slog.Warn("frr: term matches on community list absent from frr.conf; skipping dangling match",
 				"route_map", routeMapName, "term", term.Name)
 		}
 
@@ -979,6 +1032,13 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 			for _, plName := range orElseEmpty(term.PrefixList) {
 				for _, plRef := range fromPrefixListRefs(po, plName) {
 					for _, comm := range orElseEmpty(term.FromCommunity) {
+						// #10822: never emit a dangling `match community`
+						// (see the term rule above). "" is the no-match
+						// sentinel, never dangling. Reject terms never
+						// reach here with a dangling ref (deny-all above).
+						if danglingCommunity[comm] {
+							continue
+						}
 						for _, asp := range orElseEmpty(term.FromASPath) {
 							// #9881: never emit a dangling `match as-path`
 							// (see the term rule above). "" is the no-match
