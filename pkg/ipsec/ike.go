@@ -63,12 +63,12 @@ var errESPChainUnresolved = errors.New(
 var errDHGroupUnresolved = errors.New(
 	"proposal carries a Diffie-Hellman group that cannot be rendered")
 
-// errProposalUnresolved signals that every proposal available to a VPN was
-// rejected by the render-side crypto safety belt. The commit-time validator
-// names the authored value, while this sentinel lets tolerant loads skip the
-// affected VPN instead of emitting an unsafe or incomplete proposal list.
+// errProposalUnresolved signals that an IKE/ESP proposal set cannot be
+// rendered without changing operator intent: candidates were rejected by the
+// render-side safety belt or IKE proposals disagree on connection-level
+// authentication/lifetime. Tolerant loads skip the affected VPN.
 var errProposalUnresolved = errors.New(
-	"IPsec proposal cannot be rendered safely")
+	"IPsec proposal set cannot be rendered safely")
 
 // renderAlgorithmValueSafe is the renderer's second belt for already-persisted
 // values. It uses the same SectionSafe allowlist as the strict commit gate so
@@ -161,14 +161,13 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 
 	if ikePol, ok := cfg.IKEPolicies[gw.IKEPolicy]; ok {
 		aggressive = ikePol.Mode == "aggressive"
-		// #3904: `proposals [ p1 p2 ]` offers every listed IKE proposal.
-		// Build each resolvable reference and comma-join into one swanctl
-		// `proposals =` list (strongSwan negotiates the first mutually
-		// acceptable one). The auth method and lifetime are connection-level,
-		// taken from the first resolvable proposal to preserve single-proposal
-		// behaviour exactly.
+		// Auth method and lifetime are connection-level swanctl settings.
+		// The proposals offered by one policy must therefore agree on both;
+		// choosing either value from the first proposal silently changes the
+		// meaning of every other offered proposal.
 		var built []string
 		var firstLifetime int
+		var firstProposal string
 		authResolved := false
 		var dhSkipped []string
 		var proposalSkipped []string
@@ -195,13 +194,26 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 				slog.Warn("skipping IPsec IKE proposal during render", "proposal", ref, "detail", detail)
 				continue
 			}
+			proposalAuth, err := authMethodToSwan(ikeProp.AuthMethod)
+			if err != nil {
+				return "", "", 0, false, err
+			}
 			if !authResolved {
-				authMethod, err = authMethodToSwan(ikeProp.AuthMethod)
-				if err != nil {
-					return "", "", 0, false, err
-				}
+				authMethod = proposalAuth
 				firstLifetime = ikeProp.LifetimeSeconds
+				firstProposal = ref
 				authResolved = true
+			} else {
+				if authMethod != proposalAuth {
+					return "", "", 0, aggressive, fmt.Errorf(
+						"%w: ike-policy %q proposals %q and %q have incompatible authentication methods (%s and %s); authentication is connection-level in swanctl",
+						errProposalUnresolved, gw.IKEPolicy, firstProposal, ref, authMethod, proposalAuth)
+				}
+				if firstLifetime != ikeProp.LifetimeSeconds {
+					return "", "", 0, aggressive, fmt.Errorf(
+						"%w: ike-policy %q proposals %q and %q have different lifetime-seconds values (%d and %d); lifetime is connection-level in swanctl",
+						errProposalUnresolved, gw.IKEPolicy, firstProposal, ref, firstLifetime, ikeProp.LifetimeSeconds)
+				}
 			}
 			built = append(built, builtProposal)
 		}

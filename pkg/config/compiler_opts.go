@@ -353,20 +353,14 @@ type compileOpts struct {
 	// lenientPolicyMatchAddress.
 	lenientIPsecGatewayRefs bool
 
-	// lenientIKEPolicyChainRef (#2270) downgrades the IKE (Phase 1)
-	// gateway -> ike-policy -> ike-proposal cross-reference check from a
-	// hard error to a warning on the tolerant load / peer-sync paths
-	// (CompileConfigLenient / CompileConfigForNodeLenient). A dangling
-	// ike-policy reference (the policy is undefined, or its `proposals`
-	// reference dangles) made resolveIKESettings return an empty proposal,
-	// which renderConfig omitted entirely — strongSwan then negotiated
-	// phase-1 with its compiled-in default set (a silent crypto downgrade).
-	// Commit / commit-check hard-reject it so a new operator edit fails
-	// loudly, but an already-persisted or peer-synced config carrying this
-	// latent misconfiguration must still boot (the render-path safety net in
-	// pkg/ipsec resolveIKESettings -> renderConfig skips the unrenderable VPN
-	// rather than negotiating with defaults). Same doctrine as
-	// lenientIPsecPolicyProposalRef.
+	// lenientIKEPolicyChainRef (#2270, #10879) downgrades IKE policy
+	// reference and multi-proposal connection-setting consistency checks from
+	// hard errors to warnings on tolerant load / peer-sync paths. A dangling
+	// chain used to allow strongSwan defaults, while mixed authentication or
+	// lifetime values were silently coerced from the first proposal; the
+	// renderer skips affected VPNs in either case. Commit / commit-check remain
+	// strict, while an already-persisted or peer-synced config still boots per
+	// the #1960 fail-closed-on-load doctrine.
 	lenientIKEPolicyChainRef bool
 
 	// lenientIPsecEndpoints (#5630) downgrades the IPsec endpoint value gate
