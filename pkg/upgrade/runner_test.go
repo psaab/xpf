@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // fakeSystem is an in-memory System for state-machine tests. It records
@@ -78,13 +80,14 @@ func newFakeSystem(t *testing.T, ver string) *fakeSystem {
 		stagedVersion:      ver,
 		unitRunning:        true,
 		free:               1 << 40, // 1 TiB
+		readerVersion:      configstore.EnvelopeFormatVersion,
 		verifyPass:         true,
 		healthFailVersions: map[string]bool{},
 		now:                time.Unix(1_700_000_000, 0),
 	}
 }
 
-func (f *fakeSystem) log(s string)          { f.calls = append(f.calls, s) }
+func (f *fakeSystem) log(s string) { f.calls = append(f.calls, s) }
 func (f *fakeSystem) StopUnit(string) error {
 	f.log("stop")
 	if f.stopHook != nil {
