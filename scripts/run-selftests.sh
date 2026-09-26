@@ -90,7 +90,8 @@ run_shell() {
 
 # run_py <test_file.py> — run a python unittest file directly (each has a
 # `unittest.main()` __main__ and resolves its target import relative to its own
-# path, so cwd is irrelevant). Skips are reported by unittest itself (exit 0).
+# path, so cwd is irrelevant). A file with only skipped tests is a SKIP, not a
+# PASS, even though unittest exits 0.
 run_py() {
 	script=$1
 	if [ ! -f "$script" ]; then
@@ -100,10 +101,14 @@ run_py() {
 	out=$(python3 "$script" 2>&1)
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
-		# Surface any unittest-level skips in the summary line.
-		nskip=$(echo "$out" | grep -c 'skipped=' 2>/dev/null || true)
-		if [ "$nskip" -gt 0 ] 2>/dev/null; then
-			passl "$script ($(echo "$out" | grep -o 'skipped=[0-9]*' | head -1))"
+		# Compare the number of tests run with unittest's skipped count. A
+		# zero exit status is not a measured PASS when every test skipped.
+		ran=$(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9][0-9]*\) test.*/\1/p' | head -1)
+		nskip=$(printf '%s\n' "$out" | sed -n 's/.*skipped=\([0-9][0-9]*\).*/\1/p' | head -1)
+		if [ -n "$ran" ] && [ -n "$nskip" ] && [ "$ran" -gt 0 ] && [ "$ran" -eq "$nskip" ]; then
+			skipl "$script (all $nskip tests skipped)"
+		elif [ -n "$nskip" ] && [ "$nskip" -gt 0 ]; then
+			passl "$script (skipped=$nskip)"
 		else
 			passl "$script"
 		fi
