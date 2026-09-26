@@ -3069,9 +3069,11 @@ stopped.
   6 bindings and covered only 7 of those 18.
 
   **The appliance image ships NO reservation.** `scripts/image/bake.py` writes
-  `/etc/sysctl.d/99-xpf.conf` with forwarding and BPF-JIT settings only; nothing
-  in the bake or the deploy installs `99-xpf-hugepages.conf`. That is correct for
-  the default `ring-entries` (a binding is ~10 MiB at 1024, so no pool is needed),
+  `/etc/sysctl.d/99-xpf.conf` with BPF-JIT and router-advertisement settings
+  only; transit forwarding sysctls belong exclusively to the daemon's #9725
+  gate. Nothing in the bake or
+  the deploy installs `99-xpf-hugepages.conf`. This is correct at the default
+  `ring-entries` (a binding is ~10 MiB at 1024, so no pool is needed),
   but it means raising `ring-entries` to 16384 on a baked appliance takes the THP
   fallback on **every** binding unless the operator adds the reservation in the
   same change. Sizing a blind reservation at bake time would be worse — a pool is
