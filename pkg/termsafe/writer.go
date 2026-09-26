@@ -52,14 +52,18 @@ func NewSanitizingWriter(w io.Writer) *SanitizingWriter {
 
 // Write buffers p and emits every COMPLETE line, sanitized.
 //
-// It reports len(p) consumed on success. The sanitized form is a different
-// length from the input -- escaping grows it -- so returning the underlying
-// writer's count would make callers see a short write and retry, duplicating
-// output. The contract this satisfies is io.Writer's: all of p was consumed.
+// On success, it reports len(p): all input is consumed even though the
+// sanitized output can have a different length. On a downstream error, n
+// counts input bytes from p whose lines were emitted successfully. The
+// unconsumed part of p is not retained, so a caller can retry p[n:] without
+// duplicating earlier output. Any still-pending bytes buffered by earlier
+// calls remain available for the retry.
 func (s *SanitizingWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	buffered := len(s.buf)
 	s.buf = append(s.buf, p...)
+	consumed := 0
 
 	for {
 		i := indexByte(s.buf, '\n')
@@ -67,10 +71,17 @@ func (s *SanitizingWriter) Write(p []byte) (int, error) {
 			break
 		}
 		line := s.buf[:i+1]
-		s.buf = s.buf[i+1:]
 		if err := s.emit(line); err != nil {
-			return 0, err
+			s.buf = s.buf[:buffered]
+			return consumed, err
 		}
+		if buffered >= len(line) {
+			buffered -= len(line)
+		} else {
+			consumed += len(line) - buffered
+			buffered = 0
+		}
+		s.buf = s.buf[len(line):]
 	}
 
 	if len(s.buf) >= maxBufferedLine {
@@ -80,12 +91,19 @@ func (s *SanitizingWriter) Write(p []byte) (int, error) {
 		// a prefix of any rune and remain in line for immediate escaping.
 		suffixStart := incompleteUTF8Suffix(s.buf)
 		line := s.buf[:suffixStart]
-		s.buf = append([]byte(nil), s.buf[suffixStart:]...)
 		if len(line) > 0 {
 			if err := s.emit(line); err != nil {
-				return 0, err
+				s.buf = s.buf[:buffered]
+				return consumed, err
+			}
+			if buffered >= len(line) {
+				buffered -= len(line)
+			} else {
+				consumed += len(line) - buffered
+				buffered = 0
 			}
 		}
+		s.buf = append([]byte(nil), s.buf[suffixStart:]...)
 	}
 	return len(p), nil
 }
