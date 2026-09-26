@@ -89,19 +89,17 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 				n, bad := classifyDHGroup(v)
 				prop.DHGroup, prop.DHGroupInvalidSpec = n, bad
 			case "lifetime-seconds":
-				// #9008: RECORD a value that is not a usable positive
-				// integer instead of dropping it on the floor. Atoi
-				// failure leaves the field at 0 (indistinguishable from
-				// "not configured") and a NEGATIVE parses cleanly and
-				// would otherwise be stored and rendered, so neither case
-				// is recoverable downstream from the int alone. The floor
-				// mirrors the schema's ValidateIntegerMin(1) on this leaf
-				// so the tolerant path warns exactly where the strict
-				// commit gate rejects.
-				if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+				// #9008 and #10882: record values outside the supported range
+				// so the strict gate rejects and tolerant loads warn. Over-limit
+				// values are capped so legacy configs still rekey within Junos's
+				// maximum instead of carrying an effectively immortal SA.
+				if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= MaxIPsecLifetimeSeconds {
 					prop.LifetimeSeconds = n
 				} else if v != "" {
 					prop.LifetimeSecondsInvalidSpec = v
+					if err == nil && n > MaxIPsecLifetimeSeconds {
+						prop.LifetimeSeconds = MaxIPsecLifetimeSeconds
+					}
 				}
 			}
 		}
@@ -304,14 +302,16 @@ func parseDeadPeerDetectionNode(node *Node, gw *IPsecGateway, container *schemaN
 		case "interval":
 			if i+1 < len(keys) {
 				if n, err := strconv.Atoi(keys[i+1]); err == nil {
-					gw.DPDInterval = n
+					gw.DPDInterval = clampIPsecDPDValue(
+						n, MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds)
 				}
 				i++
 			}
 		case "threshold":
 			if i+1 < len(keys) {
 				if n, err := strconv.Atoi(keys[i+1]); err == nil {
-					gw.DPDThreshold = n
+					gw.DPDThreshold = clampIPsecDPDValue(
+						n, MinIPsecDPDThreshold, MaxIPsecDPDThreshold)
 				}
 				i++
 			}
@@ -330,14 +330,26 @@ func parseDeadPeerDetectionNode(node *Node, gw *IPsecGateway, container *schemaN
 			gw.DeadPeerDetect = c.Name()
 		case "interval":
 			if n, err := strconv.Atoi(nodeVal(c)); err == nil {
-				gw.DPDInterval = n
+				gw.DPDInterval = clampIPsecDPDValue(
+					n, MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds)
 			}
 		case "threshold":
 			if n, err := strconv.Atoi(nodeVal(c)); err == nil {
-				gw.DPDThreshold = n
+				gw.DPDThreshold = clampIPsecDPDValue(
+					n, MinIPsecDPDThreshold, MaxIPsecDPDThreshold)
 			}
 		}
 	}
+}
+
+func clampIPsecDPDValue(n, min, max int) int {
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
 }
 
 func compileIPsec(node *Node, sec *SecurityConfig) error {
@@ -371,19 +383,17 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 				n, bad := classifyDHGroup(v)
 				prop.DHGroup, prop.DHGroupInvalidSpec = n, bad
 			case "lifetime-seconds":
-				// #9008: RECORD a value that is not a usable positive
-				// integer instead of dropping it on the floor. Atoi
-				// failure leaves the field at 0 (indistinguishable from
-				// "not configured") and a NEGATIVE parses cleanly and
-				// would otherwise be stored and rendered, so neither case
-				// is recoverable downstream from the int alone. The floor
-				// mirrors the schema's ValidateIntegerMin(1) on this leaf
-				// so the tolerant path warns exactly where the strict
-				// commit gate rejects.
-				if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+				// #9008 and #10882: record values outside the supported range
+				// so the strict gate rejects and tolerant loads warn. Over-limit
+				// values are capped so legacy configs still rekey within Junos's
+				// maximum instead of carrying an effectively immortal SA.
+				if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= MaxIPsecLifetimeSeconds {
 					prop.LifetimeSeconds = n
 				} else if v != "" {
 					prop.LifetimeSecondsInvalidSpec = v
+					if err == nil && n > MaxIPsecLifetimeSeconds {
+						prop.LifetimeSeconds = MaxIPsecLifetimeSeconds
+					}
 				}
 			case "lifetime-kilobytes":
 				// #4313: captured for the closed-world leaf-completeness of

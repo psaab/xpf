@@ -313,12 +313,21 @@ all files stay in `package ipsec`, so the public API is unchanged.
     count feeding `dpd_timeout`;
   - the mode keyword maps to `dpd_action`: `always-send` → `restart`,
     `optimized` → `clear`/`restart`, `probe-idle-tunnel` → `trap`/`restart`.
+  Tolerant loads clamp parsed intervals and thresholds to the schema bounds
+  (1..3600 seconds and 1..100 probes) before calculating `dpd_timeout`;
+  `deriveDPD` also caps values from direct/pre-fix configs.
 
   `DPDEnable` is the single source of truth for "is DPD on"; the mode
   string only carries the explicit keyword. Before #3994 the enable check
   was `DeadPeerDetect != ""`, so a bare statement was read as DISABLED and
   an interval-only / threshold-only stanza captured the sub-field name as a
   bogus mode.
+
+- **IKE/ESP lifetime-seconds (#10882).** Junos sets an upper bound of 86400
+  seconds; the schema continues to require a positive integer. Strict commits
+  reject values above the bound; tolerant loads warn and cap an over-limit
+  lifetime at 86400 seconds, and the renderer also caps direct or pre-fix
+  configs before emitting `rekey_time`.
 - XFRM interface ID is derived from the bind-interface name via
   `xfrmiIfID()`. The same name → same numeric ID across reboots — don't
   rename a bind interface without expecting a reset of the SAs that ride

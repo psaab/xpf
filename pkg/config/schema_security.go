@@ -7,6 +7,15 @@ package config
 // a subpackage — because setSchema is unexported and consumed
 // in-package by schema_complete.go / schema_walk.go (two-SSOT doctrine,
 // #1319).
+// IPsec SA lifetime and DPD bounds are shared by schema validation, tolerant
+// compilation, and strongSwan rendering.
+const (
+	MaxIPsecLifetimeSeconds    = 86400
+	MinIPsecDPDIntervalSeconds = 1
+	MaxIPsecDPDIntervalSeconds = 3600
+	MinIPsecDPDThreshold       = 1
+	MaxIPsecDPDThreshold       = 100
+)
 
 // Security-log enum value sets (#3349). Each MUST stay in sync with the
 // corresponding runtime consumer so the commit-time validator accepts
@@ -1125,9 +1134,9 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				valueExamples: []string{"2", "14", "group19"}, validator: ValidateDHGroup, children: nil},
 			"encryption-algorithm":     {desc: "Encryption algorithm (e.g. aes-256-cbc, aes-256-gcm)", args: 1, placeholder: "<algorithm>", children: nil},
 			"authentication-algorithm": {desc: "Authentication/integrity algorithm (e.g. sha-256, hmac-sha-256-128)", args: 1, placeholder: "<algorithm>", children: nil},
-			"lifetime-seconds": {desc: "IKE SA lifetime in seconds", args: 1, placeholder: "<seconds>",
-				valueType: ValueInteger, valueDesc: "IKE SA lifetime in seconds",
-				valueExamples: []string{"3600", "28800"}, validator: ValidateIntegerMin(1), children: nil},
+			"lifetime-seconds": {desc: "IKE SA lifetime in seconds (1..86400)", args: 1, placeholder: "<seconds>",
+				valueType: ValueInteger, valueDesc: "IKE SA lifetime in seconds (1..86400)",
+				valueExamples: []string{"3600", "28800", "86400"}, validator: ValidateInteger(1, MaxIPsecLifetimeSeconds), children: nil},
 			// #4313: modeled so the closed-world flip is LEAF-COMPLETE. Junos
 			// allows a cosmetic `description` on an IKE proposal; xpf ignores it
 			// at compile (the IKE proposal loop has no case for it), but it MUST
@@ -1212,8 +1221,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"always-send":       {desc: "Send DPD probes regardless of traffic", children: nil},
 				"optimized":         {desc: "Optimized DPD probing", children: nil},
 				"probe-idle-tunnel": {desc: "Probe idle tunnels", children: nil},
-				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(1, 3600), placeholder: "<seconds>", children: nil},
-				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(1, 100), placeholder: "<count>", children: nil},
+				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds), placeholder: "<seconds>", children: nil},
+				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(MinIPsecDPDThreshold, MaxIPsecDPDThreshold), placeholder: "<count>", children: nil},
 			}},
 			"local-identity":  {desc: "Local IKE identity (type and value)", args: 2, children: nil},
 			"remote-identity": {desc: "Remote IKE identity (type and value)", args: 2, children: nil},
@@ -1277,9 +1286,9 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			"dh-group": {desc: "Diffie-Hellman group for PFS (e.g. 14 or group14)", args: 1, placeholder: "<dh-group>",
 				valueType: ValueDHGroup, valueDesc: "Diffie-Hellman group (PFS modp/ecp number)",
 				valueExamples: []string{"2", "14", "group19"}, validator: ValidateDHGroup, children: nil},
-			"lifetime-seconds": {desc: "IPsec SA lifetime in seconds", args: 1, placeholder: "<seconds>",
-				valueType: ValueInteger, valueDesc: "IPsec SA lifetime in seconds",
-				valueExamples: []string{"3600", "28800"}, validator: ValidateIntegerMin(1), children: nil},
+			"lifetime-seconds": {desc: "IPsec SA lifetime in seconds (1..86400)", args: 1, placeholder: "<seconds>",
+				valueType: ValueInteger, valueDesc: "IPsec SA lifetime in seconds (1..86400)",
+				valueExamples: []string{"3600", "28800", "86400"}, validator: ValidateInteger(1, MaxIPsecLifetimeSeconds), children: nil},
 			// #4313: modeled so the closed-world flip is LEAF-COMPLETE. The ESP
 			// volume-based rekey threshold; captured (IPsecProposal.LifetimeKilobytes)
 			// but accepted-only — the renderer does not yet program a byte-based
@@ -1379,8 +1388,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"always-send":       {desc: "Send DPD probes regardless of traffic", children: nil},
 				"optimized":         {desc: "Optimized DPD probing", children: nil},
 				"probe-idle-tunnel": {desc: "Probe idle tunnels", children: nil},
-				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(1, 3600), placeholder: "<seconds>", children: nil},
-				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(1, 100), placeholder: "<count>", children: nil},
+				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds), placeholder: "<seconds>", children: nil},
+				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(MinIPsecDPDThreshold, MaxIPsecDPDThreshold), placeholder: "<count>", children: nil},
 			}},
 			"local-identity":  {desc: "Local IKE identity (type and value)", args: 2, children: nil},
 			"remote-identity": {desc: "Remote IKE identity (type and value)", args: 2, children: nil},
