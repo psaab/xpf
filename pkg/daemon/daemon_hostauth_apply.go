@@ -476,22 +476,14 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 
 	switch passwordAction(cur, ok, desired) {
 	case pwApply:
-		// Defense-in-depth: re-validate the hash at the apply boundary
-		// before it reaches /etc/shadow. The strict operator commit gate
-		// (config.SchemaValidate → ValidateCryptHash) already rejects
-		// plaintext/DES/empty-checksum/':' values, BUT the lenient
-		// Load/SyncApply ingress (pkg/configstore/store.go
-		// compileTreeLenient, #1319 PR 2) only DOWNGRADES that violation
-		// to a warning so an older-binary persisted config or a synced
-		// peer value cannot brick boot. Without this guard, such a value
-		// would still be written to /etc/shadow verbatim — a plaintext
-		// password or a chpasswd-stdin-corrupting ':' (Codex #1944 r1
-		// High #2). Re-checking here makes "plaintext never reaches
-		// /etc/shadow" hold on EVERY path, while still not bricking boot
-		// (we skip+warn, leaving the existing shadow field untouched).
+		// Defense-in-depth: re-validate the hash at the apply boundary before
+		// it reaches /etc/shadow. Lenient Load/SyncApply ingress may downgrade
+		// strict validation to a warning, so reject here as well and report a
+		// failure rather than claiming that a skipped password converged.
 		if err := config.ValidateCryptHash(desired, nil); err != nil {
 			slog.Warn("refusing to apply invalid login encrypted-password to /etc/shadow",
 				"user", user.Name, "err", err)
+			fail(fmt.Errorf("refuse invalid encrypted password for %s: %w", user.Name, err))
 			break
 		}
 		// #5841 marker-first atomicity: record password ownership (and the
@@ -538,10 +530,17 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 			pwClaim.rollback()
 			acctClaim.rollback()
 			fail(fmt.Errorf("set password for %s: %w", user.Name, err))
+		} else if actual, ok := currentShadowHash(user.Name); !ok {
+			slog.Error("could not verify user password after chpasswd",
+				"user", user.Name)
+			fail(fmt.Errorf("verify password for %s: shadow entry unavailable after chpasswd", user.Name))
+		} else if actual != desired {
+			slog.Error("user password differs from desired hash after chpasswd",
+				"user", user.Name)
+			fail(fmt.Errorf("verify password for %s: shadow hash does not match desired value", user.Name))
 		} else {
-			// The password + account markers were already recorded marker-first
-			// above (#5841), before chpasswd ran, so nothing is written here on
-			// success — only the confirmation is logged.
+			// The password + account markers were recorded marker-first above
+			// (#5841); readback confirms the shadow mutation actually converged.
 			slog.Info("user encrypted-password applied", "user", user.Name)
 		}
 	case pwLock:

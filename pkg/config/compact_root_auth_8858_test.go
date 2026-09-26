@@ -34,7 +34,7 @@ import (
 // validate.
 
 const (
-	rootAuthHash8858 = "$6$rounds=5000$abc$def"
+	rootAuthHash8858 = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"
 	rootAuthKey1     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKfirst a@b"
 	rootAuthKey2     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsecond c@d"
 )

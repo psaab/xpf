@@ -1503,24 +1503,35 @@ The value is validated at commit time by a shared validator
 
 **Accepted:**
 
-- A modular crypt(3) hash `$<id>$<salt>$<checksum>` with a non-empty
-  salt and a non-empty final checksum, where `<id>` is one of
-  `1, 2a, 2b, 2y, 5, 6, 7, y, gy`. Parameter fields are allowed
-  (e.g. `$6$rounds=656000$salt$hash`, `$y$j9T$salt$hash`).
-- An optional leading `!` or `!!` (the locked-but-restorable form),
-  e.g. `!$6$salt$hash`.
+- SHA-512 crypt (`$6$`): a salt of 8-16 characters, an optional
+  `rounds=` parameter from 5000 through 999999999 (default 5000), and an
+  86-character checksum.
+- yescrypt (`$y$`) and GOST yescrypt (`$gy$`): a cost of at least 5
+  (`j9T` is the default), a salt of 8-86 characters, and a 43-character
+  checksum.
+- bcrypt (`$2a$`, `$2b$`, or `$2y$`): cost 10-31 and the standard
+  22-character salt plus 31-character checksum.
+- scrypt (`$7$`): its standard 11-97-character setting and 43-character
+  checksum.
+- An optional leading `!` or `!!` (the locked-but-restorable form), e.g.
+  `!$6$rounds=5000$saltsalt$<86-character-checksum>`.
 - A bare lock sentinel: `*`, `!`, or `!!`. This is the intentional Unix
   way to lock an account, and the **only** way to lock root via config
   (`set system root-authentication encrypted-password "*"`).
 
 **Rejected at commit:**
 
-- **Plaintext** — pasting a cleartext password is hard-rejected. This is
-  absolute: even a 13-character alphanumeric string (which a legacy DES
-  crypt would resemble) is rejected, because xpf does not accept legacy
-  DES hashes.
-- An empty value, an unknown `$<id>$`, an empty salt, an empty checksum
-  (`$6$salt$`), or a value containing `:` or a control character.
+- Plaintext, DES-looking plaintext, weak md5crypt (`$1$`) and sha256crypt
+  (`$5$`) hashes.
+- Hashes with an unsupported ID, missing or short salts, non-canonical or
+  below-floor costs, a truncated/overlong checksum, or a malformed
+  algorithm-specific structure (for example `$6$a$b`).
+- Any value containing `:` or a control character.
+
+The apply path repeats this validation so a weak or malformed value loaded
+from old state or peer sync is not written to `/etc/shadow`. After
+`chpasswd -e` exits successfully, xpf reads `/etc/shadow` back and requires
+the stored hash to match the requested hash before reporting convergence.
 
 ### Strict vs lenient paths
 

@@ -50,8 +50,8 @@ var redactionSecretSet = []string{
 	"set system services dynamic-dns provider dy password LEAK-DDNS-HTTP-PW",
 	"set interfaces wg0 tunnel wireguard private-key LEAK-WG-PRIVKEY",
 	"set interfaces wg0 tunnel wireguard peer p1 preshared-key LEAK-WG-PSK",
-	`set system root-authentication encrypted-password "$6$LEAKr$rootHASHrootHASH"`,
-	`set system login user op authentication encrypted-password "$6$LEAKl$loginHASHloginHASH"`,
+	`set system root-authentication encrypted-password "$6$LEAKr008$rootHASHrootHASH` + strings.Repeat("a", 70) + `"`,
+	`set system login user op authentication encrypted-password "$6$LEAKl008$loginHASHloginHASH` + strings.Repeat("a", 68) + `"`,
 }
 
 var redactionSentinels = []string{
