@@ -947,6 +947,10 @@ in ONE pass at the last statement before `rt.ApplyConfig` publishes the snapshot
 delete-sync — are issued from that capture afterwards. The capture is a READ, so
 it cannot re-admit anything; the deletes still land after the new policy set is
 live, so a cleared flow re-evaluates against the new config.
+Refused identity outcomes are not confirmed deletes: `PolicyDeleteResult` retains
+their count and each forward's RT_FLOW session ID. The `INCOMPLETE` gap text
+includes the refused count even if a later micro-batch fails, so a transport or
+semantic error cannot hide a known survivor from the commit result.
 
 The epoch is stamped by the SENDER at queue time (`stampInstallGen*` sets
 `ConfigEpoch = configGenCounter.Load()`), and compared by the RECEIVER against
