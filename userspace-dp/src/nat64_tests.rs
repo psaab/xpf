@@ -3210,6 +3210,83 @@ fn translate_v6_to_v4_first_fragment_still_translates() {
     assert_eq!(checksum16(&v4[..20]), 0, "IPv4 header checksum must verify");
 }
 
+/// #10860: RFC 7915 §5.1.1's drop posture prevents corrupting the byte geometry
+/// when a Fragment Header's Next Header names an extension header. The first
+/// fragment would strip those bytes while later fragment offsets still include
+/// them; a tail can also be mistaken for the extension header by the L4 walker.
+#[test]
+fn nat64_10860_drops_post_fragment_extension_headers_only() {
+    let (src_v6, dst_v6, snat_v4, dst_v4) = nat64_test_addrs();
+    // The first fragment has the required header-complete shape: 8-byte
+    // Destination Options + full 24-byte TCP segment. Its fragmentable length
+    // is 32 bytes, so the next fragment's offset is 4 units.
+    let tcp = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, b"data");
+    let tcp_segment = &tcp[40..];
+    let ident = 0x1234_5678u32;
+
+    let mut first = vec![0u8; 40 + 8 + 8 + tcp_segment.len()];
+    first[0] = 0x60;
+    first[4..6].copy_from_slice(&((8 + 8 + tcp_segment.len()) as u16).to_be_bytes());
+    first[6] = 44;
+    first[7] = 64;
+    first[8..24].copy_from_slice(&src_v6.octets());
+    first[24..40].copy_from_slice(&dst_v6.octets());
+    first[40] = 60; // Fragment Header Next Header = Destination Options.
+    first[42..44].copy_from_slice(&1u16.to_be_bytes()); // offset 0, M=1.
+    first[44..48].copy_from_slice(&ident.to_be_bytes());
+    first[48] = PROTO_TCP; // Destination Options Next Header = TCP.
+    first[56..].copy_from_slice(tcp_segment);
+
+    assert!(nat64_v6_translation_ineligible(&first));
+    assert!(
+        translate_v6_to_v4(&first, snat_v4, dst_v4, false).is_none(),
+        "first fragment with Destination Options after Fragment must drop"
+    );
+
+    // The tail's bytes are ordinary fragment payload, not a Destination
+    // Options header. They deliberately resemble one so the former walker
+    // accepted the tail with an empty translated payload.
+    let mut tail = vec![0u8; 40 + 8 + 8];
+    tail[0] = 0x60;
+    tail[4..6].copy_from_slice(&16u16.to_be_bytes());
+    tail[6] = 44;
+    tail[7] = 64;
+    tail[8..24].copy_from_slice(&src_v6.octets());
+    tail[24..40].copy_from_slice(&dst_v6.octets());
+    tail[40] = 60; // Same Fragment Header Next Header as the first fragment.
+    tail[42..44].copy_from_slice(&(4u16 << 3).to_be_bytes()); // offset 32 bytes.
+    tail[44..48].copy_from_slice(&ident.to_be_bytes());
+    tail[48..56].copy_from_slice(&[PROTO_TCP, 0, 0, 0, 0, 0, 0, 0]);
+
+    assert!(nat64_v6_translation_ineligible(&tail));
+    let mut translated_tail = vec![0u8; tail.len()];
+    assert!(
+        write_v6_to_v4_nonfirst_into(&mut translated_tail, &tail, snat_v4, dst_v4).is_none(),
+        "non-first fragment with Destination Options after Fragment must drop"
+    );
+
+    // Destination Options before Fragment is in the unfragmentable part and
+    // does not shift the fragmentable payload's geometry; keep that traffic
+    // eligible.
+    let mut before = vec![0u8; 40 + 8 + 8 + tcp_segment.len()];
+    before[0] = 0x60;
+    before[4..6].copy_from_slice(&((8 + 8 + tcp_segment.len()) as u16).to_be_bytes());
+    before[6] = 60;
+    before[7] = 64;
+    before[8..24].copy_from_slice(&src_v6.octets());
+    before[24..40].copy_from_slice(&dst_v6.octets());
+    before[40] = 44; // Pre-Fragment Destination Options Next Header = Fragment.
+    before[48] = PROTO_TCP;
+    before[50..52].copy_from_slice(&1u16.to_be_bytes()); // offset 0, M=1.
+    before[52..56].copy_from_slice(&ident.to_be_bytes());
+    before[56..].copy_from_slice(tcp_segment);
+    assert!(!nat64_v6_translation_ineligible(&before));
+    let translated = translate_v6_to_v4(&before, snat_v4, dst_v4, false)
+        .expect("pre-Fragment DestOpts remain eligible");
+    assert_eq!(translated[9], PROTO_TCP);
+    assert_eq!(ipv4_frag_word(&translated), 0x2000);
+}
+
 // ---------------------------------------------------------------------------
 // #2488: RFC 7915 fragment translation. The IPv4 fragmentation fields (and, in
 // the v4->v6 direction, the presence of an IPv6 Fragment Header) must be
