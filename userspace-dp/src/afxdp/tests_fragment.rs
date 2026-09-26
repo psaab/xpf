@@ -1340,6 +1340,9 @@ fn wellformed_tcp_transit_meta_9894(src_port: u16, dst_port: u16) -> UserspaceDp
     meta.flow_src_port = src_port;
     meta.flow_dst_port = dst_port;
     meta.pkt_len = 40;
+    // Match the SYN flag in the frame; otherwise strict TCP session-miss
+    // admission drops this real-flow control before the PBR assertion.
+    meta.tcp_flags = 0x02;
     meta
 }
 
