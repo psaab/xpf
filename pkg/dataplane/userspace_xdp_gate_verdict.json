@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-09-26T20:37:31.142336361Z",
+  "object_sha256": "78554f2f8bb0cfd27b78a99a064cb2e6dcd6652cfef5326c3a67a58130b822a3",
+  "verdict": "PASS",
+  "override_consumed": false,
+  "reason": "measured headroom 28.14% meets the 15.0% floor",
+  "stats": {
+    "measured": true,
+    "processed_insns": 718639,
+    "insn_limit": 1000000,
+    "headroom_pct": 28.1361,
+    "floor_pct": 15,
+    "slack_to_floor_insns": 131361
+  }
+}

@@ -1,0 +1,25 @@
+name: Retain shim gate verdict
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  retain-shim-gate-verdict:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Test verdict retention gate
+        run: python3 scripts/dist/test_retain_shim_verdict.py
+      - name: Validate and attach shim gate verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/dist/retain_shim_verdict.py "$RELEASE_TAG"
