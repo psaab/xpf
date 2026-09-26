@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -242,11 +243,12 @@ class MainValidationGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             out_dir = os.path.join(temp, "dist")
             os.makedirs(out_dir)
-            deb = Path(temp, "xpf-test.deb")
+            version = "0.0.10+g123456789abc"
+            deb = Path(temp, f"xpf_{version}_amd64.deb")
             deb.write_text("stub")
             cached = os.path.join(temp, "base.img")
             args = SimpleNamespace(
-                version="test-version",
+                version=version,
                 out=out_dir,
                 skip_build=True,
                 skip_validate=False,
@@ -267,12 +269,16 @@ class MainValidationGateTests(unittest.TestCase):
                     Path(argv[argv.index("-czf") + 1]).write_text("metadata")
 
             def out_text(argv):
+                if argv[0] == "dpkg-deb" and argv[1] == "-f":
+                    return version + "\n"
+                if argv[-1] == "version":
+                    return "xpfd release (commit 123456789abc, built test)\n"
                 if argv[0] == "virt-filesystems":
                     return "/dev/sda1 1 ext4 2\n"
                 if argv[0] == "virt-cat":
                     return "unused by mocked inventory parser"
                 if argv[0] == "git":
-                    return "deadbeef\n"
+                    raise subprocess.CalledProcessError(128, argv)
                 if argv[-1] == "protocol-versions":
                     return "ha-protocol-version=1\n"
                 raise AssertionError(f"unexpected out_text command: {argv}")
@@ -320,24 +326,21 @@ class MainValidationGateTests(unittest.TestCase):
             # A failed gate must leave no provenance that can be re-signed as
             # validated. RED on revert: bake previously wrote this as true
             # from `not --skip-validate`, before running the gate.
-            sidecar = Path(out_dir, "xpf-test-version.manifest")
+            sidecar = Path(out_dir, f"xpf-{version}.manifest")
             self.assertIn("validated: false\n", sidecar.read_text())
             with self.assertRaises(bake.sign.SignError):
                 bake.sign.assert_bake_set(
-                    os.path.join(out_dir, "xpf-test-version.SHA256SUMS"),
+                    os.path.join(out_dir, f"xpf-{version}.SHA256SUMS"),
                     [os.path.join(out_dir, name)
-                     for name in bake.sign.bake_set_basenames("test-version")])
+                     for name in bake.sign.bake_set_basenames(version)])
 
 
-    def test_skip_validate_checks_seal_but_never_signs(self):
-        with tempfile.TemporaryDirectory() as temp:
-            out_dir = os.path.join(temp, "dist")
-            os.makedirs(out_dir)
-            deb = Path(temp, "xpf-test.deb")
+            version = "0.0.10+g123456789abc"
+            deb = Path(temp, f"xpf_{version}_amd64.deb")
             deb.write_text("stub")
             cached = os.path.join(temp, "base.img")
             args = SimpleNamespace(
-                version="test-version",
+                version=version,
                 out=out_dir,
                 skip_build=True,
                 skip_validate=True,
@@ -357,12 +360,16 @@ class MainValidationGateTests(unittest.TestCase):
                     Path(argv[argv.index("-czf") + 1]).write_text("metadata")
 
             def out_text(argv):
+                if argv[0] == "dpkg-deb" and argv[1] == "-f":
+                    return version + "\n"
+                if argv[-1] == "version":
+                    return "xpfd release (commit 123456789abc, built test)\n"
                 if argv[0] == "virt-filesystems":
                     return "/dev/sda1 1 ext4 2\n"
                 if argv[0] == "virt-cat":
                     return "unused by mocked inventory parser"
                 if argv[0] == "git":
-                    return "deadbeef\n"
+                    raise subprocess.CalledProcessError(128, argv)
                 if argv[-1] == "protocol-versions":
                     return "ha-protocol-version=1\n"
                 raise AssertionError(f"unexpected out_text command: {argv}")
@@ -397,7 +404,7 @@ class MainValidationGateTests(unittest.TestCase):
             self.assertNotIn("all", seal_cmd)
             self.assertFalse(
                 any(name.endswith(".minisig") for name in os.listdir(out_dir)))
-            sidecar = Path(out_dir, "xpf-test-version.manifest")
+            sidecar = Path(out_dir, f"xpf-{version}.manifest")
             self.assertIn("validated: false\n", sidecar.read_text())
 
 

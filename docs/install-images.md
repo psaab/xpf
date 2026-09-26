@@ -27,12 +27,15 @@ Two deliverables, same root disk:
 >
 > `--version` (both `fetch` and `bake.py`) is validated as a path-safe artifact
 > segment before it names any `xpf-<ver>.*` file — allow only
-> `[A-Za-z0-9][A-Za-z0-9._+~-]*` (git-describe / semver such as
-> `1.2.3-5-gabcdef`, `1.0.0+build.7`, `1.0.0~rc1`), and fail closed on a path
-> separator, `..`, absolute path, leading dash, `%`, or the Debian epoch `:`
-> (never part of an artifact filename) — so a crafted version cannot redirect
-> the download/write out of the output directory (#5992). This mirrors the
-> systemd-ExecStart version grammar hardened in #5713.
+> `[A-Za-z0-9][A-Za-z0-9._+~-]*`, and fail closed on a path separator, `..`,
+> absolute path, leading dash, `%`, or the Debian epoch `:` (#5992). Bake's
+> default is the Makefile Debian package version
+> `0.0.<commit-count>+g<at-least-12-hex-commit>[.dirty]`; it refuses unless
+> that version matches the selected `.deb` filename and the result of
+> `dpkg-deb -f <deb> Version`, and the staged `xpfd version` identifies the
+> same source commit. `--skip-build` does not weaken these checks: a stale
+> `.deb` is never selected by mtime.
+> `fetch` accepts any path-safe version that names a published image set.
 >
 > `fetch` also closes the verify/use gap (#5817): the `--out` directory may be
 > writable by another local process, so authenticating an artifact at its public
@@ -66,8 +69,9 @@ Pipeline (offline — the image is never booted to provision it):
    contract holds — `make build` embeds the git-tracked shim object and
    the bake never runs `make generate` — then packages the freshly built
    binaries into the `xpf` Debian package (binary set staged under
-   `/usr/local/share/xpf/staged`). The bake installs that `.deb` instead
-   of copying raw binaries.
+   `/usr/local/share/xpf/staged`). The bake selects only the package whose
+   filename and dpkg control `Version` exactly equal the image `--version`,
+   then verifies the staged xpfd's source identity before installing it.
 2. Resolve the base release from the **reviewed pin**
    (`PINNED_BASE_RELEASE = "26.04"`, `bake.py`), then fetch the official
    Ubuntu *server cloudimg* and authenticate it against

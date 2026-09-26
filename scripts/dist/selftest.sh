@@ -81,6 +81,7 @@ make_pkgs() {
         echo "packages:"
         _i=0
         while [ "$_i" -lt "$_n" ]; do echo "pkg$_i=1.0-$_i"; _i=$((_i + 1)); done
+        echo "xpf=$VER"
     } > "$1"
 }
 PKGS="$OUT/xpf-$VER.pkgs"

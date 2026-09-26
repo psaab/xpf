@@ -58,7 +58,8 @@ class GateProvenanceTests(unittest.TestCase):
         self.pkgs = os.path.join(self.dir, image_inventory.sidecar_name(VER))
 
     def _sign_set(self, validated, base_pinned=True, guest_kernel=KVER,
-                  inventory=KVER, npkgs=60):
+                  inventory=KVER, npkgs=60, xpf_version=VER,
+                  manifest_version=VER):
         """(Re)write the provenance sidecar + the #6500 inventory sidecar and
         sign a manifest covering qcow + meta + both sidecars (mirrors a bake).
 
@@ -73,7 +74,7 @@ class GateProvenanceTests(unittest.TestCase):
         Every DEFAULT is a valid input, so a negative case that varies ONE of
         them is refused for the reason it names — a fixture that left several
         inputs broken at once could not tell which check fired."""
-        text = f"version: {VER}\n"
+        text = f"version: {manifest_version}\n"
         if base_pinned is not None:
             text += f"base_image_pinned: {'true' if base_pinned else 'false'}\n"
         text += f"validated: {'true' if validated else 'false'}\n"
@@ -85,6 +86,8 @@ class GateProvenanceTests(unittest.TestCase):
             body = ["# xpf appliance image inventory",
                     f"guest_kernel: {inventory}", "packages:"]
             body += [f"pkg{i}=1.0-{i}" for i in range(npkgs)]
+            if xpf_version is not None:
+                body.append(f"xpf={xpf_version}")
             Path(self.pkgs).write_text("\n".join(body) + "\n")
             artifacts.append(self.pkgs)
         elif os.path.exists(self.pkgs):
@@ -176,6 +179,18 @@ class GateProvenanceTests(unittest.TestCase):
         # re-assembled.
         self._sign_set(validated=True, guest_kernel=KVER, inventory="9.9.9-other")
         self._refused("cannot disagree")
+
+    def test_manifest_version_mismatch_refused(self):
+        self._sign_set(validated=True, manifest_version="0.0.1+gold")
+        self._refused("provenance records version")
+
+    def test_stale_package_version_refused(self):
+        self._sign_set(validated=True, xpf_version="0.0.1+gold")
+        self._refused("inventory records xpf versions")
+
+    def test_missing_package_version_refused(self):
+        self._sign_set(validated=True, xpf_version=None)
+        self._refused("inventory records xpf versions")
 
     def test_unsigned_inventory_sidecar_refused(self):
         # Covered by the signed manifest, then swapped on disk: the hash check

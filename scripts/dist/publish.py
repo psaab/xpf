@@ -634,8 +634,10 @@ def gate_provenance(dist, versions, pub):
     actually SHIPS. The manifest must carry `guest_kernel` (the kernel the
     IMAGE runs, not `bake_host_kernel`), and the version must carry an
     `xpf-<ver>.pkgs` inventory sidecar — covered by the same signed SHA256SUMS
-    — that parses as a real inventory and agrees with the manifest about the
-    kernel. A hollow inventory is refused, not accepted as best-effort.
+    — that parses as a real inventory, records exactly `xpf=<ver>`, and agrees
+    with the manifest about the kernel. A hollow or mismatched inventory is
+    refused, not accepted as best-effort. The signed manifest's own `version`
+    field must also equal the image-set version.
 
     Fail-CLOSED: every version MUST carry a provenance sidecar that is (a) listed
     in — and hash-matches — the signed manifest, (b) says validated: true, AND
@@ -662,6 +664,10 @@ def gate_provenance(dist, versions, pub):
             die(f"provenance sidecar xpf-{ver}.manifest failed verify against "
                 f"the signed manifest {os.path.basename(sums)}: {e}")
         fields = sign.parse_sidecar_fields(data.decode("utf-8", "replace"))
+        recorded_version = fields.get("version")
+        if recorded_version != ver:
+            die(f"image set {ver} provenance records version="
+                f"{recorded_version!r}; refusing a mismatched release identity")
         validated = fields.get("validated")
         if validated != "true":
             die(f"image set {ver} provenance says validated={validated!r} (not "
@@ -728,6 +734,15 @@ def gate_provenance(dist, versions, pub):
         except image_inventory.InventoryError as e:
             die(f"inventory sidecar {pkgs_name} is not a usable inventory: {e}. "
                 "Refusing to publish.")
+        # The installed binary package is the image's version anchor. Its dpkg
+        # version comes from the same package identity bake checked before
+        # installation; a stale package in a newly-named inventory is refused.
+        xpf_versions = [entry.partition("=")[2] for entry in inv_pkgs
+                        if entry.partition("=")[0] == "xpf"]
+        if xpf_versions != [ver]:
+            die(f"image set {ver}: inventory records xpf versions "
+                f"{xpf_versions!r}; expected exactly [{ver!r}]. Refusing to "
+                "publish a package/image identity mismatch.")
         # The two authenticated records must AGREE about the kernel. They are
         # written from the same in-guest read, so a divergence means one of
         # them was edited after the bake — and both are inside the signature,
