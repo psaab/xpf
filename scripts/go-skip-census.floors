@@ -19,7 +19,13 @@
 # census counts them rather than claiming those cells ran.
 # The 2026-09-24 master recount adds four #10708 route-reader cells gated on
 # netlink handle creation, link/route reads, or a usable main-table route.
-total        = 393
+# The 2026-09-26 recount banks seven environment-gated cells merged without a
+# floor update (CI runs no tests): #11191 x3 (loopback/second-interface
+# availability for monitor-interface RETH tests), #11116 x2 (sshd/ssh-keygen
+# binaries for factory root-login precedence), #11202 x1 (unconfigured host
+# interface for monitor-traffic scope), #11156 x1 (loopback for RA goodbye
+# suppression). All gate on execution-environment availability.
+total        = 400
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
@@ -28,7 +34,7 @@ priv-absent  = 49
 priv-present = 10
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 333
+other        = 340
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket
