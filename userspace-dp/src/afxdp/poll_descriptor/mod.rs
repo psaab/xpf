@@ -3164,25 +3164,34 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         .unwrap_or_else(|_| screen_parse_error_info(&meta, flow));
                         let new_flow_screen_reason = (if packet_fabric_ingress {
                             // #4155: a fabric-redirected packet was already
-                            // scan/sweep-screened on the peer ingress node
-                            // before it crossed the fabric link. In the
-                            // session-sync race window it can arrive here as a
-                            // session MISS; re-running the per-(zone,src)
-                            // scan/sweep counter on the RG owner would
-                            // double-count the same new flow. The ingress node
-                            // owns scan/sweep for this packet — skip it here.
+                            // screened on the peer ingress node before it
+                            // crossed the fabric link. In the session-sync
+                            // race window it can arrive here as a session MISS;
+                            // re-running the miss-time SYN-flood and
+                            // scan/sweep counters on the RG owner would
+                            // double-count this new flow. The ingress node owns
+                            // those counters, so skip them here.
                             // (Session-limit enforcement below still runs: it
                             // guards the owner's own SessionTable, which the
                             // ingress node did not populate.)
                             None
                         } else {
-                            screen.scan_sweep_drop_on_new_flow(
-                                from_zone,
-                                from_zone_id,
-                                &screen_pkt,
-                                // #4114: scan/sweep windows are microseconds.
-                                now_ns / 1_000,
-                            )
+                            screen
+                                .syn_ack_flood_drop_on_new_flow(
+                                    from_zone,
+                                    &screen_pkt,
+                                    now_ns,
+                                    now_secs,
+                                )
+                                .or_else(|| {
+                                    screen.scan_sweep_drop_on_new_flow(
+                                        from_zone,
+                                        from_zone_id,
+                                        &screen_pkt,
+                                        // #4114: scan/sweep windows are microseconds.
+                                        now_ns / 1_000,
+                                    )
+                                })
                         })
                         // #2134: per-IP session-limit enforcement at the
                             // new-flow decision. This dominates BOTH counted
@@ -3194,8 +3203,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #2128). Keys on the pre-NAT original src/dst
                             // (`flow.src_ip`/`flow.dst_ip`), matching Junos
                             // per-source-IP semantics and the screen stage's
-                            // own tuple. Evaluated only if scan/sweep did not
-                            // already decide a drop.
+                            // own tuple. Evaluated only if miss-time flood or
+                            // scan/sweep screening did not already decide a drop.
                             .or_else(|| {
                                 new_flow_session_limit_drop(
                                     worker_ctx.forwarding,
@@ -4190,18 +4199,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             decision,
                                             fabric_ingress,
                                         );
-                                    // #1861 §5.2: transaction boundary for the
-                                    // forward+reverse install pair. The table is
-                                    // per-worker single-threaded, so a passing
-                                    // preflight makes both installs below
-                                    // infallible within this descriptor
-                                    // iteration. On refusal: roll back the SNAT
-                                    // allocation (same call shape as the old
-                                    // failure arm), count, and DROP the trigger
-                                    // packet (Junos parity: session-creation
-                                    // failure ⇒ packet dropped) — skipping the
-                                    // reverse install, the forwarding block,
-                                    // and the flow-cache population.
+                                    // #1861 §5.2 / #10890: transaction boundary
+                                    // for the forward+reverse install pair. The
+                                    // table is per-worker single-threaded, so a
+                                    // passing preflight makes both installs below
+                                    // infallible within this descriptor iteration.
+                                    // Once validated policy admits a TCP initial
+                                    // SYN, #10890 sheds local handshake-incomplete
+                                    // TCP sessions first at 90% capacity; no
+                                    // established session is evicted. Any
+                                    // remaining refusal follows the normal
+                                    // rollback/drop path below.
                                     // `needed == 0` is the tracking-not-required
                                     // case (DNS fast-path, LocalDelivery): no
                                     // install is attempted and nothing changes.
@@ -4211,7 +4219,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // only after this read-only capacity check,
                                     // so account for exactly the slots the
                                     // authorized tuple reuse can release.
-                                    let session_capacity_available =
+                                    let reuse_fits =
                                         if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
                                             sessions.can_admit_after_closing_tcp_pair_for_syn(
                                                 needed_sessions,
@@ -4221,7 +4229,46 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         } else {
                                             sessions.can_admit(needed_sessions)
                                         };
-                                    if needed_sessions > 0 && !session_capacity_available {
+                                    // #10890: if the reuse-aware check does not
+                                    // fit, shed handshake-incomplete flows
+                                    // before refusing. Shed only on failure so
+                                    // a fitting replacement never kills embryos
+                                    // gratuitously. Conservative: the shed check
+                                    // does not re-credit the closing pair.
+                                    let (admission_allowed, pressure_shed_sessions) =
+                                        if needed_sessions == 0 || reuse_fits {
+                                            (true, crate::session::PressureShedSessions::new())
+                                        } else {
+                                            sessions.can_admit_new_syn(
+                                                needed_sessions,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                            )
+                                        };
+                                    // #10890: pressure removal is a real session
+                                    // teardown, not just a table deletion. Release
+                                    // this worker's NAT holds exactly as the GC reap
+                                    // does, including when the new SYN is later refused.
+                                    for shed in pressure_shed_sessions {
+                                        crate::nat::release_source_nat_allocation_for_worker(
+                                            &worker_ctx.forwarding.iface_nat_allocators,
+                                            &worker_ctx.forwarding.source_nat_rules,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                        crate::nat64::release_nat64_allocation_for_worker(
+                                            &worker_ctx.forwarding.nat64,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                    }
+                                    if needed_sessions > 0 && !admission_allowed {
                                         sessions.note_admission_refused();
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,

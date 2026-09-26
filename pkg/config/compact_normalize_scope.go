@@ -1430,11 +1430,10 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		// SEVERITY IS NOT UNIFORM, and the obvious reading of `flow aging` is
 		// wrong. Its leaves compile to 0 and the schema says `0 = disabled`,
 		// which looks like the elision silently disabling session aging. It does
-		// not: the braced arm raises "security flow aging configured but
-		// accepted-only -- the userspace AF_XDP dataplane ages sessions on their
-		// per-session idle timeout only", so the feature is INERT either way and
-		// what the elision costs is the ADVISORY, not behaviour. The
-		// #8879 read/not-read guard caught that overstatement before it shipped.
+		// not: configured values remain unwired, but userspace AF_XDP has a
+		// separate fixed 90% policy that pressure-sheds opening sessions. The
+		// braced arm still raises an advisory, so elision costs the ADVISORY,
+		// not behaviour. The #8879 read/not-read guard caught that overstatement before it shipped.
 		//
 		// The other four DO lose live values: `udp-session` 77 -> 0 and
 		// `icmp-session` 47 -> 0 mean an operator's tuning silently reverts to

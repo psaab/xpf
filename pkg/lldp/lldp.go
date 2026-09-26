@@ -158,11 +158,9 @@ type Manager struct {
 	// table). Atomic so a test reading it does not race a concurrent Apply.
 	applyCount atomic.Uint64
 
-	// capDropLastWarn rate-limits the "neighbor table full" warning per local
-	// interface so an LLDP flood (a dropped frame every packet) cannot itself
-	// become a log flood. Keyed by interface name, guarded by mu (only touched
-	// from learnNeighbor, which already holds mu). See #4044.
-	capDropLastWarn map[string]time.Time
+	// capEvictLastWarn rate-limits the per-interface "neighbor table full"
+	// warning. Keyed by interface name and guarded by mu; see #4044.
+	capEvictLastWarn map[string]time.Time
 }
 
 // ifSession owns the RX and TX AF_PACKET sockets for one interface for the life
@@ -282,8 +280,8 @@ func (s *ifSession) close() {
 // New creates a new LLDP manager.
 func New() *Manager {
 	return &Manager{
-		neighbors:       make(map[neighborKey]*Neighbor),
-		capDropLastWarn: make(map[string]time.Time),
+		neighbors:        make(map[neighborKey]*Neighbor),
+		capEvictLastWarn: make(map[string]time.Time),
 	}
 }
 
@@ -458,7 +456,7 @@ func (m *Manager) stopLocked() {
 
 	m.mu.Lock()
 	m.neighbors = make(map[neighborKey]*Neighbor)
-	m.capDropLastWarn = make(map[string]time.Time)
+	m.capEvictLastWarn = make(map[string]time.Time)
 	m.mu.Unlock()
 }
 
@@ -655,8 +653,9 @@ func (m *Manager) rxLoop(ctx context.Context, sess *ifSession) {
 		}
 
 		neighbor.Interface = iface.Name
-		neighbor.LastSeen = time.Now()
-		neighbor.ExpiresAt = time.Now().Add(time.Duration(neighbor.TTL) * time.Second)
+		now := time.Now()
+		neighbor.LastSeen = now
+		neighbor.ExpiresAt = now.Add(time.Duration(neighbor.TTL) * time.Second)
 		m.learnNeighbor(key, neighbor)
 	}
 }
@@ -664,53 +663,59 @@ func (m *Manager) rxLoop(ctx context.Context, sess *ifSession) {
 // maxNeighborsPerInterface bounds the number of distinct LLDP neighbors the
 // receive path caches per local interface. LLDP is an unauthenticated L2
 // protocol: any device on the segment can flood frames carrying arbitrary
-// (spoofed) chassis-id / port-id values, and each distinct pair would create a
-// new neighbor entry. Without a cap the table grows without bound until the
-// daemon is OOM-killed — an L2-local DoS: whoever can put frames on the wire
-// (or a switching loop that multiplies frames) can exhaust memory. A real
-// switch port sees one, occasionally a handful, of LLDP neighbors; 64 is far
-// above any legitimate topology while still bounding a flood. The effective
-// global bound is this cap times the number of LLDP-enabled interfaces (a
-// small, operator-configured set), so no separate global cap is needed (#4044).
+// (spoofed) chassis-id / port-id values. The cap prevents a flood from growing
+// the table without bound. A real switch port sees one, occasionally a handful
+// of LLDP neighbors; 64 is far above any legitimate topology. When the cap is
+// full, learnNeighbor replaces the least-recently-seen entry so a transient
+// flood cannot squat on every slot until its advertised TTL expires. The legal
+// 16-bit wire TTL, including 65535 seconds, is preserved; a new neighbor is
+// admitted immediately on receipt even when the interface is full. The
+// effective global bound is this cap times the number of LLDP-enabled
+// interfaces, so no separate global cap is needed (#4044, #10898).
 const maxNeighborsPerInterface = 64
 
-// capDropWarnInterval rate-limits the per-interface "neighbor table full"
-// warning so an ongoing flood (one drop per frame) does not itself flood the
-// log.
-const capDropWarnInterval = 60 * time.Second
+// capEvictWarnInterval rate-limits the per-interface "neighbor table full"
+// warning so an ongoing flood does not flood the log.
+const capEvictWarnInterval = 60 * time.Second
 
 // learnNeighbor installs or refreshes a received neighbor under the
 // per-interface cap. A refresh of an already-known (ifname/chassis/port) key
-// updates in place and never grows the table, so an established neighbor's
-// periodic re-advertisements always take effect. A genuinely NEW neighbor is
-// admitted only while its interface is below maxNeighborsPerInterface; past the
-// cap it is DROPPED with a rate-limited warn, so an LLDP flood of distinct
-// spoofed ids cannot grow the table without bound (#4044). expiryLoop still
-// reaps aged-out entries, so once a transient flood stops advertising the table
-// shrinks back below the cap and new legitimate neighbors are admitted again.
-// Returns true if the neighbor was stored, false if it was dropped by the cap.
+// updates in place. A new neighbor at the cap replaces the least-recently-seen
+// entry on that interface and is admitted; this bounds transient-flood recovery
+// to processing the first subsequent advertisement rather than waiting for an
+// attacker-controlled TTL to expire (#10898). Received TTL is not clamped, so a
+// valid maximum-TTL peer remains represented with its full advertised TTL.
+// Returns true if the neighbor was stored.
 func (m *Manager) learnNeighbor(key neighborKey, n *Neighbor) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if _, exists := m.neighbors[key]; exists {
-		// Refresh of a known neighbor: update in place. Does not grow the map,
-		// so it is always allowed even at the cap.
+		// Refresh of a known neighbor: update in place. Does not grow the map.
 		m.neighbors[key] = n
 		return true
 	}
 
-	// New neighbor: enforce the per-interface cap. The table is bounded at the
-	// cap per interface, so this count iterates a small, bounded set.
+	// Find the least-recently-seen neighbor on this interface while counting
+	// its bounded table. LastSeen is assigned by rxLoop on every advertisement.
 	count := 0
-	for _, existing := range m.neighbors {
-		if existing.Interface == n.Interface {
-			count++
+	var oldestKey neighborKey
+	var oldest *Neighbor
+	for existingKey, existing := range m.neighbors {
+		if existing.Interface != n.Interface {
+			continue
+		}
+		count++
+		if oldest == nil || existing.LastSeen.Before(oldest.LastSeen) {
+			oldestKey = existingKey
+			oldest = existing
 		}
 	}
 	if count >= maxNeighborsPerInterface {
-		m.warnNeighborCapDroppedLocked(n.Interface)
-		return false
+		// A full table necessarily has an oldest entry. Replace it atomically
+		// under m.mu so another receiver cannot consume the freed slot first.
+		delete(m.neighbors, oldestKey)
+		m.warnNeighborCapEvictedLocked(n.Interface)
 	}
 	m.neighbors[key] = n
 	return true
@@ -739,16 +744,16 @@ func (m *Manager) withdrawNeighbor(key neighborKey) {
 	delete(m.neighbors, key)
 }
 
-// warnNeighborCapDroppedLocked logs (at most once per capDropWarnInterval per
-// interface) that the neighbor table is full and a new neighbor was dropped.
+// warnNeighborCapEvictedLocked logs (at most once per capEvictWarnInterval per
+// interface) that the neighbor table is full and its oldest entry was evicted.
 // The caller must hold m.mu.
-func (m *Manager) warnNeighborCapDroppedLocked(iface string) {
+func (m *Manager) warnNeighborCapEvictedLocked(iface string) {
 	now := time.Now()
-	if last, ok := m.capDropLastWarn[iface]; ok && now.Sub(last) < capDropWarnInterval {
+	if last, ok := m.capEvictLastWarn[iface]; ok && now.Sub(last) < capEvictWarnInterval {
 		return
 	}
-	m.capDropLastWarn[iface] = now
-	slog.Warn("LLDP: neighbor table full, dropping new neighbor",
+	m.capEvictLastWarn[iface] = now
+	slog.Warn("LLDP: neighbor table full, evicting least-recently-seen neighbor",
 		"interface", iface, "cap", maxNeighborsPerInterface)
 }
 

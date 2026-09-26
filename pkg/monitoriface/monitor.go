@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/termsafe"
 	"github.com/vishvananda/netlink"
 )
 
@@ -834,7 +835,7 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 	// note for both would misreport a healthy source as unavailable.
 	if snap.DataplaneCountersNote != "" {
 		fmt.Fprintf(w, "  Note: dataplane counters unavailable (%s) — byte/packet values below are NOT a measurement\n",
-			snap.DataplaneCountersNote)
+			termsafe.SanitizeForDisplay(snap.DataplaneCountersNote))
 	}
 	// #9047: the rate below excludes userspace forwarding for this window while
 	// the TOTAL beside it includes it. Say so rather than render a rate that
@@ -875,7 +876,7 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 	// interface rather than an unread one.
 	if snap.KernelStatsNote != "" {
 		fmt.Fprintf(w, "  Note: kernel link statistics unavailable (%s) — the zeros below are NOT a measurement\n",
-			snap.KernelStatsNote)
+			termsafe.SanitizeForDisplay(snap.KernelStatsNote))
 	}
 	writeDeltaLine(w, "  Input  errors:        %20d          [", snap.RxErrors, rxErrDelta, rxErrReset)
 	writeDeltaLine(w, "  Output errors:        %20d          [", snap.TxErrors, txErrDelta, txErrReset)
@@ -971,7 +972,7 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 
 		fmt.Fprintf(w, "Userspace dataplane:\n")
 		if snap.Userspace.StatusNote != "" {
-			fmt.Fprintf(w, "  Note:                 %s\n", snap.Userspace.StatusNote)
+			fmt.Fprintf(w, "  Note:                 %s\n", termsafe.SanitizeForDisplay(snap.Userspace.StatusNote))
 		}
 		fmt.Fprintf(w, "  Helper state:         enabled=%t armed=%t snapshot_gen=%d neighbor_gen=%d\n",
 			snap.Userspace.HelperEnabled, snap.Userspace.ForwardingArmed, snap.Userspace.LastSnapshotGen, snap.Userspace.NeighborGeneration)
@@ -1022,13 +1023,13 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 		if len(snap.Userspace.LastErrors) > 0 {
 			fmt.Fprintf(w, "  Binding errors:\n")
 			for _, msg := range snap.Userspace.LastErrors {
-				fmt.Fprintf(w, "    %s\n", msg)
+				fmt.Fprintf(w, "    %s\n", termsafe.SanitizeForDisplay(msg))
 			}
 		}
 		if len(snap.Userspace.RecentExceptions) > 0 {
 			fmt.Fprintf(w, "  Recent exceptions:\n")
 			for _, msg := range snap.Userspace.RecentExceptions {
-				fmt.Fprintf(w, "    %s\n", msg)
+				fmt.Fprintf(w, "    %s\n", termsafe.SanitizeForDisplay(msg))
 			}
 		}
 		fmt.Fprintf(w, "\n")

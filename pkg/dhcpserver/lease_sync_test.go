@@ -727,14 +727,18 @@ func TestPreSeedMemfileMerged4_PreservesLocalLeases(t *testing.T) {
 	sock := tmpSocket(t, "k4merge.sock")
 	// Local Kea (already mastering RG-A) reports one live lease via lease4-get-all.
 	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
-		if cmd.Command == "lease4-get-all" {
+		switch cmd.Command {
+		case "dhcp-disable":
+			return keaResponse{Result: keaResultSuccess, Text: "disabled"}
+		case "lease4-get-all":
 			return leaseGetAllResponse([]keaLeaseJSON{{
 				IPAddress: "10.0.1.50", HWAddress: "aa:aa:aa:aa:aa:aa",
 				SubnetID: 1, ValidLft: 3600, CLTT: localNow.Unix() - 100,
 				State: keaStateDefault,
 			}})
+		default:
+			return keaResponse{Result: keaResultError, Text: "unexpected"}
 		}
-		return keaResponse{Result: keaResultError, Text: "unexpected"}
 	}}
 	dial, stop := startStubKea(t, sock, stub)
 	defer stop()
@@ -775,14 +779,18 @@ func TestPreSeedMemfileMerged6_PreservesLocalLeases(t *testing.T) {
 	localNow := time.Unix(1_700_000_000, 0)
 	sock := tmpSocket(t, "k6merge.sock")
 	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
-		if cmd.Command == "lease6-get-all" {
+		switch cmd.Command {
+		case "dhcp-disable":
+			return keaResponse{Result: keaResultSuccess, Text: "disabled"}
+		case "lease6-get-all":
 			return leaseGetAllResponse([]keaLeaseJSON{{
 				IPAddress: "2001:db8:1::50", DUID: "00:03:00:01:aa:aa",
 				IAID: 50, Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
 				CLTT: localNow.Unix() - 100, State: keaStateDefault,
 			}})
+		default:
+			return keaResponse{Result: keaResultError, Text: "unexpected"}
 		}
-		return keaResponse{Result: keaResultError, Text: "unexpected"}
 	}}
 	dial, stop := startStubKea(t, sock, stub)
 	defer stop()
@@ -813,6 +821,250 @@ func TestPreSeedMemfileMerged6_PreservesLocalLeases(t *testing.T) {
 	}
 	if !addrs["2001:db8:2::80"] {
 		t.Errorf("newly-taken peer v6 lease missing from pre-seed; memfile has %v", addrs)
+	}
+}
+
+// TestPreSeedMemfileMerged4_QuiescesWindowGrants10895 is the #10895 regression
+// guard: active Kea is quiesced before the lease snapshot and remains disabled
+// through the atomic replacement and takeover restart. A grant completed just
+// before quiescing must be in the snapshot; no further grant can slip into the
+// snapshot-to-install window and disappear from the installed file.
+//
+// The fake publishes a second lease when it processes dhcp-disable, modeling a
+// grant that completed just before the command took effect. The following
+// lease4-get-all must see both leases. Fail-on-revert: without quiescing, the
+// socket snapshot contains only the original lease.
+func TestPreSeedMemfileMerged4_QuiescesWindowGrants10895(t *testing.T) {
+	localNow := time.Unix(1_700_000_000, 0)
+	sock := tmpSocket(t, "k4reread.sock")
+	base := keaLeaseJSON{
+		IPAddress: "10.0.1.50", HWAddress: "aa:aa:aa:aa:aa:aa",
+		SubnetID: 1, ValidLft: 3600, CLTT: localNow.Unix() - 100,
+		State: keaStateDefault,
+	}
+	window := keaLeaseJSON{
+		IPAddress: "10.0.1.51", HWAddress: "bb:bb:bb:bb:bb:bb",
+		SubnetID: 1, ValidLft: 3600, CLTT: localNow.Unix(),
+		State: keaStateDefault,
+	}
+	var mu sync.Mutex
+	disabled := false
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		mu.Lock()
+		defer mu.Unlock()
+		switch cmd.Command {
+		case "dhcp-disable":
+			disabled = true
+			return keaResponse{Result: keaResultSuccess, Text: "disabled"}
+		case "lease4-get-all":
+			if disabled {
+				return leaseGetAllResponse([]keaLeaseJSON{base, window})
+			}
+			return leaseGetAllResponse([]keaLeaseJSON{base})
+		default:
+			return keaResponse{Result: keaResultError, Text: "unexpected"}
+		}
+	}}
+	dial, stop := startStubKea(t, sock, stub)
+	defer stop()
+
+	dir := t.TempDir()
+	memfile := filepath.Join(dir, "kea-leases4.csv")
+	m := New()
+	m.SetLeaseSyncSeamsForTesting(dial, sock, "", memfile, "")
+
+	if err := m.PreSeedMemfileMerged4WithAuthority(
+		context.Background(), LeaseSyncSnapshot{}, localNow, false, LeaseSyncAuthority{}); err != nil {
+		t.Fatalf("PreSeedMemfileMerged4WithAuthority: %v", err)
+	}
+	got, err := parseActiveLeases4(memfile, localNow)
+	if err != nil {
+		t.Fatalf("parseActiveLeases4 on pre-seeded file: %v", err)
+	}
+	addrs := make(map[string]bool, len(got))
+	for _, l := range got {
+		addrs[l.Address] = true
+	}
+	if !addrs["10.0.1.50"] || !addrs["10.0.1.51"] {
+		t.Errorf("pre-seed did not preserve both snapshot leases; memfile has %v", addrs)
+	}
+	commands := stub.seen()
+	if len(commands) != 2 || commands[0].Command != "dhcp-disable" || commands[1].Command != "lease4-get-all" {
+		t.Errorf("control commands = %+v, want dhcp-disable before lease4-get-all", commands)
+	}
+	mu.Lock()
+	remainedDisabled := disabled
+	mu.Unlock()
+	if !remainedDisabled {
+		t.Error("DHCP was re-enabled before the takeover restart")
+	}
+}
+
+// TestPreSeedMemfileMerged6_QuiescesWindowGrants10895 is the v6 twin of the
+// #10895 quiesce-and-snapshot guard.
+func TestPreSeedMemfileMerged6_QuiescesWindowGrants10895(t *testing.T) {
+	localNow := time.Unix(1_700_000_000, 0)
+	sock := tmpSocket(t, "k6reread.sock")
+	base := keaLeaseJSON{
+		IPAddress: "2001:db8:1::50", DUID: "00:03:00:01:aa:aa",
+		IAID: 50, Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
+		CLTT: localNow.Unix() - 100, State: keaStateDefault,
+	}
+	window := keaLeaseJSON{
+		IPAddress: "2001:db8:1::51", DUID: "00:03:00:01:bb:bb",
+		IAID: 51, Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
+		CLTT: localNow.Unix(), State: keaStateDefault,
+	}
+	var mu sync.Mutex
+	disabled := false
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		mu.Lock()
+		defer mu.Unlock()
+		switch cmd.Command {
+		case "dhcp-disable":
+			disabled = true
+			return keaResponse{Result: keaResultSuccess, Text: "disabled"}
+		case "lease6-get-all":
+			if disabled {
+				return leaseGetAllResponse([]keaLeaseJSON{base, window})
+			}
+			return leaseGetAllResponse([]keaLeaseJSON{base})
+		default:
+			return keaResponse{Result: keaResultError, Text: "unexpected"}
+		}
+	}}
+	dial, stop := startStubKea(t, sock, stub)
+	defer stop()
+
+	dir := t.TempDir()
+	memfile := filepath.Join(dir, "kea-leases6.csv")
+	m := New()
+	m.SetLeaseSyncSeamsForTesting(dial, "", sock, "", memfile)
+
+	if err := m.PreSeedMemfileMerged6WithAuthority(
+		context.Background(), LeaseSyncSnapshot{}, localNow, false, LeaseSyncAuthority{}); err != nil {
+		t.Fatalf("PreSeedMemfileMerged6WithAuthority: %v", err)
+	}
+	got, err := parseActiveLeases6(memfile, localNow)
+	if err != nil {
+		t.Fatalf("parseActiveLeases6 on pre-seeded file: %v", err)
+	}
+	addrs := make(map[string]bool, len(got))
+	for _, l := range got {
+		addrs[l.Address] = true
+	}
+	if !addrs["2001:db8:1::50"] || !addrs["2001:db8:1::51"] {
+		t.Errorf("pre-seed did not preserve both snapshot leases; memfile has %v", addrs)
+	}
+	commands := stub.seen()
+	if len(commands) != 2 || commands[0].Command != "dhcp-disable" || commands[1].Command != "lease6-get-all" {
+		t.Errorf("control commands = %+v, want dhcp-disable before lease6-get-all", commands)
+	}
+	mu.Lock()
+	remainedDisabled := disabled
+	mu.Unlock()
+	if !remainedDisabled {
+		t.Error("DHCPv6 was re-enabled before the takeover restart")
+	}
+}
+
+func TestPreSeedMemfileMerged4_FailsClosedWhenKeaCannotQuiesce10895(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	sock := tmpSocket(t, "k4disablefail.sock")
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		if cmd.Command == "dhcp-disable" {
+			return keaResponse{Result: keaResultError, Text: "disable rejected"}
+		}
+		return keaResponse{Result: keaResultError, Text: "unexpected"}
+	}}
+	dial, stop := startStubKea(t, sock, stub)
+	defer stop()
+
+	dir := t.TempDir()
+	memfile := filepath.Join(dir, "kea-leases4.csv")
+	original := []byte(keaMemfileHeader4 + "\n")
+	if err := os.WriteFile(memfile, original, 0640); err != nil {
+		t.Fatalf("write original memfile: %v", err)
+	}
+	m := New()
+	m.SetLeaseSyncSeamsForTesting(dial, sock, "", memfile, "")
+	m.unitActive = func(unit string) (bool, error) {
+		if unit != kea4Svc {
+			t.Errorf("unitActive checked %q, want %q", unit, kea4Svc)
+		}
+		return true, nil
+	}
+
+	err := m.PreSeedMemfileMerged4WithAuthority(
+		context.Background(), LeaseSyncSnapshot{}, now, false, LeaseSyncAuthority{})
+	if err == nil {
+		t.Fatal("pre-seed succeeded after active Kea rejected dhcp-disable")
+	}
+	got, readErr := os.ReadFile(memfile)
+	if readErr != nil {
+		t.Fatalf("read memfile after rejected quiesce: %v", readErr)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("pre-seed replaced memfile while Kea remained active:\n%s", got)
+	}
+	commands := stub.seen()
+	if len(commands) != 1 || commands[0].Command != "dhcp-disable" {
+		t.Fatalf("commands after failed quiesce = %+v, want only dhcp-disable", commands)
+	}
+}
+
+// TestPreSeedForcesRestartWhenConfigIsUnchanged10895 proves the memfile install
+// cannot be followed by #10896's unchanged-config restart elision. Kea must
+// reload the atomically replaced lease file before DHCP is enabled again.
+func TestPreSeedForcesRestartWhenConfigIsUnchanged10895(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	sock := tmpSocket(t, "k4restart.sock")
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		switch cmd.Command {
+		case "dhcp-disable":
+			return keaResponse{Result: keaResultSuccess, Text: "disabled"}
+		case "lease4-get-all":
+			return leaseGetAllResponse(nil)
+		default:
+			return keaResponse{Result: keaResultError, Text: "unexpected"}
+		}
+	}}
+	dial, stop := startStubKea(t, sock, stub)
+	defer stop()
+
+	m, calls := testManager(t, map[string]bool{kea4Svc: true}, "")
+	memfile := filepath.Join(t.TempDir(), "kea-leases4.csv")
+	m.SetLeaseSyncSeamsForTesting(dial, sock, "", memfile, "")
+	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) {
+		return os.Getuid(), os.Getgid(), true
+	})
+	cfg := v4Config("reth0.0")
+	if err := m.Apply(cfg); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+	if len(m.appliedConfig4) == 0 {
+		t.Fatal("initial Apply did not record the loaded v4 config")
+	}
+
+	if err := m.PreSeedMemfileMerged4WithAuthority(
+		context.Background(), LeaseSyncSnapshot{}, now, false, LeaseSyncAuthority{}); err != nil {
+		t.Fatalf("PreSeedMemfileMerged4WithAuthority: %v", err)
+	}
+	if m.appliedConfig4 != nil {
+		t.Fatal("pre-seed retained the applied-config cache for the old memfile")
+	}
+	if err := m.Apply(cfg); err != nil {
+		t.Fatalf("Apply after pre-seed: %v", err)
+	}
+
+	restarts := 0
+	for _, call := range *calls {
+		if call == "restart "+kea4Svc {
+			restarts++
+		}
+	}
+	if restarts != 2 {
+		t.Fatalf("identical-config Apply restarted v4 %d times, want 2 (initial load + memfile reload); calls=%v", restarts, *calls)
 	}
 }
 
@@ -880,6 +1132,7 @@ func TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853(t *testing.T) {
 						ctrl6, file6 = filepath.Join(dir, "missing6.sock"), memfile
 					}
 					m := New()
+					m.unitActive = func(string) (bool, error) { return false, nil }
 					m.SetLeaseSyncSeamsForTesting(nil, ctrl4, ctrl6, file4, file6)
 					m.SetKeaOwnerLookupForTesting(func() (int, int, bool) {
 						return os.Getuid(), os.Getgid(), true
@@ -999,6 +1252,7 @@ func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *tes
 				ctrl6, file6 = filepath.Join(dir, "missing6.sock"), memfile
 			}
 			m := New()
+			m.unitActive = func(string) (bool, error) { return false, nil }
 			m.SetLeaseSyncSeamsForTesting(nil, ctrl4, ctrl6, file4, file6)
 			m.SetKeaOwnerLookupForTesting(func() (int, int, bool) {
 				return os.Getuid(), os.Getgid(), true
@@ -1120,6 +1374,7 @@ func TestPreSeedMemfileMerged4_FailsClosedOnUntrustedLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New()
+	m.unitActive = func(string) (bool, error) { return false, nil }
 	// nil dialer + a bogus socket path → socket read fails → memfile fallback →
 	// corrupt memfile → local read errors.
 	m.SetLeaseSyncSeamsForTesting(nil, filepath.Join(dir, "nope.sock"), "", memfile, "")

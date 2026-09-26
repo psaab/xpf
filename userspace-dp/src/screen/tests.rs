@@ -2661,12 +2661,14 @@ fn syn_flood_triggers() {
     );
 }
 
+/// SYN-ACK is not metered by the pre-lookup packet screen because it can be a
+/// reply on an existing session. The session-miss hook accounts for new
+/// SYN-ACK-first pickups separately.
 #[test]
-fn syn_flood_ignores_syn_ack() {
+fn syn_flood_prelookup_ignores_syn_ack() {
     let mut profile = ScreenProfile::default();
     profile.syn_flood_threshold = 1;
     let mut state = make_state("trust", profile);
-    // SYN+ACK should not count toward SYN flood
     let pkt = tcp_pkt(
         IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
         IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
@@ -2677,6 +2679,28 @@ fn syn_flood_ignores_syn_ack() {
     assert_eq!(state.check_packet("trust", &pkt, 100), ScreenVerdict::Pass);
     assert_eq!(state.check_packet("trust", &pkt, 100), ScreenVerdict::Pass);
     assert_eq!(state.check_packet("trust", &pkt, 100), ScreenVerdict::Pass);
+}
+
+#[test]
+fn syn_ack_session_misses_are_visible_to_syn_flood_gate_10891() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 2;
+    let mut state = make_state("trust", profile);
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        1234,
+        80,
+        TCP_SYN | TCP_ACK,
+    );
+    for expected in [None, None, Some("syn-flood")] {
+        assert_eq!(state.check_packet("trust", &pkt, 100), ScreenVerdict::Pass);
+        assert_eq!(
+            state.syn_ack_flood_drop_on_new_flow("trust", &pkt, 100, 0),
+            expected,
+            "new SYN-ACK-first misses must charge the configured flood gate"
+        );
+    }
 }
 
 #[test]

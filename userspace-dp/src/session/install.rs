@@ -61,6 +61,121 @@ impl SessionTable {
     pub fn can_admit(&self, needed: usize) -> bool {
         self.len().saturating_add(needed) <= self.max_sessions
     }
+    /// #10890: preflight an already-validated TCP initial SYN. At 90% of this
+    /// worker's cap, reclaim handshake-incomplete local TCP sessions first;
+    /// established and peer-owned sessions are never pressure victims. The
+    /// caller remains responsible for refusing/rolling back the packet if the
+    /// remaining table cannot fit the full install group.
+    pub fn can_admit_new_syn(
+        &mut self,
+        needed: usize,
+        protocol: u8,
+        tcp_flags: u8,
+    ) -> (bool, PressureShedSessions) {
+        let mut shed_sessions = PressureShedSessions::new();
+        let high_watermark = self.max_sessions.saturating_sub(self.max_sessions / 10);
+        if needed == 0
+            || protocol != PROTO_TCP
+            || !is_initial_syn(tcp_flags)
+            || self.len() < high_watermark
+        {
+            return (self.can_admit(needed), shed_sessions);
+        }
+        if needed > self.max_sessions {
+            return (false, shed_sessions);
+        }
+
+        let mut shed = false;
+        loop {
+            if shed && self.can_admit(needed) {
+                return (true, shed_sessions);
+            }
+            if !self.shed_one_opening_flow(&mut shed_sessions) {
+                return (self.can_admit(needed), shed_sessions);
+            }
+            shed = true;
+        }
+    }
+
+    /// Remove one indexed local opening flow (both halves when the matching
+    /// reverse companion is present). Returns false when no safe victim remains.
+    fn shed_one_opening_flow(
+        &mut self,
+        shed_sessions: &mut PressureShedSessions,
+    ) -> bool {
+        loop {
+            let Some(key) = self.pressure_shed_openings.keys().next().cloned() else {
+                return false;
+            };
+            let candidate = self.entry_by_key(&key).and_then(|entry| {
+                SessionTable::is_pressure_shed_opening(&key, entry, false).then(|| {
+                    (
+                        entry.decision,
+                        entry.metadata.clone(),
+                        entry.origin,
+                        entry.session_id,
+                    )
+                })
+            });
+            let Some((decision, metadata, origin, session_id)) = candidate else {
+                self.pressure_shed_openings.remove(&key);
+                continue;
+            };
+
+            let companion_key = reverse_session_key(&key, decision.nat);
+            let companion_is_opening = if companion_key == key {
+                None
+            } else {
+                self.entry_by_key(&companion_key).and_then(|companion| {
+                    (reverse_session_key(&companion_key, companion.decision.nat) == key)
+                        .then(|| {
+                            SessionTable::is_pressure_shed_opening(
+                                &companion_key,
+                                companion,
+                                true,
+                            )
+                        })
+                })
+            };
+            if companion_is_opening == Some(false) {
+                // Do not tear down only one half if its actual companion is
+                // established or peer-owned. The stale/ineligible forward key
+                // is discarded from this cold-path index and other openings
+                // remain eligible.
+                self.pressure_shed_openings.remove(&key);
+                continue;
+            }
+
+            let Some(forward_entry) = self.remove_entry(&key, RemovalKind::Terminal) else {
+                continue;
+            };
+            shed_sessions.push(PressureShedSession {
+                key: key.clone(),
+                decision: forward_entry.decision,
+                is_reverse: forward_entry.metadata.is_reverse,
+            });
+            if companion_is_opening == Some(true) {
+                if let Some(companion_entry) =
+                    self.remove_entry(&companion_key, RemovalKind::Terminal)
+                {
+                    shed_sessions.push(PressureShedSession {
+                        key: companion_key.clone(),
+                        decision: companion_entry.decision,
+                        is_reverse: companion_entry.metadata.is_reverse,
+                    });
+                }
+            }
+            self.emit_close_delta_with_origin(
+                key,
+                decision,
+                metadata,
+                origin,
+                false,
+                session_id,
+            );
+            return true;
+        }
+    }
 
     /// #1861 §5.1: counted preflight refusal (one per refused flow).
     pub fn note_admission_refused(&mut self) {
@@ -172,11 +287,15 @@ impl SessionTable {
         // session's SESSION_CREATE and SESSION_CLOSE RT_FLOW records share one
         // correlatable id, and a reused 5-tuple gets a distinct id.
         let session_id = self.alloc_session_id();
-        // #3152/#10889: TCP bare SYNs and app-managed datagrams both begin in
-        // their conservative timeout class until their respective promotion
-        // evidence arrives.
+        // #3152/#10889/#10891: TCP bare-SYN and SYN-ACK-first pickups start
+        // OPENING; other TCP midstream pickups stay established. Non-TCP
+        // sessions with a custom app timeout use the global window until reply.
+        let syn_ack_first =
+            matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && !is_closing(tcp_flags);
+        let tcp_opening =
+            matches!(protocol, PROTO_TCP) && (is_initial_syn(tcp_flags) || syn_ack_first);
         let established = if matches!(protocol, PROTO_TCP) {
-            !is_initial_syn(tcp_flags)
+            !tcp_opening
         } else {
             metadata.inactivity_timeout_ns.is_none()
         };
@@ -191,12 +310,14 @@ impl SessionTable {
                 // #2465: stamp the creation instant once at install. Never
                 // re-stamped, so the close delta reports the true session age.
                 created_ns: now_ns,
-                // #3152: bare-SYN TCP sessions start OPENING. #10889:
-                // non-TCP sessions with an application timeout stay on the
-                // global window until a genuine reverse packet promotes them.
+                // #3152/#10889/#10891: TCP bare-SYN and SYN-ACK-first pickups
+                // start OPENING; other midstream TCP pickups stay established.
+                // A non-TCP custom app timeout also starts gated until reply.
                 established,
-                // #6752: a fresh install has seen no SYN-ACK, so nothing is pending.
-                handshake_pending: false,
+                // A SYN-ACK-first pickup has seen the SYN-ACK but still waits
+                // for the reverse ACK that completes its asymmetric handshake.
+                handshake_pending: syn_ack_first,
+                syn_ack_first,
                 // #7212: no static input-filter verdict has been derived for
                 // this ENTRY yet. The forward install's own first packet was
                 // adjudicated by the session-MISS path, but this constructor
@@ -223,16 +344,16 @@ impl SessionTable {
                 expires_after_ns: session_timeout_ns(
                     protocol,
                     tcp_flags,
-                    // #3152/#10889: use the same timeout class as the
+                    // #3152/#10889/#10891: use the same timeout class as the
                     // established state seeded above.
                     established,
                     &self.timeouts,
                     // #3227: per-application idle timeout override (None = global).
                     metadata.inactivity_timeout_ns,
-                    // #3527: the ingress zone's `syn-flood timeout` override of
+                    // #3527: the ingress zone's syn-flood timeout override of
                     // the half-open window (None = global). Only consulted on
-                    // the OPENING branch, so a bare-SYN session in a screened
-                    // zone reaps on the operator's window.
+                    // OPENING branch, so a bare-SYN or SYN-ACK-first session in
+                    // a screened zone reaps on the operator's window.
                     self.opening_override_for(metadata.ingress_zone),
                 ),
                 closing: matches!(protocol, PROTO_TCP) && is_closing(tcp_flags),
@@ -547,6 +668,7 @@ impl SessionTable {
                 // to wait for — pending must stay false or it would be held on the
                 // opening window forever.
                 handshake_pending: false,
+                syn_ack_first: false,
                 // #7212: a peer-synced import carries NO locally-derived
                 // input-filter verdict — the peer adjudicated it against the
                 // peer's own interfaces. `UNVALIDATED` makes the first packet

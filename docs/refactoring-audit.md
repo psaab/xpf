@@ -101,6 +101,14 @@ two gates apart because fusing them made the useful one unusable.
 | Does every accepted crossing still name a live file at its tier floor? | the author of the shrink and the next test run | `pkg/refactoraudit.TestAcceptedEntriesAreLive` | **yes** |
 | Does the committed global snapshot still match the tree? | nobody in particular | `make audit-refresh` (job) + `TestGlobalHeatmapFreshnessAdvisory` (reports) | no |
 
+### Struct heterogeneity (advisory, not a gate)
+
+`scripts/refactoring-audit-structs.sh` emits a review signal; its census is
+not an enforced threshold. Anonymous nested structs each normalize to one
+`struct{...}` type, so their inner concerns can be undercounted. The separate
+enforced floor is the touched-file LOC gate above: it catches a touched file
+that grows past 1500/2000 LOC, but it does not measure struct heterogeneity.
+
 ### 1. The touched-file gate (hard)
 
 `TestTouchedFileCrossedModularityThreshold` asks

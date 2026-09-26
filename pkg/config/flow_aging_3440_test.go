@@ -170,14 +170,14 @@ func TestFlowAgingStrictLenientDowngrades(t *testing.T) {
 	}
 }
 
-// TestFlowAgingConfigOnlyWarning pins the #3440 H1 accepted-only advisory:
-// any aging knob set on the userspace dataplane (the only runtime path) earns
-// a config-only warning because the GC watermark sweep is skipped there.
+// TestFlowAgingConfigOnlyWarning pins the #3440/#10890 advisory: configured
+// aging values remain unwired even though userspace has a separate fixed
+// half-open shedding rule at 90% of each worker's cap.
 func TestFlowAgingConfigOnlyWarning(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security flow aging early-ageout 20",
-		"set security flow aging high-watermark 90",
-		"set security flow aging low-watermark 80",
+		"set security flow aging high-watermark 75",
+		"set security flow aging low-watermark 60",
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -185,13 +185,15 @@ func TestFlowAgingConfigOnlyWarning(t *testing.T) {
 	}
 	found := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "security flow aging configured but accepted-only") {
+		if strings.Contains(w, "security flow aging configured but accepted-only") &&
+			strings.Contains(w, "fixed 90%") &&
+			strings.Contains(w, "values do not control that policy") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected the #3440 H1 accepted-only aging advisory, got warnings: %v", cfg.Warnings)
+		t.Fatalf("expected the #3440/#10890 fixed-policy advisory, got warnings: %v", cfg.Warnings)
 	}
 }
 

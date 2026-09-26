@@ -253,7 +253,7 @@ pub(crate) fn screen_reason_drop_index(reason: &str) -> Option<usize> {
     })
 }
 
-use crate::tcp_flags::{is_closing, is_initial_syn};
+use crate::tcp_flags::{is_closing, is_initial_syn, is_syn_ack};
 use packet::{PROTO_TCP, TCP_ACK, TCP_SYN};
 // #2151: production screen no longer references these directly (the
 // FIN/closing checks moved to is_closing); the screen test module still
@@ -1186,6 +1186,60 @@ impl ScreenState {
         }
 
         ScreenVerdict::Pass
+    }
+
+    /// #10891: include SYN-ACK-first session misses in the embryonic SYN-flood
+    /// meter without counting ordinary SYN-ACK replies on existing sessions.
+    /// Called only after a session MISS; SYN-cookie challenges are not valid
+    /// responses to a server's SYN-ACK, so a gate trip drops instead.
+    pub fn syn_ack_flood_drop_on_new_flow(
+        &mut self,
+        zone: &str,
+        pkt: &ScreenPacketInfo,
+        now_ns: u64,
+        now_secs: u64,
+    ) -> Option<&'static str> {
+        if pkt.protocol != PROTO_TCP || !is_syn_ack(pkt.tcp_flags) {
+            return None;
+        }
+        let codec_available = self.syn_cookie_codec.is_some();
+        let gate = {
+            let Some(zstate) = self.zones.get_mut(zone) else {
+                return None;
+            };
+            if zstate.profile.syn_flood_threshold == 0 {
+                return None;
+            }
+            zstate.syn_flood_gate(pkt, now_ns, now_secs, codec_available, false)
+        };
+        match gate {
+            SynFloodGate::Admit { alarm } => {
+                if alarm {
+                    self.syn_alarm_pending = true;
+                    self.syn_flood_alarm_events =
+                        self.syn_flood_alarm_events.wrapping_add(1);
+                }
+                None
+            }
+            SynFloodGate::DropDst => {
+                self.syn_flood_dst_drops = self.syn_flood_dst_drops.wrapping_add(1);
+                Some("syn-flood")
+            }
+            SynFloodGate::DropAggregate => Some("syn-flood"),
+            SynFloodGate::DropSrc { alarm } => {
+                if alarm {
+                    self.syn_alarm_pending = true;
+                    self.syn_flood_alarm_events =
+                        self.syn_flood_alarm_events.wrapping_add(1);
+                }
+                self.syn_flood_src_drops = self.syn_flood_src_drops.wrapping_add(1);
+                Some("syn-flood")
+            }
+            SynFloodGate::DropCookieUnavailable => Some("syn-cookie-unavailable"),
+            // A SYN-ACK reply cannot be answered with a valid SYN-cookie
+            // challenge; it remains counted, but over-threshold traffic drops.
+            SynFloodGate::MintChallenge => Some("syn-flood"),
+        }
     }
 
     /// #2210 + #2209: port-scan / IP-sweep evaluation at the NEW-FLOW

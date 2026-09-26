@@ -12,7 +12,8 @@ parses a torn file, no fsync on the apply path.
 - `New()` — `dhcpserver.go`.
 - `Apply(cfg *config.DHCPServerConfig) error` — `dhcpserver.go`.
   Authoritative reconcile (#1778): for each configured family it
-  regenerates the Kea config and restarts the unit; for each
+  regenerates the Kea config and restarts the unit unless that unit is
+  active with the exact same config already loaded successfully. For each
   unconfigured family (including `cfg == nil`) it stops the unit if
   `systemctl is-active` reports it active — even if a PREVIOUS xpfd
   instance started it — and removes the generated config.
@@ -21,16 +22,18 @@ parses a torn file, no fsync on the apply path.
   "DHCP server failed" instead of silently succeeding with no
   service. A failed restart gets exactly one recovery attempt first
   (#9601, `restartClearingStartLimit`): `systemctl reset-failed` and a
-  second restart. A node taking several redundancy groups at once
-  restarts Kea once per MASTER apply, which can trip the unit's systemd
-  start limit; systemd then refuses every start, including the #6535
-  converger's retry, until the interval passes or the failed state is
-  reset. A unit that still fails after the reset returns the combined
-  error and stays retryable. The `systemctl is-active` probe (`unitIsActive`) is itself
-  tri-state (#4870): a recognized state string is authoritative
-  (active / inactive / failed) regardless of exit code, but a query
-  that CANNOT determine the state — timeout, exec error, garbled/empty
-  output — returns an error rather than the previous silent "inactive".
+  second restart. A node taking several redundancy groups at once can
+  trip the unit's systemd start limit; systemd then refuses every start,
+  including the #6535 converger's retry, until the interval passes or the
+  failed state is reset. An unchanged active family skips its restart on
+  retries caused by a sibling-family failure; changed config and inactive
+  or uncertain unit state still require enforcement. A unit that still
+  fails after the reset returns the combined error and stays retryable.
+  The `systemctl is-active` probe (`unitIsActive`) is itself tri-state
+  (#4870): a recognized state string is authoritative (active / inactive /
+  failed) regardless of exit code, but a query that CANNOT determine the
+  state — timeout, exec error, garbled/empty output — returns an error
+  rather than the previous silent "inactive".
   On such an uncertain query the reconcile fails closed: it restarts a
   configured family (to enforce the freshly generated config) or stops
   a removed family (to enforce the removal) AND surfaces the query
@@ -100,8 +103,9 @@ parses a torn file, no fsync on the apply path.
   Lock order is `mu` -> `retryMu`; only the tail of `apply` takes both.
 - `ApplyClusterCommit(cfg) error` — `dhcpserver.go`. Cluster-commit
   reconcile (#1835 F3): always regenerates configs for configured
-  families but restarts only units that are currently active; clears
-  unconfigured families like `Apply`. Fail-closed.
+  families but restarts only active units whose exact config has not
+  already been loaded successfully; clears unconfigured families like
+  `Apply`. Fail-closed.
 - `ApplyWithLeaseAuthority` and `ApplyClusterCommitWithLeaseAuthority` — `dhcpserver.go`. Synchronous commit variants used by the daemon to bind each lease-authority generation to the exact family apply result. A family is marked `Applied` only after its config generation/reconcile branch succeeds; a failure publishes an unapplied proof (Served preserved, Applied=false) instead of leaving the prior generation authoritative.
 - `Clear()` — `dhcpserver.go`. Stops both Kea units if systemd
   reports them active and removes config files. Void signature for
@@ -881,6 +885,14 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   takeover no longer strips the MAC from every IPv6 lease (#2386). DHCPv6 keys
   on DUID so the lease itself was never lost, but the empty column dropped
   hwaddr-based logging / reservation matching / operator visibility.
+- `PreSeedMemfileMerged{4,6}` — takeover's local+peer union. If Kea is active,
+  it issues `dhcp-disable` before reading the live lease set and keeps DHCP
+  disabled through the atomic memfile install. The pre-seed invalidates Kea's
+  cached loaded-config proof, so the queued takeover apply restarts Kea even if
+  the rendered configuration is unchanged (#10896). A 300-second `max-period`
+  restores service if that restart never arrives. If active Kea cannot be
+  quiesced, the pre-seed fails closed without replacing the memfile (#10895).
+
 - `WaitControlSocket{4,6}(ctx, within)` — bounded readiness wait before the
   post-start seed.
 
@@ -1032,31 +1044,34 @@ adds `github.com/miekg/dns` (DNS UPDATE construction + TSIG signing).
   continues, so an unavailable Kea binary cannot brick daemon boot.
   In cluster mode the commit path calls `ApplyClusterCommit`
   (#1835 F3) with the master-RG-filtered config: configs are always
-  regenerated, but units restart only if currently active (this node
-  is serving) — also fail-closed. VRRP MASTER/BACKUP transitions own
-  start/stop via `ApplyAsync`.
+  regenerated, but an active unit restarts only when its config has
+  changed or has not been successfully loaded before — also fail-closed.
+  VRRP MASTER/BACKUP transitions own start/stop via `ApplyAsync`.
 - **Failed applies had no converger (#6535).** In cluster mode every
   Kea driver is an EDGE: `applyRethServicesForRG` /
   `clearRethServicesForRG` run only under `if tr.Changed`,
   `applyDirectVIPOwnership` only on an ownership change, and
-  `ApplyClusterCommit` only when an operator commits. The async worker
-  logs an apply error and drops it — it does not retry. So a failover
-  whose Kea apply failed left the wrong node serving: persistent
-  dual-DHCP (both nodes' Kea up) or no-DHCP (neither), until the next RG
-  transition or commit. Neither happens on its own.
-  The fix pairs a success-gated debt marker here (`applyFailed`, set on
-  every completed attempt, cleared only by a success) with a periodic
-  converger in `pkg/daemon` (`reconcileClusterDHCPServices`, called from
-  `reconcileRGState` beside the RA converger it mirrors). Two rules for
-  future edits: the marker advances only on a COMPLETED attempt — a
-  superseded apply (`gen <= lastAppliedGen`) never ran and leaves it
-  alone — and the retry must stay SPACED, because re-driving a
-  permanently broken Kea on every 2s tick is a continuous systemctl
+  `ApplyClusterCommit` only runs on an operator commit; asynchronous failures
+  are retried by this #6535 converger every 30 seconds. A deterministic render
+  error leaves the debt set; before #10896, each full retry also restarted
+  healthy unchanged family units.
+  The converger uses a success-gated debt marker (`applyFailed`, set on every
+  completed attempt and cleared only by a success) in `pkg/daemon`
+  (`reconcileClusterDHCPServices`, called from `reconcileRGState` beside the
+  RA converger it mirrors). Two rules for future edits: the marker advances
+  only on a COMPLETED attempt — a superseded apply (`gen <= lastAppliedGen`)
+  never ran and leaves it alone — and the retry must stay SPACED, because
+  re-driving a permanently broken Kea on every 2s tick is a continuous systemctl
   restart loop.
   Note `lastAppliedGen` still advances on failure, deliberately: a retry
   allocates a fresh generation so it is never blocked by the superseded
   guard, and leaving that ordering invariant alone keeps the #1835
   coalescing reasoning intact.
+  A family whose exact rendered bytes were successfully loaded and whose
+  unit remains active is not restarted by a sibling family's failed retry;
+  changed configs, inactive units, and uncertain unit states still follow
+  the normal enforcement path. This prevents a deterministic v6 render
+  failure from repeatedly restarting healthy v4.
   The desired state every driver applies is single-sourced in
   `pkg/daemon` as `desiredClusterDHCPConfig` — a converger that
   disagreed with the edge would fight it every tick.

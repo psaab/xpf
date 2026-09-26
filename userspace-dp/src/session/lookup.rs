@@ -13,6 +13,7 @@
 // modules and are visible to this descendant.
 
 use super::*;
+use crate::tcp_flags::{has_ack, has_syn};
 
 /// #4109: the TCP close / handshake-promotion state a `lookup_with_origin`
 /// mutation must mirror onto the matched entry's forward↔reverse companion.
@@ -33,8 +34,8 @@ pub(in crate::session) struct TcpStatePropagation {
     /// learns that ITS peer has closed. Distinct from `close`, which is FIN or
     /// RST: only a FIN advances the close handshake toward TIME_WAIT.
     pub(in crate::session) fin: bool,
-    /// A reverse SYN-ACK promoted the matched (reverse) entry (F16): promote the
-    /// forward companion too, so ESTABLISHED requires real handshake evidence.
+    /// A reverse SYN-ACK after a SYN-first install, or a reverse ACK after a
+    /// SYN-ACK-first install, promotes the matched half and its companion.
     pub(in crate::session) established: bool,
     /// #6752: the companion's `handshake_pending` must clear with this half's,
     /// or the companion probe keeps refusing to extend a flow that IS complete.
@@ -278,15 +279,11 @@ impl SessionTable {
             } else {
                 false
             };
-            // #3152/#4109: TCP OPENING promotes only on a genuine reverse
-            // SYN-ACK. Forward and reverse are two independent entries, so the
-            // server's handshake response promotes this reverse entry and its
-            // forward companion; a client-only ACK never promotes it.
-            //
-            // #10889: for a non-TCP entry with an application override, only
-            // the first packet observed on the pre-installed reverse half
-            // opens the app-timeout gate. Forward-only traffic remains on the
-            // global per-protocol window.
+            // #3152/#4109/#10891: SYN-first TCP flows require a reverse
+            // SYN-ACK; SYN-ACK-first pickups instead require a reverse ACK.
+            // A bare reverse ACK cannot bypass the normal opening reap.
+            // #10889: a non-TCP entry with an application override promotes
+            // only on the first packet observed on its reverse half.
             let promote_from_reverse = if is_tcp {
                 is_syn_ack(tcp_flags) && entry.metadata.is_reverse
             } else {
@@ -297,26 +294,31 @@ impl SessionTable {
             if promote_from_reverse {
                 entry.established = true;
                 if is_tcp {
-                    // #6752: TCP promotion is on the SYN-ACK, not handshake
-                    // completion. Keep both halves on the OPENING class until
-                    // the completing forward segment arrives.
+                    // #6752: the SYN-ACK is not handshake completion, so both
+                    // halves remain on the opening window until the final ACK.
                     entry.handshake_pending = true;
                 }
             }
-            // #6752: the handshake-completing forward segment. Any FORWARD-
-            // direction TCP segment ends the gap — the final ACK normally, and a
-            // data segment implies it too.
-            //
-            // This is reachable, which the fix depends on: `packet_eligible`
-            // (afxdp/flow_cache.rs) admits a TCP packet to the flow cache only
-            // when `is_ack_only`, and `should_cache` uses the same predicate, so
-            // neither the SYN nor the SYN-ACK ever seeds an entry. The final ACK
-            // is therefore a cache MISS and falls through to this slow path,
-            // where it both completes the handshake and seeds the cache for the
-            // data that follows.
-            let handshake_completed = is_tcp && entry.handshake_pending && !entry.metadata.is_reverse;
+            let promote_from_asymmetric_ack = is_tcp
+                && entry.syn_ack_first
+                && entry.handshake_pending
+                && entry.metadata.is_reverse
+                && has_ack(tcp_flags)
+                && !has_syn(tcp_flags);
+            // A normal SYN-first handshake completes on the forward segment
+            // following its reverse SYN-ACK (data implies completion too).
+            // With SYN-ACK-first pickup, only a reverse non-SYN ACK completes;
+            // a retransmitted SYN-ACK in the installing direction must remain
+            // OPENING.
+            let handshake_completed = if entry.syn_ack_first {
+                promote_from_asymmetric_ack
+            } else {
+                is_tcp && entry.handshake_pending && !entry.metadata.is_reverse
+            };
             if handshake_completed {
+                entry.established = true;
                 entry.handshake_pending = false;
+                entry.syn_ack_first = false;
             }
             let refresh =
                 !was_closing || close_progress || (!do_close && !entry.reset && !entry.fin_own);
@@ -362,7 +364,7 @@ impl SessionTable {
                 close: close_progress,
                 reset: is_tcp && has_rst(tcp_flags),
                 fin: is_tcp && has_fin(tcp_flags),
-                established: promote_from_reverse,
+                established: promote_from_reverse || promote_from_asymmetric_ack,
                 handshake_completed,
             };
             (

@@ -412,6 +412,8 @@ func (d *Daemon) reconcileIPMon(cfg *config.Config) {
 	if d.ipmon == nil || cfg == nil {
 		return
 	}
+	// RPM.Results returns a non-nil authoritative snapshot, even when empty.
+	// Keep nil reserved for an unavailable manager so Apply preserves state.
 	var results []*rpm.ProbeResult
 	if d.rpm != nil {
 		results = d.rpm.Results()

@@ -740,22 +740,23 @@ struct SessionEntry {
     /// set together with `closing`, the timeout selection uses the short
     /// `TCP_RST_TIMEOUT_NS` instead of the FIN close timeout.
     reset: bool,
-    /// #3152/#10889: per-entry promotion state used to derive the idle class.
-    /// For TCP, false means a bare SYN is OPENING; a reverse SYN-ACK sets this
-    /// true while `handshake_pending` keeps the entry on `tcp_opening_ns` until
-    /// the handshake completes. For non-TCP sessions with a custom app timeout,
-    /// false keeps the global protocol timeout until a genuine reverse packet
-    /// promotes both halves. Non-TCP sessions without an app override start
-    /// true because both states use the same global window.
+    /// #3152/#10889/#10891: per-entry promotion state used to derive the idle
+    /// class. For TCP, false means OPENING: bare-SYN and SYN-ACK-first pickups
+    /// start false. A reverse SYN-ACK promotes a SYN-first flow while
+    /// `handshake_pending` keeps it on `tcp_opening_ns`; SYN-ACK-first pickups
+    /// stay false until their reverse ACK completes the handshake. Other TCP
+    /// midstream pickups start true. For non-TCP sessions with a custom app
+    /// timeout, false keeps the global protocol timeout until a genuine reverse
+    /// packet promotes both halves; sessions without an app override start true.
     ///
-    /// Node-local derived state: this is not serialized. TCP peer-synced
-    /// entries remain established; a non-TCP app-timeout entry imports gated
-    /// because reply evidence is not carried on the HA wire.
+    /// Node-local derived state: this is not serialized. TCP peer-synced entries
+    /// remain established; non-TCP app-timeout imports remain gated because
+    /// reply evidence is not carried on the HA wire.
     established: bool,
-    /// #6752: `established` was set by the reverse SYN-ACK, so it does NOT mean
-    /// the three-way handshake COMPLETED. This bit is the gap: true from the
-    /// moment the SYN-ACK promotes the flow until the handshake-completing
-    /// forward segment arrives.
+    /// #6752/#10891: `handshake_pending` marks the gap after a SYN-ACK is seen
+    /// (or a SYN-ACK-first session is installed) but before its completing ACK.
+    /// For a SYN-first session that is the reverse SYN-ACK then the forward
+    /// ACK; a SYN-ACK-first pickup waits for the reverse ACK.
     ///
     /// It exists because two correct changes combined into an incorrect
     /// outcome. #4109 (2026-07-04) promoted on the SYN-ACK and deliberately did
@@ -787,6 +788,11 @@ struct SessionEntry {
     /// serialized, so this is not on any wire and an HA peer re-derives it from
     /// the segments it sees.
     handshake_pending: bool,
+    /// #10891: the OPENING session was installed from a SYN-ACK. While true,
+    /// only a non-SYN ACK on the reverse half completes the handshake; this
+    /// prevents a retransmitted SYN-ACK in the installing direction from
+    /// clearing `handshake_pending`.
+    syn_ack_first: bool,
     /// #965: absolute wheel tick at which this session is scheduled to
     /// be checked for expiration. Updated on every push to the wheel.
     /// A WheelEntry whose `scheduled_tick != entry.wheel_tick` is a
@@ -1125,6 +1131,15 @@ pub(crate) enum RemovalKind {
     Transfer,
 }
 
+/// One removed entry returned to the worker for per-session NAT teardown.
+pub(crate) struct PressureShedSession {
+    pub(crate) key: SessionKey,
+    pub(crate) decision: SessionDecision,
+    pub(crate) is_reverse: bool,
+}
+
+pub(crate) type PressureShedSessions = SmallVec<[PressureShedSession; 2]>;
+
 pub(crate) struct SessionTable {
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
@@ -1167,6 +1182,10 @@ pub(crate) struct SessionTable {
     /// #964 Step 1: forward-key → handle. Replaces the
     /// `sessions` HashMap's key-to-entry mapping.
     key_to_handle: SeededKeyMap<u32>,
+    /// Forward keys for local TCP sessions whose handshake is incomplete.
+    /// Seeded and maintained with insert, promotion, and removal so pressure
+    /// arbitration does not scan the session table.
+    pressure_shed_openings: SeededKeyMap<()>,
     /// #9951: per-session inter-VRF leak incarnation, kept outside
     /// `SessionDecision` so the WAN-pinning decision and its wire shape remain
     /// unchanged. Only sessions created on this worker are stamped; peer
@@ -1513,6 +1532,7 @@ impl SessionTable {
             // `state` is the shared `FxSeededState` (carries the seed; a
             // `Clone` per map is just a `usize` copy).
             key_to_handle: HashMap::with_hasher(state.clone()),
+            pressure_shed_openings: HashMap::with_hasher(state.clone()),
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
             reverse_translated_index: HashMap::with_hasher(state.clone()),
@@ -2293,6 +2313,24 @@ impl SessionTable {
     // `self.key_to_handle.get(key).and_then(|h| self.entries.get(*h as usize))`
     // throughout 30+ call sites.
 
+    /// #10890: identifies locally-owned, handshake-incomplete TCP forward
+    /// entries eligible for pressure shedding. Peer imports, transient
+    /// seeds, fabric-ingress rows and reverse companions are not candidates.
+    #[inline]
+    fn is_pressure_shed_opening(
+        key: &SessionKey,
+        entry: &SessionEntry,
+        expect_reverse: bool,
+    ) -> bool {
+        key.protocol == PROTO_TCP
+            && entry.metadata.is_reverse == expect_reverse
+            && !entry.metadata.fabric_ingress
+            && (!entry.established || entry.handshake_pending)
+            && !entry.origin.is_peer_synced()
+            && !entry.origin.is_transient_local_seed()
+            && !entry.origin.is_local_tun_origin()
+    }
+
     /// #6297: insert a record into the session slab and advance the
     /// live-extent high-watermark. This is the SOLE slab-insert choke
     /// point so the `slot_high_watermark` invariant holds for every insert
@@ -2302,11 +2340,19 @@ impl SessionTable {
     /// the backing Vec otherwise — so `raw + 1` is the extent this record
     /// occupies. Bumping the watermark to at least that guarantees
     /// `slot_high_watermark >= 1 + every occupied slot index`, which the
-    /// budgeted refresh walk relies on to never skip a live session. Just a
-    /// compare-and-maybe-store on the hot install path; no allocation.
+    /// budgeted refresh walk relies on to never skip a live session.
+    ///
+    /// #10890: register eligible forward opening records here so every
+    /// insert path maintains the pressure-shed candidate index.
     #[inline]
     fn insert_record(&mut self, record: SessionRecord) -> usize {
+        let opening_key =
+            Self::is_pressure_shed_opening(&record.key, &record.entry, false)
+                .then(|| record.key.clone());
         let raw = self.entries.insert(record);
+        if let Some(key) = opening_key {
+            self.pressure_shed_openings.insert(key, ());
+        }
         // Only grows, never shrinks — see the `slot_high_watermark` field
         // doc for why a stale-low watermark would be a correctness bug but
         // a slightly-high one is merely a few wasted vacant visits.
@@ -2807,9 +2853,9 @@ impl SessionTable {
         let mut rebucket = false;
         if let Some(entry) = self.entry_by_key_mut(&companion_key) {
             if established && matches!(companion_key.protocol, PROTO_TCP) {
-                // F16: mirror a genuine reverse SYN-ACK promotion onto the TCP
-                // forward companion. Its handshake-completing segment will
-                // stamp the established idle window later.
+                // A reverse SYN-ACK after SYN-first install, or a reverse ACK
+                // after SYN-ACK-first install, promotes the TCP half and its
+                // companion. A completing ACK clears the pending gap below.
                 //
                 // #6752: keep both halves in the opening class until the
                 // handshake completes, so a client that never ACKs the SYN-ACK
@@ -2834,11 +2880,11 @@ impl SessionTable {
                 rebucket = true;
             }
             if handshake_completed {
-                // #6752: the matched (forward) half saw the completing segment;
-                // clear the companion's gap too, so the probe may extend this
-                // flow again and the reverse half's next segment stamps the
-                // established window.
+                // #6752/#10891: the completing segment clears the matched half's
+                // gap; clear the companion too so the established half can
+                // retain its full idle window.
                 entry.handshake_pending = false;
+                entry.syn_ack_first = false;
             }
             if close {
                 // F17: a FIN/RST on one half kills the whole flow. Stamp the
@@ -2862,6 +2908,12 @@ impl SessionTable {
                 entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
                 rebucket = true;
             }
+        }
+        if handshake_completed {
+            // Completion can be observed from either direction (including the
+            // reverse-half ACK path), so retire both possible key orientations.
+            self.pressure_shed_openings.remove(matched_key);
+            self.pressure_shed_openings.remove(&companion_key);
         }
         if rebucket {
             // The companion's lifetime changed; re-bucket it so GC checks the
@@ -3096,6 +3148,16 @@ impl SessionTable {
             // epoch; the HOLD branch never writes seen_rg_epoch).
             record.entry.first_held_ns = 0;
             record.entry.seen_rg_epoch = 0;
+        }
+        if protocol == PROTO_TCP && !metadata.is_reverse {
+            let remains_opening = self
+                .entry_by_key(key)
+                .is_some_and(|entry| Self::is_pressure_shed_opening(key, entry, false));
+            if remains_opening {
+                self.pressure_shed_openings.insert(key.clone(), ());
+            } else {
+                self.pressure_shed_openings.remove(key);
+            }
         }
         // #10310: keep count maintenance balanced across in-place origin
         // transitions (notably WorkerLocalImport -> local promotion).
@@ -3564,6 +3626,10 @@ impl SessionTable {
     /// `ExpiredSession::in_export_window`.
     fn remove_entry(&mut self, key: &SessionKey, kind: RemovalKind) -> Option<SessionEntry> {
         self.leak_incarnations.remove(key);
+        // The pressure-shed index contains only forward opening entries.
+        // Remove by key here so every terminal and replacement path keeps it
+        // paired with the authoritative session record.
+        self.pressure_shed_openings.remove(key);
         let handle = self.key_to_handle.remove(key)?;
         // Read the record (still in slab) to learn what to clean.
         // `.get` not `.remove` — we'll remove from slab last.
