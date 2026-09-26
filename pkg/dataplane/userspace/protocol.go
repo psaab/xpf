@@ -351,7 +351,12 @@ const (
 	// transit TCP session-miss admission. A v33 helper ignores the explicit
 	// no-syn-check opt-out and keeps dropping the midstream packet the option
 	// permits; exact equality fences this mixed version.
-	ProtocolVersion = 34
+	// v34 -> v35 (#10827 follow-up): `WebManagementConfig.TLSCertificate` /
+	// `TLSPrivateKey` ride the snapshot wire (siblings untagged). A v34
+	// helper ignores them, which is benign today, but the shape moved and
+	// the version must agree with it so a future helper-side consumer can
+	// never silently misread a mixed pairing.
+	ProtocolVersion = 35
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

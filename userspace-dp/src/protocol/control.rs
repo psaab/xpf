@@ -209,7 +209,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // transit TCP session-miss admission configurable. A v33 helper ignores the
 // no-syn-check opt-out and continues the default SYN-first drop; exact
 // equality fences the mixed version.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 34;
+// v34 -> v35 (#10827 follow-up): `WebManagementConfig.TLSCertificate` /
+// `TLSPrivateKey` ride the snapshot wire. Mirrors the Go bump; exact
+// equality keeps version and shape in agreement.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 35;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
