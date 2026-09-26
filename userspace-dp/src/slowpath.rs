@@ -2198,6 +2198,31 @@ pub(crate) fn write_packet_nonblocking(fd: i32, bytes: &[u8]) -> io::Result<()> 
 pub(crate) fn open_tun(name: &str) -> Result<(std::fs::File, String), String> {
     open_tun_with_flags(name, false)
 }
+/// #10805: determine whether this process can attach to a TUN device.
+///
+/// Coordinator tests that assert a thread exits because opening its TUN fails
+/// are only valid where `TUNSETIFF` is denied. Probe the capability with a
+/// uniquely named, non-persistent device; dropping the file closes and removes
+/// that temporary device; the probe never brings it up or persists it.
+#[cfg(test)]
+pub(crate) fn tun_creation_usable() -> bool {
+    let Ok(tun) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open("/dev/net/tun")
+    else {
+        return false;
+    };
+    static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(0);
+    let probe_id = NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed) & 0x00ff_ffff;
+    let name = format!("x{:x}{probe_id:06x}", std::process::id());
+    let Ok(mut ifr) = IfReq::new(&name, IFF_TUN | IFF_NO_PI) else {
+        return false;
+    };
+    let rc = unsafe { libc::ioctl(tun.as_raw_fd(), TUNSETIFF, &mut ifr) };
+    rc == 0
+}
 
 fn open_tun_with_flags(
     name: &str,

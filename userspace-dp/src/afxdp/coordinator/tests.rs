@@ -4218,6 +4218,13 @@ fn wg1866_defer_prune_releases_port_and_sweep_does_not_resurrect() {
 /// respawn from the stale forwarding state during a defer window.
 #[test]
 fn wg1866_sweep_suppresses_stale_identity_respawn_under_defer() {
+    // #10805: the tombstone assertions require open_tun to fail. Skip when
+    // this process can attach to a temporary TUN device.
+    if crate::slowpath::tun_creation_usable() {
+        eprintln!("SKIP: requires TUNSETIFF to fail for open_tun tombstones");
+        return;
+    }
+
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap_a = wg1866_snapshot(1, 4242, "wgt1866f", port, WG1866_PRIVKEY_A);
@@ -4249,6 +4256,13 @@ fn wg1866_sweep_suppresses_stale_identity_respawn_under_defer() {
 /// not respawn the OLD attachment from stale forwarding.
 #[test]
 fn wg1866_sweep_suppresses_stale_attachment_respawn_under_defer() {
+    // #10805: the tombstone assertions require open_tun to fail. Skip when
+    // this process can attach to a temporary TUN device.
+    if crate::slowpath::tun_creation_usable() {
+        eprintln!("SKIP: requires TUNSETIFF to fail for open_tun tombstones");
+        return;
+    }
+
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap_a = wg1866_snapshot(1, 4242, "wgt1866g", port, WG1866_PRIVKEY_A);
@@ -4298,6 +4312,13 @@ fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
 /// fires for such rows.
 #[test]
 fn wg1866_sweep_respawns_with_empty_linux_name_rows() {
+    // #10805: the tombstone assertions require open_tun to fail. Skip when
+    // this process can attach to a temporary TUN device.
+    if crate::slowpath::tun_creation_usable() {
+        eprintln!("SKIP: requires TUNSETIFF to fail for open_tun tombstones");
+        return;
+    }
+
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let mut snap = wg1866_snapshot(1, 4244, "wgt1866k", port, WG1866_PRIVKEY_A);
@@ -4967,6 +4988,13 @@ fn gre1881_defer_prune_removes_only_stale_entries() {
 /// the forwarding attachment.
 #[test]
 fn gre1881_exit_tombstones_sweep_unpublishes_and_respawn_is_coherence_gated() {
+    // #10805: the tombstone assertions require open_tun to fail. Skip when
+    // this process can attach to a temporary TUN device.
+    if crate::slowpath::tun_creation_usable() {
+        eprintln!("SKIP: requires TUNSETIFF to fail for open_tun tombstones");
+        return;
+    }
+
     let mut coordinator = gre1881_coordinator_with_worker();
     let snap = gre1881_snapshot(1, 36290, "gre1881i", "198.51.100.7");
     coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
