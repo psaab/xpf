@@ -5,16 +5,12 @@
 // .max_sessions, field 12, populated by the peer from its own helper status in
 // grpcapi/server_sessions.go) was already on the wire and discarded.
 //
-// The #5323 regression test greps its output for "10000000" and would look
-// like coverage. It is not: its fixture leaves CLI.cluster nil, and the peer
-// block is gated on `c.cluster != nil && c.cluster.PeerAlive()`, so the peer
-// branch never executes and the assertion is physically unable to see the
-// literal it was written to catch. CLI.cluster is a concrete *cluster.Manager,
-// not an interface, so no fixture can reach that branch without a live cluster.
-//
-// The render is therefore EXTRACTED into renderPeerSessionSummary, which this
-// file tests directly, plus a wiring cell asserting showFlowSession still
-// delegates to it — because a correct helper nothing calls is not a fix.
+// Before #10836, the peer block was gated on PeerAlive(), so a fixture with
+// CLI.cluster nil could not reach it and the local-only summary appeared
+// complete. The production path now attempts a peer RPC for every cluster-mode
+// summary and prints an explicit unreachable block on failure; the #10836
+// regression test exercises that failure path. This file continues to test the
+// successful peer render's capacity value directly.
 package cli
 
 import (
@@ -85,13 +81,11 @@ func TestPeerSessionSummaryUnknownMax7422(t *testing.T) {
 
 // TestShowFlowSessionDelegatesThePeerSummaryRender7422 is the WIRING cell.
 //
-// The two cells above test a function; this one tests that production still
-// calls it. Re-inlining the peer render into showFlowSession — the exact shape
-// the defect had — leaves both of them green while restoring the bug, because
-// nothing they can reach executes the inlined copy. The check is a source scan
-// rather than an execution because the peer branch is gated on a live
-// *cluster.Manager that no unit fixture can construct; that unreachability is
-// the whole reason this row survived #5323.
+// The two cells above test a function; this one ensures production continues
+// to use it. Re-inlining the peer render into showFlowSession would leave those
+// value assertions green while bypassing them on successful cluster fetches.
+// The #10836 regression test drives the cluster-mode failure path end to end;
+// this wiring assertion protects the successful render delegation.
 func TestShowFlowSessionDelegatesThePeerSummaryRender7422(t *testing.T) {
 	const src = "cli_show_flow.go"
 	fset := token.NewFileSet()
