@@ -108,15 +108,10 @@ while ($n < $cap) {
 }
 ' -- "$1" "$2"
 }
-# install_config_durable <validated-file> atomically replaces xpf.conf with
-# the already-validated bytes and persists both the file and directory entry.
-install_config_durable() {
-	local source="$1" target="$XPF_DIR/xpf.conf" staged
-	staged=$(mktemp "$XPF_DIR/.xpf.conf.XXXXXX") || return 1
-	if ! install -o root -g root -m 0600 "$source" "$staged"; then
-		rm -f "$staged"
-		return 1
-	fi
+# durable_replace <staged> <target> <directory> fsyncs the staged file,
+# atomically renames it, then fsyncs its parent directory.
+durable_replace() {
+	local staged="$1" target="$2" dir="$3"
 	if ! perl -MIO::Handle -MFcntl=O_RDONLY -e '
 use strict;
 use warnings;
@@ -128,7 +123,38 @@ rename($staged, $target) or die "rename $staged to $target: $!";
 sysopen(my $directory, $dir, O_RDONLY) or die "open directory $dir: $!";
 $directory->sync or die "fsync directory $dir: $!";
 close $directory or die "close directory $dir: $!";
-' "$staged" "$target" "$XPF_DIR"; then
+' "$staged" "$target" "$dir"; then
+		return 1
+	fi
+	return 0
+}
+
+# install_config_durable <validated-file> atomically replaces xpf.conf with
+# the already-validated bytes and persists both the file and directory entry.
+install_config_durable() {
+	local source="$1" target="$XPF_DIR/xpf.conf" staged
+	staged=$(mktemp "$XPF_DIR/.xpf.conf.XXXXXX") || return 1
+	if ! install -o root -g root -m 0600 "$source" "$staged"; then
+		rm -f "$staged"
+		return 1
+	fi
+	if ! durable_replace "$staged" "$target" "$XPF_DIR"; then
+		rm -f "$staged"
+		return 1
+	fi
+	return 0
+}
+
+# write_line_durable <target> <line> <mode> installs a single line with the
+# same file and directory durability as xpf.conf.
+write_line_durable() {
+	local target="$1" line="$2" mode="$3" dir="${1%/*}" base="${1##*/}" staged
+	staged=$(mktemp "$dir/.$base.XXXXXX") || return 1
+	if ! printf '%s\n' "$line" >"$staged" || ! chmod "$mode" "$staged"; then
+		rm -f "$staged"
+		return 1
+	fi
+	if ! durable_replace "$staged" "$target" "$dir"; then
 		rm -f "$staged"
 		return 1
 	fi
@@ -272,6 +298,17 @@ try_device() {
 
 	mkdir -p "$XPF_DIR"
 	chmod 0750 "$XPF_DIR" 2>/dev/null || true
+	# xpfd reads node-id before importing xpf.conf. Persist it durably before
+	# exposing a config that was validated for this node.
+	if [ -n "$nodeid" ]; then
+		if ! write_line_durable "$XPF_DIR/node-id" "$nodeid" 0644; then
+			warn "failed to persist node-id $nodeid durably — NOT installing config"
+			rm -f "$tmpconf"
+			umount "$MNT"
+			return 1
+		fi
+		log "installed node-id $nodeid"
+	fi
 	# The config may carry credentials; install only the validated copy with
 	# mode 0600. A same-directory temp + rename prevents torn readers.
 	if ! install_config_durable "$tmpconf"; then
@@ -281,23 +318,14 @@ try_device() {
 		return 1
 	fi
 	rm -f "$tmpconf"
-	# Persist node-id BEFORE stamping success: the config was commit-checked
-	# with -node-id and xpfd reads /etc/xpf/node-id before bootstrap. If this
-	# tiny write fails we must NOT stamp — a config validated as node 1 could
-	# otherwise boot with standalone/node-0 expansion while the stamp claims
-	# success. Return non-zero so the next boot retries (install is
-	# idempotent; the stamp gates retry).
-	if [ -n "$nodeid" ]; then
-		if ! printf '%s\n' "$nodeid" >"$XPF_DIR/node-id"; then
-			warn "failed to persist node-id $nodeid — not stamping; will retry on reboot"
-			rm -f "$XPF_DIR/xpf.conf"
-			umount "$MNT"
-			return 1
-		fi
-		log "installed node-id $nodeid"
+	# Stamp last: only mark success after node-id (when present) and config are
+	# both durable.
+	stamp_line="applied $(basename "$conf") from $dev at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	if ! write_line_durable "$STAMP" "$stamp_line" 0644; then
+		warn "failed to persist day-0 stamp durably"
+		umount "$MNT"
+		return 1
 	fi
-	printf 'applied %s from %s at %s\n' "$(basename "$conf")" "$dev" \
-		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAMP"
 	log "day-0 config installed as $XPF_DIR/xpf.conf — xpfd will import and commit it at startup"
 	umount "$MNT"
 	return 0
