@@ -410,11 +410,22 @@ func gatheredNames(mfs []*dto.MetricFamily) map[string]bool {
 func TestCollectorDescriptorCoverage(t *testing.T) {
 	store := newDescriptorCoverageStore(t)
 	gc := conntrack.NewGC(nil, time.Minute)
+	eventBuf := logging.NewEventBuffer(8)
+	var eventSubs []*logging.Subscription
+	for sub := eventBuf.TrySubscribe(1); sub != nil; sub = eventBuf.TrySubscribe(1) {
+		eventSubs = append(eventSubs, sub)
+	}
+	defer func() {
+		for _, sub := range eventSubs {
+			sub.Close()
+		}
+	}()
 
 	srv := &Server{
 		store:     store,
 		gc:        gc,
 		startTime: time.Now(),
+		eventBuf:  eventBuf,
 		// #1780: wire a non-nil neighbor-phase age source so the
 		// neighbor_periodic_last_success_age_seconds family emits and the
 		// canary covers its descriptor declaration.
@@ -537,6 +548,15 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 			"(canary would be vacuous)")
 	}
 
+	for _, mf := range mfs {
+		if mf.GetName() != "xpf_event_stream_subscriber_refusals_total" {
+			continue
+		}
+		if len(mf.GetMetric()) != 1 || mf.GetMetric()[0].GetCounter().GetValue() != 1 {
+			t.Fatalf("subscriber-refusal metric = %v, want counter value 1 from the shared EventBuffer", mf)
+		}
+	}
+
 	// Positive sentinels: one representative family per collect path, so a
 	// future change that drops an entire family (rather than mis-declaring
 	// a single desc) also fails this canary.
@@ -653,6 +673,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		// so the canary is what keeps the reader from being deleted back to
 		// nothing without a test going red.
 		"xpf_syslog_messages_dropped_total",
+		"xpf_event_stream_subscriber_refusals_total", // shared REST SSE + gRPC admission refusals
 	}
 	if ifaceResolvable {
 		want = append(want, "xpf_interface_packets_total") // collectInterfaceCounters (lo)

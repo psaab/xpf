@@ -119,6 +119,15 @@ type EventBuffer struct {
 	// slow REST-SSE / gRPC / CLI-monitor consumer silently shedding security
 	// records is visible (surfaced as xpf_event_stream_subscriber_dropped_total).
 	droppedTotal atomic.Uint64
+
+	// refused counts TrySubscribe calls rejected at the maxSubs cap (#10910).
+	// The daemon's REST SSE handlers and the gRPC MonitorPacketDrop RPC share
+	// ONE EventBuffer (daemon_run_servers.go wires the same instance to both
+	// servers), so this single counter is the admission-denial accounting for
+	// BOTH surfaces — an SSE 503 and a gRPC ResourceExhausted increment the
+	// same number (surfaced as xpf_event_stream_subscriber_refusals_total).
+	// Monotonic; never reset.
+	refused atomic.Uint64
 }
 
 // Subscription receives new events from an EventBuffer.
@@ -244,6 +253,11 @@ func (eb *EventBuffer) Add(rec EventRecord) {
 // drop metric exported to Prometheus.
 func (eb *EventBuffer) DroppedTotal() uint64 { return eb.droppedTotal.Load() }
 
+// SubscriberRefusals reports how many TrySubscribe calls this buffer rejected
+// because the live subscriber cap was reached. It includes every control
+// surface sharing the buffer (REST SSE, gRPC, and internal callers).
+func (eb *EventBuffer) SubscriberRefusals() uint64 { return eb.refused.Load() }
+
 // Dropped returns the number of records THIS subscriber lost because its
 // channel was full when Add tried to deliver (#5064). A nonzero value means
 // the stream this subscriber observed is gapped; the gaps are locatable via
@@ -339,6 +353,7 @@ func (eb *EventBuffer) TrySubscribe(bufSize int) *Subscription {
 	}
 	eb.subMu.Lock()
 	if eb.maxSubs > 0 && len(eb.subs) >= eb.maxSubs {
+		eb.refused.Add(1)
 		eb.subMu.Unlock()
 		return nil
 	}
