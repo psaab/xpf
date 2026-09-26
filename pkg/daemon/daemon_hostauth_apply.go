@@ -59,6 +59,61 @@ func validateAuthorizedSSHKeys(principal string, keys []string) error {
 	return nil
 }
 
+// Login-shell policy for configured local accounts (#10833). Only the literal
+// super-user class keeps a general-purpose shell; all other known classes enter
+// the RBAC-enforced xpf CLI, and empty/unknown classes fail closed to nologin.
+const (
+	loginShellBash    = "/bin/bash"
+	loginShellNologin = "/usr/sbin/nologin"
+)
+
+var loginCLIShellCandidates = []string{"/usr/local/sbin/cli", "/usr/local/bin/cli"}
+
+func resolveLoginCLIShell() string {
+	for _, p := range loginCLIShellCandidates {
+		st, err := os.Stat(p)
+		if err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	// A missing CLI denies shell login rather than falling back to bash.
+	if len(loginCLIShellCandidates) > 0 {
+		return loginCLIShellCandidates[0]
+	}
+	return loginShellNologin
+}
+
+func loginShellForClass(cfg *config.Config, class, cliShell string) string {
+	switch class {
+	case "super-user":
+		return loginShellBash
+	case "", "unauthorized":
+		return loginShellNologin
+	default:
+		if _, ok := config.ResolveClassPermissions(cfg, class); !ok {
+			return loginShellNologin
+		}
+		return cliShell
+	}
+}
+
+func loginUserShell(name string) (string, bool, error) {
+	data, err := os.ReadFile(passwdPath)
+	if err != nil {
+		return "", false, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) > 0 && fields[0] == name {
+			if len(fields) < 7 {
+				return "", false, fmt.Errorf("passwd: malformed entry for %q", name)
+			}
+			return fields[6], true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // applySystemLogin creates OS user accounts and SSH authorized_keys from
 // system { login { user ... } } configuration.
 // applySystemLogin reconciles OS login accounts (create/password/SSH keys)
@@ -78,6 +133,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 		return nil
 	}
 
+	cliShell := resolveLoginCLIShell()
 	for _, user := range cfg.System.Login.Users {
 		if user.Name == "" || user.Name == "root" {
 			continue // never create/modify root via config
@@ -106,10 +162,13 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 		// doesn't exist"; a timeout also lands here, in which case the
 		// useradd below fails with "already exists" and is logged. The `--`
 		// stops id treating a name as an option (#5005).
+		shell := loginShellForClass(cfg, user.Class, cliShell)
+
 		_, err := runCommandTimeout("id", "--", user.Name)
 		if err != nil {
 			// User doesn't exist — create it
-			args := []string{"-m", "-s", "/bin/bash"}
+			args := []string{"-m", "-s", shell}
+
 			if user.UID > 0 {
 				args = append(args, "-u", fmt.Sprintf("%d", user.UID))
 			}
@@ -133,6 +192,24 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 						"user", user.Name, "err", err)
 					fail(fmt.Errorf("mark provisioned %s: %w", user.Name, err))
 				}
+			}
+		} else {
+			// `id` may resolve NSS accounts that are not local. Only manage
+			// shells for passwd-file accounts; fail visibly if their shell
+			// cannot be determined so an old bash cannot be reported as fixed.
+			currentShell, found, err := loginUserShell(user.Name)
+			if err != nil {
+				fail(fmt.Errorf("determine login shell for %s: %w", user.Name, err))
+				continue
+			}
+			if found && currentShell != shell {
+				if out, err := runCommandTimeout("usermod", "-s", shell, "--", user.Name); err != nil {
+					slog.Warn("failed to update login shell",
+						"user", user.Name, "shell", shell, "err", err, "output", strings.TrimSpace(string(out)))
+					fail(fmt.Errorf("update login shell for %s: %w", user.Name, err))
+					continue
+				}
+				slog.Info("updated login shell", "user", user.Name, "shell", shell)
 			}
 		}
 

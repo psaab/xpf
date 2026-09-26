@@ -37,7 +37,9 @@ func TestFunctional1944(t *testing.T) {
 	// Build the user struct the daemon would compile from config.
 	user := &config.LoginUser{Name: name, Class: "operator", EncryptedPassword: hash}
 
-	// (a) Create the account the way applySystemLogin does, then apply.
+	// This password-only fixture intentionally uses bash so `su -c true` can
+	// verify PAM without requiring a running CLI daemon. It does not exercise
+	// applySystemLogin's class-aware OS-shell policy.
 	if out, err := runCommandTimeout("useradd", "-m", "-s", "/bin/bash", name); err != nil {
 		t.Fatalf("useradd: %v / %s", err, out)
 	}

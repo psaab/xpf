@@ -29,13 +29,12 @@ type userClassSetter interface {
 //
 // Two independent holes, either sufficient on its own:
 //
-//   - `$USER` is set by whoever invoked the process. Per #5278 the daemon
-//     provisions every `system login user` with a real shell account
-//     (`useradd -m -s /bin/bash`), so an operator restricted to
-//     `class read-only` ran `USER=nobody xpf` — or unset the variable — and
-//     matched nothing. Identity now comes from the kernel instead: pkg/osident
-//     reads the REAL uid and resolves it through passwd, which the caller's own
-//     environment cannot rewrite.
+//   - `$USER` is attacker-controlled. Before #6701 it was used to find the
+//     login class, so a caller could spoof another account or unset it. The
+//     kernel real uid now supplies identity instead: pkg/osident resolves that
+//     uid through passwd and the caller's environment cannot rewrite it. #10833
+//     separately closes the old direct-bash path by assigning class-specific
+//     OS login shells; identity still must not depend on the environment.
 //
 //   - the `!found` default PROMOTED. An OS account that exists on the box but
 //     is absent from `system login` — and, before the fix, any caller at all —
