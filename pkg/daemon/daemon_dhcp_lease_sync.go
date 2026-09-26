@@ -351,16 +351,22 @@ func (d *Daemon) maybePushFamily(family int, snapshot dhcpserver.LeaseSyncSnapsh
 }
 
 // dhcpLeaseSetFingerprint computes a stable, order-independent fingerprint of a
-// lease set for change detection. It deliberately EXCLUDES Remaining so the
-// per-second countdown does not look like a change; an on-grant/renewal (which
-// changes ValidLife or the membership) does change it.
+// lease set for change detection. It includes every field that affects the
+// failover seed or lease-conflict arbitration, excluding Remaining and
+// PreferredRemaining because both are countdowns that change on every poll.
 func dhcpLeaseSetFingerprint(leases []dhcpserver.SyncLease) string {
 	if len(leases) == 0 {
 		return ""
 	}
 	keys := make([]string, 0, len(leases))
 	for _, l := range leases {
-		keys = append(keys, fmt.Sprintf("%s#%d#%s", l.IdentityKey(), l.ValidLife, l.Hostname))
+		// Quote strings to keep delimiters unambiguous even for arbitrary
+		// hostnames. State is intentionally omitted: reads filter to active
+		// leases and both seed paths write Kea's default state.
+		keys = append(keys, fmt.Sprintf("%d|%q|%d|%q|%q|%q|%d|%q|%d|%q|%t|%t|%d",
+			l.Family, l.Address, l.SubnetID, l.HWAddress, l.ClientID, l.DUID,
+			l.IAID, l.LeaseType, l.PrefixLen, l.Hostname, l.FQDNFwd, l.FQDNRev,
+			l.ValidLife))
 	}
 	sort.Strings(keys)
 	return strings.Join(keys, "|")
