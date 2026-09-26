@@ -17,6 +17,7 @@ use arc_swap::ArcSwapOption;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const PERMIT: u64 = 7;
 const QEPOCH: u64 = 11;
@@ -328,7 +329,15 @@ fn complete_conn_streams_completions() {
     assert_eq!(completions[0].bytes_written, 50);
     assert_eq!(completions[1].request_id, 2);
     assert_eq!(completions[1].outcome, ReinjectOutcome::Cancelled);
-    assert_eq!(core.live_count(), 0, "streamed completions release budget");
+    let ack_deadline = Instant::now() + Duration::from_secs(1);
+    while core.live_count() != 0 && Instant::now() < ack_deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        core.live_count(),
+        0,
+        "streamed completions release budget after ack"
+    );
     running.store(false, Ordering::SeqCst);
     core.shutdown();
     handle.join().unwrap();
