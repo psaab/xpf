@@ -189,7 +189,7 @@ and unmatchable) rather than widening to match-any.
 
 ## 7. User/Identity Firewall
 
-User-based policy enforcement integrating with directory services. Not implemented in xpf.
+User-based policy enforcement integrating with directory services. Not implemented in xpf. The accepted Junos stanzas remain visible in configuration but have no runtime effect; strict commits and tolerant load/peer-sync warn about AD (`active-directory-access`), JIMS (`identity-management`), and `local-authentication-table` (#10947).
 
 | Feature | Junos Config Path | Description | Priority | Status |
 |---------|-------------------|-------------|----------|--------|

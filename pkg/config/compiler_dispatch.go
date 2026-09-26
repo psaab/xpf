@@ -64,7 +64,7 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				return fmt.Errorf("class-of-service: %w", err)
 			}
 		case "services":
-			if err := compileServices(node, &cfg.Services); err != nil {
+			if err := compileServices(node, &cfg.Services, &cfg.Warnings); err != nil {
 				return fmt.Errorf("services: %w", err)
 			}
 		case "forwarding-options":
