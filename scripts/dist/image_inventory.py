@@ -31,6 +31,7 @@ Format (line-oriented, no parser dependency — the guest half is POSIX sh):
     packages:
     adduser=3.152
     apt=3.1.5
+    xpf=0.0.675+g0123456789ab
     ...
 """
 

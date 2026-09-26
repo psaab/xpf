@@ -238,11 +238,140 @@ def out_text(argv):
     return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
 
 
-def git_version():
+def deb_version_for_head():
+    """Mirror Makefile's default DEB_VERSION for the current checkout."""
     try:
-        return out_text(["git", "-C", ROOT, "describe", "--tags", "--always", "--dirty"]).strip()
-    except Exception:
-        return "dev"
+        count = out_text(["git", "-C", ROOT, "rev-list", "--count", "HEAD"]).strip()
+        commit = out_text(
+            ["git", "-C", ROOT, "rev-parse", "--short=12", "HEAD"]).strip()
+        dirty = subprocess.run(
+            ["git", "-C", ROOT, "diff", "--quiet"]).returncode
+    except (OSError, subprocess.CalledProcessError) as e:
+        die(f"cannot derive the current Debian package version: {e}")
+    if not count.isdigit() or not re.fullmatch(r"[0-9a-f]{12,40}", commit):
+        die("git returned an invalid commit identity for the Debian package version")
+    if dirty not in (0, 1):
+        die("cannot determine whether the Debian package source is dirty")
+    return f"0.0.{count}+g{commit}{'.dirty' if dirty else ''}"
+
+
+def deb_commit_from_version(version):
+    """Return the source commit prefix encoded in Makefile's DEB_VERSION."""
+    match = re.fullmatch(
+        r"0\.0\.\d+\+g([0-9a-f]{12,40})(?:\.dirty)?", version)
+    if not match:
+        die(f"unsupported xpf Debian package version {version!r}: "
+            "expected 0.0.<count>+g<at-least-12-hex-commit>[.dirty]")
+    return match.group(1)
+
+
+def parse_xpfd_version(output):
+    """Parse the version and source commit reported by the staged package."""
+    match = re.fullmatch(
+        r"xpfd ([^\s]+) \(commit ([0-9a-f]{7,40}), built [^\r\n]+\)\s*",
+        output)
+    if not match:
+        die(f"staged xpfd returned an unrecognized version identity: "
+            f"{output.strip()!r}")
+    return match.group(1), match.group(2)
+
+
+def bind_deb_identity(deb_version, staged_version_output, *, skip_build,
+                      head_commit):
+    """Bind the staged xpfd to this package's version and source commit.
+
+    The Debian version carries a 12-hex source commit while xpfd reports Git's
+    unique abbreviated commit. Resolve both to the same object when available;
+    in a --skip-build bake, record the package's own commit, never the current
+    checkout's unrelated HEAD.
+    """
+    package_commit = deb_commit_from_version(deb_version)
+    xpfd_version, xpfd_commit = parse_xpfd_version(staged_version_output)
+    if not (package_commit.startswith(xpfd_commit)
+            or xpfd_commit.startswith(package_commit)):
+        die(f"package {deb_version} embeds commit {package_commit}, but its "
+            f"staged xpfd reports {xpfd_commit}")
+
+    if not skip_build:
+        if not head_commit.startswith(package_commit):
+            die(f"package {deb_version} embeds commit {package_commit}, which "
+                f"does not match current HEAD {head_commit}")
+        commit = head_commit
+    else:
+        try:
+            resolved = out_text([
+                "git", "-C", ROOT, "rev-parse", "--verify",
+                f"{package_commit}^{{commit}}",
+            ]).strip()
+            if (not re.fullmatch(r"[0-9a-f]{40}", resolved)
+                    or not resolved.startswith(package_commit)):
+                die(f"git returned invalid source commit {resolved!r} for "
+                    f"package version {deb_version}")
+            commit = resolved
+        except (OSError, subprocess.CalledProcessError):
+            # The package version itself carries a real, non-unknown commit
+            # identity. A skip-build bake may not have that object locally.
+            commit = package_commit
+    if len(commit) == 40:
+        try:
+            expected_xpfd_version = out_text([
+                "git", "-C", ROOT, "describe", "--tags", "--always", commit,
+            ]).strip()
+        except (OSError, subprocess.CalledProcessError) as e:
+            die(f"cannot verify staged xpfd version against package commit "
+                f"{commit}: {e}")
+        observed = xpfd_version.removesuffix("-dirty")
+        same_version = observed == expected_xpfd_version
+        if not same_version and re.fullmatch(r"[0-9a-f]{7,40}", observed):
+            same_version = (
+                re.fullmatch(r"[0-9a-f]{7,40}", expected_xpfd_version)
+                and (observed.startswith(expected_xpfd_version)
+                     or expected_xpfd_version.startswith(observed)))
+        if not same_version:
+            die(f"staged xpfd version {xpfd_version!r} does not match package "
+                f"commit {commit} (expected {expected_xpfd_version!r})")
+    return xpfd_version, commit
+
+
+def deb_filename_version(path):
+    """Return the version field from an xpf_<version>_<arch>.deb basename."""
+    name = os.path.basename(path)
+    if not name.startswith("xpf_") or not name.endswith(".deb"):
+        return None
+    fields = name[4:-4].rsplit("_", 1)
+    if len(fields) != 2 or not fields[0] or not fields[1]:
+        return None
+    return fields[0]
+
+
+def select_xpf_deb(deb_dir, expected_version):
+    """Select exactly the .deb whose filename and dpkg metadata match version."""
+    import glob
+
+    debs = sorted(glob.glob(os.path.join(deb_dir, "xpf_*.deb")))
+    matches = [path for path in debs
+               if deb_filename_version(path) == expected_version]
+    if not matches:
+        found = sorted({deb_filename_version(path) for path in debs
+                        if deb_filename_version(path) is not None})
+        die(f"no xpf .deb in {deb_dir} has requested version "
+            f"{expected_version!r} (found {found or 'none'}); build the "
+            "matching package or pass its exact --version")
+    if len(matches) != 1:
+        die(f"multiple xpf .debs in {deb_dir} have requested version "
+            f"{expected_version!r}; refusing ambiguous package selection")
+    package = matches[0]
+    try:
+        actual_version = out_text(
+            ["dpkg-deb", "-f", package, "Version"]).strip()
+    except (OSError, subprocess.CalledProcessError) as e:
+        die(f"cannot read Version from {package}: {e}")
+    filename_version = deb_filename_version(package)
+    if actual_version != expected_version or filename_version != actual_version:
+        die(f"xpf package identity mismatch: --version={expected_version!r}, "
+            f"filename version={filename_version!r}, "
+            f"dpkg-deb Version={actual_version!r}")
+    return package
 
 
 def ensure_memlock():
@@ -988,15 +1117,16 @@ def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--version", default=git_version())
+    p.add_argument("--version")
     p.add_argument("--out", default=os.path.join(ROOT, "dist"))
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--skip-validate", action="store_true")
     p.add_argument("--keep-work", action="store_true")
     a = p.parse_args()
-    # #5992: reject a path-escaping / crafted --version before it names any
-    # artifact file (xpf-<ver>.qcow2 …). The default is git_version(), already
-    # a safe segment; this guards an operator-supplied override.
+    if a.version is None:
+        a.version = deb_version_for_head()
+    # --version is the xpf Debian package version which names the image set.
+    # Refuse unsafe paths before they name any xpf-<ver>.* artifact.
     validate_version(a.version, "--version")
 
     for t, hint in [("qemu-img", "apt-get install qemu-utils"),
@@ -1018,7 +1148,6 @@ def main():
     os.makedirs(cache_dir, exist_ok=True)
     work = tempfile.mkdtemp(prefix="xpf-bake-", dir=os.environ.get("TMPDIR", "/tmp"))
 
-    import glob
     try:
         # 1. build the xpf .deb (#1917 increment A). `make deb` runs
         #    `make build build-ctl build-userspace-dp` via debian/rules, so
@@ -1033,16 +1162,10 @@ def main():
         if not a.skip_build:
             info("building xpf .deb (xpfd, cli, xpf-userspace-dp -> staged)...")
             run(["make", "-C", ROOT, "deb"])
-        # The git-derived version is computed by the Makefile; glob for the
-        # binary package (NOT the xpf-appliance metapackage) and pick the
-        # NEWEST by mtime so a stale deb from an earlier (e.g. dirty-tree)
-        # build in dist-deb/ is never selected over the one just built.
-        debs = sorted((g for g in glob.glob(os.path.join(deb_dir, "xpf_*.deb"))
-                       if "xpf-appliance" not in os.path.basename(g)),
-                      key=os.path.getmtime)
-        if not debs:
-            die(f"no xpf_*.deb in {deb_dir} (run without --skip-build, or run `make deb`)")
-        xpf_deb = debs[-1]
+        # Pick only the package whose filename and dpkg metadata match the
+        # release identity. Never let filesystem mtime choose the code that
+        # gets installed into an image labelled with --version.
+        xpf_deb = select_xpf_deb(deb_dir, a.version)
         info(f"using package: {xpf_deb}")
         # build-host pre-gate (best-effort): verify the embedded shim against
         # the build-host kernel before baking it in (#1864). Verify the xpfd
@@ -1055,6 +1178,25 @@ def main():
         run(["dpkg-deb", "-x", xpf_deb, os.path.join(work, "pregate")])
         if not os.access(staged_xpfd, os.X_OK):
             die(f"package {xpf_deb} does not contain an executable staged xpfd")
+        try:
+            staged_version_output = out_text([staged_xpfd, "version"])
+        except (OSError, subprocess.CalledProcessError) as e:
+            die(f"cannot read staged xpfd version identity from {xpf_deb}: {e}")
+        head_commit = ""
+        if not a.skip_build:
+            try:
+                head_commit = out_text(
+                    ["git", "-C", ROOT, "rev-parse", "HEAD"]).strip()
+            except (OSError, subprocess.CalledProcessError) as e:
+                die(f"cannot determine current source commit for package "
+                    f"identity check: {e}")
+            if not re.fullmatch(r"[0-9a-f]{40}", head_commit):
+                die(f"git returned an invalid current source commit {head_commit!r}")
+        xpfd_version, commit = bind_deb_identity(
+            a.version, staged_version_output, skip_build=a.skip_build,
+            head_commit=head_commit)
+        info(f"package identity: version={a.version}, xpfd={xpfd_version}, "
+             f"commit={commit}")
         if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0:
             info(f"build-host pre-gate: packaged xpfd verify-dataplane "
                  f"(host kernel {os.uname().release})...")
@@ -1142,10 +1284,8 @@ def main():
         # validation gate (#4017); see write_manifest below and
         # finalize_artifacts() at the end of the pipeline.
 
-        try:
-            commit = out_text(["git", "-C", ROOT, "rev-parse", "HEAD"]).strip()
-        except Exception:
-            commit = "unknown"
+        # The signed git_commit is the commit attested by the selected package,
+        # not an independent lookup of whatever checkout happens to run bake.
 
         # #1930 INC-3 LANE-2: record the staged binary's compile-time HA /
         # session-sync / config-DB protocol versions in the manifest so the
