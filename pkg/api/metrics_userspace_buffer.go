@@ -515,6 +515,16 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		float64(status.GreDecapUnsupportedVersionRefusalsTotal),
 	)
 
+	// #10865: GRE PT/nibble mismatch refusals at a configured endpoint.
+	// Emitted unconditionally so 0 means no matching endpoint refused a
+	// mismatched packet. This is not a drop counter; ordinary transit is not
+	// counted.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceGreDecapPtNibbleMismatchRefusals,
+		prometheus.CounterValue,
+		float64(status.GreDecapPtNibbleMismatchRefusalsTotal),
+	)
+
 	// #2472: locally-generated error-reply per-reason token-bucket drops.
 	// Emitted unconditionally so a 0 is a real "no generated errors
 	// rate-limited" signal rather than an absent series. Nonzero flags an

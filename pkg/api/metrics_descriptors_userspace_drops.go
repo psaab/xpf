@@ -90,6 +90,17 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"terminate (#6842).",
 		nil, nil,
 	)
+	c.userspaceGreDecapPtNibbleMismatchRefusals = prometheus.NewDesc(
+		"xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total",
+		"Native-GRE frames refused for decapsulation because the GRE "+
+			"Protocol Type disagreed with the inner IP version nibble "+
+			"while the outer tuple, key, and transport domain matched a "+
+			"configured GRE tunnel endpoint. This is a refusal, not a "+
+			"drop: the frame continues on the ordinary transit or "+
+			"host-inbound path, and transit GRE mismatches are not "+
+			"counted (#10865).",
+		nil, nil,
+	)
 	c.userspaceTimeExceededRateLimited = prometheus.NewDesc(
 		"xpf_userspace_time_exceeded_rate_limited_total",
 		"Locally-generated ICMP/ICMPv6 Time Exceeded (TTL/hop-limit) "+

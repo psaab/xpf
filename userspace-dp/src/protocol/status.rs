@@ -807,6 +807,14 @@ pub(crate) struct ProcessStatus {
     /// ALG to terminate. Additive / defaulted for backward compatibility.
     #[serde(rename = "gre_decap_unsupported_version_refusals_total", default)]
     pub gre_decap_unsupported_version_refusals_total: u64,
+    /// #10865: configured native-GRE endpoints refusing decapsulation
+    /// because the GRE Protocol Type disagrees with the inner packet's IP
+    /// version nibble. This is a refusal, not a drop; the frame continues
+    /// through its normal transit/host-inbound disposition. Transit GRE with
+    /// no matching configured endpoint is not counted. Additive / defaulted
+    /// for backward compatibility.
+    #[serde(rename = "gre_decap_pt_nibble_mismatch_refusals_total", default)]
+    pub gre_decap_pt_nibble_mismatch_refusals_total: u64,
     /// #2472: locally-generated ICMP Time Exceeded / PTB / `reject` replies
     /// dropped because the per-reason token bucket was empty. Each reason has
     /// an independent global-per-reason bucket (Linux `icmp_msgs_per_sec`
