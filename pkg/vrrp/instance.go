@@ -266,7 +266,10 @@ type vrrpInstance struct {
 	lastGARPEpoch    atomic.Uint64 // epoch of last completed sendGARP()
 	lastGARPTime     atomic.Int64  // Unix nanos of last GARP send
 	lastGARPOwnerGen atomic.Uint64 // owner generation in which the last GARP completed
-	garpClampWarned  atomic.Bool   // #5695: guards a once-per-instance warn when a configured GARPCount is clamped (never per-send)
+	// lastMasterReaffirmTime independently rate-limits winner-side refreshes
+	// triggered by repeated peer MASTER advertisements.
+	lastMasterReaffirmTime atomic.Int64 // Unix nanos of the last winner-side neighbor refresh.
+	garpClampWarned        atomic.Bool  // #5695: guards a once-per-instance warn when a configured GARPCount is clamped (never per-send)
 
 	// ownerGen is the identity of the current Master/Backup ownership tenure
 	// (#5082). setState bumps it whenever the state actually changes, so every

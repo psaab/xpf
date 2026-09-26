@@ -290,6 +290,12 @@
 
 ## Important Bugs
 
+### Stable VRRP MASTER leaves stale neighbor mappings after out-ranking a claimant (FIXED #10777)
+- **Symptom:** A brief dual-MASTER window lets the losing peer advertise its node-specific RETH MAC. The higher-priority MASTER remains MASTER and does not re-announce, so host ARP/NDP entries can continue pointing at the loser until neighbor expiry.
+- **Root cause:** The winner-side `handleMasterRx()` path retained ownership after a lower-priority advert or an equal-priority tie it won, but did not refresh host neighbor caches. VRRP advertisements refresh bridge forwarding state, not host VIP ARP/NDP bindings.
+- **Fix:** The winner asynchronously sends a forced GARP/NA refresh after a lower-priority advert or an equal-priority tie it wins. A separate 500ms cooldown bounds repeats without letting a recent ordinary GARP suppress the first correction; strict-VIP-ownership suppression remains in force.
+- **Tests:** `TestHandleMasterRx_ReaffirmsAfterOutrankingClaimant_10777` captures both IPv4 GARP and IPv6 NA after a recent prior burst, checks repeated adverts are rate-limited, and verifies an equal-priority loser does not announce.
+
 ### tx_ports devmap value size
 - Go wrote 4-byte struct (ifindex only) but BPF DEVMAP_HASH expects 8-byte `bpf_devmap_val` (ifindex + prog_fd)
 - **File:** loader.go
