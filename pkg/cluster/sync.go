@@ -266,13 +266,14 @@ type SyncStats struct {
 	// exactly that reason.
 	SweepSessionsSent atomic.Uint64
 	SessionsReceived  atomic.Uint64
-	// MalformedRecordsDropped counts sync records REJECTED by the #7175 decode
-	// contract: a session record truncated before its policy/zone/NAT block, or
-	// a DHCP full-set push that did not decode completely. Before #7175 these
-	// decoded ok=true and installed partial state — a session whose SessionID,
-	// PolicyID, zone ids and NAT fields were all fabricated zeros, or a lease
-	// set silently truncated to a prefix.
-	//
+	// MalformedRecordsDropped counts rejected sync input: session records
+	// truncated before policy/zone/NAT blocks, DHCP sets with invalid wire
+	// framing, and individual lease rows rejected by semantic validation
+	// (#10893). A malformed DHCP frame counts once; semantically invalid lease
+	// rows count separately. Before #7175, truncated sessions and cut lease sets
+	// decoded as partial state — zero-filled policy fields or a set silently
+	// truncated to a prefix.
+
 	// CORRECTION: this doc previously cited #6682 for the claim that zone pair
 	// (0,0) is matched by a wildcard permit. #3110 fenced every rule tier against
 	// zone 0 and #6682 made an unzoned ingress an explicit deny, so a wildcard
@@ -426,7 +427,7 @@ type SyncStats struct {
 	// PreKeyAuthEvictions counts keyed-node session-sync connections closed
 	// after they failed to authenticate within the #10717 upgrade grace.
 	PreKeyAuthEvictions atomic.Uint64
-	DeletesDropped             atomic.Uint64
+	DeletesDropped      atomic.Uint64
 	// DeletesSuppressedPeerIncapable counts outgoing session deletes WITHHELD
 	// because the peer advertised its capabilities and did NOT claim #9714
 	// peer-delete ownership (capFlagPeerDeleteOwnership). Such a peer applies a
@@ -2248,9 +2249,9 @@ type zoneOwnershipSnapshot struct {
 	// fallbackPrimary is the captured RG 0 answer for absent zones.
 	fallbackPrimary bool
 	// Per-session ownership is evaluated only against these bulk-start answers.
-	useRG  bool
-	foldRG map[uint32]int
-	foldFn func(uint32, uint16) uint32
+	useRG   bool
+	foldRG  map[uint32]int
+	foldFn  func(uint32, uint16) uint32
 	primary map[int]bool
 	// mapGen is the ownership-map generation captured at bulk start.
 	mapGen uint64

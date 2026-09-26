@@ -1640,6 +1640,31 @@ func validLeaseIdentityForFamily(msgFamily int, l dhcpserver.SyncLease) bool {
 	}
 }
 
+// filterDHCPLeasesBySemantics drops decoded records that cannot represent a
+// lease the outer DHCP family can serve, and clamps attacker-controlled
+// lifetimes before the held set reaches either takeover seed path (#10893).
+// Pure: the receiver owns drop accounting and retain-on-empty disposition.
+func filterDHCPLeasesBySemantics(msgFamily int, leases []dhcpserver.SyncLease) ([]dhcpserver.SyncLease, int) {
+	kept := make([]dhcpserver.SyncLease, 0, len(leases))
+	dropped := 0
+	for _, lease := range leases {
+		// Keep cross-family records for the established identity filter below:
+		// it rejects them before the held set/callback and preserves the
+		// DHCPLeasesDroppedNoIdentity accounting contract (#9915).
+		if lease.Family != msgFamily {
+			kept = append(kept, lease)
+			continue
+		}
+		sanitized, ok := dhcpserver.SanitizeSyncLeaseForFamily(msgFamily, lease)
+		if !ok {
+			dropped++
+			continue
+		}
+		kept = append(kept, sanitized)
+	}
+	return kept, dropped
+}
+
 // filterDHCPLeasesByIdentity drops records lacking minimal identity for the
 // OUTER message family, returning survivors and the drop count. Pure: callers
 // own counting and the retain-on-empty disposition.
