@@ -245,6 +245,22 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 	for _, name := range names {
 		pl := po.PrefixLists[name]
 		for i, prefix := range pl.Prefixes {
+			// #10823 render-side belt: a malformed entry (bad octet,
+			// out-of-range length, non-IP) renders a line FRR rejects, and a
+			// single CMD_WARNING_CONFIG_FAILED exits the whole vtysh
+			// add-batch non-zero — failing the ENTIRE frr-reload, not just
+			// this list. The #7273 strict gate is firewall-scoped, so a
+			// routing-only list reaches here unchecked on every path
+			// (strict compile accepts it). Skip the entry (match-nothing,
+			// fail-closed) rather than poison the reload; the seq slot
+			// stays a gap, which is FRR-legal (#2103 precedent). Same
+			// net.ParseCIDR predicate as the route-filter belt, so the two
+			// cannot drift.
+			if _, _, err := net.ParseCIDR(prefix); err != nil {
+				slog.Warn("frr: omitting malformed prefix-list entry",
+					"list", name, "prefix", prefix, "reason", err)
+				continue
+			}
 			// #4482: sanitize the prefix so an embedded newline from a
 			// leniently-loaded / peer-synced / rolled-back stored value cannot
 			// inject an extra frr.conf line. #4097 added this render-side belt

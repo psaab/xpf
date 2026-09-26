@@ -1147,22 +1147,30 @@ step. Both are required — neither sees the other's case:
   is added. (NOTE: a Junos→FRR as-path regex *syntax* translation is still
   absent — Junos regex operates on whole AS-number terms, FRR uses POSIX ERE
   over the space-separated AS string — tracked separately, not part of #4097.)
-- **The render-side belt now covers the route-map `set` clauses and
-  prefix-list entries too (#4482).** #4097 wrapped only the community-list /
-  as-path-list DEFINITIONS; the route-map `set community` / `set community …
-  additive` / `set comm-list … delete` / `set as-path prepend` clauses, the
-  `match community` / `match as-path` names, and the `ip/ipv6 prefix-list …
-  permit <prefix>` entries (both the top-level `policy-options prefix-list`
-  and the inline route-filter lists) still emitted their value with a bare
-  `%s` — a residual bypass on the TOLERANT-load path (peer-sync / rollback /
-  lenient load, where the strict #1798 commit gate only warns, #1960). All of
-  those slots now pass through `sanitizeFRRValue`, so ALL FRR-rendered
-  free-text is sanitized regardless of load path. Like the #4097 values these
-  take a rest-of-line token, so a legitimate space (a multi-AS `set as-path
-  prepend`, a multi-word regex) survives while a `\n` collapses to a space and
-  cannot inject a standalone frr.conf command. Guarded by
-  `TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482` (fail on
-  revert of any wrapped site).
+- **The render-side sanitize belt covers route-map `set` clauses, matches, and
+  emitted prefix-list values (#4482).** #4097 wrapped the community-list /
+  as-path-list DEFINITIONS; #4482 extended `sanitizeFRRValue` to the route-map
+  `set community` / `set community additive` / `set comm-list … delete` /
+  `set as-path prepend` clauses, `match community` / `match as-path` names,
+  and `ip/ipv6 prefix-list … permit <prefix>` values. The top-level
+  `policy-options prefix-list` and inline route-filter entries now run through
+  their CIDR ParseCIDR belts first (#10823 / #2105), so malformed values are
+  omitted rather than sanitized into an FRR-invalid line. Other emitted
+  free-text slots still sanitize control chars while preserving legitimate
+  spaces. The remaining sanitize-on-one-line slots are covered by
+  `TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823`;
+  malformed prefix-list cases are covered by
+  `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`.
+- **Malformed routing-only prefix-list entries are omitted before FRR emission
+  (#10823).** The #7273 strict CIDR gate is scoped to firewall-referenced
+  lists, so a routing-only `policy-options prefix-list` can reach rendering
+  unchecked on strict as well as tolerant compile paths. The top-level
+  `ip/ipv6 prefix-list` definition and the same-family inline access-list both
+  apply `net.ParseCIDR`, warn, and omit malformed entries; unused sequence
+  slots remain gaps, so a bad entry cannot poison the whole frr-reload and
+  contributes no match. `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`
+  covers `/33`, bad-octet, and non-IP entries through both compile paths while
+  checking valid siblings still render.
 - **Three route-map slots the #4482 sweep missed are now wrapped too
   (#4498).** The #4494 hostile review noted that `set ip/ipv6 next-hop
   <term.NextHop>`, `set origin <term.Origin>`, and `match source-protocol
