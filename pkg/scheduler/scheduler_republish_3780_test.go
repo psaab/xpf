@@ -132,3 +132,92 @@ func TestScheduler_SuccessfulRepublishNeverLatchesPending(t *testing.T) {
 		t.Fatalf("no-change tick after a successful republish must not re-fire, got %d", calls)
 	}
 }
+
+func TestScheduler_CarriesClockHoldAndRepublishFailureAcrossReplacement(t *testing.T) {
+	oldCfg := map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", StartTime: "09:00:00", StopTime: "17:00:00"},
+	}
+	newCfg := map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", AllDay: true},
+	}
+	now := time.Date(2026, 2, 12, 10, 0, 0, 0, time.UTC)
+
+	var oldCalls int
+	old, initial := NewPrimed(oldCfg, func(context.Context, map[string]bool) error {
+		oldCalls++
+		return errors.New("republish unavailable")
+	}, now)
+	if !initial["workhours"] {
+		t.Fatal("old scheduler should start with the permit active")
+	}
+
+	// Simulate a wall-clock step. The scheduler must hold scheduled permits
+	// closed and the failed close must begin the bounded republish streak.
+	old.mu.Lock()
+	old.lastWallUnixNano = now.Add(time.Hour).UnixNano()
+	old.mu.Unlock()
+	stepAt := now.Add(time.Minute)
+	old.evaluate(context.Background(), stepAt, true)
+	if oldCalls != 1 || old.IsActive("workhours") {
+		t.Fatalf("clock-step evaluation calls=%d active=%t, want one failed close and inactive state",
+			oldCalls, old.IsActive("workhours"))
+	}
+
+	// A hash replacement during the recovery hold must not reset the hold or
+	// prime a newly-active permit.
+	holdReplacement, _ := NewPrimed(newCfg, func(context.Context, map[string]bool) error { return nil }, stepAt.Add(time.Minute))
+	holdReplacement.CarryRecoveryStateFrom(old, stepAt.Add(time.Minute))
+	if holdReplacement.ActiveState()["workhours"] {
+		t.Fatal("replacement scheduler reopened the permit during the inherited clock recovery hold")
+	}
+
+	// Keep the old republish failing through its five-minute fail-closed bound.
+	for minute := 2; minute <= 7; minute++ {
+		old.evaluate(context.Background(), now.Add(time.Duration(minute)*time.Minute), true)
+	}
+	if !old.RepublishFailClosed() {
+		t.Fatal("five-minute failed republish streak did not latch fail-closed")
+	}
+	if old.IsActive("workhours") {
+		t.Fatal("old scheduler did not publish an inactive state after fail-closed latched")
+	}
+	_, failuresBeforeReplace, sinceBeforeReplace := old.RepublishFailureStatus()
+	if failuresBeforeReplace < 6 || !sinceBeforeReplace.Equal(stepAt) {
+		t.Fatalf("failure status before replacement = (%d, %v), want continued streak from %v",
+			failuresBeforeReplace, sinceBeforeReplace, stepAt)
+	}
+
+	// Replacement config is active at this wall time. It must inherit the
+	// retry/fail-closed latch and retry the denied state rather than silently
+	// clearing the five-minute recovery bound.
+	replacedAt := now.Add(8 * time.Minute)
+	var (
+		newCalls int
+		newState map[string]bool
+	)
+	replacement, primed := NewPrimed(newCfg, func(_ context.Context, state map[string]bool) error {
+		newCalls++
+		newState = state
+		return errors.New("republish unavailable")
+	}, replacedAt)
+	if !primed["workhours"] {
+		t.Fatal("changed schedule should be active before inherited safety state")
+	}
+	replacement.CarryRecoveryStateFrom(old, replacedAt)
+	if !replacement.RepublishPending() || !replacement.RepublishFailClosed() {
+		t.Fatal("replacement scheduler lost the pending fail-closed recovery state")
+	}
+	if replacement.ActiveState()["workhours"] {
+		t.Fatal("replacement scheduler exposed an active permit after fail-closed inheritance")
+	}
+	_, failuresAfterReplace, sinceAfterReplace := replacement.RepublishFailureStatus()
+	if failuresAfterReplace != failuresBeforeReplace || !sinceAfterReplace.Equal(sinceBeforeReplace) {
+		t.Fatalf("failure status after replacement = (%d, %v), want (%d, %v)",
+			failuresAfterReplace, sinceAfterReplace, failuresBeforeReplace, sinceBeforeReplace)
+	}
+
+	replacement.evaluate(context.Background(), replacedAt.Add(time.Minute), true)
+	if newCalls != 1 || newState == nil || newState["workhours"] {
+		t.Fatalf("inherited pending retry calls=%d state=%v, want one inactive retry", newCalls, newState)
+	}
+}

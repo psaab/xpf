@@ -35,6 +35,9 @@ xpf (0.0.0) unstable; urgency=medium
     preserving translated reassembly geometry (#10860).
   * Quarantine super-user event planting received over unauthenticated
     session-sync; preserve it for verified peers (#10870).
+  * Preserve scheduler clock-safety and bounded republish retry state across
+    config replacement, and retry failed or skipped initial schedule publishes
+    (#10873).
   * Send match-all XFRM SA dump requests with the iproute2 address-filter
     attribute, avoiding malformed netlink attribute warnings (#11225).
 

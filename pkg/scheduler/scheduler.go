@@ -325,6 +325,54 @@ func (s *Scheduler) RepublishFailClosed() bool {
 	return s.republishFailClosed
 }
 
+// CarryRecoveryStateFrom preserves the safety and retry state when a config
+// change replaces this scheduler. The replacement has already been primed for
+// its new config; an active state computed during an inherited clock hold or
+// fail-closed streak must therefore be suppressed before it can be published.
+func (s *Scheduler) CarryRecoveryStateFrom(previous *Scheduler, now time.Time) {
+	if s == nil || previous == nil || s == previous {
+		return
+	}
+
+	previous.mu.RLock()
+	lastEval := previous.lastEval
+	lastWallUnixNano := previous.lastWallUnixNano
+	unsafeUntil := previous.unsafeUntil
+	republishPending := previous.republishPending
+	republishFirstFail := previous.republishFirstFail
+	republishFailures := previous.republishFailures
+	lastRepublishErr := previous.lastRepublishErr
+	republishFailClosed := previous.republishFailClosed
+	previous.mu.RUnlock()
+
+	s.mu.Lock()
+	s.lastEval = lastEval
+	s.lastWallUnixNano = lastWallUnixNano
+	s.unsafeUntil = unsafeUntil
+	s.republishPending = republishPending
+	s.republishFirstFail = republishFirstFail
+	s.republishFailures = republishFailures
+	s.lastRepublishErr = lastRepublishErr
+	s.republishFailClosed = republishFailClosed
+	if republishFailClosed || (!unsafeUntil.IsZero() && now.Before(unsafeUntil)) {
+		for name := range s.active {
+			s.active[name] = false
+		}
+	}
+	s.mu.Unlock()
+}
+
+// RecordRepublishResult records the result of an initial publish performed by
+// the daemon's apply transaction rather than by evaluate's retry callback.
+func (s *Scheduler) RecordRepublishResult(err error, now time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.recordRepublishResultLocked(err, now)
+	s.mu.Unlock()
+}
+
 func (s *Scheduler) wallClockDiscontinuousLocked(now time.Time) bool {
 	if s.lastEval.IsZero() {
 		return false
