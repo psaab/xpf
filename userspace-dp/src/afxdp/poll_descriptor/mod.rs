@@ -1334,6 +1334,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // MAC bytes; the epochs are monotonic invalidation signals that
                 // only need eventual cross-thread visibility. NUM_SHARDS relaxed
                 // loads, on this cold cache-miss/resolve path only.
+                // #10887: ACK-less, non-SYN, non-closing TCP flags (NULL,
+                // PSH-only, and similar anomalies) must not refresh an
+                // existing session or complete its handshake. The check is
+                // deliberately before session resolution; a live hit drops
+                // here instead of becoming a miss and reaching an opt-out
+                // new-flow install path. Normal ACK/data, SYN-bearing, and
+                // FIN/RST hit traffic retain their existing handling.
+                if let Some(flow) = flow.as_ref()
+                    && should_drop_tcp_session_hit_for_flags(
+                        sessions,
+                        worker_ctx.shared_sessions,
+                        worker_ctx.shared_forward_wire_sessions,
+                        &flow.forward_key,
+                        now_ns,
+                        meta.tcp_flags,
+                    )
+                {
+                    // This is an aggregate session-control drop, not a
+                    // profile screen with a per-reason or per-zone ordinal.
+                    telemetry.counters.record_screen_drop(
+                        "tcp-session-hit-flags",
+                        0,
+                        &worker_ctx.forwarding.flood_counter_slot_map,
+                    );
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 let neighbor_epoch_snapshot = worker_ctx.dynamic_neighbors.snapshot_shard_epochs();
                 // Per-packet proof consumed by the filtered reinject
                 // chokepoint below. It is set only by the host-inbound gate

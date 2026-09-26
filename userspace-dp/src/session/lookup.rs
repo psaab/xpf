@@ -86,6 +86,39 @@ impl SessionTable {
         Self::lookup_record_matches_key(record, key, via_alias).then_some(record)
     }
 
+    /// A non-allocating counterpart to the local packet-hit probes, used by
+    /// pre-lookup gates that must decide whether a packet would mutate an
+    /// existing session. It mirrors the direct/alias then forward-wire order
+    /// and the strict idle deadline of `lookup_session_across_scopes`.
+    ///
+    /// An exact direct/alias entry that is idle-crossed is terminal for this
+    /// worker, just as it is in the normal resolver; do not fall through to a
+    /// colliding forward-wire candidate.
+    pub(crate) fn has_session_hit_at(&self, key: &SessionKey, now_ns: u64) -> bool {
+        if let Some(record) = self.probe_record_with_origin(key) {
+            return now_ns.saturating_sub(record.entry.last_seen_ns)
+                <= record.entry.expires_after_ns;
+        }
+
+        let Some(bucket) = self.forward_wire_index.get(key) else {
+            return false;
+        };
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || forward_wire_key(&record.key, entry.decision.nat) != *key
+                || now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
+            {
+                continue;
+            }
+            return true;
+        }
+        false
+    }
+
     pub fn lookup(
         &mut self,
         key: &SessionKey,
