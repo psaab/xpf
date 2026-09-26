@@ -94,6 +94,48 @@ func TestHostInputFenceOverlayInstallAndReadback9506(t *testing.T) {
 	}
 }
 
+func TestHostInputFenceLiveReadbackAndRestore9506(t *testing.T) {
+	enterPrivateNetns9813(t)
+	installer := xnft.NewNetlinkInstaller()
+	overlay := xnft.HostInputFenceOverlay{
+		MasterSet:       []string{"st0"},
+		Generation:      7,
+		PermitEpoch:     11,
+		CloseRequestSeq: 13,
+		CloseRequestKey: "3/7/[xfrmi:st0]",
+		WatchGeneration: 7,
+		State:           "CLOSING",
+	}
+	t.Cleanup(func() {
+		_ = installer.DeleteTable(xnft.HostInboundTableName)
+		_ = installer.DeleteTable(xnft.HostInboundGapTableName)
+	})
+	if err := installer.InstallHostInbound(xnft.HostInboundSpec{Overlay: &overlay}); err != nil {
+		t.Fatalf("install live host-input DROP: %v", err)
+	}
+	if err := installer.VerifyHostInboundOverlay(overlay); err != nil {
+		t.Fatalf("exact live overlay readback: %v", err)
+	}
+	wrongAuthority := overlay
+	wrongAuthority.PermitEpoch++
+	if err := installer.VerifyHostInboundOverlay(wrongAuthority); err == nil {
+		t.Fatal("live overlay readback accepted a different permit epoch")
+	}
+
+	if err := installer.InstallHostInbound(xnft.HostInboundSpec{}); err != nil {
+		t.Fatalf("restore ordinary host-input table: %v", err)
+	}
+	if err := installer.VerifyHostInboundOverlay(overlay); err == nil {
+		t.Fatal("restored host-input table retained the prior fence marker")
+	}
+	if err := installer.DeleteTable(xnft.HostInboundTableName); err != nil {
+		t.Fatalf("clear restored host-input table: %v", err)
+	}
+	if err := installer.VerifyHostInboundOverlay(overlay); err == nil {
+		t.Fatal("clean restore left the prior fence marker readable")
+	}
+}
+
 func TestHostInputFenceOverlayReadbackFailureIsNotPublished9506(t *testing.T) {
 	origInstaller := nftInstaller
 	origDelete := conntrackDeleteFilters

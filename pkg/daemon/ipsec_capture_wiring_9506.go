@@ -873,9 +873,14 @@ func (r *ipsecCaptureRuntime) close() error {
 	// The close owner clears the D11 join key only after actor/listener,
 	// queue, and supervisor retirement have completed. This sends an explicit
 	// CLOSED frame for the selected run while the reinject submitter is still
-	// available. The shared S4 permit is intentionally untouched here:
-	// finalizePermitClose has no production caller in this owner and must not
-	// be invented in an old-generation capture close.
+	// available. The shared S4 permit is intentionally untouched here: the F1
+	// fence-before-removal gate (holdIpsecHostInputFenceForDivertTransition) is
+	// the sole fence-authority owner across removal — it revokes the permit to
+	// CLOSING and ACKs the host-input xfrmi DROP before the divert is removed,
+	// and the permit stays CLOSING until a new divert commits or the reconciler
+	// re-opens it. finalizePermitClose has no production caller in this owner
+	// and must not be invented in an old-generation capture close; the queue
+	// retirement above stays allocator-only for the same reason.
 	revokeErr := r.clearD11AuthorityOverride()
 	if revokeErr != nil {
 		// A transient announce failure must not strand a live D11 authority;
@@ -1492,19 +1497,46 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 	}
 	if staged == nil {
 		var owner *xnft.IpsecDivertSpec
+		var extraMasters []string
 		if old != nil {
 			owner = &old.spec
-			d.ipsecCaptureRemovalPending.Store(true)
-			if err := d.holdIpsecHostInputFenceForDivertTransition(ipsecDivertSpecMasters9506(old.spec)); err != nil {
+			extraMasters = ipsecDivertSpecMasters9506(old.spec)
+		}
+		d.ipsecCaptureRemovalPending.Store(true)
+		if err := d.holdIpsecHostInputFenceForDivertTransition(extraMasters); err != nil {
+			if old != nil {
 				d.ipsecCaptureRemovalPending.Store(false)
-				d.restoreIpsecCaptureRuntime(old)
-				return fmt.Errorf("ipsec capture: hold host-input fence before divert removal: %w", err)
 			}
+			d.restoreIpsecCaptureRuntime(old)
+			return fmt.Errorf("ipsec capture: hold host-input fence before divert removal: %w", err)
 		}
 		if err := removeIpsecDivert9506(owner); err != nil {
-			d.ipsecCaptureRemovalPending.Store(false)
+			reverifyErr := d.holdIpsecHostInputFenceForDivertTransition(extraMasters)
+			removeErr := fmt.Errorf("ipsec capture: remove divert: %w", err)
+			if reverifyErr != nil {
+				// A failed netlink flush is ambiguous: do not let a stale fence
+				// ACK reopen the permit after a possibly-successful removal.
+				d.ipsecOverlayAcked.Store(nil)
+				fallbackSpec := xnft.IpsecDivertSpec{QuarantineAll: true}
+				if old != nil {
+					fallbackSpec = old.spec
+				}
+				guardErr := installIpsecQuarantine9506(fallbackSpec)
+				d.restoreIpsecCaptureRuntime(old)
+				d.ipsecCaptureRemovalPending.Store(true)
+				if guardErr != nil {
+					return errors.Join(removeErr,
+						fmt.Errorf("ipsec capture: re-verify host-input fence after failed divert removal: %w", reverifyErr),
+						fmt.Errorf("ipsec capture: install verified quarantine after ambiguous removal: %w", guardErr))
+				}
+				return errors.Join(removeErr,
+					fmt.Errorf("ipsec capture: re-verify host-input fence after failed divert removal: %w", reverifyErr))
+			}
+			// The prior runtime remains published, but keep OPEN barred until
+			// a later successful divert commit resolves the ambiguous removal.
 			d.restoreIpsecCaptureRuntime(old)
-			return fmt.Errorf("ipsec capture: remove divert: %w", err)
+			d.ipsecCaptureRemovalPending.Store(true)
+			return removeErr
 		}
 		d.publishIpsecCaptureCommitted(nil)
 		d.ipsecCaptureRemovalPending.Store(false)
@@ -1650,6 +1682,17 @@ func (d *Daemon) shutdownIpsecCapture() {
 		if remove {
 			if err := removeIpsecDivert9506(owner); err != nil {
 				slog.Warn("ipsec capture shutdown: remove divert failed", "err", err)
+				if active != nil {
+					if verifyErr := d.holdIpsecHostInputFenceForDivertTransition(ipsecDivertSpecMasters9506(active.spec)); verifyErr != nil {
+						slog.Warn("ipsec capture shutdown: fence re-readback failed after divert removal error; installing quarantine",
+							"err", verifyErr)
+						d.ipsecOverlayAcked.Store(nil)
+						if guardErr := installIpsecQuarantine9506(active.spec); guardErr != nil {
+							slog.Warn("ipsec capture shutdown: verified quarantine fallback failed after ambiguous removal",
+								"err", guardErr)
+						}
+					}
+				}
 			}
 		}
 	}
