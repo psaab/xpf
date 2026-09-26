@@ -1173,6 +1173,10 @@ pub(crate) struct SessionTable {
     /// #964 Step 1: forward-key → handle. Replaces the
     /// `sessions` HashMap's key-to-entry mapping.
     key_to_handle: SeededKeyMap<u32>,
+    /// Forward keys for local TCP sessions whose handshake is incomplete.
+    /// Seeded and maintained with insert, promotion, and removal so pressure
+    /// arbitration does not scan the session table.
+    pressure_shed_openings: SeededKeyMap<()>,
     /// #9951: per-session inter-VRF leak incarnation, kept outside
     /// `SessionDecision` so the WAN-pinning decision and its wire shape remain
     /// unchanged. Only sessions created on this worker are stamped; peer
@@ -1519,6 +1523,7 @@ impl SessionTable {
             // `state` is the shared `FxSeededState` (carries the seed; a
             // `Clone` per map is just a `usize` copy).
             key_to_handle: HashMap::with_hasher(state.clone()),
+            pressure_shed_openings: HashMap::with_hasher(state.clone()),
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
             reverse_translated_index: HashMap::with_hasher(state.clone()),
@@ -2299,6 +2304,24 @@ impl SessionTable {
     // `self.key_to_handle.get(key).and_then(|h| self.entries.get(*h as usize))`
     // throughout 30+ call sites.
 
+    /// #10890: identifies locally-owned, handshake-incomplete TCP forward
+    /// entries eligible for pressure shedding. Peer imports, transient
+    /// seeds, fabric-ingress rows and reverse companions are not candidates.
+    #[inline]
+    fn is_pressure_shed_opening(
+        key: &SessionKey,
+        entry: &SessionEntry,
+        expect_reverse: bool,
+    ) -> bool {
+        key.protocol == PROTO_TCP
+            && entry.metadata.is_reverse == expect_reverse
+            && !entry.metadata.fabric_ingress
+            && (!entry.established || entry.handshake_pending)
+            && !entry.origin.is_peer_synced()
+            && !entry.origin.is_transient_local_seed()
+            && !entry.origin.is_local_tun_origin()
+    }
+
     /// #6297: insert a record into the session slab and advance the
     /// live-extent high-watermark. This is the SOLE slab-insert choke
     /// point so the `slot_high_watermark` invariant holds for every insert
@@ -2308,11 +2331,19 @@ impl SessionTable {
     /// the backing Vec otherwise — so `raw + 1` is the extent this record
     /// occupies. Bumping the watermark to at least that guarantees
     /// `slot_high_watermark >= 1 + every occupied slot index`, which the
-    /// budgeted refresh walk relies on to never skip a live session. Just a
-    /// compare-and-maybe-store on the hot install path; no allocation.
+    /// budgeted refresh walk relies on to never skip a live session.
+    ///
+    /// #10890: register eligible forward opening records here so every
+    /// insert path maintains the pressure-shed candidate index.
     #[inline]
     fn insert_record(&mut self, record: SessionRecord) -> usize {
+        let opening_key =
+            Self::is_pressure_shed_opening(&record.key, &record.entry, false)
+                .then(|| record.key.clone());
         let raw = self.entries.insert(record);
+        if let Some(key) = opening_key {
+            self.pressure_shed_openings.insert(key, ());
+        }
         // Only grows, never shrinks — see the `slot_high_watermark` field
         // doc for why a stale-low watermark would be a correctness bug but
         // a slightly-high one is merely a few wasted vacant visits.
@@ -2869,6 +2900,12 @@ impl SessionTable {
                 rebucket = true;
             }
         }
+        if handshake_completed {
+            // Completion can be observed from either direction (including the
+            // reverse-half ACK path), so retire both possible key orientations.
+            self.pressure_shed_openings.remove(matched_key);
+            self.pressure_shed_openings.remove(&companion_key);
+        }
         if rebucket {
             // The companion's lifetime changed; re-bucket it so GC checks the
             // new deadline instead of its install-time or prior deadline.
@@ -3102,6 +3139,16 @@ impl SessionTable {
             // epoch; the HOLD branch never writes seen_rg_epoch).
             record.entry.first_held_ns = 0;
             record.entry.seen_rg_epoch = 0;
+        }
+        if protocol == PROTO_TCP && !metadata.is_reverse {
+            let remains_opening = self
+                .entry_by_key(key)
+                .is_some_and(|entry| Self::is_pressure_shed_opening(key, entry, false));
+            if remains_opening {
+                self.pressure_shed_openings.insert(key.clone(), ());
+            } else {
+                self.pressure_shed_openings.remove(key);
+            }
         }
         // #10310: keep count maintenance balanced across in-place origin
         // transitions (notably WorkerLocalImport -> local promotion).
@@ -3570,6 +3617,10 @@ impl SessionTable {
     /// `ExpiredSession::in_export_window`.
     fn remove_entry(&mut self, key: &SessionKey, kind: RemovalKind) -> Option<SessionEntry> {
         self.leak_incarnations.remove(key);
+        // The pressure-shed index contains only forward opening entries.
+        // Remove by key here so every terminal and replacement path keeps it
+        // paired with the authoritative session record.
+        self.pressure_shed_openings.remove(key);
         let handle = self.key_to_handle.remove(key)?;
         // Read the record (still in slab) to learn what to clean.
         // `.get` not `.remove` — we'll remove from slab last.

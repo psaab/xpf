@@ -204,13 +204,11 @@ var admittedElisionCases8879 = []struct {
 	//
 	// The readers print the FIELD rather than a fingerprint, because a
 	// difference tells you something was lost and not what the loss did --
-	// and here that distinction reversed a verdict. `flow aging` LOOKS like
-	// the worst row (its leaves compile to 0 and the schema says
-	// `0 = disabled`), but the braced arm warns that pressure-based shedding
-	// is accepted-only in the AF_XDP dataplane, so the feature is inert either
-	// way and the elision costs the ADVISORY rather than behaviour. It is
-	// registered in TestAdmittedDropsAreReadSomewhere8879's not-read set for
-	// that reason. The other four lose live values.
+	// losing the value costs the ADVISORY rather than behaviour: the values are
+	// still not wired, while the AF_XDP dataplane has a separate fixed 90%
+	// half-open shedding rule. It is registered in
+	// TestAdmittedDropsAreReadSomewhere8879's not-read set for that reason. The
+	// other four lose live values.
 	{"flow aging",
 		`security { flow { aging { early-ageout 37; high-watermark 91; low-watermark 71; } } }`,
 		`security { flow aging { early-ageout 37; high-watermark 91; low-watermark 71; } }`,
@@ -804,7 +802,7 @@ func TestAdmittedDropsAreReadSomewhere8879(t *testing.T) {
 	// them means a MEMBERSHIP change reds this cell even when the total holds.
 	knownNotRead := map[string]string{
 		"forwarding-options family":      "inet6 mode packet-based is accepted-only; the dataplane is flow-based",
-		"flow aging":                     "pressure-based shedding is accepted-only; the AF_XDP dataplane ages on per-session idle timeout only",
+		"flow aging":                     "configured aging values do not control the fixed 90% AF_XDP shedding policy",
 		"pre-id-default-policy then":     "pre-id session logging is inert; no pre-identification admit path exists (the depth-2 pair, same advisory as the depth-1 one above)",
 		"class-of-service rewrite-rules": "exp rewrite is inert; the dataplane rewrites dscp on egress only",
 		"security pre-id-default-policy": "pre-id session logging is inert; no pre-identification admit path exists",

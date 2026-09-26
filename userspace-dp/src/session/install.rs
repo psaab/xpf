@@ -61,6 +61,97 @@ impl SessionTable {
     pub fn can_admit(&self, needed: usize) -> bool {
         self.len().saturating_add(needed) <= self.max_sessions
     }
+    /// #10890: preflight an already-validated TCP initial SYN. At 90% of this
+    /// worker's cap, reclaim handshake-incomplete local TCP sessions first;
+    /// established and peer-owned sessions are never pressure victims. The
+    /// caller remains responsible for refusing/rolling back the packet if the
+    /// remaining table cannot fit the full install group.
+    pub fn can_admit_new_syn(&mut self, needed: usize, protocol: u8, tcp_flags: u8) -> bool {
+        let high_watermark = self.max_sessions.saturating_sub(self.max_sessions / 10);
+        if needed == 0
+            || protocol != PROTO_TCP
+            || !is_initial_syn(tcp_flags)
+            || self.len() < high_watermark
+        {
+            return self.can_admit(needed);
+        }
+        if needed > self.max_sessions {
+            return false;
+        }
+
+        let mut shed = false;
+        loop {
+            if shed && self.can_admit(needed) {
+                return true;
+            }
+            if !self.shed_one_opening_flow() {
+                return self.can_admit(needed);
+            }
+            shed = true;
+        }
+    }
+
+    /// Remove one indexed local opening flow (both halves when the matching
+    /// reverse companion is present). Returns false when no safe victim remains.
+    fn shed_one_opening_flow(&mut self) -> bool {
+        loop {
+            let Some(key) = self.pressure_shed_openings.keys().next().cloned() else {
+                return false;
+            };
+            let candidate = self.entry_by_key(&key).and_then(|entry| {
+                SessionTable::is_pressure_shed_opening(&key, entry, false).then(|| {
+                    (
+                        entry.decision,
+                        entry.metadata.clone(),
+                        entry.origin,
+                        entry.session_id,
+                    )
+                })
+            });
+            let Some((decision, metadata, origin, session_id)) = candidate else {
+                self.pressure_shed_openings.remove(&key);
+                continue;
+            };
+
+            let companion_key = reverse_session_key(&key, decision.nat);
+            let companion_is_opening = if companion_key == key {
+                None
+            } else {
+                self.entry_by_key(&companion_key).and_then(|companion| {
+                    (reverse_session_key(&companion_key, companion.decision.nat) == key)
+                        .then(|| {
+                            SessionTable::is_pressure_shed_opening(
+                                &companion_key,
+                                companion,
+                                true,
+                            )
+                        })
+                })
+            };
+            if companion_is_opening == Some(false) {
+                // Do not tear down only one half if its actual companion is
+                // established or peer-owned. The stale/ineligible forward key
+                // is discarded from this cold-path index and other openings
+                // remain eligible.
+                self.pressure_shed_openings.remove(&key);
+                continue;
+            }
+
+            self.delete(&key);
+            if companion_is_opening == Some(true) {
+                self.delete(&companion_key);
+            }
+            self.emit_close_delta_with_origin(
+                key,
+                decision,
+                metadata,
+                origin,
+                false,
+                session_id,
+            );
+            return true;
+        }
+    }
 
     /// #1861 §5.1: counted preflight refusal (one per refused flow).
     pub fn note_admission_refused(&mut self) {

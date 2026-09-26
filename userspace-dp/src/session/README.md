@@ -1099,17 +1099,23 @@ at cap, a refused forward still forwarded (and flow-cached) the trigger
 packet on a rolled-back SNAT decision, and a refused reverse left a
 one-sided forward session.
 
-The transaction boundary is a preflight: `can_admit(needed)` checks
-capacity for the whole install group BEFORE the first install. Because
-the table is single-writer (`&mut`, worker thread; GC and worker
-commands run between poll phases, never mid-descriptor), a passing
-preflight makes the subsequent installs infallible — no reservation or
-rollback machinery is needed. `can_admit` is deliberately conservative:
-it charges a full slot per entry even when the key already exists,
-matching the install's own cap check (which also refuses replacements
-at cap), so the preflight can never pass where the install would fail.
-On refusal the caller drops the trigger packet (Junos parity), rolls
-back the SNAT allocation, and counts via `note_admission_refused`.
+The transaction boundary is a preflight. The packet path calls
+`can_admit_new_syn(needed, protocol, tcp_flags)`, which keeps
+`can_admit(needed)` as the hard-cap check and, at the fixed 90%-of-cap
+watermark, may shed local handshake-incomplete TCP sessions before
+rechecking capacity for an initial SYN. Established and peer-owned sessions
+are never pressure victims. This rule is independent of the configured flow
+aging values, which remain unwired.
+
+Because the table is single-writer (`&mut`, worker thread; GC and worker
+commands run between poll phases, never mid-descriptor), a passing preflight
+makes the subsequent installs infallible — no reservation or rollback
+machinery is needed. `can_admit` is deliberately conservative: it charges a
+full slot per entry even when the key already exists, matching the install's
+own cap check (which also refuses replacements at cap), so the preflight can
+never pass where the install would fail. On refusal the caller drops the
+trigger packet (Junos parity), rolls back the SNAT allocation, and counts via
+`note_admission_refused`.
 
 Counters (all plain worker-owned u64s like `create_drops`, exported
 since #1861 via the worker-runtime status path as

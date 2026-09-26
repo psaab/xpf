@@ -1034,25 +1034,18 @@ func ValidateConfig(cfg *Config) []string {
 			strings.Join(policyUnknown, ", ")))
 	}
 
-	// #3440 H1: `security flow aging` (early-ageout / high-watermark /
-	// low-watermark) drives the Go-side conntrack GC watermark hysteresis
-	// (pkg/conntrack/gc.go), but that GC sweep is skipped entirely whenever
-	// the userspace AF_XDP dataplane is active (daemon_run.go installs
-	// gc.SkipSweep = true for the userspace delta-drainer, which is the only
-	// runtime forwarding path post #1373/#1476). The userspace session
-	// expiry (userspace-dp/src/session/expire.rs) ages each entry only on its
-	// own per-session idle timeout (expires_after_ns) with no watermark-driven
-	// pressure shedding. So the documented early-ageout/watermark behavior
-	// never runs on the userspace dataplane: an operator who configures it
-	// believes they have pressure-based session shedding when they do not.
-	// Warn so the knob is not silently misleading (matching the #2078 /
-	// #2008 H13 accepted-only treatment). Note: per-application
-	// inactivity-timeout (#3227) is a DIFFERENT, fully-enforced knob — it
-	// reaches the userspace session table via the snapshot and is honored by
-	// expire.rs; only the aging watermark machinery here is inert.
+	// #3440 H1 / #10890: `security flow aging` values still do not reach the
+	// userspace session table. The Go-side conntrack GC sweep is skipped on
+	// the userspace AF_XDP dataplane, and the configured early-ageout and
+	// high/low-watermark values are not wired into its admission policy.
+	// #10890 adds a separate fixed 90%-of-cap policy: when a validated new
+	// TCP initial SYN reaches a worker at that pressure, it sheds local
+	// handshake-incomplete TCP sessions first, never established sessions.
+	// Keep the advisory so operators do not mistake that fixed rule for
+	// enforcement of their configured values.
 	if f := cfg.Security.Flow; f.AgingEarlyAgeout > 0 || f.AgingHighWatermark > 0 || f.AgingLowWatermark > 0 {
 		warnings = append(warnings,
-			"security flow aging configured but accepted-only — the userspace AF_XDP dataplane ages sessions on their per-session idle timeout only and does not enforce early-ageout / high-watermark / low-watermark pressure-based shedding (config-only, #3440)")
+			"security flow aging configured but accepted-only — userspace AF_XDP sheds opening/half-open TCP sessions first at a fixed 90% of each worker's max_sessions; configured early-ageout / high-watermark / low-watermark values do not control that policy (#3440/#10890)")
 	}
 
 	// #654: warn on `system processes X disable` for a process that
