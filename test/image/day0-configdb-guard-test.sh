@@ -18,7 +18,7 @@
 #
 # shellcheck disable=SC1007  # `CDPATH= cd` is an env-prefix, not an assignment
 # shellcheck disable=SC1090  # the sourced loader path is a runtime argument
-# shellcheck disable=SC2034  # STAMP/XPFD are consumed by the sourced main()
+# shellcheck disable=SC2034  # REJECT_MARKER/STAMP/XPFD are consumed by main()
 # shellcheck disable=SC2329  # probe/regen stubs are invoked indirectly by main()
 set -u
 
@@ -88,6 +88,7 @@ scenario_no_configdb_reprobes() (
 scenario_main_empty_dir_probes() (
 	XPF_DIR=$(mktemp -d)
 	STAMP="$XPF_DIR/.day0-config-applied"
+	REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
 	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
 	mkdir -p "$XPF_DIR/.configdb"          # empty dir as xpfd leaves it
 	regen_ssh_host_keys() { :; }           # no ssh-keygen
@@ -106,6 +107,7 @@ scenario_main_empty_dir_probes() (
 scenario_main_active_json_skips() (
 	XPF_DIR=$(mktemp -d)
 	STAMP="$XPF_DIR/.day0-config-applied"
+	REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
 	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
 	mkdir -p "$XPF_DIR/.configdb"
 	: >"$XPF_DIR/.configdb/active.json"
