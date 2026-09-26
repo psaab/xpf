@@ -129,6 +129,10 @@ func validateIPsecPolicyProposalReferencesStrict(cfg *Config) error {
 // the same class validateIPsecPolicyProposalReferencesStrict closes for the
 // Phase-2 (ESP) chain.
 //
+// Multi-proposal IKE policies are also rejected when their proposals disagree
+// on authentication method or lifetime: swanctl stores both on the connection,
+// so selecting either from just the first proposal silently changes policy.
+//
 // What is accepted (mirror resolveIKESettings exactly so commit and render
 // agree on what resolves):
 //   - a gateway with no `ike-policy` at all: the intentional no-policy
@@ -231,6 +235,20 @@ func validateIKEPolicyChainReferencesStrict(cfg *Config) error {
 			continue
 		}
 		if chainResolves(gw.IKEPolicy) {
+			if pol, ok := ikePolicies[gw.IKEPolicy]; ok && pol != nil && len(pol.Proposals) > 0 {
+				allIKEProposalsResolve := true
+				for _, ref := range pol.Proposals {
+					if _, ok := ikeProposals[ref]; !ok {
+						allIKEProposalsResolve = false
+						break
+					}
+				}
+				if allIKEProposalsResolve {
+					if err := validateIKEProposalSettingsAgree(gw.IKEPolicy, pol.Proposals, ikeProposals); err != nil {
+						return fmt.Errorf("gateway %q (used by ipsec vpn %q): %w", gw.Name, vpnName, err)
+					}
+				}
+			}
 			continue
 		}
 		// A gateway may be authored under either `security ike gateway` or
@@ -276,6 +294,52 @@ func validateIKEPolicyChainReferencesStrict(cfg *Config) error {
 			gw.IKEPolicy, gw.Name, vpnName, strings.Join(pol.Proposals, " "))
 	}
 	return nil
+}
+
+// validateIKEProposalSettingsAgree rejects policy proposal lists whose
+// connection-level swanctl authentication or lifetime would otherwise be
+// taken from one proposal and silently applied to the others.
+func validateIKEProposalSettingsAgree(policyName string, refs []string, proposals map[string]*IKEProposal) error {
+	var firstName, firstAuth string
+	var firstLifetime int
+	found := false
+	for _, ref := range refs {
+		proposal := proposals[ref]
+		if proposal == nil {
+			continue
+		}
+		auth, ok := ikeConnectionAuthMethod(proposal.AuthMethod)
+		if !ok {
+			continue
+		}
+		if !found {
+			firstName, firstAuth, firstLifetime = ref, auth, proposal.LifetimeSeconds
+			found = true
+			continue
+		}
+		if auth != firstAuth {
+			return fmt.Errorf(
+				"ike-policy %q proposals %q and %q have incompatible authentication-method values; swanctl authentication is connection-level",
+				policyName, firstName, ref)
+		}
+		if proposal.LifetimeSeconds != firstLifetime {
+			return fmt.Errorf(
+				"ike-policy %q proposals %q and %q have different lifetime-seconds values (%d and %d); swanctl lifetime is connection-level",
+				policyName, firstName, ref, firstLifetime, proposal.LifetimeSeconds)
+		}
+	}
+	return nil
+}
+
+func ikeConnectionAuthMethod(method string) (string, bool) {
+	switch method {
+	case "", "pre-shared-keys":
+		return "psk", true
+	case "rsa-signatures", "ecdsa-signatures":
+		return "pubkey", true
+	default:
+		return "", false
+	}
 }
 
 // validateIPsecProposalProtocolStrict hard-rejects an IPsec (Phase 2)

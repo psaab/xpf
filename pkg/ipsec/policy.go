@@ -116,8 +116,8 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			}
 			if errors.Is(err, errProposalUnresolved) {
 				skipped[name] = true
-				slog.Warn("skipping IPsec VPN: no safe IKE proposal remains "+
-					"(an unsafe algorithm value would change swanctl syntax)",
+				slog.Warn("skipping IPsec VPN: no safe IKE proposal set remains "+
+					"(unsafe algorithm or conflicting connection-level authentication/lifetime values)",
 					"vpn", name, "detail", err.Error())
 				continue
 			}
@@ -687,6 +687,7 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 	}
 	return children
 }
+
 // ChildSelector is an exported view of the renderer's resolved selector pair.
 // Its fields are the exact values rendered as swanctl local_ts/remote_ts.
 type ChildSelector = childSelector
