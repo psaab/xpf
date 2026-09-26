@@ -8,10 +8,10 @@ manifest. The signature is a trust artifact — downstream publish
 validated one (#1864 secure-boot chain) — so a bake that fails validation
 must NOT leave a signed .minisig behind (fable-161 F-092).
 
-These tests drive bake.finalize_artifacts() with injected validate/sign
-steps and assert the sign step never runs when validation fails. On
-revert (sign ordered before validate) the failure-path tests go RED: the
-sign step runs and a .minisig is produced despite the validation failure.
+These unit tests drive bake.finalize_artifacts() with injected validate/sign
+steps. A main() integration case also stubs external tools but exercises the
+real validation return-code check and main() wiring, proving a failed gate
+cannot reach signing.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _SPEC = importlib.util.spec_from_file_location(
     "bake", Path(__file__).with_name("bake.py")
@@ -130,6 +132,91 @@ class ValidationGateStepTests(unittest.TestCase):
     def test_skip_validate_does_not_die(self):
         # Should return without raising; qcow/meta paths are unused when skipped.
         bake.validation_gate_step(True, "/nonexistent.qcow2", "/nonexistent.meta")
+
+
+class MainValidationGateTests(unittest.TestCase):
+    """The actual bake main path must treat validate.py's nonzero rc as fatal."""
+
+    def test_failed_validation_command_prevents_signing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out_dir = os.path.join(temp, "dist")
+            os.makedirs(out_dir)
+            deb = Path(temp, "xpf-test.deb")
+            deb.write_text("stub")
+            cached = os.path.join(temp, "base.img")
+            args = SimpleNamespace(
+                version="test-version",
+                out=out_dir,
+                skip_build=True,
+                skip_validate=False,
+                keep_work=False,
+            )
+            subprocess_calls = []
+            sign_calls = []
+
+            def run(argv, **kwargs):
+                if argv[0] == "dpkg-deb":
+                    staged_xpfd = Path(argv[3], "usr/local/share/xpf/staged/xpfd")
+                    staged_xpfd.parent.mkdir(parents=True)
+                    staged_xpfd.write_text("stub")
+                    staged_xpfd.chmod(0o755)
+                elif argv[0] == "virt-sparsify":
+                    Path(argv[-1]).write_text("qcow")
+                elif argv[0] == "tar":
+                    Path(argv[argv.index("-czf") + 1]).write_text("metadata")
+
+            def out_text(argv):
+                if argv[0] == "virt-filesystems":
+                    return "/dev/sda1 1 ext4 2\n"
+                if argv[0] == "virt-cat":
+                    return "unused by mocked inventory parser"
+                if argv[0] == "git":
+                    return "deadbeef\n"
+                if argv[-1] == "protocol-versions":
+                    return "ha-protocol-version=1\n"
+                raise AssertionError(f"unexpected out_text command: {argv}")
+
+            def subprocess_run(argv, **kwargs):
+                subprocess_calls.append(argv)
+                return SimpleNamespace(returncode=1)
+
+            def sign(out_dir, sums, ver, snapshot, work):
+                sign_calls.append(ver)
+                Path(out_dir, f"xpf-{ver}.SHA256SUMS.minisig").write_text("sig\n")
+
+            with (
+                patch.object(bake.argparse.ArgumentParser, "parse_args",
+                             return_value=args),
+                patch.object(bake, "require"),
+                patch.object(bake, "ensure_memlock"),
+                patch.object(bake, "run", side_effect=run),
+                patch.object(bake, "out_text", side_effect=out_text),
+                patch.object(bake, "fetch_base",
+                             return_value=("jammy", "https://example", "base.img",
+                                           cached, "a" * 64, True)),
+                patch.object(bake.image_inventory, "parse",
+                             return_value=("6.18.0", ["xpf=1"])),
+                patch.object(bake.subprocess, "run", side_effect=subprocess_run),
+                patch.object(bake, "sign_manifest_step_from_snapshot",
+                             side_effect=sign),
+                patch("glob.glob", return_value=[str(deb)]),
+                patch.dict(os.environ, {"XDG_CACHE_HOME": temp}),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    bake.main()
+
+            self.assertNotEqual(ctx.exception.code, 0)
+            validate_cmd = subprocess_calls[-1]
+            self.assertEqual(validate_cmd[0], bake.sys.executable)
+            self.assertEqual(validate_cmd[1], os.path.join(bake.HERE, "validate.py"))
+            self.assertEqual(validate_cmd[2], "--qcow2")
+            self.assertEqual(validate_cmd[4], "--metadata")
+            self.assertEqual(validate_cmd[-1], "all")
+            self.assertEqual(sign_calls, [])
+            self.assertEqual(
+                [name for name in os.listdir(out_dir) if name.endswith(".minisig")],
+                [],
+            )
 
 
 class RuntimePackageSyncTests(unittest.TestCase):
