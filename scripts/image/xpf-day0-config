@@ -21,8 +21,8 @@
 #      labeled `xpf-config` (any filesystem type), plus any ISO9660
 #      medium (the vSRX cdrom convention). The medium must carry
 #      xpf.conf — or juniper.conf as the vSRX-parity alias — at its
-#      root, optionally with a node-id file (`0` or `1`) for cluster
-#      members.
+#      root. `node-id` is optional for standalone configs; an HA cluster
+#      config requires an explicit `0` or `1`, enforced by check-config.
 #   3. Validate with the REAL commit-check gate (`xpfd check-config`,
 #      configstore.CheckText: strict parse + #1319 SchemaValidate +
 #      strict compile). Only a config that a real commit would accept
@@ -210,10 +210,10 @@ try_device() {
 		return 1
 	fi
 
-	# node-id is optional: absent is fine, anything unreadable is ignored
-	# with a warning (the config stands on its own). Two-step rc capture —
-	# no pipefail in this script, so piping the helper into tr would report
-	# tr's status and conflate every failure mode.
+	# node-id is optional for standalone configs; strict check-config rejects
+	# HA cluster configs unless this input resolves to 0 or 1. Two-step rc
+	# capture — no pipefail in this script, so piping the helper into tr would
+	# report tr's status and conflate every failure mode.
 	nodeid_raw=""
 	rc=0
 	nodeid_raw=$(safe_read_medium "$MNT/node-id" 16 2>/dev/null) || rc=$?

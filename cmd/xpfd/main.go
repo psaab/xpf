@@ -14,6 +14,7 @@ import (
 	"os"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/daemon"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -147,6 +148,21 @@ func classifyCommand(argv []string) xpfdCommand {
 // file (dir/device/FIFO) is refused up front.
 func readBoundedFile(path string, max int64) ([]byte, error) {
 	return configstore.ReadBoundedFile(path, max)
+}
+
+// checkConfigForDay0 runs strict config validation and requires explicit node
+// identity whenever the result contains a chassis cluster. The generic
+// compiler's node0 fallback is useful for standalone inspection, but unsafe
+// for installing a shared HA config.
+func checkConfigForDay0(content string, nodeID int) (*config.Config, error) {
+	compiled, err := configstore.CheckText(content, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	if compiled.Chassis.Cluster != nil && nodeID < 0 {
+		return nil, errors.New("HA cluster config requires -node-id 0 or 1; refusing generic node0 fallback")
+	}
+	return compiled, nil
 }
 
 // readBounded reads at most max+1 bytes from r and rejects a source that
@@ -333,7 +349,7 @@ func main() {
 		// loader keys its REJECT logging on.
 		fs := flag.NewFlagSet("check-config", flag.ContinueOnError)
 		nodeID := fs.Int("node-id", -1,
-			"cluster node ID for ${node} apply-group expansion (0 or 1; -1 = standalone)")
+			"cluster node ID; required for HA configs, 0 or 1 (-1 = standalone)")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			os.Exit(1)
 		}
@@ -353,11 +369,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "check-config: %v\n", err)
 			os.Exit(1)
 		}
-		compiled, err := configstore.CheckText(string(data), *nodeID)
+		compiled, err := checkConfigForDay0(string(data), *nodeID)
 		if err != nil {
 			fmt.Printf("FAIL %s\n%v\n", path, err)
 			os.Exit(2)
 		}
+
 		// #4183: the strict parse+schema+compile gate above does NOT catch a
 		// device-map that would strand management on next boot — the same
 		// preflight an interactive commit runs. When check-config runs ON THE
