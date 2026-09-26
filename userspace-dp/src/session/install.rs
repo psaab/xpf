@@ -232,13 +232,18 @@ impl SessionTable {
                 ),
                 closing: matches!(protocol, PROTO_TCP) && is_closing(tcp_flags),
                 reset: matches!(protocol, PROTO_TCP) && has_rst(tcp_flags),
-                // #7342: a fresh install has seen exactly one packet, so at most
-                // one direction can have FINed and the companion's is unknown.
-                // A session installed BY a closing packet is therefore CLOSING,
-                // never TIME_WAIT — which is also the window it reaped on before
-                // the state existed.
-                fin_own: matches!(protocol, PROTO_TCP) && has_fin(tcp_flags),
-                fin_peer: false,
+                // #7342/#10885: seed the FIN pair relative to this entry's
+                // direction. The session-miss packet is installed on the
+                // forward entry and its reverse companion receives the same
+                // flags, so that companion records the observed FIN as `fin_peer`,
+                // not as its own FIN. A fresh install still cannot infer a FIN
+                // from any other direction.
+                fin_own: matches!(protocol, PROTO_TCP)
+                    && has_fin(tcp_flags)
+                    && !metadata.is_reverse,
+                fin_peer: matches!(protocol, PROTO_TCP)
+                    && has_fin(tcp_flags)
+                    && metadata.is_reverse,
                 wheel_tick: 0,
                 // #2120: a freshly-installed entry has never been HELD and
                 // has not yet been self-healed. 0 is the never-self-healed

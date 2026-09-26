@@ -225,17 +225,16 @@ impl SessionTable {
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
             close_class_before = entry.tcp_close_class_wire();
-            // #10636: a deferring lookup skips the close stamp. The re-bucket
-            // below keys off `entry.closing` (untouched here), the companion
-            // propagation keys off `propagate.close = do_close`, and the #9412
-            // emit keys off `closed_this_packet = do_close` — so gating this
-            // one bool defers all four close effects (stamp, window demotion,
-            // #4109 propagation, HA Update) while idle refresh, established
-            // promotion, and handshake completion run unchanged.
+            // #10885: only close progress or traffic from the non-FINed
+            // direction refreshes a closing entry. A RST-aborted entry and
+            // both TIME_WAIT halves therefore keep a fixed deadline.
+            let was_closing = entry.closing;
             let do_close = !defer_close && is_tcp && is_closing(tcp_flags);
-            if do_close {
-                Self::stamp_tcp_close(entry, key, tcp_flags);
-            }
+            let close_progress = if do_close {
+                Self::stamp_tcp_close(entry, key, tcp_flags)
+            } else {
+                false
+            };
             // #3152/#4109: promote OPENING -> ESTABLISHED only on a genuine
             // reverse SYN-ACK. Forward and reverse are two independent entries;
             // the server's handshake response is a SYN-ACK on the REVERSE half,
@@ -276,45 +275,49 @@ impl SessionTable {
             if handshake_completed {
                 entry.handshake_pending = false;
             }
-            entry.last_seen_ns = now_ns;
-            entry.expires_after_ns = if is_tcp && entry.closing {
-                // #7342: CLOSING vs TIME_WAIT is decided by the FIN-direction
-                // pair this entry has accumulated, through the one shared
-                // formula.
-                tcp_close_window_ns(entry.tcp_close_class(), &timeouts)
-            } else {
-                // #3227: re-apply the admitting application's per-app idle
-                // timeout on every established refresh so the session keeps
-                // aging on the app's value, not the global per-protocol one.
-                // #3152: an un-established (OPENING) TCP session ages on the
-                // short opening window via session_timeout_ns(established=…).
-                session_timeout_ns(
-                    key.protocol,
-                    // #10636: a deferring lookup withholds the close, so the
-                    // refresh must not see the close bits either —
-                    // `session_timeout_ns` demotes on `is_closing(flags)`
-                    // directly. Scrub FIN/RST (SYN/ACK/PSH/URG preserved for
-                    // the opening/established arms); the deferred apply
-                    // re-buckets onto the close window explicitly.
-                    if defer_close {
-                        tcp_flags & !(TCP_FIN | TCP_RST)
-                    } else {
-                        tcp_flags
-                    },
-                    // #6752: the EFFECTIVE established class. A flow promoted by
-                    // the SYN-ACK but not yet completed stays on the opening
-                    // window, so a handshake the client never finishes reaps at
-                    // ~20s instead of holding 300s.
-                    entry.established && !entry.handshake_pending,
-                    &timeouts,
-                    entry.metadata.inactivity_timeout_ns,
-                    // #3527: per-zone half-open override resolved above.
-                    opening_override_ns,
-                )
-            };
+            let refresh =
+                !was_closing || close_progress || (!do_close && !entry.reset && !entry.fin_own);
+            if refresh {
+                entry.last_seen_ns = now_ns;
+                entry.expires_after_ns = if is_tcp && entry.closing {
+                    // #7342: CLOSING vs TIME_WAIT is decided by the FIN-direction
+                    // pair this entry has accumulated, through the one shared
+                    // formula.
+                    tcp_close_window_ns(entry.tcp_close_class(), &timeouts)
+                } else {
+                    // #3227: re-apply the admitting application's per-app idle
+                    // timeout on every established refresh so the session keeps
+                    // aging on the app's value, not the global per-protocol one.
+                    // #3152: an un-established (OPENING) TCP session ages on the
+                    // short opening window via session_timeout_ns(established=…).
+                    session_timeout_ns(
+                        key.protocol,
+                        // #10636: a deferring lookup withholds the close, so the
+                        // refresh must not see the close bits either —
+                        // `session_timeout_ns` demotes on `is_closing(flags)`
+                        // directly. Scrub FIN/RST (SYN/ACK/PSH/URG preserved for
+                        // the opening/established arms); the deferred apply
+                        // re-buckets onto the close window explicitly.
+                        if defer_close {
+                            tcp_flags & !(TCP_FIN | TCP_RST)
+                        } else {
+                            tcp_flags
+                        },
+                        // #6752: the EFFECTIVE established class. A flow promoted by
+                        // the SYN-ACK but not yet completed stays on the opening
+                        // window, so a handshake the client never finishes reaps at
+                        // ~20s instead of holding 300s.
+                        entry.established && !entry.handshake_pending,
+                        &timeouts,
+                        entry.metadata.inactivity_timeout_ns,
+                        // #3527: per-zone half-open override resolved above.
+                        opening_override_ns,
+                    )
+                };
+            }
             let propagate = TcpStatePropagation {
                 nat: entry.decision.nat,
-                close: do_close,
+                close: close_progress,
                 reset: is_tcp && has_rst(tcp_flags),
                 fin: is_tcp && has_fin(tcp_flags),
                 established: promote_from_reverse,
@@ -366,12 +369,13 @@ impl SessionTable {
         Some(result)
     }
 
-    /// #10636: the TCP close stamp, shared by the inline close in
-    /// [`Self::lookup_with_origin_inner`] and the deferred close in
-    /// [`Self::apply_deferred_owner_close`]. Sticky close/reset/FIN bits only —
-    /// the window re-bucket, companion propagation, and HA emit stay at the
-    /// call sites, which own their borrows.
-    fn stamp_tcp_close(entry: &mut SessionEntry, key: &SessionKey, tcp_flags: u8) {
+    /// #10636: stamp the sticky close bits shared by inline and deferred close.
+    /// Returns true only when the first RST or a FIN in a previously un-FINed
+    /// direction advances the close state; repeated FIN/RST packets do not
+    /// refresh the close window.
+    fn stamp_tcp_close(entry: &mut SessionEntry, key: &SessionKey, tcp_flags: u8) -> bool {
+        let progressed =
+            !entry.reset && (has_rst(tcp_flags) || (has_fin(tcp_flags) && !entry.fin_own));
         if !entry.closing {
             debug_log!(
                 "SESS_CLOSING: {} proto=TCP {}:{} -> {}:{} rev={} tcp_flags=0x{:02x}",
@@ -385,18 +389,9 @@ impl SessionTable {
             );
         }
         entry.closing = true;
-        // #3046: a RST close is reaped on the short timeout. The flag
-        // is sticky so a later reordered non-RST segment cannot promote
-        // the entry back to the graceful-FIN close window.
         entry.reset |= has_rst(tcp_flags);
-        // #7342: record that THIS direction has FINed. Sticky, and
-        // gated on FIN specifically rather than on `is_closing` (which
-        // is FIN **or** RST) — a RST is an abort with no close
-        // handshake to complete, and `tcp_close_class` short-circuits
-        // on `reset` before it ever consults these bits. The companion's
-        // half of the pair is mirrored below by
-        // `propagate_tcp_state_to_companion`.
         entry.fin_own |= has_fin(tcp_flags);
+        progressed
     }
 
     /// #10636: apply a close the deferring lookup skipped, after the #9519
@@ -428,7 +423,9 @@ impl SessionTable {
             }
             let entry = &mut record.entry;
             close_class_before = entry.tcp_close_class_wire();
-            Self::stamp_tcp_close(entry, key, tcp_flags);
+            if !Self::stamp_tcp_close(entry, key, tcp_flags) {
+                return;
+            }
             entry.last_seen_ns = now_ns;
             entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
             (

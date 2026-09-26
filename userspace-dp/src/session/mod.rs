@@ -2570,6 +2570,10 @@ impl SessionTable {
     /// idle time crosses `expires_after_ns / N`, keeping its age ~`T/N`
     /// in steady state regardless of co-resident flow rates, so it can
     /// never be GC'd mid-flow (reaped only if a real gap exceeds `T`).
+    /// #10885: closing TCP entries still serve cache hits inside their
+    /// deadline, but only a non-FINed, non-reset direction may move it. A
+    /// FIN-owning side and either side of RST/TIME_WAIT keep the close timer
+    /// fixed, allowing the closing entry to expire despite matching traffic.
     ///
     /// Why this replaces the prior binding-global modulo-64 counter: that
     /// counter incremented across ALL flows on the binding and touched
@@ -2587,25 +2591,27 @@ impl SessionTable {
     /// compare. Allocation-free.
     #[inline]
     pub fn touch_if_stale(&mut self, key: &SessionKey, now_ns: u64) -> bool {
-        let stale = match self.record_by_key(key) {
+        let (stale, refresh_allowed) = match self.record_by_key(key) {
             Some(record) => {
-                let last_seen = record.entry.last_seen_ns;
-                let expires_after = record.entry.expires_after_ns;
-                let age = now_ns.saturating_sub(last_seen);
+                let entry = &record.entry;
+                let age = now_ns.saturating_sub(entry.last_seen_ns);
                 // Keep the flow-cache keepalive from resurrecting a session
                 // after the same strict deadline enforced by packet lookup
                 // and the expiry wheel. The wheel still owns physical
                 // removal, including HA HOLD/SELF-HEAL retention.
-                if age > expires_after {
+                if age > entry.expires_after_ns {
                     return false;
                 }
-                let refresh_after =
-                    expires_after.max(SESSION_KEEPALIVE_DIVISOR) / SESSION_KEEPALIVE_DIVISOR;
-                age >= refresh_after
+                let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
+                    / SESSION_KEEPALIVE_DIVISOR;
+                (
+                    age >= refresh_after,
+                    !entry.closing || (!entry.reset && !entry.fin_own),
+                )
             }
             None => return false,
         };
-        if stale {
+        if stale && refresh_allowed {
             self.touch(key, now_ns);
         }
         true
@@ -4123,6 +4129,11 @@ mod tests;
 #[cfg(test)]
 #[path = "tcp_close_state_7342_tests.rs"]
 mod tcp_close_state_7342_tests;
+// #10885: closing-entry refresh must respect reset and FIN direction in lookup,
+// flow-cache keepalive, and companion retention.
+#[cfg(test)]
+#[path = "close_refresh_gate_10885_tests.rs"]
+mod close_refresh_gate_10885_tests;
 
 // #9412: pins that the production HA import path carries `tcp_flags: 0`, so the
 // close bits derived from it are vacuous and an imported session ages on the

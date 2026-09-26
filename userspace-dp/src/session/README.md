@@ -480,6 +480,12 @@ steady-state per-hit cost is two warm `key_to_handle` probes (admission plus
 keepalive) and integer compares; the `last_seen_ns` write + throttled
 `push_to_wheel` run only when actually stale. Allocation-free.
 
+For closing TCP, #10885 keeps the timer directional: reset entries and
+FIN-owning halves do not slide on hits, while the non-FINed half of a
+half-close remains refreshable. Companion retention follows the same
+close state: reset and FIN-owning companions cannot keep an entry alive,
+but an active non-FINed companion can retain its FINed peer.
+
 This replaced the pre-#2220 binding-GLOBAL modulo-64 counter
 (`flow_cache_session_touch`), which incremented across ALL flows on the
 binding and touched only the flow whose hit happened to land on a global
