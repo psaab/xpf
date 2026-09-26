@@ -18,10 +18,29 @@ package cliterm
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/chzyer/readline"
 )
+
+// SecureReadlineHistory creates a history file or tightens its permissions
+// before readline opens it. Readline requests mode 0666 for new files, so
+// relying on the process umask can leave command history readable by others.
+func SecureReadlineHistory(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open history file: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("set history file permissions: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close history file: %w", err)
+	}
+	return nil
+}
 
 // DisableReadlineHistoryAutoSave prevents readline from persisting submitted
 // CLI lines, which may contain credentials.

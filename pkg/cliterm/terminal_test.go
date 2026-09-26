@@ -76,6 +76,7 @@ func TestOtherReadErrorsAlsoAbort(t *testing.T) {
 	}
 }
 
+// #10908: history must stay private even when the process umask is permissive.
 func TestReadlineHistoryDoesNotPersistSubmittedPSK_10743(t *testing.T) {
 	const secretCommand = "set security ike policy pol1 pre-shared-key ascii-text LEAK-READLINE-PSK"
 
@@ -95,6 +96,15 @@ func TestReadlineHistoryDoesNotPersistSubmittedPSK_10743(t *testing.T) {
 	}
 
 	historyFile := filepath.Join(t.TempDir(), "history")
+	if err := os.WriteFile(historyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(historyFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SecureReadlineHistory(historyFile); err != nil {
+		t.Fatalf("secure history file: %v", err)
+	}
 	cfg := DisableReadlineHistoryAutoSave(&readline.Config{
 		HistoryFile:        historyFile,
 		HistoryLimit:       10000,
@@ -106,6 +116,13 @@ func TestReadlineHistoryDoesNotPersistSubmittedPSK_10743(t *testing.T) {
 		FuncGetWidth:       func() int { return 80 },
 		FuncOnWidthChanged: func(func()) {},
 	})
+	mode, err := os.Stat(historyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mode.Mode().Perm(); got != 0o600 {
+		t.Fatalf("history mode before readline open = %04o, want 0600", got)
+	}
 
 	rl, err := readline.NewEx(cfg)
 	if err != nil {
@@ -122,6 +139,13 @@ func TestReadlineHistoryDoesNotPersistSubmittedPSK_10743(t *testing.T) {
 	}
 	if err := rl.Close(); err != nil {
 		t.Fatalf("close readline: %v", err)
+	}
+	mode, err = os.Stat(historyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mode.Mode().Perm(); got != 0o600 {
+		t.Fatalf("history mode after readline open = %04o, want 0600", got)
 	}
 
 	history, err := os.ReadFile(historyFile)
