@@ -41,6 +41,23 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 	}
 }
 
+func TestFailedMeaningDoesNotAssumeTextConfigWasInstalled(t *testing.T) {
+	out := render(Snapshot{
+		Status: StatusFailed,
+		Error:  "day-0 config REJECTED by commit-check",
+		Failed: true,
+	})
+	meaning := meaningLine(t, out)
+	if strings.Contains(meaning, "file was present") {
+		t.Fatalf("a loader-rejected medium installs no xpf.conf, so import-failed "+
+			"must not claim a text file was present:\n%s", out)
+	}
+	if !strings.Contains(meaning, "could NOT be applied") {
+		t.Fatalf("import-failed must explain that a configuration could not be applied:\n%s", out)
+	}
+}
+
+
 func meaningLine(t *testing.T, out string) string {
 	t.Helper()
 	for _, ln := range strings.Split(out, "\n") {

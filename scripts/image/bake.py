@@ -210,15 +210,16 @@ SYSPREP_ENABLE_OPS = (
 )
 
 # Paths removed by the seal's --run-command. The xpf state entries make the
-# image a factory artifact (no committed config, no day-0 stamp); the SNMPv3
-# EngineID component and its engineBoots counter (#5283) and the systemd
-# random-seed are per-device identity — every clone must regenerate them on
-# first boot, or all of them derive byte-identical localized USM keys and
-# accept each other's authenticated SNMPv3 requests.
+# image a factory artifact (no committed config, day-0 stamp, or transient
+# loader-rejection signal); the SNMPv3 EngineID component and its engineBoots
+# counter (#5283) and the systemd random-seed are per-device identity — every
+# clone must regenerate them on first boot, or all of them derive byte-identical
+# localized USM keys and accept each other's authenticated SNMPv3 requests.
 SYSPREP_PURGE_PATHS = (
     "/etc/xpf/.configdb",
     "/etc/xpf/xpf.conf",
     "/etc/xpf/.day0-config-applied",
+    "/etc/xpf/.day0-config-rejected",
     "/etc/xpf/.root-grown",
     "/var/lib/xpf/snmp-engine-id",
     "/var/lib/xpf/snmp-engineboots",

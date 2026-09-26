@@ -374,14 +374,20 @@ Day-0 loader specifics (`scripts/image/xpf-day0-config`, oneshot unit
 - Failures never block the boot: the unit is ordering-only (no
   `Requires=`), the script always exits 0, and `TimeoutStartSec`
   backstops a hung mount. Fallback is always the factory bootstrap.
-- The "already configured, skip the probe" guard tests
-  `/etc/xpf/.configdb/active.json` (a COMMITTED config), NOT the bare
+- The "already configured, skip the probe" guard reads
+  `/etc/xpf/.configdb/active.json`'s commit marker, NOT the bare
   `.configdb` directory. xpfd creates that directory on EVERY start
   (`configstore.NewDB` → `MkdirAllDurable`, before any commit), so its
-  mere existence is not a "configured" signal — guarding on it would
-  make a box that booted once (empty `.configdb` present) permanently
-  skip the probe, killing the fix-and-reboot retry above. A box in
-  factory bootstrap has no `active.json`, so the loader re-probes.
+  mere existence is not a "configured" signal. A `committed=0` active DB
+  (the never-committed target after a timed-out first `commit confirmed`)
+  also does not count as configured; the day-0 probe must be allowed to
+  recover it. Legacy DBs without the marker and `committed=1` DBs still
+  suppress probing.
+- When check-config rejects a medium (exit 2), the loader does not install
+  `xpf.conf`; it records a private `/etc/xpf/.day0-config-rejected` signal
+  so xpfd records `import-failed` rather than misreporting `no-config`.
+  Each loader invocation clears an old signal first. The signal contains no
+  config bytes; detailed validation output remains in the loader journal.
 
 ### "My day-0 config did not apply" — where to look (#4184 / #6496)
 
@@ -393,9 +399,9 @@ ssh, local `cli` or remote):
 > show system bootstrap-import
 Bootstrap configuration import:
   Status:   import-failed
-  Meaning:  a configuration file was present but could NOT be applied — see Error below
+  Meaning:  a configuration could NOT be applied — see Error below
   Recorded: 2026-08-21 14:02:11 UTC
-  Error:    day-0 config REJECTED by commit-check: ...
+  Error:    day-0 config REJECTED by commit-check; see the xpf-day0-config journal for validation details
 
   The box is in the lifeline-safe bootstrap state; ...
 ```
@@ -403,8 +409,8 @@ Bootstrap configuration import:
 The four statuses are `ok` (imported + committed), `loaded-from-db` (an active
 config was already present, so no file import was attempted — the normal
 steady-state boot), `no-config` (nothing to import: the expected factory boot),
-and `import-failed` (a file was present but could not be read, parsed,
-committed, or survived the device-map strand preflight).
+and `import-failed` (a file could not be read, parsed, committed, or survived
+the device-map strand preflight, or the loader rejected a medium at commit-check).
 
 `import-failed` is INFORMATIONAL, not a fault state: the box is in the
 lifeline-safe bootstrap state and still reachable, so neither this command nor

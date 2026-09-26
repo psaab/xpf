@@ -74,20 +74,33 @@ func classifyLoadError(err error) loadErrorClass {
 }
 
 // shouldBootstrapFromFile reports whether Run should import the text config
-// file (xpf.conf) after Store.Load. The import runs only when there is no
-// active config to boot from AND the Load did not fail closed on a config
-// error (a compile failure or absent active.json with surviving history).
+// file (xpf.conf) after Store.Load. A first-commit rollback leaves a compiled
+// empty config with EverCommitted=false; it is still eligible for import.
+// ActiveConfig alone would misread that Item-1b state as already configured.
 //
-// #1960/#10297: the `!failClosedLoad` clause is load-bearing, not cosmetic.
-// On either fail-closed load ActiveConfig() is nil (compiled stayed nil), so
-// without this guard the import would fire — silently swapping a DIFFERENT
-// config (whatever xpf.conf holds) in over the broken/missing committed DB
-// and then taking over interfaces, defeating the fail-closed intent. This
-// predicate is the single source of truth for that decision (daemon_run.go
-// calls it) so the guard cannot be dropped without TestShouldBootstrapFromFile
-// failing.
-func shouldBootstrapFromFile(hasActiveConfig, failClosedLoad bool) bool {
-	return !hasActiveConfig && !failClosedLoad
+// #1960/#10297: the failClosedLoad clause is load-bearing. On either
+// fail-closed load ActiveConfig() is nil, so without this guard the import
+// would fire — silently swapping a DIFFERENT config (whatever xpf.conf holds)
+// in over the broken/missing committed DB and then taking over interfaces.
+func shouldBootstrapFromFile(hasActiveConfig, everCommitted, failClosedLoad bool) bool {
+	return (!hasActiveConfig || !everCommitted) && !failClosedLoad
+}
+
+const (
+	day0RejectMarkerName    = ".day0-config-rejected"
+	day0RejectMarkerContent = "commit-check-rejected"
+	day0RejectImportDetail  = "day-0 config REJECTED by commit-check; see the xpf-day0-config journal for validation details"
+)
+
+// day0RejectMarkerDetail translates the loader's private signal into the
+// bootstrap-import vocabulary. The marker deliberately carries no config
+// bytes or validation output; the loader journal retains those details.
+func day0RejectMarkerDetail(configFile string) string {
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(configFile), day0RejectMarkerName))
+	if err != nil || strings.TrimSpace(string(data)) != day0RejectMarkerContent {
+		return ""
+	}
+	return day0RejectImportDetail
 }
 
 // lifelineRecordFile persists the management-NIC identity (PCI bus address +

@@ -192,7 +192,8 @@ class SealBakeAgreementTests(unittest.TestCase):
         They are not part of the clone-identity verdict, but silently losing
         them ships a committed config inside the golden image."""
         for p in ("/etc/xpf/.configdb", "/etc/xpf/xpf.conf",
-                  "/etc/xpf/.day0-config-applied", "/etc/xpf/.root-grown"):
+                  "/etc/xpf/.day0-config-applied",
+                  "/etc/xpf/.day0-config-rejected", "/etc/xpf/.root-grown"):
             self.assertIn(p, bake.SYSPREP_PURGE_PATHS)
 
 

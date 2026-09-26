@@ -252,6 +252,7 @@ class TryDeviceTests(unittest.TestCase):
         script = (f'. "{LOADER}"\n'
                   f'XPF_DIR="{self.xpf_dir}"\n'
                   f'STAMP="$XPF_DIR/.day0-config-applied"\n'
+                  f'REJECT_MARKER="$XPF_DIR/.day0-config-rejected"\n'
                   f'MNT="{self.mnt}"\n'
                   f'XPFD="{self.xpfd}"\n'
                   + prelude +
@@ -267,6 +268,9 @@ class TryDeviceTests(unittest.TestCase):
         return f.read_bytes() if f.is_file() else None
 
     def test_installs_valid_conf(self):
+        self.xpf_dir.mkdir()
+        marker = self.xpf_dir / ".day0-config-rejected"
+        marker.write_text("commit-check-rejected\n")
         body = CONF.format(name="day0-ok").encode()
         self._medium("/dev/fake0", {"xpf.conf": body})
         rc, out, _dt = self._try_device()
@@ -283,6 +287,22 @@ class TryDeviceTests(unittest.TestCase):
                          "successful install did not rename its staged file")
         stamp = (self.xpf_dir / ".day0-config-applied").read_text()
         self.assertIn("/dev/fake0", stamp)
+        self.assertFalse(marker.exists(),
+                         "a successful install after another medium's REJECT must clear its signal")
+
+    def test_commit_check_reject_leaves_daemon_signal(self):
+        self.xpfd.write_text(
+            '#!/bin/sh\necho "FAIL bad stanza"\nexit 2\n')
+        self._medium("/dev/fake0",
+                     {"xpf.conf": CONF.format(name="rejected").encode()})
+        rc, out, _dt = self._try_device()
+        self.assertEqual(rc, 1, out[-600:])
+        self.assertIsNone(self._installed(),
+                          "a REJECTed config must not be installed")
+        marker = self.xpf_dir / ".day0-config-rejected"
+        self.assertEqual(marker.read_text(), "commit-check-rejected\n",
+                         "xpfd needs a private signal because REJECT installs no xpf.conf")
+        self.assertIn("REJECTED by commit-check", out)
 
     def test_node_id_is_durable_before_config_is_exposed(self):
         body = b"""chassis {

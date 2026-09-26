@@ -168,6 +168,7 @@ class _LoaderBase(unittest.TestCase):
         script = (f'. "{LOADER}"\n'
                   f'XPF_DIR="{self.xpf_dir}"\n'
                   f'STAMP="$XPF_DIR/.day0-config-applied"\n'
+                  f'REJECT_MARKER="$XPF_DIR/.day0-config-rejected"\n'
                   f'MNT="{self.mnt}"\n'
                   f'XPFD="{self.xpfd}"\n'
                   # regen_ssh_host_keys would try to write /etc/ssh.
@@ -240,6 +241,38 @@ class ProbeOrderTests(_LoaderBase):
         # The vSRX cdrom parity path is not regressed by the ordering fix.
         self.add_blkid(isos=["/dev/sr0"])
         self.assertEqual(self.probe(), ["/dev/sr0"])
+
+    def test_never_committed_active_json_does_not_skip_day0_probe(self):
+        active = self.xpf_dir / ".configdb" / "active.json"
+        active.parent.mkdir(parents=True)
+        active.write_text(
+            "#xpf-config-envelope v=2 writer=test ast=1 min-reader=1 "
+            "rollback-fmt=1 committed=0\n{}\n")
+        self.add_blkid(labeled=["/dev/sdb"])
+        self.add_medium("/dev/sdb", "from-day0-after-rollback")
+
+        res = self.run_main()
+
+        self.assertEqual(self.installed_hostname(), "from-day0-after-rollback",
+                         "committed=0 active.json must allow first-boot retry")
+        self.assertEqual(self.mounted(), ["/dev/sdb"])
+        self.assertTrue((self.xpf_dir / ".day0-config-applied").is_file())
+
+    def test_committed_active_json_still_skips_day0_probe(self):
+        active = self.xpf_dir / ".configdb" / "active.json"
+        active.parent.mkdir(parents=True)
+        active.write_text(
+            "#xpf-config-envelope v=2 writer=test ast=1 min-reader=1 "
+            "rollback-fmt=1 committed=1\n{}\n")
+        self.add_blkid(labeled=["/dev/sdb"])
+        self.add_medium("/dev/sdb", "must-not-replace")
+
+        res = self.run_main()
+
+        self.assertIn("system already configured", res.stdout)
+        self.assertEqual(self.mounted(), [])
+        self.assertIsNone(self.installed_hostname())
+
 
     def test_blank_blkid_output_emits_nothing_at_all(self):
         # Asserted on the RAW output: `probe()` splits on whitespace and would

@@ -6,14 +6,16 @@
 # applied at first boot while the system is factory-default. This is
 # the xpf analog, run as a oneshot systemd unit ordered Before=xpfd:
 #
-#   1. If the system has ever been configured (stamp file, a COMMITTED
-#      configstore DB — active.json, written only on commit/sync — or a
-#      preseeded /etc/xpf/xpf.conf), do nothing. A day-0 config is
-#      applied at most once; later boots never re-apply or clobber.
+#   1. If the system has ever been configured (stamp file, a successfully
+#      committed configstore DB, or a preseeded /etc/xpf/xpf.conf), do
+#      nothing. The active.json marker written by a timed-out first
+#      `commit confirmed` is explicitly never-committed and does NOT count
+#      as configured. A day-0 config is applied at most once; later boots
+#      never re-apply or clobber.
 #      The guard tests active.json, NOT the bare .configdb directory:
 #      xpfd creates that directory on EVERY start (NewDB ->
-#      MkdirAllDurable, before any commit), so its mere existence is not
-#      a "configured" signal. Guarding on the bare directory silently
+#      MkdirAllDurable, before any commit), so its mere existence is not a
+#      "configured" signal. Guarding on the bare directory silently
 #      defeated the fix-and-reboot retry contract (see Retriability
 #      below): after the first boot the empty .configdb existed, so a
 #      rejected/absent drive could never be retried.
@@ -51,6 +53,7 @@ set -u
 
 XPF_DIR=/etc/xpf
 STAMP="$XPF_DIR/.day0-config-applied"
+REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
 MNT=/run/xpf-day0
 XPFD=/usr/local/sbin/xpfd
 MAX_CONF_BYTES=$((4 * 1024 * 1024)) # keep in sync with xpfd check-config
@@ -82,6 +85,9 @@ safe_read_medium() {
 		return 13
 	fi
 	command -v perl >/dev/null 2>&1 || return 14
+	# shellcheck disable=SC2016
+	# The Perl program is intentionally passed literally; its input paths are the
+	# positional arguments after `--`.
 	timeout 10 perl -e '
 use strict;
 use warnings;
@@ -286,7 +292,12 @@ try_device() {
 	rc=$?
 	if [ $rc -ne 0 ]; then
 		case $rc in
-		2) warn "day-0 config on $dev REJECTED by commit-check — NOT installing; falling back to factory bootstrap (fxp0 DHCP)" ;;
+		2)
+			warn "day-0 config on $dev REJECTED by commit-check — NOT installing; falling back to factory bootstrap (fxp0 DHCP)"
+			if ! mkdir -p "$XPF_DIR" || ! write_line_durable "$REJECT_MARKER" "commit-check-rejected" 0600; then
+				warn "could not record the day-0 commit-check REJECT for xpfd"
+			fi
+			;;
 		124) warn "day-0 config validation timed out after ${CHECK_TIMEOUT}s — NOT installing" ;;
 		*) warn "day-0 config validation failed (exit $rc) — NOT installing" ;;
 		esac
@@ -326,28 +337,35 @@ try_device() {
 		umount "$MNT"
 		return 1
 	fi
+	# A later medium may have passed after an earlier REJECT. Do not leave
+	# that failure signal behind once a config was durably installed.
+	rm -f "$REJECT_MARKER"
 	log "day-0 config installed as $XPF_DIR/xpf.conf — xpfd will import and commit it at startup"
 	umount "$MNT"
 	return 0
 }
 
-# have_committed_config — true (0) when the box already holds a COMMITTED
-# configstore DB, i.e. .configdb/active.json exists. active.json is written
-# only by a successful commit / HA sync / rollback (pkg/configstore/db.go
-# WriteActive*); the bare .configdb DIRECTORY is created on EVERY xpfd start
-# by NewDB -> MkdirAllDurable (before any commit), so its existence is NOT a
-# "configured" signal. Testing active.json — not the directory — is what
-# makes the fix-and-reboot retry contract work: a rejected/absent drive
-# leaves the box in factory bootstrap with no active.json, so the loader
-# re-probes on the next boot instead of falsely declaring "already
-# configured" forever.
+# have_committed_config — true (0) when active.json represents a committed
+# configstore DB. New-format active.json carries a committed= marker; the
+# never-committed committed=0 marker written by Item 1b must allow day-0
+# probing, while legacy envelopes and plain DBs remain committed by default.
 have_committed_config() {
-	[ -e "$XPF_DIR/.configdb/active.json" ]
+	local active="$XPF_DIR/.configdb/active.json" header=""
+	[ -e "$active" ] || return 1
+	IFS= read -r header <"$active" || true
+	if [[ "$header" == "#xpf-config-envelope "* ]] &&
+		[[ "$header" =~ (^|[[:space:]])committed=0([[:space:]]|$) ]]; then
+		return 1
+	fi
+	return 0
 }
 
 main() {
 	regen_ssh_host_keys
 
+	# This signal belongs to one loader invocation. A new attempt must never
+	# inherit the previous boot's REJECT outcome.
+	rm -f "$REJECT_MARKER"
 	if [ -e "$STAMP" ]; then
 		log "day-0 config already applied ($STAMP) — skipping"
 		return 0
