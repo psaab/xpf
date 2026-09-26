@@ -55,6 +55,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "scripts", "dist"))
 import image_inventory  # noqa: E402  (#6500 inventory format)
 from bridge_floor_10171 import bridge_floor_offline_snippet  # noqa: E402  (#10171)
+from seed_layout_10771 import seeded_runtime_layout_snippet  # noqa: E402  (#10771)
 import sign  # noqa: E402
 
 # Runtime dependency set installed explicitly into the image. This is the
@@ -697,6 +698,9 @@ def virt_customize(work_qcow, xpf_deb):
         # empty enumeration rather than shipping a hollow record.
         "--run-command", image_inventory.WRITE_CMD,
         "--run-command", "/usr/local/sbin/xpfd version",
+        # #10771: fail the bake if first-install seeding silently fell back to
+        # direct staged links or left any managed runtime outside versions/.
+        "--run-command", seeded_runtime_layout_snippet(),
     ]
     run(argv)
 

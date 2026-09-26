@@ -56,6 +56,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "dist"))
 from bridge_floor_10171 import bridge_floor_live_snippet  # noqa: E402  (#10171)
+from seed_layout_10771 import seeded_runtime_layout_snippet  # noqa: E402  (#10771)
 import make_config_drive  # noqa: E402
 import sign  # noqa: E402  (#1924 signed-distribution helper)
 
@@ -1185,7 +1186,14 @@ class Harness:
         info("── Scenario A: first boot, NO config drive ──")
         a = self.iname("a")   # run-namespaced instance name (#4905-D)
         self.launch(a)
+
         self.wait_xpfd(a)
+        layout = guest(a, "sh", "-c", seeded_runtime_layout_snippet(),
+                       check=False, capture=True)
+        if layout.returncode != 0:
+            detail = (layout.stderr or layout.stdout).strip()
+            fail("first-install sbin links do not resolve through "
+                 f"versions/current (#10771): {detail}")
         kver = guest(a, "uname", "-r", capture=True).stdout.strip()
         info(f"guest kernel: {kver}")
         rel = kver.split("-")[0]

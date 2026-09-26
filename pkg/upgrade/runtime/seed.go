@@ -26,6 +26,7 @@
 package runtime
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -106,9 +107,9 @@ func (c *Config) withDefaults() {
 //
 // Steps (each idempotent and crash-safe):
 //  1. read the staged version (validated as a safe single path segment).
-//  2. copy staged/* -> versions/<ver>/ via a .partial dir + atomic rename
-//     (skip if versions/<ver> already exists — a prior seed crashed after
-//     the rename).
+//  2. copy staged/* -> versions/<ver>/ via a .partial dir + atomic rename;
+//     an existing directory is adopted only when every managed file is
+//     complete and byte-identical to staged/.
 //  3. repoint versions/current -> <ver> (atomic).
 //  4. repoint /usr/local/sbin/<bin> -> versions/current/<bin> (atomic).
 func Seed(cfg Config) (err error) {
@@ -131,18 +132,20 @@ func Seed(cfg Config) (err error) {
 	}
 
 	verDir := filepath.Join(cfg.VersionsDir, ver)
-	if fi, statErr := os.Stat(verDir); statErr == nil {
-		// An existing versions/<ver> is treated as a completed prior copy and
-		// the copy is skipped (resume-after-crash). But a NON-directory entry
-		// there (corruption / manual edit) would make `current` and the sbin
-		// links resolve to a broken launch path. Fail seeding so the postinst
-		// falls back to legacy direct-staged links rather than leaving the
-		// daemon unlaunchable (Copilot).
-		if !fi.IsDir() {
-			return fmt.Errorf("seed: %s exists but is not a directory (corrupt "+
-				"runtime layout); refusing to seed through it", verDir)
+	if fi, statErr := os.Lstat(verDir); statErr == nil {
+		// A pre-existing version dir may be a foreign or interrupted copy,
+		// not a completed seed. Adopt it only when its lockstep binaries are
+		// startable and every managed byte matches the fully-unpacked staged
+		// payload. On failure the postinst keeps direct-staged links, rather
+		// than switching current to a mixed or stale runtime.
+		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("seed: %s exists but is not a real directory "+
+				"(corrupt runtime layout); refusing to seed through it", verDir)
 		}
-		logf("seed: version dir %s already present; skipping copy", verDir)
+		if err := verifyVersionDirMatchesStaged(verDir, cfg.StagedDir); err != nil {
+			return fmt.Errorf("seed: refusing to adopt existing version dir %s: %w", verDir, err)
+		}
+		logf("seed: version dir %s is complete and matches staged; resuming", verDir)
 	} else if !os.IsNotExist(statErr) {
 		return fmt.Errorf("seed: stat version dir: %w", statErr)
 	} else {
@@ -224,6 +227,61 @@ func copyStagedToVersion(stagedDir, versionsDir, verDir string) error {
 		return fmt.Errorf("seed: fsync versions dir after rename: %w", err)
 	}
 	return nil
+}
+
+// verifyVersionDirMatchesStaged adopts an existing seed directory only when
+// its lockstep executables are present and every managed file is byte-identical
+// to the staged source. This handles a completed copy after a crash, while
+// refusing foreign, partial, or same-version-different-content directories.
+func verifyVersionDirMatchesStaged(verDir, stagedDir string) error {
+	for _, name := range manifest.LockstepNames() {
+		path := filepath.Join(verDir, name)
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("lockstep binary %s is missing: %w", name, err)
+		}
+		if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("lockstep binary %s is not a regular executable", name)
+		}
+	}
+	for _, name := range managedBins {
+		stagedPath := filepath.Join(stagedDir, name)
+		versionPath := filepath.Join(verDir, name)
+		stagedDigest, err := regularFileSHA256(stagedPath)
+		if err != nil {
+			return fmt.Errorf("inspect staged binary %s: %w", name, err)
+		}
+		versionDigest, err := regularFileSHA256(versionPath)
+		if err != nil {
+			return fmt.Errorf("inspect versioned binary %s: %w", name, err)
+		}
+		if stagedDigest != versionDigest {
+			return fmt.Errorf("managed binary %s differs from staged source", name)
+		}
+	}
+	return nil
+}
+
+func regularFileSHA256(path string) ([sha256.Size]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if !fi.Mode().IsRegular() {
+		return [sha256.Size]byte{}, fmt.Errorf("not a regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	var sum [sha256.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
 }
 
 // stagedVersion runs `<staged>/xpfd version` and returns the version token.

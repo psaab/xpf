@@ -1,19 +1,16 @@
 #!/bin/sh
-# #2000 — debian/xpf.postinst UPGRADE absent-link recovery test. The postinst
-# is shell, so it is tested in shell. Run:
+# First-install seed safety (#10771) and upgrade absent-link recovery (#2000).
+# The postinst is shell, so it is tested in shell. Run:
 #
 #   sh   test/debian/postinst-test.sh
 #   dash test/debian/postinst-test.sh
 #
-# It runs the REAL postinst with the layout path vars rewritten to a temp ROOT,
-# builds a hardened layout (versions/current present, sbin links resolving
-# THROUGH it), deletes ONE sbin link, runs the `configure <old-version>`
-# (upgrade) branch, and asserts the REPAIRED link resolves through
-# versions/current/<bin>, NOT staged/<bin> (#2000). It also covers the
-# newly-introduced-managed-binary edge (target absent from versions/current ->
-# the link stays absent until the verified cut) and proves NON-TAUTOLOGY by
-# synthesizing the pre-#2000 direct-to-staged postinst and asserting it repairs
-# to staged (so the assertion discriminates the fix).
+# It runs the REAL postinst with layout paths rewritten to a temp ROOT. The
+# first-install cells exercise `configure ""` on success and seed failure,
+# then kill the postinst shell while seed-runtime is blocked and assert all
+# staged launch links already exist. The upgrade cells prove absent links
+# recover through versions/current rather than staged, cover a newly managed
+# binary, and retain the #2000 old-bug non-tautology control.
 set -e
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -95,6 +92,120 @@ EOF
         ln -sf "$CURRENT/$b" "$SBIN/$b"
     done
 }
+
+# First-install success: the fake seed-runtime adopts the pre-created staged
+# launch links into the versioned chain, exercising the configure "" branch.
+build_first_install_success() {
+    mkdir -p "$STAGED"
+    for b in $BINS; do
+        printf 'staged-%s\n' "$b" > "$STAGED/$b"
+        chmod 0755 "$STAGED/$b"
+    done
+    cat > "$STAGED/xpfd" <<EOF
+#!/bin/sh
+case "\$1" in
+    seed-runtime)
+        mkdir -p "$VERSIONS/1.0.0"
+        for b in $BINS; do cp "$STAGED/\$b" "$VERSIONS/1.0.0/\$b"; done
+        ln -sfn 1.0.0 "$CURRENT"
+        for b in $BINS; do ln -sfn "$CURRENT/\$b" "$SBIN/\$b"; done
+        exit 0 ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod 0755 "$STAGED/xpfd"
+}
+
+scenario_first_install_configure_empty_seeds_layout() {
+    build_first_install_success
+    "$ROOT/postinst" configure ""
+    for b in $BINS; do
+        [ -L "$SBIN/$b" ] || { echo "FAIL: first install omitted sbin/$b"; exit 1; }
+        [ "$(readlink "$SBIN/$b")" = "$CURRENT/$b" ] || {
+            echo "FAIL: first install $b link is not through versions/current"; exit 1; }
+        cmp -s "$STAGED/$b" "$SBIN/$b" || {
+            echo "FAIL: first install $b link does not resolve to the versioned staged bytes"; exit 1; }
+    done
+}
+
+scenario_first_install_seed_failure_falls_back_to_staged() {
+    mkdir -p "$STAGED"
+    for b in $BINS; do
+        printf 'staged-%s\n' "$b" > "$STAGED/$b"
+        chmod 0755 "$STAGED/$b"
+    done
+    cat > "$STAGED/xpfd" <<'EOF'
+#!/bin/sh
+case "$1" in
+    seed-runtime) exit 1 ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod 0755 "$STAGED/xpfd"
+    "$ROOT/postinst" configure ""
+    for b in $BINS; do
+        [ -L "$SBIN/$b" ] || { echo "FAIL: seed failure left sbin/$b absent"; exit 1; }
+        [ "$(readlink "$SBIN/$b")" = "$STAGED/$b" ] || {
+            echo "FAIL: seed failure $b fallback is not direct-staged"; exit 1; }
+        [ -x "$SBIN/$b" ] || { echo "FAIL: seed failure sbin/$b is not launchable"; exit 1; }
+    done
+}
+
+
+# Kill the postinst shell while seed-runtime is still running. All sbin names
+# must already resolve to staged binaries even though neither the seed's step 4
+# nor #DEBHELPER# can run.
+scenario_first_install_killed_during_seed_keeps_launch_links() {
+    mkdir -p "$STAGED"
+    for b in $BINS; do
+        printf 'staged-%s\n' "$b" > "$STAGED/$b"
+        chmod 0755 "$STAGED/$b"
+    done
+    cat > "$STAGED/xpfd" <<EOF
+#!/bin/sh
+case "\$1" in
+    seed-runtime)
+        echo \$\$ > "$ROOT/seed-child.pid"
+        : > "$ROOT/seed-started"
+        while [ ! -e "$ROOT/release-seed" ]; do sleep 0.05; done
+        : > "$ROOT/seed-finished"
+        exit 0 ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod 0755 "$STAGED/xpfd"
+    "$ROOT/postinst" configure "" &
+    postinst_pid=$!
+    tries=0
+    while [ ! -f "$ROOT/seed-started" ]; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 100 ]; then
+            kill -KILL "$postinst_pid" 2>/dev/null || true
+            echo "FAIL: first-install postinst never entered seed-runtime"; exit 1
+        fi
+        sleep 0.05
+    done
+    kill -KILL "$postinst_pid" 2>/dev/null || true
+    if wait "$postinst_pid" 2>/dev/null; then
+        echo "FAIL: first-install postinst unexpectedly survived SIGKILL"; exit 1
+    fi
+    : > "$ROOT/release-seed"
+    tries=0
+    while [ ! -f "$ROOT/seed-finished" ]; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 100 ]; then
+            echo "FAIL: seed-runtime child did not exit after release"; exit 1
+        fi
+        sleep 0.05
+    done
+    for b in $BINS; do
+        [ -L "$SBIN/$b" ] || { echo "FAIL: killed postinst left sbin/$b absent"; exit 1; }
+        [ "$(readlink "$SBIN/$b")" = "$STAGED/$b" ] || {
+            echo "FAIL: killed postinst sbin/$b does not fall back to staged"; exit 1; }
+        [ -x "$SBIN/$b" ] || { echo "FAIL: killed postinst sbin/$b is not launchable"; exit 1; }
+    done
+}
+
 
 # === #2000 CORE: an absent sbin link is recovered THROUGH versions/current ===
 # Delete ONE sbin link, run the upgrade-configure branch, assert the repaired
@@ -276,6 +387,9 @@ scenario_oldbug_repairs_to_staged_proves_nontautology() {
         echo "FAIL(non-tautology): old-bug postinst recovered cli to '$tgt', expected '$STAGED/cli' — the core test would not discriminate the fix"; exit 1; }
 }
 
+run_scenario first_install_configure_empty_seeds_layout
+run_scenario first_install_seed_failure_falls_back_to_staged
+run_scenario first_install_killed_during_seed_keeps_launch_links
 run_scenario recovers_cli_through_current
 run_scenario recovers_helper_through_current
 run_scenario leaves_existing_and_dangling_links
