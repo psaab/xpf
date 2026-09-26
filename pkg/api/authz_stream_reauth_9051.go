@@ -45,8 +45,8 @@ import (
 var readReauthInterval9051 = 5 * time.Second
 
 // watchReadAuthorization returns a request whose context is cancelled as soon
-// as the principal stops being authorized for `required`, plus a stop func the
-// caller must defer.
+// as the full REST read policy stops authorizing it, plus a stop func the
+// caller must defer. The same predicate gates the initial read and each tick.
 //
 // A cancelled context is all an SSE handler needs: every one of them selects on
 // r.Context().Done() to notice a disconnected client, so revocation lands on
@@ -70,8 +70,8 @@ func (s *Server) watchReadAuthorization(r *http.Request, required config.LoginCl
 				// demoted in the config without the principal changing at all,
 				// which is the likelier revocation and the one a
 				// principal-only re-check would miss.
-				cfg, p, _ := s.authorizeInputs(r)
-				if err := authz.Authorize(cfg, p, required); err != nil {
+				p, err := s.authorizeRESTRead(r, required)
+				if err != nil {
 					slog.Warn("api: terminating a stream whose principal is no "+
 						"longer authorized (#9051)",
 						"method", r.Method, "path", r.URL.Path,
