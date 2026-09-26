@@ -7,10 +7,11 @@
 # at publish time (scripts/dist/publish.py stamp-installer), so the piped
 # one-liner needs no env — `sudo sh` is required because it mutates the host.
 #
-# Tier B (verify-before-run): get xpf-image.pub from the SOURCE REPO (git
-# clone / GitHub — the out-of-band trust root, NEVER from the dist host),
-# then `minisign -V -p xpf-image.pub -m install.sh -x install.sh.minisig`,
-# read this script, and run it.
+# Tier B (verify-before-run): get the active image public keys from the SOURCE
+# REPO (git clone / GitHub — the out-of-band trust root, NEVER from the dist
+# host). Use `scripts/dist/sign.py verify-file` with repeated --pubkey options
+# to accept rotation overlap; fetch each required key-addressed .minisig sidecar,
+# then read this script and run it.
 #
 # What it does:
 #   1. PREFLIGHT: amd64 + Debian-family + kernel >= 6.18 + systemd-networkd.
