@@ -52,12 +52,11 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 			}
 		}
 	}
-	// Cluster startup: goodbye RAs for stale routes are handled by the
-	// reconcile loop (reconcileRGState) after VRRP election settles.
-	// Each RETH node has a different virtual MAC (hence different
-	// link-local), so both nodes appear as separate routers to hosts.
-	// Only the primary sends RAs (via applyRethServicesForRG on MASTER);
-	// the reconcile loop sends goodbye RAs for inactive RGs.
+	// Cluster startup: RA senders start on the active owner after VRRP election.
+	// The stable RETH source is shared across peers, so an inactive node must
+	// not send a lifetime-0 goodbye for an identity the active peer continues
+	// to advertise. Demotion hard-stops only that shared-identity sender;
+	// explicitly configured per-node sources retain their graceful withdrawal.
 	//
 	// Stable link-local cleanup: handled by reconcile after election.
 	//

@@ -164,3 +164,42 @@ func TestConfigChangeEmitsNoGoodbye_5092(t *testing.T) {
 
 	_ = m.Clear()
 }
+
+func TestClearInterfacesWithoutGoodbye10779(t *testing.T) {
+	if _, err := net.InterfaceByName("lo"); err != nil {
+		t.Skip("lo interface unavailable")
+	}
+	fl := newFakeListen(t)
+	m := New()
+	if err := m.Apply([]*config.RAInterfaceConfig{testCfg("lo")}); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+	loConn := waitConn(t, fl.getConn, "lo")
+	waitWrites(t, loConn, 1)
+
+	kept, keptConn := startFakeSender(t, fl.getConn, "keepif0")
+	waitWrites(t, keptConn, 1)
+	m.mu.Lock()
+	m.senders["keepif0"] = kept
+	m.mu.Unlock()
+
+	if err := m.ClearInterfacesWithoutGoodbye([]string{"lo", "lo"}); err != nil {
+		t.Fatalf("ClearInterfacesWithoutGoodbye: %v", err)
+	}
+	if total, conns := fl.goodbyeStats("lo"); total != 0 || conns != 0 {
+		t.Fatalf("ownership clear emitted a goodbye (%d conns / %d writes); "+
+			"shared router identity must remain advertised by the peer", conns, total)
+	}
+	if got := fl.liveCount(); got != 1 {
+		t.Fatalf("live sender count after scoped clear = %d, want kept sender only", got)
+	}
+	m.mu.Lock()
+	_, demotedRemains := m.senders["lo"]
+	_, keptRemains := m.senders["keepif0"]
+	m.mu.Unlock()
+	if demotedRemains || !keptRemains {
+		t.Fatalf("senders after scoped clear: demoted=%v kept=%v, want false/true",
+			demotedRemains, keptRemains)
+	}
+	_ = m.Clear()
+}

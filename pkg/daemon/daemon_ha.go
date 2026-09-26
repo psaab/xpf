@@ -1439,13 +1439,10 @@ func (d *Daemon) reconcileRGState() {
 			}
 		}
 
-		// Startup goodbye RA: when an RG is inactive on the first
-		// reconcile pass (node booted as secondary), send a one-shot
-		// goodbye RA (lifetime=0) to clear stale routes from a
-		// previous primary run. Each RETH node has a per-node virtual
-		// MAC producing a distinct link-local, so hosts see each node
-		// as a separate IPv6 router. Without this, hosts ECMP-split
-		// traffic to BOTH nodes even though only one is active.
+		// Cold-boot goodbyes clear a prior node's distinct router identity.
+		// The stable RETH source is shared by both peers, so an inactive node
+		// must not withdraw the identity the active peer continues to advertise.
+		// Keep the one-shot for any explicitly configured per-node source.
 		if !tr.Active && d.ra != nil && d.startupGoodbyeNeeded(rgID) {
 			cfg := d.store.ActiveConfig()
 			if cfg != nil {
@@ -1461,6 +1458,7 @@ func (d *Daemon) reconcileRGState() {
 						rgRA = append(rgRA, ra)
 					}
 				}
+				rgRA = startupGoodbyeConfigs(cfg, rgID, rgRA)
 				if len(rgRA) > 0 && d.startupGoodbyeBegin(rgID) {
 					// Emit off the reconcile goroutine (bind retry can take ~2s);
 					// the sticky bit is set only after the goodbye lands so a
@@ -1555,6 +1553,23 @@ func (d *Daemon) runStartupGoodbye(rgID int, rgRA []*config.RAInterfaceConfig) {
 	if done {
 		slog.Info("ra: startup goodbye complete", "rg", rgID)
 	}
+}
+
+// startupGoodbyeConfigs removes interfaces using the stable shared RETH router
+// identity: a cold-boot secondary must not withdraw a router its peer serves.
+func startupGoodbyeConfigs(cfg *config.Config, rgID int, rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return rgRA
+	}
+	sharedSource := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID).String()
+	kept := rgRA[:0]
+	for _, raCfg := range rgRA {
+		if raCfg == nil || raCfg.SourceLinkLocal == sharedSource {
+			continue
+		}
+		kept = append(kept, raCfg)
+	}
+	return kept
 }
 
 // rethInterfacesForRG returns the Linux interface names of RETH interfaces
@@ -1855,7 +1870,36 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	}
 }
 
-// clearRethServicesForRG withdraws RA senders and stops DHCP server only
+type raScopedClearer interface {
+	ClearInterfacesWithoutGoodbye([]string) error
+}
+
+func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Config, rgID int, allRA []*config.RAInterfaceConfig) error {
+	if clearer == nil || cfg == nil || cfg.Chassis.Cluster == nil {
+		return nil
+	}
+	rgIfaces := rethInterfacesForRG(cfg, rgID)
+	if len(rgIfaces) == 0 {
+		return nil
+	}
+	rgIfaceSet := make(map[string]bool, len(rgIfaces))
+	for _, name := range rgIfaces {
+		rgIfaceSet[name] = true
+	}
+	sharedSource := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID).String()
+	var names []string
+	for _, raCfg := range allRA {
+		if raCfg != nil && rgIfaceSet[raCfg.Interface] && raCfg.SourceLinkLocal == sharedSource {
+			names = append(names, raCfg.Interface)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return clearer.ClearInterfacesWithoutGoodbye(names)
+}
+
+// clearRethServicesForRG stops RA senders and stops DHCP server only
 // for RETH interfaces belonging to the given RG. Called on VRRP BACKUP
 // transition. If other RGs are still MASTER, their services remain active.
 func (d *Daemon) clearRethServicesForRG(rgID int) {
@@ -1888,13 +1932,23 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 		}
 	}
 
-	// RA senders (#5861): converge to the union of RA configs for the RGs this
-	// node still owns. The state machine already marked rgID inactive before
-	// this call, so reconcileClusterRAServices drops rgID's interfaces from the
-	// desired set — ra.Apply emits the lifetime-0 goodbye for them and leaves
-	// any still-owned RG's senders running (subsuming the prior
-	// WithdrawInterfaces / Withdraw split). Owner-gated + serialized so a
-	// concurrent commit cannot re-arm the demoted RG's senders.
+	// Stop only senders bound to the shared stable source without a lifetime-0
+	// RA; that would withdraw the router identity the new owner still advertises.
+	// Explicit per-node source senders remain for graceful withdrawal below.
+	if d.ra != nil {
+		// Serialize the hard stop with any older RA snapshot that may have
+		// started before this ownership transition. Later reconciles observe the
+		// already-inactive RG and cannot re-arm its sender.
+		d.raReconcileMu.Lock()
+		err := clearRethRASendersWithoutGoodbye(d.ra, cfg, rgID, d.buildRAConfigs(cfg))
+		d.raReconcileMu.Unlock()
+		if err != nil {
+			slog.Warn("ra: failed to clear demoted RG senders without goodbye",
+				"rg", rgID, "err", err)
+		}
+	}
+	// Reconcile the union for any RGs this node still owns. Explicitly configured
+	// per-node sources are removed by Apply's normal graceful-withdraw path.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-backup-rg%d", rgID))
 	if d.dhcpServer != nil {
 		// ApplyAsync on both branches (#1835 F2): keeps this VRRP

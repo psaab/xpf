@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dhcp"
@@ -353,5 +354,61 @@ func TestClusterRAMultiPDPrefixOrderStableNoFlap(t *testing.T) {
 		t.Fatalf("buildRAConfigs logged the PD-advertise line at Info %d times across "+
 			"%d periodic reconciles — per-poll-tick Info spam; it must be slog.Debug (#6036)",
 			n, passes)
+	}
+}
+
+type sharedLLClearSpy10779 struct {
+	calls [][]string
+}
+
+func (s *sharedLLClearSpy10779) ClearInterfacesWithoutGoodbye(names []string) error {
+	s.calls = append(s.calls, append([]string(nil), names...))
+	return nil
+}
+
+func TestStartupGoodbyeSkipsSharedStableRethIdentity10779(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1077:9::/64")
+	cfg := store.ActiveConfig()
+	d := &Daemon{}
+	raConfigs := d.buildRAConfigs(cfg)
+	if len(raConfigs) != 1 {
+		t.Fatalf("buildRAConfigs returned %d interfaces, want 1", len(raConfigs))
+	}
+	sharedSource := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, 1).String()
+	if raConfigs[0].SourceLinkLocal != sharedSource {
+		t.Fatalf("test config source = %q, want shared source %q",
+			raConfigs[0].SourceLinkLocal, sharedSource)
+	}
+
+	perNode := *raConfigs[0]
+	perNode.Interface = "ge-7-0-0.50"
+	perNode.SourceLinkLocal = "fe80::face"
+	got := startupGoodbyeConfigs(cfg, 1, []*config.RAInterfaceConfig{raConfigs[0], &perNode})
+	if len(got) != 1 || got[0] != &perNode {
+		t.Fatalf("startup goodbye targets = %v, want only per-node source %q",
+			got, perNode.SourceLinkLocal)
+	}
+}
+
+func TestDemotionStopsOnlySharedSourceRAWithoutGoodbye10779(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1077:9::/64")
+	cfg := store.ActiveConfig()
+	d := &Daemon{}
+	raConfigs := d.buildRAConfigs(cfg)
+	perNode := *raConfigs[0]
+	perNode.Interface = "ge-7-0-0.50"
+	perNode.SourceLinkLocal = "fe80::face"
+	allRA := append(raConfigs, &perNode)
+
+	clearer := &sharedLLClearSpy10779{}
+	if err := clearRethRASendersWithoutGoodbye(clearer, cfg, 1, allRA); err != nil {
+		t.Fatalf("clear demoted RG senders: %v", err)
+	}
+	if len(clearer.calls) != 1 {
+		t.Fatalf("scoped clear calls = %d, want 1", len(clearer.calls))
+	}
+	if !reflect.DeepEqual(clearer.calls[0], []string{raConfigs[0].Interface}) {
+		t.Fatalf("cleared interfaces = %v, want only shared source %s",
+			clearer.calls[0], raConfigs[0].Interface)
 	}
 }

@@ -981,6 +981,54 @@ func (m *Manager) WithdrawInterfaces(names []string) {
 	}
 }
 
+// ClearInterfacesWithoutGoodbye stops only the named senders without emitting
+// lifetime-0 RAs. HA ownership moves use this when the router identity remains
+// present on the peer; other interfaces and their senders are untouched.
+func (m *Manager) ClearInterfacesWithoutGoodbye(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+
+	m.mu.Lock()
+	seen := make(map[string]struct{}, len(names))
+	var owned []ownedDrain
+	for _, name := range names {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		m.bumpIfaceEpoch(name)
+		if s, ok := m.senders[name]; ok {
+			delete(m.senders, name)
+			m.draining[name] = &drainEntry{sender: s, cfg: s.cfg}
+			s.signalStop(modeHard)
+			owned = append(owned, ownedDrain{name: name, s: s})
+			delete(m.goodbyeOwed, name)
+			continue
+		}
+		if _, draining := m.draining[name]; !draining {
+			// A prior graceful attempt is no longer relevant after ownership
+			// moved to a peer advertising the same router identity.
+			delete(m.goodbyeOwed, name)
+		}
+	}
+	epoch := m.epoch
+	m.mu.Unlock()
+
+	var errs []error
+	for _, o := range owned {
+		if err := m.releaseDrain(o.name, o.s, epoch, nil); err != nil {
+			errs = append(errs, err)
+		}
+		m.mu.Lock()
+		if _, draining := m.draining[o.name]; !draining {
+			delete(m.goodbyeOwed, o.name)
+		}
+		m.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
 // claimGracefulLocked records the graceful withdrawal intent for each named
 // interface UNDER m.mu, and returns only the interfaces THIS Withdraw owns the
 // join+release for. Per interface (atomic under m.mu — #2033 MAJOR 2):
