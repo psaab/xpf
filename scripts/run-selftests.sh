@@ -278,6 +278,14 @@ fi
 hdr "shell self-tests"
 run_shell scripts/image/test-grow-root.sh
 run_shell scripts/dist/selftest.sh
+# #10747: image day-0 state and Debian maintainer-script regressions. These
+# hermetic shell tests were on disk but absent from the runner and census.
+run_bash test/image/day0-configdb-guard-test.sh
+run_shell test/debian/postinst-test.sh
+run_shell test/debian/postrm-test.sh
+run_shell test/debian/preinst-besteffort-test.sh
+run_shell test/debian/preinst-migrate-test.sh
+run_shell test/debian/preinst-safe-segment-test.sh
 # #7423: the mutation harness's scoring library. Hermetic (fixture logs). The
 # refusal cell is the one that matters -- a runner that gates in one language
 # scores every cross-language mutation as an ESCAPE, which is a claim that the
@@ -547,7 +555,7 @@ fi
 #
 # The defect was not "one script was forgotten" -- it was that NOTHING NOTICED.
 # The inline block that used to live here globbed ONE location
-# (test/incus/*-selftest.sh); the extracted census covers all six self-test
+# (test/incus/*-selftest.sh); the extracted census covers all eight self-test
 # locations plus the §4 odd-name exact set and the §3 __main__ guard, with
 # its own self-test (test/incus/selftest-census-selftest.sh) proving each
 # failure direction. `sh` is correct: the census declares #!/bin/sh and is

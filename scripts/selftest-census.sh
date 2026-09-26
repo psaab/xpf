@@ -4,10 +4,11 @@
 # WHAT IT ASSERTS
 #
 #   1. Every self-test on disk is INVOKED by scripts/run-selftests.sh, across
-#      all six locations that carry them (not just test/incus/):
+#      all eight locations that carry them (not just test/incus/):
 #        test/incus/*-selftest.sh  test/xsk-repro/selftest*.sh
 #        test/routing/selftest*.sh test/mutation/selftest*.sh
 #        scripts/*selftest*.sh     scripts/docs/*selftest*.sh
+#        test/image/*-test.sh      test/debian/*-test.sh
 #      Registration is a `run_bash <path>` / `run_shell <path>` call in the
 #      runner with comments stripped (a bare filename mention would be
 #      satisfied by a comment naming the script — the shape where a
@@ -74,7 +75,7 @@ FAIL=0
 note_fail() { echo "  FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 note_pass() { echo "  PASS: $*"; }
 
-SELFTEST_GLOBS="test/incus/*-selftest.sh test/xsk-repro/selftest*.sh test/routing/selftest*.sh test/mutation/selftest*.sh scripts/*selftest*.sh scripts/docs/*selftest*.sh"
+SELFTEST_GLOBS="test/incus/*-selftest.sh test/xsk-repro/selftest*.sh test/routing/selftest*.sh test/mutation/selftest*.sh scripts/*selftest*.sh scripts/docs/*selftest*.sh test/image/*-test.sh test/debian/*-test.sh"
 PY_GLOBS="scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py"
 ODD_SET="scripts/dist/selftest.sh scripts/image/test-grow-root.sh test/incus/wire-policy-deny.sh test/incus/wire-appmatch-twins.sh test/incus/wire-zone-matrix.sh test/incus/wire-hostinbound-deny.sh test/incus/wire-conntrack-lifecycle.sh test/incus/wire-routing-separation.sh"
 POSITIVE_CONTROL="test/incus/harness-result-selftest.sh"
@@ -82,7 +83,7 @@ POSITIVE_CONTROL="test/incus/harness-result-selftest.sh"
 runner_code=$(sed 's/#.*//' "$RUNNER")
 
 # ── 1. discovery: every self-test invoked ──
-echo "selftest census: discovery over 6 globs"
+echo "selftest census: discovery over 8 globs"
 discovered=""
 discovered_n=0
 set -f

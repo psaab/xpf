@@ -31,13 +31,20 @@ stamp_clean() {
 	local fix="$1"
 	mkdir -p "$fix/test/incus" "$fix/test/xsk-repro" "$fix/test/routing" \
 		"$fix/test/mutation" "$fix/scripts/docs" "$fix/scripts/image" \
-		"$fix/scripts/dist" "$fix/scripts/deploy"
+		"$fix/scripts/dist" "$fix/scripts/deploy" "$fix/test/image" \
+		"$fix/test/debian"
 	echo '#!/bin/sh' >"$fix/test/incus/a-selftest.sh"
 	echo '#!/bin/sh' >"$fix/test/xsk-repro/selftest-a.sh"
 	echo '#!/bin/sh' >"$fix/test/routing/selftest-a.sh"
 	echo '#!/bin/sh' >"$fix/test/mutation/selftest-a.sh"
 	echo '#!/bin/sh' >"$fix/scripts/selftest-a.sh"
 	echo '#!/bin/sh' >"$fix/scripts/docs/selftest-a.sh"
+	echo '#!/usr/bin/env bash' >"$fix/test/image/day0-configdb-guard-test.sh"
+	echo '#!/bin/sh' >"$fix/test/debian/postinst-test.sh"
+	echo '#!/bin/sh' >"$fix/test/debian/postrm-test.sh"
+	echo '#!/bin/sh' >"$fix/test/debian/preinst-besteffort-test.sh"
+	echo '#!/bin/sh' >"$fix/test/debian/preinst-migrate-test.sh"
+	echo '#!/bin/sh' >"$fix/test/debian/preinst-safe-segment-test.sh"
 	echo '#!/bin/sh' >"$fix/test/incus/harness-result-selftest.sh"
 	for d in image dist deploy; do
 		printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/$d/test_a.py"
@@ -54,6 +61,12 @@ run_bash scripts/selftest-a.sh
 run_bash scripts/docs/selftest-a.sh
 run_shell scripts/dist/selftest.sh
 run_shell scripts/image/test-grow-root.sh
+run_bash test/image/day0-configdb-guard-test.sh
+run_shell test/debian/postinst-test.sh
+run_shell test/debian/postrm-test.sh
+run_shell test/debian/preinst-besteffort-test.sh
+run_shell test/debian/preinst-migrate-test.sh
+run_shell test/debian/preinst-safe-segment-test.sh
 run_bash test/incus/wire-policy-deny.sh --selftest
 run_bash test/incus/wire-appmatch-twins.sh --selftest
 run_bash test/incus/wire-zone-matrix.sh --selftest
@@ -85,6 +98,30 @@ else
 	case "$out" in
 	*"test/xsk-repro/selftest-a.sh"*) ok "unregistered self-test fails, naming the file" ;;
 	*) bad "unregistered failure did not name the file: $out" ;;
+	esac
+fi
+# ── 2b. all six issue #10747 tests must be registered ──
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+sed -i '/test\/image\/day0-configdb-guard-test.sh/d; /test\/debian\/postinst-test.sh/d; /test\/debian\/postrm-test.sh/d; /test\/debian\/preinst-besteffort-test.sh/d; /test\/debian\/preinst-migrate-test.sh/d; /test\/debian\/preinst-safe-segment-test.sh/d' "$fix/runner.sh"
+if out=$(run_census "$fix"); then
+	bad "unregistered #10747 tests passed the census"
+else
+	case "$out" in
+	*"test/image/day0-configdb-guard-test.sh"*"test/debian/postinst-test.sh"*"test/debian/postrm-test.sh"*"test/debian/preinst-besteffort-test.sh"*"test/debian/preinst-migrate-test.sh"*"test/debian/preinst-safe-segment-test.sh"*) ok "all six unregistered #10747 tests fail, naming each file" ;;
+	*) bad "unregistered #10747 failure did not name all six files: $out" ;;
+	esac
+fi
+
+# ── 2c. reverting #10747's two census globs is RED ──
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+mutated="$WORK/selftest-census-without-image-debian-globs.sh"
+sed 's# test/image/.*-test.sh test/debian/.*-test.sh##' "$CENSUS" >"$mutated"
+if out=$(SELFTEST_CENSUS_ROOT="$fix" SELFTEST_CENSUS_RUNNER=runner.sh sh "$mutated" 2>&1); then
+	bad "census with reverted #10747 globs passed"
+else
+	case "$out" in
+	*"test/image/day0-configdb-guard-test.sh"*"test/debian/postinst-test.sh"*"test/debian/postrm-test.sh"*"test/debian/preinst-besteffort-test.sh"*"test/debian/preinst-migrate-test.sh"*"test/debian/preinst-safe-segment-test.sh"*) ok "reverting #10747 globs is RED, naming all six tests" ;;
+	*) bad "reverted-glob failure did not name all six tests: $out" ;;
 	esac
 fi
 
