@@ -72,6 +72,19 @@ pub(crate) fn extract_screen_info(
     dst_port: u16,
     l3_offset: usize,
 ) -> Result<ScreenPacketInfo, ScreenParseError> {
+    // #10729 X2-F6: a v6 chain sighting AH screens as AH (proto 51, no L4),
+    // symmetric with v4 where AH is terminal. Without this the inner TCP
+    // tuple/flags/seq would feed port/scan/flood screens exactly like
+    // cleartext — the same alias the session/policy path just closed.
+    let (protocol, tcp_flags, src_port, dst_port) = if crate::afxdp::frame::ipv6_ah_sighted(
+        frame,
+        addr_family,
+        l3_offset,
+    ) {
+        (crate::ip_proto::PROTO_AH, 0, 0, 0)
+    } else {
+        (protocol, tcp_flags, src_port, dst_port)
+    };
     let mut info = ScreenPacketInfo {
         addr_family,
         protocol,

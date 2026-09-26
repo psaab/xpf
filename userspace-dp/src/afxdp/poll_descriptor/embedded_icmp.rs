@@ -427,6 +427,9 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
         gated_zone_override,
         resolution.egress_ifindex,
     );
+    // #10729 X2-F6: same effective-proto-51 substitution as the transit
+    // flowless arms (identity today: prebuilts carry no AH).
+    let policy_proto = crate::afxdp::frame::flowless_effective_protocol(queued_frame, policy_meta);
     let policy_result = if resolution.disposition == ForwardingDisposition::ForwardCandidate {
         crate::policy::evaluate_policy_result_l3_aware(
             &worker_ctx.forwarding.policy,
@@ -434,7 +437,7 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
             to_zone_id,
             policy_flow.src_ip,
             policy_flow.dst_ip,
-            policy_flow.forward_key.protocol,
+            policy_proto,
             0,
             0,
             super::policy_packet_icmp(queued_frame, policy_meta),

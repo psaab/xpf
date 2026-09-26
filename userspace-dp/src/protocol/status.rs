@@ -144,6 +144,10 @@ pub(crate) struct ProcessStatus {
     /// `default`ed (#1961), so an older helper that does not emit it decodes 0.
     #[serde(rename = "nat64_frag_cross_domain_misses_total", default)]
     pub nat64_frag_cross_domain_misses_total: u64,
+    /// #10729 X2-F6: v6 chains declined to flowless for sighting AH.
+    /// Additive + `default`ed (#1961).
+    #[serde(rename = "ipv6_ah_flowless_total", default)]
+    pub ipv6_ah_flowless_total: u64,
     /// #7056: the sibling leg — same domain, PROTOCOL alias (TCP vs UDP on one
     /// `(src, dst, ident)`). Distinct from the cross-domain counter on purpose.
     /// Additive + `default`ed (#1961).

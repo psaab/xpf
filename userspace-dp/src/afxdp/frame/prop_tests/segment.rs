@@ -70,11 +70,14 @@ struct ExpectedTuple {
 }
 
 fn expected_tuple(pkt: &ValidPacket, nat: NatDecision) -> ExpectedTuple {
+    // #10729 X2-F6: port rewrites strip through AH (ICV break); address
+    // rewrites still land. The oracle must expect original ports there.
+    let ah = crate::afxdp::frame::ipv6_ah_sighted(&pkt.frame, pkt.addr_family, pkt.l3);
     ExpectedTuple {
         src_ip: nat.rewrite_src.unwrap_or(pkt.src_ip),
         dst_ip: nat.rewrite_dst.unwrap_or(pkt.dst_ip),
-        src_port: nat.rewrite_src_port.unwrap_or(pkt.src_port),
-        dst_port: nat.rewrite_dst_port.unwrap_or(pkt.dst_port),
+        src_port: if ah { pkt.src_port } else { nat.rewrite_src_port.unwrap_or(pkt.src_port) },
+        dst_port: if ah { pkt.dst_port } else { nat.rewrite_dst_port.unwrap_or(pkt.dst_port) },
     }
 }
 

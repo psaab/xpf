@@ -89,6 +89,14 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"bearing the identity of a datagram admitted in another.",
 		nil, nil,
 	)
+	c.userspaceIPv6AHFlowlessTotal = prometheus.NewDesc(
+		"xpf_userspace_ipv6_ah_flowless_total",
+		"#10729 X2-F6: v6 chains declined to flowless for sighting an "+
+			"Authentication Header (classified as AH, not the inner protocol, "+
+			"symmetric with v4). Previously such packets minted TCP sessions "+
+			"aliased with cleartext and matched port-bearing policy.",
+		nil, nil,
+	)
 	c.userspaceNAT64FragProtocolAliasMisses = prometheus.NewDesc(
 		"xpf_userspace_nat64_frag_protocol_alias_misses_total",
 		"#7056: the sibling of the cross-domain series — a same-datagram "+

@@ -123,11 +123,14 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     if flow.forward_key.src_port == 0 && flow.forward_key.dst_port == 0 {
         extra.ports_unknown = true;
     }
+    // #10729 X2-F6: a v6 chain sighting AH steers as proto 51 (identity for
+    // flow-backed callers: they never sight AH, since AH packets are flowless).
+    let eval_protocol = crate::afxdp::frame::flowless_effective_protocol(frame, meta);
     let routing_result = match crate::filter::evaluate_filter_ref_routing_instance_event_counted(
         filter,
         flow.src_ip,
         flow.dst_ip,
-        meta.protocol,
+        eval_protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,

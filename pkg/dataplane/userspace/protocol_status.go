@@ -480,6 +480,10 @@ type ProcessStatus struct {
 	// the TRAFFIC rather than cache pressure.
 	NAT64FragCrossDomainMissesTotal uint64 `json:"nat64_frag_cross_domain_misses_total,omitempty"`
 
+	// IPv6AHFlowlessTotal is #10729 X2-F6: v6 chains declined to flowless
+	// for sighting AH (classified as AH, not the inner protocol).
+	IPv6AHFlowlessTotal uint64 `json:"ipv6_ah_flowless_total,omitempty"`
+
 	// NAT64FragProtocolAliasMissesTotal is #7056's sibling leg: same ingress
 	// domain, different upper-layer protocol — a TCP and a UDP datagram that
 	// collided on (src, dst, ident) and were separated by the #5798 `protocol`

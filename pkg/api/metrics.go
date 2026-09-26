@@ -557,6 +557,7 @@ type xpfCollector struct {
 	// exhaustion.
 	userspaceInterfaceSNATPATCollisions   *prometheus.Desc
 	userspaceNAT64FragCrossDomainMisses   *prometheus.Desc
+	userspaceIPv6AHFlowlessTotal          *prometheus.Desc
 	userspaceNAT64FragProtocolAliasMisses *prometheus.Desc
 	// #9901: packet-identity counters — absolute-lifetime frag evictions
 	// (F-010), unknown-MTU fail-open forwards (F-074), subminimal-quote
@@ -1166,6 +1167,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceNatReverseKeySharedDisplacements
 	ch <- c.userspaceInterfaceSNATPATCollisions
 	ch <- c.userspaceNAT64FragCrossDomainMisses
+	ch <- c.userspaceIPv6AHFlowlessTotal
 	ch <- c.userspaceNAT64FragProtocolAliasMisses
 	ch <- c.userspaceFragMaxLifetimeEvictions
 	ch <- c.userspaceEgressMTUUnknownForward

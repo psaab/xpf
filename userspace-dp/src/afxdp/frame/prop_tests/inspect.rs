@@ -136,9 +136,16 @@ proptest! {
         prop_assert_eq!(rel, pkt.rel_l4);
         prop_assert_eq!(walked_proto, pkt.protocol);
 
-        // Meta-consistent parse.
+        // Meta-consistent parse. #10729 X2-F6: an AH-bearing chain is
+        // flowless by design (AH identity, not the inner tuple) — the
+        // authoritative walk is the oracle for what counts as AH-bearing.
+        let has_ah = walk_ipv6_ext_chain(&pkt.frame, pkt.l3).ah_present;
         let flow = parse_session_flow_from_bytes(&pkt.frame, pkt.meta);
-        prop_assert_eq!(flow.as_ref(), Some(&expected));
+        if has_ah {
+            prop_assert_eq!(flow, None);
+        } else {
+            prop_assert_eq!(flow.as_ref(), Some(&expected));
+        }
 
         // Frame-led parse: tuple + offsets zeroed, family/protocol
         // retained (the shim always stamps those).
@@ -151,7 +158,11 @@ proptest! {
         blank.flow_src_addr = [0u8; 16];
         blank.flow_dst_addr = [0u8; 16];
         let frame_led = parse_session_flow_from_bytes(&pkt.frame, blank);
-        prop_assert_eq!(frame_led.as_ref(), Some(&expected));
+        if has_ah {
+            prop_assert_eq!(frame_led, None);
+        } else {
+            prop_assert_eq!(frame_led.as_ref(), Some(&expected));
+        }
 
         // Destination reader agrees with the tuple.
         prop_assert_eq!(
@@ -320,9 +331,13 @@ fn pin_ext_walk_mixed_chain_exact_offset() {
         packet_rel_l4_offset_and_protocol(&pkt.frame[pkt.l3..], AF6).expect("walk");
     assert_eq!((rel, proto), (expected_rel, PROTO_UDP));
     assert_eq!(frame_l4_offset(&pkt.frame, AF6), Some(pkt.l3 + expected_rel));
-    // And the flow parses through the chain.
-    let flow = parse_session_flow_from_bytes(&pkt.frame, pkt.meta).expect("flow");
-    assert_eq!(flow, pkt.session_flow());
+    // #10729 X2-F6: the chain sights AH, so no ported flow is minted
+    // (offset resolution above is unchanged — traversal preserved).
+    assert_eq!(
+        parse_session_flow_from_bytes(&pkt.frame, pkt.meta),
+        None,
+        "AH-sighted chain must be flowless"
+    );
 }
 
 /// No-next-header (59) pin: the walk refuses to produce an L4 offset.

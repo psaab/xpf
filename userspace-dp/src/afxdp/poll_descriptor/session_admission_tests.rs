@@ -485,4 +485,27 @@ mod tcp_syn_check_tests {
             "a RST on an existing session tears it down in place, never dropped as a miss"
         );
     }
+
+    // #10729 X2-F6 RED cell 4: the SYN gate never drops AH — effective
+    // proto 51 is non-TCP under every knob combination, so a v6+AH
+    // non-SYN is not strict-dropped as a TCP miss (and AH seeds no TCP
+    // session: flowless packets carry no install key).
+    #[test]
+    fn ah_protocol_never_drops_at_syn_gate_10729() {
+        for flags in [TCP_SYN, TCP_ACK, TCP_ACK | TCP_PSH, TCP_FIN, 0] {
+            for (no_syn, strict) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                assert!(
+                    !strict_syn_check_drops_new_flow(
+                        crate::ip_proto::PROTO_AH,
+                        flags,
+                        no_syn,
+                        strict
+                    ),
+                    "proto AH flags 0x{flags:02x} (no_syn={no_syn}, strict={strict}) must never drop"
+                );
+            }
+        }
+    }
 }

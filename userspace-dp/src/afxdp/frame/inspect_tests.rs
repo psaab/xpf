@@ -1641,3 +1641,98 @@ fn ipv6_mapped_compat_ingress_predicate_boundaries_10686() {
         libc::AF_INET6 as u8
     ));
 }
+
+/// Build a v6+AH+TCP frame: eth(14) + IPv6(40, nexthdr=51) + AH(12:
+/// next=6, len=1) + minimal TCP header(20) with the given ports/flags.
+fn v6_ah_tcp_frame(src_port: u16, dst_port: u16, flags: u8) -> Vec<u8> {
+    let mut tcp = vec![0u8; 20];
+    tcp[0..2].copy_from_slice(&src_port.to_be_bytes());
+    tcp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    tcp[13] = flags;
+    let mut l4 = vec![6u8, 1u8];
+    l4.extend_from_slice(&[0u8; 10]);
+    l4.extend_from_slice(&tcp);
+    v6_frame(crate::ip_proto::PROTO_AH, (l4.len()) as u16, &l4)
+}
+
+fn v6_ah_meta_inner() -> UserspaceDpMeta {
+    UserspaceDpMeta {
+        addr_family: libc::AF_INET6 as u8,
+        // As the shim stamps it post-walk: the INNER protocol + tuple.
+        protocol: 6,
+        l3_offset: 14,
+        l4_offset: 14 + 40 + 12,
+        flow_src_port: 0x1111,
+        flow_dst_port: 0x2222,
+        ..UserspaceDpMeta::default()
+    }
+}
+
+// #10729 X2-F6 RED cell 1: v6+AH+TCP must NOT mint a ported flow — it is
+// flowless (None), symmetric with v4+AH. Pre-fix this returned Some(TCP).
+#[test]
+fn v6_ah_tcp_session_flow_is_flowless_10729() {
+    let frame = v6_ah_tcp_frame(0x1111, 0x2222, 0x02);
+    assert_eq!(
+        parse_session_flow_from_bytes(&frame, v6_ah_meta_inner()),
+        None,
+        "v6+AH+TCP must be flowless (AH identity), not a TCP flow"
+    );
+    // Control: the same TCP tuple WITHOUT AH mints a flow.
+    let mut tcp = vec![0u8; 20];
+    tcp[0..2].copy_from_slice(&0x1111u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&0x2222u16.to_be_bytes());
+    let plain = v6_frame(6, tcp.len() as u16, &tcp);
+    let mut meta = v6_ah_meta_inner();
+    meta.l4_offset = 14 + 40;
+    assert!(
+        parse_session_flow_from_bytes(&plain, meta).is_some(),
+        "plain v6 TCP control must still mint a flow"
+    );
+}
+
+// #10729 X2-F6: AH behind another extension header (HbH→AH→TCP) is still
+// sighted; ESP stays flowless via its pre-existing terminal path.
+#[test]
+fn v6_ah_sighting_covers_chained_and_esp_controls_10729() {
+    // HbH(8B: next=51, len=0) → AH(12B: next=6) → TCP.
+    let mut l4 = vec![51u8, 0u8];
+    l4.extend_from_slice(&[0u8; 6]);
+    l4.extend_from_slice(&[6u8, 1u8]);
+    l4.extend_from_slice(&[0u8; 10]);
+    l4.extend_from_slice(&[0x11u8; 20]);
+    let frame = v6_frame(0, l4.len() as u16, &l4);
+    assert!(
+        ipv6_ah_sighted(&frame, libc::AF_INET6 as u8, 14),
+        "AH behind HbH must be sighted"
+    );
+    // DestOpt(8B) → HbH(8B) → AH(12B): AH at depth 2 is still sighted.
+    let mut deep = vec![0u8, 0u8];
+    deep.extend_from_slice(&[0u8; 6]);
+    deep.extend_from_slice(&[51u8, 0u8]);
+    deep.extend_from_slice(&[0u8; 6]);
+    deep.extend_from_slice(&[6u8, 1u8]);
+    deep.extend_from_slice(&[0u8; 10]);
+    deep.extend_from_slice(&[0x11u8; 20]);
+    let deep_frame = v6_frame(60, deep.len() as u16, &deep);
+    assert!(
+        ipv6_ah_sighted(&deep_frame, libc::AF_INET6 as u8, 14),
+        "AH at depth 2 must be sighted"
+    );
+    // Truncated AH header (declared but unreadable): not sighted — the
+    // Truncated outcome fails closed downstream instead.
+    let trunc = vec![6u8];
+    let trunc_frame = v6_frame(51, trunc.len() as u16, &trunc);
+    assert!(
+        !ipv6_ah_sighted(&trunc_frame, libc::AF_INET6 as u8, 14),
+        "unreadable AH header must not count as sighted"
+    );
+    assert!(
+        !ipv6_ah_sighted(&v6_frame(6, 20, &[0x11u8; 20]), libc::AF_INET6 as u8, 14),
+        "terminal-first TCP must skip the walk (no AH)"
+    );
+    assert!(
+        !ipv6_ah_sighted(&v6_frame(50, 20, &[0x11u8; 20]), libc::AF_INET6 as u8, 14),
+        "ESP is terminal, never AH-sighted"
+    );
+}

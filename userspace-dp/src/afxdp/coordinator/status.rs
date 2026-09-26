@@ -463,6 +463,12 @@ impl super::Coordinator {
         crate::fragment_assoc::NAT64_FRAG_CROSS_DOMAIN_MISSES.load(Ordering::Relaxed)
     }
 
+    /// #10729 X2-F6: v6 chains declined to flowless for sighting AH.
+    /// Surfaced as `xpf_userspace_ipv6_ah_flowless_total`.
+    pub fn ipv6_ah_flowless_total(&self) -> u64 {
+        crate::afxdp::frame::IPV6_AH_FLOWLESS_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #7056: the sibling leg — same ingress domain, different upper-layer
     /// protocol, i.e. a TCP and a UDP datagram that collided on
     /// `(src, dst, ident)` and were separated by the #5798 `protocol` key

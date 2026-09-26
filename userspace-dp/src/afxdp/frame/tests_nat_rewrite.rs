@@ -2070,3 +2070,81 @@ fn nat64_8896_encapsulates_the_reverse_v4_to_v6_direction() {
         "#8896 reverse: outer destination must be the tunnel endpoint's"
     );
 }
+
+// #10729 X2-F6 RED cell 6: MSS clamp must not rewrite through AH. A v6+AH+TCP
+// SYN carrying MSS 1460 with selected MSS 536 must keep its MSS bytes after
+// the in-place rewrite (any rewrite breaks the AH ICV). Pre-fix the inner
+// TCP was clamped exactly like cleartext.
+#[test]
+fn rewrite_in_place_leaves_mss_untouched_through_ah_10729() {
+    let src_ip = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+    let dst_ip = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        0,
+        0x86dd,
+    );
+    // IPv6 base header, nexthdr = AH(51), payload = AH(12) + TCP(24).
+    frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00, 0x00, 36, 51, 64]);
+    frame.extend_from_slice(&src_ip.octets());
+    frame.extend_from_slice(&dst_ip.octets());
+    // AH header: next = TCP(6), len = 1 ((1+2)*4 = 12 bytes).
+    frame.extend_from_slice(&[6, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2]);
+    // TCP SYN with MSS option (kind=2, len=4, value=1460).
+    let mut tcp = vec![0u8; 24];
+    tcp[0..2].copy_from_slice(&12345u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+    tcp[13] = 0x02;
+    tcp[12] = 0x60; // data offset: 24-byte header (MSS option present)
+    tcp[20..24].copy_from_slice(&[2, 4, 0x05, 0xb4]);
+    frame.extend_from_slice(&tcp);
+
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(0, frame.len())
+        .expect("slice")
+        .copy_from_slice(&frame);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 14 + 40 + 12,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        tcp_flags: 0x02,
+        ..UserspaceDpMeta::default()
+    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(dst_ip)),
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let rewrite_result = rewrite_forwarded_frame_in_place(
+        &area,
+        XdpDesc { addr: 0, len: frame.len() as u32, options: 0 },
+        meta,
+        &decision,
+        false,
+        None,
+        536,
+    )
+    .expect("in-place v6+AH forward");
+    let out = area
+        .slice(rewrite_result.offset as usize, rewrite_result.len as usize)
+        .expect("rewritten frame");
+    // TCP header starts at 14 + 40 + 12 = 66; MSS value at +20.
+    assert_eq!(
+        &out[66 + 20..66 + 24],
+        &[2, 4, 0x05, 0xb4],
+        "MSS must be untouched through AH (ICV break otherwise)"
+    );
+}

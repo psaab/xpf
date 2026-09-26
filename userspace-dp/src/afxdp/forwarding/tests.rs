@@ -7305,3 +7305,125 @@ fn subnet_router_anycast_v6_prefix_len_guards_10692() {
         assert_eq!(resolved.egress_ifindex, ifindex);
     }
 }
+
+/// Minimal v6+AH+TCP frame for #10729 X2-F6 parity cells: eth(14) +
+/// IPv6(40, nexthdr=51) + AH(12: next=6) + TCP(20).
+fn v6_ah_tcp_frame_10729() -> Vec<u8> {
+    let mut frame = vec![0u8; 14 + 40 + 12 + 20];
+    frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    frame[14] = 0x60;
+    frame[20] = 51;
+    frame[54] = 6;
+    frame[55] = 1;
+    frame
+}
+
+fn v6_ah_meta_10729() -> crate::afxdp::types::UserspaceDpMeta {
+    crate::afxdp::types::UserspaceDpMeta {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        l3_offset: 14,
+        l4_offset: 14 + 40 + 12,
+        ..crate::afxdp::types::UserspaceDpMeta::default()
+    }
+}
+
+fn ah_parity_rule(name: &str, apps: Vec<String>, terms: Vec<crate::PolicyApplicationSnapshot>, action: &str) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: name.to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: apps,
+        application_terms: terms,
+        action: action.to_string(),
+        ..Default::default()
+    }
+}
+
+fn ah_term(name: &str, protocol: &str, dst_port: &str) -> crate::PolicyApplicationSnapshot {
+    crate::PolicyApplicationSnapshot {
+        name: name.to_string(),
+        protocol: protocol.to_string(),
+        source_port: String::new(),
+        destination_port: dst_port.to_string(),
+        icmp_type: None,
+        icmp_code: None,
+        inactivity_timeout: None,
+    }
+}
+
+// #10729 X2-F6 RED cell 2: v6+AH+TCP verdicts are identical to v4+AH under
+// every policy shape — port terms fail closed for both, `ah` terms match
+// both. Pre-fix the v6 side evaluated as inner-TCP (permit on port terms,
+// no-match on `ah` terms), opposite to v4 in both directions.
+#[test]
+fn v6_ah_policy_parity_with_v4_ah_10729() {
+    use crate::policy::{evaluate_policy_result_l3_aware, parse_policy_state, PolicyAction};
+    use rustc_hash::FxHashMap;
+    use std::net::IpAddr;
+    let mut zones = FxHashMap::default();
+    zones.insert("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID);
+    zones.insert("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID);
+    let v4_src: IpAddr = "192.0.2.1".parse().unwrap();
+    let v4_dst: IpAddr = "192.0.2.2".parse().unwrap();
+    let v6_src: IpAddr = "2001:db8::1".parse().unwrap();
+    let v6_dst: IpAddr = "2001:db8::2".parse().unwrap();
+    let frame = v6_ah_tcp_frame_10729();
+    let meta = v6_ah_meta_10729();
+    let v6_eff = crate::afxdp::frame::flowless_effective_protocol(&frame, meta);
+    assert_eq!(v6_eff, 51, "v6+AH must evaluate as proto 51");
+
+    let tcp_permit = ah_parity_rule(
+        "tcp-permit", vec!["junos-http".to_string()],
+        vec![ah_term("junos-http", "tcp", "80")], "permit",
+    );
+    let tcp_deny = ah_parity_rule(
+        "tcp-deny", vec!["junos-http".to_string()],
+        vec![ah_term("junos-http", "tcp", "80")], "deny",
+    );
+    let ah_permit = ah_parity_rule(
+        "ah-permit", vec!["ah".to_string()],
+        vec![ah_term("ah", "ah", "")], "permit",
+    );
+    let ah_deny = ah_parity_rule(
+        "ah-deny", vec!["ah".to_string()],
+        vec![ah_term("ah", "ah", "")], "deny",
+    );
+    let any_permit = ah_parity_rule("any", vec!["any".to_string()], vec![], "permit");
+
+    for default_policy in ["deny", "permit"] {
+        for (label, rules) in [
+            ("tcp-port permit", vec![tcp_permit.clone(), any_permit.clone()]),
+            ("tcp-port deny + any permit", vec![tcp_deny.clone(), any_permit.clone()]),
+            ("ah permit", vec![ah_permit.clone()]),
+            ("ah deny", vec![ah_deny.clone()]),
+        ] {
+            let state = parse_policy_state(default_policy, &rules, &zones);
+            let v4 = evaluate_policy_result_l3_aware(
+                &state, crate::test_zone_ids::TEST_LAN_ZONE_ID,
+                crate::test_zone_ids::TEST_WAN_ZONE_ID,
+                v4_src, v4_dst, 51, 0, 0, None, 128, false,
+            );
+            let v6 = evaluate_policy_result_l3_aware(
+                &state, crate::test_zone_ids::TEST_LAN_ZONE_ID,
+                crate::test_zone_ids::TEST_WAN_ZONE_ID,
+                v6_src, v6_dst, v6_eff, 0, 0, None, 128, false,
+            );
+            assert_eq!(
+                v4.action, v6.action,
+                "{label} (default {default_policy}): v4+AH={:?} must equal v6+AH={:?}",
+                v4.action, v6.action,
+            );
+        }
+    }
+    // `ah` terms fire for v6-AH transit (not just parity with v4).
+    let state = parse_policy_state("deny", &[ah_permit], &zones);
+    let v6 = evaluate_policy_result_l3_aware(
+        &state, crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        v6_src, v6_dst, v6_eff, 0, 0, None, 128, false,
+    );
+    assert_eq!(v6.action, PolicyAction::Permit, "`ah` permit must fire for v6-AH transit");
+}
