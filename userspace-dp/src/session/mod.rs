@@ -1138,6 +1138,8 @@ pub(crate) struct PressureShedSession {
     pub(crate) is_reverse: bool,
 }
 
+pub(crate) type PressureShedSessions = SmallVec<[PressureShedSession; 2]>;
+
 pub(crate) struct SessionTable {
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///

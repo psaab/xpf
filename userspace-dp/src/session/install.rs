@@ -71,8 +71,8 @@ impl SessionTable {
         needed: usize,
         protocol: u8,
         tcp_flags: u8,
-    ) -> (bool, Vec<PressureShedSession>) {
-        let mut shed_sessions = Vec::new();
+    ) -> (bool, PressureShedSessions) {
+        let mut shed_sessions = PressureShedSessions::new();
         let high_watermark = self.max_sessions.saturating_sub(self.max_sessions / 10);
         if needed == 0
             || protocol != PROTO_TCP
@@ -101,7 +101,7 @@ impl SessionTable {
     /// reverse companion is present). Returns false when no safe victim remains.
     fn shed_one_opening_flow(
         &mut self,
-        shed_sessions: &mut Vec<PressureShedSession>,
+        shed_sessions: &mut PressureShedSessions,
     ) -> bool {
         loop {
             let Some(key) = self.pressure_shed_openings.keys().next().cloned() else {
