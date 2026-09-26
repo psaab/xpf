@@ -926,33 +926,100 @@ pub(super) fn should_drop_tcp_session_hit_for_flags(
         || lock_shared_recover(shared_forward_wire_sessions).contains_key(key)
 }
 
-pub(super) fn lookup_session_across_scopes_with_shared(
+/// A live closing pair matched by a bare SYN. This is only a probe: the poll
+/// path checks packet authority before deciding whether to miss the session,
+/// and retires the old pair only after the owner's policy permits the packet.
+#[derive(Clone, Debug)]
+pub(super) struct ClosingSynCandidate {
+    pub(super) key: SessionKey,
+    pub(super) metadata: SessionMetadata,
+    pub(super) origin: SessionOrigin,
+}
+
+pub(super) fn probe_closing_syn_candidate(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> Option<ClosingSynCandidate> {
+    if !matches!(key.protocol, crate::ip_proto::PROTO_TCP)
+        || !crate::tcp_flags::is_initial_syn(tcp_flags)
+        || crate::tcp_flags::is_closing(tcp_flags)
+    {
+        return None;
+    }
+    let hit = probe_session_across_scopes(
+        sessions,
+        shared_sessions,
+        shared_forward_wire_sessions,
+        key,
+        now_ns,
+    )?;
+    let canonical_key = hit.key.as_ref(key).clone();
+    let closing = hit
+        .shared_entry
+        .as_ref()
+        .is_some_and(|entry| entry.tcp_close_class != 0)
+        || (hit.shared_entry.is_none()
+            && sessions.is_closing_tcp_pair_for_syn(&canonical_key, tcp_flags));
+    closing.then(|| ClosingSynCandidate {
+        key: canonical_key,
+        metadata: hit.lookup.metadata,
+        origin: hit.origin,
+    })
+}
+
+/// Retire an old closing incarnation after the owner's new-flow policy has
+/// permitted its SYN. A foreign SYN never calls this; ordinary lookups remain
+/// read/refresh-only and cannot evict either local or shared copies.
+pub(super) fn evict_owner_closing_tcp_pair_for_syn(
     sessions: &mut SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
+    tcp_flags: u8,
+) -> bool {
+    let pair = sessions
+        .evict_closing_tcp_pair_for_syn(key, tcp_flags)
+        .or_else(|| {
+            shared_closing_tcp_entry_for_syn(
+                shared_sessions,
+                shared_forward_wire_sessions,
+                key,
+                tcp_flags,
+            )
+        });
+    let Some((forward_key, reverse_key)) = pair else {
+        return false;
+    };
+    retire_shared_tcp_pair_for_syn(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        &forward_key,
+        &reverse_key,
+    );
+    true
+}
+
+pub(super) fn lookup_session_across_scopes_with_shared(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    _shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    _shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
     now_ns: u64,
     tcp_flags: u8,
 ) -> Option<ResolvedSessionLookup> {
-    // #10287: a bare SYN on a live closing tuple is a new incarnation. Evict
-    // the old local pair and stop here: falling through to a shared-map copy
-    // would rematerialize the same dead close state before the miss path can
-    // install the fresh pair.
-    if let Some((forward_key, reverse_key)) =
-        sessions.evict_closing_tcp_pair_for_syn(key, tcp_flags)
-    {
-        retire_shared_tcp_pair_for_syn(
-            shared_sessions,
-            shared_nat_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            &forward_key,
-            &reverse_key,
-        );
-        return None;
-    }
+    // #10886: lookup never evicts a closing pair for a SYN. The poll path
+    // probes it read-only, checks authority, and only retires it after an
+    // owner's new-flow policy permit.
     // #10636: defer TCP close-state until the #9519 authority verdict names
     // the owner (applied by `apply_deferred_owner_close` after an Owner
     // verdict). A foreign RST/FIN must not drive close state it is dropped for.
@@ -993,25 +1060,6 @@ pub(super) fn lookup_session_across_scopes_with_shared(
         }
         LocalExpiryProbe::Stale => return None,
         LocalExpiryProbe::Absent => {}
-    }
-    // A worker may have no local copy while the shared map still carries the
-    // old closing incarnation. Treat that copy the same way: remove it before
-    // the miss path can install a fresh local pair.
-    if let Some((forward_key, reverse_key)) = shared_closing_tcp_entry_for_syn(
-        shared_sessions,
-        shared_forward_wire_sessions,
-        key,
-        tcp_flags,
-    ) {
-        retire_shared_tcp_pair_for_syn(
-            shared_sessions,
-            shared_nat_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            &forward_key,
-            &reverse_key,
-        );
-        return None;
     }
     lookup_shared_session(shared_sessions, key)
         .map(ResolvedSessionLookup::shared)

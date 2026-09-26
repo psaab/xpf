@@ -1367,35 +1367,65 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // pass arms (or the owner-only solicited-reply exemption);
                 // an unproven LocalDelivery therefore cannot select Trusted.
                 let mut host_inbound_gate_proof = false;
-                let mut decision = if let Some(flow) = flow.as_ref() {
-                if let Some(mut resolved) = resolve_flow_session_decision_with_conntrack(
+                // #10886: identify a closing tuple reused by a bare SYN
+                // without mutating local or shared state. An owner takes the
+                // ordinary new-flow policy path; foreign arrivals remain
+                // ordinary session hits and can never retire the pair.
+                let owner_syn_reuse_key = flow.as_ref().and_then(|flow| {
+                    crate::afxdp::shared_ops::probe_closing_syn_candidate(
                         sessions,
-                        binding.bpf_maps.session_map.handle(),
-                        conntrack_v4_fd,
-                        conntrack_v6_fd,
                         worker_ctx.shared_sessions,
-                        worker_ctx.shared_nat_sessions,
                         worker_ctx.shared_forward_wire_sessions,
-                        &worker_ctx.shared_owner_rg_indexes,
-                        worker_ctx.peer_worker_commands,
-                        worker_ctx.forwarding,
-                        worker_ctx.ha_state,
-                        worker_ctx.dynamic_neighbors,
-                        flow,
+                        &flow.forward_key,
                         now_ns,
-                        now_secs,
-                        meta.protocol,
                         meta.tcp_flags,
-                        meta.ingress_ifindex as i32,
-                        // #9383: the arrival VLAN, so the #7169 reverse-session
-                        // synthesis can resolve the LOGICAL unit rather than
-                        // keying `ifindex_to_zone_id` on the raw physical index.
-                        meta.ingress_vlan_id,
-                        packet_fabric_ingress,
-                        fabric_link_ingress,
-                        ha_startup_grace_until_secs,
-                        worker_id,
-                    ) {
+                    )
+                    .filter(|candidate| {
+                        matches!(
+                            session_hit_authority(
+                                worker_ctx.forwarding,
+                                &candidate.metadata,
+                                candidate.origin,
+                                meta,
+                                packet_fabric_ingress,
+                                fabric_arrival_zone,
+                            ),
+                            HitAuthority::Owner
+                        )
+                    })
+                    .map(|candidate| candidate.key)
+                });
+                let owner_syn_reuse = owner_syn_reuse_key.is_some();
+                let mut decision = if let Some(flow) = flow.as_ref() {
+                    if !owner_syn_reuse
+                        && let Some(mut resolved) = resolve_flow_session_decision_with_conntrack(
+                            sessions,
+                            binding.bpf_maps.session_map.handle(),
+                            conntrack_v4_fd,
+                            conntrack_v6_fd,
+                            worker_ctx.shared_sessions,
+                            worker_ctx.shared_nat_sessions,
+                            worker_ctx.shared_forward_wire_sessions,
+                            &worker_ctx.shared_owner_rg_indexes,
+                            worker_ctx.peer_worker_commands,
+                            worker_ctx.forwarding,
+                            worker_ctx.ha_state,
+                            worker_ctx.dynamic_neighbors,
+                            flow,
+                            now_ns,
+                            now_secs,
+                            meta.protocol,
+                            meta.tcp_flags,
+                            meta.ingress_ifindex as i32,
+                            // #9383: the arrival VLAN, so the #7169 reverse-session
+                            // synthesis can resolve the LOGICAL unit rather than
+                            // keying `ifindex_to_zone_id` on the raw physical index.
+                            meta.ingress_vlan_id,
+                            packet_fabric_ingress,
+                            fabric_link_ingress,
+                            ha_startup_grace_until_secs,
+                            worker_id,
+                        ) {
                         // #10597 G5: a queued WireGuard record may only enter
                         // the worker's local-delivery path. Use the pipeline's
                         // final FIB result here (not the ingress interface's
@@ -3661,6 +3691,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 policy_counter_idx: host_policy_counter_idx,
                                 policy_counter: host_policy_counter,
                             };
+                            if owner_syn_reuse {
+                                crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                    sessions,
+                                    worker_ctx.shared_sessions,
+                                    worker_ctx.shared_nat_sessions,
+                                    worker_ctx.shared_forward_wire_sessions,
+                                    &worker_ctx.shared_owner_rg_indexes,
+                                    owner_syn_reuse_key
+                                        .as_ref()
+                                        .expect("owner SYN reuse has a closing candidate"),
+                                    meta.tcp_flags,
+                                );
+                            }
                             if install_helper_local_session_on_miss(
                                 sessions,
                                 binding.bpf_maps.session_map.handle(),
@@ -4148,6 +4191,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // `needed == 0` is the tracking-not-required
                                     // case (DNS fast-path, LocalDelivery): no
                                     // install is attempted and nothing changes.
+                                    if owner_syn_reuse && track_in_userspace {
+                                        crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                            sessions,
+                                            worker_ctx.shared_sessions,
+                                            worker_ctx.shared_nat_sessions,
+                                            worker_ctx.shared_forward_wire_sessions,
+                                            &worker_ctx.shared_owner_rg_indexes,
+                                            owner_syn_reuse_key
+                                                .as_ref()
+                                                .expect("owner SYN reuse has a closing candidate"),
+                                            meta.tcp_flags,
+                                        );
+                                    }
                                     let needed_sessions = usize::from(track_in_userspace)
                                         + usize::from(track_in_userspace && install_local_reverse);
                                     if needed_sessions > 0 && !sessions.can_admit(needed_sessions) {
@@ -5118,6 +5174,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // session for a non-host native delivery; the
                                 // common post-HA gate below recycles it.
                                 if owned_packet_frame.is_some() || !l2_group_unicast_ip {
+                                    if owner_syn_reuse {
+                                        crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                            sessions,
+                                            worker_ctx.shared_sessions,
+                                            worker_ctx.shared_nat_sessions,
+                                            worker_ctx.shared_forward_wire_sessions,
+                                            &worker_ctx.shared_owner_rg_indexes,
+                                            owner_syn_reuse_key
+                                                .as_ref()
+                                                .expect("owner SYN reuse has a closing candidate"),
+                                            meta.tcp_flags,
+                                        );
+                                    }
                                     install_helper_local_session_on_miss(
                                         sessions,
                                         binding.bpf_maps.session_map.handle(),
@@ -8030,6 +8099,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // application timeout on the seed.
                                         seed_inactivity_timeout,
                                     );
+                                    if owner_syn_reuse {
+                                        crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                            sessions,
+                                            worker_ctx.shared_sessions,
+                                            worker_ctx.shared_nat_sessions,
+                                            worker_ctx.shared_forward_wire_sessions,
+                                            &worker_ctx.shared_owner_rg_indexes,
+                                            owner_syn_reuse_key
+                                                .as_ref()
+                                                .expect("owner SYN reuse has a closing candidate"),
+                                            meta.tcp_flags,
+                                        );
+                                    }
                                     let pending_installed = sessions.install_with_protocol_with_origin(
                                         flow.forward_key.clone(),
                                         pending_decision,

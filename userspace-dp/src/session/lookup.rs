@@ -477,21 +477,38 @@ impl SessionTable {
         self.push_to_wheel(&actual_key, now_ns);
     }
 
-    /// #10287: evict a live closing TCP incarnation before admitting a bare
-    /// SYN on the same tuple as a new connection.
+    /// Read-only half of #10886's authorized TCP tuple-reuse path. A bare SYN
+    /// may bypass the old closing session only after the poll path has checked
+    /// its authority; the pair itself is removed later, after policy permits.
+    pub(crate) fn is_closing_tcp_pair_for_syn(&self, key: &SessionKey, tcp_flags: u8) -> bool {
+        if !matches!(key.protocol, PROTO_TCP)
+            || !is_initial_syn(tcp_flags)
+            || is_closing(tcp_flags)
+        {
+            return false;
+        }
+        let Some((handle, via_alias)) = self.resolve_lookup_handle(key) else {
+            return false;
+        };
+        let Some(record) = self.entries.get(handle as usize) else {
+            return false;
+        };
+        Self::lookup_record_matches_key(record, key, via_alias) && record.entry.closing
+    }
+
+    /// #10287/#10886: evict a live closing TCP incarnation after an authorized
+    /// bare SYN has passed the owner's new-flow policy.
     ///
-    /// A closing entry is the old connection's state. Reusing that entry would
-    /// preserve its sticky close/reset/FIN bits and short reap window, so the
-    /// new connection would be reaped while its endpoints still consider it
-    /// established. Remove both local halves instead and let the normal
-    /// session-miss path install a fresh pair (new ids, OPENING timeout, and
-    /// the ordinary handshake promotion).
+    /// Reusing the old entry would preserve its sticky close/reset/FIN bits and
+    /// short reap window, so the admitted replacement would be reaped while its
+    /// endpoints still consider it established. Remove both local halves and
+    /// let the normal miss path install a fresh pair (new ids, OPENING timeout,
+    /// and the ordinary handshake promotion).
     ///
     /// This is deliberately limited to an initial bare SYN. A SYN-ACK is a
     /// retransmission of the old handshake and all non-SYN packets retain the
     /// existing close/TIME-WAIT behavior. On success, returns the exact
-    /// `(forward_key, reverse_key)` pair so callers with shared-map access can
-    /// retire every old alias before the miss path runs.
+    /// `(forward_key, reverse_key)` pair so the caller can retire shared copies.
     pub(crate) fn evict_closing_tcp_pair_for_syn(
         &mut self,
         key: &SessionKey,
