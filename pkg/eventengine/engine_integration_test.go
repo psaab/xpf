@@ -627,9 +627,9 @@ func TestQueue_HeldLockPastDeadlineDrops(t *testing.T) {
 	}
 }
 
-// #2157 concurrency: many probe goroutines firing distinct policies must all
-// serialize through the single worker with no race and each committing once.
-// Run with -race to catch a regression to the per-probe EnterConfigure race.
+// #2157 concurrency: many probe goroutines firing distinct policies serialize
+// through the worker. The #10871 global budget admits only four commits in the
+// rolling minute, with every additional action explicitly counted as dropped.
 func TestQueue_ConcurrentProbesSerialize(t *testing.T) {
 	s := newStore(t)
 	const n = 8
@@ -657,10 +657,17 @@ func TestQueue_ConcurrentProbesSerialize(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Every distinct policy should commit exactly once (serialized).
-	waitFor(t, "all commits", func() bool { return e.Stats().Committed >= n })
-	if got := e.Stats().Committed; got != n {
-		t.Errorf("Committed=%d; want exactly %d (each distinct policy commits once)", got, n)
+	// Four root commits are admitted in the rolling minute; the other four
+	// distinct policies are refused rather than serialized into an unbounded
+	// sequence of config applies.
+	waitFor(t, "budget outcome", func() bool {
+		st := e.Stats()
+		return st.Committed >= globalActionBudget &&
+			st.DroppedGlobalBudget >= n-globalActionBudget
+	})
+	if got := e.Stats().Committed; got != globalActionBudget {
+		t.Errorf("Committed=%d; want global budget %d for %d simultaneous policies",
+			got, globalActionBudget, n)
 	}
 }
 

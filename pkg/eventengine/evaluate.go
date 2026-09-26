@@ -126,9 +126,12 @@ func (e *Engine) evaluateEvent(ev rpm.Event) []triggeredPolicy {
 			"test-owner", ev.TestOwner,
 			"test-name", ev.TestName)
 
-		// Capture the policy's semantic revision under the same lock so the
-		// enqueued action can be revalidated against it before commit (#3750).
-		triggered = append(triggered, triggeredPolicy{pol: pol, semRev: e.semRev[pol.Name]})
+		// Capture the semantic revision and config order under the same lock.
+		// The order lets HandleEvent rotate the global budget across policies
+		// instead of repeatedly favoring the first matching actions.
+		triggered = append(triggered, triggeredPolicy{
+			pol: pol, semRev: e.semRev[pol.Name], order: e.policyOrder[pol.Name],
+		})
 	}
 	return triggered
 }

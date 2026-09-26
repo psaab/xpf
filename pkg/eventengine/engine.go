@@ -87,6 +87,14 @@ import (
 //     is the only genuine rejection.
 type CommitFn func(ctx context.Context, comment string) (*config.Config, error)
 
+// Maximum event-options commit attempts in a rolling window, shared across all
+// policies. This caps the commit rate at four per minute while preserving a
+// four-action burst for simultaneous legitimate failures.
+const (
+	globalActionBudget       = 4
+	globalActionBudgetWindow = time.Minute
+)
+
 // Minimum time between successive triggers of the same policy.
 const policyCooldown = 30 * time.Second
 
@@ -103,14 +111,15 @@ const (
 // fields are cumulative since daemon start except QueueDepth, which is the
 // instantaneous number of queued-but-not-yet-applied actions.
 type Stats struct {
-	Committed         uint64 // actions whose batch committed successfully (INCLUDES committed-with-apply-debt, #5063)
-	CommittedWithDebt uint64 // subset of Committed that promoted+armed but left a best-effort subsystem in debt (#5063)
-	Rejected          uint64 // actions rejected (bad plan / CommitCheck / commit not promoted)
-	Retried           uint64 // retry attempts after a held config lock
-	DroppedQueueFull  uint64 // actions genuinely dropped: the queue was full of OTHER policies (a distinct policy could not fit, or a survivor was lost) — capacity loss, alert-worthy
-	Superseded        uint64 // same-policy queued actions REPLACED by a newer trigger (benign dedup; nothing lost — the newer equivalent action runs) (#5853)
-	DroppedLockHeld   uint64 // actions dropped after the lock-retry deadline elapsed
-	DroppedStale      uint64 // actions dropped at commit: policy removed/redefined or cooldown active (#3750)
+	Committed           uint64 // actions whose batch committed successfully (INCLUDES committed-with-apply-debt, #5063)
+	CommittedWithDebt   uint64 // subset of Committed that promoted+armed but left a best-effort subsystem in debt (#5063)
+	Rejected            uint64 // actions rejected (bad plan / CommitCheck / commit not promoted)
+	Retried             uint64 // retry attempts after a held config lock
+	DroppedQueueFull    uint64 // actions genuinely dropped: the queue was full of OTHER policies (a distinct policy could not fit, or a survivor was lost) — capacity loss, alert-worthy
+	Superseded          uint64 // same-policy queued actions REPLACED by a newer trigger (benign dedup; nothing lost — the newer equivalent action runs) (#5853)
+	DroppedLockHeld     uint64 // actions dropped after the lock-retry deadline elapsed
+	DroppedStale        uint64 // actions dropped at commit: policy removed/redefined or cooldown active (#3750)
+	DroppedGlobalBudget uint64 // actions refused by the cross-policy rolling action budget (#10871)
 	// DroppedShutdown counts queued or in-flight-retry actions abandoned by Close
 	// (#9916 F-131). Deliberately NOT surfaced to Prometheus: it increments at
 	// process exit and would never be scraped. Explicit accounting (test-observable
@@ -123,18 +132,19 @@ type Stats struct {
 
 // engineCounters holds the atomic counters behind Stats.
 type engineCounters struct {
-	committed         atomic.Uint64
-	committedWithDebt atomic.Uint64
-	rejected          atomic.Uint64
-	retried           atomic.Uint64
-	droppedQueueFull  atomic.Uint64
-	superseded        atomic.Uint64
-	droppedLockHeld   atomic.Uint64
-	droppedStale      atomic.Uint64
-	droppedShutdown   atomic.Uint64
-	attributesInvalid atomic.Uint64
-	plantClassInvalid atomic.Uint64
-	queueDepth        atomic.Int64
+	committed           atomic.Uint64
+	committedWithDebt   atomic.Uint64
+	rejected            atomic.Uint64
+	retried             atomic.Uint64
+	droppedQueueFull    atomic.Uint64
+	superseded          atomic.Uint64
+	droppedLockHeld     atomic.Uint64
+	droppedStale        atomic.Uint64
+	droppedGlobalBudget atomic.Uint64
+	droppedShutdown     atomic.Uint64
+	attributesInvalid   atomic.Uint64
+	plantClassInvalid   atomic.Uint64
+	queueDepth          atomic.Int64
 }
 
 // plannedOp is one classified ThenCommand: a candidate set or delete.
@@ -161,7 +171,8 @@ type plannedAction struct {
 	// semRev is the policy's semantic revision (policySemanticRevision) as of
 	// the evaluate that enqueued the action. The worker drops the action if the
 	// live revision no longer matches (policy redefined) or is absent (removed).
-	semRev string
+	semRev      string
+	policyOrder int
 	// plantClass is the authenticated class that authored this payload. It is
 	// checked again immediately before any candidate mutation.
 	plantClass string
@@ -182,6 +193,7 @@ type plannedAction struct {
 type triggeredPolicy struct {
 	pol    *config.EventPolicy
 	semRev string
+	order  int
 }
 
 // policyRuntime is the per-policy temporal/cooldown state. It is split from the
@@ -235,9 +247,20 @@ type Engine struct {
 	regexCache map[string]*regexp.Regexp
 
 	// eventIndex maps an event NAME to the policies that list it.
-	eventIndex map[string][]*config.EventPolicy
+	eventIndex  map[string][]*config.EventPolicy
+	policyOrder map[string]int
 
 	counters engineCounters
+
+	// Global commit budget (#10871). The fixed-size timestamp ring is protected
+	// by budgetMu; at most globalActionBudget timestamps are retained.
+	// budgetCursor rotates policy order so a sustained multi-policy storm cannot
+	// permanently favor the first policies in the config.
+	budgetMu     sync.Mutex
+	budgetTimes  [globalActionBudget]time.Time
+	budgetStart  int
+	budgetCount  int
+	budgetCursor int
 
 	// Action queue + single worker (#2157). actions is bounded; the worker is
 	// the ONLY goroutine that enters configure mode on the engine's behalf, so
@@ -363,6 +386,7 @@ func New(store *configstore.Store, commitFn CommitFn) *Engine {
 		semRev:        make(map[string]string),
 		regexCache:    make(map[string]*regexp.Regexp),
 		eventIndex:    make(map[string][]*config.EventPolicy),
+		policyOrder:   make(map[string]int),
 		invalidWarnAt: make(map[string]int64),
 		actions:       make(chan plannedAction, actionQueueDepth),
 		stopCh:        make(chan struct{}),
@@ -376,6 +400,44 @@ func (e *Engine) now() time.Time {
 		return e.nowFn()
 	}
 	return time.Now()
+}
+
+// pruneGlobalBudgetLocked expires commit attempts outside the rolling window.
+// The caller holds budgetMu.
+func (e *Engine) pruneGlobalBudgetLocked(now time.Time) {
+	for e.budgetCount > 0 {
+		oldest := e.budgetTimes[e.budgetStart]
+		if now.Sub(oldest) < globalActionBudgetWindow {
+			break
+		}
+		e.budgetTimes[e.budgetStart] = time.Time{}
+		e.budgetStart = (e.budgetStart + 1) % globalActionBudget
+		e.budgetCount--
+	}
+}
+
+func (e *Engine) globalBudgetAvailable() bool {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	e.pruneGlobalBudgetLocked(e.now())
+	return e.budgetCount < globalActionBudget
+}
+
+// reserveGlobalCommit accounts one commit attempt. The worker is serialized,
+// so a reservation is made only when it is ready to enter the commit callback.
+func (e *Engine) reserveGlobalCommit(policyOrder int) bool {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	now := e.now()
+	e.pruneGlobalBudgetLocked(now)
+	if e.budgetCount == globalActionBudget {
+		return false
+	}
+	next := (e.budgetStart + e.budgetCount) % globalActionBudget
+	e.budgetTimes[next] = now
+	e.budgetCount++
+	e.budgetCursor = policyOrder + 1
+	return true
 }
 
 // newRetryTimer returns the backoff fire channel plus a stop func for the
@@ -491,10 +553,12 @@ func (e *Engine) apply(policies []*config.EventPolicy, cfg *config.Config, enfor
 	// policy that (legacy config) lists the same event name twice is still
 	// evaluated once — matching the old eventMatches "return on first match".
 	e.eventIndex = make(map[string][]*config.EventPolicy)
-	for _, pol := range policies {
+	e.policyOrder = make(map[string]int, len(policies))
+	for order, pol := range policies {
 		if pol == nil {
 			continue
 		}
+		e.policyOrder[pol.Name] = order
 		seen := make(map[string]struct{}, len(pol.Events))
 		for _, ev := range pol.Events {
 			if _, dup := seen[ev]; dup {
@@ -567,10 +631,27 @@ func policySemanticRevision(pol *config.EventPolicy) string {
 // probe goroutines may call HandleEvent concurrently without racing on the
 // config lock. Concurrent enqueues are serialized by enqueueMu so a full-queue
 // supersede cannot lose an already-accepted action to a racing producer (#5062).
+// Within each event, policy order rotates after every budgeted commit to avoid
+// permanently favoring the same policies in a sustained cross-policy flap.
 func (e *Engine) HandleEvent(ev rpm.Event) {
 	e.startOnce.Do(e.startWorker)
 	triggered := e.evaluateEvent(ev)
-	for _, tp := range triggered {
+	if len(triggered) == 0 {
+		return
+	}
+
+	e.budgetMu.Lock()
+	cursor := e.budgetCursor
+	e.budgetMu.Unlock()
+	start := 0
+	for i, tp := range triggered {
+		if tp.order >= cursor {
+			start = i
+			break
+		}
+	}
+	for offset := range triggered {
+		tp := triggered[(start+offset)%len(triggered)]
 		ops, ok := e.classifyPlan(tp.pol)
 		if !ok {
 			// Malformed/unknown command: reject the whole batch before it can
@@ -586,13 +667,14 @@ func (e *Engine) HandleEvent(ev rpm.Event) {
 		// state before committing, plus the triggering-event context (#3754)
 		// for the remediation commit's audit description.
 		if !e.enqueue(plannedAction{
-			policyName: tp.pol.Name,
-			semRev:     tp.semRev,
-			plantClass: tp.pol.PlantClass,
-			event:      ev.Name,
-			testOwner:  ev.TestOwner,
-			testName:   ev.TestName,
-			ops:        ops,
+			policyName:  tp.pol.Name,
+			semRev:      tp.semRev,
+			policyOrder: tp.order,
+			plantClass:  tp.pol.PlantClass,
+			event:       ev.Name,
+			testOwner:   ev.TestOwner,
+			testName:    ev.TestName,
+			ops:         ops,
 		}) {
 			// fire. evaluateEvent already armed the edge latch for it; leaving
 			// it armed makes withinMatches suppress every later at/above-
@@ -672,18 +754,19 @@ func (e *Engine) PolicyCount() int {
 // pkg/api for the xpf_event_actions_* metric family.
 func (e *Engine) Stats() Stats {
 	return Stats{
-		Committed:         e.counters.committed.Load(),
-		CommittedWithDebt: e.counters.committedWithDebt.Load(),
-		Rejected:          e.counters.rejected.Load(),
-		Retried:           e.counters.retried.Load(),
-		DroppedQueueFull:  e.counters.droppedQueueFull.Load(),
-		Superseded:        e.counters.superseded.Load(),
-		DroppedLockHeld:   e.counters.droppedLockHeld.Load(),
-		DroppedStale:      e.counters.droppedStale.Load(),
-		DroppedShutdown:   e.counters.droppedShutdown.Load(),
-		AttributesInvalid: e.counters.attributesInvalid.Load(),
-		PlantClassInvalid: e.counters.plantClassInvalid.Load(),
-		QueueDepth:        e.counters.queueDepth.Load(),
+		Committed:           e.counters.committed.Load(),
+		CommittedWithDebt:   e.counters.committedWithDebt.Load(),
+		Rejected:            e.counters.rejected.Load(),
+		Retried:             e.counters.retried.Load(),
+		DroppedQueueFull:    e.counters.droppedQueueFull.Load(),
+		Superseded:          e.counters.superseded.Load(),
+		DroppedLockHeld:     e.counters.droppedLockHeld.Load(),
+		DroppedStale:        e.counters.droppedStale.Load(),
+		DroppedGlobalBudget: e.counters.droppedGlobalBudget.Load(),
+		DroppedShutdown:     e.counters.droppedShutdown.Load(),
+		AttributesInvalid:   e.counters.attributesInvalid.Load(),
+		PlantClassInvalid:   e.counters.plantClassInvalid.Load(),
+		QueueDepth:          e.counters.queueDepth.Load(),
 	}
 }
 
@@ -708,6 +791,10 @@ func (e *Engine) actionWorker() {
 // cooldown (#2140 SMR finding 3 — arm on commit, not at evaluate, so a
 // dropped/rejected action never consumes the cooldown).
 func (e *Engine) runAction(a plannedAction) {
+	if !e.globalBudgetAvailable() {
+		e.dropGlobalBudget(a)
+		return
+	}
 	deadline := e.now().Add(e.lockRetryDeadline())
 	backoff := e.lockRetryInitial()
 	maxBackoff := e.lockRetryMax()
@@ -751,6 +838,10 @@ func (e *Engine) runAction(a plannedAction) {
 			e.counters.droppedStale.Add(1)
 			slog.Info("event-options: remediation dropped (stale queued action)",
 				"policy", a.policyName, "err", err)
+			return
+		}
+		if errors.Is(err, errGlobalActionBudget) {
+			e.dropGlobalBudget(a)
 			return
 		}
 		if errors.Is(err, configstore.ErrConfigLocked) {
@@ -914,6 +1005,13 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		e.store.ExitConfigure()
 		return errBatch("commit-check: %v", err)
 	}
+	// Reserve the cross-policy budget only when this action is ready to commit.
+	// Queue-time admission would let a held worker accumulate expired budget
+	// timestamps and then release an unbounded commit burst.
+	if !e.reserveGlobalCommit(a.policyOrder) {
+		e.store.ExitConfigure()
+		return errGlobalActionBudget
+	}
 
 	// #3754: stamp a deterministic audit description so the autonomous
 	// remediation lands in commit/rollback history attributed to the policy and
@@ -984,6 +1082,12 @@ func (e *commitDebtError) Unwrap() error { return e.err }
 // errors.Is, counts it as dropped_stale, and does NOT retry (staleness is
 // terminal for that action).
 var errStaleAction = errors.New("stale queued remediation")
+var errGlobalActionBudget = errors.New("global event action budget exhausted")
+
+func (e *Engine) dropGlobalBudget(a plannedAction) {
+	e.counters.droppedGlobalBudget.Add(1)
+	e.releaseEdgeLatch(a.policyName, a.event, a.semRev)
+}
 
 // staleErr wraps errStaleAction with a human-readable reason for logging.
 func staleErr(reason string) error {

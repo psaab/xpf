@@ -67,6 +67,32 @@ cycle would otherwise fire into a nil callback and be lost (#3755); registering
 first closes the gap, and `pkg/rpm` additionally buffers-and-replays any event
 fired before a callback exists as a belt against a future reorder.
 
+## Cross-policy global action budget (#10871)
+
+Per-policy cooldowns do not constrain a storm across many distinct policies.
+The worker therefore admits at most **four commit attempts in any rolling
+60-second window**, shared by every event-options policy. Four simultaneous
+actions can still run as a burst; once exhausted, queued actions are dropped
+before taking the config lock and counted by
+`xpf_event_actions_dropped_total{reason="global_budget"}`. A denied `trigger on`
+edge has its latch released, so a later edge can retry after budget capacity
+returns.
+
+Admission order rotates from the policy after the last budgeted commit. This
+prevents the first four policies in config order from consuming every refill
+while later planted policies starve.
+
+**Throughput bound:** for 64 policies matching the same `ping_test_failed`
+event, with no `within` threshold and failure edges every 3 seconds, the old
+30-second per-policy cooldown could allow 64 serialized commits per edge and
+up to 128 commits/minute. The global budget caps this at four commit attempts
+per rolling minute (a 32× reduction); further actions are shed until an older
+attempt ages out. `TestFlappingTargetGlobalBudgetAndOperatorLatency10871`
+exercises this profile, verifies the 59-second boundary and next refill, and
+holds an operator commit to a 500 ms SLO while the flapping actions are being
+dropped. The test models a 25 ms per-action apply interval; it does not claim a
+universal latency bound for a real apply that itself exceeds the SLO.
+
 ## Transactional batch (#2139)
 
 A `change-configuration` action's `then` commands are applied as an
@@ -356,9 +382,10 @@ blocks a `commitFn` on `ctx.Done()` and asserts `Close()` aborts it with
 - `xpf_event_actions_committed_with_debt_total` (#5063 — see below)
 - `xpf_event_actions_rejected_total`
 - `xpf_event_actions_retried_total`
-- `xpf_event_actions_dropped_total{reason="lock_held"|"queue_full"|"stale"}`
+- `xpf_event_actions_dropped_total{reason="lock_held"|"queue_full"|"stale"|"global_budget"}`
   (`stale` = revalidate-before-commit dropped a removed/redefined-policy or
-  within-cooldown action, #3750)
+  within-cooldown action, #3750; `global_budget` = the shared #10871 rolling
+  commit-attempt budget was exhausted)
 - `xpf_event_attributes_match_invalid_total`
 - `xpf_event_action_queue_depth` (gauge)
 
