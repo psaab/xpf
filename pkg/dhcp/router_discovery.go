@@ -56,6 +56,18 @@ func raPreferenceRank(pref ndp.Preference) int {
 	}
 }
 
+// routerDiscoveryConn is the subset of ndp.Conn needed to solicit and
+// collect Router Advertisements. Keeping the collector independent of the
+// privileged socket makes its wire decisions testable without CAP_NET_RAW.
+type routerDiscoveryConn interface {
+	SetICMPFilter(*ipv6.ICMPFilter) error
+	SetControlMessage(ipv6.ControlFlags, bool) error
+	JoinGroup(netip.Addr) error
+	WriteTo(ndp.Message, *ipv6.ControlMessage, netip.Addr) error
+	SetReadDeadline(time.Time) error
+	ReadFrom() (ndp.Message, *ipv6.ControlMessage, netip.Addr, error)
+}
+
 // routerAdvertisements solicits routers directly; it does not depend on
 // kernel RA route installation (managed links set IPv6AcceptRA=no).
 func (m *Manager) routerAdvertisements(ctx context.Context, ifaceName string) []observedRouter {
@@ -73,18 +85,22 @@ func (m *Manager) routerAdvertisements(ctx context.Context, ifaceName string) []
 		return nil
 	}
 	defer conn.Close()
+	return collectRouterAdvertisements(ctx, ifi, conn)
+}
+
+func collectRouterAdvertisements(ctx context.Context, ifi *net.Interface, conn routerDiscoveryConn) []observedRouter {
 	var filter ipv6.ICMPFilter
 	filter.SetAll(true)
 	filter.Accept(ipv6.ICMPTypeRouterAdvertisement)
 	if err := conn.SetICMPFilter(&filter); err != nil {
-		slog.Debug("DHCPv6: cannot set RA filter", "interface", ifaceName, "err", err)
+		slog.Debug("DHCPv6: cannot set RA filter", "interface", ifi.Name, "err", err)
 	}
 	if err := conn.SetControlMessage(ipv6.FlagInterface|ipv6.FlagHopLimit, true); err != nil {
-		slog.Warn("DHCPv6: cannot validate received Router Advertisements", "interface", ifaceName, "err", err)
+		slog.Warn("DHCPv6: cannot validate received Router Advertisements", "interface", ifi.Name, "err", err)
 		return nil
 	}
 	if err := conn.JoinGroup(netip.MustParseAddr("ff02::1")); err != nil {
-		slog.Debug("DHCPv6: cannot join all-nodes multicast group", "interface", ifaceName, "err", err)
+		slog.Debug("DHCPv6: cannot join all-nodes multicast group", "interface", ifi.Name, "err", err)
 	}
 	allRouters := netip.MustParseAddr("ff02::2")
 	rs := &ndp.RouterSolicitation{}
@@ -96,7 +112,7 @@ func (m *Manager) routerAdvertisements(ctx context.Context, ifaceName string) []
 	}
 	send := func() {
 		if err := conn.WriteTo(rs, nil, allRouters); err != nil {
-			slog.Debug("DHCPv6: Router Solicitation send failed", "interface", ifaceName, "err", err)
+			slog.Debug("DHCPv6: Router Solicitation send failed", "interface", ifi.Name, "err", err)
 		}
 	}
 
@@ -141,7 +157,7 @@ func (m *Manager) routerAdvertisements(ctx context.Context, ifaceName string) []
 			if errors.As(err, &nerr) && nerr.Timeout() {
 				continue
 			}
-			slog.Debug("DHCPv6: NDP read failed during router discovery", "interface", ifaceName, "err", err)
+			slog.Debug("DHCPv6: NDP read failed during router discovery", "interface", ifi.Name, "err", err)
 			return result
 		}
 		ra, ok := msg.(*ndp.RouterAdvertisement)
