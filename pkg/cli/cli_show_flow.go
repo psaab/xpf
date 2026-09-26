@@ -224,12 +224,11 @@ func (c *CLI) showFlowSession(args []string) error {
 
 	// In cluster mode, print node header before local sessions.
 	clusterMode := c.cluster != nil
+	// Cluster node IDs are 0 and 1; derive the peer label locally so it stays
+	// valid when heartbeat liveness is down or flapping.
 	peerNodeID := -1
 	if clusterMode {
 		peerNodeID = 1 - c.cluster.NodeID()
-		if c.cluster.PeerAlive() {
-			peerNodeID = c.cluster.PeerNodeID()
-		}
 	}
 	if clusterMode && !f.summary {
 		fmt.Printf("node%d:\n", c.cluster.NodeID())
