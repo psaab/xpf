@@ -39,7 +39,7 @@ func withNamingStub(t *testing.T) *namingStub {
 		return nil
 	}
 	enumerateAndRenameMappedFn = func(*config.DeviceMapConfig, *config.Config, map[string]bool) error {
-		t.Fatal("device-map branch must not fire for a plain cluster config")
+		t.Fatal("device-map branch must not fire for a plain positional test config")
 		return nil
 	}
 	t.Cleanup(func() {
@@ -74,27 +74,33 @@ func clusterConfigNode1() *config.Config {
 	return cfg
 }
 
-// TestConfigArrivalRenamingHANode is the #4179 regression: a config-less HA
-// node (emptyHANamingPending set at boot) that receives its first non-empty
-// CLUSTER config must re-run startup naming in CLUSTER mode with the node's ID
-// (node 1 => FPC 7), so the standalone-named NICs are renamed to em0 +
-// ge-7-0-X. Reverting the fix (maybeReapplyConfigArrivalNaming becomes a no-op,
-// or the boot flag is never set) makes this RED: naming is never re-run and the
-// interfaces keep their standalone boot names.
+func standaloneConfig() *config.Config {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/1": {Name: "ge-0/0/1"},
+	}
+	return cfg
+}
+
+// TestConfigArrivalRenamingHANode covers the live config-arrival case: a
+// config-less HA node can accept a standalone config, but a clustered config
+// is rejected by the topology preflight because no HA runtime was built at
+// boot. Re-applying the accepted config's naming settings before reconcile
+// keeps its interface map from being ignored.
 func TestConfigArrivalRenamingHANode(t *testing.T) {
 	st := withNamingStub(t)
 	d := newStoreDaemon(t)
 	d.emptyHANamingPending.Store(true)
 
-	cfg := clusterConfigNode1()
+	cfg := standaloneConfig()
 	if !d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Fatal("expected config-arrival re-naming to run on the first non-empty cluster config")
+		t.Fatal("expected config-arrival re-naming for the first accepted standalone config")
 	}
 	if len(st.calls) != 1 {
 		t.Fatalf("expected exactly one naming re-run, got %d", len(st.calls))
 	}
-	if !st.calls[0].clusterMode || st.calls[0].nodeID != 1 {
-		t.Fatalf("re-naming must use cluster mode + node 1 (FPC 7), got clusterMode=%v nodeID=%d",
+	if st.calls[0].clusterMode || st.calls[0].nodeID != 0 {
+		t.Fatalf("standalone re-naming must use standalone mode + node 0, got clusterMode=%v nodeID=%d",
 			st.calls[0].clusterMode, st.calls[0].nodeID)
 	}
 
@@ -104,6 +110,25 @@ func TestConfigArrivalRenamingHANode(t *testing.T) {
 	}
 	if len(st.calls) != 1 {
 		t.Fatalf("second apply re-ran naming (%d calls); must be one-shot", len(st.calls))
+	}
+}
+
+// TestConfigArrivalRenamingRejectsClusterConfig pins the runtime boundary at
+// the naming hook too: a cluster config must not be applied as if config arrival
+// could construct the HA runtime and rename interfaces live.
+func TestConfigArrivalRenamingRejectsClusterConfig(t *testing.T) {
+	st := withNamingStub(t)
+	d := newStoreDaemon(t)
+	d.emptyHANamingPending.Store(true)
+
+	if d.maybeReapplyConfigArrivalNaming(clusterConfigNode1()) {
+		t.Fatal("cluster config cannot trigger config-arrival naming on a node without an HA runtime")
+	}
+	if len(st.calls) != 0 {
+		t.Fatalf("cluster config must not re-run naming, got %d calls", len(st.calls))
+	}
+	if !d.emptyHANamingPending.Load() {
+		t.Fatal("rejected cluster config must not consume the standalone config-arrival marker")
 	}
 }
 
@@ -122,7 +147,7 @@ func TestConfigArrivalRenamingRetriesOnFailure(t *testing.T) {
 	d := newStoreDaemon(t)
 	d.emptyHANamingPending.Store(true)
 
-	cfg := clusterConfigNode1()
+	cfg := standaloneConfig()
 
 	// First apply: naming is attempted but errors → returns false, flag STAYS.
 	if d.maybeReapplyConfigArrivalNaming(cfg) {
@@ -158,8 +183,8 @@ func TestConfigArrivalRenamingRetriesOnFailure(t *testing.T) {
 
 // TestConfigArrivalRenamingEmptyConfigDoesNotConsumeFlag proves an empty
 // config (no interfaces) does not consume the one-shot flag — naming waits for
-// the REAL cluster config, mirroring the bootstrap-exit "empty config is not a
-// takeover" rule.
+// the first accepted standalone config, mirroring the bootstrap-exit "empty
+// config is not a takeover" rule.
 func TestConfigArrivalRenamingEmptyConfigDoesNotConsumeFlag(t *testing.T) {
 	st := withNamingStub(t)
 	d := newStoreDaemon(t)
@@ -173,12 +198,12 @@ func TestConfigArrivalRenamingEmptyConfigDoesNotConsumeFlag(t *testing.T) {
 		t.Fatalf("empty config must not re-run naming, got %d calls", len(st.calls))
 	}
 
-	// The flag survived: the real cluster config still triggers naming.
-	if !d.maybeReapplyConfigArrivalNaming(clusterConfigNode1()) {
-		t.Fatal("the flag must survive an empty config so the real cluster config re-runs naming")
+	// The flag survived: a non-empty accepted standalone config still triggers naming.
+	if !d.maybeReapplyConfigArrivalNaming(standaloneConfig()) {
+		t.Fatal("the flag must survive an empty config so a later standalone config re-runs naming")
 	}
 	if len(st.calls) != 1 {
-		t.Fatalf("cluster config must re-run naming after the empty one, got %d calls", len(st.calls))
+		t.Fatalf("standalone config must re-run naming after the empty one, got %d calls", len(st.calls))
 	}
 }
 
@@ -188,7 +213,7 @@ func TestConfigArrivalRenamingSkippedWhenNotPending(t *testing.T) {
 	st := withNamingStub(t)
 	d := newStoreDaemon(t) // emptyHANamingPending defaults false
 
-	if d.maybeReapplyConfigArrivalNaming(clusterConfigNode1()) {
+	if d.maybeReapplyConfigArrivalNaming(standaloneConfig()) {
 		t.Fatal("a node that did not boot config-less must not re-run naming")
 	}
 	if len(st.calls) != 0 {

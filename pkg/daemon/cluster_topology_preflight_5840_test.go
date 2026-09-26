@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +24,44 @@ func clusterCfg() *config.Config {
 	cfg := &config.Config{}
 	cfg.Chassis.Cluster = &config.ClusterConfig{ClusterID: 1, NodeID: 0}
 	return cfg
+}
+
+// TestConfiglessHANodeStartupDiagnosticRequiresRestart pins the operator-facing
+// recovery message and the restart advice returned by the live topology preflight.
+func TestConfiglessHANodeStartupDiagnosticRequiresRestart(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "xpf.conf")
+	d := &Daemon{store: newConfigStore(t, configFile), opts: Options{ConfigFile: configFile}}
+
+	savedNodeIDCheck := hasNodeIDFileFn
+	hasNodeIDFileFn = func() bool { return true }
+	t.Cleanup(func() { hasNodeIDFileFn = savedNodeIDCheck })
+	previousLogger := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	if failClosed, err := d.loadAndBootstrapConfig(); err != nil || failClosed {
+		t.Fatalf("loadAndBootstrapConfig() = (%v, %v); want (false, nil)", failClosed, err)
+	}
+	if d.inBootstrap() || !d.emptyHANamingPending.Load() {
+		t.Fatalf("config-less HA boot state: bootstrap=%v namingPending=%v; want false/true",
+			d.inBootstrap(), d.emptyHANamingPending.Load())
+	}
+
+	message := logs.String()
+	if !strings.Contains(message, "restart xpfd into that configuration") ||
+		!strings.Contains(message, "cluster config arrival cannot start it or reconcile interface naming") {
+		t.Fatalf("config-less HA boot log must explain why a restart is required; got %q", message)
+	}
+	if strings.Contains(message, "automatically when that config arrives") ||
+		strings.Contains(message, "no restart required") {
+		t.Fatalf("config-less HA boot log must not promise live cluster renaming; got %q", message)
+	}
+
+	err := clusterTopologyCommitPreflight(false /*runtimeClusterActive*/, clusterCfg())
+	if err == nil || !strings.Contains(err.Error(), "restart xpfd into the clustered configuration") {
+		t.Fatalf("adding cluster topology without an HA runtime must direct the operator to restart; got %v", err)
+	}
 }
 
 // TestClusterTopologyDay2TransitionRejected is the #5840 fail-on-revert gate.
@@ -59,7 +99,7 @@ func TestClusterTopologyDay2TransitionRejected(t *testing.T) {
 		t.Fatalf("rejection must wrap the restart-required sentinel; got %v", err)
 	}
 	if !strings.Contains(err.Error(), "chassis cluster") ||
-		!strings.Contains(err.Error(), "restart") {
+		!strings.Contains(err.Error(), "restart xpfd into the clustered configuration") {
 		t.Fatalf("rejection must carry an actionable operator diagnostic; got %q", err.Error())
 	}
 

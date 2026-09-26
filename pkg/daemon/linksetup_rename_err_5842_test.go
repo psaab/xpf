@@ -119,18 +119,13 @@ func TestEnumerateAndRenameInterfaces_SuccessReturnsNil(t *testing.T) {
 	}
 }
 
-// TestConfigArrivalNamingKeepsRetryMarkerOnPositionalFailure_5842 is the
-// CONSEQUENCE, and the reason this is a defect rather than a logging nit.
+// TestConfigArrivalNamingKeepsRetryMarkerOnPositionalFailure_5842 verifies the
+// reachable standalone config-arrival retry path. A failed positional naming
+// pass must preserve emptyHANamingPending so a later accepted standalone config
+// can retry; clustered config arrival is rejected by the topology preflight.
 //
-// maybeReapplyConfigArrivalNaming consumes the one-shot emptyHANamingPending
-// marker only when applyStartupNamingForConfig returns nil. In POSITIONAL mode
-// that was always. So a #4179 config-less HA node whose renames all failed
-// burned its single retry and stayed on standalone names until a restart —
-// the precise failure #4956 fixed for the mapped path, still open on the
-// default one.
-//
-// RED-on-revert: launder the error again and the marker is consumed on a boot
-// where nothing was renamed.
+// RED-on-revert: launder the error again and the marker is consumed after a
+// failed standalone naming pass.
 func TestConfigArrivalNamingKeepsRetryMarkerOnPositionalFailure_5842(t *testing.T) {
 	stubPositionalRenameSeams(t, fmt.Errorf("simulated rename failure"), nil)
 
@@ -144,9 +139,7 @@ func TestConfigArrivalNamingKeepsRetryMarkerOnPositionalFailure_5842(t *testing.
 		t.Error("maybeReapplyConfigArrivalNaming reported success on a boot where every rename failed")
 	}
 	if !d.emptyHANamingPending.Load() {
-		t.Error("the one-shot retry marker was consumed even though naming did not converge: " +
-			"this config-less HA node is now stranded on standalone names until a restart, " +
-			"with no further retry on any later commit")
+		t.Error("the standalone config-arrival retry marker was consumed even though naming did not converge")
 	}
 }
 

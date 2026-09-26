@@ -281,13 +281,17 @@ func (c bootClass) String() string {
 	}
 }
 
-// hasNodeIDFile reports whether the install-time-stable HA signal
-// (/etc/xpf/node-id) is present. The cluster short-circuit (C2/C8) keys on
-// this FILE, NOT on the config-derived clusterMode (which is false until a
-// cluster config loads and so cannot pre-empt the predicate).
-func hasNodeIDFile() bool {
+// hasNodeIDFileFn reports whether the install-time-stable HA signal
+// (/etc/xpf/node-id) is present. Tests replace it to exercise config-less HA
+// startup without creating a host-global file.
+var hasNodeIDFileFn = func() bool {
 	_, err := os.Stat(nodeIDFile)
 	return err == nil
+}
+
+// hasNodeIDFile reports whether the install-time-stable HA signal is present.
+func hasNodeIDFile() bool {
+	return hasNodeIDFileFn()
 }
 
 // computeBootClass implements the #1922 five-case boot predicate. It is

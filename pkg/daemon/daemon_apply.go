@@ -431,12 +431,11 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 
 	// #4179 config-arrival re-naming: a config-less HA node (node-id present,
 	// no committed config at boot) is NOT in bootstrap mode, so the block above
-	// never fires for it. That node named its NICs STANDALONE at boot; the
-	// first non-empty config to arrive (a cluster SyncApply from the primary,
-	// or a local commit) finally supplies its cluster identity, so re-run
-	// startup naming here — BEFORE the reconcile below wires the config onto
-	// the interfaces — to reconcile them to the node's cluster names. One-shot;
-	// a no-op on a standalone config or any later commit.
+	// never fires for it. Its first accepted standalone config can add interface
+	// mappings or naming settings, so re-run startup naming here BEFORE reconcile
+	// wires the config onto the interfaces. A clustered config cannot arrive via
+	// local commit or peer sync: the topology preflight rejects it when d.cluster
+	// is nil, and the naming hook also refuses cluster-mode candidates. One-shot.
 	d.maybeReapplyConfigArrivalNaming(cfg)
 
 	// Log config validation warnings

@@ -282,6 +282,18 @@ func (d *Daemon) clearStaleProbePinsAtStartup() error {
 	return d.routing.ClearProbePins()
 }
 
+// configlessHANodeStartupDiagnostic explains how to recover a node that has
+// a node-id but no committed or importable config. Clustered topology cannot
+// be installed by a live commit or peer sync when the boot did not construct
+// the HA runtime; xpfd must restart with the clustered configuration.
+func configlessHANodeStartupDiagnostic() string {
+	return "xpf HA node has /etc/xpf/node-id but no committed config and no importable " +
+		"xpf.conf; proceeding with EMPTY config takeover (NOT bootstrap mode) using STANDALONE " +
+		"interface names. HA availability is NOT promised: the HA runtime is constructed only at " +
+		"startup, so cluster config arrival cannot start it or reconcile interface naming. Install " +
+		"the clustered configuration and restart xpfd into that configuration."
+}
+
 // loadAndBootstrapConfig loads the persisted configuration (DB, falling back to
 // the text config file), enforces the #1917 fatal-on-parse floor, runs
 // bootstrapFromFile when required, and derives the boot class + node-id state.
@@ -440,20 +452,14 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 		// silently suppressed on a normal deploy, but HA availability is NOT
 		// promised — this is an operator misconfiguration. Log loudly.
 		//
-		// #4179: the nil active config carries no cluster stanza, so the boot
-		// naming below runs in STANDALONE mode (clusterMode=false → fxp0 +
-		// ge-0-0-X, no em0 / FPC). Arm the one-shot re-naming flag so the first
-		// non-empty config that arrives (a cluster SyncApply from the primary,
-		// or a local commit) re-runs startup naming with the config's real
-		// cluster identity. Naming reconciles on config arrival — no daemon
-		// restart is required.
+		// #4179: the nil active config carries no cluster stanza, so boot
+		// naming below runs in STANDALONE mode. The one-shot re-naming flag
+		// lets an accepted first standalone config apply its interface map and
+		// naming settings before reconcile. A clustered config cannot arrive
+		// live here: the topology preflight rejects it because d.cluster was
+		// not constructed at boot, so the operator must restart xpfd with it.
 		d.emptyHANamingPending.Store(true)
-		slog.Error("xpf HA node has /etc/xpf/node-id but no committed config and no importable "+
-			"xpf.conf; proceeding with EMPTY config takeover (NOT bootstrap mode) using STANDALONE "+
-			"interface names. HA availability is NOT promised until the cluster config is pushed and "+
-			"committed; interface naming will reconcile to the node's cluster names (em0, ge-<fpc>-0-X) "+
-			"automatically when that config arrives (no restart required)",
-			"node_id_file", nodeIDFile)
+		slog.Error(configlessHANodeStartupDiagnostic(), "node_id_file", nodeIDFile)
 	}
 	return failClosedLoad, nil
 }
