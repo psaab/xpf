@@ -89,6 +89,9 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
     (`owner_rg_for_flow(egress_ifindex)`). The default routing-instance
     (`inet.0`/`inet6.0`) case still matches default-table connected
     routes.
+    If the same host address is present on more than one interface in a
+    routing table, attribution chooses the lowest matching ifindex (#10867);
+    zone/security and HA-RG selection therefore do not depend on snapshot order.
   - **Local-delivery DECISION is table-scoped too (#3769).** #3151 fixed
     the ifindex ATTRIBUTION but the membership DECISION stayed global:
     `local_v[46]` is a global set, and it also carries NAT/DNAT external
