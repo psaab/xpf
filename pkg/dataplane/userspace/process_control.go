@@ -588,6 +588,55 @@ func (m *Manager) requestHAWatchdogSessionLockedAtPath(groups []HAGroupStatus, s
 	return nil
 }
 
+var requiredProcessStatusFields = [...]string{"pid", "started_at", "control_socket"}
+
+// ControlResponse rejects incomplete status identities at the wire boundary.
+// The additive status fields remain optional; these three stable fields are
+// needed to distinguish a real helper status from a malformed partial object.
+func (r *ControlResponse) UnmarshalJSON(data []byte) error {
+	var envelope struct {
+		Status json.RawMessage `json:"status"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	if len(envelope.Status) != 0 {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(envelope.Status, &fields); err != nil {
+			return fmt.Errorf("decode control response status: %w", err)
+		}
+		if fields != nil {
+			for _, name := range requiredProcessStatusFields {
+				raw, ok := fields[name]
+				if !ok || strings.TrimSpace(string(raw)) == "null" {
+					return fmt.Errorf("control response status is partial: missing or null required field %q", name)
+				}
+			}
+		}
+	}
+
+	type controlResponseAlias ControlResponse
+	var decoded controlResponseAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = ControlResponse(decoded)
+	return nil
+}
+
+// validateRequiredStatusReply keeps missing status distinct from a valid zero
+// value. The helper identity is required for status and ping responses only;
+// session/control responses may legitimately omit it.
+func validateRequiredStatusReply(requestType string, status *ProcessStatus) error {
+	if requestType != "status" && requestType != "ping" {
+		return nil
+	}
+	if status == nil {
+		return fmt.Errorf("%s response omitted required status", requestType)
+	}
+	return nil
+}
+
 func (m *Manager) requestLocked(req ControlRequest, status *ProcessStatus) error {
 	// #9684: count every partial update sent, whatever its outcome, so Compile
 	// can tell whether one ran while it built its snapshot outside m.mu.
@@ -599,6 +648,9 @@ func (m *Manager) requestLocked(req ControlRequest, status *ProcessStatus) error
 	}
 	resp, err := m.requestDetailedLocked(req)
 	if err != nil {
+		return err
+	}
+	if err := validateRequiredStatusReply(req.Type, resp.Status); err != nil {
 		return err
 	}
 	if status != nil && resp.Status != nil {

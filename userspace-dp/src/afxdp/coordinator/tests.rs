@@ -5380,8 +5380,7 @@ fn reconcile_post_teardown_worker_spawn_failure_fails_closed_4952() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -5476,8 +5475,7 @@ fn post_spawn_inthread_bind_failure_fails_closed_5143() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -5600,8 +5598,7 @@ fn reconcile_partial_spawn_failure_preserves_launched_records_6242() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -5689,8 +5686,7 @@ fn reconcile_bind_incomplete_clears_all_records_6242() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -5802,8 +5798,7 @@ fn bind_incomplete_leaves_no_bound_sibling_8388() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -5890,8 +5885,7 @@ fn spawn_failure_does_leave_bound_siblings_8388() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -5988,8 +5982,7 @@ fn bind_failure_cause_survives_the_failclosed_teardown_8558() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -6088,8 +6081,7 @@ fn a_recovered_reconcile_leaves_no_stale_bind_failure_cause_8558() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -6166,8 +6158,7 @@ fn a_legitimate_teardown_does_not_inherit_the_bind_failure_cause_8558() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -6287,8 +6278,7 @@ fn worker_bind_incomplete_report_carries_explicit_failure_6245() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coordinator = Coordinator::new();
@@ -6685,8 +6675,7 @@ fn rejected_apply_does_not_prune_live_zone_counters_6832() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     // The NEGATIVE direction. A build that succeeded but whose workers failed
@@ -6847,8 +6836,7 @@ fn rejected_spawn_apply_does_not_prune_live_rule_counters_7010() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let _neigh_serial = crate::afxdp::neigh_monitor_test_serial();
@@ -6935,8 +6923,7 @@ fn committed_reconcile_prunes_rule_counters_for_removed_rules_7010() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let _neigh_serial = crate::afxdp::neigh_monitor_test_serial();
@@ -7024,8 +7011,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     // #7413: this test spawns a `neigh-monitor` thread, and the #6637 leak
@@ -8703,8 +8689,7 @@ fn coordinator_bringup_does_not_leak_a_neigh_monitor_thread_6637() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     // #7413: this test spawns a `neigh-monitor` thread, and the #6637 leak
@@ -8775,8 +8760,7 @@ fn stopped_coordinator_guard_joins_the_neigh_monitor_on_drop_6637() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     // #7413: this test spawns a `neigh-monitor` thread, and the #6637 leak

@@ -151,8 +151,7 @@ fn capped_now_is_unknown_after_a_first_worker_spawn_failure_9654() {
     // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
     // IpsecSaNotReady before this test's subject — skip explicitly (visible
     // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::xfrm_monitor_usable() {
-        eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
         return;
     }
     let mut coord = Coordinator::new();
