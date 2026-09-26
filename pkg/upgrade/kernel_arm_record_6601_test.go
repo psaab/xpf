@@ -293,7 +293,7 @@ func TestPromoteRevertsWhenTheRunningBinaryIsNotTheRecordedOne(t *testing.T) {
 	f.verifyPass = true
 	f.beaconPass = true
 
-	err = r.Promote()
+	_, err = r.Promote()
 	if err == nil {
 		t.Fatal("Promote SUCCEEDED while running a binary the arming did not designate; " +
 			"an undesignated xpfd authorized the promotion (#6601 Gate 2b)")

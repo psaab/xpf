@@ -320,8 +320,12 @@ func TestKernelPromoteHappyPath(t *testing.T) {
 	f.verifyPass = true
 	f.beaconPass = true
 
-	if err := r.Promote(); err != nil {
+	outcome, err := r.Promote()
+	if err != nil {
 		t.Fatalf("Promote: %v", err)
+	}
+	if outcome.Outcome != RollOutcomePromoted {
+		t.Fatalf("Promote outcome = %q, want %q", outcome.Outcome, RollOutcomePromoted)
 	}
 	// candidate slot (0004) now front of BootOrder (non-destructive)
 	if f.order[0] != "0004" {
@@ -353,7 +357,7 @@ func TestKernelPromoteRevertOnVerifyReject(t *testing.T) {
 	f.verifyPass = false // REJECT
 	f.beaconPass = true
 
-	err := r.Promote()
+	_, err := r.Promote()
 	if err == nil {
 		t.Fatal("expected a revert error on verify REJECT")
 	}
@@ -382,7 +386,7 @@ func TestKernelPromoteRevertOnBeaconFail(t *testing.T) {
 	f.verifyPass = true
 	f.beaconPass = false // forwards-not
 
-	if err := r.Promote(); err == nil {
+	if _, err := r.Promote(); err == nil {
 		t.Fatal("expected revert on beacon fail")
 	}
 	if contains(f.calls, "bootorder-front:0004") {
@@ -410,7 +414,7 @@ func TestKernelPromoteCountsNVRAMReadTimeoutAsRevert10761(t *testing.T) {
 
 	f.entriesErr = fmt.Errorf("efibootmgr timed out: context deadline exceeded")
 
-	err := r.Promote()
+	_, err := r.Promote()
 	if !errorsIsReverted(err) {
 		t.Fatalf("Promote error = %v, want a controlled revert for the timed-out NVRAM read", err)
 	}
@@ -447,8 +451,22 @@ func TestKernelPromoteAlreadyKnownGoodNoReboot(t *testing.T) {
 	f.beaconPass = true
 
 	// NO error (no reboot requested — we're already on known-good).
-	if err := r.Promote(); err != nil {
+	outcome, err := r.Promote()
+	if err != nil {
 		t.Fatalf("expected nil (already on known-good, no reboot), got %v", err)
+	}
+	if outcome.Outcome != RollOutcomeDiscarded {
+		t.Fatalf("known-good cleanup outcome = %q, want %q", outcome.Outcome, RollOutcomeDiscarded)
+	}
+	if outcome.Version != "6.18.5-12-generic" || outcome.KnownGood != "6.18.5-10-generic" {
+		t.Fatalf("known-good cleanup version pair = %q / %q", outcome.Version, outcome.KnownGood)
+	}
+	wantReason := fmt.Sprintf("BootCurrent=0003 != candidate slot %s (0004) — already on known-good, no reboot", SlotB)
+	if outcome.Reason != wantReason {
+		t.Fatalf("known-good cleanup reason = %q, want %q", outcome.Reason, wantReason)
+	}
+	if f.lastRollWrites != 1 || f.lastRoll.Outcome != RollOutcomeDiscarded {
+		t.Fatalf("last-roll writes/record = %d/%q, want one discarded outcome", f.lastRollWrites, f.lastRoll.Outcome)
 	}
 	if contains(f.calls, "bootorder-front:0004") {
 		t.Fatal("promoted despite firmware not booting the candidate")
@@ -493,7 +511,7 @@ func TestKernelPromoteRevertAttemptsCapped(t *testing.T) {
 			}
 			_ = r.saveKernelJournal(jj)
 		}
-		err := r.Promote()
+		_, err := r.Promote()
 		if errorsIsReverted(err) {
 			reverts++
 		}
@@ -513,7 +531,7 @@ func TestKernelPromoteRevertOnKernelMismatch(t *testing.T) {
 	f.verifyPass = true
 	f.beaconPass = true
 
-	if err := r.Promote(); err == nil {
+	if _, err := r.Promote(); err == nil {
 		t.Fatal("expected revert on uname mismatch")
 	}
 }
@@ -639,8 +657,12 @@ func TestKernelArmRefusesWhenAlreadyArmed(t *testing.T) {
 func TestKernelPromoteNoOpWhenNotArmed(t *testing.T) {
 	f := newFakeKernelSystem()
 	r := newKernelRunner(t, f)
-	if err := r.Promote(); err != nil {
+	outcome, err := r.Promote()
+	if err != nil {
 		t.Fatalf("Promote on ordinary boot should be a no-op, got %v", err)
+	}
+	if outcome.Recorded() {
+		t.Fatalf("ordinary boot returned a roll outcome: %+v", outcome)
 	}
 	if contains(f.calls, "bootorder-front:0004") {
 		t.Fatal("ordinary boot must not touch BootOrder")
@@ -704,7 +726,7 @@ func TestKernelRevertDisarmsWatchdog(t *testing.T) {
 	f.bootCurrent = "0004"
 	f.running = "6.18.5-12-generic"
 	f.verifyPass = false
-	if err := r.Promote(); !errorsIsReverted(err) {
+	if _, err := r.Promote(); !errorsIsReverted(err) {
 		t.Fatalf("expected revert, got %v", err)
 	}
 	if f.wdArmed {
@@ -724,7 +746,7 @@ func TestKernelPromoteRevertsOnBootOrderFailure(t *testing.T) {
 	f.beaconPass = true
 	f.bootOrderFrontErr = true // SetBootOrderFront fails
 
-	err := r.Promote()
+	_, err := r.Promote()
 	if !errorsIsReverted(err) {
 		t.Fatalf("expected a REVERT when promote BootOrder reorder fails, got %v", err)
 	}
@@ -745,7 +767,7 @@ func TestKernelPromoteBootCurrentErrRunningCandidateDoesNotPrune(t *testing.T) {
 	f.verifyPass = true
 	f.beaconPass = true
 
-	if err := r.Promote(); err != nil {
+	if _, err := r.Promote(); err != nil {
 		t.Fatalf("healthy candidate must promote despite a BootCurrent read error, got %v", err)
 	}
 	if contains(f.calls, "prune:"+SlotB) {
@@ -768,7 +790,7 @@ func TestKernelPromoteIndeterminateFailsClosed(t *testing.T) {
 	f.bootCurrentErr = fmt.Errorf("efibootmgr read failure")
 	f.runningErr = fmt.Errorf("uname -r failure")
 
-	err := r.Promote()
+	_, err := r.Promote()
 	if err == nil {
 		t.Fatal("#4872 A: indeterminate boot state must surface an error, not proceed as healthy")
 	}
@@ -796,8 +818,12 @@ func TestKernelPromoteBootCurrentErrRunningKnownGoodCleansUp(t *testing.T) {
 	f.bootCurrentErr = fmt.Errorf("efibootmgr read failure")
 	f.running = "6.18.5-10-generic" // known-good, NOT the candidate
 
-	if err := r.Promote(); err != nil {
+	outcome, err := r.Promote()
+	if err != nil {
 		t.Fatalf("on positively-known-good boot, expect nil cleanup, got %v", err)
+	}
+	if outcome.Outcome != RollOutcomeDiscarded || f.lastRoll.Outcome != RollOutcomeDiscarded {
+		t.Fatalf("known-good cleanup outcome/record = %q/%q, want discarded", outcome.Outcome, f.lastRoll.Outcome)
 	}
 	if !contains(f.calls, "prune:"+SlotB) {
 		t.Fatal("expected the un-promoted candidate pruned when positively on known-good")

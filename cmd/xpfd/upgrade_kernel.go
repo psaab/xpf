@@ -127,7 +127,8 @@ func runUpgradeKernelSubcommand(args []string) {
 		fmt.Println("kernel candidate armed; reboot pending")
 
 	case "promote":
-		if err := r.Promote(); err != nil {
+		outcome, err := r.Promote()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "upgrade kernel promote: %v\n", err)
 			// A REVERT is the expected "candidate failed the gate" outcome:
 			// exit 3 so the promotion oneshot reboots to the known-good slot.
@@ -139,7 +140,7 @@ func runUpgradeKernelSubcommand(args []string) {
 			}
 			os.Exit(1)
 		}
-		fmt.Println("kernel candidate promoted")
+		fmt.Println(kernelPromoteMessage(outcome))
 
 	case "status":
 		// Report the durable promotion marker too — the external HA orchestrator
@@ -206,6 +207,25 @@ func runUpgradeKernelSubcommand(args []string) {
 	default:
 		fmt.Fprintf(os.Stderr, "upgrade kernel: unknown verb %q (want arm|promote|status|drain|rejoin)\n", verb)
 		os.Exit(1)
+	}
+}
+
+// kernelPromoteMessage keeps the success output tied to the gate's actual
+// result. A nil Promote error also covers an ordinary no-op boot and a
+// known-good cleanup; neither means the candidate was promoted.
+func kernelPromoteMessage(outcome upgrade.KernelRollOutcome) string {
+	switch outcome.Outcome {
+	case upgrade.RollOutcomePromoted:
+		return "kernel candidate promoted"
+	case upgrade.RollOutcomeDiscarded:
+		if outcome.Reason == "" {
+			return "kernel candidate discarded (already on known-good)"
+		}
+		return fmt.Sprintf("kernel candidate discarded (already on known-good): %s", outcome.Reason)
+	case "":
+		return "no armed kernel candidate; nothing to promote"
+	default:
+		return fmt.Sprintf("kernel promotion completed with outcome %q", outcome.Outcome)
 	}
 }
 

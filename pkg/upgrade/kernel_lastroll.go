@@ -15,17 +15,17 @@ import (
 //
 // The kernel channel deliberately forgets. `revert()` clears the journal by
 // design — the next boot must be a clean ordinary boot — and the promotion
-// marker is written only on PROMOTE. So after a candidate is rejected,
-// `xpfd upgrade kernel status` prints `promoted=none` / `armed=none`: correct,
-// and indistinguishable from a box that never tried. The reason a candidate
-// was rejected survived only in journald, which on an appliance may not be
+// marker is written only on PROMOTE. So after a candidate is rejected or
+// firmware falls back before the candidate boots, `xpfd upgrade kernel status`
+// prints `promoted=none` / `armed=none`: correct, and indistinguishable from a
+// box that never tried. The reason for a rejection or known-good fallback
+// otherwise survives only in journald, which on an appliance may not be
 // persistent at all.
 //
-// That is the wrong thing to forget. A reverted roll is exactly the moment an
-// operator needs to know WHAT was tried and WHY it failed, and it is the moment
-// the box has just rebooted. So the outcome — and only the outcome, a few
-// bytes, never the in-flight state — is recorded durably alongside the
-// promotion marker.
+// That is the wrong thing to forget. Operators need to know WHAT was tried,
+// WHY it failed, or that firmware discarded the trial by returning to
+// known-good. So the outcome — and only the outcome, a few bytes, never the
+// in-flight state — is recorded durably alongside the promotion marker.
 //
 // Deliberately NOT cleared at arm time, unlike the promotion marker. The marker
 // is cleared on Arm because a stale "promoted" from a prior same-version roll
@@ -42,6 +42,10 @@ const (
 	// RollOutcomeReverted: the candidate did not pass; the box went back to
 	// the known-good slot.
 	RollOutcomeReverted = "reverted"
+	// RollOutcomeDiscarded: the gate found the box already on the known-good
+	// slot (the firmware fell back / ignored BootNext), so the candidate was
+	// pruned in place with no reboot (#10772 x1-F6).
+	RollOutcomeDiscarded = "discarded"
 )
 
 // KernelRollOutcome is the durable record of the LAST completed kernel roll.
@@ -50,12 +54,13 @@ type KernelRollOutcome struct {
 	// Version is the candidate `uname -r` the roll was attempting.
 	Version string `json:"version"`
 	// KnownGood is the version the box was on before (and returned to, on a
-	// revert). Rendering the pair is what makes a revert legible: "tried X,
-	// still on Y".
+	// revert or a known-good discard). Rendering the pair makes the result
+	// legible: "tried X, still on Y".
 	KnownGood string `json:"known_good,omitempty"`
-	// Outcome is RollOutcomePromoted or RollOutcomeReverted.
+	// Outcome is RollOutcomePromoted, RollOutcomeReverted, or
+	// RollOutcomeDiscarded.
 	Outcome string `json:"outcome"`
-	// Reason is the revert cause (which gate failed). Empty on a promote,
+	// Reason explains a revert or known-good discard. Empty on a promote,
 	// where "it passed every gate" is the whole story.
 	Reason string `json:"reason,omitempty"`
 	// UnixSec is when the outcome was recorded.
@@ -109,11 +114,9 @@ func (s *realKernelSystem) ReadLastRoll() (KernelRollOutcome, error) {
 	return rec, nil
 }
 
-// recordRollOutcome durably stores the outcome of a completed roll.
-// Best-effort by construction, exactly like the promotion marker: a
-// history-write failure must never change what the channel DOES. A revert that
-// could not record itself is still a revert.
-func (r *KernelRunner) recordRollOutcome(j *KernelJournal, outcome, reason string) {
+// recordRollOutcome durably stores the outcome of a completed roll and returns
+// the exact record attempted, even when the best-effort history write fails.
+func (r *KernelRunner) recordRollOutcome(j *KernelJournal, outcome, reason string) KernelRollOutcome {
 	rec := KernelRollOutcome{
 		Outcome: outcome,
 		UnixSec: time.Now().Unix(),
@@ -128,4 +131,5 @@ func (r *KernelRunner) recordRollOutcome(j *KernelJournal, outcome, reason strin
 	if err := r.cfg.Sys.WriteLastRoll(rec); err != nil {
 		r.logf("kernel-upgrade: WARNING record last-roll outcome (%s): %v", outcome, err)
 	}
+	return rec
 }
