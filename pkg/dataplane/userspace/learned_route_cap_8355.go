@@ -2,8 +2,12 @@ package userspace
 
 import (
 	"log/slog"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/psaab/xpf/pkg/routing"
 )
 
 // #8355 acceptance items 2 and 3: the learned-route cap, what it does when it
@@ -72,68 +76,171 @@ func maxLearnedRoutes() int {
 	return int(mib * bytesPerMiB / learnedRouteBytesEach)
 }
 
-// learnedRouteCapHits counts publishes refused by the cap. Exposed so the
-// condition is visible to something other than the log.
+// learnedRouteCapHits counts snapshot builds that shed at least one learned
+// route group. Exposed so the condition is visible to something other than the log.
 var learnedRouteCapHits atomic.Uint64
 
-// LearnedRouteCapHits reports how many snapshot builds have declined the
-// learned-route import because the kernel table exceeded the cap.
+// LearnedRouteCapHits reports how many snapshot builds exceeded the
+// learned-route publish budget and shed one or more protocol/table groups.
 func LearnedRouteCapHits() uint64 { return learnedRouteCapHits.Load() }
 
-// learnedRouteCapExceeded decides what happens when the kernel table is larger
-// than one publish can carry, and reports whether the import is declined.
+// learnedRouteCapProtocolHits records cap-triggered protocol/table groups.
+// Known protocols are present at zero in accessor snapshots.
+var learnedRouteCapProtocolHits = struct {
+	sync.Mutex
+	counts map[string]uint64
+}{
+	counts: map[string]uint64{
+		"bgp":       0,
+		"connected": 0,
+		"dhcp":      0,
+		"isis":      0,
+		"ospf":      0,
+		"rip":       0,
+		"static":    0,
+	},
+}
+
+// LearnedRouteCapHitsByProtocol reports cap-triggered group sheds by the
+// kernel protocol name. The returned map is a snapshot and may be modified.
+func LearnedRouteCapHitsByProtocol() map[string]uint64 {
+	learnedRouteCapProtocolHits.Lock()
+	defer learnedRouteCapProtocolHits.Unlock()
+	out := make(map[string]uint64, len(learnedRouteCapProtocolHits.counts))
+	for protocol, count := range learnedRouteCapProtocolHits.counts {
+		out[protocol] = count
+	}
+	return out
+}
+
+func noteLearnedRouteCapProtocolHit(protocol string) {
+	if protocol == "" {
+		protocol = "unknown"
+	}
+	learnedRouteCapProtocolHits.Lock()
+	learnedRouteCapProtocolHits.counts[protocol]++
+	learnedRouteCapProtocolHits.Unlock()
+}
+
+type learnedRouteQuotaKey struct {
+	tableID  int
+	protocol string
+}
+
+// capLearnedRouteGroups sheds whole (table, protocol) groups rather than
+// refusing every learned route when the combined kernel dump exceeds the
+// publish budget. Oversized groups are shed first. BGP groups are then shed
+// before other protocols; remaining groups are shed largest-first until the
+// combined set fits. A BGP flood cannot remove unrelated routes, and no group
+// is partially imported.
+func capLearnedRouteGroups(routes []routing.LearnedRoute) ([]routing.LearnedRoute, bool) {
+	limit := maxLearnedRoutes()
+	if limit <= 0 || len(routes) <= limit {
+		return routes, false
+	}
+
+	counts := make(map[learnedRouteQuotaKey]int)
+	keys := make([]learnedRouteQuotaKey, 0)
+	for _, route := range routes {
+		key := learnedRouteQuotaKey{tableID: route.TableID, protocol: route.Protocol}
+		if _, exists := counts[key]; !exists {
+			keys = append(keys, key)
+		}
+		counts[key]++
+	}
+
+	dropped := make(map[learnedRouteQuotaKey]struct{})
+	remaining := len(routes)
+	for _, key := range keys {
+		if counts[key] > limit {
+			dropped[key] = struct{}{}
+			remaining -= counts[key]
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		isBGPi, isBGPj := keys[i].protocol == "bgp", keys[j].protocol == "bgp"
+		if isBGPi != isBGPj {
+			return isBGPi
+		}
+		if counts[keys[i]] != counts[keys[j]] {
+			return counts[keys[i]] > counts[keys[j]]
+		}
+		if keys[i].protocol != keys[j].protocol {
+			return keys[i].protocol < keys[j].protocol
+		}
+		return keys[i].tableID < keys[j].tableID
+	})
+	for _, key := range keys {
+		if remaining <= limit {
+			break
+		}
+		if _, alreadyDropped := dropped[key]; alreadyDropped {
+			continue
+		}
+		dropped[key] = struct{}{}
+		remaining -= counts[key]
+	}
+
+	if len(dropped) == 0 {
+		return routes, false
+	}
+	if !learnedRouteCapExceeded(len(routes)) {
+		return routes, false
+	}
+	for _, key := range keys {
+		if _, shed := dropped[key]; !shed {
+			continue
+		}
+		protocol := key.protocol
+		if protocol == "" {
+			protocol = "unknown"
+		}
+		noteLearnedRouteCapProtocolHit(protocol)
+		slog.Warn("learned-route protocol/table group shed to keep the snapshot within its publish budget",
+			"table_id", key.tableID,
+			"protocol", protocol,
+			"learned_routes", counts[key],
+			"cap", limit,
+			"publish_budget", learnedRoutePublishBudget.String(),
+		)
+	}
+	kept := routes[:0]
+	for _, route := range routes {
+		key := learnedRouteQuotaKey{tableID: route.TableID, protocol: route.Protocol}
+		if _, shed := dropped[key]; !shed {
+			kept = append(kept, route)
+		}
+	}
+	return kept, true
+}
+
+// learnedRouteCapExceeded records a build that exceeded the combined
+// publish budget. capLearnedRouteGroups decides which complete protocol/table
+// groups to shed; this predicate records the build-level counter and diagnostic.
 //
-// THE DECISION: DEGRADE TO NO IMPORT, never a bounded subset.
+// #9522 owns the disposition above the cap. Capped NoRoute frames are
+// adjudicated against the configured policy, and denied results are dropped as
+// PolicyDenied. The cap does not delegate NoRoute to the kernel.
 //
-// #9522 owns the disposition above the cap. The old #9054 exception restored
-// kernel delegation for NoRoute while the flag was set, but that made every
-// kernel-routable destination the helper did not import eligible for transit
-// with no zone policy, session, NAT or screen — a permitted-by-absence path
-// that does not exist under an uncapped import. The helper now adjudicates
-// capped NoRoute frames exactly as uncapped ones and the NoRoute arm drops a
-// denied result as PolicyDenied.
-//
-// The cap itself is unchanged and the reasoning for declining the ENTIRE
-// import still holds:
-//
-//   - NO IMPORT is uniform. Every learned destination behaves the same way,
-//     the box is in one describable state, and an operator can reason about it
-//     from the one diagnostic below.
-//   - A BOUNDED SUBSET is per-destination, and which destinations make the cut
-//     is decided by the emission sort order — table id, then family, then
-//     destination string. That is arbitrary with respect to anything an
-//     operator cares about: two prefixes to the same peer land on opposite
-//     sides of the cut because of where they sort. The result is a box where
-//     some traffic takes the fast path and some does not, with no rule anyone
-//     can state, and it presents as intermittent performance rather than as a
-//     limit being hit.
-//
-// This deliberately accepts the availability cost of dropping capped NoRoute
-// frames on a deny-default box. Kernel-assisted adjudication and a chunked
-// route verb were considered in #9522 and plan-killed for lack of an ordering
-// and atomicity proof. Until one of those designs has a complete contract, a
-// silent kernel delegation is the security defect this cap must not recreate.
-//
-// LOUD, because silently importing a prefix of the table is the failure that
-// reads as healthy. The log names the count, cap, fail-closed consequence and
-// protocol pairing; the cap counter plus policy-denial counter make the state
-// readable without log scraping.
+// Whole-group shedding avoids selecting an arbitrary route prefix by emission
+// sort order. Each cap hit records the affected protocol separately, while
+// unrelated groups remain eligible for the helper FIB.
 func learnedRouteCapExceeded(count int) bool {
 	limit := maxLearnedRoutes()
 	if limit <= 0 || count <= limit {
 		return false
 	}
 	learnedRouteCapHits.Add(1)
-	slog.Warn("learned-route import DECLINED — the kernel table is larger than one control-socket publish can carry",
+	slog.Warn("learned-route publish budget exceeded — complete protocol/table groups are being shed",
 		"learned_routes", count,
 		"cap", limit,
 		"publish_budget", learnedRoutePublishBudget.String(),
 		"bytes_per_route", learnedRouteBytesEach,
-		"consequence", "the helper FIB keeps its config-derived routes only; every LEARNED destination resolves NoRoute. Capped NoRoute frames are ADJUDICATED and DROPPED as policy denials on a deny-default box; xpf_policy_denies_total counts them and xpf_learned_route_import_capped reports the capped state. On a helper older than snapshot protocol 27 the snapshot is REFUSED outright rather than applied (#9522)",
-		"security_note", "the capped state no longer delegates NoRoute to the kernel: the #7480 policy adjudication applies above and below the cap, and only a PolicyAction::Permit result keeps the normal slow-path delegation. A kernel-routable destination cannot transit by absence of a userspace route",
-		"why_not_partial", "a bounded subset would be selected by emission sort order, making fast-path eligibility per-destination and unpredictable rather than a state an operator can describe",
+		"consequence", "only complete (table, protocol) groups are omitted; remaining groups stay imported. Missing-group NoRoute frames are ADJUDICATED and DROPPED as policy denials on a deny-default box; xpf_policy_denies_total counts them and xpf_learned_route_import_capped reports the capped state. On a helper older than snapshot protocol 27 the snapshot is REFUSED outright rather than applied (#9522)",
+		"security_note", "the capped state does not delegate NoRoute to the kernel: the #7480 policy adjudication applies above and below the cap, and only a PolicyAction::Permit result keeps normal slow-path delegation",
+		"why_not_partial", "a whole (table, protocol) group is shed, never a prefix chosen by route sort order",
 		"remedy", "reduce the imported table (filter what FRR installs into the kernel), or raise the publish budget if holding the control socket that long is acceptable",
-		"observability", "xpf_learned_route_cap_hits_total counts the refused import; xpf_learned_route_import_capped reports the live capped state; xpf_policy_denies_total advances for every capped NoRoute frame denied by policy",
+		"observability", "xpf_learned_route_cap_hits_total counts capped builds; LearnedRouteCapHitsByProtocol reports group sheds by protocol; xpf_learned_route_import_capped reports the live capped state; xpf_policy_denies_total advances for denied capped NoRoute frames",
 	)
 	return true
 }

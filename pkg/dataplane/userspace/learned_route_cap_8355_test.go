@@ -1,6 +1,8 @@
 package userspace
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,8 +16,8 @@ import (
 //
 // The measurement (#8554) established that the binding constraint is TIME, not
 // size. These cells bind what was done about it: the cap is derived from the
-// deadline formula rather than picked, it declines the whole import rather than
-// truncating, and the decline is visible.
+// deadline formula, over-budget protocol/table groups are shed whole rather
+// than sliced by route order, and both build and protocol hits are observable.
 
 // THE DERIVATION, which is the part that can rot silently.
 //
@@ -84,6 +86,63 @@ func TestUnderTheCapTheTableIsImportedWhole8355(t *testing.T) {
 	}
 	if got := LearnedRouteCapHits(); got != before {
 		t.Errorf("the cap counter moved (%d -> %d) for a table well under the limit", before, got)
+	}
+}
+
+func TestBGPOverCapPreservesOSPFRoutes10824(t *testing.T) {
+	limit := maxLearnedRoutes()
+	if limit < 2 {
+		t.Fatalf("learned-route cap = %d, need at least two routes for the regression fixture", limit)
+	}
+	ospfCount := limit - 1
+	routes := make([]routing.LearnedRoute, 0, ospfCount+limit+1)
+	add := func(protocol, prefix string, count int) {
+		for i := range count {
+			routes = append(routes, routing.LearnedRoute{
+				TableID:     learnedRouteMainTableID,
+				Family:      unix.AF_INET,
+				Destination: fmt.Sprintf("%s.%d.%d/32", prefix, i/256, i%256),
+				NextHops:    []string{"192.0.2.1"},
+				Protocol:    protocol,
+			})
+		}
+	}
+	add("ospf", "10.40", ospfCount)
+	add("bgp", "10.41", limit+1)
+
+	previous := learnedRouteImportFn
+	t.Cleanup(func() { learnedRouteImportFn = previous })
+	learnedRouteImportFn = func([]int) ([]routing.LearnedRoute, error) {
+		return routes, nil
+	}
+
+	beforeTotal := LearnedRouteCapHits()
+	beforeByProtocol := LearnedRouteCapHitsByProtocol()
+	snapshots, capped, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	if !capped {
+		t.Fatal("the over-cap BGP group did not mark the snapshot as capped")
+	}
+	if len(snapshots) != ospfCount {
+		t.Fatalf("snapshot has %d routes, want all %d OSPF routes to survive the BGP flood",
+			len(snapshots), ospfCount)
+	}
+	for _, snapshot := range snapshots {
+		if !strings.HasPrefix(snapshot.Destination, "10.40.") {
+			t.Errorf("non-OSPF route survived the BGP group shed: %s", snapshot.Destination)
+		}
+	}
+	if got := LearnedRouteCapHits(); got != beforeTotal+1 {
+		t.Errorf("cap-hit builds = %d, want one increment from %d", got, beforeTotal)
+	}
+	afterByProtocol := LearnedRouteCapHitsByProtocol()
+	if got := afterByProtocol["bgp"]; got != beforeByProtocol["bgp"]+1 {
+		t.Errorf("BGP cap hits = %d, want one increment from %d", got, beforeByProtocol["bgp"])
+	}
+	if got := afterByProtocol["ospf"]; got != beforeByProtocol["ospf"] {
+		t.Errorf("OSPF cap hits = %d, want unchanged at %d", got, beforeByProtocol["ospf"])
 	}
 }
 
