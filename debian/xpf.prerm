@@ -1,0 +1,20 @@
+#!/bin/sh
+# #10758: remove the legacy systemd-networkd Requires link BEFORE the
+# generated dh_installsystemd stop hook. Otherwise stopping the required fence
+# propagates a stop to networkd on every package removal.
+set -e
+
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    requires_link=/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service
+    if [ -L "$requires_link" ]; then
+        rm -f "$requires_link"
+        rmdir "$(dirname "$requires_link")" 2>/dev/null || true
+        # Reload before the generated stop hook. If reload fails,
+        # abort removal rather than stop the fence with a stale Requires edge.
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+        fi
+    fi
+fi
+
+#DEBHELPER#
