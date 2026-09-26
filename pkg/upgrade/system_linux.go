@@ -252,6 +252,46 @@ func (s *realSystem) HelperHealthy(expectVersion string, deadline time.Duration)
 
 func (s *realSystem) Now() time.Time { return time.Now() }
 
+// runCmdTimeout and captureCmdTimeout bound firmware/NVRAM helpers that can
+// block in platform code. The context deadline must be comfortably inside the
+// promotion unit's TimeoutStartSec so Promote can persist its revert attempt
+// before systemd's uncounted OnFailure reboot path runs.
+func runCmdTimeout(timeout time.Duration, name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s %s: timed out after %s: %w (command error: %v, output: %s)",
+				name, strings.Join(args, " "), timeout, ctx.Err(), err, strings.TrimSpace(out.String()))
+		}
+		return fmt.Errorf("%s %s: %w (output: %s)", name, strings.Join(args, " "), err, strings.TrimSpace(out.String()))
+	}
+	return nil
+}
+
+func captureCmdTimeout(timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	// Keep parsed command output locale-independent just like captureCmd.
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%s %s: timed out after %s: %w (command error: %v, output: %s)",
+				name, strings.Join(args, " "), timeout, ctx.Err(), err, strings.TrimSpace(out.String()))
+		}
+		return "", fmt.Errorf("%s %s: %w (output: %s)", name, strings.Join(args, " "), err, strings.TrimSpace(out.String()))
+	}
+	return out.String(), nil
+}
+
 func runCmd(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	var out bytes.Buffer
