@@ -181,10 +181,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return d.setupDataplaneAndInitialConfig()
 		}},
 	}
-	if err := d.runStartupOrAbort(ctx, phases, func(abortErr error) error {
+	eventBuf, startupErr := d.runStartupWithEventBuffer(ctx, phases, func(abortErr error) error {
 		return d.runShutdownSequence(&wg, stop, abortErr)
-	}); err != nil {
-		return err
+	})
+	if startupErr != nil {
+		return startupErr
 	}
 	// The gate's periodic kernel-truth census starts after startup has completed
 	// and remains joined through the normal shutdown WaitGroup. Writer events
@@ -211,9 +212,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.applyCancelContext, d.applyCancel = context.WithCancel(ctx)
 	defer d.applyCancel()
 
-	// Create event buffer (shared between event reader and CLI)
-	eventBuf := logging.NewEventBuffer(1000)
-	d.eventBuf = eventBuf
+	// The event buffer was created before the startup phases so events emitted
+	// during config loading are retained. It is shared between the event reader
+	// and CLI.
 
 	// (wg is declared at the top of Run so the #5807 startup-abort path can pass
 	// it to runShutdownSequence.)
@@ -1040,6 +1041,15 @@ func (d *Daemon) runStartupOrAbort(ctx context.Context, phases []startupPhase, t
 		return teardown(err)
 	}
 	return err
+}
+
+// runStartupWithEventBuffer creates the event buffer before executing startup
+// phases. Phase 1 can emit bootstrap-import events, so initialization after
+// runStartupOrAbort silently loses them.
+func (d *Daemon) runStartupWithEventBuffer(ctx context.Context, phases []startupPhase, teardown func(error) error) (*logging.EventBuffer, error) {
+	eventBuf := logging.NewEventBuffer(1000)
+	d.eventBuf = eventBuf
+	return eventBuf, d.runStartupOrAbort(ctx, phases, teardown)
 }
 
 // startReconcileRGStateLoop launches the RG-state reconcile safety-net loop and

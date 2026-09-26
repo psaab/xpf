@@ -13,7 +13,7 @@ func render(s Snapshot) string {
 	return b.String()
 }
 
-// The four recorded statuses each render their own status token AND their own
+// The six recorded statuses each render their own status token AND their own
 // meaning. RED on revert: collapse two cases in explain() and the pair that
 // collapsed reports the same meaning line.
 func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
@@ -21,6 +21,8 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 		{StatusOK, "ok"},
 		{StatusLoadedDB, "loaded-from-db"},
 		{StatusNoConfig, "no-config"},
+		{StatusPending, "credential-apply-pending"},
+		{StatusCredentialFailed, "credential-apply-failed"},
 		{StatusFailed, "import-failed"},
 	}
 	seen := map[string]string{}
@@ -41,6 +43,29 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 	}
 }
 
+func TestCredentialApplyFailureExplainsPartialAccess(t *testing.T) {
+	out := render(Snapshot{
+		Status: StatusCredentialFailed,
+		Error:  "host credential reconciliation failed; inspect the daemon journal",
+		Failed: true,
+	})
+	if !strings.Contains(out, "configured access may be incomplete") {
+		t.Fatalf("credential-apply-failed must explain that configured access may be incomplete:\n%s", out)
+	}
+	if strings.Contains(out, "NOT the one on the day-0 medium") {
+		t.Fatalf("credential-apply-failed must not claim the imported config is absent:\n%s", out)
+	}
+}
+
+func TestCredentialApplyPendingDoesNotShowFailureRemediation(t *testing.T) {
+	out := render(Snapshot{Status: StatusPending})
+	if !strings.Contains(out, "initial host-credential application is still running") {
+		t.Fatalf("pending status must say credential application has not finished:\n%s", out)
+	}
+	if strings.Contains(out, "configured access may be incomplete") {
+		t.Fatalf("pending status must not be rendered as a failure:\n%s", out)
+	}
+}
 func TestFailedMeaningDoesNotAssumeTextConfigWasInstalled(t *testing.T) {
 	out := render(Snapshot{
 		Status: StatusFailed,
@@ -56,7 +81,6 @@ func TestFailedMeaningDoesNotAssumeTextConfigWasInstalled(t *testing.T) {
 		t.Fatalf("import-failed must explain that a configuration could not be applied:\n%s", out)
 	}
 }
-
 
 func meaningLine(t *testing.T, out string) string {
 	t.Helper()
@@ -121,6 +145,7 @@ func TestNonFailureNeverShowsRemediation(t *testing.T) {
 		{Status: StatusOK, UnixSec: 1755792000},
 		{Status: StatusNoConfig, UnixSec: 1755792000},
 		{Status: StatusLoadedDB, UnixSec: 1755792000},
+		{Status: StatusPending, UnixSec: 1755792000},
 	} {
 		out := render(s)
 		if strings.Contains(out, "lifeline-safe bootstrap state") {

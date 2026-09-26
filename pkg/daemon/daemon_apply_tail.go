@@ -213,6 +213,12 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 	// 13. Apply root authentication (encrypted-password + SSH keys)
 	rootAuthErr := d.applyRootAuth(cfg)
 
+	// The bootstrap-import status remains pending until this initial credential
+	// set has completed. Only its five host-credential owners affect that
+	// status; failures elsewhere in the apply do not rewrite import success.
+	d.completeBootstrapCredentialApply(errors.Join(
+		loginErr, sudoersErr, absentUsersErr, sshConfigErr, rootAuthErr))
+
 	// 14. Apply syslog file destinations (rsyslog configs)
 	d.applySyslogFiles(cfg)
 

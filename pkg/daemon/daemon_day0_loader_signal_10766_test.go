@@ -71,7 +71,7 @@ func TestDay0ImportRetriesAfterFirstCommitRollback_10766(t *testing.T) {
 		t.Fatalf("day-0 config was not imported after committed=0 rollback: committed=%v active=%s",
 			reloaded.EverCommitted(), reloaded.ShowActiveSet())
 	}
-	if got := d.BootstrapImportSnapshot(); got.Status != bootstrapImportOK || got.Failed {
-		t.Fatalf("bootstrap import = %+v; want ok", got)
+	if got := d.BootstrapImportSnapshot(); got.Status != bootstrapImportPending || got.Failed {
+		t.Fatalf("after the successful import but before credential reconciliation = %+v; want credential-apply-pending", got)
 	}
 }

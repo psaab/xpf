@@ -29,9 +29,11 @@ import (
 )
 
 // Status vocabulary for the boot-time config-import decision. pkg/daemon
-// records exactly one of these once per boot (recordBootstrapImport).
+// records its import result during startup and finalizes a successful import
+// after initial host-credential reconciliation.
 const (
-	// StatusOK: the text config file was imported and committed.
+	// StatusOK: the text config was imported and its initial host credentials
+	// were applied successfully.
 	StatusOK = "ok"
 	// StatusLoadedDB: an active config was already present in the DB; no file
 	// import was attempted (the normal steady-state boot).
@@ -39,6 +41,12 @@ const (
 	// StatusNoConfig: no text config file present (factory / fresh boot).
 	// Expected — NOT a failure.
 	StatusNoConfig = "no-config"
+	// StatusPending: import succeeded but initial host-credential reconciliation
+	// has not completed.
+	StatusPending = "credential-apply-pending"
+	// StatusCredentialFailed: import succeeded but initial host credentials did
+	// not converge.
+	StatusCredentialFailed = "credential-apply-failed"
 	// StatusFailed: a text-config import failed (read/parse/commit/device-map
 	// preflight), or the day-0 loader rejected a medium before installing it.
 	StatusFailed = "import-failed"
@@ -48,9 +56,9 @@ const (
 // without importing pkg/daemon (which imports both show paths).
 type Snapshot struct {
 	Status  string // a Status* constant; "" when the decision has not been reached yet
-	Error   string // detail when Status == StatusFailed
-	UnixSec int64  // when the outcome was recorded
-	Failed  bool   // true only for StatusFailed
+	Error   string // safe detail for an import or initial credential-apply failure
+	UnixSec int64  // when the outcome was last updated
+	Failed  bool   // true for a text-import or initial credential-apply failure
 }
 
 // explain returns the operator-facing meaning of a status. An UNKNOWN status
@@ -61,11 +69,15 @@ type Snapshot struct {
 func explain(status string) string {
 	switch status {
 	case StatusOK:
-		return "the day-0 / preseeded configuration was imported and committed"
+		return "the day-0 / preseeded configuration was imported and host credentials were applied"
 	case StatusLoadedDB:
 		return "an active configuration was already present; no file import was attempted"
 	case StatusNoConfig:
 		return "no configuration file was present (factory boot) — expected, not a failure"
+	case StatusPending:
+		return "the day-0 configuration was imported; initial host-credential application is still running"
+	case StatusCredentialFailed:
+		return "the day-0 configuration was imported, but host-credential application failed"
 	case StatusFailed:
 		return "a configuration could NOT be applied — see Error below"
 	case "":
@@ -78,16 +90,14 @@ func explain(status string) string {
 // Render writes the Junos-style rendering of the recorded outcome.
 //
 // Informational by construction (#6496 acceptance): it describes state and
-// never signals failure through its own return, mirroring the deliberate
-// /health posture where import-failed does NOT force a 503 — a reachable box
-// whose day-0 config did not take must not be pulled from rotation over it.
+// never signals failure through its own return, mirroring the /health posture.
+// Import or credential-apply failure does not force a 503 because a box whose
+// day-0 configuration did not fully converge can still be reachable.
 //
-// Unlike /health, this surface DOES render the error detail. /health withholds
-// it on purpose (#5031): that endpoint is unauthenticated and the raw import
-// error quotes the offending config, which can echo a submitted secret. The
-// CLI and ShowText paths are authenticated, so this is the only surface that
-// can answer "why didn't my config apply" with the actual reason — which is
-// the entire point of the command.
+// Unlike /health, this surface renders error details. /health withholds raw
+// import errors on purpose (#5031), because they quote the submitted config
+// and can echo a secret. The CLI and ShowText paths are authenticated; this is
+// the in-band answer to "why didn't my day-0 config apply?"
 func Render(w io.Writer, s Snapshot) {
 	fmt.Fprintln(w, "Bootstrap configuration import:")
 	status := s.Status
@@ -109,9 +119,16 @@ func Render(w io.Writer, s Snapshot) {
 	// dressed up as one.
 	if s.Failed {
 		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "  The box is in the lifeline-safe bootstrap state; the running")
-		fmt.Fprintln(w, "  configuration is NOT the one on the day-0 medium. Fix the cause")
-		fmt.Fprintln(w, "  above, then either commit the corrected configuration from this")
-		fmt.Fprintln(w, "  CLI or re-present a corrected day-0 medium and reboot.")
+		if s.Status == StatusCredentialFailed {
+			fmt.Fprintln(w, "  The day-0 configuration was imported, but host credentials")
+			fmt.Fprintln(w, "  did not converge; configured access may be incomplete.")
+			fmt.Fprintln(w, "  Inspect the daemon journal, fix the cause, then re-apply")
+			fmt.Fprintln(w, "  or commit the configuration.")
+		} else {
+			fmt.Fprintln(w, "  The box is in the lifeline-safe bootstrap state; the running")
+			fmt.Fprintln(w, "  configuration is NOT the one on the day-0 medium. Fix the cause")
+			fmt.Fprintln(w, "  above, then either commit the corrected configuration from this")
+			fmt.Fprintln(w, "  CLI or re-present a corrected day-0 medium and reboot.")
+		}
 	}
 }

@@ -406,16 +406,22 @@ Bootstrap configuration import:
   The box is in the lifeline-safe bootstrap state; ...
 ```
 
-The four statuses are `ok` (imported + committed), `loaded-from-db` (an active
-config was already present, so no file import was attempted — the normal
-steady-state boot), `no-config` (nothing to import: the expected factory boot),
-and `import-failed` (a file could not be read, parsed, committed, or survived
-the device-map strand preflight, or the loader rejected a medium at commit-check).
+The six status values are `ok` (the text config was imported and committed,
+and the initial host-credential reconciliation succeeded),
+`credential-apply-pending` (import succeeded but initial host credentials are
+still being applied), `credential-apply-failed` (import committed but that
+reconciliation did not converge), `loaded-from-db` (an active config was already
+present, so no file import was attempted — the normal steady-state boot),
+`no-config` (nothing to import: the expected factory boot), and `import-failed`
+(a file could not be read, parsed, committed, or survived the device-map strand
+preflight, or the loader rejected a medium at commit-check).
 
-`import-failed` is INFORMATIONAL, not a fault state: the box is in the
-lifeline-safe bootstrap state and still reachable, so neither this command nor
-`/health` treats it as a reason to pull the box. It also emits a
-`BOOTSTRAP_IMPORT_FAILED` event.
+`import-failed` is INFORMATIONAL, not a fault state: the box is still
+reachable, so neither this command nor `/health` treats it as a reason to pull
+the box. It emits a `BOOTSTRAP_IMPORT_FAILED` event. `credential-apply-failed`
+is also informational and does not force a health 503; it means the imported
+configuration is active but configured access may be incomplete. Its specific
+reconcile error remains in the daemon journal.
 
 The same status is on the loopback REST probe for scripted checks:
 
