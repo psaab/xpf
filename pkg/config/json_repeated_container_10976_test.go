@@ -37,23 +37,23 @@ func TestFormatJSONRepeatedContainers_10976(t *testing.T) {
         from-zone trust to-zone untrust {
             policy p {
                 match { source-address any; destination-address any; application any; }
-                then { permit; }
                 then { deny; }
+                then { count; }
             }
         }
     }
 }`,
-			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":{"p":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"permit":true,"deny":true}}}}}}}}`,
+			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":{"p":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true,"count":true}}}}}}}}`,
 		},
 		{
 			name: "duplicate zone-pair contexts preserve both policies",
 			cfg: `security {
     policies {
         from-zone trust to-zone untrust {
-            policy allow { match { source-address any; destination-address any; application any; } then { permit; } }
+            policy block { match { source-address any; destination-address any; application any; } then { deny; } }
         }
         from-zone trust to-zone untrust {
-            policy block { match { source-address any; destination-address any; application any; } then { deny; } }
+            policy allow { match { source-address any; destination-address any; application any; } then { permit; } }
         }
     }
 }`,
