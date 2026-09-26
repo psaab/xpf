@@ -12,6 +12,7 @@ package frr
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -214,6 +215,15 @@ func renderFromPrefixListACL(b *strings.Builder, aclName, matchKW string, pl *co
 	seqn := 5
 	for _, prefix := range pl.Prefixes {
 		if strings.Contains(prefix, ":") != v6 {
+			continue
+		}
+		// #10823: policy-options prefix-list entries are also copied into
+		// inline access-lists when a route-filter and from-prefix-list share
+		// a route-map term. Keep malformed entries out of this second FRR
+		// emission path as well as the top-level prefix-list definition.
+		if _, _, err := net.ParseCIDR(prefix); err != nil {
+			slog.Warn("frr: omitting malformed prefix-list entry from inline access-list",
+				"list", pl.Name, "prefix", prefix, "reason", err)
 			continue
 		}
 		if v6 {

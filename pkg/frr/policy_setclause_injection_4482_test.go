@@ -7,50 +7,33 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482 is a
-// FAIL-ON-REVERT guard for the residual #4097 sanitize-belt bypass on the
-// tolerant-load path. #4097 wrapped the `bgp community-list` / `bgp as-path
-// access-list` DEFINITIONS in sanitizeFRRValue, but left the route-map `set
-// community` / `set as-path prepend` clauses AND the `ip/ipv6 prefix-list`
-// entries rendering with a bare %s. A value that carries an embedded newline
-// (materialized from a stored `\n` escape by the lexer on a leniently-loaded /
-// peer-synced / rolled-back config — the paths the strict #1798 commit gate
-// does NOT cover) would then inject a standalone frr.conf command.
+// TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823
+// preserves #4482's hostile newline-injection coverage for values that remain
+// sanitized onto their directive lines. The #10823 render belt now parses
+// policy-options prefix-list entries as CIDRs before sanitization: malformed
+// newline-bearing values are warned and omitted (fail-closed) rather than
+// emitted as sanitized-but-invalid FRR prefixes. Inline route-filter entries
+// already use the same fail-closed ParseCIDR posture (#2105).
 //
-// The fix routes ALL FRR-rendered free-text through sanitizeFRRValue regardless
-// of load path, collapsing the newline to a space so the value stays on its
-// single rendered line. Reverting any of the wrapped sites turns this RED: a
-// bare `router bgp` / `neighbor` line appears in the managed section.
+// #4498 completes coverage for the remaining sanitized route-map slots. This
+// test drives a newline payload through each one, verifies no injected
+// top-level command appears, and checks that both malformed top-level
+// prefix-list entries and malformed inline route-filters are absent:
 //
-// #4498 completes the coverage. The original guard exercised only 3 of the
-// route-map free-text slots (prefix-list, set community, set as-path prepend);
-// this test now drives an injection payload through EVERY wrapped slot so a
-// revert of any one of them is caught:
+//   - malformed IPv4 / IPv6 policy-options prefix-list entries (#10823)
+//   - match community / match as-path                   (#4482)
+//   - set community (replace / additive)                (#4482)
+//   - set comm-list delete / set as-path prepend         (#4482)
+//   - set ip / ipv6 next-hop / origin / source-protocol   (#4498)
 //
-//   - ip / ipv6 prefix-list entry            (#4482)
-//   - match community                        (#4482)
-//   - match as-path                          (#4482)
-//   - set community (replace)                (#4482)
-//   - set community <v> additive             (#4482)
-//   - set comm-list <name> delete            (#4482)
-//   - set as-path prepend                    (#4482)
-//   - set ip / ipv6 next-hop                 (#4498 residual)
-//   - set origin                             (#4498 residual)
-//   - match source-protocol                  (#4498 residual)
-//
-// The inline route-filter prefix-list slot (renderRouteFilterEntry) is also a
-// sanitizeFRRValue call site, but it sits BEHIND the #2105 net.ParseCIDR belt:
-// a control-char prefix fails net.ParseCIDR and the entry is skipped entirely
-// (fail-closed) before the sanitize call is ever reached, so its sanitize is
-// pure defense-in-depth and cannot be exercised with a control-char payload.
-// The test asserts that fail-closed property directly (no injected line, and
-// the malformed prefix never appears in the output).
-func TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482(t *testing.T) {
+// The NAME slots render through frrName rather than sanitizeFRRValue; their
+// assertions below keep the injected values bounded to one FRR token.
+func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *testing.T) {
 	m := &Manager{frrConf: "/dev/null"}
 	po := &config.PolicyOptionsConfig{
 		PrefixLists: map[string]*config.PrefixList{
-			// Newline-injecting prefix values — IPv4 and IPv6 variants
-			// exercise both the `ip` and `ipv6` prefix-list render arms.
+			// Newline-injecting invalid CIDRs exercise both family arms.
+			// The #10823 ParseCIDR belt must omit these before sanitization.
 			"pl-evil":  {Name: "pl-evil", Prefixes: []string{"10.0.0.0/8\n router bgp 65000"}},
 			"pl-evil6": {Name: "pl-evil6", Prefixes: []string{"2001:db8::/32\n router bgp 65000"}},
 		},
@@ -151,16 +134,13 @@ func TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482(t *testing.T
 		}
 	}
 
-	// Every wrapped slot's payload must survive collapsed onto its single
-	// directive line (newline → space, so the "\n " in each payload becomes a
-	// double space). A per-slot assertion pinpoints exactly which sanitize
-	// call regressed if one is reverted.
+	// Every still-sanitized route-map payload must survive collapsed onto its
+	// single directive line (newline → space). The prefix-list payloads below
+	// are instead rejected by ParseCIDR and have dedicated omission assertions.
 	wantOnOneLine := []struct {
 		slot string
 		want string
 	}{
-		{"ip prefix-list", "ip prefix-list pl-evil seq 5 permit 10.0.0.0/8  router bgp 65000\n"},
-		{"ipv6 prefix-list", "ipv6 prefix-list pl-evil6 seq 5 permit 2001:db8::/32  router bgp 65000\n"},
 		{"set community (replace)", " set community 65000:1  neighbor 6.6.6.6 remote-as 65000\n"},
 		{"set as-path prepend", " set as-path prepend 65001  router bgp 65000 65001\n"},
 		{"match source-protocol", " match source-protocol bgp  router bgp 65000\n"},
@@ -185,6 +165,12 @@ func TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482(t *testing.T
 			t.Errorf("%s not sanitized onto one line (want %q), got:\n%s", tc.slot, tc.want, got)
 		}
 	}
+	for _, malformed := range []string{"10.0.0.0/8", "2001:db8::/32"} {
+		if strings.Contains(got, malformed) {
+			t.Errorf("policy-options prefix-list: malformed CIDR %q must be omitted, got:\n%s", malformed, got)
+		}
+	}
+
 	for _, tc := range []struct{ slot, want string }{
 		{"match community", " match community " + frrName("cm1\n neighbor 7.7.7.7 remote-as 65000") + "\n"},
 		{"match as-path", " match as-path " + frrName("ap1\n router bgp 65000") + "\n"},
