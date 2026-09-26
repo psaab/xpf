@@ -922,6 +922,72 @@ pub(crate) fn xfrm_monitor_usable() -> bool {
         None => false,
     }
 }
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum XfrmLifecycleSkipAction {
+    Continue,
+    Skip,
+    Fail,
+}
+
+#[cfg(test)]
+fn xfrm_lifecycle_skip_action(monitor_usable: bool, must_run: bool) -> XfrmLifecycleSkipAction {
+    match (monitor_usable, must_run) {
+        (true, _) => XfrmLifecycleSkipAction::Continue,
+        (false, false) => XfrmLifecycleSkipAction::Skip,
+        (false, true) => XfrmLifecycleSkipAction::Fail,
+    }
+}
+
+#[cfg(test)]
+fn apply_xfrm_lifecycle_skip_action(action: XfrmLifecycleSkipAction) -> bool {
+    match action {
+        XfrmLifecycleSkipAction::Continue => true,
+        XfrmLifecycleSkipAction::Skip => {
+            eprintln!("SKIP: needs NETLINK_XFRM bind privilege for the SA-monitor baseline");
+            false
+        }
+        XfrmLifecycleSkipAction::Fail => {
+            panic!(
+                "XPF_REQUIRE_XFRM_LIFECYCLE is set, but NETLINK_XFRM bind is unavailable; \
+                 this lifecycle test must run in the privileged gate"
+            );
+        }
+    }
+}
+
+/// Run from every lifecycle test whose setup requires the kernel XFRM monitor.
+/// Ordinary unprivileged suites keep their documented SKIP behavior; the
+/// privileged `make test-xfrm-lifecycle` leg sets the must-run gate so a missing
+/// NETLINK_XFRM capability fails the test instead of silently passing it.
+#[cfg(test)]
+pub(crate) fn require_xfrm_monitor_for_lifecycle_test() -> bool {
+    let must_run = std::env::var_os("XPF_REQUIRE_XFRM_LIFECYCLE").is_some();
+    apply_xfrm_lifecycle_skip_action(xfrm_lifecycle_skip_action(xfrm_monitor_usable(), must_run))
+}
+
+#[cfg(test)]
+#[test]
+fn xfrm_lifecycle_unprivileged_skip_is_preserved_10868() {
+    assert!(!apply_xfrm_lifecycle_skip_action(
+        xfrm_lifecycle_skip_action(false, false,)
+    ));
+}
+
+#[cfg(test)]
+#[test]
+#[should_panic(expected = "XPF_REQUIRE_XFRM_LIFECYCLE is set")]
+fn xfrm_lifecycle_must_run_gate_rejects_skip_10868() {
+    apply_xfrm_lifecycle_skip_action(xfrm_lifecycle_skip_action(false, true));
+}
+
+#[cfg(test)]
+#[test]
+fn xfrm_lifecycle_must_run_gate_runs_with_xfrm_10868() {
+    assert!(apply_xfrm_lifecycle_skip_action(
+        xfrm_lifecycle_skip_action(true, true,)
+    ));
+}
 
 fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
     let mut request = [0u8; NLMSG_HDR_LEN + XFRM_MSG_ID_LEN];

@@ -114,6 +114,8 @@ test:
 	echo "  SKIPS unprivileged. It is the ONLY behavioural coverage of the shim's"; \
 	echo "  control flow, and the #1864 verifier gate does not substitute: two"; \
 	echo "  distinct WRONG fixes both pass it. Run 'sudo make test-root' (#9052)."; \
+	echo "  XFRM lifecycle tests also SKIP if NETLINK_XFRM is unavailable;"; \
+	echo "  test-root runs them with XPF_REQUIRE_XFRM_LIFECYCLE=1 (#10868)."; \
 	exit $$status
 
 # #9052 item 1: the root-capable aggregate. `test-shim-run` was a prerequisite
@@ -128,8 +130,19 @@ test:
 # ordinary gate unusable. The remedy is the ANNOUNCEMENT above plus this named
 # aggregate — the gate now says what it did not examine instead of implying it
 # examined everything.
+
+# #10868: unprivileged `make test` deliberately preserves SKIP=PASS for the
+# XFRM-dependent lifecycle cells. This root-capable gate sets the must-run
+# environment flag and runs the full Rust test targets: every existing gated
+# cell must either execute with NETLINK_XFRM or fail the suite instead of
+# returning PASS after SKIP.
+.PHONY: test-xfrm-lifecycle
+test-xfrm-lifecycle:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp XPF_REQUIRE_XFRM_LIFECYCLE=1 $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
+		--bins --tests -- --test-threads=1
+
 .PHONY: test-root
-test-root: test-shim-run test-memlock-guards
+test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle
 	@echo "make test-root: the privilege-gated legs ran."
 	@echo "  NOTE: some cells skip BECAUSE you are root (10 at last census)."
 	@echo "  No single run examines every cell; see 'make go-skip-census'."

@@ -14,10 +14,10 @@ pub(in crate::afxdp) use ipsec::*;
 mod mss;
 mod ipsec_sa;
 pub(in crate::afxdp) use ipsec_sa::*;
-// #10647: test-only XFRM-usability probe, crate-visible so server tests gate
-// on it too. Only this symbol crosses the boundary; the module stays private.
+// #10868: test-only monitor probe and lifecycle skip gate shared by the
+// XFRM-dependent coordinator/server lifecycle tests.
 #[cfg(test)]
-pub(crate) use self::ipsec_sa::xfrm_monitor_usable;
+pub(crate) use self::ipsec_sa::{require_xfrm_monitor_for_lifecycle_test, xfrm_monitor_usable};
 pub(in crate::afxdp) use mss::*;
 mod ha;
 pub(in crate::afxdp) use ha::*;
