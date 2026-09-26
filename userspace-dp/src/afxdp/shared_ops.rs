@@ -928,7 +928,7 @@ pub(super) fn should_drop_tcp_session_hit_for_flags(
 
 /// A live closing pair matched by a bare SYN. This is only a probe: the poll
 /// path checks packet authority before deciding whether to miss the session,
-/// and retires the old pair only after the owner's policy permits the packet.
+/// and evicts only after owner policy and replacement admission both succeed.
 #[derive(Clone, Debug)]
 pub(super) struct ClosingSynCandidate {
     pub(super) key: SessionKey,
@@ -971,9 +971,10 @@ pub(super) fn probe_closing_syn_candidate(
     })
 }
 
-/// Retire an old closing incarnation after the owner's new-flow policy has
-/// permitted its SYN. A foreign SYN never calls this; ordinary lookups remain
-/// read/refresh-only and cannot evict either local or shared copies.
+/// Retire an old closing incarnation after the owner's new-flow policy and
+/// applicable capacity/tuple admission gates accept its SYN. A foreign SYN
+/// never calls this; ordinary lookups remain read/refresh-only and cannot
+/// evict either local or shared copies.
 pub(super) fn evict_owner_closing_tcp_pair_for_syn(
     sessions: &mut SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,

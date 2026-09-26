@@ -1177,7 +1177,8 @@ fn established_hit_flag_contract_drops_ackless_anomalies_10887() {
         }
     }
 /// A foreign bare SYN must not retire either local close half or the HA copies
-/// before the normal authority verdict rejects it.
+/// before the normal authority/policy verdict; a policy-permitted foreign hit
+/// still forwards without taking ownership of the closing pair.
 #[test]
 fn a_foreign_bare_syn_preserves_closing_pair_and_shared_copies_10886() {
     let fw = forwarding(WAN_ONLY);
@@ -1207,6 +1208,30 @@ fn a_foreign_bare_syn_preserves_closing_pair_and_shared_copies_10886() {
     assert_eq!(sessions.close_class_wire_for(&reverse), 1);
     let copies = shared.lock().expect("shared session lock");
     assert_eq!(copies.len(), 2, "both shared close copies must survive");
+    assert_eq!(copies[&forward].tcp_close_class, 1);
+    assert_eq!(copies[&reverse].tcp_close_class, 1);
+    drop(copies);
+    let foreign_permit_fw = forwarding(Posture {
+        dmz_permit: true,
+        ..WAN_ONLY
+    });
+    let permitted_foreign = drive_with_shared(
+        &foreign_permit_fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_SYN, DMZ_IFINDEX),
+        &shared,
+    );
+    assert_eq!(permitted_foreign.session_hit, 1);
+    assert_eq!(
+        permitted_foreign.tx, 1,
+        "policy-permitted foreign hit forwards"
+    );
+    assert_eq!(permitted_foreign.foreign_authority_drops, 0);
+    assert_eq!(session_count(&sessions), 2);
+    assert_eq!(sessions.close_class_wire_for(&forward), 1);
+    assert_eq!(sessions.close_class_wire_for(&reverse), 1);
+    let copies = shared.lock().expect("shared session lock");
+    assert_eq!(copies.len(), 2);
     assert_eq!(copies[&forward].tcp_close_class, 1);
     assert_eq!(copies[&reverse].tcp_close_class, 1);
 }
@@ -1265,6 +1290,11 @@ fn an_owner_bare_syn_replaces_closing_pair_after_policy_permit_10886() {
     );
     assert_eq!(owner_fin.session_hit, 1);
     let (forward, reverse) = closing_pair_keys(&sessions);
+    // The pair already consumes the entire per-worker cap. Its slots must be
+    // credited during the read-only preflight, then reclaimed only once both
+    // session and tuple admission succeed.
+    sessions.set_max_sessions_for_test(2);
+    assert_eq!(session_count(&sessions), 2);
     let old_session_id = sessions.session_id_for(&forward);
     let shared = shared_closing_copies(&sessions);
 
@@ -1289,4 +1319,51 @@ fn an_owner_bare_syn_replaces_closing_pair_after_policy_permit_10886() {
     assert_eq!(copies.len(), 2);
     assert_eq!(copies[&forward].tcp_close_class, 0);
     assert_eq!(copies[&reverse].tcp_close_class, 0);
+}
+
+/// A busy global tuple gate rejects the replacement without deleting the
+/// closing owner pair or either shared copy.
+#[test]
+fn an_owner_bare_syn_preserves_closing_pair_when_tuple_gate_busy_10886() {
+    let fw = forwarding(WAN_ONLY);
+    let mut sessions = SessionTable::new();
+    let client_port = 61_234;
+    let first_syn = drive(
+        &fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, client_port, VIP_PORT, TCP_SYN, WAN_IFINDEX),
+    );
+    assert_eq!(first_syn.tx, 1);
+    let owner_fin = drive(
+        &fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, client_port, VIP_PORT, TCP_FIN, WAN_IFINDEX),
+    );
+    assert_eq!(owner_fin.session_hit, 1);
+    let (forward, reverse) = closing_pair_keys(&sessions);
+    let old_session_id = sessions.session_id_for(&forward);
+    let shared = shared_closing_copies(&sessions);
+
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([forward.clone()])
+        .expect("test holds the forward tuple's install permit");
+    let owner_syn = drive_with_shared(
+        &fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, client_port, VIP_PORT, TCP_SYN, WAN_IFINDEX),
+        &shared,
+    );
+    drop(held);
+
+    assert_eq!(owner_syn.session_hit, 0);
+    assert_eq!(owner_syn.session_miss, 1);
+    assert_eq!(owner_syn.tx, 0, "the busy tuple gate refuses this install");
+    assert_eq!(session_count(&sessions), 2);
+    assert_eq!(sessions.session_id_for(&forward), old_session_id);
+    assert_eq!(sessions.close_class_wire_for(&forward), 1);
+    assert_eq!(sessions.close_class_wire_for(&reverse), 1);
+    let copies = shared.lock().expect("shared session lock");
+    assert_eq!(copies.len(), 2);
+    assert_eq!(copies[&forward].tcp_close_class, 1);
+    assert_eq!(copies[&reverse].tcp_close_class, 1);
 }

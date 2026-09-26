@@ -3691,7 +3691,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 policy_counter_idx: host_policy_counter_idx,
                                 policy_counter: host_policy_counter,
                             };
-                            if owner_syn_reuse {
+                            let local_session_capacity_available =
+                                if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
+                                    sessions.can_admit_after_closing_tcp_pair_for_syn(
+                                        1,
+                                        reuse_key,
+                                        meta.tcp_flags,
+                                    )
+                                } else {
+                                    true
+                                };
+                            if owner_syn_reuse && local_session_capacity_available {
                                 crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
                                     sessions,
                                     worker_ctx.shared_sessions,
@@ -3704,22 +3714,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta.tcp_flags,
                                 );
                             }
-                            if install_helper_local_session_on_miss(
-                                sessions,
-                                binding.bpf_maps.session_map.handle(),
-                                worker_ctx.shared_sessions,
-                                worker_ctx.shared_nat_sessions,
-                                worker_ctx.shared_forward_wire_sessions,
-                                &worker_ctx.shared_owner_rg_indexes,
-                                &flow.forward_key,
-                                decision,
-                                local_metadata.clone(),
-                                SessionOrigin::LocalMiss,
-                                now_ns,
-                                meta.protocol,
-                                meta.tcp_flags,
-                                worker_ctx.forwarding.has_routing_domains,
-                            ) {
+                            if local_session_capacity_available
+                                && install_helper_local_session_on_miss(
+                                    sessions,
+                                    binding.bpf_maps.session_map.handle(),
+                                    worker_ctx.shared_sessions,
+                                    worker_ctx.shared_nat_sessions,
+                                    worker_ctx.shared_forward_wire_sessions,
+                                    &worker_ctx.shared_owner_rg_indexes,
+                                    &flow.forward_key,
+                                    decision,
+                                    local_metadata.clone(),
+                                    SessionOrigin::LocalMiss,
+                                    now_ns,
+                                    meta.protocol,
+                                    meta.tcp_flags,
+                                    worker_ctx.forwarding.has_routing_domains,
+                                ) {
                                 telemetry.counters.session_creates += 1;
                                 telemetry.dbg.session_create += 1;
                                 // #2218: a DNAT/static-DNAT to a firewall-
@@ -3767,6 +3778,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     timeout_secs,
                                     SessionOrigin::LocalMiss,
                                 );
+                            }
+                            if !local_session_capacity_available {
+                                sessions.note_admission_refused();
                             }
                         }
                         // #5690: the generic embedded-ICMP NAT reversal is
@@ -4191,22 +4205,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // `needed == 0` is the tracking-not-required
                                     // case (DNS fast-path, LocalDelivery): no
                                     // install is attempted and nothing changes.
-                                    if owner_syn_reuse && track_in_userspace {
-                                        crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
-                                            sessions,
-                                            worker_ctx.shared_sessions,
-                                            worker_ctx.shared_nat_sessions,
-                                            worker_ctx.shared_forward_wire_sessions,
-                                            &worker_ctx.shared_owner_rg_indexes,
-                                            owner_syn_reuse_key
-                                                .as_ref()
-                                                .expect("owner SYN reuse has a closing candidate"),
-                                            meta.tcp_flags,
-                                        );
-                                    }
                                     let needed_sessions = usize::from(track_in_userspace)
                                         + usize::from(track_in_userspace && install_local_reverse);
-                                    if needed_sessions > 0 && !sessions.can_admit(needed_sessions) {
+                                    // The local closing rows will be reclaimed
+                                    // only after this read-only capacity check,
+                                    // so account for exactly the slots the
+                                    // authorized tuple reuse can release.
+                                    let session_capacity_available =
+                                        if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
+                                            sessions.can_admit_after_closing_tcp_pair_for_syn(
+                                                needed_sessions,
+                                                reuse_key,
+                                                meta.tcp_flags,
+                                            )
+                                        } else {
+                                            sessions.can_admit(needed_sessions)
+                                        };
+                                    if needed_sessions > 0 && !session_capacity_available {
                                         sessions.note_admission_refused();
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
@@ -4468,6 +4483,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     flow_cache_policy_counter_idx =
                                         policy_result.policy_counter_idx;
                                     flow_cache_policy_counter = bound_policy_counter.clone();
+                                    // Preserve the incumbent until capacity and
+                                    // global tuple admission have both succeeded.
+                                    // This is the final state change before the
+                                    // preflighted replacement install.
+                                    if owner_syn_reuse && track_in_userspace {
+                                        crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                            sessions,
+                                            worker_ctx.shared_sessions,
+                                            worker_ctx.shared_nat_sessions,
+                                            worker_ctx.shared_forward_wire_sessions,
+                                            &worker_ctx.shared_owner_rg_indexes,
+                                            owner_syn_reuse_key
+                                                .as_ref()
+                                                .expect("owner SYN reuse has a closing candidate"),
+                                            meta.tcp_flags,
+                                        );
+                                    }
                                     let forward_installed = track_in_userspace
                                         && sessions.install_with_protocol_with_origin(
                                             flow.forward_key.clone(),
@@ -5174,35 +5206,49 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // session for a non-host native delivery; the
                                 // common post-HA gate below recycles it.
                                 if owned_packet_frame.is_some() || !l2_group_unicast_ip {
-                                    if owner_syn_reuse {
-                                        crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                    let fabric_seed_capacity_available =
+                                        if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
+                                            sessions.can_admit_after_closing_tcp_pair_for_syn(
+                                                1,
+                                                reuse_key,
+                                                meta.tcp_flags,
+                                            )
+                                        } else {
+                                            true
+                                        };
+                                    if fabric_seed_capacity_available {
+                                        if owner_syn_reuse {
+                                            crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                                sessions,
+                                                worker_ctx.shared_sessions,
+                                                worker_ctx.shared_nat_sessions,
+                                                worker_ctx.shared_forward_wire_sessions,
+                                                &worker_ctx.shared_owner_rg_indexes,
+                                                owner_syn_reuse_key
+                                                    .as_ref()
+                                                    .expect("owner SYN reuse has a closing candidate"),
+                                                meta.tcp_flags,
+                                            );
+                                        }
+                                        install_helper_local_session_on_miss(
                                             sessions,
+                                            binding.bpf_maps.session_map.handle(),
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,
                                             worker_ctx.shared_forward_wire_sessions,
                                             &worker_ctx.shared_owner_rg_indexes,
-                                            owner_syn_reuse_key
-                                                .as_ref()
-                                                .expect("owner SYN reuse has a closing candidate"),
+                                            &flow.forward_key,
+                                            decision,
+                                            seed_metadata,
+                                            SessionOrigin::FabricPuntSeed,
+                                            now_ns,
+                                            meta.protocol,
                                             meta.tcp_flags,
+                                            worker_ctx.forwarding.has_routing_domains,
                                         );
+                                    } else {
+                                        sessions.note_admission_refused();
                                     }
-                                    install_helper_local_session_on_miss(
-                                        sessions,
-                                        binding.bpf_maps.session_map.handle(),
-                                        worker_ctx.shared_sessions,
-                                        worker_ctx.shared_nat_sessions,
-                                        worker_ctx.shared_forward_wire_sessions,
-                                        &worker_ctx.shared_owner_rg_indexes,
-                                        &flow.forward_key,
-                                        decision,
-                                        seed_metadata,
-                                        SessionOrigin::FabricPuntSeed,
-                                        now_ns,
-                                        meta.protocol,
-                                        meta.tcp_flags,
-                                        worker_ctx.forwarding.has_routing_domains,
-                                    );
                                 }
                             }
                         }
@@ -8099,7 +8145,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // application timeout on the seed.
                                         seed_inactivity_timeout,
                                     );
-                                    if owner_syn_reuse {
+                                    let pending_capacity_available =
+                                        if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
+                                            sessions.can_admit_after_closing_tcp_pair_for_syn(
+                                                1,
+                                                reuse_key,
+                                                meta.tcp_flags,
+                                            )
+                                        } else {
+                                            true
+                                        };
+                                    if owner_syn_reuse && pending_capacity_available {
                                         crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
                                             sessions,
                                             worker_ctx.shared_sessions,
@@ -8112,15 +8168,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.tcp_flags,
                                         );
                                     }
-                                    let pending_installed = sessions.install_with_protocol_with_origin(
-                                        flow.forward_key.clone(),
-                                        pending_decision,
-                                        sess_meta.clone(),
-                                        SessionOrigin::MissingNeighborSeed,
-                                        now_ns,
-                                        meta.protocol,
-                                        meta.tcp_flags,
-                                    );
+                                    if !pending_capacity_available {
+                                        sessions.note_admission_refused();
+                                    }
+                                    let pending_installed = pending_capacity_available
+                                        && sessions.install_with_protocol_with_origin(
+                                            flow.forward_key.clone(),
+                                            pending_decision,
+                                            sess_meta.clone(),
+                                            SessionOrigin::MissingNeighborSeed,
+                                            now_ns,
+                                            meta.protocol,
+                                            meta.tcp_flags,
+                                        );
                                     if pending_installed {
                                         if let Some(incarnation) = pending_leak_incarnation {
                                             sessions.stamp_leak_incarnation(

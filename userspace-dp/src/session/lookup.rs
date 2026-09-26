@@ -41,6 +41,16 @@ pub(in crate::session) struct TcpStatePropagation {
     pub(in crate::session) handshake_completed: bool,
 }
 
+/// The local records a policy-admitted bare SYN would replace. Keep canonical
+/// removal order separate from flow direction because reverse-side hits must
+/// preserve the existing teardown ordering.
+struct ClosingTcpPairKeys {
+    canonical: SessionKey,
+    companion: SessionKey,
+    forward: SessionKey,
+    reverse: SessionKey,
+}
+
 /// #9856: outcome of one budgeted export-walk slice.
 ///
 /// `ResumeAt(next)` continues the cycle at slot `next` — including a
@@ -477,27 +487,66 @@ impl SessionTable {
         self.push_to_wheel(&actual_key, now_ns);
     }
 
-    /// Read-only half of #10886's authorized TCP tuple-reuse path. A bare SYN
-    /// may bypass the old closing session only after the poll path has checked
-    /// its authority; the pair itself is removed later, after policy permits.
-    pub(crate) fn is_closing_tcp_pair_for_syn(&self, key: &SessionKey, tcp_flags: u8) -> bool {
-        if !matches!(key.protocol, PROTO_TCP)
-            || !is_initial_syn(tcp_flags)
-            || is_closing(tcp_flags)
+    fn closing_tcp_pair_keys_for_syn(
+        &self,
+        key: &SessionKey,
+        tcp_flags: u8,
+    ) -> Option<ClosingTcpPairKeys> {
+        if !matches!(key.protocol, PROTO_TCP) || !is_initial_syn(tcp_flags) || is_closing(tcp_flags)
         {
-            return false;
+            return None;
         }
-        let Some((handle, via_alias)) = self.resolve_lookup_handle(key) else {
-            return false;
+        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
+        let record = self.entries.get(handle as usize)?;
+        if !Self::lookup_record_matches_key(record, key, via_alias) || !record.entry.closing {
+            return None;
+        }
+        let canonical = record.key.clone();
+        let companion = reverse_session_key(&canonical, record.entry.decision.nat);
+        let (forward, reverse) = if record.entry.metadata.is_reverse {
+            (companion.clone(), canonical.clone())
+        } else {
+            (canonical.clone(), companion.clone())
         };
-        let Some(record) = self.entries.get(handle as usize) else {
-            return false;
+        Some(ClosingTcpPairKeys {
+            canonical,
+            companion,
+            forward,
+            reverse,
+        })
+    }
+
+    /// Read-only half of #10886's authorized TCP tuple-reuse path. A bare SYN
+    /// may bypass the old closing session only after authority is checked; the
+    /// pair is removed after policy and install admission both succeed.
+    pub(crate) fn is_closing_tcp_pair_for_syn(&self, key: &SessionKey, tcp_flags: u8) -> bool {
+        self.closing_tcp_pair_keys_for_syn(key, tcp_flags).is_some()
+    }
+
+    /// #10886: account for the exact local rows a closing-pair replacement
+    /// will reclaim without mutating the table before policy and tuple-gate
+    /// admission. Shared-only candidates reclaim no local slots.
+    pub(crate) fn can_admit_after_closing_tcp_pair_for_syn(
+        &self,
+        needed: usize,
+        key: &SessionKey,
+        tcp_flags: u8,
+    ) -> bool {
+        let Some(pair) = self.closing_tcp_pair_keys_for_syn(key, tcp_flags) else {
+            return self.can_admit(needed);
         };
-        Self::lookup_record_matches_key(record, key, via_alias) && record.entry.closing
+        let mut reclaimed = 0;
+        if self.key_to_handle.contains_key(&pair.forward) {
+            reclaimed += 1;
+        }
+        if pair.reverse != pair.forward && self.key_to_handle.contains_key(&pair.reverse) {
+            reclaimed += 1;
+        }
+        self.len().saturating_sub(reclaimed).saturating_add(needed) <= self.max_sessions
     }
 
     /// #10287/#10886: evict a live closing TCP incarnation after an authorized
-    /// bare SYN has passed the owner's new-flow policy.
+    /// bare SYN has passed the owner's new-flow policy and install admission.
     ///
     /// Reusing the old entry would preserve its sticky close/reset/FIN bits and
     /// short reap window, so the admitted replacement would be reaped while its
@@ -514,39 +563,13 @@ impl SessionTable {
         key: &SessionKey,
         tcp_flags: u8,
     ) -> Option<(SessionKey, SessionKey)> {
-        if !matches!(key.protocol, PROTO_TCP)
-            || !is_initial_syn(tcp_flags)
-            || is_closing(tcp_flags)
-        {
-            return None;
+        let pair = self.closing_tcp_pair_keys_for_syn(key, tcp_flags)?;
+        let _ = self.remove_entry(&pair.canonical, RemovalKind::Replace);
+        if pair.companion != pair.canonical {
+            let _ = self.remove_entry(&pair.companion, RemovalKind::Replace);
         }
-        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
-        let (canonical_key, nat, is_reverse) = {
-            let record = self.entries.get(handle as usize)?;
-            if !Self::lookup_record_matches_key(record, key, via_alias)
-                || !record.entry.closing
-            {
-                return None;
-            }
-            (
-                record.key.clone(),
-                record.entry.decision.nat,
-                record.entry.metadata.is_reverse,
-            )
-        };
-        let companion_key = reverse_session_key(&canonical_key, nat);
-        let (forward_key, reverse_key) = if is_reverse {
-            (companion_key.clone(), canonical_key.clone())
-        } else {
-            (canonical_key.clone(), companion_key.clone())
-        };
-        let _ = self.remove_entry(&canonical_key, RemovalKind::Replace);
-        if companion_key != canonical_key {
-            let _ = self.remove_entry(&companion_key, RemovalKind::Replace);
-        }
-        Some((forward_key, reverse_key))
+        Some((pair.forward, pair.reverse))
     }
-
 
     pub fn find_forward_nat_match(&self, reply_key: &SessionKey) -> Option<ForwardSessionMatch> {
         self.find_forward_nat_match_inner(reply_key, None)
