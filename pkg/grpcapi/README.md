@@ -520,6 +520,13 @@ contract.
   action-journal write still happens BEFORE the wipe. `ZeroizeFn` is nil
   only in a NoDataplane / no-daemon build, where the handler falls back to
   an ungated direct wipe (there is no running reconcile loop to race).
+- **Interrupted factory resets stay gated across crashes (#10742).** Before
+  any wipe leg, zeroize atomically replaces the day-0 loader stamp with a
+  versioned intent and stores the same record beside the configured config
+  root. The day-0 loader skips media probing, and `Store.Load` enters the
+  existing fail-closed recovery path while the intent remains. A retry reuses
+  the captured archive path and log inventory; both markers are removed only
+  after every wipe leg succeeds.
 - **The interactive console shares ONE wipe primitive (#5890).** The
   in-process console `request system zeroize` (`pkg/cli`) previously ran
   its OWN partial wipe (`zeroizeConfigState`: config DB + archive only),

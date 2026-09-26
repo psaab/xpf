@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,10 +20,79 @@ import (
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
+// FactoryResetPendingBase reuses the day-0 success-stamp name as the loader
+// gate while a factory reset is in progress.
+const FactoryResetPendingBase = Day0ConfigAppliedBase
+
+// FactoryResetPendingPrefix distinguishes a zeroize intent record from the
+// normal day-0 success stamp stored at FactoryResetPendingBase.
+const FactoryResetPendingPrefix = "#xpf-zeroize-pending v=1\n"
+
+// FactoryResetPendingPath is the day-0 loader's fixed stamp path. A zeroize
+// must gate that loader even when xpfd uses a non-default config root.
+// Tests may point it at a temporary path; production code must never mutate it.
+var FactoryResetPendingPath = filepath.Join("/etc/xpf", FactoryResetPendingBase)
+
+func hasFactoryResetPendingMarker(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	prefix := make([]byte, len(FactoryResetPendingPrefix))
+	_, readErr := io.ReadFull(f, prefix)
+	closeErr := f.Close()
+	if closeErr != nil {
+		return false, closeErr
+	}
+	if readErr == nil {
+		return string(prefix) == FactoryResetPendingPrefix, nil
+	}
+	if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+		return false, nil
+	}
+	return false, readErr
+}
+
+// IsFactoryResetPending reports whether configDir's day-0 stamp carries a
+// zeroize-intent prefix rather than its ordinary successful-apply content.
+func IsFactoryResetPending(configDir string) (bool, error) {
+	pending, err := hasFactoryResetPendingMarker(filepath.Join(configDir, FactoryResetPendingBase))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return pending, err
+}
+
+// factoryResetPendingError is also an ErrConfigAbsentWithHistory for boot
+// classification: both conditions must suppress day-0 import and takeover.
+type factoryResetPendingError struct{}
+
+func (factoryResetPendingError) Error() string { return "factory reset is pending" }
+func (factoryResetPendingError) Is(target error) bool {
+	return target == ErrConfigAbsentWithHistory
+}
+
+// ErrFactoryResetPending marks a durable interrupted factory reset.
+var ErrFactoryResetPending error = factoryResetPendingError{}
+
 // Load builds the configuration from disk.
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// The configured-root intent survives removal of its config DB. Check it
+	// before loading active.json or text bootstrap so an interrupted zeroize
+	// cannot boot as a pristine, never-configured appliance.
+	if s.filePath != "" {
+		configDir := filepath.Dir(s.filePath)
+		pending, err := IsFactoryResetPending(configDir)
+		if err == nil && pending {
+			return fmt.Errorf("%w: retry zeroize to complete the interrupted factory reset", ErrFactoryResetPending)
+		} else if err != nil {
+			pendingPath := filepath.Join(configDir, FactoryResetPendingBase)
+			return fmt.Errorf("%w: inspect marker %s: %v", ErrFactoryResetPending, pendingPath, err)
+		}
+	}
 
 	tree, committed, err := s.db.ReadActiveMeta()
 	if err != nil {
