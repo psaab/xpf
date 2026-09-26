@@ -13,5 +13,7 @@ xpf (0.0.0) unstable; urgency=medium
   * Install live-address host-input fences on #1960/#10297 fail-closed
     cold boots, preserving management addresses while blocking data addresses
     until a valid config can be applied (#10732).
+  * Register day-0 and Debian maintainer-script regression tests with
+    `make selftest` and census both test locations (#10747).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
