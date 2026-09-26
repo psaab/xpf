@@ -724,8 +724,14 @@ func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*datapla
 		return nil, ctx.Err()
 	default:
 	}
-	if _, err := m.Compile(cfg); err != nil {
-		return nil, err
+	compiled, err := m.Compile(cfg)
+	if err != nil {
+		// Compile can fail after it has built the desired interface models,
+		// e.g. when the helper cannot start or accept the snapshot. Preserve
+		// those models for independent daemon reconciles such as networkd;
+		// they are not a successful dataplane publication and must not replace
+		// LastApplyResult's retained authority.
+		return dataplane.ApplyResultFromCompileResult(compiled), err
 	}
 	return m.LastApplyResult(), nil
 }

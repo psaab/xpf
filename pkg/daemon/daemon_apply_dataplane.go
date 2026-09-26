@@ -191,14 +191,21 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	}
 
 	var applyResult *dataplane.ApplyResult
+	var networkdApplyResult *dataplane.ApplyResult
 	if rt := d.dataplane(); rt != nil {
 		var err error
 		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
+		networkdApplyResult = applyResult
 		// #9725: an apply may attach and then fail, or detach its last link
 		// while reconciling. Re-read kernel truth on both outcomes; the tick
 		// remains the completeness guarantee outside this path.
 		d.reassertTransitGate("apply")
 		if err != nil {
+			// A partial result still contains this config's networkd models,
+			// but it is not an accepted dataplane snapshot. Keep it scoped to
+			// networkd so zone ownership and other live dataplane consumers
+			// continue to observe the previous-good result.
+			applyResult = nil
 			d.recordCompileFailure(err)
 			// #9637-D1: the dataplane still runs the previous snapshot while
 			// the tail below renders from the NEW config — clear the
@@ -300,26 +307,28 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 
 	// 2.5. Write systemd-networkd config for managed interfaces.
 	//
+	// networkd is an independent host-configuration owner and must still
+	// configure this generation's interface models when the dataplane apply
+	// fails after compiling them (for example, if the userspace helper cannot
+	// start). Such a partial result is kept out of dataplane consumers above,
+	// and the apply error remains fail-closed at the tail.
+	//
 	// An empty ManagedInterfaces set is NOT a no-op (#2988): when the last
 	// xpf-managed interface is removed, networkd.Apply must still run so its
 	// stale `10-xpf-*` sweep cleans the now-orphaned .network/.link/.netdev
 	// snippets (otherwise the next reload resurrects stale addresses/bonds/
-	// renames). The previous `len(...) > 0` guard shadowed the sweep, leaving
-	// the library fix dead on the live reconcile path. The lifeline is still
-	// protected end-to-end: SetProtectedResolver (daemon_run.go) feeds
-	// resolveProtectedInterfaces, which derives the mgmt set from
-	// ActiveConfig independently of ManagedInterfaces, so the empty-set sweep
-	// preserves the management NIC's files. The `applyResult != nil` guard
-	// stays — a nil result (no dataplane) means there is nothing to reconcile
-	// and the daemon's own startup/Clear paths own the files.
-	//
+	// renames). The lifeline is still protected end-to-end: SetProtectedResolver
+	// (daemon_run.go) feeds resolveProtectedInterfaces, which derives the mgmt
+	// set from ActiveConfig independently of ManagedInterfaces, so the empty-set
+	// sweep preserves the management NIC's files.
+
 	// A write failure is captured (not swallowed, #2987) and returned at the
 	// tail of applyConfigLocked so the commit reports failure (fail-closed),
 	// mirroring dhcpServerErr: every downstream reconcile step still runs so a
 	// networkd write error does not skip RETH MAC programming, VRRP VIP
 	// reconcile, FRR, RA, IPsec, etc. and leave HA state half-applied.
-	if d.networkd != nil && applyResult != nil {
-		if err := d.networkd.Apply(applyResult.ManagedInterfaces); err != nil {
+	if d.networkd != nil && networkdApplyResult != nil {
+		if err := d.networkd.Apply(networkdApplyResult.ManagedInterfaces); err != nil {
 			slog.Warn("failed to apply networkd config", "err", err)
 			// errors.Join (not assignment) so a device-map teardown failure
 			// recorded just above (#5309) is not clobbered — both fail-closed.
