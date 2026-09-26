@@ -806,14 +806,14 @@ Three fixes for mtr/traceroute6 over NAT64 (64:ff9b::/96):
 - **Verification:** FRR config now shows `ipv6 route ::/0 fe80::50 ge-0-0-1.50 5`; kernel route shows `via fe80::50 dev ge-0-0-1.50`; ping to `2001:559:8585:50::6` works
 - **Files:** `pkg/vrrp/instance.go`, `pkg/config/compiler.go`, `pkg/frr/frr.go`, `pkg/frr/frr_test.go`, `pkg/daemon/daemon.go`
 
-### Cluster config sync broken: ${node} parse error + no reverse-sync (FIXED, `64bc9d5`)
+### Cluster config sync: ${node} parse error + reverse-sync history (parse fix: `64bc9d5`; push authority: #78)
 - **Symptom:** Config changes committed on primary (fw0) never appeared on secondary (fw1). fw1 log showed: `"cluster: config sync apply failed" err="sync config parse error: line 93, column 14: unexpected character: $"`
 - **Root cause (parse error):** `Format()` used `KeyPath()` which joins keys with spaces but doesn't re-quote keys containing special characters. When the original config has `apply-groups "${node}"`, the parser stores the key as `${node}` (without quotes). `Format()` then outputs it unquoted, and the receiving parser fails on `$`.
 - **Fix (quoting):** Added `QuotedKeyPath()` and `quoteKey()` to `pkg/config/ast.go`. Keys containing non-identifier characters are wrapped in double quotes. All format output paths (Format, FormatPath, FormatSet, FormatCompare, FormatInheritance) updated.
-- **Symptom (reverse-sync):** When fw0 returned after being down, it preempted to primary and pushed its STALE disk config to fw1, overwriting fw1's newer config. No mechanism existed for the returning node to receive config from the node that was running.
-- **Root cause:** VRRP preemption via heartbeat is faster (~1s) than TCP sync connection (~3s). By the time `OnPeerConnected` fired on fw1, it was already secondary and `syncConfigToPeer()` returned early (checks `IsLocalPrimary(0)`).
-- **Fix (reverse-sync):** Added `OnPeerConnected` callback to `SessionSync`. On reconnect: (a) stable node (running >30s) calls `pushConfigToPeer()` which bypasses the primary check, (b) fresh node (running <30s) skips push to avoid overwriting newer config. Added `startTime` field to Daemon.
-- **Files:** `pkg/config/ast.go`, `pkg/config/parser_test.go`, `pkg/cluster/sync.go`, `pkg/daemon/daemon.go`
+- **Historical symptom (reverse-sync):** When fw0 returned after being down, it could preempt to primary and push its stale disk config to fw1, overwriting fw1's newer config.
+- **Historical root cause:** VRRP preemption via heartbeat was faster (~1s) than TCP sync connection (~3s). The original reconnect handler on fw1 could run only after it was already secondary, so its primary-gated `syncConfigToPeer()` returned early.
+- **Historical fix (`64bc9d5`), superseded by #78 (`a39ab3f0`):** The reconnect callback temporarily added a stable-node push that bypassed the primary check. #78 removed that reverse-sync direction: only the RG0 primary pushes config, including on peer reconnect, and a local RG0 primary rejects peer config. Thus a returning node that is the RG0 primary pushes its own config; it does not receive the running secondary's config.
+- **Files:** `${node}` quoting: `pkg/config/ast.go`, `pkg/config/parser_test.go`; current RG0-primary reconnect reconciliation: `pkg/daemon/daemon_ha_sync.go`, `pkg/daemon/daemon_ha_comms_wiring.go`
 
 ### RETH .link file overwritten with virtual MAC on DHCP recompile (FIXING)
 - **Symptom:** After a DHCP recompile (or any config recompile), the `.link` file for RETH member interfaces was rewritten with `MACAddress=02:bf:72:...` (the virtual MAC). On reboot, the interface starts with its physical MAC, so the `.link` file no longer matches and the interface is not renamed. The daemon then cannot find the interface by its config name.

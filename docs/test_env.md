@@ -447,8 +447,8 @@ sg incus-admin -c 'incus exec xpf-fw0 -- ip -6 route show default'
 # Expected: "via fe80::50 dev ge-0-0-1.50" (NOT dev ge-0-0-1)
 ```
 
-### Config Sync Test (`64bc9d5`)
-Verify config sync works in both directions.
+### Config Sync Test (`64bc9d5`, authority #78)
+Verify config flows from the RG0 primary to the secondary, including on reconnect. There is no reverse-sync: a returning node that takes RG0 primary keeps its own config and pushes it to the secondary.
 ```bash
 # Forward sync: commit on primary → secondary receives
 printf 'configure\nset routing-options static route 10.77.77.0/24 discard\ncommit\nexit\nexit\n' | \
@@ -458,18 +458,18 @@ printf 'show configuration routing-options | match 77\nexit\n' | \
   sg incus-admin -c 'incus exec xpf-fw1 -- cli' 2>/dev/null
 # Expected: "route 10.77.77.0/24 discard;"
 
-# Reverse sync: stop+start fw0 → fw0 gets config from fw1
-sg incus-admin -c 'incus exec xpf-fw0 -- systemctl stop xpfd'
+# Reconnect push: restart the secondary while the RG0 primary remains up
+sg incus-admin -c 'incus exec xpf-fw1 -- systemctl stop xpfd'
 sleep 2
-# Add route on fw1 (becomes primary during fw0 downtime)
+# Commit a route on fw0 (RG0 primary) while fw1 is down
 printf 'configure\nset routing-options static route 10.88.88.0/24 discard\ncommit\nexit\nexit\n' | \
-  sg incus-admin -c 'incus exec xpf-fw1 -- cli' 2>/dev/null
-# Restart fw0 — should receive fw1's config before preempting
-sg incus-admin -c 'incus exec xpf-fw0 -- systemctl start xpfd'
+  sg incus-admin -c 'incus exec xpf-fw0 -- cli' 2>/dev/null
+# Restart fw1 — the RG0 primary pushes its config on peer reconnect (#78)
+sg incus-admin -c 'incus exec xpf-fw1 -- systemctl start xpfd'
 sleep 10
 printf 'show configuration routing-options | match 88\nexit\n' | \
-  sg incus-admin -c 'incus exec xpf-fw0 -- cli' 2>/dev/null
-# Expected: "route 10.88.88.0/24 discard;" (synced from fw1)
+  sg incus-admin -c 'incus exec xpf-fw1 -- cli' 2>/dev/null
+# Expected: "route 10.88.88.0/24 discard;" (pushed by the RG0 primary on reconnect)
 
 # Cleanup: remove test routes
 printf 'configure\ndelete routing-options static route 10.77.77.0/24\ndelete routing-options static route 10.88.88.0/24\ncommit\nexit\nexit\n' | \
