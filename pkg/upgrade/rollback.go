@@ -255,10 +255,12 @@ func (r *Runner) defaultRollbackTarget(current string) (string, error) {
 		return "", fmt.Errorf("cannot enumerate rollback targets: %w", err)
 	}
 	type candidate struct {
-		name string
-		mod  int64
+		name  string
+		mod   int64
+		stamp *committedStamp
 	}
-	var candidates []candidate
+	byName := make(map[string]candidate)
+	var committed, legacy []candidate
 	for _, entry := range entries {
 		name := entry.Name()
 		if name == current || name == currentLink || strings.HasPrefix(name, ".") || !entry.IsDir() {
@@ -271,11 +273,62 @@ func (r *Runner) defaultRollbackTarget(current string) (string, error) {
 		if err != nil {
 			continue
 		}
-		candidates = append(candidates, candidate{name: name, mod: info.ModTime().UnixNano()})
+		stamp, present := r.readCommittedStamp(name)
+		if present && (stamp == nil || !stamp.Committed) {
+			continue
+		}
+		c := candidate{name: name, mod: info.ModTime().UnixNano(), stamp: stamp}
+		byName[name] = c
+		if stamp == nil {
+			legacy = append(legacy, c)
+		} else {
+			committed = append(committed, c)
+		}
 	}
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("no restorable non-current rollback target found; re-seed a compatible version and retry")
+	sort.Slice(committed, func(i, j int) bool {
+		if committed[i].stamp.CommittedAtUnixNano != committed[j].stamp.CommittedAtUnixNano {
+			return committed[i].stamp.CommittedAtUnixNano > committed[j].stamp.CommittedAtUnixNano
+		}
+		if committed[i].mod != committed[j].mod {
+			return committed[i].mod > committed[j].mod
+		}
+		return committed[i].name < committed[j].name
+	})
+	sort.Slice(legacy, func(i, j int) bool {
+		if legacy[i].mod != legacy[j].mod {
+			return legacy[i].mod > legacy[j].mod
+		}
+		return legacy[i].name < legacy[j].name
+	})
+	var listing []string
+	for _, c := range committed {
+		listing = append(listing, fmt.Sprintf("%s(commit=%d mtime=%d)", c.name, c.stamp.CommittedAtUnixNano, c.mod))
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].mod > candidates[j].mod })
-	return candidates[0].name, nil
+	for _, c := range legacy {
+		listing = append(listing, fmt.Sprintf("%s(legacy mtime=%d)", c.name, c.mod))
+	}
+	currentStamp, currentHasRecord := r.readCommittedStamp(current)
+	if currentHasRecord && currentStamp != nil && currentStamp.Committed && currentStamp.Predecessor != "" {
+		if predecessor, ok := byName[currentStamp.Predecessor]; ok {
+			r.logf("upgrade: rollback candidates ordered by committed history (mtime tie-break only): %s; default selects committed predecessor %s of current %s",
+				strings.Join(listing, ", "), predecessor.name, current)
+			return predecessor.name, nil
+		}
+		r.logf("upgrade: WARN committed predecessor %s of current %s is not a restorable candidate; ordered fallback candidates: %s",
+			currentStamp.Predecessor, current, strings.Join(listing, ", "))
+	} else if currentHasRecord {
+		r.logf("upgrade: WARN current %s has no usable committed predecessor; ordered fallback candidates: %s",
+			current, strings.Join(listing, ", "))
+	}
+	if len(committed) > 0 {
+		r.logf("upgrade: rollback candidates ordered by committed time (mtime tie-break only): %s; selecting %s",
+			strings.Join(listing, ", "), committed[0].name)
+		return committed[0].name, nil
+	}
+	if len(legacy) > 0 {
+		r.logf("upgrade: WARN no committed history is available; using legacy mtime-only rollback fallback (review candidate listing): %s; selecting %s",
+			strings.Join(listing, ", "), legacy[0].name)
+		return legacy[0].name, nil
+	}
+	return "", fmt.Errorf("no restorable committed or legacy rollback target found; re-seed a compatible version and retry")
 }
