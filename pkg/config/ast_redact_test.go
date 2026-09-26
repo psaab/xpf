@@ -23,6 +23,78 @@ func buildRedactTree(t *testing.T, lines []string) *ConfigTree {
 	return tree
 }
 
+// TestIdentityBindPasswordIsRedacted10948 covers AD/LDAP bind-password leaves
+// under both unmodeled identity contexts and both AST shapes. The compiled
+// ServicesConfig drops these stanzas, so only the raw AST can protect the
+// REST/gRPC display surface.
+func TestIdentityBindPasswordIsRedacted10948(t *testing.T) {
+	const leak = "LEAK-AD-LDAP-BIND-PASSWORD-10948"
+	tests := []struct {
+		name string
+		tree *ConfigTree
+	}{
+		{
+			name: "hierarchical user-identification",
+			tree: parseRedactTree10948(t, `services {
+    user-identification {
+        active-directory-access {
+            domain-name corp.example;
+            password `+leak+`;
+        }
+    }
+}`),
+		},
+		{
+			name: "flat-set user-identification",
+			tree: buildRedactTree(t, []string{
+				"set services user-identification active-directory-access domain-name corp.example password " + leak,
+			}),
+		},
+		{
+			name: "hierarchical access",
+			tree: parseRedactTree10948(t, `access {
+    profile ldap-bind {
+        ldap-server ldap.example {
+            password `+leak+`;
+        }
+    }
+}`),
+		},
+		{
+			name: "flat-set access",
+			tree: buildRedactTree(t, []string{
+				"set access profile ldap-bind ldap-server ldap.example password " + leak,
+			}),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			redacted := tc.tree.RedactedClone()
+			for name, rendered := range map[string]string{
+				"hierarchical": redacted.Format(),
+				"flat-set":     redacted.FormatSet(),
+			} {
+				if strings.Contains(rendered, leak) {
+					t.Errorf("%s rendered the AD/LDAP bind password in cleartext:\n%s", name, rendered)
+				}
+				if !strings.Contains(rendered, SecretDataPlaceholder) {
+					t.Errorf("%s did not render the %s placeholder:\n%s", name, SecretDataPlaceholder, rendered)
+				}
+			}
+		})
+	}
+}
+
+func parseRedactTree10948(t *testing.T, text string) *ConfigTree {
+	t.Helper()
+	tree, errs := NewParser(text).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("NewParser: %v", errs)
+	}
+	return tree
+}
+
 // redactionSecretSet mirrors the #2053 secret-bearing leaves (the same set the
 // pkg/api typed-struct redaction test stages), one distinctive sentinel per
 // secret leaf so a single leak is identifiable in the raw-AST render.
