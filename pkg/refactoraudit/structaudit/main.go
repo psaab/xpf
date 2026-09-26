@@ -11,6 +11,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,43 +21,60 @@ import (
 )
 
 func main() {
-	skip := flag.String("skip", "", "AUDIT_SKIP_RE from refactoring-audit-lib.sh (required)")
-	goRoots := flag.String("go-roots", "", "AUDIT_ROOTS_GO, space separated")
-	rsRoots := flag.String("rs-roots", "", "AUDIT_ROOTS_RS, space separated")
-	all := flag.Bool("all", false, "emit every struct, not only those at or above the watch floor")
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("structaudit", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	skip := flags.String("skip", "", "AUDIT_SKIP_RE from refactoring-audit-lib.sh (required)")
+	goRoots := flags.String("go-roots", "", "AUDIT_ROOTS_GO, space separated")
+	rsRoots := flags.String("rs-roots", "", "AUDIT_ROOTS_RS, space separated")
+	all := flags.Bool("all", false, "emit every struct, not only those at or above the watch floor")
+	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
 
 	if *skip == "" {
-		fmt.Fprintln(os.Stderr, "structaudit: -skip is required; pass $AUDIT_SKIP_RE so the "+
+		fmt.Fprintln(stderr, "structaudit: -skip is required; pass $AUDIT_SKIP_RE so the "+
 			"shell lib stays the single source of truth for exclusions")
-		os.Exit(2)
+		return 2
 	}
 	skipRe, err := regexp.Compile(*skip)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "structaudit: bad -skip regex: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "structaudit: bad -skip regex: %v\n", err)
+		return 2
 	}
 	audited := func(rel string) bool { return !skipRe.MatchString(rel) }
 
 	var rows []refactoraudit.StructRow
-	collect := func(roots string, fn func(string, func(string) bool) ([]refactoraudit.StructRow, error)) {
+	collect := func(roots string, fn func(string, func(string) bool) ([]refactoraudit.StructRow, error)) error {
 		for _, r := range strings.Fields(roots) {
 			if _, statErr := os.Stat(r); statErr != nil {
-				continue // a root that does not exist is tolerated, as the LOC generator does
+				return fmt.Errorf("configured root %q is unavailable: %w", r, statErr)
 			}
 			got, ferr := fn(r, func(rel string) bool { return audited(filepath.Join(r, rel)) })
 			if ferr != nil {
-				fmt.Fprintf(os.Stderr, "structaudit: %v\n", ferr)
-				os.Exit(1)
+				return ferr
 			}
 			for i := range got {
 				got[i].Path = filepath.Join(r, got[i].Path)
 			}
 			rows = append(rows, got...)
 		}
+		return nil
 	}
-	collect(*goRoots, refactoraudit.GoStructs)
-	collect(*rsRoots, refactoraudit.RustStructs)
+	if err := collect(*goRoots, refactoraudit.GoStructs); err != nil {
+		fmt.Fprintf(stderr, "structaudit: %v\n", err)
+		return 1
+	}
+	if err := collect(*rsRoots, refactoraudit.RustStructs); err != nil {
+		fmt.Fprintf(stderr, "structaudit: %v\n", err)
+		return 1
+	}
 
 	refactoraudit.SortStructRows(rows)
 	for _, r := range rows {
@@ -67,6 +85,7 @@ func main() {
 		if *all && tag == "" {
 			tag = "[-]"
 		}
-		fmt.Printf("%-12s %4d types  %5d fields  %s.%s\n", tag, r.DistinctTypes, r.Fields, r.Path, r.Name)
+		fmt.Fprintf(stdout, "%-12s %4d types  %5d fields  %s.%s\n", tag, r.DistinctTypes, r.Fields, r.Path, r.Name)
 	}
+	return 0
 }

@@ -3,9 +3,10 @@ package refactoraudit
 // Struct-heterogeneity signal for the modularity audit (#6937).
 //
 // The LOC heatmap measures one dimension: production file LOC. That
-// dimension cannot see field accretion, and a god-struct hides in a small
-// file — `Daemon` reached 255 fields inside a 1167-LOC file, legitimately
-// under the [WATCH] floor, and would still be invisible if it doubled.
+// dimension cannot see field accretion: `Daemon` reached 255 fields inside
+// a 1167-LOC file, legitimately under the [WATCH] floor. The struct census
+// below adds a second, advisory signal, but undercounts anonymous nesting
+// and is not a complete measure of struct heterogeneity.
 //
 // # Why this counts DISTINCT FIELD TYPES and not fields (#6937)
 //
@@ -56,6 +57,25 @@ package refactoraudit
 // rather than calibrated against a population. If a second such case
 // appears, add it then, with both cases as its justification, and check it
 // does not also drop a true positive.
+//
+// # Advisory-only: anonymous nesting undercounts by design (#10901)
+//
+// Each direct anonymous nested `struct { ... }` field counts as ONE
+// distinct type — `struct{...}` — regardless of its inner fields;
+// multiple such fields share the same token. For example, an outer struct
+// with `int` and two nested structs containing many different inner field
+// types still reads as 2 types, not the many concerns it contains.
+// This collapse is deliberate: counting the printer's multi-line
+// rendering inflated the census to "7 structs with >= 100 distinct
+// types" when the truth was 1, failing in the alarming direction that gets
+// acted on.
+// Pinned by TestGoCounterCollapsesAnonymousNestedStructs6937.
+//
+// This signal is ADVISORY-ONLY: it ranks review candidates; it never
+// fails a build. The separate enforced floor is the touched-file LOC gate
+// (TestTouchedFileCrossedModularityThreshold), which rejects growth that
+// carries a touched file past 1500/2000 LOC. It is not a struct-heterogeneity
+// threshold, so this census's anonymous-nesting blind spot remains visible.
 
 import (
 	"fmt"
