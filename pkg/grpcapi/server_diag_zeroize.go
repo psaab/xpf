@@ -699,21 +699,20 @@ func zeroizeRootAuthorizedKeysPath() string {
 //     whole reset. Root is the appliance's own superuser, never a disposable
 //     provisioned account, so it is revoked IN PLACE, never deleted.
 //
-// Revocation kills root login vectors only when xpf owns them: remove
-// /root/.ssh/authorized_keys when a root account marker exists, and lock the
-// password only when the separate provisioned-passwords marker proves xpf set
-// it. A keys-only root-authentication must preserve the pre-existing console
-// password. The SSH-key removal runs FIRST so that vector dies even if the
-// password lock later fails (mirrors the generic path's keys-before-userdel
-// ordering).
+// Root revocation removes /root/.ssh/authorized_keys and locks the password
+// only when the separate provisioned-passwords marker proves xpf set it. A
+// keys-only root-authentication must preserve the pre-existing console password.
+// The SSH-key removal runs FIRST so that vector dies even if an owned password
+// lock later fails (mirrors the generic path's keys-before-userdel ordering).
 //
-// Fail CLOSED (#5496/#5493 discipline): if an owned revocation fails or the
-// password marker cannot be read/resolved, surface the error (so
-// performZeroizeWipe reports the reset INCOMPLETE) and RETAIN the provenance
+// Fail CLOSED (#5496/#5493 discipline): if key removal fails, an owned password
+// lock fails, or password ownership cannot be read/resolved, surface the error
+// (so performZeroizeWipe reports the reset INCOMPLETE) and RETAIN the provenance
 // marker so a retried zeroize re-attempts. An absent password marker means xpf
 // never provisioned that password; it is intentionally left untouched. An
 // already-absent authorized_keys (os.ErrNotExist) is the goal, not a failure.
-// The account marker is dropped only when each owned revocation succeeds.
+// The account marker is dropped only when key removal and all owned revocations
+// succeed.
 func zeroizeRootLoginAccount(fail func(error), attest func(string)) (removeMarker bool) {
 	removeMarker = true
 	// Kill the SSH-key vector first (survives a password-lock failure). An
@@ -841,9 +840,11 @@ func zeroizeLookupUIDErr(name string) (uid int, found bool, err error) {
 //     (markProvisioned("root", 0), applyRootAuth), so root IS enumerated here —
 //     but it is special-cased away from the userdel path (#5520): its keys live
 //     at /root/.ssh (not /home/root) and userdel -r root fails on UID 0. It is
-//     revoked IN PLACE (remove /root/.ssh/authorized_keys + lock the password),
-//     never deleted. See zeroizeRootLoginAccount. A root with NO marker
-//     (unmanaged-root appliance) is not enumerated and stays untouched.
+//     revoked IN PLACE (remove /root/.ssh/authorized_keys; lock the password
+//     only when the provisioned-passwords marker proves xpf set it). A
+//     keys-only root therefore keeps its existing password. See
+//     zeroizeRootLoginAccount. A root with NO marker (unmanaged-root appliance)
+//     is not enumerated and stays untouched.
 //
 // Ownership uncertainty FAILS CLOSED (#5496). Deciding "is this the account xpf
 // provisioned?" needs TWO reads: the live UID (/etc/passwd, zeroizeLookupUIDErr)
@@ -989,8 +990,9 @@ func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]
 			// the generic /home/<name> + userdel-r path is wrong for it: root's
 			// keys live at /root/.ssh (not /home/root) and userdel -r root fails
 			// on UID 0 and can abort the reset (#5520). Revoke it IN PLACE
-			// (remove /root/.ssh/authorized_keys + lock the password); drop the
-			// marker only when the revocation fully succeeded (fail-closed).
+			// (remove /root/.ssh/authorized_keys; lock the password only when the
+			// provisioned-passwords marker proves xpf set it); drop the account
+			// marker only when its owned revocations fully succeeded (fail-closed).
 			if zeroizeRootLoginAccount(fail, attest) {
 				attest(markerFile)
 				fail(os.Remove(markerFile))
