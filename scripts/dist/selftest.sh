@@ -573,6 +573,9 @@ if XPF_IMAGE_PUBKEY="$WORK/img.pub" $PY "$DIST/publish.py" \
 else
     ok "publish refuses an unsigned non-target channel latest.json (H-13)"
 fi
+# The unsigned pointer was only a negative-test fixture, not trusted channel
+# state; remove it before the publisher initializes this channel.
+rm -f "$GOOD/edge/latest.json"
 # A properly SIGNED edge pointer passes the whole gate.
 XPF_SIGN_SECKEY="$WORK/img.sec" $PY "$DIST/publish.py" make-latest \
     --channel edge --version "$VER" --dist "$GOOD" >/dev/null 2>&1
@@ -787,14 +790,13 @@ fi
 # bytes change — the stale-mirror / swapped-object case, which is the whole
 # reason the pointer is signed.
 #
-# The tamper edits the DATE, deliberately NOT the version. Rewriting the
-# version to something unpublished also makes the fetch fail, but for the
-# WRONG reason — the artifacts it names are simply absent — so that leg would
-# have passed with the signature check ripped out entirely. (Confirmed: it
-# did, until this fixture changed.) Editing a field the fetch never uses
-# leaves the signature as the ONLY thing that can refuse it.
+# The tamper edits `manifest`, deliberately NOT the version, date, or channel.
+# Fetch derives artifact names from the version and ignores this field, so
+# only signature verification can refuse the pointer. Editing the date would
+# also trip #10849's freshness check and make this leg pass for the wrong
+# reason.
 rm -rf "$FD"; mkdir -p "$FD"
-sed 's/"date": "[^"]*"/"date": "1999-01-01T00:00:00Z"/' \
+sed 's/"manifest": "[^"]*"/"manifest": "xpf-tampered.SHA256SUMS"/' \
     "$FT/stable/latest.json" > "$FT/stable/latest.json.new"
 if cmp -s "$FT/stable/latest.json" "$FT/stable/latest.json.new"; then
     bad "8k tamper fixture changed NOTHING — the leg would pass vacuously (#6504)"

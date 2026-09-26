@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -191,7 +192,10 @@ class FetchKeyRotation10767(unittest.TestCase):
         channel = self.host / "stable"
         channel.mkdir()
         latest = channel / "latest.json"
-        latest.write_text(json.dumps({"channel": "stable", "version": self.VER}) + "\n")
+        latest.write_text(json.dumps({
+            "channel": "stable", "version": self.VER,
+            "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }) + "\n")
         sign.sign_manifest(str(latest), [str(self.old_sec), str(self.new_sec)])
         resolved = deploy._resolve_channel_version(
             self.host.as_uri(), "stable", sign, pubkey_path=[str(self.new_pub)])

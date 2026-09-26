@@ -2,13 +2,13 @@ package upgrade
 
 import (
 	"errors"
+	"fmt"
+	"github.com/psaab/xpf/pkg/configstore"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // rollbackFixture models a node mid-life: versions/<cur>/ is live
@@ -161,27 +161,110 @@ func TestRollbackTo_ExplicitTargetHonored(t *testing.T) {
 	}
 }
 
-func TestRollbackTo_DefaultPicksNewestRestorableNonCurrent(t *testing.T) {
+func stampCommittedForTest(t *testing.T, fx *rollbackFixture, ver, predecessor string, committedAt int64) {
+	t.Helper()
+	if err := fx.r.writeCommitStamp(committedStamp{
+		Version:             ver,
+		Predecessor:         predecessor,
+		Committed:           true,
+		CommittedAtUnixNano: committedAt,
+	}); err != nil {
+		t.Fatalf("write commit record for %s: %v", ver, err)
+	}
+}
+
+func TestRollbackTo_DefaultIgnoresTouchedOldCommittedVersion(t *testing.T) {
 	fx := setupRollback(t, "3.0.0", "1.0.0", rollbackV1Snap)
 	writeCompleteVersionDir(t, fx.cfg, "2.0.0")
-	// 1.0.0 is older, 2.0.0 is the immediate predecessor: newest mtime wins
-	// (the gc newest-first precedent).
+	stampCommittedForTest(t, fx, "3.0.0", "2.0.0", 300)
+	stampCommittedForTest(t, fx, "2.0.0", "1.0.0", 200)
+	stampCommittedForTest(t, fx, "1.0.0", "", 100)
+	// The ancient version has the newest directory mtime, but the current
+	// version's persisted predecessor is the genuine intermediate rollback.
+	touched := time.Now().Add(time.Hour)
 	old := time.Now().Add(-48 * time.Hour)
-	newer := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(filepath.Join(fx.cfg.VersionsDir, "1.0.0"), old, old); err != nil {
+	if err := os.Chtimes(filepath.Join(fx.cfg.VersionsDir, "1.0.0"), touched, touched); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(filepath.Join(fx.cfg.VersionsDir, "2.0.0"), newer, newer); err != nil {
+	if err := os.Chtimes(filepath.Join(fx.cfg.VersionsDir, "2.0.0"), old, old); err != nil {
 		t.Fatal(err)
 	}
 	if err := fx.r.RollbackTo("", RollbackOptions{}); err != nil {
 		t.Fatalf("RollbackTo: %v", err)
 	}
 	if got := currentTarget(t, fx.cfg); got != "2.0.0" {
-		t.Errorf("default target -> %q, want newest restorable non-current 2.0.0", got)
+		t.Errorf("default target -> %q, want committed predecessor 2.0.0 despite touched-old mtime", got)
 	}
 }
 
+func TestRollbackTo_DefaultExcludesActuallyFailedCutVersion(t *testing.T) {
+	fs := newFakeSystem(t, "4.0.0")
+	r, cfg := testEnv(t, fs)
+	writeCompleteVersionDir(t, cfg, "0.9.0")
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	fx := &rollbackFixture{r: r, cfg: cfg, fs: fs}
+	stampCommittedForTest(t, fx, "1.0.0", "0.9.0", 100)
+	mkfile(t, filepath.Join(cfg.VersionsDir, ".1.0.0.dbsnap", "active.json"), rollbackV1Snap+"{}")
+
+	// A real forward cut fails on START and auto-rolls back to 1.0.0. Its
+	// complete version dir remains present with a durable non-committed stamp.
+	fs.startFailOnce = true
+	if err := r.Run(Options{}); err == nil {
+		t.Fatal("Run succeeded despite synthetic failed start; want auto-rollback")
+	}
+	if got := currentTarget(t, cfg); got != "1.0.0" {
+		t.Fatalf("current after auto-rollback -> %q, want 1.0.0", got)
+	}
+	if stamp, present := r.readCommittedStamp("4.0.0"); !present || stamp == nil || stamp.Committed {
+		t.Fatalf("failed target commit record = (%+v,present=%v), want explicit non-committed", stamp, present)
+	}
+
+	// Bare operator rollback must resolve current's committed predecessor,
+	// never the just-failed but still-restorable 4.0.0 directory.
+	if err := r.RollbackTo("", RollbackOptions{}); err != nil {
+		t.Fatalf("RollbackTo: %v", err)
+	}
+	if got := currentTarget(t, cfg); got != "0.9.0" {
+		t.Errorf("default target -> %q, want committed predecessor 0.9.0 (not failed 4.0.0)", got)
+	}
+}
+
+func TestGC_RanksCommittedVersionsBeforeDirectoryMtime(t *testing.T) {
+	fs := newFakeSystem(t, "5.0.0")
+	r, cfg := testEnv(t, fs)
+	fx := &rollbackFixture{r: r, cfg: cfg}
+	for i := 1; i <= 5; i++ {
+		ver := fmt.Sprintf("%d.0.0", i)
+		writeCompleteVersionDir(t, cfg, ver)
+		predecessor := ""
+		if i > 1 {
+			predecessor = fmt.Sprintf("%d.0.0", i-1)
+		}
+		stampCommittedForTest(t, fx, ver, predecessor, int64(i*100))
+	}
+	if err := os.Symlink("5.0.0", currentLinkPath(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	// A copy/touch makes the oldest build's mtime newest. GC must still retain
+	// the committed intermediate (3.0.0) inside the N=3 history window.
+	touched := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(cfg.VersionsDir, "1.0.0"), touched, touched); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.gc(&Journal{TargetVersion: "5.0.0", PreviousVersion: "4.0.0"}); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	for _, ver := range []string{"3.0.0", "4.0.0", "5.0.0"} {
+		if _, err := os.Stat(filepath.Join(cfg.VersionsDir, ver)); err != nil {
+			t.Errorf("committed version %s was not retained: %v", ver, err)
+		}
+	}
+	for _, ver := range []string{"1.0.0", "2.0.0"} {
+		if _, err := os.Stat(filepath.Join(cfg.VersionsDir, ver)); !os.IsNotExist(err) {
+			t.Errorf("old version %s survived committed-history GC (stat err=%v)", ver, err)
+		}
+	}
+}
 func TestRollbackTo_TargetEqualsCurrentRefuses(t *testing.T) {
 	fx := setupRollback(t, "2.0.0", "1.0.0", rollbackV1Snap)
 	if err := fx.r.RollbackTo("2.0.0", RollbackOptions{}); err == nil {

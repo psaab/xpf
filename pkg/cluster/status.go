@@ -3,8 +3,11 @@ package cluster
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // FormatStatus returns a Junos-style status string for all RGs.
@@ -191,6 +194,62 @@ func (m *Manager) FormatStatus() string {
 			}
 		}
 		fmt.Fprintln(&b)
+	}
+	return b.String()
+}
+
+// FormatVRRPConfigRows renders config-derived per-group VRRP detail for the
+// local CLI and gRPC ShowText cluster-status surfaces (#10844). Manager.FormatStatus
+// already supplies live per-RG `vrrp-master=all|partial|none`; these rows name
+// the configured group and VIP behind an aggregate, but are not live state.
+// Every row therefore carries an explicit `configured:` label.
+//
+// Returns "" when cfg has no zone-bound VRRP groups, leaving non-VRRP output
+// unchanged. Nil config entries from tolerant/HA-sync paths are skipped.
+func FormatVRRPConfigRows(cfg *config.Config) string {
+	if cfg == nil || cfg.Security.Zones == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, zone := range cfg.Security.Zones {
+		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
+			continue
+		}
+		for _, ifaceRef := range zone.Interfaces {
+			// #4908 (C175-HC-116): a zone binds a LOGICAL interface such as
+			// "ge-0/0/0.0" or "reth0.50", but cfg.Interfaces.Interfaces is
+			// keyed by the BASE interface name ("ge-0/0/0" / "reth0"). Split
+			// off the unit suffix, look up the base, and (when a unit was
+			// named) show only that unit's groups.
+			base := ifaceRef
+			wantUnit := -1
+			if parts := strings.SplitN(ifaceRef, ".", 2); len(parts) == 2 {
+				base = parts[0]
+				if u, err := strconv.Atoi(parts[1]); err == nil {
+					wantUnit = u
+				}
+			}
+			ifCfg, ok := config.LookupInterface(cfg, base)
+			if !ok {
+				continue
+			}
+			for _, unit := range ifCfg.Units {
+				if unit == nil { // #5886: skip present-but-nil InterfaceUnit
+					continue
+				}
+				if wantUnit >= 0 && unit.Number != wantUnit {
+					continue
+				}
+				for addr, vg := range unit.VRRPGroups {
+					if vg == nil {
+						continue
+					}
+					fmt.Fprintf(&b, "VRRP on %s.%d: configured: group %d, priority %d, VIP %s, address %s\n",
+						base, unit.Number, vg.ID, vg.Priority,
+						strings.Join(vg.VirtualAddresses, ","), addr)
+				}
+			}
+		}
 	}
 	return b.String()
 }

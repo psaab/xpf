@@ -16,11 +16,12 @@ artifact in the publish set is properly signed:
       404s without it; opt out with --no-installer), carries NO placeholder
       key and NO unsubstituted %%…%% marker (it must be stamped first), and
       has a verifying install.sh.minisig;
-  (d) the TARGET channel's latest.json verifies against the image pubkey AND
-      names a version present in the image set, AND every OTHER channel's
-      latest.json present in the tree also carries a verifying signature — the
-      whole dist tree is uploaded, so a stale/unsigned pointer for a non-target
-      channel must not ship unverified (HB165 H-13).
+  (d) the TARGET channel's latest.json verifies against the image pubkey, has a
+      date within the 90-day freshness window, AND names a version present in
+      the image set; every OTHER channel's latest.json in the tree also carries
+      a verifying signature and fresh date — the whole dist tree is uploaded,
+      so a stale/unsigned non-target pointer must not ship unverified (HB165
+      H-13).
 
 The bake may be fail-OPEN (a dev bake without a key still produces artifacts),
 but PUBLISH is fail-CLOSED — an unsigned dev bake can never reach the channel.
@@ -757,11 +758,7 @@ def gate_provenance(dist, versions, pub):
 
 
 def _gate_one_latest(dist, channel, pub, require_present):
-    """Verify one channel's signed latest.json. `require_present`, when not
-    None, is the set of versions the pointer's `version` MUST name (the target
-    channel's freshness contract); pass None to enforce only the signature (a
-    non-target channel may legitimately point at a version outside THIS
-    publish's dist set)."""
+    """Verify one signed, fresh latest.json and its optional target membership."""
     latest = os.path.join(dist, channel, "latest.json")
     if not os.path.isfile(latest):
         die(f"{channel}/latest.json missing — run "
@@ -779,6 +776,12 @@ def _gate_one_latest(dist, channel, pub, require_present):
         die(f"{channel}/latest.json signature failed verify: {e}")
     except (ValueError, UnicodeDecodeError) as e:
         die(f"{channel}/latest.json is not valid JSON after verify: {e}")
+    if not isinstance(data, dict):
+        die(f"{channel}/latest.json is not a JSON object")
+    try:
+        sign.validate_latest_date(data.get("date"))
+    except sign.SignError as e:
+        die(f"{channel}/latest.json has a stale or invalid date: {e}")
     ver = data.get("version")
     if require_present is not None and ver not in require_present:
         die(f"{channel}/latest.json names version {ver!r} which is NOT in the "
@@ -790,19 +793,19 @@ def _gate_one_latest(dist, channel, pub, require_present):
 def gate_latest(dist, channel, versions, pub):
     """(d): the TARGET channel's latest.json verifies and names a present
     version, AND every OTHER dist/<chan>/latest.json in the tree also carries a
-    verifying signature (HB165 H-13). The whole dist tree is uploaded, so a
-    stale/tampered/unsigned pointer for a non-target channel would otherwise
-    ship unverified — mirror gate_apt's per-suite InRelease posture and gate
-    EVERY channel's freshness pointer, not just `--channel`'s."""
+    verifying signature and fresh date (HB165 H-13). The whole dist tree is
+    uploaded, so a stale/tampered/unsigned pointer for a non-target channel
+    must not ship unverified."""
     # Target channel: mandatory + must name a version present in this publish.
     _gate_one_latest(dist, channel, pub, require_present=versions)
-    # Every other channel pointer present in the tree: signature only.
+    # Every other channel pointer present in the tree: signature + date only.
     for entry in sorted(os.listdir(dist)):
         cdir = os.path.join(dist, entry)
         if entry == channel or not os.path.isdir(cdir):
             continue
         if os.path.isfile(os.path.join(cdir, "latest.json")):
             _gate_one_latest(dist, entry, pub, require_present=None)
+
 
 
 def gate_apt(dist, channel):
@@ -903,8 +906,39 @@ def gate_apt(dist, channel):
     _gate_key_agreement(dist, signer_fprs, packaged_keyrings)
 
 
+def _latest_suffix_key(suffix):
+    key = []
+    for part in re.split(r"(\d+)", suffix):
+        if part:
+            key.append((0, int(part)) if part.isdigit() else (1, part))
+    return tuple(key)
+
+
+def _latest_version_key(version):
+    """Order versions like xpf-deploy's anti-rollback watermark comparator."""
+    s = str(version).partition("+")[0]
+    cut = min((i for i in (s.find("-"), s.find("~")) if i >= 0), default=-1)
+    if cut >= 0:
+        rel, suffix = s[:cut], s[cut + 1:]
+    else:
+        rel, suffix = s, ""
+    rel_key = [(0, int(tok)) if tok.isdigit() else (-1, tok)
+               for tok in rel.split(".")]
+    if not suffix:
+        pre_rank = (1,)
+    elif suffix[:1].isdigit():
+        pre_rank = (2,) + _latest_suffix_key(suffix)
+    else:
+        pre_rank = (0,) + _latest_suffix_key(suffix)
+    return (rel_key, pre_rank)
+
+
 def make_latest(dist, channel, version):
-    """Write + sign the per-channel latest.json freshness pointer (§5.6)."""
+    """Write + sign a non-rollback, fresh per-channel pointer (§5.6)."""
+    try:
+        version = sign.validate_version(version, "--version")
+    except sign.SignError as e:
+        die(str(e))
     manifest = os.path.join(dist, f"xpf-{version}.SHA256SUMS")
     if not os.path.isfile(manifest):
         die(f"no manifest for version {version} in {dist}")
@@ -919,11 +953,46 @@ def make_latest(dist, channel, version):
     cdir = os.path.join(dist, channel)
     os.makedirs(cdir, exist_ok=True)
     latest = os.path.join(cdir, "latest.json")
+    now = time.time()
+    date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    if os.path.isfile(latest):
+        sig = latest + ".minisig"
+        if not os.path.isfile(sig):
+            die(f"{channel}/latest.json exists without its signature; refusing "
+                "to replace the channel freshness pointer.")
+        try:
+            previous = json.loads(sign.verify_and_read(
+                latest, sig, image_pubkey()).decode())
+        except sign.SignError as e:
+            die(f"{channel}/latest.json signature failed verify: {e}")
+        except (ValueError, UnicodeDecodeError) as e:
+            die(f"{channel}/latest.json is not valid JSON after verify: {e}")
+        if not isinstance(previous, dict):
+            die(f"{channel}/latest.json is not a JSON object")
+        old_channel = previous.get("channel")
+        if old_channel is not None and old_channel != channel:
+            die(f"{channel}/latest.json says it is for channel "
+                f"{old_channel!r}; refusing to replace it.")
+        try:
+            old_version = sign.validate_version(
+                previous.get("version"), "version in existing latest.json")
+            old_date = sign.parse_latest_date(previous.get("date"))
+        except sign.SignError as e:
+            die(f"{channel}/latest.json has an invalid version or date: {e}")
+        if old_date > now + sign.LATEST_FUTURE_SKEW_SECONDS:
+            die(f"{channel}/latest.json date is too far in the future; "
+                "refusing to replace it.")
+        if _latest_version_key(version) < _latest_version_key(old_version):
+            die(f"refusing to roll {channel}/latest.json back from "
+                f"{old_version} to {version}.")
+        if sign.parse_latest_date(date) <= old_date:
+            die(f"refusing to write a non-advancing date to "
+                f"{channel}/latest.json.")
     data = {
         "channel": channel,
         "version": version,
         "manifest": f"xpf-{version}.SHA256SUMS",
-        "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "date": date,
     }
     with open(latest, "w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
@@ -934,6 +1003,8 @@ def make_latest(dist, channel, version):
     except sign.SignError as e:
         die(f"could not sign {channel}/latest.json: {e}")
     info(f"wrote + signed {latest} -> {version} ({len(seckeys)} key(s))")
+
+
 
 
 def _fsync_tree(root):

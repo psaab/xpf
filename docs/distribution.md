@@ -157,22 +157,27 @@ channel.
   sidecar the signed sums list but the mirror withholds is refused regardless;
   a release whose signed sums list no sidecar at all predates it and gets a
   warning. `image-roll` applies the same rule to the manifest it verifies.
-  `xpf-deploy.py fetch` records a best-effort monotonic watermark at
+  `xpf-deploy.py fetch` records a best-effort monotonic version watermark at
   `${XDG_STATE_HOME:-~/.local/state}/xpf/image-watermark.json` (per
   `--channel`, default `stable`) and REFUSES a version older than the recorded
-  one — `--allow-rollback` permits a deliberate downgrade. This detects stale
-  mirrors / accidental rollback; it is not TUF-grade freeze protection, and a
-  fresh workstation with no watermark trusts the artifact's own signature.
+  one. `--allow-rollback` permits a deliberate version downgrade; it never
+  bypasses freshness validation when the version comes from `latest.json`.
+  The signed `latest.json` date is an independent freshness check: fetch and
+  `publish.py` refuse a missing/invalid timestamp, one more than 90 days old,
+  or one over five minutes in the future. `make-latest` verifies the prior
+  signed pointer and refuses a version rollback or a non-advancing date
+  (republishing the same version is allowed only with a newer date). Therefore
+  an old, validly signed pointer replayed to a fresh workstation fails without
+  a watermark. This bounds cross-host/time replay; it is not TUF-grade freeze
+  protection, and a pointer within the 90-day window can still be replayed.
   Version ordering is FAIL-CLOSED (#8969): a version the comparator cannot
   order — a non-numeric release component such as `1.2.x`, or any spelling
   `validate_version` accepts but semver does not define — sorts BELOW the
-  watermark and is refused, so an unorderable candidate cannot silently pass
-  as newer. `--allow-rollback` is the escape hatch for a deliberate install of
-  one. Debian's tilde pre-release (`1.2.3~rc1`) and git-describe's hyphen
-  (`1.2.3-rc1`) are ordered identically, both BEFORE their base release, and
-  semver build metadata is ignored for precedence (`1.0.0+build.7` ranks equal
-  to `1.0.0`, per semver 11.4) — all three spellings are advertised as
-  accepted by `validate_version`.
+  watermark and is refused. Debian's tilde pre-release (`1.2.3~rc1`) and
+  git-describe's hyphen (`1.2.3-rc1`) are ordered identically, both BEFORE
+  their base release. Semver build metadata is ignored for precedence
+  (`1.0.0+build.7` ranks equal to `1.0.0`, per semver 11.4) — all three
+  spellings are advertised as accepted by `validate_version`.
   The watermark check runs TWICE — once before the download and once after
   verification — and BOTH are refusals (#9238). The late one used to be only
   the condition for *writing* the watermark, so when it failed the fetch fell
