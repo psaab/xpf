@@ -463,6 +463,29 @@ type Store struct {
 	// archiving normally.
 	archiveFenced atomic.Bool
 
+	// rescueWG tracks the in-flight synchronous rescue.conf writers (#10769
+	// d05-F8). SaveRescueConfig Add(1)s under s.mu guarded by !rescueFenced
+	// before it writes; QuiesceRescueWrites Wait()s on it so a factory reset
+	// can JOIN every save that has already started before it erases
+	// rescue.conf. Without the join an untracked save could resume AFTER the
+	// wipe removed rescue.conf and recreate the PRIOR tenant's full
+	// active-config text (cleartext IKE PSKs, WireGuard keys, SNMP
+	// communities) — zeroize secret residue on a re-tenanted device, the
+	// rescue-file instance of the #5869/#6185 archive-writer class.
+	rescueWG sync.WaitGroup
+
+	// rescueFenced is set true by QuiesceRescueWrites at the start of a
+	// factory reset (#10769 d05-F8). Once set, SaveRescueConfig is REJECTED
+	// with ErrRescueSaveFenced instead of recreating the rescue.conf the
+	// zeroize erased (or is erasing). Unlike the archive fence — whose fenced
+	// path is a silent no-op because archival is a background side-effect of
+	// an already-succeeded commit — a rescue save is an explicit operator
+	// command, so silencing it would lie about the safety net. It is a
+	// one-way latch for the terminal reset path; ResumeRescueWrites clears it
+	// only on the fail-closed recoverable-wipe path so a daemon that stays up
+	// keeps serving rescue saves normally.
+	rescueFenced atomic.Bool
+
 	// rollbackPersistDegraded records that the most recent
 	// saveRollbackFiles() failed to durably write a rollback slot or sync
 	// the directory (#3441 L1). The commit itself still succeeds — the

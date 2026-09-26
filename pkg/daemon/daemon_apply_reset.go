@@ -43,11 +43,11 @@ func (d *Daemon) exitResetGeneration() { d.resetting.Store(false) }
 //  2. Enter the terminal reset generation BEFORE the wipe, so a writer that
 //     acquires applySem AFTER this returns (a periodic reconciler, a late
 //     commit, a shutdown-time apply) short-circuits on errDaemonResetting.
-//     2a. Quiesce config archival (#5869): the reset generation gates the daemon's
-//     config writers but NOT the configstore-owned fire-and-forget archive
-//     goroutine, so fence + JOIN it here before the wipe erases the archive
-//     directory — otherwise a resumed writer would recreate a prior-tenant
-//     config archive after FactoryResetArchiveDir removed it.
+//     2a. Quiesce config archival (#5869) and rescue.conf saves (#10769):
+//     the reset generation gates daemon writers but not configstore-owned
+//     writers that bypass applySem. Fence + JOIN them before the wipe so
+//     neither the archive directory nor rescue.conf can be recreated after
+//     it is erased.
 //  3. Run the wipe while holding applySem.
 //     - On FAILURE: exit the reset generation and release applySem (deferred)
 //     so the half-reset box is recoverable and a retry can run, and return
@@ -74,14 +74,20 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	// returns no writer can recreate the archive the wipe is about to erase.
 	// (Nil-store guard: unit tests drive factoryReset on a bare Daemon.)
 	if d.store != nil {
+		// #10769 d05-F8: rescueAction's SaveRescueConfig bypasses applySem,
+		// so the daemon generation cannot fence it. Fence and join that
+		// store-owned writer before the wipe erases rescue.conf.
+		d.store.QuiesceRescueWrites()
 		d.store.QuiesceArchival()
 	}
 	if err := wipe(); err != nil {
 		// Fail-closed recoverable path: the daemon stays up and resumes normal
-		// config work, so re-enable archival too (a SUCCESSFUL wipe instead
-		// stops the daemon, leaving the fence latched). #5869.
+		// config work, so re-enable archival and rescue saves too (a SUCCESSFUL
+		// wipe instead stops the daemon, leaving both fences latched). #5869,
+		// #10769.
 		if d.store != nil {
 			d.store.ResumeArchival()
+			d.store.ResumeRescueWrites()
 		}
 		d.exitResetGeneration()
 		return err

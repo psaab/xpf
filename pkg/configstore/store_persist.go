@@ -1269,6 +1269,35 @@ func (s *Store) ResumeArchival() {
 	s.archiveFenced.Store(false)
 }
 
+// ErrRescueSaveFenced reports that a factory reset has fenced rescue.conf
+// writers. An explicit rescue-save command must report this state instead of
+// claiming a safety net was written when it was not.
+var ErrRescueSaveFenced = errors.New("factory reset in progress: rescue configuration saves are rejected")
+
+// rescueWriteBarrier is a test seam invoked by SaveRescueConfig after it has
+// registered in rescueWG and before its durable write. Production is a no-op.
+var rescueWriteBarrier = func() {}
+
+// QuiesceRescueWrites fences and drains rescue.conf saves before a factory
+// reset erases the file (#10769 d05-F8). The fence is set under s.mu so the
+// check+WaitGroup Add in SaveRescueConfig cannot race with Wait: every save
+// that registered before this lock is acquired is joined, and every later save
+// is rejected with ErrRescueSaveFenced. This closes both the in-wipe race and
+// the post-wipe stop-grace window.
+func (s *Store) QuiesceRescueWrites() {
+	s.mu.Lock()
+	s.rescueFenced.Store(true)
+	s.mu.Unlock()
+	s.rescueWG.Wait()
+}
+
+// ResumeRescueWrites clears the rescue-save fence only when a factory-reset
+// wipe fails and the daemon remains available for normal operation. Successful
+// resets leave it latched for the daemon's remaining lifetime.
+func (s *Store) ResumeRescueWrites() {
+	s.rescueFenced.Store(false)
+}
+
 // ArchiveConfig saves a timestamped copy of the active config. The active
 // text and the timestamp are captured together under the lock so the
 // written archive matches the config that was active at the call (#3441 H4),
@@ -1534,10 +1563,33 @@ func (s *Store) rescuePath() string {
 }
 
 // SaveRescueConfig saves the active config as rescue configuration.
+//
+// #10769 d05-F8: the save honors the rescue fence set by QuiesceRescueWrites
+// at the start of a factory reset. A fenced save is REJECTED with
+// ErrRescueSaveFenced — never a silent no-op, because this is an explicit
+// operator command and reporting success without writing would lie about the
+// safety net — and an unfenced save registers itself in rescueWG so a
+// concurrent QuiesceRescueWrites JOINs it before the wipe erases rescue.conf.
+// The fence read and the Add(1) run under s.mu guarded by !rescueFenced: the
+// read lock is mutually exclusive with the write lock QuiesceRescueWrites
+// sets the fence under, so a concurrent quiesce either observes this save in
+// rescueWG and JOINs it or sets the fence first and this save rejects — the
+// counter can never rise from zero concurrently with Wait. Only the WRITE
+// itself runs off-lock, so a long durable write never blocks
+// reconcile/QuiesceRescueWrites (#6185).
 func (s *Store) SaveRescueConfig() error {
 	s.mu.RLock()
+	if s.rescueFenced.Load() {
+		// A factory reset is erasing (or has erased) rescue.conf; do not
+		// recreate it.
+		s.mu.RUnlock()
+		return fmt.Errorf("save rescue config: %w", ErrRescueSaveFenced)
+	}
+	s.rescueWG.Add(1)
 	data := s.active.Format()
 	s.mu.RUnlock()
+	defer s.rescueWG.Done()
+	rescueWriteBarrier()
 
 	path := s.rescuePath()
 	// DurableState (#1894): the rescue config is the operator's
