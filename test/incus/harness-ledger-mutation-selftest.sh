@@ -564,6 +564,54 @@ while IFS=$'\t' read -r cell gate; do
 done < <(mutate list)
 
 restore
+# #10748: the checked-in expected-red rows must admit the current tracked
+# ledger, and removing the only declaration for a red pair must make the
+# same aggregate RED. This binds the historical-row maintenance to the gate,
+# rather than letting a stale allowlist mask a permanently failing board.
+real_ledger="$SCRIPT_DIR/../results/ledger.d"
+expected_red="$SCRIPT_DIR/ledger-expected-red.txt"
+compare_real_ledger() {
+	python3 "$SCRIPT_DIR/ledger_compare.py" --all --ledger "$real_ledger" \
+		--expected-red "$1"
+}
+if compare_real_ledger "$expected_red" >"$WORK/real-ledger.out" 2>&1; then
+	echo "PASS: checked-in expected-red rows leave the tracked ledger green"
+else
+	echo "FAIL: checked-in expected-red rows do not match the tracked ledger" >&2
+	sed 's/^/    /' "$WORK/real-ledger.out" | tail -30 >&2
+	exit 1
+fi
+python3 - "$expected_red" "$WORK/expected-red-revert.txt" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+lines = source.splitlines(keepends=True)
+matches = [
+    i for i, line in enumerate(lines)
+    if line.split()[:2] == ["wire_conntrack_lifecycle", "loss-userspace-cluster"]
+]
+if len(matches) != 1:
+    raise SystemExit(
+        "expected exactly one wire_conntrack_lifecycle declaration; "
+        f"found {len(matches)}"
+    )
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    fh.writelines(line for i, line in enumerate(lines) if i != matches[0])
+PY
+if compare_real_ledger "$WORK/expected-red-revert.txt" >"$WORK/ledger-revert.out" 2>&1; then
+	echo "FAIL: removing the historical conntrack-red declaration did not RED the aggregate" >&2
+	exit 1
+fi
+if ! grep -qF "=== wire_conntrack_lifecycle @ loss-userspace-cluster [RED]" \
+	"$WORK/ledger-revert.out"; then
+	echo "FAIL: declaration removal failed for a reason other than the expected red pair" >&2
+	sed 's/^/    /' "$WORK/ledger-revert.out" | tail -30 >&2
+	exit 1
+fi
+echo "PASS: removing the historical conntrack-red declaration REDs the aggregate"
+
+restore
 
 echo
 echo "  harness-ledger mutation: $KILLED killed, $(wc -w <<<"$ESCAPED") escaped, $(wc -w <<<"$VOIDED") void, of $CELLS cells"
