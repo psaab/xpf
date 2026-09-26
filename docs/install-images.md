@@ -455,6 +455,9 @@ posture. A factory reset does not remove it (the reset erases an exact,
 xpf-owned allowlist of config artifacts), so a zeroized appliance comes back up
 in the factory `fxp0`-DHCP posture — which is the vSRX behaviour.
 
+The zeroize pending marker uses the reserved basename `.day0-config-applied`;
+a configured config file with that basename is rejected before the wipe begins.
+
 Build a config drive:
 
 ```bash
