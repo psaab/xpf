@@ -40,6 +40,12 @@ const (
 	SurfaceFabricMethod   Surface = "fabric_method_allowlist"
 	SurfaceFabricStream   Surface = "fabric_stream_allowlist"
 	SurfaceRESTCrossSite  Surface = "rest_cross_site"
+	// #10832: REST login-class denials (pkg/api/authz.go) and api-auth
+	// credential failures (dynamicAuthMiddleware) were Debug-only with no
+	// counter, invisible at the shipped Info level while the gRPC half was
+	// Warned and counted. Same bounded pattern as the surfaces above.
+	SurfaceRESTLoginClass  Surface = "rest_login_class"
+	SurfaceRESTAPIAuthFail Surface = "rest_api_auth_fail"
 )
 
 // Surfaces returns every surface, in a stable order.
@@ -54,6 +60,8 @@ func Surfaces() []Surface {
 		SurfaceFabricMethod,
 		SurfaceFabricStream,
 		SurfaceRESTCrossSite,
+		SurfaceRESTLoginClass,
+		SurfaceRESTAPIAuthFail,
 	}
 }
 
@@ -82,6 +90,14 @@ func resetForTest() {
 		state[i].mu.Unlock()
 	}
 }
+
+// ResetWindowsForTest clears all rate-limit windows for tests OUTSIDE this
+// package that assert a FIRST emission (#10832: pkg/api proves a denied REST
+// request Warns at the shipped Info level). Same caveat as resetForTest —
+// package state is process-wide — so callers must not run in parallel with
+// other tests that assert emissions. Counters are untouched: Total stays
+// monotonic across a reset.
+func ResetWindowsForTest() { resetForTest() }
 
 // buckets is FIXED, and that is the point.
 //

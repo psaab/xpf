@@ -208,11 +208,12 @@ func (f *fakeProcReader) ReadCgroupMemoryMax() (uint64, error) {
 }
 
 // freshProcReader returns a reader that parses clean with plausible
-// values: ~100s uptime, moderate CPU accumulation, 16 GiB MemTotal.
+// ~1000s uptime, moderate CPU accumulation, and 16 GiB MemTotal.
 func freshProcReader() *fakeProcReader {
 	now := time.Now().Unix()
-	// Daemon started 100 ticks (=1s when userHZ=100) after boot, and
-	// boot was now-1000s ago, so daemon has been up ~999s.
+	// Daemon started 100 ticks after boot; use the detected USER_HZ
+	// when interpreting /proc/self/stat's start-time counter.
+	// Boot was now-1000s ago, so uptime is near 1000s.
 	return &fakeProcReader{
 		selfStat: ProcSelfStat{
 			UtimeTicks:     50,

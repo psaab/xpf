@@ -1296,7 +1296,11 @@ message ShowTextRequest {
                       // "flow-timeouts", "flow-monitoring", "nat-static"
   string filter = 2; // optional filter string (topic-specific, e.g. zone pair)
 }
-message ShowTextResponse { string output = 1; }
+message ShowTextResponse {
+  string output = 1;
+  // Present for "chassis-forwarding" when the responder has a cluster node ID.
+  optional int32 responder_node_id = 2;
+}
 
 // --- System info ---
 

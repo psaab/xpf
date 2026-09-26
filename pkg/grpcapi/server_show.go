@@ -62,6 +62,10 @@ func rpcStatus(err error) error {
 // not at the 63 individual returns.
 func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.ShowTextResponse, error) {
 	resp, err := s.showText(ctx, req)
+	if err == nil && resp != nil && req != nil && req.Topic == "chassis-forwarding" && s.cluster != nil {
+		nodeID := int32(s.cluster.NodeID())
+		resp.ResponderNodeId = &nodeID
+	}
 	return resp, rpcStatus(err)
 }
 

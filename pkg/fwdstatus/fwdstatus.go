@@ -42,15 +42,16 @@ type ForwardingStatus struct {
 
 	// CPU windows (5s / 1m / 5m) — indexed by CPUWindow* constants.
 	// DaemonCPUWindows is /proc/self/stat per-core % (can exceed
-	// 100 on multi-core).  WorkerCPUWindows is per-worker-average
-	// activity fraction in [0, 100] — time-weighted Σactive_ns /
-	// Σwall_ns across all workers.  Parallel *Valid flags are
-	// false when the ring doesn't have a sample ≥ W old yet
-	// (short uptime); the formatter renders `-` for invalid cols.
+	// 100 on multi-core). WorkerCPUWindows is a per-worker-average
+	// OS thread CPU ratio. Parallel *Valid flags are false when the
+	// ring lacks history, a worker sample was held, or the sample is
+	// stale; the formatter renders invalid columns as `-`.
 	DaemonCPUWindows     [numCPUWindows]float64
 	WorkerCPUWindows     [numCPUWindows]float64
 	DaemonCPUWindowValid [numCPUWindows]bool
 	WorkerCPUWindowValid [numCPUWindows]bool
+	CPUDataStale         bool
+	UserHZApprox         bool // USER_HZ fell back to the Linux ABI default.
 
 	// WorkerCPUMode distinguishes the eBPF "no workers" path from
 	// the userspace path — on eBPF the worker row prints the
@@ -164,23 +165,29 @@ func Format(fs *ForwardingStatus) string {
 	var b strings.Builder
 	b.WriteString("FWDD status:\n")
 	writeRow(&b, "State", string(fs.State))
-	// CPU rows: three sliding windows (5s / 1m / 5m).  Daemon row
-	// is /proc/self/stat per-core % (can exceed 100 on multi-core;
-	// no upper clamp).  Worker row is Σ(thread_cpu_ns) / Σ(wall_ns)
-	// from CLOCK_THREAD_CPUTIME_ID — OS thread CPU, not dataplane
-	// activity (see #883/#884; activity-based signal was tried and
-	// empirically found broken at 25 Gbps).  Columns with insufficient
-	// history (uptime < window) render `-`.  On eBPF, the worker row
-	// prints the N/A label.
-	writeRow(&b, "Daemon CPU utilization",
-		formatWindowRow(fs.DaemonCPUWindows, fs.DaemonCPUWindowValid))
+	// CPU rows: three sliding windows (5s / 1m / 5m). Daemon usage
+	// is per-core and can exceed 100%; worker usage is OS thread CPU.
+	// Busy-poll mode may show ~100% worker CPU with no traffic, so that
+	// row is not itself evidence of throughput.
+	daemonCPU := formatWindowRow(fs.DaemonCPUWindows, fs.DaemonCPUWindowValid)
+	if fs.UserHZApprox {
+		daemonCPU += " (approx: assumes USER_HZ=100)"
+	}
+	if fs.CPUDataStale {
+		daemonCPU += " (stale sample)"
+	}
+	writeRow(&b, "Daemon CPU utilization", daemonCPU)
 
 	if fs.WorkerCPUMode == CPUModeEBPFNoWorkers {
 		writeRow(&b, "Worker threads CPU utilization",
 			"N/A — eBPF path has no worker threads")
 	} else {
-		writeRow(&b, "Worker threads CPU utilization",
-			formatWindowRow(fs.WorkerCPUWindows, fs.WorkerCPUWindowValid))
+		workerCPU := formatWindowRow(fs.WorkerCPUWindows, fs.WorkerCPUWindowValid)
+		workerCPU += " (busy-poll can show ~100% idle)"
+		if fs.CPUDataStale {
+			workerCPU += " (stale sample)"
+		}
+		writeRow(&b, "Worker threads CPU utilization", workerCPU)
 	}
 
 	if fs.HeapPercentValid {
@@ -200,7 +207,11 @@ func Format(fs *ForwardingStatus) string {
 		writeRow(&b, "Buffer utilization", "unknown")
 	}
 
-	writeRow(&b, "Uptime:", formatUptime(fs.Uptime))
+	uptime := formatUptime(fs.Uptime)
+	if fs.UserHZApprox {
+		uptime += " (approx: assumes USER_HZ=100)"
+	}
+	writeRow(&b, "Uptime:", uptime)
 	if len(fs.LastSnapshotRejectReasons) > 0 {
 		writeRow(&b, "Last snapshot rejection", fs.LastSnapshotRejectReasons[0])
 		for _, reason := range fs.LastSnapshotRejectReasons[1:] {

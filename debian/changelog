@@ -19,5 +19,8 @@ xpf (0.0.0) unstable; urgency=medium
     and SSE streams, and expose flow-trace drop totals (#10834).
   * Report unknown interface duplex and surface counter/address read failures
     and unmatched interface filters in extensive interface output (#10843).
+  * Include responder node identity in chassis-forwarding RPC responses and
+    flag divergence between peer response identity and heartbeat belief
+    (#10841).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

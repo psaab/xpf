@@ -1,20 +1,31 @@
 package fwdstatus
 
 import (
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// userHZ is the kernel's scheduler tick frequency.  Every mainline
-// kernel config we ship sets CONFIG_HZ_100=y, so this is 100 on
-// every supported deployment.  golang.org/x/sys/unix does not expose
-// `Sysconf`/`_SC_CLK_TCK` on Linux and we avoid cgo in this package,
-// so the value is hardcoded.  There is no init-time validation; a
-// pathological custom kernel with a different HZ would cause CPU
-// percentages derived from /proc ticks to be inaccurate, but will
-// not crash the daemon.
-const userHZ = 100
+// Linux exposes the process clock-tick rate through getconf's
+// CLK_TCK value. If getconf is unavailable (for example, in a minimal
+// container), fall back to the Linux ABI default and explicitly mark
+// daemon CPU as approximate.
+var userHZ, userHZApprox = kernelUserHZ()
+
+func kernelUserHZ() (int, bool) {
+	out, err := exec.Command("getconf", "CLK_TCK").Output()
+	if err == nil {
+		hz, parseErr := strconv.Atoi(strings.TrimSpace(string(out)))
+		if parseErr == nil && hz > 0 {
+			return hz, false
+		}
+	}
+	return 100, true
+}
 
 // Well-known follow-up issue number printed in the rendered output
 // when Buffer% cannot be read on userspace-dp.
@@ -62,6 +73,7 @@ func Build(
 		WorkerCPUMode:     CPUModeEBPFNoWorkers,
 		BufferKnown:       false,
 		BufferFollowupRef: followupUMEMBuffer,
+		UserHZApprox:      userHZApprox,
 	}
 
 	// --- Uptime: shared PID-start anchor ---------------------------
@@ -70,7 +82,7 @@ func Build(
 	hasProcStat := statErr == nil && btimeErr == nil
 
 	if hasProcStat {
-		pidStart := time.Unix(int64(stat.BootTime)+int64(selfStat.StartTimeTicks)/userHZ, 0)
+		pidStart := time.Unix(int64(stat.BootTime)+int64(selfStat.StartTimeTicks)/int64(userHZ), 0)
 		fs.Uptime = time.Since(pidStart)
 	} else {
 		// Fallback: in-memory daemon start time.  Differs from true
@@ -80,9 +92,9 @@ func Build(
 	}
 
 	// --- CPU windows (5s / 1m / 5m) --------------------------------
-	// Populated from the sampler's cumulative-counter ring.  An
-	// empty snap (no sampler wired, or zero samples yet) leaves all
-	// windows invalid — formatter renders `-`.
+	// A missing or stale sample leaves the affected window columns
+	// invalid — the formatter renders them as `-`.
+	fs.CPUDataStale = cpuSnapshotStale(snap)
 	fs.DaemonCPUWindows, fs.WorkerCPUWindows,
 		fs.DaemonCPUWindowValid, fs.WorkerCPUWindowValid = computeCPUWindows(snap)
 
@@ -283,14 +295,14 @@ func Build(
 }
 
 func ticksToNanos(ticks uint64) uint64 {
-	// Divide before multiply. The naive `ticks * 1e9 / userHZ` overflows
-	// uint64 once `ticks * 1e9` exceeds 2^64 — at ~1.845e10 ticks (~33 days of
-	// busy time summed across 64 cores at 100 Hz) the product wraps and the CPU
-	// windows that diagnose saturation go invalid (#4909). Splitting into a
-	// whole-second term plus a sub-second remainder keeps full precision (the
-	// remainder is < userHZ so `rem * 1e9` cannot overflow) while pushing the
-	// overflow point out by a factor of userHZ, far beyond any real uptime.
-	return (ticks/userHZ)*1_000_000_000 + (ticks%userHZ)*1_000_000_000/userHZ
+	return ticksToNanosAtHZ(ticks, uint64(userHZ))
+}
+
+// ticksToNanosAtHZ converts /proc scheduler ticks without assuming the
+// host's USER_HZ value. Divide before multiply to avoid an overflowing
+// ticks*1e9 intermediate.
+func ticksToNanosAtHZ(ticks, hz uint64) uint64 {
+	return (ticks/hz)*1_000_000_000 + (ticks%hz)*1_000_000_000/hz
 }
 
 // heartbeatsHealthy returns true only on positive, in-window evidence
@@ -322,25 +334,11 @@ func heartbeatsHealthy(hbs []time.Time, now time.Time, maxAge time.Duration) boo
 	return true
 }
 
-// pageSize is runtime.Getpagesize wrapped so tests can't accidentally
-// call it with a mock that doesn't match the real parser (the parser
-// returns raw page counts).
+// pageSize returns the running kernel's page size, the unit used by
+// the `resident` field of /proc/self/statm. Captured from the runtime
+// system call at initialization rather than assumed to be 4096.
+var systemPageSize = os.Getpagesize()
+
 func pageSize() int {
-	return syscallPageSize
+	return systemPageSize
 }
-
-// syscallPageSize is the page size in bytes used to convert the
-// `resident` field of /proc/self/statm (which is in pages) to
-// bytes.  Hardcoded to 4096 — Linux x86_64/arm64 page size on every
-// mainline kernel config we ship.  We intentionally do NOT call
-// `unix.Getpagesize()` here to keep this package dependency-light;
-// if we ever deploy on a kernel with a non-4K page size (HugeTLBFS
-// main allocation, transparent-hugepage config), Heap% will be
-// inaccurate by a constant factor until this is fetched at runtime.
-var syscallPageSize = 4096
-
-// (A library package must not panic on sensor unreliability.  A
-// malformed /proc/self/stat is caught by Build returning State=Unknown
-// — no init-time sanity check here.  If a user deploys on a kernel
-// with a non-standard HZ, the operator will see wrong CPU percentages
-// and investigate; that is strictly better than crashing xpfd.)

@@ -47,20 +47,34 @@ func (s *Server) showChassisForwarding(ctx context.Context, buf *strings.Builder
 	fmt.Fprintf(buf, "node%d:\n%s\n%s",
 		localNodeID, chassisForwardingSeparator, localBuf)
 
-	peerBuf, peerErr := s.dialAndShowForwarding(ctx)
-	// Codex round-1 fix: guard against PeerNodeID() returning 0
-	// before the first heartbeat — would produce two `node0:`
-	// headers. If peer was never seen, label it as unknown.
-	peerLabel := "node?"
-	if s.cluster.PeerAlive() {
-		peerLabel = fmt.Sprintf("node%d", s.cluster.PeerNodeID())
+	peerResp, peerErr := s.dialAndShowForwarding(ctx)
+	peerAlive := s.cluster.PeerAlive()
+	expectedPeerNodeID := 0
+	if peerAlive {
+		expectedPeerNodeID = s.cluster.PeerNodeID()
 	}
+	var responderNodeID *int32
+	if peerResp != nil {
+		responderNodeID = peerResp.ResponderNodeId
+	}
+	peerLabel := chassisForwardingPeerLabel(responderNodeID, peerAlive, expectedPeerNodeID)
 	fmt.Fprintf(buf, "\n%s:\n%s\n", peerLabel, chassisForwardingSeparator)
 	if peerErr != nil {
 		fmt.Fprintf(buf, "FWDD status:\n  (peer unreachable: %s)\n", peerErr)
-	} else {
-		buf.WriteString(peerBuf)
+	} else if peerResp != nil {
+		buf.WriteString(peerResp.Output)
 	}
+}
+
+func chassisForwardingPeerLabel(responderNodeID *int32, peerAlive bool, expectedPeerNodeID int) string {
+	if responderNodeID == nil {
+		return "node?"
+	}
+	label := fmt.Sprintf("node%d", *responderNodeID)
+	if peerAlive && int(*responderNodeID) != expectedPeerNodeID {
+		return fmt.Sprintf("%s (identity mismatch: expected node%d)", label, expectedPeerNodeID)
+	}
+	return label
 }
 
 // showChassisClusterStatus renders the cluster status (also serves the

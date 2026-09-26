@@ -3,9 +3,12 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/base64"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/denyaudit"
 )
 
 // AuthConfig holds authentication credentials for the API middleware.
@@ -184,8 +187,24 @@ func authMiddleware(cfg AuthConfig, metricsRequireAuth bool, next http.Handler) 
 			next.ServeHTTP(w, r)
 			return
 		}
+		logRESTAPIAuthFailure(r)
 		writeAuthChallenge(w)
 	})
+}
+
+// logRESTAPIAuthFailure records each failed REST credential check while
+// rate-limiting WARN output. Its fixed key prevents caller-controlled credentials,
+// paths, or addresses from multiplying log volume or limiter state.
+func logRESTAPIAuthFailure(r *http.Request) {
+	if emit, suppressed := denyaudit.Note(denyaudit.SurfaceRESTAPIAuthFail, "rest-api-auth-failure"); emit {
+		slog.Warn("api: REST authentication failed",
+			"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
+			"suppressed_since_last", suppressed,
+			"denials_total", denyaudit.Total(denyaudit.SurfaceRESTAPIAuthFail))
+		return
+	}
+	slog.Debug("api: REST authentication failed",
+		"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
 }
 
 // authCheck reports whether a request is authorized under cfg (or exempt). It is

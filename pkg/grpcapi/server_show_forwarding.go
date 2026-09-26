@@ -122,10 +122,10 @@ func (s *Server) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 	return base
 }
 
-func (s *Server) dialAndShowForwarding(ctx context.Context) (string, error) {
+func (s *Server) dialAndShowForwarding(ctx context.Context) (*pb.ShowTextResponse, error) {
 	conn, err := s.dialPeer(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer conn.Close()
 	client := pb.NewBpfrxServiceClient(conn)
@@ -134,9 +134,9 @@ func (s *Server) dialAndShowForwarding(ctx context.Context) (string, error) {
 	ctx = metadata.AppendToOutgoingContext(ctx, "xpf-no-peer", "1")
 	resp, err := client.ShowText(ctx, &pb.ShowTextRequest{Topic: "chassis-forwarding"})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resp.Output, nil
+	return resp, nil
 }
 
 // --- #1700: residual ShowText branches ---

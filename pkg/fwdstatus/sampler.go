@@ -31,6 +31,7 @@ type cpuSample struct {
 	daemonCPUNs    uint64 // /proc/self/stat utime+stime, converted to ns
 	workerThreadNs uint64 // Σ WorkerRuntimeStatus.thread_cpu_ns across workers
 	workerWallNs   uint64 // Σ WorkerRuntimeStatus.wall_ns across workers
+	workerHeld     bool   // CachedStatus miss: worker counters are stale, not zero.
 }
 
 // Sampler maintains a ring of cumulative CPU counters.  One
@@ -94,7 +95,7 @@ func (s *Sampler) loop(ctx context.Context) {
 // /proc/self/stat read failure the sample is dropped entirely —
 // skipping preserves monotonicity of daemonCPUNs.  On worker
 // telemetry failure the worker counters are held at their
-// previous values (honest zero-rate for that interval).
+// previous values and marked invalid (not an observed zero interval).
 //
 // Worker CPU comes from Σthread_cpu_ns (OS thread CPU via
 // CLOCK_THREAD_CPUTIME_ID) divided by Σwall_ns.  NOT Σactive_ns —
@@ -121,6 +122,7 @@ func (s *Sampler) sample(now time.Time) {
 	// error path did. #2114: the provider IS a CachedStatusProvider
 	// now — the per-tick type assertion is gone.
 	workerThread, workerWall := s.lastWorkerThread, s.lastWorkerWall
+	workerHeld := false
 	if s.dp != nil {
 		if st, ok := s.dp.CachedStatus(); ok {
 			var tc, w uint64
@@ -129,6 +131,8 @@ func (s *Sampler) sample(now time.Time) {
 				w += wr.WallNS
 			}
 			workerThread, workerWall = tc, w
+		} else {
+			workerHeld = true
 		}
 	}
 
@@ -138,6 +142,7 @@ func (s *Sampler) sample(now time.Time) {
 		daemonCPUNs:    daemonNs,
 		workerThreadNs: workerThread,
 		workerWallNs:   workerWall,
+		workerHeld:     workerHeld,
 	}
 	s.head = (s.head + 1) % ringSize
 	s.count++
@@ -179,8 +184,9 @@ func (s *Sampler) Snapshot() SamplerSnapshot {
 
 // computeCPUWindows returns per-core Daemon CPU% and per-worker-average
 // Worker thread CPU% for the three windows, plus parallel validity
-// flags.  A window is valid iff the snapshot contains a sample with
-// wall ≤ newest.wall − W.
+// flags. A window is valid iff the snapshot is fresh and contains a
+// sample with wall ≤ newest.wall − W. Worker windows also require that
+// no counter in the interval was held after a cached-status miss.
 //
 // Daemon %: (Δdaemon_cpu_ns / Δwall_ns) × 100 — per-core percent;
 //
@@ -188,16 +194,16 @@ func (s *Sampler) Snapshot() SamplerSnapshot {
 //
 // Worker %: (Δworker_thread_cpu_ns / Δworker_wall_ns) × 100 —
 //
-//	per-worker-average OS thread CPU via CLOCK_THREAD_CPUTIME_ID,
-//	summed across workers.  Busy-poll mode shows ~100% regardless
-//	of traffic (known false-positive); eBPF path has no workers
-//	so Δworker_wall_ns stays 0 and the window flags as invalid.
-//	See #883 / #884 for why we don't use active_ns here.
+//	per-worker-average OS thread CPU via CLOCK_THREAD_CPUTIME_ID.
+//	Busy-poll mode can show ~100% with no traffic (not a throughput
+//	signal); eBPF path has no workers so Δworker_wall_ns stays 0 and
+//	the window flags as invalid. See #883 / #884 for why we don't use
+//	active_ns here.
 func computeCPUWindows(snap SamplerSnapshot) (
 	daemonPct, workerPct [numCPUWindows]float64,
 	daemonValid, workerValid [numCPUWindows]bool,
 ) {
-	if len(snap.Samples) < 2 {
+	if len(snap.Samples) < 2 || cpuSnapshotStale(snap) {
 		return
 	}
 	newest := snap.Samples[len(snap.Samples)-1]
@@ -217,13 +223,9 @@ func computeCPUWindows(snap SamplerSnapshot) (
 		if wallDelta <= 0 {
 			continue
 		}
-		// Guard against non-monotonic counters.  A userspace-dp
-		// restart or a brief Status() miscarriage can reset the
-		// cumulative series; an unchecked subtract on uint64 would
-		// underflow to a huge value and pass the clamp-on-display
-		// path, reporting a bogus 9e20%.  Mark the window invalid
-		// in that case so the operator sees `-` until fresh samples
-		// accumulate.
+		// Guard against non-monotonic counters. A userspace-dp
+		// restart can reset the cumulative series; an unchecked
+		// subtract on uint64 would underflow and report a bogus rate.
 		wallNs := uint64(wallDelta.Nanoseconds())
 		if newest.daemonCPUNs >= then.daemonCPUNs {
 			daemonDelta := newest.daemonCPUNs - then.daemonCPUNs
@@ -231,7 +233,14 @@ func computeCPUWindows(snap SamplerSnapshot) (
 			daemonValid[i] = true
 		}
 
-		if newest.workerWallNs > then.workerWallNs &&
+		workerHeld := false
+		for j := idx; j < len(snap.Samples); j++ {
+			if snap.Samples[j].workerHeld {
+				workerHeld = true
+				break
+			}
+		}
+		if !workerHeld && newest.workerWallNs > then.workerWallNs &&
 			newest.workerThreadNs >= then.workerThreadNs {
 			workerWallDelta := newest.workerWallNs - then.workerWallNs
 			workerThreadDelta := newest.workerThreadNs - then.workerThreadNs
@@ -241,6 +250,20 @@ func computeCPUWindows(snap SamplerSnapshot) (
 		}
 	}
 	return
+}
+
+// cpuSnapshotStale distinguishes a sampler stall from insufficient
+// history. A sample may be at most two intervals old; future or
+// unclocked samples are invalid rather than trusted as current.
+func cpuSnapshotStale(snap SamplerSnapshot) bool {
+	if len(snap.Samples) == 0 {
+		return false
+	}
+	if snap.Now.IsZero() {
+		return true
+	}
+	age := snap.Now.Sub(snap.Samples[len(snap.Samples)-1].wall)
+	return age < 0 || age > 2*SampleInterval
 }
 
 // findSampleAtOrBefore returns the index of the sample with the
