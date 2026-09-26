@@ -41,5 +41,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Send match-all XFRM SA dump requests with the iproute2 address-filter
     attribute, avoiding malformed netlink attribute warnings (#11225).
   * Bound IKE/ESP rekey lifetimes and clamp tolerant DPD timers (#10882).
+  * Return accurate consumed-input counts from sanitizing writers on emit
+    errors, permitting retries without duplicating already-emitted lines
+    (#10900).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
