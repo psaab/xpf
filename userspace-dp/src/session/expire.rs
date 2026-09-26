@@ -218,6 +218,7 @@ impl SessionTable {
                     // just below. Snapshot it (Copy) before the immutable
                     // `entry` borrow is dropped.
                     let e_nat = entry.decision.nat;
+                    let e_reset = entry.reset;
                     // #4380: the companion idle-retention probe applies ONLY to
                     // the owner-side idle-expiry path — the `Age` HA decision or
                     // the `ha == None` standalone path (both start eligible). The
@@ -349,7 +350,9 @@ impl SessionTable {
                     // pass only. Gated to the owner-side Age / no-HA path
                     // (`companion_eligible`): the deliberate stale-synced /
                     // aged-owner reaps do not consult it.
-                    if companion_eligible && self.companion_keeps_alive(&key, e_nat, now_ns) {
+                    if companion_eligible
+                        && self.companion_keeps_alive(&key, e_nat, e_reset, now_ns)
+                    {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
@@ -538,10 +541,16 @@ impl SessionTable {
     /// companion also stops receiving packets both halves' timestamps freeze,
     /// both cross the timeout, and the flow reaps within one timeout window of
     /// its last activity in either direction (bounded, terminating).
+    ///
+    /// #10885: close state constrains which direction can keep its peer alive.
+    /// A RST has no active half, and traffic from a FIN-owning companion must
+    /// not keep the opposite entry fresh. A non-FINed companion may still keep
+    /// its FINed peer alive for legitimate half-close traffic.
     fn companion_keeps_alive(
         &mut self,
         key: &SessionKey,
         entry_nat: NatDecision,
+        entry_reset: bool,
         now_ns: u64,
     ) -> bool {
         let companion_key = reverse_session_key(key, entry_nat);
@@ -562,6 +571,12 @@ impl SessionTable {
                 // (`promote_from_reverse` plus
                 // `propagate_tcp_state_to_companion`).
                 if companion.handshake_pending {
+                    return false;
+                }
+                // #10885: a reset or a FIN-owning companion cannot provide
+                // refresh for this entry. A non-FINed companion remains eligible
+                // to keep a FINed peer alive during a legitimate half-close.
+                if entry_reset || companion.reset || (companion.closing && companion.fin_own) {
                     return false;
                 }
                 // Companion still within ITS idle window (complement of the
