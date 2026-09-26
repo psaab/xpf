@@ -16,8 +16,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+)
+
+const (
+	syncedImportGateBusyMaxRetries = 4
+	syncedImportGateBusyRetryDelay = 10 * time.Millisecond
 )
 
 func (m *Manager) syncSessionV4Locked(op string, key dataplane.SessionKey, val *dataplane.SessionValue) error {
@@ -28,6 +34,7 @@ func (m *Manager) syncSessionV4Locked(op string, key dataplane.SessionKey, val *
 	m.stampSessionMutationLocked(&req)
 	startGen := m.procGen
 	err := m.syncSessionRequestLocked(req)
+	err = m.retrySyncedImportGateBusyLocked(&req, err)
 	// P12-E: churn self-heal — restamp to the live generation and retry
 	// once (single-key idempotent verbs only; capture-based policy
 	// batches gap instead and never call this).
@@ -46,6 +53,7 @@ func (m *Manager) syncSessionV6Locked(op string, key dataplane.SessionKeyV6, val
 	m.stampSessionMutationLocked(&req)
 	startGen := m.procGen
 	err := m.syncSessionRequestLocked(req)
+	err = m.retrySyncedImportGateBusyLocked(&req, err)
 	// P12-E: churn self-heal (V4 twin).
 	if m.churnedSinceLocked(startGen) && req.HelperEpoch != 0 {
 		req.HelperEpoch = m.procGen
@@ -84,6 +92,28 @@ func (m *Manager) stampSessionMutationLocked(req *SessionSyncRequest) {
 			req.NATDstPort,
 		)
 	}
+}
+
+// retrySyncedImportGateBusyLocked retries only a strict synced import that the
+// helper refused because tuple admission was transiently busy. A fresh
+// OperationID is essential: the helper replays an identical
+// (epoch, operation_id, mutation_id), while a new operation ID with the same
+// MutationID is admitted as a retry. The caller holds m.mu; socket I/O still
+// drops it, and the backoff does too.
+func (m *Manager) retrySyncedImportGateBusyLocked(req *SessionSyncRequest, err error) error {
+	if req.Operation != "mirror_upsert" {
+		return err
+	}
+	for retry := 0; retry < syncedImportGateBusyMaxRetries && errors.Is(err, errSyncedImportGateBusy); retry++ {
+		m.mu.Unlock()
+		time.Sleep(syncedImportGateBusyRetryDelay << retry)
+		m.mu.Lock()
+
+		req.OperationID = ""
+		m.stampSessionMutationLocked(req)
+		err = m.syncSessionRequestLocked(*req)
+	}
+	return err
 }
 
 // churnedSinceLocked reports whether the helper turned over since

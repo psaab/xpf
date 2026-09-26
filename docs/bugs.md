@@ -296,6 +296,24 @@
 - **Fix:** The winner asynchronously sends a forced GARP/NA refresh after a lower-priority advert or an equal-priority tie it wins. A separate 500ms cooldown bounds repeats without letting a recent ordinary GARP suppress the first correction; strict-VIP-ownership suppression remains in force.
 - **Tests:** `TestHandleMasterRx_ReaffirmsAfterOutrankingClaimant_10777` captures both IPv4 GARP and IPv6 NA after a recent prior burst, checks repeated adverts are rate-limited, and verifies an equal-priority loser does not announce.
 
+
+### HA session imports lost during tuple-gate clear (FIXED #10788 F2)
+- **Symptom:** A peer-synced session that hit a temporary tuple-gate fence was
+  treated as a terminal refusal and never retried, leaving the standby without
+  a live flow until a later bulk sync.
+- **Root cause:** `RejectedGateBusy` shared the semantic-refusal response path
+  with stale-generation and capacity verdicts, although gate contention and
+  clear fences are transient helper state.
+- **Fix:** Classify the exact `gate-busy` token as retryable and retry strict
+  `mirror_upsert` up to four times with bounded backoff. Each attempt gets a
+  fresh `OperationID` while retaining its `MutationID`, so the helper does not
+  replay the cached refusal. Other semantic refusals and transport failures
+  keep their existing classifications.
+- **Tests:** `TestSyncedImportGateBusyRetriesWithFreshOperationID_10788`
+  exercises V4 and V6 busy-then-success paths; the bounded-retry cell proves
+  terminal refusals are not retried. Rust test
+  `clear_fence_rejects_new_tuple_lease` pins gate refusal during clear.
+
 ### tx_ports devmap value size
 - Go wrote 4-byte struct (ifindex only) but BPF DEVMAP_HASH expects 8-byte `bpf_devmap_val` (ifindex + prog_fd)
 - **File:** loader.go

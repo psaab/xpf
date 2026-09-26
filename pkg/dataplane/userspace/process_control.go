@@ -85,6 +85,11 @@ const (
 // batch keeps going: the helper is alive and only this request was refused.
 var errSessionHelperUnreachable = errors.New("session helper unreachable")
 
+// errSyncedImportGateBusy marks the helper's retryable tuple-gate refusal.
+// Unlike terminal semantic refusals, it needs another operation ID so the
+// helper mutation replay cache runs the import again.
+var errSyncedImportGateBusy = errors.New("synced session import gate busy")
+
 // syncedImportRefusedPrefix is the machine-readable token the helper prefixes
 // onto a SEMANTIC synced-import refusal (SYNCED_IMPORT_REFUSED_PREFIX in
 // userspace-dp/src/afxdp/ha/session_import.rs). The two spellings must agree;
@@ -470,8 +475,11 @@ func (m *Manager) requestSessionSyncResponseLocked(req ControlRequest) (ControlR
 		// human-readable remainder, so the sentence can be reworded without
 		// silently reclassifying a refusal as a transport failure.
 		if strings.HasPrefix(resp.Error, syncedImportRefusedPrefix) {
-			return ControlResponse{}, fmt.Errorf("%w: %s", dataplane.ErrSyncedImportRefused,
-				strings.TrimPrefix(resp.Error, syncedImportRefusedPrefix))
+			reason := strings.TrimPrefix(resp.Error, syncedImportRefusedPrefix)
+			if reason == "gate-busy" {
+				return ControlResponse{}, fmt.Errorf("%w: %s", errSyncedImportGateBusy, reason)
+			}
+			return ControlResponse{}, fmt.Errorf("%w: %s", dataplane.ErrSyncedImportRefused, reason)
 		}
 		return ControlResponse{}, errors.New(resp.Error)
 	}
