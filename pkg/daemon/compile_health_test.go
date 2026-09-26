@@ -1,8 +1,16 @@
 package daemon
 
 import (
+	"context"
 	"errors"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/api"
+	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/vrrp"
 )
 
 // TestCompileHealth_RecordFailure pins the #758 state transitions:
@@ -60,5 +68,61 @@ func TestCompileHealth_RecordFailure(t *testing.T) {
 	}
 	if s.FailureCount != 2 {
 		t.Errorf("FailureCount after success = %d, want 2 (preserved)", s.FailureCount)
+	}
+}
+
+// TestApplyConfigLockedRecordsCompileFailureAndHealth503 guards the production
+// ApplyConfig error path and the resulting public readiness response.
+func TestApplyConfigLockedRecordsCompileFailureAndHealth503(t *testing.T) {
+	d := &Daemon{
+		vrrpMgr: vrrp.NewManager(),
+		store:   newConfigStore(t, filepath.Join(t.TempDir(), "config.db")),
+		opts:    Options{NoDataplane: true},
+	}
+	dp := &runtimeOnlyApplyTestDP{applyErr: dpuserspace.ErrPersistentSourceNATProtocolIncompatible}
+	d.setDataplane(dp)
+
+	err := d.applyConfigLocked(context.Background(), &config.Config{})
+	if !errors.Is(err, dpuserspace.ErrPersistentSourceNATProtocolIncompatible) {
+		t.Fatalf("applyConfigLocked error = %v, want dataplane apply failure", err)
+	}
+	if dp.applyCalls != 1 {
+		t.Fatalf("ApplyConfig calls = %d, want 1", dp.applyCalls)
+	}
+	h := d.CompileHealthSnapshot()
+	if h.EverSucceeded || h.FailureCount != 1 || h.LastError != dpuserspace.ErrPersistentSourceNATProtocolIncompatible.Error() {
+		t.Fatalf("compile health = %+v, want one recorded failure and no success", h)
+	}
+
+	s := api.NewServer(api.Config{
+		Addr: "127.0.0.1:0",
+		CompileHealthFn: func() api.CompileHealthSnapshot {
+			h := d.CompileHealthSnapshot()
+			return api.CompileHealthSnapshot{
+				EverSucceeded:    h.EverSucceeded,
+				FailureCount:     h.FailureCount,
+				LastError:        h.LastError,
+				LastErrorUnixSec: h.LastErrorUnixSec,
+			}
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := s.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("start health API: %v", err)
+	}
+	defer func() {
+		cancel()
+		s.Wait()
+	}()
+
+	handler := s.HTTPHandlerForTest()
+	if handler == nil {
+		t.Fatal("health API has no live HTTP handler")
+	}
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/health", nil))
+	if rr.Code != 503 {
+		t.Fatalf("/health status = %d, want 503; body: %s", rr.Code, rr.Body.String())
 	}
 }
