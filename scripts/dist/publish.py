@@ -378,45 +378,50 @@ def _extract_installsh_key(installsh_path):
     return text[i:j + len(end)] + "\n"
 
 
-def _gate_key_agreement(dist, archive_pub, signer_fprs):
-    """H-15: cross-check that the installer's embedded key, the packaged
-    keyring, and the InRelease signer AGREE by fingerprint. publish.py
-    otherwise only checked each source for placeholder-ness independently, so a
-    stale install.sh (an old, real, retired key) could publish cleanly after a
-    rotation and brick every new Tier-A install at `apt-get update`.
+def _gate_key_agreement(dist, signer_fprs, packaged_keyrings):
+    """H-15: cross-check the installer's embedded key, the keyring in each
+    pooled package payload, and the InRelease signer AGREE by fingerprint.
+    The archive key file used to verify InRelease is only a publish-time input;
+    it is not necessarily the keyring the package will install on hosts.
 
     Requires (fingerprints are PRIMARY key fprs):
-      - the InRelease signer(s) S are covered by the packaged keyring K
+      - the InRelease signer(s) S are covered by each packaged keyring K
         (existing hosts verify the repo on `apt upgrade`); and, when install.sh
         is in the publish set,
-      - install.sh's embedded key set I is a SUBSET of K (a keyring superset is
-        allowed during a documented dual-sign window), and
+      - install.sh's embedded key set I is a SUBSET of each K (a keyring
+        superset is allowed during a documented dual-sign window), and
       - the InRelease signer(s) S are covered by I so a fresh Tier-A install's
         `apt-get update` (which runs against install.sh's embedded key BEFORE
         the packaged keyring lands) verifies the published repo.
     """
-    keyring_fprs = _key_fingerprints(archive_pub)
-    if not keyring_fprs:
-        die("archive keyring has no importable keys — cannot cross-check the "
-            "InRelease signer against the packaged keyring.")
     if not signer_fprs:
         die("could not determine the InRelease signer fingerprint — refusing "
             "to publish without confirming key agreement.")
-    if not signer_fprs <= keyring_fprs:
-        die(f"InRelease signer {sorted(signer_fprs)} is NOT in the packaged "
-            f"keyring {sorted(keyring_fprs)} — the repo is signed by a key the "
-            "shipped keyring does not carry; existing hosts would fail apt "
-            "update. Ship the signing key in the keyring or re-sign the repo.")
+    if not packaged_keyrings:
+        die("no pooled package ships /usr/share/keyrings/"
+            "xpf-archive-keyring.asc — cannot cross-check the InRelease "
+            "signer against the keyring installed on hosts.")
+    for package, keyring_fprs in packaged_keyrings:
+        if not keyring_fprs:
+            die(f"pooled package {package} keyring has no importable keys — "
+                "cannot cross-check the InRelease signer.")
+        if not signer_fprs <= keyring_fprs:
+            die(f"InRelease signer {sorted(signer_fprs)} is NOT in the "
+                f"packaged keyring from pooled package {package} "
+                f"{sorted(keyring_fprs)} — the repo is signed by a key the "
+                "shipped keyring does not carry; existing hosts would fail "
+                "apt update. Ship the signing key in the keyring or re-sign "
+                "the repo.")
 
     installsh = os.path.join(dist, "install.sh")
     if not os.path.isfile(installsh):
         info("key-agreement: install.sh not in publish set — "
-             "installer cross-check skipped (signer vs keyring OK)")
+             "installer cross-check skipped (signer vs packaged keyrings OK)")
         return
     armored = _extract_installsh_key(installsh)
     if armored is None:
         die("install.sh is in the publish set but has no embedded PGP key "
-            "block to cross-check against the keyring/InRelease signer.")
+            "block to cross-check against the packaged keyring/InRelease signer.")
     if "PLACEHOLDER-xpf-archive-keyring" in armored:
         die("install.sh embeds the #1924 PLACEHOLDER archive key — cannot "
             "cross-check key agreement. Substitute the real key first.")
@@ -431,20 +436,23 @@ def _gate_key_agreement(dist, archive_pub, signer_fprs):
     if not inst_fprs:
         die("install.sh embedded key could not be parsed for fingerprints — "
             "refusing to publish without confirming key agreement.")
-    if not inst_fprs <= keyring_fprs:
-        die(f"install.sh embedded key {sorted(inst_fprs)} is NOT a subset of "
-            f"the packaged keyring {sorted(keyring_fprs)} — the installer "
-            "trusts a key the shipped keyring lacks (stale installer or "
-            "un-rotated keyring). Re-embed the current archive key in "
-            "install.sh (a keyring superset is allowed during dual-sign).")
+    for package, keyring_fprs in packaged_keyrings:
+        if not inst_fprs <= keyring_fprs:
+            die(f"install.sh embedded key {sorted(inst_fprs)} is NOT a subset "
+                f"of the packaged keyring from pooled package {package} "
+                f"{sorted(keyring_fprs)} — the installer trusts a key the "
+                "shipped keyring lacks (stale installer or un-rotated "
+                "keyring). Re-embed the current archive key in install.sh "
+                "(a keyring superset is allowed during dual-sign).")
     if not signer_fprs <= inst_fprs:
         die(f"InRelease signer {sorted(signer_fprs)} is NOT covered by "
             f"install.sh's embedded key {sorted(inst_fprs)} — a fresh Tier-A "
             "install would fail `apt-get update` against the published repo "
             "(stale install.sh key). Re-embed the signing key in install.sh "
             "before publishing.")
-    info(f"key-agreement OK (installer {sorted(inst_fprs)} subset of keyring; "
-         f"InRelease signer {sorted(signer_fprs)} covered by installer + keyring)")
+    info(f"key-agreement OK (installer {sorted(inst_fprs)} subset of "
+         f"packaged keyring; InRelease signer {sorted(signer_fprs)} covered "
+         "by installer + packaged keyring)")
 
 
 def list_versions(dist):
@@ -861,15 +869,14 @@ def gate_apt(dist, channel):
                 if len(parts) >= 3 and parts[1] == "VALIDSIG":
                     signer_fprs.add(parts[-1])
             info(f"apt InRelease ({suite}) signature OK")
-        # H-15 (#4203): the installer's embedded key, the packaged keyring, and
-        # the InRelease signer must AGREE by fingerprint — three independent
-        # placeholder checks never caught a stale-but-real install.sh key.
-        _gate_key_agreement(dist, pub, signer_fprs)
     # The pooled .deb must not carry the PLACEHOLDER archive keyring
     # (Codex-r2-2): a package built before the real key existed would, once
     # installed, overwrite a host's real /usr/share/keyrings key with the
-    # placeholder and break `apt update`. Refuse to publish such a pool.
+    # placeholder and break `apt update`. Also collect the exact keyrings that
+    # will be installed; the repo's verification key above is not proof of the
+    # package payload (issue #10737).
     pool = os.path.join(dist, "apt", "pool")
+    packaged_keyrings = []
     if os.path.isdir(pool):
         import tempfile as _tf
         for root, _dirs, files in os.walk(pool):
@@ -889,11 +896,17 @@ def gate_apt(dist, channel):
                             "refusing to publish an uninspectable package.")
                     kp = os.path.join(td, "usr/share/keyrings/"
                                       "xpf-archive-keyring.asc")
-                    if os.path.isfile(kp) and _is_placeholder(kp):
-                        die(f"pooled package {fn} ships the PLACEHOLDER archive "
-                            "keyring — refusing to publish (it would clobber a "
-                            "host's real key on upgrade). Rebuild the .deb after "
-                            "dropping in scripts/dist/xpf-archive-keyring.asc.")
+                    if os.path.isfile(kp):
+                        if _is_placeholder(kp):
+                            die(f"pooled package {fn} ships the PLACEHOLDER "
+                                "archive keyring — refusing to publish (it "
+                                "would clobber a host's real key on upgrade). "
+                                "Rebuild the .deb after dropping in "
+                                "scripts/dist/xpf-archive-keyring.asc.")
+                        packaged_keyrings.append((fn, _key_fingerprints(kp)))
+    # H-15 (#4203): compare against the keyring in the actual pooled package,
+    # not just the repo-side archive key used to verify InRelease.
+    _gate_key_agreement(dist, signer_fprs, packaged_keyrings)
 
 
 def make_latest(dist, channel, version):

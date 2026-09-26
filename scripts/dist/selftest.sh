@@ -177,8 +177,11 @@ EOF
 gpg --batch --gen-key "$WORK/gpg-batch" >/dev/null 2>&1
 GPGKEY=$(gpg --batch --list-keys --with-colons selftest@xpf.invalid | awk -F: '/^fpr:/{print $10; exit}')
 [ -n "$GPGKEY" ] && ok "archive key generated ($GPGKEY)" || { bad "archive key gen failed"; }
+ARCHASC="$WORK/archive.asc"
+gpg --batch --armor --export selftest@xpf.invalid > "$ARCHASC"
 
-# Fake .deb (apt-ftparchive only reads control metadata; a minimal valid .deb).
+# Fake .deb carries the keyring payload checked by publish.py; apt-ftparchive
+# only needs control metadata.
 DEBDIR="$WORK/pkg"; mkdir -p "$DEBDIR/DEBIAN"
 cat > "$DEBDIR/DEBIAN/control" <<EOF
 Package: xpf-appliance
@@ -187,6 +190,8 @@ Architecture: amd64
 Maintainer: selftest <selftest@xpf.invalid>
 Description: xpf selftest fake package
 EOF
+mkdir -p "$DEBDIR/usr/share/keyrings"
+cp "$ARCHASC" "$DEBDIR/usr/share/keyrings/xpf-archive-keyring.asc"
 mkdir -p "$ROOT/dist-deb"
 FAKEDEB="$ROOT/dist-deb/xpf-appliance_${VER}_amd64.selftest.deb"
 dpkg-deb --build "$DEBDIR" "$FAKEDEB" >/dev/null 2>&1
@@ -296,8 +301,6 @@ mk_installsh() {  # mk_installsh <dest-install.sh> <armored-key-file>
       echo ")"
     } > "$1"
 }
-ARCHASC="$WORK/archive.asc"
-gpg --batch --armor --export selftest@xpf.invalid > "$ARCHASC"
 # Positive: install.sh embeds the SIGNER key -> gate passes.
 KAOK="$WORK/kagree-ok"; mkdir -p "$KAOK"; cp -r "$OUT/apt" "$KAOK/apt"
 mk_installsh "$KAOK/install.sh" "$ARCHASC"
@@ -328,6 +331,32 @@ if XPF_ARCHIVE_PUBKEY="$ARCHASC" $PY "$DIST/publish.py" \
 else
     ok "publish rejects install.sh embedding a non-signer key"
 fi
+# Regression (#10737): the repo-side archive pubkey and installer are current,
+# but a real, stale keyring in the pooled .deb would brick upgraded hosts. The
+# failure must identify the packaged payload, not reject an unrelated gate.
+cp "$WORK/stale.asc" "$DEBDIR/usr/share/keyrings/xpf-archive-keyring.asc"
+STALEDEB="$WORK/xpf-appliance-stale.deb"
+dpkg-deb --build "$DEBDIR" "$STALEDEB" >/dev/null 2>&1
+KAPAYLOAD="$WORK/kagree-stale-payload"; mkdir -p "$KAPAYLOAD"
+if XPF_GPG_KEY="$GPGKEY" XPF_APT_VALID_DAYS=365 \
+   sh "$DIST/build-apt-repo.sh" --out "$KAPAYLOAD" --suite stable \
+      --debs "$STALEDEB" >/dev/null 2>&1; then
+    mk_installsh "$KAPAYLOAD/install.sh" "$ARCHASC"
+    if XPF_ARCHIVE_PUBKEY="$ARCHASC" $PY "$DIST/publish.py" \
+         --dist "$KAPAYLOAD" --channel stable --no-image \
+         >"$WORK/stale-payload.out" 2>&1; then
+        bad "publish MUST reject a stale pooled .deb keyring but PASSED"
+    elif grep -q "packaged keyring from pooled package" \
+             "$WORK/stale-payload.out"; then
+        ok "publish rejects a stale keyring inside the pooled .deb"
+    else
+        bad "publish failed for the wrong reason on a stale pooled keyring"
+        cat "$WORK/stale-payload.out" >&2
+    fi
+else
+    bad "could not build a signed apt fixture with a stale pooled keyring"
+fi
+
 # Negative: InRelease signer absent from the packaged keyring must be rejected.
 if XPF_ARCHIVE_PUBKEY="$WORK/stale.asc" $PY "$DIST/publish.py" \
      --dist "$KAOK" --channel stable --no-image >/dev/null 2>&1; then
