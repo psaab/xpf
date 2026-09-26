@@ -370,10 +370,10 @@ func (c *CLI) showFlowSession(args []string) error {
 			polName = fmt.Sprintf("%d", val.PolicyID)
 		}
 		if haState != "" {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Valid\n",
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 				sid, polName, val.PolicyID, haState, val.Timeout)
 		} else {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Session State: Valid\n",
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 				sid, polName, val.PolicyID, val.Timeout)
 		}
 
@@ -499,10 +499,10 @@ func (c *CLI) showFlowSession(args []string) error {
 			polName = fmt.Sprintf("%d", val.PolicyID)
 		}
 		if haState != "" {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Valid\n",
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 				sid, polName, val.PolicyID, haState, val.Timeout)
 		} else {
-			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Session State: Valid\n",
+			fmt.Printf("Session ID: %d, Policy name: %s/%d, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 				sid, polName, val.PolicyID, val.Timeout)
 		}
 
@@ -584,15 +584,15 @@ func (c *CLI) showFlowSession(args []string) error {
 		}
 		// Junos-style session summary format
 		fmt.Printf("Unicast-sessions: %d\n", count)
-		fmt.Printf("Multicast-sessions: 0\n")
-		fmt.Printf("Services-offload-sessions: 0\n")
-		fmt.Printf("Failed-sessions: 0\n")
-		fmt.Printf("Sessions-in-drop-flow: 0\n")
+		fmt.Printf("Multicast-sessions: unknown\n")
+		fmt.Printf("Services-offload-sessions: unknown\n")
+		fmt.Printf("Failed-sessions: unknown\n")
+		fmt.Printf("Sessions-in-drop-flow: unknown\n")
 		fmt.Printf("Sessions-in-use: %d\n", count)
-		fmt.Printf("  Valid sessions: %d\n", count)
-		fmt.Printf("  Pending sessions: 0\n")
-		fmt.Printf("  Invalidated sessions: 0\n")
-		fmt.Printf("  Sessions in other states: 0\n")
+		fmt.Printf("  Valid sessions: unknown\n")
+		fmt.Printf("  Pending sessions: unknown\n")
+		fmt.Printf("  Invalidated sessions: unknown\n")
+		fmt.Printf("  Sessions in other states: unknown\n")
 		// #5323: render the dataplane's dynamic max (worker_count x per-worker
 		// capacity) from the live helper status, not the old hardcoded
 		// 10000000. If no userspace status is available (max 0), render
@@ -726,7 +726,7 @@ func (c *CLI) showFlowSession(args []string) error {
 					if se.HaActive {
 						peerHAState = "Active"
 					}
-					fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Valid\n",
+					fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 						peerFullSID, polDisplay, se.PolicyId, peerHAState, se.TimeoutSeconds)
 					inZone := se.IngressZoneName
 					if inZone == "" {
@@ -1313,15 +1313,15 @@ func renderPeerSessionSummary(peerResp *pb.GetSessionSummaryResponse) string {
 	fmt.Fprintf(&b, "node%d:\n", peerResp.NodeId)
 	fmt.Fprintln(&b, "--------------------------------------------------------------------------")
 	fmt.Fprintf(&b, "Unicast-sessions: %d\n", peerResp.ForwardOnly)
-	fmt.Fprintf(&b, "Multicast-sessions: 0\n")
-	fmt.Fprintf(&b, "Services-offload-sessions: 0\n")
-	fmt.Fprintf(&b, "Failed-sessions: 0\n")
-	fmt.Fprintf(&b, "Sessions-in-drop-flow: 0\n")
+	fmt.Fprintf(&b, "Multicast-sessions: unknown\n")
+	fmt.Fprintf(&b, "Services-offload-sessions: unknown\n")
+	fmt.Fprintf(&b, "Failed-sessions: unknown\n")
+	fmt.Fprintf(&b, "Sessions-in-drop-flow: unknown\n")
 	fmt.Fprintf(&b, "Sessions-in-use: %d\n", peerResp.ForwardOnly)
-	fmt.Fprintf(&b, "  Valid sessions: %d\n", peerResp.ForwardOnly)
-	fmt.Fprintf(&b, "  Pending sessions: 0\n")
-	fmt.Fprintf(&b, "  Invalidated sessions: 0\n")
-	fmt.Fprintf(&b, "  Sessions in other states: 0\n")
+	fmt.Fprintf(&b, "  Valid sessions: unknown\n")
+	fmt.Fprintf(&b, "  Pending sessions: unknown\n")
+	fmt.Fprintf(&b, "  Invalidated sessions: unknown\n")
+	fmt.Fprintf(&b, "  Sessions in other states: unknown\n")
 	// The PEER's real capacity, not the hardcoded 10000000 #5323 was written to
 	// delete. The LOCAL branch was fixed there; this one was missed, and
 	// `peerResp.MaxSessions` has been on the wire the whole time

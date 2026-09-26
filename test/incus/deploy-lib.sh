@@ -356,7 +356,7 @@ deploy_node_role_every_rg_ok() {
 #
 # The smoke asserts primacy by reading `show chassis cluster status` — a field
 # the node reports about ITSELF — and separately asserts that the same node
-# carries established sessions, which is a real measurement. The two are never
+# carries session entries, a separate count-only observation. The two are never
 # compared. #6656 showed what that costs: node0 reported primary for every RG
 # with 1 session while node1 carried 33, and the smoke's session assertion
 # caught it only INCIDENTALLY, reporting a session-count shortfall on a run
@@ -365,11 +365,10 @@ deploy_node_role_every_rg_ok() {
 # Arguments: sessions on the node REPORTED primary, sessions on its peer, and
 # the minimum a healthy primary must carry. Echoes one of:
 #
-#   ok        the reported primary carries the traffic
-#   diverged  the reported primary carries almost nothing while the PEER does
-#             — ownership and forwarding disagree
-#   nostream  neither node carries traffic — the iperf streams did not
-#             establish, which is a different failure with a different fix
+#   ok        the reported primary has enough session entries
+#   diverged  the reported primary has almost none while the PEER does
+#   nostream   neither node reports session entries — the flow table is empty,
+#             which is a different failure with a different fix
 #
 # Split out here so deploy-lib-selftest.sh can drive every combination without
 # a cluster; the caller only formats the message.

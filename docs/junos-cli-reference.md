@@ -152,6 +152,10 @@ Session ID: 17179902569, Policy name: allow-everything-out-not-logged/270, HA St
   - `HA State: Active|Backup`
   - `Timeout: <seconds>`
   - `Session State: Valid|Invalid`
+- **xpf validity is not measured.** The local CLI cannot distinguish Junos
+  `Valid`/`Invalid` sessions from the dataplane's TCP FSM state, so detailed
+  rows report `Session State: Unknown (validity not tracked)` rather than
+  mislabeling `Established` or another TCP state as validity.
 - **Two policy indexes are RESERVED and do not name a configured policy**
   (#4626). The index is always printed, so nothing is hidden:
   - `unattributed/0` — no configured policy admitted this session.
@@ -261,9 +265,13 @@ Maximum-sessions: 4194304
   extracted as `renderPeerSessionSummary` so it is testable without a live
   cluster, with a source-level cell asserting `showFlowSession` still delegates
   to it.
-- **Multicast/Failed/Services-offload counters stay `0`.** The AF_XDP helper
-  publishes no multicast/failed-session counters, so those Junos rows are
-  reported as `0` for format parity (documented follow-up, not authoritative).
+- **Session-state distribution is not measured.** All CLI summaries report
+  the Valid/Pending/Invalidated/Other buckets as `unknown`, not
+  fabricated zeroes or counts derived from the TCP FSM. Unavailable
+  multicast/offload/failure/drop-flow totals are likewise `unknown`.
+- **Multicast/Failed/Services-offload counters are unavailable.** The AF_XDP
+  helper publishes no counts for these categories, so xpf reports `unknown`
+  rather than fabricating `0`.
 - **HA completeness (`include_peer`).** `GetSessionSummary` /
   `GetZonePairSummary` and the REST `/api/v1/security/sessions/summary`
   [`/zone-pairs`] endpoints now carry a machine-readable peer-fetch status
@@ -2956,7 +2964,7 @@ set security log stream syslog-server host port 514
    In cluster mode, should replicate the `nodeN:` + 74-dash separator format.
 
 2. **Session format:** xpf currently has a different format. Should match:
-   - `Session ID: <id>, Policy name: <name>/<index>, HA State: Active, Timeout: <N>, Session State: Valid`
+   - `Session ID: <id>, Policy name: <name>/<index>, HA State: Active, Timeout: <N>, Session State: Unknown (validity not tracked)`
    - `  In: <src>/<port> --> <dst>/<port>;<proto>, Conn Tag: 0x0, If: <iface>, Pkts: <N>, Bytes: <N>, `
    - Note the trailing comma+space on In/Out lines.
 

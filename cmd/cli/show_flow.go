@@ -295,7 +295,7 @@ func printSessionEntries(resp *pb.GetSessionsResponse, brief bool) {
 		} else {
 			haStr = "Backup"
 		}
-		fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Valid\n",
+		fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 			sid, polDisplay, se.PolicyId, haStr, se.TimeoutSeconds)
 
 		inIf := se.IngressInterface
@@ -374,15 +374,15 @@ func printNodeSessionSummary(nodeID int, resp *pb.GetSessionSummaryResponse) {
 func printSessionSummaryBlock(resp *pb.GetSessionSummaryResponse) {
 	unicast := resp.ForwardOnly
 	fmt.Printf("Unicast-sessions: %d\n", unicast)
-	fmt.Printf("Multicast-sessions: 0\n")
-	fmt.Printf("Services-offload-sessions: 0\n")
-	fmt.Printf("Failed-sessions: 0\n")
-	fmt.Printf("Sessions-in-drop-flow: 0\n")
+	fmt.Printf("Multicast-sessions: unknown\n")
+	fmt.Printf("Services-offload-sessions: unknown\n")
+	fmt.Printf("Failed-sessions: unknown\n")
+	fmt.Printf("Sessions-in-drop-flow: unknown\n")
 	fmt.Printf("Sessions-in-use: %d\n", unicast)
-	fmt.Printf("  Valid sessions: %d\n", unicast)
-	fmt.Printf("  Pending sessions: 0\n")
-	fmt.Printf("  Invalidated sessions: 0\n")
-	fmt.Printf("  Sessions in other states: 0\n")
+	fmt.Printf("  Valid sessions: unknown\n")
+	fmt.Printf("  Pending sessions: unknown\n")
+	fmt.Printf("  Invalidated sessions: unknown\n")
+	fmt.Printf("  Sessions in other states: unknown\n")
 	// #5323: render the dataplane's dynamic max (worker_count x per-worker
 	// capacity) the live helper publishes, not the old hardcoded 10000000. A
 	// dataplane with no userspace status attached reports 0 -> "unknown"

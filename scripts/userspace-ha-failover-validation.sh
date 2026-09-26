@@ -1149,7 +1149,7 @@ validate_clean_session_baseline() {
 
 session_count() {
 	local vm="$1"
-	run_vm "$vm" "cli -c \"show security flow session destination-prefix ${IPERF_TARGET}\" 2>/dev/null | grep -c 'Session State: Valid' || true"
+	run_vm "$vm" "cli -c \"show security flow session destination-prefix ${IPERF_TARGET}\" 2>/dev/null | grep -c '^Session ID:' || true"
 }
 
 validate_target_reachability() {

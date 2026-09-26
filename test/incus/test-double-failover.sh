@@ -52,7 +52,7 @@ IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 IPERF_PORT="${IPERF_PORT:-5211}"
 IPERF_DURATION=300      # seconds — long enough to span two full failover cycles
 IPERF_STREAMS=4
-MIN_SESSIONS=4          # minimum established sessions (control + some data streams)
+MIN_SESSIONS=4          # minimum observed session entries (control + some data streams)
 SYNC_WAIT=5             # seconds to wait for session sync sweep
 REBOOT_WAIT=90          # max seconds to wait for a node to come back
 TAKEOVER_WAIT=60        # max seconds to wait for "Takeover ready: yes"
@@ -139,7 +139,7 @@ for attempt in 1 2 3; do
 	fi
 
 	fw0_sessions=$(incus exec "$FW0" -- cli -c \
-		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 	if [[ "$fw0_sessions" -ge "$IPERF_STREAMS" ]]; then
 		iperf_started=true
 		break
@@ -174,11 +174,11 @@ fi
 
 # Verify sessions exist on fw0
 fw0_sessions=$(incus exec "$FW0" -- cli -c \
-	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 if [[ "$fw0_sessions" -ge "$MIN_SESSIONS" ]]; then
-	pass "fw0 has $fw0_sessions established sessions"
+	pass "fw0 has $fw0_sessions session entries"
 else
-	fail "fw0 has only $fw0_sessions established sessions (expected >= $MIN_SESSIONS)"
+	fail "fw0 has only $fw0_sessions session entries (expected >= $MIN_SESSIONS)"
 fi
 
 # ── Phase 2: Wait for session sync fw0 → fw1 ────────────────────────
@@ -187,7 +187,7 @@ info "Waiting ${SYNC_WAIT}s for session sync to fw1"
 sleep "$SYNC_WAIT"
 
 fw1_sessions=$(incus exec "$FW1" -- cli -c \
-	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 if [[ "$fw1_sessions" -ge "$MIN_SESSIONS" ]]; then
 	pass "fw1 has $fw1_sessions synced sessions"
 else
@@ -295,7 +295,7 @@ info "Verifying session sync from fw1 → fw0"
 sleep "$SYNC_WAIT"
 
 fw0_synced=$(incus exec "$FW0" -- cli -c \
-	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 if [[ "$fw0_synced" -ge "$MIN_SESSIONS" ]]; then
 	pass "fw0 has $fw0_synced synced sessions from fw1"
 else

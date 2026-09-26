@@ -28,6 +28,40 @@ func TestPrintSessionSummaryBlockDynamicMax(t *testing.T) {
 	if strings.Contains(out, "10000000") {
 		t.Fatalf("output still prints the retired hardcoded max:\n%s", out)
 	}
+	for _, state := range []string{
+		"Valid sessions: unknown",
+		"Pending sessions: unknown",
+		"Invalidated sessions: unknown",
+		"Sessions in other states: unknown",
+	} {
+		if !strings.Contains(out, state) {
+			t.Errorf("remote summary must mark unmeasured %q as unknown:\n%s", state, out)
+		}
+	}
+	if strings.Contains(out, "Valid sessions: 5") ||
+		strings.Contains(out, "Pending sessions: 0") ||
+		strings.Contains(out, "Invalidated sessions: 0") {
+		t.Fatalf("remote summary fabricates session-state distribution:\n%s", out)
+	}
+}
+
+func TestPrintSessionEntriesReportsValidityUnknown10835(t *testing.T) {
+	out := captureStdout(t, func() {
+		printSessionEntries(&pb.GetSessionsResponse{Sessions: []*pb.SessionEntry{
+			{SrcAddr: "192.0.2.1", DstAddr: "198.51.100.1", Protocol: "tcp", State: "ESTABLISHED"},
+			{SrcAddr: "192.0.2.2", DstAddr: "198.51.100.2", Protocol: "tcp", State: "SYN_SENT"},
+		}}, false)
+	})
+
+	const unknown = "Session State: Unknown (validity not tracked)"
+	if got := strings.Count(out, unknown); got != 2 {
+		t.Fatalf("remote session rows report validity %d times, want twice:\n%s", got, out)
+	}
+	if strings.Contains(out, "Session State: Valid") ||
+		strings.Contains(out, "Session State: ESTABLISHED") ||
+		strings.Contains(out, "Session State: SYN_SENT") {
+		t.Fatalf("remote CLI must not invent validity or substitute TCP FSM state:\n%s", out)
+	}
 }
 
 // TestPrintSessionSummaryBlockUnknownMax asserts a 0 max (no dataplane status)

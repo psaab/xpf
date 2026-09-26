@@ -1275,7 +1275,7 @@ test_reassert_is_wired_into_both_deploy_paths() {
 #
 # #6656 is what that costs: node0 reported primary for every RG with 1 session
 # while node1 carried 33. The session assertion DID fail, but reported a
-# session-count shortfall, so the run read as "the streams did not establish"
+# session-count shortfall, so the run read as "too few session entries"
 # — attributed to whatever change was under test — when the actual failure was
 # that ownership and forwarding disagreed.
 #
@@ -1302,8 +1302,8 @@ test_ownership_verdict_diverged() {
 }
 
 test_ownership_verdict_nostream() {
-	# Neither node carries traffic: a real establishment failure, and a
-	# DIFFERENT bug with a different fix. Reporting it as a divergence would
+	# Neither node reports session entries: the flow table is empty, a
+	# DIFFERENT failure with a different fix. Reporting it as divergence would
 	# be the same conflation in the other direction.
 	local got; got=$(failover_ownership_verdict 0 0 4)
 	if [[ "$got" == "nostream" ]]; then
@@ -1325,9 +1325,9 @@ test_ownership_verdict_boundary_is_inclusive() {
 }
 
 test_ownership_verdict_peer_below_min_is_not_divergence() {
-	# The peer carrying a FEW synced sessions while the primary carries none is
-	# still an establishment failure — session sync means the peer legitimately
-	# holds sessions, so "peer has some" cannot be the discriminator.
+	# The peer carrying a FEW synced session entries while the primary carries
+	# none is still a session-count shortfall — session sync means the peer
+	# legitimately holds entries, so "peer has some" cannot be the discriminator.
 	local got; got=$(failover_ownership_verdict 0 2 4)
 	if [[ "$got" == "nostream" ]]; then
 		ok "ownership: peer below the minimum -> nostream, not diverged"

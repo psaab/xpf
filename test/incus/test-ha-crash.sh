@@ -319,9 +319,9 @@ fi
 
 # Verify sessions on fw0
 fw0_sessions=$(incus exec "$FW0" -- cli -c \
-	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 if [[ "$fw0_sessions" -ge "$IPERF_STREAMS" ]]; then
-	pass "phase1: fw0 has $fw0_sessions established sessions"
+	pass "phase1: fw0 has $fw0_sessions session entries"
 else
 	fail "phase1: fw0 has only $fw0_sessions sessions (expected >= $IPERF_STREAMS)"
 fi

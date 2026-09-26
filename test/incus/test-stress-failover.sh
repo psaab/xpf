@@ -186,11 +186,11 @@ fi
 
 # Verify sessions exist on fw0
 fw0_sessions=$(incus exec "$FW0" -- cli -c \
-	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 if [[ "$fw0_sessions" -ge "$IPERF_STREAMS" ]]; then
-	pass "fw0 has $fw0_sessions established sessions"
+	pass "fw0 has $fw0_sessions session entries"
 else
-	fail "fw0 has only $fw0_sessions established sessions (expected >= $IPERF_STREAMS)"
+	fail "fw0 has only $fw0_sessions session entries (expected >= $IPERF_STREAMS)"
 fi
 
 # ── Phase 2: Wait for session sync ──────────────────────────────────
@@ -199,7 +199,7 @@ info "Phase 2: Waiting ${SYNC_WAIT}s for session sync to fw1"
 sleep "$SYNC_WAIT"
 
 fw1_sessions=$(incus exec "$FW1" -- cli -c \
-	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
+	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "^Session ID:" || true)
 if [[ "$fw1_sessions" -ge "$IPERF_STREAMS" ]]; then
 	pass "fw1 has $fw1_sessions synced sessions"
 else
