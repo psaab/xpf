@@ -138,38 +138,70 @@ func TestSeed_Idempotent(t *testing.T) {
 	}
 }
 
-// TestSeed_ResumeAfterCopyCrash simulates a crash AFTER the version dir was
-// created but BEFORE current/sbin were repointed. A re-run must NOT recopy
-// (different content would prove a clobber) and must complete current+sbin.
+// TestSeed_ResumeAfterCopyCrash adopts a complete, byte-identical version dir
+// left by a crash after the atomic rename, then completes current and sbin.
 func TestSeed_ResumeAfterCopyCrash(t *testing.T) {
 	cfg := seedEnv(t, "1.0.0")
-	// Pre-create the version dir as if a prior seed crashed post-rename.
 	verDir := filepath.Join(cfg.VersionsDir, "1.0.0")
 	for _, b := range managedBins {
 		mkfile(t, filepath.Join(verDir, b), "bin-"+b+"-1.0.0")
 	}
-	// Tamper one file to a sentinel: if Seed recopies, this is overwritten
-	// back to staged content; we want it PRESERVED (skip-copy on existing).
-	sentinel := filepath.Join(verDir, "xpfd")
-	if err := os.WriteFile(sentinel, []byte("SENTINEL-do-not-clobber"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := Seed(cfg); err != nil {
 		t.Fatalf("Seed (resume): %v", err)
 	}
-	got, _ := os.ReadFile(sentinel)
-	if string(got) != "SENTINEL-do-not-clobber" {
-		t.Errorf("Seed recopied an existing version dir (clobbered sentinel): got %q", got)
-	}
-	// current + sbin must still be completed.
-	cur, err := os.Readlink(filepath.Join(cfg.VersionsDir, currentLink))
-	if err != nil || filepath.Base(cur) != "1.0.0" {
-		t.Errorf("current not completed on resume: %q (%v)", cur, err)
-	}
-	for _, b := range managedBins {
-		if _, err := os.Readlink(filepath.Join(cfg.SbinDir, b)); err != nil {
-			t.Errorf("sbin %s not completed on resume: %v", b, err)
-		}
+	assertSeeded(t, cfg, "1.0.0")
+}
+
+func TestSeed_RefusesForeignOrIncompleteVersionDir(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		damage func(t *testing.T, verDir string)
+	}{
+		{
+			name: "missing lockstep binary",
+			damage: func(t *testing.T, verDir string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(verDir, "xpf-userspace-dp")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "different managed bytes",
+			damage: func(t *testing.T, verDir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(verDir, "cli"), []byte("foreign cli"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := seedEnv(t, "1.0.0")
+			verDir := filepath.Join(cfg.VersionsDir, "1.0.0")
+			for _, b := range managedBins {
+				mkfile(t, filepath.Join(verDir, b), "bin-"+b+"-1.0.0")
+			}
+			tc.damage(t, verDir)
+			if err := Seed(cfg); err == nil {
+				t.Fatal("Seed accepted a foreign or incomplete existing version dir")
+			}
+			if _, err := os.Lstat(filepath.Join(cfg.VersionsDir, currentLink)); !os.IsNotExist(err) {
+				t.Fatalf("Seed changed current despite refusing the directory: err=%v", err)
+			}
+			if _, err := os.Stat(cfg.SbinDir); !os.IsNotExist(err) {
+				t.Fatalf("Seed created sbin links despite refusing the directory: err=%v", err)
+			}
+			for _, b := range managedBins {
+				got, err := os.ReadFile(filepath.Join(verDir, b))
+				if err != nil {
+					continue
+				}
+				if b == "cli" && tc.name == "different managed bytes" && string(got) != "foreign cli" {
+					t.Fatalf("Seed replaced foreign %s bytes: %q", b, got)
+				}
+			}
+		})
 	}
 }
 

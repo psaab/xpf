@@ -61,6 +61,15 @@ case "$1" in
             # launches (degraded: the next upgrade then takes the legacy-
             # migration preinst path), and we do NOT fail the install (a
             # non-zero postinst leaves dpkg half-configured).
+            # Establish a launchable path BEFORE handing control to seed-runtime.
+            # If dpkg kills this shell while the child is copying or repointing
+            # links, #DEBHELPER# may never run and the next boot still needs the
+            # staged binaries to exist at their stable sbin names.
+            mkdir -p "$SBIN"
+            for b in $BINS; do
+                ln -sfnT "$STAGED/$b" "$SBIN/$b"
+            done
+
             if "$STAGED/xpfd" seed-runtime; then
                 :
             else
