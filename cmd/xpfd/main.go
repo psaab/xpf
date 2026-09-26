@@ -260,16 +260,11 @@ func main() {
 		fm := frr.New()
 		fm.DisableDegradedRetry()
 		clearErr := fm.Clear()
-		if clearErr != nil {
-			fmt.Fprintf(os.Stderr, "cleanup: FRR managed-section clear: %v\n"+
-				"  frr.conf was rewritten without the managed section, but the running\n"+
-				"  FRR config may retain it until the next xpfd start reapplies FRR.\n", clearErr)
-		}
 		fm.Stop()
 		// #10907: do not claim FRR managed routes were removed if Clear
 		// failed. Keep the #1880 one-shot exit behavior; the next daemon
 		// start reconciles any FRR residue.
-		fmt.Println(cleanupSummary(clearErr))
+		reportCleanupFRRResult(os.Stdout, os.Stderr, clearErr)
 		return
 
 	case cmdUpgrade:
@@ -605,11 +600,15 @@ func parseCleanupArgs(args []string) error {
 	return nil
 }
 
-// cleanupSummary reports FRR's outcome without changing cleanup's one-shot
-// exit contract.
-func cleanupSummary(clearErr error) string {
+// reportCleanupFRRResult reports whether cleanup removed the FRR managed
+// routes. A failed clear keeps the one-shot command's zero exit contract.
+func reportCleanupFRRResult(stdout, stderr io.Writer, clearErr error) {
 	if clearErr != nil {
-		return "all pinned BPF state removed; FRR managed routes may remain active until the next xpfd start reapplies FRR"
+		fmt.Fprintf(stderr, "cleanup: FRR managed-section clear: %v\n"+
+			"  frr.conf was rewritten without the managed section, but the running\n"+
+			"  FRR config may retain it until the next xpfd start reapplies FRR.\n", clearErr)
+		fmt.Fprintln(stdout, "all pinned BPF state removed; FRR managed routes may remain active until the next xpfd start reapplies FRR")
+		return
 	}
-	return "all pinned BPF state and managed routes removed"
+	fmt.Fprintln(stdout, "all pinned BPF state and managed routes removed")
 }
