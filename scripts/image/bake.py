@@ -38,6 +38,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import re
 import resource
@@ -721,24 +722,41 @@ def record_validation_success(manifest, sums, manifest_inputs, snapshot):
     """Mark provenance validated only after the gate passes, then refresh the
     checksum manifest using the original hash-time snapshot for image bytes.
 
-    Only the sidecar hash changes here. The qcow2 and metadata hashes remain
-    the snapshots of the exact staged bytes consumed by the validation gate.
+    Recheck both gate-window inputs before changing provenance: the current
+    sidecar bytes must still match their pre-gate snapshot, and the live sums
+    must still describe that snapshot. Only then is the sidecar's validated
+    field flipped. The qcow2 and metadata hashes remain the snapshots of the
+    exact staged bytes consumed by the validation gate.
     """
     name = os.path.basename(manifest)
     if name not in snapshot:
         die(f"cannot record validation success in {manifest}: no hash-time "
             "snapshot exists")
-    with open(manifest) as f:
-        lines = f.readlines()
+    try:
+        with open(manifest, "rb") as f:
+            original = f.read()
+        pre_gate_sums = sign.parse_manifest(sums)
+    except (OSError, sign.SignError) as e:
+        die(f"cannot verify hash-time bake snapshot before recording "
+            f"validation success: {e}")
+    if hashlib.sha256(original).hexdigest() != snapshot[name]:
+        die(f"provenance sidecar {manifest} drifted during validation — "
+            "refusing to record validation success (#9921)")
+    if pre_gate_sums != snapshot:
+        die(f"pre-gate checksum manifest {sums} drifted from its hash-time "
+            "snapshot — refusing to record validation success (#9921)")
+
+    lines = original.decode("utf-8").splitlines(keepends=True)
     matches = [i for i, line in enumerate(lines)
                if line.rstrip("\r\n") == "validated: false"]
     if len(matches) != 1:
         die(f"cannot record validation success in {manifest}: expected one "
             "'validated: false' field")
     lines[matches[0]] = "validated: true\n"
-    with open(manifest, "w") as f:
-        f.writelines(lines)
-    snapshot[name] = sign.sha256_file(manifest)
+    validated_bytes = "".join(lines).encode("utf-8")
+    with open(manifest, "wb") as f:
+        f.write(validated_bytes)
+    snapshot[name] = hashlib.sha256(validated_bytes).hexdigest()
     sign.write_manifest(sums, manifest_inputs, recorded_hashes=snapshot)
 
 

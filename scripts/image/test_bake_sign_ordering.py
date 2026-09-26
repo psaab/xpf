@@ -142,17 +142,23 @@ class ValidationGateStepTests(unittest.TestCase):
 
 
 class ValidationProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def _write_fixture(temp):
+        names = bake.sign.bake_set_basenames("test")
+        files = [os.path.join(temp, name) for name in names]
+        for path in files:
+            Path(path).write_text("artifact\n")
+        manifest = files[2]
+        sums = os.path.join(temp, "xpf-test.SHA256SUMS")
+        Path(manifest).write_text("version: test\nvalidated: false\n")
+        snapshot = bake.snapshot_manifest_inputs(files)
+        bake.sign.write_manifest(sums, files, recorded_hashes=snapshot)
+        return files, manifest, sums, snapshot
+
     def test_success_updates_sidecar_and_only_its_snapshot_hash(self):
         with tempfile.TemporaryDirectory() as temp:
-            names = bake.sign.bake_set_basenames("test")
-            files = [os.path.join(temp, name) for name in names]
-            for path in files:
-                Path(path).write_text("artifact\n")
-            manifest, sums = files[2], os.path.join(temp, "xpf-test.SHA256SUMS")
-            Path(manifest).write_text("version: test\nvalidated: false\n")
-            snapshot = bake.snapshot_manifest_inputs(files)
+            files, manifest, sums, snapshot = self._write_fixture(temp)
             before = dict(snapshot)
-            bake.sign.write_manifest(sums, files, recorded_hashes=snapshot)
 
             bake.record_validation_success(manifest, sums, files, snapshot)
 
@@ -163,6 +169,32 @@ class ValidationProvenanceTests(unittest.TestCase):
                 if name != os.path.basename(manifest):
                     self.assertEqual(snapshot[name], digest)
 
+    def test_gate_window_sidecar_drift_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files, manifest, sums, snapshot = self._write_fixture(temp)
+            tampered = Path(manifest).read_text().replace(
+                "version: test", "version: tampered")
+            Path(manifest).write_text(tampered)
+
+            with self.assertRaises(SystemExit) as ctx:
+                bake.record_validation_success(manifest, sums, files, snapshot)
+
+            self.assertIn("drifted during validation", str(ctx.exception))
+            self.assertEqual(Path(manifest).read_text(), tampered)
+            self.assertEqual(bake.sign.parse_manifest(sums), snapshot)
+
+    def test_gate_window_checksum_drift_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files, manifest, sums, snapshot = self._write_fixture(temp)
+            tampered = dict(snapshot)
+            tampered["xpf-test.pkgs"] = "f" * 64
+            bake.sign.write_manifest(sums, files, recorded_hashes=tampered)
+
+            with self.assertRaises(SystemExit) as ctx:
+                bake.record_validation_success(manifest, sums, files, snapshot)
+
+            self.assertIn("checksum manifest", str(ctx.exception))
+            self.assertIn("validated: false\n", Path(manifest).read_text())
 
 
 class MainValidationGateTests(unittest.TestCase):
