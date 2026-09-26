@@ -78,10 +78,34 @@ set services rpm probe WAN test wan-a next-hop 172.16.50.1
 set services rpm probe WAN test wan-a thresholds successive-loss 3
 ```
 
-- **icmp-ping is a real ICMP echo** (id/seq matched, 3 s timeout).
-  Before #1827 it never sent a packet and always passed — upgrading
-  makes dead-path probes start failing, which can trigger existing
-  event-options policies. This is the intended fix.
+### Probe trust boundary (#10872; accepted risk)
+
+RPM `icmp-ping`, `tcp-ping`, and `http-get` are reachability checks, not
+authenticated health protocols. This is an accepted limitation: none of these
+probe types has a shared secret or target-cooperating challenge-response
+protocol. An on-path attacker can observe and forge an ICMP echo using its
+per-exchange token, inject a TCP handshake response, or return an HTTP status
+below 400 (which RPM counts as success). ICMP's unpredictable 128-bit
+per-exchange token rejects static replies and blind guesses, but does not
+authenticate the peer.
+
+Deployment guidance:
+
+- For `http-get`, configure an explicit `https://` target with a certificate
+  trusted by the daemon and a name matching the target. Bare targets default
+  to plaintext `http://`; HTTPS redirects must not downgrade to HTTP.
+- `tcp-ping` proves only that a TCP handshake completed; it does not establish
+  the identity or health of the application behind the port.
+- Protect the probe's local link and network path against active injection.
+  If the threat model includes an on-path attacker, do not use these RPM
+  results alone to drive security-critical failover; use an independent
+  authenticated health signal. Multiple matched tests are not a quorum:
+  `ip-monitoring` treats a failure from any matched probe as failure.
+
+- **icmp-ping is a real ICMP echo** (fresh challenge token plus id/seq/peer
+  matching, 3 s timeout). Before #1827 it never sent a packet and always
+  passed — upgrading makes dead-path probes start failing, which can trigger
+  existing event-options policies. This is the intended fix.
 - `destination-interface` pins the probe socket to the unit's device
   (`SO_BINDTODEVICE`; RETH names resolve to the local physical member).
 - `next-hop` pins the probe's route with **zero transit impact**: the

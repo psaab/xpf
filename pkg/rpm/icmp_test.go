@@ -1,6 +1,7 @@
 package rpm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -212,6 +213,47 @@ func TestProbeICMPIgnoresForeignReplies(t *testing.T) {
 	test := &config.RPMTest{Name: "t", Target: "192.0.2.10"}
 	if _, err := m.probeICMP(context.Background(), test, probeSockOpts{}); err != nil {
 		t.Fatalf("probeICMP should skip foreign replies and match the real one: %v", err)
+	}
+}
+
+func TestProbeICMPChallengeIsFreshAndRejectsLegacyStaticReply(t *testing.T) {
+	target := net.ParseIP("192.0.2.10")
+	staticData := []byte("xpf-rpm-probe")
+	var priorChallenge []byte
+	m, conn := newFakeManager(func(b []byte, _ net.Addr) []fakeReply {
+		request, err := icmp.ParseMessage(icmpProtocolIPv4, b)
+		if err != nil {
+			t.Fatalf("parse sent echo: %v", err)
+		}
+		echo, ok := request.Body.(*icmp.Echo)
+		if !ok {
+			t.Fatalf("sent message is not an echo: %T", request.Body)
+		}
+		if bytes.Equal(echo.Data, staticData) {
+			t.Fatal("ICMP request data is static; want a fresh per-exchange challenge")
+		}
+		if priorChallenge != nil && bytes.Equal(echo.Data, priorChallenge) {
+			t.Fatal("successive ICMP exchanges reused the same challenge")
+		}
+		priorChallenge = append(priorChallenge[:0], echo.Data...)
+		forged := icmp.Message{
+			Type: ipv4.ICMPTypeEchoReply,
+			Code: 0,
+			Body: &icmp.Echo{ID: echo.ID, Seq: echo.Seq, Data: staticData},
+		}
+		wire, err := forged.Marshal(nil)
+		if err != nil {
+			t.Fatalf("marshal forged reply: %v", err)
+		}
+		return []fakeReply{{data: wire, peer: &net.IPAddr{IP: target}}}
+	})
+	conn.failFast = true
+	test := &config.RPMTest{Name: "t", Target: "192.0.2.10"}
+
+	for exchange := range 2 {
+		if _, err := m.probeICMP(context.Background(), test, probeSockOpts{}); err == nil {
+			t.Fatalf("probeICMP exchange %d accepted a reply carrying the legacy static payload", exchange+1)
+		}
 	}
 }
 
