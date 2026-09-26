@@ -73,6 +73,7 @@ func TestCollectDHCPRoutesSuppressesClasslessRoutesInsideConnectedSubnets10762(t
 // a unit-1 member must not move unit 0's connected subnet out of the default
 // table.
 func TestConnectedPrefixRoutingContextUsesLogicalUnitOwnership10762(t *testing.T) {
+	t.Setenv(dhcpClasslessTrustOverrideEnv, "")
 	store := testStoreWithSetConfig(t, []string{
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
 		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.2.1/24",
