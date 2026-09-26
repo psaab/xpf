@@ -197,59 +197,60 @@ override, and its synthesized reverse companion inherits that `None`. This is
 the correct value for self-originated traffic, not the #5153 forward-has-value
 / reverse-hardcoded-`None` inconsistency.
 
-**TCP opening / half-open state (#3152).** A TCP session created by a
-bare SYN (SYN set, ACK clear) starts in the OPENING (half-open) state
-(`SessionEntry.established == false`) and is reaped on the short
-`SessionTimeouts.tcp_opening_ns` window (20 s, the Junos
-`tcp-initial-timeout` default) instead of the full 300 s established
-timeout. It is promoted to ESTABLISHED only on a genuine reverse SYN-ACK
-(**#4109**, tightened from "any ACK-bearing segment"): the server's
-handshake response is a SYN-ACK on the REVERSE half of the flow, so ONLY a
-SYN-ACK (`is_syn_ack`, not merely `has_ack`) on the reverse companion
-(`metadata.is_reverse`) promotes, and it promotes BOTH the reverse entry
-and its forward companion (see the companion propagation below). A
-client-only forward ACK never promotes a half-open session — before #4109
-any ACK did, so a bare SYN followed by a bare ACK pinned a 300 s
-established entry with no peer ever replying, a 2-packet bypass of the
-#3152 half-open reap (a real vSRX with the syn-check default does not mark
-a session ESTABLISHED on a client ACK that precedes the server's SYN-ACK).
+**TCP opening / half-open state (#3152/#10891).** A TCP session created by a
+bare SYN (SYN set, ACK clear) or a SYN-ACK-first asymmetric pickup starts in
+the OPENING state (`SessionEntry.established == false`) and is reaped on the
+short `SessionTimeouts.tcp_opening_ns` window (20 s by default), not the full
+300 s established timeout. For a normal SYN-first flow, only a genuine reverse
+SYN-ACK promotes the two halves to ESTABLISHED (**#4109**; not merely any
+ACK-bearing segment). A SYN-ACK-first pickup remains OPENING until its reverse
+half receives a non-SYN ACK, which promotes both halves. The `syn_ack_first`
+marker distinguishes that completion from a retransmitted SYN-ACK in the
+installing direction. A client-only forward ACK never promotes a SYN-first
+session — before #4109 any ACK did, so a bare SYN followed by a bare ACK pinned
+a 300 s established entry without a server reply, bypassing the #3152 reap.
 
 **The established idle window applies only once the handshake COMPLETES
-(#6752),** which is a strictly later moment than the promotion above.
-Promotion is on the SYN-ACK, so a SYN-ACK the client never ACKs used to put
-BOTH halves on the 300 s window: the reverse half was re-stamped to 300 s
-immediately, and the #4380 companion probe — protocol- and
-handshake-agnostic — then re-stamped the forward half off it at the forward
-half's 20 s deadline. #4109 had explicitly declined to extend the forward
-half's expiry "so a handshake the client never completes still reaps on the
-short opening window"; #4380 landed three days later and falsified that
-without either change being wrong on its own. `SessionEntry.handshake_pending`
-closes the gap: it is set on both halves by the SYN-ACK and cleared by the
-handshake-completing forward segment. The idle-window selection then treats
-`established && !handshake_pending` as the established class, which is what
-closes the ~300 s hold — with it, both halves reap at ~20 s on their own.
-`companion_keeps_alive` additionally refuses to extend a half whose companion
-is still pending; that closes a smaller, separate leak, where a server
-retransmitting its SYN-ACK slides the reverse half's window forward and the
-handshake-agnostic probe re-stamps the forward half off it for as long as the
-retransmissions continue. A completed handshake is unaffected — the forward segment that
-completes it is guaranteed to reach the slow path, because `packet_eligible`
-admits a TCP packet to the flow cache only when `is_ack_only` and
-`should_cache` uses the same predicate, so neither the SYN nor the SYN-ACK
-ever seeds an entry and the final ACK is a cache miss.
-Requiring the SYN bit (not just `has_ack` on the reverse tuple) also closes
-the residual where a server-spoofed bare reverse ACK could promote — in a
-legitimate 3-way handshake (and simultaneous open) the server's only
-pre-established reverse segment IS the SYN-ACK, and xpf is inline so it
-always observes it (control segments bypass the flow cache and reach this
-slow-path promotion site). The promotion is sticky (a later segment never demotes an
-established session back to OPENING) and is applied on all three
-timeout-selection sites (`install` / `upsert_synced`, `lookup`,
-`update_session`). `established` starts true for non-TCP sessions without a
-custom app timeout and TCP sessions not created by a bare SYN. A non-TCP
-session with a custom app timeout starts false and promotes only after a
-genuine reverse packet; HA imports also start gated because reply history is
-not on the wire (#10889).
+(#6752),** which is a strictly later moment than the promotion above. For a
+normal SYN-first handshake, the reverse SYN-ACK promotes but does not complete:
+the client must ACK. A SYN-ACK the client never ACKs used to put BOTH halves
+on the 300 s window: the reverse half was re-stamped to 300 s immediately, and
+the #4380 companion probe — protocol- and handshake-agnostic — then re-stamped
+the forward half off it at the forward half's 20 s deadline. #4109 had
+explicitly declined to extend the forward half's expiry, "so a handshake the
+client never completes still reaps on the short opening window"; #4380 landed
+three days later and falsified that without either change being wrong on its
+own.
+
+`SessionEntry.handshake_pending` closes this gap: it is set on both halves by
+the reverse SYN-ACK and cleared by the handshake-completing forward segment. For
+SYN-ACK-first pickup it is seeded at install and cleared by a non-SYN ACK on
+the reverse half. The `syn_ack_first` marker prevents a retransmitted SYN-ACK
+in the installing direction from clearing that gap. The idle-window selection
+treats `established && !handshake_pending` as the established class, which
+closes the ~300 s hold: both halves reap at ~20 s on their own. The
+`companion_keeps_alive` probe additionally refuses to extend a half whose
+companion is still pending; this closes the smaller retransmission-driven leak
+where a server retransmitting SYN-ACK slides the reverse window forward and
+the probe re-stamps the forward half off it. A completed handshake is
+unaffected — its completing segment reaches the slow path because
+`packet_eligible` and `should_cache` admit TCP packets only when `is_ack_only`,
+so neither SYN nor SYN-ACK seeds the flow cache and the final ACK is a miss.
+
+The normal SYN-first path still requires the SYN bit on the reverse tuple, not
+just `has_ack`, to prevent a server-spoofed bare reverse ACK from bypassing the
+half-open reap. Promotion is sticky and is applied on the timeout-selection
+sites (`install` / `upsert_synced`, `lookup`, `update_session`). For TCP,
+`established` starts false for a bare SYN or SYN-ACK-first packet and true for
+other midstream pickups. A non-TCP session with a custom app timeout starts
+false and promotes only after a genuine reverse packet; without a custom app
+timeout it starts true. TCP peer imports start established; non-TCP app-timeout
+imports remain gated because reply history is not on the wire (#10889).
+
+On a new-flow miss, the SYN flood gate also counts a SYN-ACK-first packet
+before install. Because it cannot be answered with a valid SYN-cookie
+challenge, over-threshold SYN-ACKs drop; packets matching existing sessions
+bypass this miss-only meter.
 
 Without this, a bare SYN landed on the full established timeout, so a
 low-rate bare-SYN flood (SYN with no follow-up ACK) could pin half-open

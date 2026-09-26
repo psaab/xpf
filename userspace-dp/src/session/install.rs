@@ -172,11 +172,15 @@ impl SessionTable {
         // session's SESSION_CREATE and SESSION_CLOSE RT_FLOW records share one
         // correlatable id, and a reused 5-tuple gets a distinct id.
         let session_id = self.alloc_session_id();
-        // #3152/#10889: TCP bare SYNs and app-managed datagrams both begin in
-        // their conservative timeout class until their respective promotion
-        // evidence arrives.
+        // #3152/#10889/#10891: TCP bare-SYN and SYN-ACK-first pickups start
+        // OPENING; other TCP midstream pickups stay established. Non-TCP
+        // sessions with a custom app timeout use the global window until reply.
+        let syn_ack_first =
+            matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && !is_closing(tcp_flags);
+        let tcp_opening =
+            matches!(protocol, PROTO_TCP) && (is_initial_syn(tcp_flags) || syn_ack_first);
         let established = if matches!(protocol, PROTO_TCP) {
-            !is_initial_syn(tcp_flags)
+            !tcp_opening
         } else {
             metadata.inactivity_timeout_ns.is_none()
         };
@@ -191,12 +195,14 @@ impl SessionTable {
                 // #2465: stamp the creation instant once at install. Never
                 // re-stamped, so the close delta reports the true session age.
                 created_ns: now_ns,
-                // #3152: bare-SYN TCP sessions start OPENING. #10889:
-                // non-TCP sessions with an application timeout stay on the
-                // global window until a genuine reverse packet promotes them.
+                // #3152/#10889/#10891: TCP bare-SYN and SYN-ACK-first pickups
+                // start OPENING; other midstream TCP pickups stay established.
+                // A non-TCP custom app timeout also starts gated until reply.
                 established,
-                // #6752: a fresh install has seen no SYN-ACK, so nothing is pending.
-                handshake_pending: false,
+                // A SYN-ACK-first pickup has seen the SYN-ACK but still waits
+                // for the reverse ACK that completes its asymmetric handshake.
+                handshake_pending: syn_ack_first,
+                syn_ack_first,
                 // #7212: no static input-filter verdict has been derived for
                 // this ENTRY yet. The forward install's own first packet was
                 // adjudicated by the session-MISS path, but this constructor
@@ -223,16 +229,16 @@ impl SessionTable {
                 expires_after_ns: session_timeout_ns(
                     protocol,
                     tcp_flags,
-                    // #3152/#10889: use the same timeout class as the
+                    // #3152/#10889/#10891: use the same timeout class as the
                     // established state seeded above.
                     established,
                     &self.timeouts,
                     // #3227: per-application idle timeout override (None = global).
                     metadata.inactivity_timeout_ns,
-                    // #3527: the ingress zone's `syn-flood timeout` override of
+                    // #3527: the ingress zone's syn-flood timeout override of
                     // the half-open window (None = global). Only consulted on
-                    // the OPENING branch, so a bare-SYN session in a screened
-                    // zone reaps on the operator's window.
+                    // OPENING branch, so a bare-SYN or SYN-ACK-first session in
+                    // a screened zone reaps on the operator's window.
                     self.opening_override_for(metadata.ingress_zone),
                 ),
                 closing: matches!(protocol, PROTO_TCP) && is_closing(tcp_flags),
@@ -547,6 +553,7 @@ impl SessionTable {
                 // to wait for — pending must stay false or it would be held on the
                 // opening window forever.
                 handshake_pending: false,
+                syn_ack_first: false,
                 // #7212: a peer-synced import carries NO locally-derived
                 // input-filter verdict — the peer adjudicated it against the
                 // peer's own interfaces. `UNVALIDATED` makes the first packet
