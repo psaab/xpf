@@ -24,6 +24,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 _SPEC = importlib.util.spec_from_file_location(
     "xpf_deploy", Path(__file__).with_name("xpf-deploy.py")
@@ -251,6 +253,46 @@ class LibvirtGoldenPathAgreementTests(unittest.TestCase):
         # if the whole feature is removed).
         self.assertTrue(hasattr(xpf_deploy, "libvirt_golden_path"))
         self.assertTrue(hasattr(xpf_deploy, "_install_libvirt_golden"))
+
+
+# ── #10745: reject duplicate node IDs before deploying an HA pair ─────────
+class DuplicateClusterNodeIDTests(unittest.TestCase):
+    def _appliance(self, name, node_id):
+        return {"name": name, "mode": "cluster", "node_id": node_id}
+
+    def test_duplicate_ids_abort_the_whole_pair_before_deploy(self):
+        appliances = {
+            "fw0.yaml": self._appliance("fw0", 0),
+            "fw0-copy.yaml": self._appliance("fw0-copy", 0),
+        }
+        deployed = []
+        with mock.patch.object(xpf_deploy, "load_yaml_appliance",
+                               side_effect=appliances.__getitem__), \
+             mock.patch.object(xpf_deploy, "deploy",
+                               side_effect=lambda ap, args: deployed.append(ap)):
+            with self.assertRaises(SystemExit) as cm:
+                xpf_deploy.cmd_deploy(
+                    SimpleNamespace(yamls=list(appliances)))
+
+        self.assertIn("repeats cluster node-id 0", str(cm.exception))
+        self.assertEqual(deployed, [],
+                         "duplicate pair was detected only after a deploy began")
+
+    def test_pair_with_distinct_node_ids_is_deployed(self):
+        appliances = {
+            "fw0.yaml": self._appliance("fw0", 0),
+            "fw1.yaml": self._appliance("fw1", 1),
+        }
+        deployed = []
+        with mock.patch.object(xpf_deploy, "load_yaml_appliance",
+                               side_effect=appliances.__getitem__), \
+             mock.patch.object(xpf_deploy, "deploy",
+                               side_effect=lambda ap, args: deployed.append(ap)):
+            rc = xpf_deploy.cmd_deploy(
+                SimpleNamespace(yamls=list(appliances)))
+
+        self.assertEqual(rc, 0)
+        self.assertEqual([ap["node_id"] for ap in deployed], [0, 1])
 
 
 if __name__ == "__main__":

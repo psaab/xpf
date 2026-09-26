@@ -1542,6 +1542,31 @@ func (r *heartbeatReceiver) srcIsConfiguredPeer(src *net.UDPAddr) bool {
 	return r.peerAddr.IP.Equal(src.IP)
 }
 
+// noteDuplicateNodeIDFromForeign checks only the fixed heartbeat header and
+// group-section length before surfacing a duplicate node-id from a source
+// rejected by the peer pin. This keeps the cheap-source-filter behavior for
+// arbitrary foreign datagrams while making the #4549 warning reachable when a
+// shared ${node} config assigns the same control-link address to both nodes
+// (#10745). The frame is never admitted.
+func (r *heartbeatReceiver) noteDuplicateNodeIDFromForeign(frame []byte) {
+	if len(frame) < heartbeatHeaderSize ||
+		frame[0] != heartbeatMagic[0] ||
+		frame[1] != heartbeatMagic[1] ||
+		frame[2] != heartbeatMagic[2] ||
+		frame[3] != heartbeatMagic[3] ||
+		frame[4] != heartbeatVersion {
+		return
+	}
+	need := heartbeatHeaderSize + int(frame[8])*heartbeatGroupSize
+	if len(frame) < need {
+		return
+	}
+	if binary.LittleEndian.Uint16(frame[6:8]) == uint16(r.mgr.ClusterID()) &&
+		int(frame[5]) == r.mgr.NodeID() {
+		r.mgr.NoteDuplicateNodeIDHeartbeat()
+	}
+}
+
 // noteForeignSource counts and (rate-limited) reports a datagram dropped by the
 // peer pin. Called only from readLoop, which owns lastForeignWarn.
 func (r *heartbeatReceiver) noteForeignSource(src *net.UDPAddr) {
@@ -1663,6 +1688,16 @@ func (r *heartbeatReceiver) readLoop() {
 		// misconfiguration that was previously silent, and a constraint on
 		// where forged frames can originate if the PSK ever leaks.
 		if !r.srcIsConfiguredPeer(src) {
+			// #10745: peek for a duplicate-node-id peer before dropping. In
+			// the shared ${node} config shape the peer-address and em0 live
+			// inside the node0/node1 groups, so two chassis with the SAME
+			// node-id hold the SAME em0 address AND the same peer-address —
+			// every duplicate heartbeat sources from an address this pin
+			// rejects, and the #4549 F11 same-node-id check below can never
+			// fire. Surfacing the signature here keeps the defence reachable
+			// in exactly the recommended deployment shape. The frame is still
+			// foreign and still dropped; this only warns.
+			r.noteDuplicateNodeIDFromForeign(buf[:n])
 			r.noteForeignSource(src)
 			continue
 		}

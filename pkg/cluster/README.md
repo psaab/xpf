@@ -568,24 +568,37 @@ identical `electRG` code and compute the identical result. There is no
 correct runtime resolution; the only remedy is correcting
 `/etc/xpf/node-id` on one chassis.
 
-Two defenses, both fail-safe rather than manufacturing a false winner:
+Two runtime defenses, both fail-safe rather than manufacturing a false winner,
+protect the receiver and election. The deployer also catches the shared-config
+typo before it can create a pair:
 
-- **Join point (`heartbeatReceiver.recvLoop`, `heartbeat.go`).** On a
+- **Join point (`heartbeatReceiver.readLoop`, `heartbeat.go`).** On a
   unicast point-to-point control link a node never receives its own
   frame, so a same-cluster heartbeat carrying the local node-id is a
   duplicate-node-id peer, not a loopback. The receiver still discards it
   (it cannot be told apart from a stray loopback, and a duplicate-node-id
   cluster is unresolvable), but calls `NoteDuplicateNodeIDHeartbeat` to
   emit a rate-limited (`>=30s`) `slog.Error` so the operator sees the
-  misconfiguration instead of a silent split-brain. Because the frame is
-  discarded, `peerAlive`/`peerNodeID` never reflect the duplicate peer, so
-  in production both nodes run `electSingleNode` and would otherwise both
-  claim PRIMARY — the warning is the operator-facing signal that this is
-  happening.
+  misconfiguration instead of a silent split-brain. In the documented
+  `ha-pair.conf` shape, the selected `em0` address and `peer-address` are
+  inside the same `${node}` group. Two nodes using the same node-id therefore
+  select identical addresses: each sends from the same `em0` address, while
+  the receiver expects its configured peer address. The frame is normally
+  undeliverable and any datagram that is delivered is dropped by the pin before
+  the warning. Before dropping a foreign source, the receiver now checks only
+  the fixed heartbeat header and group-section length for a same-cluster/local-
+  node-id frame and emits the same warning. This check only warns: the source
+  is still dropped, it is not authenticated by this header peek, and it cannot
+  refresh `peerAlive`/`peerNodeID` or drive election. Both nodes would otherwise
+  run `electSingleNode` and claim PRIMARY.
+
+- **Deploy preflight (`scripts/deploy/xpf-deploy.py`).** A `deploy` invocation
+  containing multiple cluster YAMLs rejects repeated node IDs before
+  deploying any of them; an HA pair must use distinct IDs 0 and 1.
 
 - **Election tie-break (`electRG`, `election.go`).** If a same-node-id
   peer ever does reach election (the direct API / tests, or any future
-  path that does not go through `recvLoop`), the dual-active tie, the
+  path that does not go through `readLoop`), the dual-active tie, the
   preempt tie, and the initial-state tie all detect
   `m.nodeID == m.peerNodeID` and **fail closed to SECONDARY** (via
   `warnDuplicateNodeIDLocked`). Before the fix the dual-active and preempt

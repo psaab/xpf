@@ -1517,8 +1517,22 @@ def destroy(ap, args):
 def cmd_deploy(args):
     if not args.yamls:
         die("deploy needs at least one YAML file")
-    for path in args.yamls:
-        deploy(load_yaml_appliance(path), args)
+    appliances = [load_yaml_appliance(path) for path in args.yamls]
+    # A multi-file cluster deploy is one HA pair. Check every node identity
+    # before deploying any appliance, so duplicate node IDs cannot leave a
+    # partially-created pair that can never communicate correctly.
+    cluster_node_ids = {}
+    for path, ap in zip(args.yamls, appliances):
+        if ap["mode"] != "cluster":
+            continue
+        node_id = ap["node_id"]
+        if node_id in cluster_node_ids:
+            die(f"deploy repeats cluster node-id {node_id} in "
+                f"{cluster_node_ids[node_id]} and {path}; an HA pair must use "
+                "distinct node IDs 0 and 1")
+        cluster_node_ids[node_id] = path
+    for ap in appliances:
+        deploy(ap, args)
     return 0
 
 
