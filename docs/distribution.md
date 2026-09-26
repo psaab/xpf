@@ -157,7 +157,18 @@ channel.
   sidecar the signed sums list but the mirror withholds is refused regardless;
   a release whose signed sums list no sidecar at all predates it and gets a
   warning. `image-roll` applies the same rule to the manifest it verifies.
-  `xpf-deploy.py fetch` records a best-effort monotonic version watermark at
+
+  Fetch bases must use HTTPS outside loopback/local-file development fixtures;
+  redirects cannot downgrade to HTTP. Deploy and bake fetches use connection
+  and wall-clock timeouts plus hard byte ceilings. Newer `SHA256SUMS` manifests
+  also carry a signed `# size <basename> <bytes>` comment for each artifact;
+  deploy verifies that manifest before downloading artifacts and uses the
+  authenticated size as the transfer ceiling. Older manifests without size
+  comments remain supported under static per-kind limits. Bake release
+  listings and checksums are capped at 8 MiB, base-image downloads at 16 GiB,
+  deploy qcow2 downloads at 64 GiB, and metadata at 64 MiB.
+
+  `xpf-deploy.py fetch` records a best-effort monotonic watermark at
   `${XDG_STATE_HOME:-~/.local/state}/xpf/image-watermark.json` (per
   `--channel`, default `stable`) and REFUSES a version older than the recorded
   one. `--allow-rollback` permits a deliberate version downgrade; it never

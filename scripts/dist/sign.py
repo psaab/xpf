@@ -38,11 +38,13 @@ import datetime
 import hashlib
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 LATEST_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
 LATEST_FUTURE_SKEW_SECONDS = 5 * 60
@@ -67,6 +69,125 @@ DEFAULT_IMAGE_PUBKEY = default_image_pubkey()
 class SignError(Exception):
     """Signing/verification failure — fatal to the caller's gate."""
 
+
+
+# ── Bounded remote fetch (#10853) ─────────────────────────────────────
+#
+# Every image fetch was an unbounded `curl -fsSL`: no scheme restriction, no
+# redirect-downgrade protection, no timeout, no size cap. A hostile/slow
+# mirror could hang a fetch/bake indefinitely or fill the disk with an
+# oversized qcow2 before signature verification. Integrity remains protected
+# by the signed manifest/pinned base digest; this bounds availability impact.
+FETCH_CONNECT_TIMEOUT_S = 30
+FETCH_MAX_TIME_SMALL_S = 120
+FETCH_MAX_TIME_LARGE_S = 1800
+FETCH_MAX_BYTES_SMALL = 8 * 1024 * 1024
+FETCH_MAX_BYTES_METADATA = 64 * 1024 * 1024
+FETCH_MAX_BYTES_BASE_IMAGE = 16 * 1024 * 1024 * 1024
+FETCH_MAX_BYTES_QCOW2 = 64 * 1024 * 1024 * 1024
+_FETCH_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_FETCH_MAX_URL_LEN = 4096
+
+
+def validate_fetch_url(url, field="fetch URL"):
+    """Validate an operator-controlled fetch base URL (#10853).
+
+    Production URLs must use HTTPS. Local HTTP and file URLs remain available
+    for development mirrors and hermetic tests. Reject userinfo, query,
+    fragment, whitespace/control bytes, malformed hosts and non-local file
+    URLs; artifact names are appended to the base, so query/fragment syntax
+    would otherwise alter the requested resource.
+    """
+    if not isinstance(url, str) or not url:
+        raise SignError(f"{field} must be a non-empty URL (#10853).")
+    if len(url) > _FETCH_MAX_URL_LEN:
+        raise SignError(f"{field} exceeds {_FETCH_MAX_URL_LEN} characters (#10853).")
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in url):
+        raise SignError(f"{field} contains whitespace or a control byte (#10853).")
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:
+        raise SignError(f"{field} is malformed: {e} (#10853).") from e
+    scheme = parts.scheme.lower()
+    if parts.query or parts.fragment:
+        raise SignError(f"{field} must not include a query or fragment (#10853).")
+    if scheme in ("https", "http"):
+        if not parts.netloc or "@" in parts.netloc:
+            raise SignError(f"{field} must have a bare host and no userinfo (#10853).")
+        try:
+            host = parts.hostname
+            parts.port  # validates malformed/out-of-range ports
+        except ValueError as e:
+            raise SignError(f"{field} has an invalid host or port: {e} (#10853).") from e
+        if not host:
+            raise SignError(f"{field} must have a host (#10853).")
+        if scheme == "http" and host.lower() not in _FETCH_LOOPBACK_HOSTS:
+            raise SignError(
+                f"{field} must use HTTPS outside loopback development hosts (#10853).")
+    elif scheme == "file":
+        if parts.netloc not in ("", "localhost") or not parts.path:
+            raise SignError(f"{field} must be a local file URL with a path (#10853).")
+    else:
+        raise SignError(f"{field} must use HTTPS (#10853).")
+    return url
+
+
+def curl_fetch_argv(url, dest=None, *, max_bytes=FETCH_MAX_BYTES_SMALL,
+                    max_time=FETCH_MAX_TIME_SMALL_S):
+    """Build curl argv with redirect, time and byte bounds (#10853)."""
+    scheme = urlsplit(url).scheme.lower()
+    if scheme == "https":
+        protocols = ["--proto", "=https", "--proto-redir", "=https"]
+    elif scheme == "http":
+        protocols = ["--proto", "=http,https", "--proto-redir", "=https"]
+    elif scheme == "file":
+        protocols = ["--proto", "=file", "--proto-redir", "=file"]
+    else:
+        raise SignError(f"unsupported fetch URL scheme {scheme!r} (#10853).")
+    argv = ["curl", "-fsSL"] + protocols + [
+        "--connect-timeout", str(FETCH_CONNECT_TIMEOUT_S),
+        "--max-time", str(int(max_time)),
+        "--max-filesize", str(int(max_bytes))]
+    if dest is not None:
+        argv.extend(["-o", dest])
+    argv.append(url)
+    return argv
+
+
+def fetch_caps_for(basename):
+    """Return the static (byte, time) backstop for a fetch target (#10853)."""
+    if basename.endswith(".qcow2"):
+        return FETCH_MAX_BYTES_QCOW2, FETCH_MAX_TIME_LARGE_S
+    if basename.endswith(".incus-metadata.tar.gz"):
+        return FETCH_MAX_BYTES_METADATA, FETCH_MAX_TIME_LARGE_S
+    if basename.endswith(".img"):
+        return FETCH_MAX_BYTES_BASE_IMAGE, FETCH_MAX_TIME_LARGE_S
+    return FETCH_MAX_BYTES_SMALL, FETCH_MAX_TIME_SMALL_S
+
+
+def fetch_file_limit(max_bytes):
+    """Return a child pre-exec hook enforcing a hard file-size ceiling.
+
+    curl's --max-filesize rejects a known oversized response before transfer,
+    but libcurl documents that it cannot enforce that option when a server
+    omits Content-Length. RLIMIT_FSIZE caps writes to the exclusive temp even
+    for chunked/unknown-length responses; curl then fails and the caller
+    removes the partial file. Respect any stricter inherited process limit.
+    """
+    max_bytes = int(max_bytes)
+    if max_bytes <= 0:
+        raise SignError(f"download byte ceiling must be positive, got {max_bytes}")
+
+    def apply_limit():
+        soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        limit = max_bytes
+        if soft != resource.RLIM_INFINITY:
+            limit = min(limit, soft)
+        if hard != resource.RLIM_INFINITY:
+            limit = min(limit, hard)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+
+    return apply_limit
 
 
 def _key_paths(value):
@@ -388,17 +509,18 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def write_manifest(manifest_path, files, recorded_hashes=None):
-    """Write a sha256sum-format manifest listing `files` by BASENAME only.
+def write_manifest(manifest_path, files, recorded_hashes=None,
+                   recorded_sizes=None, with_sizes=False):
+    """Write the signed sha256sum-format manifest by basename.
 
-    Basename-only (never a path) so the manifest is location-independent and
-    a consumer that fetched the file to any directory can verify it. Refuses
-    duplicate basenames at write time — a duplicate would make the
-    {basename: hash} map ambiguous on the verify side.
-
-    When `recorded_hashes` is supplied by the strict re-sign gate, render
-    those already-checked digests instead of re-reading live artifact bytes.
+    #10853: each artifact may have a following signed `# size <name> <bytes>`
+    comment so a fetcher can cap its transfer BEFORE hash verification. The
+    comment preserves compatibility with ordinary `sha256sum -c` readers.
+    Frozen bake artifacts pass their hash-time snapshots rather than rereading
+    writable live paths; the default remains the legacy manifest format.
     """
+    if recorded_sizes is not None and recorded_hashes is None:
+        raise SignError("recorded_sizes requires recorded_hashes")
     seen = set()
     lines = []
     for path in files:
@@ -414,7 +536,19 @@ def write_manifest(manifest_path, files, recorded_hashes=None):
             except KeyError as e:
                 raise SignError(
                     f"no recorded hash for {base} while writing manifest") from e
+        if recorded_sizes is not None:
+            try:
+                size = recorded_sizes[base]
+            except KeyError as e:
+                raise SignError(
+                    f"no recorded size for {base} while writing manifest") from e
+        elif with_sizes:
+            size = os.path.getsize(path)
+        else:
+            size = None
         lines.append(f"{digest}  {base}\n")
+        if size is not None:
+            lines.append(f"# size {base} {size}\n")
     with open(manifest_path, "w") as f:
         f.writelines(lines)
     return manifest_path
@@ -495,17 +629,31 @@ def sign_manifest(manifest_path, seckey_path, comment=None, sig_path=None):
 
 
 def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None,
-                            recorded_hashes=None):
-    """Write + sign `manifest_path` and its one-or-many signatures atomically."""
+                            recorded_hashes=None, recorded_sizes=None):
+    """Write + sign `manifest_path` and its one-or-many signatures atomically.
+
+    When re-signing a size-bearing manifest, preserve its already-recorded
+    signed sizes alongside the hashes; otherwise a routine key rotation would
+    silently drop #10853's pre-download bounds.
+    """
     manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
     base = os.path.basename(manifest_path)
     tmp_manifest = None
     tmp_sigs = []
+    if (recorded_sizes is None and recorded_hashes is not None
+            and os.path.isfile(manifest_path)):
+        prior = parse_manifest_sizes(manifest_path)
+        if (set(prior) == set(recorded_hashes)
+                and all(size is not None for _digest, size in prior.values())):
+            recorded_sizes = {
+                name: size for name, (_digest, size) in prior.items()
+            }
     try:
         fd, tmp_manifest = tempfile.mkstemp(prefix="." + base + ".",
                                             suffix=".tmp", dir=manifest_dir)
         os.close(fd)
-        write_manifest(tmp_manifest, files, recorded_hashes=recorded_hashes)
+        write_manifest(tmp_manifest, files, recorded_hashes=recorded_hashes,
+                       recorded_sizes=recorded_sizes)
         if os.path.exists(manifest_path):
             shutil.copymode(manifest_path, tmp_manifest)
         tmp_sig = tmp_manifest + ".minisig"
@@ -572,18 +720,36 @@ def verify_signature(manifest_path, sig_path, pubkey_path=None):
         f"minisign signature verification FAILED for "
         f"{os.path.basename(manifest_path)}: {'; '.join(errors)}")
 
-def parse_manifest(manifest_path):
-    """Parse a sha256sum-format manifest into {basename: hexhash}.
-
-    Rejects pathful entries (a basename must not contain '/') and duplicate
-    basenames — both would let a verifier bind the wrong bytes. Call this
-    only AFTER verify_signature() has authenticated the manifest.
-    """
-    result = {}
+def _manifest_entries(manifest_path):
+    """Return {basename: (sha256, signed size or None)} from a manifest."""
+    entries = {}
+    sizes = {}
     with open(manifest_path) as f:
         for lineno, raw in enumerate(f, 1):
             line = raw.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            if line.startswith("# size "):
+                parts = line.split()
+                if len(parts) != 4 or parts[:2] != ["#", "size"]:
+                    raise SignError(
+                        f"{manifest_path}:{lineno}: malformed size field: {raw!r}")
+                _marker, _size, name, value = parts
+                if (not name or "/" in name or "\\" in name or
+                        name in (".", "..")):
+                    raise SignError(
+                        f"{manifest_path}:{lineno}: size field must name a "
+                        f"bare basename, got {name!r}")
+                if not value.isascii() or not value.isdigit() or int(value) <= 0:
+                    raise SignError(
+                        f"{manifest_path}:{lineno}: size must be a positive "
+                        f"decimal byte count, got {value!r}")
+                if name in sizes:
+                    raise SignError(
+                        f"{manifest_path}:{lineno}: duplicate size field for {name}")
+                sizes[name] = int(value)
+                continue
+            if line.startswith("#"):
                 continue
             parts = line.split()
             if len(parts) != 2:
@@ -598,13 +764,29 @@ def parse_manifest(manifest_path):
             if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest.lower()):
                 raise SignError(
                     f"{manifest_path}:{lineno}: not a sha256 hex digest: {digest!r}")
-            if name in result:
+            if name in entries:
                 raise SignError(
                     f"{manifest_path}:{lineno}: duplicate basename in manifest: {name}")
-            result[name] = digest.lower()
-    if not result:
+            entries[name] = (digest.lower(), None)
+    if not entries:
         raise SignError(f"{manifest_path}: manifest has no entries")
-    return result
+    for name, size in sizes.items():
+        if name not in entries:
+            raise SignError(
+                f"{manifest_path}: size field references unlisted artifact {name!r}")
+        entries[name] = (entries[name][0], size)
+    return entries
+
+
+def parse_manifest(manifest_path):
+    """Parse SHA256 values from a sha256sum-format manifest."""
+    return {name: digest for name, (digest, _size)
+            in _manifest_entries(manifest_path).items()}
+
+
+def parse_manifest_sizes(manifest_path):
+    """Parse {basename: (sha256, size|None)} from a checksum manifest."""
+    return _manifest_entries(manifest_path)
 
 
 def _resolve_pubkeys(pubkey_path):
@@ -714,6 +896,24 @@ def verify_manifest_map(manifest_path, sig_path, pubkey_path=None,
         with open(p, "wb") as fh:
             fh.write(data)
         return parse_manifest(p)
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp, ignore_errors=True)
+
+
+def verify_manifest_map_with_sizes(manifest_path, sig_path, pubkey_path=None,
+                                   require_all=False):
+    """Verify and parse the signed hashes and per-artifact sizes (#10853)."""
+    data = verify_and_read(manifest_path, sig_path, pubkey_path,
+                           require_all=require_all)
+    import tempfile as _tf
+    tmp = _tf.mkdtemp(prefix="xpf-manifest-")
+    try:
+        os.chmod(tmp, 0o700)
+        path = os.path.join(tmp, "m")
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return parse_manifest_sizes(path)
     finally:
         import shutil as _sh
         _sh.rmtree(tmp, ignore_errors=True)

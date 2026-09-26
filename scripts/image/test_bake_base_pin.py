@@ -134,6 +134,23 @@ class AuthenticateBaseDigestTests(_EnvGuard):
 
 
 class FetchBaseTests(_EnvGuard):
+    def test_operator_urls_must_be_secure_before_any_fetch(self):
+        for env_name, value in (
+                ("XPF_BASE_URL", "http://mirror.invalid/base"),
+                ("XPF_UBUNTU_RELEASES_URL", "http://mirror.invalid/releases")):
+            with self.subTest(env_name=env_name), tempfile.TemporaryDirectory() as tmp:
+                cache_dir = Path(tmp) / "cache"
+                work_dir = Path(tmp) / "work"
+                cache_dir.mkdir()
+                work_dir.mkdir()
+                with mock.patch.dict(os.environ, {env_name: value}), \
+                        mock.patch.object(
+                            bake, "discover_base_release", return_value="26.04"), \
+                        mock.patch.object(bake, "run") as run:
+                    with self.assertRaises(SystemExit):
+                        bake.fetch_base(str(cache_dir), str(work_dir))
+                run.assert_not_called()
+
     def test_fetch_uses_the_pinned_serial_url(self):
         image = b"verified serial image"
         digest = hashlib.sha256(image).hexdigest()
