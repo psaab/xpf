@@ -84,6 +84,17 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 			return err
 		}
 	}
+	// #10754: legacy persisted or peer-synced configs use this tolerant path.
+	// Keep them bootable, but never let RG0 preempt bypass the cold-boot peer wait.
+	if opts.lenientChassisRG && cfg.Chassis.Cluster != nil {
+		for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
+			if rg != nil && rg.ID == 0 && rg.Preempt {
+				rg.Preempt = false
+				cfg.Warnings = append(cfg.Warnings,
+					"chassis cluster redundancy-group 0 preempt ignored on tolerant path (#10754)")
+			}
+		}
+	}
 
 	// #4573 VRRP VRID wire-width gate. Strict on commit / commit-check
 	// (hard-reject a `vrrp-group <id>` outside the RFC 5798 VRID range 1..255 —
