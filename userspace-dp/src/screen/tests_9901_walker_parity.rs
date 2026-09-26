@@ -96,6 +96,18 @@ fn assert_agreement(shape: &str, v: u8, prefix: &[u8]) {
     if let Ok(info) = &screen {
         match walk.outcome {
             ExtChainOutcome::L4(off, 6) if !walk.non_first_fragment_offset_seen => {
+                if walk.ah_present {
+                    // #10729 X2-F6: deliberate divergence — the walker still
+                    // resolves the inner offset (traversal preserved), but
+                    // the screen suppresses inner-TCP exposure through AH.
+                    assert_eq!(
+                        (info.tcp_seq, info.tcp_ack),
+                        (0, 0),
+                        "#9901 R2 + #10729: {shape} v={v} t={t}: AH-sighted \
+                         TCP must read zeros on the screen side",
+                    );
+                    return;
+                }
                 if off + 20 <= t {
                     let exp_seq =
                         u32::from_be_bytes(prefix[off + 4..off + 8].try_into().unwrap());

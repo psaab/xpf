@@ -2671,6 +2671,17 @@ fn at_limit_chain_still_publishes_the_key_the_shim_probes() {
             "#6923: proto={proto}: the shim must resolve a chain of exactly MAX_EXT_HDRS ({n}) \
              headers to its terminal; if it does not, the control is not at the limit"
         );
+        // #10729 X2-F6: AH chains are flowless by design (AH identity), so
+        // the at-limit control expects None for proto 51 — the shim still
+        // resolves the terminal above, but userspace declines the flow.
+        if proto == 51 {
+            assert_eq!(
+                parse_session_flow_from_bytes(&frame, meta),
+                None,
+                "#10729: proto=51 at-limit chain must be flowless"
+            );
+            continue;
+        }
         let flow = parse_session_flow_from_bytes(&frame, meta).unwrap_or_else(|| {
             panic!(
                 "#6923: proto={proto}: a resolvable {n}-header chain must still produce a session \

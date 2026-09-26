@@ -33,6 +33,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// forwarding/screen paths.
 pub(crate) const MAX_IPV6_EXT_HEADERS: usize = 8;
 
+/// v6 chains declined to flowless for sighting AH (#10729 X2-F6). Surfaced
+/// as `xpf_userspace_ipv6_ah_flowless_total`.
+pub(crate) static IPV6_AH_FLOWLESS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 // #4517: the IPv6 extension-header types every walker in this file treats
 // as a generic length-prefixed header (byte 0 = next header, byte 1 =
 // HdrExtLen in 8-octet units excluding the first 8, advance
@@ -133,6 +137,12 @@ pub(crate) struct ExtChainWalk {
     /// Since #10661 the forwarding non-first predicates fold this too,
     /// matching the shim's every-sighting verdict.
     pub non_first_fragment_offset_seen: bool,
+    /// #10729 X2-F6: set when ANY Authentication Header (protocol 51) was
+    /// sighted along the walk in readable bytes. The walk still traverses
+    /// past AH to the inner terminal (offset resolution), but consumers
+    /// that classify by protection domain must treat an AH-sighted chain
+    /// as AH, not as its inner protocol.
+    pub ah_present: bool,
     /// #10661: the FIRST readably non-ATOMIC Fragment header sighted
     /// along the walk — offset != 0 or M != 0 in readable bytes — with
     /// its header offset, so the overlap tracker keys its range off the
@@ -187,6 +197,7 @@ pub(crate) struct ExtChainWalk {
 pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
     let mut fragment = None;
     let mut non_first_fragment_offset_seen = false;
+    let mut ah_present = false;
     let mut first_non_atomic_fragment = None;
     let mut fragment_truncated = false;
     if buf.len() < l3 + 40 {
@@ -194,6 +205,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
             outcome: ExtChainOutcome::Truncated,
             fragment,
             non_first_fragment_offset_seen,
+            ah_present,
             first_non_atomic_fragment,
             fragment_truncated,
         };
@@ -226,6 +238,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                 outcome: ExtChainOutcome::OverLimit,
                 fragment,
                 non_first_fragment_offset_seen,
+                ah_present,
                 first_non_atomic_fragment,
                 fragment_truncated,
             };
@@ -240,6 +253,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -250,6 +264,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -260,6 +275,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -271,16 +287,20 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
                 };
+                // Readable AH header sighted (#10729 X2-F6).
+                ah_present = true;
                 protocol = opt[0];
                 let Some(next) = offset.checked_add((usize::from(opt[1]) + 2) * 4) else {
                     return ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -291,6 +311,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -310,6 +331,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -320,6 +342,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -330,6 +353,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         outcome: ExtChainOutcome::Truncated,
                         fragment,
                         non_first_fragment_offset_seen,
+                        ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
                     };
@@ -340,6 +364,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     outcome: ExtChainOutcome::NoNextHeader,
                     fragment,
                     non_first_fragment_offset_seen,
+                    ah_present,
                     first_non_atomic_fragment,
                     fragment_truncated,
                 };
@@ -349,6 +374,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     outcome: ExtChainOutcome::L4(offset, protocol),
                     fragment,
                     non_first_fragment_offset_seen,
+                    ah_present,
                     first_non_atomic_fragment,
                     fragment_truncated,
                 };
@@ -359,11 +385,47 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
         outcome: ExtChainOutcome::OverLimit,
         fragment,
         non_first_fragment_offset_seen,
+        ah_present,
         first_non_atomic_fragment,
         fragment_truncated,
     }
 }
 
+/// Whether the v6 chain at `l3` sights an Authentication Header (#10729
+/// X2-F6). Returns false for non-v6 families. Hot-path guarded: a terminal
+/// first Next Header (anything but an extension header) proves no AH without
+/// walking — the walker would return immediately. Only ext-headered chains
+/// pay the walk, and the walk result is authoritative (readable AH sighted).
+#[inline(always)]
+pub(crate) fn ipv6_ah_sighted(buf: &[u8], addr_family: u8, l3: usize) -> bool {
+    if !matches!(addr_family as i32, libc::AF_INET6) {
+        return false;
+    }
+    let Some(&first) = buf.get(l3 + 6) else {
+        return false;
+    };
+    if !matches!(first, 0 | 43 | 44 | 51 | 60 | 135 | 139 | 140 | 253 | 254) {
+        return false;
+    }
+    walk_ipv6_ext_chain(buf, l3).ah_present
+}
+
+/// The protocol identity a FLOWLESS policy evaluation must use (#10729 X2-F6).
+/// A v6 chain sighting AH evaluates as proto 51 (ports 0, `l4_present=false`),
+/// symmetric with v4 where the shim leaves AH terminal. Every other packet
+/// keeps its stamped protocol. Callers MUST use this (not `meta.protocol`)
+/// at each flowless `*_l3_aware` evaluation so v6-AH transit matches `ah`
+/// terms and fails closed on port terms exactly like v4-AH. The sighting
+/// walks from the verified L3 so a lying stamp cannot make AH transparent.
+#[inline(always)]
+pub(in crate::afxdp) fn flowless_effective_protocol(frame: &[u8], meta: UserspaceDpMeta) -> u8 {
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
+    if ipv6_ah_sighted(frame, meta.addr_family, l3) {
+        crate::ip_proto::PROTO_AH
+    } else {
+        meta.protocol
+    }
+}
 /// #10665/#10661: record all status derived from one declared Fragment
 /// header. Shared by the in-loop arm and bound early-return so both paths
 /// agree. `fragment` retains the first declaration; offset status accumulates
@@ -1043,6 +1105,13 @@ pub(in crate::afxdp) fn term_match_extra_from_frame(
     // closed. The is-fragment bit above stays as-is (L3-only).
     let non_first_fragment =
         l3_declared.is_some_and(|packet| is_non_first_fragment(packet, meta.addr_family));
+    // #10729 X2-F6: an AH-sighted chain exposes no usable L4 either — the
+    // stamped/readable inner bytes belong to authenticated payload. Fold it
+    // into the no-L4 predicate so every gate below (icmp/tcp reads, zeroing,
+    // `l4_present`) fails closed on it exactly like a non-first fragment.
+    // The is-fragment bit above stays as-is (L3-only).
+    let non_first_fragment =
+        non_first_fragment || ipv6_ah_sighted(frame, meta.addr_family, l3);
     // #2449 + #5568: ICMP/ICMPv6 type+code occupy the first 2 L4 bytes; they are
     // present ONLY if the DECLARED datagram reaches `l4 + 2`. The pre-#5568 gate
     // used the physical `frame.len()`, so Ethernet padding beyond a short declared
@@ -1771,6 +1840,24 @@ pub(in crate::afxdp) fn parse_session_flow_from_bytes(
     if frame_is_non_first_fragment(frame, meta) {
         return None;
     }
+    // #10729 X2-F6: a v6 chain sighting AH classifies as AH, not as its
+    // inner protocol — symmetric with v4, where the protocol byte is
+    // terminal and AH never mints a ported flow. The shim walks THROUGH
+    // AH and stamps the inner TCP tuple, so without this the packet
+    // installs/hits a cleartext-aliased TCP session, matches port-bearing
+    // policy, and takes L4 NAT/MSS treatment — all of which v4+AH fails
+    // closed. Returning `None` makes it flowless (route-based, session-less,
+    // proto-51 policy identity downstream). The sighting walks from the
+    // VERIFIED L3 (not the stamp) so meta-led and frame-led arbitration
+    // agree even on distrusted stamps; terminal-first chains skip the walk.
+    if ipv6_ah_sighted(
+        frame,
+        meta.addr_family,
+        verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family),
+    ) {
+        IPV6_AH_FLOWLESS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
     let meta_flow = parse_session_flow_from_meta(meta);
     // #3290: the metadata fallback below copies `meta.flow_src_port` verbatim
     // into the SessionKey, but the XDP shim stamps bytes [l4+4..l4+6] as
@@ -2284,6 +2371,21 @@ pub(in crate::afxdp) fn l3_enforcement_flow_from_meta(
             routing_domain: 0,
         },
     })
+}
+
+/// [`l3_enforcement_flow_from_meta`] with the v6-AH protocol identity
+/// applied (#10729 X2-F6). The synthetic flow's protocol drives filter,
+/// policy, and NAT matching for flowless packets; a v6 chain sighting AH
+/// must carry 51 (not the stamped inner protocol) so every consumer fails
+/// closed on port terms and matches `ah` terms exactly like v4+AH.
+/// Non-AH packets are byte-identical to the meta-only form.
+pub(in crate::afxdp) fn l3_enforcement_flow_from_frame(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> Option<SessionFlow> {
+    let mut flow = l3_enforcement_flow_from_meta(meta)?;
+    flow.forward_key.protocol = flowless_effective_protocol(frame, meta);
+    Some(flow)
 }
 
 pub(in crate::afxdp) fn parse_ipv4_session_flow_from_frame(

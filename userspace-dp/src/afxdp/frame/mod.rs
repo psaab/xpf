@@ -84,8 +84,10 @@ pub(crate) use inspect::MAX_IPV6_EXT_HEADERS;
 // `ExtChainFragment` container types stay inspect-local — callers read
 // their fields, never name them.
 pub(crate) use inspect::{
-    ExtChainOutcome, IPV6_GENERIC_EXT_HEADERS, ipv6_ext_header_is_traversable, walk_ipv6_ext_chain,
+    ExtChainOutcome, IPV6_GENERIC_EXT_HEADERS, ipv6_ah_sighted, ipv6_ext_header_is_traversable,
+    walk_ipv6_ext_chain,
 };
+pub(in crate::afxdp) use inspect::IPV6_AH_FLOWLESS_TOTAL;
 pub(super) use inspect::{
     frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset, live_frame_ports,
     live_frame_ports_bytes, live_frame_ports_from_meta_bytes, metadata_tuple_complete,
@@ -97,12 +99,12 @@ pub(super) use inspect::{
 };
 pub(in crate::afxdp) use inspect::{
     authoritative_forward_ports, decode_frame_summary, declared_l3_end, dest_is_directed_broadcast,
-    dest_is_multicast_or_broadcast, forward_tuple_mismatch_reason, icmp_reply_type,
+    dest_is_multicast_or_broadcast, flowless_effective_protocol, forward_tuple_mismatch_reason, icmp_reply_type,
     ipv4_is_any_fragment, ipv4_is_non_first_fragment, ipv6_ext_chain_over_limit,
     ipv6_addr_is_v4_mapped_or_compat, ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment,
     ipv6_is_non_first_fragment, ipv6_is_nonatomically_fragmented, is_any_fragment,
     L3_CTX_NONE_UNSPECIFIED_ADDR, is_non_first_fragment, l3_enforcement_flow_from_meta,
-    l3_session_flow_from_meta,
+    l3_enforcement_flow_from_frame, l3_session_flow_from_meta,
     l2_dst_is_group_or_broadcast, meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
     neighbor_ip_is_learnable, neighbor_mac_is_learnable,
     parse_session_flow, post_nat_expected_ports,
@@ -1155,7 +1157,12 @@ pub(super) fn rewrite_forwarded_frame_in_place(
         // shared-UMEM generic in-place path must apply the same selected
         // policy after NAT/TTL rewrites so its incremental TCP checksum
         // update sees the final wire tuple.
-        let _ = tcp::clamp_tcp_mss_frame(packet, prep.ip_start, selected_tcp_mss);
+        // #10729 X2-F6: never clamp through AH — the inner TCP belongs to
+        // authenticated payload and any rewrite breaks its ICV. v4+AH never
+        // presents TCP here (terminal protocol); v6+AH must not either.
+        if !ipv6_ah_sighted(packet, meta.addr_family, prep.ip_start) {
+            let _ = tcp::clamp_tcp_mss_frame(packet, prep.ip_start, selected_tcp_mss);
+        }
     }
     // Debug: dump first N in-place rewritten frames' Ethernet headers
     #[cfg(feature = "debug-log")]
@@ -1393,6 +1400,16 @@ pub(super) fn apply_nat_ipv6(
     nat: NatDecision,
     non_first_fragment: bool,
 ) -> Option<()> {
+    // #10729 X2-F6: strip L4 port rewrites through AH — the inner tuple
+    // belongs to authenticated payload (any rewrite breaks its ICV), and no
+    // port mapping may be minted on it. Address rewrites below proceed per
+    // the existing flowless-NAT rules. `packet` is the L3 slice (v6 addrs at
+    // +8), so the sighting walks from 0.
+    let nat = if ipv6_ah_sighted(packet, libc::AF_INET6 as u8, 0) {
+        NatDecision { rewrite_src_port: None, rewrite_dst_port: None, ..nat }
+    } else {
+        nat
+    };
     if nat == NatDecision::default() {
         return Some(());
     }

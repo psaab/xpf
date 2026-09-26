@@ -3275,12 +3275,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // aggregate-only class). No per-packet event is emitted:
                         // a non-SYN session-miss flood must not become a log
                         // storm.
+                        // #10729 X2-F6: evaluate the SYN gate on the flowless
+                        // effective protocol — a v6+AH non-SYN must not be
+                        // dropped as a TCP miss (it is flowless proto 51, and
+                        // v4+AH never reaches this gate as TCP).
+                        let syn_protocol =
+                            crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
                         if matches!(
                             decision.resolution.disposition,
                             ForwardingDisposition::ForwardCandidate
                                 | ForwardingDisposition::MissingNeighbor
                         ) && strict_syn_check_drops_new_flow(
-                            meta.protocol,
+                            syn_protocol,
                             meta.tcp_flags,
                             worker_ctx.forwarding.tcp_no_syn_check,
                             worker_ctx.forwarding.tcp_strict_syn_check,
@@ -5186,7 +5192,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // miss cannot diverge on what the filter sees. Screen /
                     // IPsec are NOT repeated here: `stage_screen_check` already
                     // runs earlier in this loop for every packet, hit or miss.
-                    let hit_l3_ctx = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta);
+                    let hit_l3_ctx = crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta);
                     if let Some(l3_flow) = hit_l3_ctx.as_ref() {
                         // #9894 (GPT-2): this evaluation runs on an L3-only
                         // enforcement context whose ports are 0-substituted by
@@ -5337,7 +5343,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // reason in each: the flowless path has no L4 header to
                     // synthesize a reject from, and an ICMP error must never be
                     // answered with an ICMP error.
-                    let l3_ctx = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta);
+                    let l3_ctx = crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta);
 
                     // (1) Interface input filter (pre-routing), mirroring the
                     //     session-miss site above. The frame-derived `extra`
@@ -5774,13 +5780,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #3020: an icmp-type-constrained application term fails
                         // closed for a non-first fragment (no readable L4 → None).
                         let policy_icmp = policy_packet_icmp(packet_frame, meta);
+                        // #10729 X2-F6: v6+AH evaluates as proto 51 (not the
+                        // stamped inner protocol), symmetric with v4+AH.
+                        let policy_proto = crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
                         let policy_result = crate::policy::evaluate_policy_result_l3_aware(
                             &worker_ctx.forwarding.policy,
                             from_zone_id,
                             to_zone_id,
                             l3_flow.src_ip,
                             l3_flow.dst_ip,
-                            meta.protocol,
+                            policy_proto,
                             0,
                             0,
                             policy_icmp,
@@ -6883,7 +6892,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(f) => Some((f, true)),
                                 None => {
                                     synthetic_l3 =
-                                        crate::afxdp::frame::l3_enforcement_flow_from_meta(meta);
+                                        crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta);
                                     synthetic_l3.as_ref().map(|f| (f, false))
                                 }
                             };
@@ -7319,9 +7328,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // observability, then PolicyDenied so the trailing
                                     // #1913 reinject chokepoint drops it fail-closed.
                                     if let Some(l3_flow) =
-                                        crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)
+                                        crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta)
                                     {
                                         let policy_icmp = policy_packet_icmp(packet_frame, meta);
+                                        // #10729 X2-F6: v6+AH evaluates as proto 51 (see the
+                                        // ForwardCandidate flowless arm above).
+                                        let policy_proto = crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
                                         let policy_result =
                                             crate::policy::evaluate_policy_result_l3_aware(
                                                 &worker_ctx.forwarding.policy,
@@ -7329,7 +7341,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 to_zone_id,
                                                 l3_flow.src_ip,
                                                 l3_flow.dst_ip,
-                                                meta.protocol,
+                                                policy_proto,
                                                 0,
                                                 0,
                                                 policy_icmp,

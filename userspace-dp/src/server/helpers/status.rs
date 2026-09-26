@@ -163,6 +163,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // cross-domain probe from a TCP/UDP ident collision.
     state.status.nat64_frag_cross_domain_misses_total =
         state.afxdp.nat64_frag_cross_domain_misses_total();
+    // #10729 X2-F6: v6 chains declined to flowless for sighting AH.
+    state.status.ipv6_ah_flowless_total = state.afxdp.ipv6_ah_flowless_total();
     state.status.nat64_frag_protocol_alias_misses_total =
         state.afxdp.nat64_frag_protocol_alias_misses_total();
     // #9901 (F-010): absolute-lifetime reclamations — the sustained same-key

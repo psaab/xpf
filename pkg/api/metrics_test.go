@@ -983,6 +983,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceIPv6AHFlowlessTotal: prometheus.NewDesc(
+			"xpf_userspace_ipv6_ah_flowless_total",
+			"v6 chains declined to flowless for AH",
+			nil,
+			nil,
+		),
 		userspaceNAT64FragProtocolAliasMisses: prometheus.NewDesc(
 			"xpf_userspace_nat64_frag_protocol_alias_misses_total",
 			"nat64 frag protocol refused-alias misses",
@@ -1532,7 +1538,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		InterfaceSNATPATCollisionsTotal: 17,
 		// #7056: DISTINCT fixture values, so an emit wired to the wrong field
 		// swaps two numbers that differ rather than two that happen to match.
-		NAT64FragCrossDomainMissesTotal:   23,
+		NAT64FragCrossDomainMissesTotal: 23,
+		// #10729 X2-F6: DISTINCT value (unused prime above).
+		IPv6AHFlowlessTotal:               31,
 		NAT64FragProtocolAliasMissesTotal: 29,
 		// #9901: DISTINCT fixture values, so an emit wired to the wrong
 		// field swaps two numbers that differ.
@@ -1657,12 +1665,13 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// +12 for #10695's zone-gate and IPsec-inner parse/ECN/queue/slab/orphan
 	// counters, plus #10720's incomplete-synced-key refusal counter = 88; no
 	// cause may be folded into another series.
+	// +1 for #10729 X2-F6's AH-flowless total = 89 (asserted below).
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 88 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 88 metrics, got %d", len(got))
+	if len(got) != 89 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 89 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1687,6 +1696,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// #7056: assert the VALUES, not merely that two more series appeared — a
 	// census bump alone would pass against emits wired to the wrong field.
 	assertCounterClose(t, got, c.userspaceNAT64FragCrossDomainMisses, nil, 23)
+	assertCounterClose(t, got, c.userspaceIPv6AHFlowlessTotal, nil, 31)
 	assertCounterClose(t, got, c.userspaceNAT64FragProtocolAliasMisses, nil, 29)
 	// #9901: assert the VALUES, not merely the census — a census bump
 	// alone would pass against emits wired to the wrong field.

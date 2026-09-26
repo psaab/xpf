@@ -41,6 +41,13 @@ pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv6(
     if !skip_ttl && l3_payload[7] <= 1 {
         return None; // Hop limit expired
     }
+    // #10729 X2-F6: decline chains sighting AH — the descriptor's
+    // precomputed checksum delta covers port writes the generic path now
+    // strips through AH (ICV break), so the paths cannot agree here. The
+    // generic fallback applies full AH semantics. AH is rare; slow is fine.
+    if crate::afxdp::frame::ipv6_ah_sighted(l3_payload, libc::AF_INET6 as u8, 0) {
+        return None;
+    }
 
     // L4 offset from metadata or by parsing extension headers — the
     // shared `v6_rel_l4_offset` helper (#1838) keeps this precedence

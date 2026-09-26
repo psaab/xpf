@@ -307,6 +307,14 @@ proptest! {
         let rd = make_descriptor(&pkt, nat, tx_vlan);
         let fast = apply_rewrite_descriptor(&area_b, desc, pkt.meta, &rd, None);
 
+        // #10729 X2-F6: the descriptor path declines AH (its precomputed
+        // checksum delta cannot express the stripped port writes); the
+        // generic path handles it. Byte-equality holds only off-AH.
+        if crate::afxdp::frame::ipv6_ah_sighted(frame, pkt.meta.addr_family, pkt.l3) {
+            prop_assert!(fast.is_none(), "descriptor must decline AH chains");
+            prop_assert!(generic.is_some(), "generic must handle AH chains");
+            return Ok(());
+        }
         let generic = generic.expect("generic rewrite must succeed on valid input");
         let fast = fast.expect("descriptor rewrite must succeed on valid input");
         prop_assert_eq!(generic, fast, "InPlaceRewriteResult (offset/len/l2) must agree");
@@ -1449,11 +1457,22 @@ fn ext_kind_nat_rewrite_placement() {
                 apply_nat_ipv6(&mut packet, rel_l4, proto, nat, false).is_some(),
                 "apply_nat_ipv6 succeeds ({ext:?}/{proto})"
             );
-            assert_eq!(
-                u16::from_be_bytes([packet[rel_l4 + 2], packet[rel_l4 + 3]]),
-                0x4444,
-                "dst port at parsed offset ({ext:?}/{proto})"
-            );
+            if matches!(ext, ExtHdr::Ah(_)) {
+                // #10729 X2-F6: port rewrites are stripped through AH (ICV
+                // break); only the address rewrite lands. The original dst
+                // port survives at the parsed offset.
+                assert_eq!(
+                    u16::from_be_bytes([packet[rel_l4 + 2], packet[rel_l4 + 3]]),
+                    u16::from_be_bytes([original[rel_l4 + 2], original[rel_l4 + 3]]),
+                    "dst port must NOT be rewritten through AH ({ext:?}/{proto})"
+                );
+            } else {
+                assert_eq!(
+                    u16::from_be_bytes([packet[rel_l4 + 2], packet[rel_l4 + 3]]),
+                    0x4444,
+                    "dst port at parsed offset ({ext:?}/{proto})"
+                );
+            }
             assert_eq!(
                 &packet[40..rel_l4],
                 &original[40..rel_l4],
