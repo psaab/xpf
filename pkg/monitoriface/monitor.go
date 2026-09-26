@@ -80,6 +80,96 @@ type Snapshot struct {
 	KernelStatsNote       string
 }
 
+type trafficDeltas struct {
+	rxPkts, txPkts, rxBytes, txBytes                     uint64
+	rxPktsReset, txPktsReset, rxBytesReset, txBytesReset bool
+	userspaceDropped                                     bool
+}
+
+type trafficRates struct {
+	rxPps, txPps, rxBytesPerSec, txBytesPerSec           uint64
+	rxPktsReset, txPktsReset, rxBytesReset, txBytesReset bool
+}
+
+func formatCounterValue(value string, reset bool) string {
+	if reset {
+		return "n/a"
+	}
+	return value
+}
+
+func writeCounterRate(w io.Writer, value uint64, unit string, reset bool) {
+	if reset {
+		_, _ = io.WriteString(w, "n/a")
+		return
+	}
+	fmt.Fprintf(w, "%d %s", value, unit)
+}
+
+func writeCounterDelta(w io.Writer, value uint64, reset bool) {
+	if reset {
+		_, _ = io.WriteString(w, "n/a")
+		return
+	}
+	fmt.Fprintf(w, "%d", value)
+}
+
+func writeSummaryCounterDelta(w io.Writer, value uint64, reset bool) {
+	if reset {
+		fmt.Fprintf(w, "%16s", "n/a")
+		return
+	}
+	fmt.Fprintf(w, "%16d", value)
+}
+
+func writeRateDeltaLine(w io.Writer, format string, counter, rate, delta uint64, unit string, rateReset, deltaReset bool) {
+	fmt.Fprintf(w, format, counter)
+	writeCounterRate(w, rate, unit, rateReset)
+	_, _ = io.WriteString(w, ")    [")
+	writeCounterDelta(w, delta, deltaReset)
+	_, _ = io.WriteString(w, "]\n")
+}
+
+func writeDeltaLine(w io.Writer, format string, counter, delta uint64, reset bool) {
+	fmt.Fprintf(w, format, counter)
+	writeCounterDelta(w, delta, reset)
+	_, _ = io.WriteString(w, "]\n")
+}
+
+// deltaU64 marks a decreasing cumulative counter as reset instead of treating
+// it as a measured zero delta.
+func deltaU64(curr, prev uint64) (uint64, bool) {
+	if curr < prev {
+		return 0, true
+	}
+	return curr - prev, false
+}
+
+func deltaU64Rebase(curr uint64, baseline *uint64) (uint64, bool) {
+	delta, reset := deltaU64(curr, *baseline)
+	if reset {
+		*baseline = curr
+	}
+	return delta, reset
+}
+
+// Rebaseline only the kernel counters that actually decreased. A reset in the
+// userspace component must not erase the kernel baseline.
+func rebaselineInterfaceTrafficCounters(curr, baseline *Snapshot) {
+	if curr.RxPkts < baseline.RxPkts {
+		baseline.RxPkts = curr.RxPkts
+	}
+	if curr.TxPkts < baseline.TxPkts {
+		baseline.TxPkts = curr.TxPkts
+	}
+	if curr.RxBytes < baseline.RxBytes {
+		baseline.RxBytes = curr.RxBytes
+	}
+	if curr.TxBytes < baseline.TxBytes {
+		baseline.TxBytes = curr.TxBytes
+	}
+}
+
 type trafficCounters struct {
 	rxBytes uint64
 	txBytes uint64
@@ -200,22 +290,31 @@ func displayTrafficCounters(snap *Snapshot) trafficCounters {
 // genuinely idle interface. #7422 fixed the two sibling groups on the strength
 // of the userspace group already having a note -- and then the RATE path went
 // on dropping that same group silently.
-func snapshotTrafficDeltas(curr, prev *Snapshot) (rxPktsDelta, txPktsDelta, rxBytesDelta, txBytesDelta uint64, userspaceDropped bool) {
+func snapshotTrafficDeltas(curr, prev *Snapshot) trafficDeltas {
+	var deltas trafficDeltas
 	if curr == nil || prev == nil {
-		return 0, 0, 0, 0, false
+		return deltas
 	}
 
-	rxPktsDelta = deltaU64(curr.RxPkts, prev.RxPkts)
-	txPktsDelta = deltaU64(curr.TxPkts, prev.TxPkts)
-	rxBytesDelta = deltaU64(curr.RxBytes, prev.RxBytes)
-	txBytesDelta = deltaU64(curr.TxBytes, prev.TxBytes)
+	deltas.rxPkts, deltas.rxPktsReset = deltaU64(curr.RxPkts, prev.RxPkts)
+	deltas.txPkts, deltas.txPktsReset = deltaU64(curr.TxPkts, prev.TxPkts)
+	deltas.rxBytes, deltas.rxBytesReset = deltaU64(curr.RxBytes, prev.RxBytes)
+	deltas.txBytes, deltas.txBytesReset = deltaU64(curr.TxBytes, prev.TxBytes)
 
 	if hasUserspaceTrafficSource(curr.Userspace) && hasUserspaceTrafficSource(prev.Userspace) {
-		rxPktsDelta += deltaU64(curr.Userspace.RxPackets, prev.Userspace.RxPackets)
-		txPktsDelta += deltaU64(curr.Userspace.TxPackets, prev.Userspace.TxPackets)
-		rxBytesDelta += deltaU64(curr.Userspace.RxBytes, prev.Userspace.RxBytes)
-		txBytesDelta += deltaU64(curr.Userspace.TxBytes, prev.Userspace.TxBytes)
-		return rxPktsDelta, txPktsDelta, rxBytesDelta, txBytesDelta, false
+		userDelta, reset := deltaU64(curr.Userspace.RxPackets, prev.Userspace.RxPackets)
+		deltas.rxPkts += userDelta
+		deltas.rxPktsReset = deltas.rxPktsReset || reset
+		userDelta, reset = deltaU64(curr.Userspace.TxPackets, prev.Userspace.TxPackets)
+		deltas.txPkts += userDelta
+		deltas.txPktsReset = deltas.txPktsReset || reset
+		userDelta, reset = deltaU64(curr.Userspace.RxBytes, prev.Userspace.RxBytes)
+		deltas.rxBytes += userDelta
+		deltas.rxBytesReset = deltas.rxBytesReset || reset
+		userDelta, reset = deltaU64(curr.Userspace.TxBytes, prev.Userspace.TxBytes)
+		deltas.txBytes += userDelta
+		deltas.txBytesReset = deltas.txBytesReset || reset
+		return deltas
 	}
 
 	// Dropped. Report it ONLY when the interface actually has a userspace
@@ -223,8 +322,8 @@ func snapshotTrafficDeltas(curr, prev *Snapshot) (rxPktsDelta, txPktsDelta, rxBy
 	// kernel-only interface would carry a permanent note about a component it
 	// never has, which is the false-positive that makes operators stop reading
 	// notes.
-	return rxPktsDelta, txPktsDelta, rxBytesDelta, txBytesDelta,
-		hasUserspaceTrafficSource(curr.Userspace)
+	deltas.userspaceDropped = hasUserspaceTrafficSource(curr.Userspace)
+	return deltas
 }
 
 func ResolvePhysicalParent(name string) string {
@@ -685,22 +784,26 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 	}
 
 	var rxBps, txBps, rxPps, txPps uint64
+	var windowDeltas trafficDeltas
 	var userspaceRateDropped bool
 	if prev != nil {
+		windowDeltas = snapshotTrafficDeltas(snap, prev)
+		userspaceRateDropped = windowDeltas.userspaceDropped
 		dt := snap.Timestamp.Sub(prev.Timestamp).Seconds()
 		if dt > 0 {
-			rxPktsDelta, txPktsDelta, rxBytesDeltaStep, txBytesDeltaStep, dropped := snapshotTrafficDeltas(snap, prev)
-			userspaceRateDropped = dropped
-			rxBps = uint64(float64(rxBytesDeltaStep) * 8 / dt)
-			txBps = uint64(float64(txBytesDeltaStep) * 8 / dt)
-			rxPps = uint64(float64(rxPktsDelta) / dt)
-			txPps = uint64(float64(txPktsDelta) / dt)
+			rxBps = uint64(float64(windowDeltas.rxBytes) * 8 / dt)
+			txBps = uint64(float64(windowDeltas.txBytes) * 8 / dt)
+			rxPps = uint64(float64(windowDeltas.rxPkts) / dt)
+			txPps = uint64(float64(windowDeltas.txPkts) / dt)
 		}
 	}
 
-	var rxBytesDelta, txBytesDelta, rxPktsDelta, txPktsDelta uint64
+	var baselineDeltas trafficDeltas
 	if baseline != nil {
-		rxPktsDelta, txPktsDelta, rxBytesDelta, txBytesDelta, _ = snapshotTrafficDeltas(snap, baseline)
+		baselineDeltas = snapshotTrafficDeltas(snap, baseline)
+		if snap.DataplaneCountersNote == "" {
+			rebaselineInterfaceTrafficCounters(snap, baseline)
+		}
 	}
 	currCounters := displayTrafficCounters(snap)
 
@@ -722,21 +825,28 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 			"(no userspace counters in the previous sample — helper start, restart, or a "+
 			"failed status read); the totals below DO include it, so bps/pps under-reports\n")
 	}
-	fmt.Fprintf(w, "  Input  bytes:         %20d (%d bps)    [%d]\n", currCounters.rxBytes, rxBps, rxBytesDelta)
-	fmt.Fprintf(w, "  Output bytes:         %20d (%d bps)    [%d]\n", currCounters.txBytes, txBps, txBytesDelta)
-	fmt.Fprintf(w, "  Input  packets:       %20d (%d pps)    [%d]\n", currCounters.rxPkts, rxPps, rxPktsDelta)
-	fmt.Fprintf(w, "  Output packets:       %20d (%d pps)    [%d]\n", currCounters.txPkts, txPps, txPktsDelta)
+	writeRateDeltaLine(w, "  Input  bytes:         %20d (", currCounters.rxBytes, rxBps,
+		baselineDeltas.rxBytes, "bps", windowDeltas.rxBytesReset, baselineDeltas.rxBytesReset)
+	writeRateDeltaLine(w, "  Output bytes:         %20d (", currCounters.txBytes, txBps,
+		baselineDeltas.txBytes, "bps", windowDeltas.txBytesReset, baselineDeltas.txBytesReset)
+	writeRateDeltaLine(w, "  Input  packets:       %20d (", currCounters.rxPkts, rxPps,
+		baselineDeltas.rxPkts, "pps", windowDeltas.rxPktsReset, baselineDeltas.rxPktsReset)
+	writeRateDeltaLine(w, "  Output packets:       %20d (", currCounters.txPkts, txPps,
+		baselineDeltas.txPkts, "pps", windowDeltas.txPktsReset, baselineDeltas.txPktsReset)
 	fmt.Fprintf(w, "\n")
 
-	var rxErrDelta, txErrDelta, rxDropDelta, txDropDelta, rxFrameDelta, txCarrierDelta, colDelta uint64
-	if baseline != nil {
-		rxErrDelta = deltaU64(snap.RxErrors, baseline.RxErrors)
-		txErrDelta = deltaU64(snap.TxErrors, baseline.TxErrors)
-		rxDropDelta = deltaU64(snap.RxDrops, baseline.RxDrops)
-		txDropDelta = deltaU64(snap.TxDrops, baseline.TxDrops)
-		rxFrameDelta = deltaU64(snap.RxFrame, baseline.RxFrame)
-		txCarrierDelta = deltaU64(snap.TxCarrier, baseline.TxCarrier)
-		colDelta = deltaU64(snap.Collisions, baseline.Collisions)
+	var (
+		rxErrDelta, txErrDelta, rxDropDelta, txDropDelta, rxFrameDelta, txCarrierDelta, colDelta uint64
+		rxErrReset, txErrReset, rxDropReset, txDropReset, rxFrameReset, txCarrierReset, colReset bool
+	)
+	if baseline != nil && snap.KernelStatsNote == "" {
+		rxErrDelta, rxErrReset = deltaU64Rebase(snap.RxErrors, &baseline.RxErrors)
+		txErrDelta, txErrReset = deltaU64Rebase(snap.TxErrors, &baseline.TxErrors)
+		rxDropDelta, rxDropReset = deltaU64Rebase(snap.RxDrops, &baseline.RxDrops)
+		txDropDelta, txDropReset = deltaU64Rebase(snap.TxDrops, &baseline.TxDrops)
+		rxFrameDelta, rxFrameReset = deltaU64Rebase(snap.RxFrame, &baseline.RxFrame)
+		txCarrierDelta, txCarrierReset = deltaU64Rebase(snap.TxCarrier, &baseline.TxCarrier)
+		colDelta, colReset = deltaU64Rebase(snap.Collisions, &baseline.Collisions)
 	}
 
 	fmt.Fprintf(w, "Error statistics:                                  Current delta\n")
@@ -747,71 +857,96 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 		fmt.Fprintf(w, "  Note: kernel link statistics unavailable (%s) — the zeros below are NOT a measurement\n",
 			snap.KernelStatsNote)
 	}
-	fmt.Fprintf(w, "  Input  errors:        %20d          [%d]\n", snap.RxErrors, rxErrDelta)
-	fmt.Fprintf(w, "  Output errors:        %20d          [%d]\n", snap.TxErrors, txErrDelta)
-	fmt.Fprintf(w, "  Input  drops:         %20d          [%d]\n", snap.RxDrops, rxDropDelta)
-	fmt.Fprintf(w, "  Output drops:         %20d          [%d]\n", snap.TxDrops, txDropDelta)
-	fmt.Fprintf(w, "  Input  frame errors:  %20d          [%d]\n", snap.RxFrame, rxFrameDelta)
-	fmt.Fprintf(w, "  Output carrier:       %20d          [%d]\n", snap.TxCarrier, txCarrierDelta)
-	fmt.Fprintf(w, "  Collisions:           %20d          [%d]\n", snap.Collisions, colDelta)
+	writeDeltaLine(w, "  Input  errors:        %20d          [", snap.RxErrors, rxErrDelta, rxErrReset)
+	writeDeltaLine(w, "  Output errors:        %20d          [", snap.TxErrors, txErrDelta, txErrReset)
+	writeDeltaLine(w, "  Input  drops:         %20d          [", snap.RxDrops, rxDropDelta, rxDropReset)
+	writeDeltaLine(w, "  Output drops:         %20d          [", snap.TxDrops, txDropDelta, txDropReset)
+	writeDeltaLine(w, "  Input  frame errors:  %20d          [", snap.RxFrame, rxFrameDelta, rxFrameReset)
+	writeDeltaLine(w, "  Output carrier:       %20d          [", snap.TxCarrier, txCarrierDelta, txCarrierReset)
+	writeDeltaLine(w, "  Collisions:           %20d          [", snap.Collisions, colDelta, colReset)
 	fmt.Fprintf(w, "\n")
-
 	if snap.Userspace != nil {
 		var (
-			usRxBps, usTxBps, usRxPps, usTxPps                                     uint64
-			usRxBytesDelta, usTxBytesDelta, usRxPktsDelta, usTxPktsDelta           uint64
-			usDirectDelta, usCopyDelta, usInPlaceDelta                             uint64
-			usDirectNoFrameDelta, usDirectBuildDelta, usDirectDisallowedDelta      uint64
-			usTxCompletionsDelta, usKernelRXDroppedDelta, usKernelRXInvalidDelta   uint64
-			usPendingFillDelta, usSpareFillDelta, usFreeTXDelta                    uint64
-			usPendingPreparedDelta, usPendingLocalDelta                            uint64
-			usOutstandingTXDelta, usInFlightRecycleDelta                           uint64
-			usSessionMissDelta, usNeighborMissDelta, usRouteMissDelta              uint64
-			usPolicyDeniedDelta, usExceptionDelta, usSlowPathDelta                 uint64
-			usSlowPathLocalDelta, usSlowPathMissingNeighborDelta                   uint64
-			usSlowPathNoRouteDelta, usSlowPathNextTableDelta, usSlowPathBuildDelta uint64
+			usRxBps, usTxBps, usRxPps, usTxPps                                           uint64
+			usRxBytesDelta, usTxBytesDelta, usRxPktsDelta, usTxPktsDelta                 uint64
+			usDirectDelta, usCopyDelta, usInPlaceDelta                                   uint64
+			usDirectNoFrameDelta, usDirectBuildDelta, usDirectDisallowedDelta            uint64
+			usTxCompletionsDelta, usKernelRXDroppedDelta, usKernelRXInvalidDelta         uint64
+			usPendingFillDelta, usSpareFillDelta, usFreeTXDelta                          uint64
+			usPendingPreparedDelta, usPendingLocalDelta                                  uint64
+			usOutstandingTXDelta, usInFlightRecycleDelta                                 uint64
+			usSessionMissDelta, usNeighborMissDelta, usRouteMissDelta                    uint64
+			usPolicyDeniedDelta, usExceptionDelta, usSlowPathDelta                       uint64
+			usSlowPathLocalDelta, usSlowPathMissingNeighborDelta                         uint64
+			usSlowPathNoRouteDelta, usSlowPathNextTableDelta, usSlowPathBuildDelta       uint64
+			usRxBytesReset, usTxBytesReset, usRxPktsReset, usTxPktsReset                 bool
+			usDirectReset, usCopyReset, usInPlaceReset                                   bool
+			usDirectNoFrameReset, usDirectBuildReset, usDirectDisallowedReset            bool
+			usTxCompletionsReset, usKernelRXDroppedReset, usKernelRXInvalidReset         bool
+			usPendingFillReset, usSpareFillReset, usFreeTXReset                          bool
+			usPendingPreparedReset, usPendingLocalReset                                  bool
+			usOutstandingTXReset, usInFlightRecycleReset                                 bool
+			usSessionMissReset, usNeighborMissReset, usRouteMissReset                    bool
+			usPolicyDeniedReset, usExceptionReset, usSlowPathReset                       bool
+			usSlowPathLocalReset, usSlowPathMissingNeighborReset                         bool
+			usSlowPathNoRouteReset, usSlowPathNextTableReset, usSlowPathBuildReset       bool
+			usRxBytesRateReset, usTxBytesRateReset, usRxPktsRateReset, usTxPktsRateReset bool
 		)
 		if prev != nil && prev.Userspace != nil {
 			dt := snap.Timestamp.Sub(prev.Timestamp).Seconds()
+			delta, reset := deltaU64(snap.Userspace.RxBytes, prev.Userspace.RxBytes)
+			usRxBytesRateReset = reset
 			if dt > 0 {
-				usRxBps = uint64(float64(deltaU64(snap.Userspace.RxBytes, prev.Userspace.RxBytes)) * 8 / dt)
-				usTxBps = uint64(float64(deltaU64(snap.Userspace.TxBytes, prev.Userspace.TxBytes)) * 8 / dt)
-				usRxPps = uint64(float64(deltaU64(snap.Userspace.RxPackets, prev.Userspace.RxPackets)) / dt)
-				usTxPps = uint64(float64(deltaU64(snap.Userspace.TxPackets, prev.Userspace.TxPackets)) / dt)
+				usRxBps = uint64(float64(delta) * 8 / dt)
+			}
+			delta, reset = deltaU64(snap.Userspace.TxBytes, prev.Userspace.TxBytes)
+			usTxBytesRateReset = reset
+			if dt > 0 {
+				usTxBps = uint64(float64(delta) * 8 / dt)
+			}
+			delta, reset = deltaU64(snap.Userspace.RxPackets, prev.Userspace.RxPackets)
+			usRxPktsRateReset = reset
+			if dt > 0 {
+				usRxPps = uint64(float64(delta) / dt)
+			}
+			delta, reset = deltaU64(snap.Userspace.TxPackets, prev.Userspace.TxPackets)
+			usTxPktsRateReset = reset
+			if dt > 0 {
+				usTxPps = uint64(float64(delta) / dt)
 			}
 		}
-		if baseline != nil && baseline.Userspace != nil {
-			usRxBytesDelta = deltaU64(snap.Userspace.RxBytes, baseline.Userspace.RxBytes)
-			usTxBytesDelta = deltaU64(snap.Userspace.TxBytes, baseline.Userspace.TxBytes)
-			usRxPktsDelta = deltaU64(snap.Userspace.RxPackets, baseline.Userspace.RxPackets)
-			usTxPktsDelta = deltaU64(snap.Userspace.TxPackets, baseline.Userspace.TxPackets)
-			usDirectDelta = deltaU64(snap.Userspace.DirectTXPackets, baseline.Userspace.DirectTXPackets)
-			usCopyDelta = deltaU64(snap.Userspace.CopyTXPackets, baseline.Userspace.CopyTXPackets)
-			usInPlaceDelta = deltaU64(snap.Userspace.InPlaceTXPackets, baseline.Userspace.InPlaceTXPackets)
-			usDirectNoFrameDelta = deltaU64(snap.Userspace.DirectTXNoFrameFallbackPackets, baseline.Userspace.DirectTXNoFrameFallbackPackets)
-			usDirectBuildDelta = deltaU64(snap.Userspace.DirectTXBuildFallbackPackets, baseline.Userspace.DirectTXBuildFallbackPackets)
-			usDirectDisallowedDelta = deltaU64(snap.Userspace.DirectTXDisallowedFallbackPackets, baseline.Userspace.DirectTXDisallowedFallbackPackets)
-			usTxCompletionsDelta = deltaU64(snap.Userspace.TxCompletions, baseline.Userspace.TxCompletions)
-			usKernelRXDroppedDelta = deltaU64(snap.Userspace.KernelRXDropped, baseline.Userspace.KernelRXDropped)
-			usKernelRXInvalidDelta = deltaU64(snap.Userspace.KernelRXInvalidDescs, baseline.Userspace.KernelRXInvalidDescs)
-			usPendingFillDelta = deltaU64(snap.Userspace.DebugPendingFillFrames, baseline.Userspace.DebugPendingFillFrames)
-			usSpareFillDelta = deltaU64(snap.Userspace.DebugSpareFillFrames, baseline.Userspace.DebugSpareFillFrames)
-			usFreeTXDelta = deltaU64(snap.Userspace.DebugFreeTXFrames, baseline.Userspace.DebugFreeTXFrames)
-			usPendingPreparedDelta = deltaU64(snap.Userspace.DebugPendingTXPrepared, baseline.Userspace.DebugPendingTXPrepared)
-			usPendingLocalDelta = deltaU64(snap.Userspace.DebugPendingTXLocal, baseline.Userspace.DebugPendingTXLocal)
-			usOutstandingTXDelta = deltaU64(snap.Userspace.DebugOutstandingTX, baseline.Userspace.DebugOutstandingTX)
-			usInFlightRecycleDelta = deltaU64(snap.Userspace.DebugInFlightRecycles, baseline.Userspace.DebugInFlightRecycles)
-			usSessionMissDelta = deltaU64(snap.Userspace.SessionMisses, baseline.Userspace.SessionMisses)
-			usNeighborMissDelta = deltaU64(snap.Userspace.NeighborMissPackets, baseline.Userspace.NeighborMissPackets)
-			usRouteMissDelta = deltaU64(snap.Userspace.RouteMissPackets, baseline.Userspace.RouteMissPackets)
-			usPolicyDeniedDelta = deltaU64(snap.Userspace.PolicyDeniedPackets, baseline.Userspace.PolicyDeniedPackets)
-			usExceptionDelta = deltaU64(snap.Userspace.ExceptionPackets, baseline.Userspace.ExceptionPackets)
-			usSlowPathDelta = deltaU64(snap.Userspace.SlowPathPackets, baseline.Userspace.SlowPathPackets)
-			usSlowPathLocalDelta = deltaU64(snap.Userspace.SlowPathLocalDeliveryPackets, baseline.Userspace.SlowPathLocalDeliveryPackets)
-			usSlowPathMissingNeighborDelta = deltaU64(snap.Userspace.SlowPathMissingNeighborPackets, baseline.Userspace.SlowPathMissingNeighborPackets)
-			usSlowPathNoRouteDelta = deltaU64(snap.Userspace.SlowPathNoRoutePackets, baseline.Userspace.SlowPathNoRoutePackets)
-			usSlowPathNextTableDelta = deltaU64(snap.Userspace.SlowPathNextTablePackets, baseline.Userspace.SlowPathNextTablePackets)
-			usSlowPathBuildDelta = deltaU64(snap.Userspace.SlowPathForwardBuildPackets, baseline.Userspace.SlowPathForwardBuildPackets)
+		if baseline != nil && baseline.Userspace != nil && snap.Userspace.StatusNote == "" {
+			usRxBytesDelta, usRxBytesReset = deltaU64Rebase(snap.Userspace.RxBytes, &baseline.Userspace.RxBytes)
+			usTxBytesDelta, usTxBytesReset = deltaU64Rebase(snap.Userspace.TxBytes, &baseline.Userspace.TxBytes)
+			usRxPktsDelta, usRxPktsReset = deltaU64Rebase(snap.Userspace.RxPackets, &baseline.Userspace.RxPackets)
+			usTxPktsDelta, usTxPktsReset = deltaU64Rebase(snap.Userspace.TxPackets, &baseline.Userspace.TxPackets)
+			usDirectDelta, usDirectReset = deltaU64Rebase(snap.Userspace.DirectTXPackets, &baseline.Userspace.DirectTXPackets)
+			usCopyDelta, usCopyReset = deltaU64Rebase(snap.Userspace.CopyTXPackets, &baseline.Userspace.CopyTXPackets)
+			usInPlaceDelta, usInPlaceReset = deltaU64Rebase(snap.Userspace.InPlaceTXPackets, &baseline.Userspace.InPlaceTXPackets)
+			usDirectNoFrameDelta, usDirectNoFrameReset = deltaU64Rebase(snap.Userspace.DirectTXNoFrameFallbackPackets, &baseline.Userspace.DirectTXNoFrameFallbackPackets)
+			usDirectBuildDelta, usDirectBuildReset = deltaU64Rebase(snap.Userspace.DirectTXBuildFallbackPackets, &baseline.Userspace.DirectTXBuildFallbackPackets)
+			usDirectDisallowedDelta, usDirectDisallowedReset = deltaU64Rebase(snap.Userspace.DirectTXDisallowedFallbackPackets, &baseline.Userspace.DirectTXDisallowedFallbackPackets)
+			usTxCompletionsDelta, usTxCompletionsReset = deltaU64Rebase(snap.Userspace.TxCompletions, &baseline.Userspace.TxCompletions)
+			usKernelRXDroppedDelta, usKernelRXDroppedReset = deltaU64Rebase(snap.Userspace.KernelRXDropped, &baseline.Userspace.KernelRXDropped)
+			usKernelRXInvalidDelta, usKernelRXInvalidReset = deltaU64Rebase(snap.Userspace.KernelRXInvalidDescs, &baseline.Userspace.KernelRXInvalidDescs)
+			usPendingFillDelta, usPendingFillReset = deltaU64Rebase(snap.Userspace.DebugPendingFillFrames, &baseline.Userspace.DebugPendingFillFrames)
+			usSpareFillDelta, usSpareFillReset = deltaU64Rebase(snap.Userspace.DebugSpareFillFrames, &baseline.Userspace.DebugSpareFillFrames)
+			usFreeTXDelta, usFreeTXReset = deltaU64Rebase(snap.Userspace.DebugFreeTXFrames, &baseline.Userspace.DebugFreeTXFrames)
+			usPendingPreparedDelta, usPendingPreparedReset = deltaU64Rebase(snap.Userspace.DebugPendingTXPrepared, &baseline.Userspace.DebugPendingTXPrepared)
+			usPendingLocalDelta, usPendingLocalReset = deltaU64Rebase(snap.Userspace.DebugPendingTXLocal, &baseline.Userspace.DebugPendingTXLocal)
+			usOutstandingTXDelta, usOutstandingTXReset = deltaU64Rebase(snap.Userspace.DebugOutstandingTX, &baseline.Userspace.DebugOutstandingTX)
+			usInFlightRecycleDelta, usInFlightRecycleReset = deltaU64Rebase(snap.Userspace.DebugInFlightRecycles, &baseline.Userspace.DebugInFlightRecycles)
+			usSessionMissDelta, usSessionMissReset = deltaU64Rebase(snap.Userspace.SessionMisses, &baseline.Userspace.SessionMisses)
+			usNeighborMissDelta, usNeighborMissReset = deltaU64Rebase(snap.Userspace.NeighborMissPackets, &baseline.Userspace.NeighborMissPackets)
+			usRouteMissDelta, usRouteMissReset = deltaU64Rebase(snap.Userspace.RouteMissPackets, &baseline.Userspace.RouteMissPackets)
+			usPolicyDeniedDelta, usPolicyDeniedReset = deltaU64Rebase(snap.Userspace.PolicyDeniedPackets, &baseline.Userspace.PolicyDeniedPackets)
+			usExceptionDelta, usExceptionReset = deltaU64Rebase(snap.Userspace.ExceptionPackets, &baseline.Userspace.ExceptionPackets)
+			usSlowPathDelta, usSlowPathReset = deltaU64Rebase(snap.Userspace.SlowPathPackets, &baseline.Userspace.SlowPathPackets)
+			usSlowPathLocalDelta, usSlowPathLocalReset = deltaU64Rebase(snap.Userspace.SlowPathLocalDeliveryPackets, &baseline.Userspace.SlowPathLocalDeliveryPackets)
+			usSlowPathMissingNeighborDelta, usSlowPathMissingNeighborReset = deltaU64Rebase(snap.Userspace.SlowPathMissingNeighborPackets, &baseline.Userspace.SlowPathMissingNeighborPackets)
+			usSlowPathNoRouteDelta, usSlowPathNoRouteReset = deltaU64Rebase(snap.Userspace.SlowPathNoRoutePackets, &baseline.Userspace.SlowPathNoRoutePackets)
+			usSlowPathNextTableDelta, usSlowPathNextTableReset = deltaU64Rebase(snap.Userspace.SlowPathNextTablePackets, &baseline.Userspace.SlowPathNextTablePackets)
+			usSlowPathBuildDelta, usSlowPathBuildReset = deltaU64Rebase(snap.Userspace.SlowPathForwardBuildPackets, &baseline.Userspace.SlowPathForwardBuildPackets)
 		}
 
 		fmt.Fprintf(w, "Userspace dataplane:\n")
@@ -822,44 +957,48 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 			snap.Userspace.HelperEnabled, snap.Userspace.ForwardingArmed, snap.Userspace.LastSnapshotGen, snap.Userspace.NeighborGeneration)
 		fmt.Fprintf(w, "  Binding state:        bindings=%d ready=%d bound=%d xsk=%d zc=%d\n",
 			snap.Userspace.Bindings, snap.Userspace.ReadyBindings, snap.Userspace.BoundBindings, snap.Userspace.XSKRegistered, snap.Userspace.ZeroCopyBindings)
-		fmt.Fprintf(w, "  RX bytes:             %20d (%d bps)    [%d]\n", snap.Userspace.RxBytes, usRxBps, usRxBytesDelta)
-		fmt.Fprintf(w, "  TX bytes:             %20d (%d bps)    [%d]\n", snap.Userspace.TxBytes, usTxBps, usTxBytesDelta)
-		fmt.Fprintf(w, "  RX packets:           %20d (%d pps)    [%d]\n", snap.Userspace.RxPackets, usRxPps, usRxPktsDelta)
-		fmt.Fprintf(w, "  TX packets:           %20d (%d pps)    [%d]\n", snap.Userspace.TxPackets, usTxPps, usTxPktsDelta)
-		fmt.Fprintf(w, "  Direct TX packets:    %20d          [%d]\n", snap.Userspace.DirectTXPackets, usDirectDelta)
-		fmt.Fprintf(w, "  Copy TX packets:      %20d          [%d]\n", snap.Userspace.CopyTXPackets, usCopyDelta)
-		fmt.Fprintf(w, "  In-place TX packets:  %20d          [%d]\n", snap.Userspace.InPlaceTXPackets, usInPlaceDelta)
-		fmt.Fprintf(w, "  TX completions:       %20d          [%d]\n", snap.Userspace.TxCompletions, usTxCompletionsDelta)
-		fmt.Fprintf(w, "  Kernel RX dropped:    %20d          [%d]\n", snap.Userspace.KernelRXDropped, usKernelRXDroppedDelta)
-		fmt.Fprintf(w, "  Kernel RX invalid:    %20d          [%d]\n", snap.Userspace.KernelRXInvalidDescs, usKernelRXInvalidDelta)
-		fmt.Fprintf(w, "  Direct TX no-frame:   %20d          [%d]\n", snap.Userspace.DirectTXNoFrameFallbackPackets, usDirectNoFrameDelta)
-		fmt.Fprintf(w, "  Direct TX build-none: %20d          [%d]\n", snap.Userspace.DirectTXBuildFallbackPackets, usDirectBuildDelta)
-		fmt.Fprintf(w, "  Direct TX disallowed: %20d          [%d]\n", snap.Userspace.DirectTXDisallowedFallbackPackets, usDirectDisallowedDelta)
-		fmt.Fprintf(w, "  Pending fill frames:  %20d          [%d]\n", snap.Userspace.DebugPendingFillFrames, usPendingFillDelta)
-		fmt.Fprintf(w, "  Spare fill frames:    %20d          [%d]\n", snap.Userspace.DebugSpareFillFrames, usSpareFillDelta)
-		fmt.Fprintf(w, "  Free TX frames:       %20d          [%d]\n", snap.Userspace.DebugFreeTXFrames, usFreeTXDelta)
-		fmt.Fprintf(w, "  Pending TX prepared:  %20d          [%d]\n", snap.Userspace.DebugPendingTXPrepared, usPendingPreparedDelta)
-		fmt.Fprintf(w, "  Pending TX local:     %20d          [%d]\n", snap.Userspace.DebugPendingTXLocal, usPendingLocalDelta)
-		fmt.Fprintf(w, "  Outstanding TX:       %20d          [%d]\n", snap.Userspace.DebugOutstandingTX, usOutstandingTXDelta)
-		fmt.Fprintf(w, "  In-flight recycles:   %20d          [%d]\n", snap.Userspace.DebugInFlightRecycles, usInFlightRecycleDelta)
-		fmt.Fprintf(w, "  Session misses:       %20d          [%d]\n", snap.Userspace.SessionMisses, usSessionMissDelta)
-		fmt.Fprintf(w, "  Neighbor misses:      %20d          [%d]\n", snap.Userspace.NeighborMissPackets, usNeighborMissDelta)
-		fmt.Fprintf(w, "  Route misses:         %20d          [%d]\n", snap.Userspace.RouteMissPackets, usRouteMissDelta)
-		fmt.Fprintf(w, "  Policy denied:        %20d          [%d]\n", snap.Userspace.PolicyDeniedPackets, usPolicyDeniedDelta)
-		fmt.Fprintf(w, "  Exception packets:    %20d          [%d]\n", snap.Userspace.ExceptionPackets, usExceptionDelta)
-		fmt.Fprintf(w, "  Slow path packets:    %20d          [%d]  local=%d[%d] neigh=%d[%d] route=%d[%d] next=%d[%d] build=%d[%d]\n",
-			snap.Userspace.SlowPathPackets,
-			usSlowPathDelta,
-			snap.Userspace.SlowPathLocalDeliveryPackets,
-			usSlowPathLocalDelta,
-			snap.Userspace.SlowPathMissingNeighborPackets,
-			usSlowPathMissingNeighborDelta,
-			snap.Userspace.SlowPathNoRoutePackets,
-			usSlowPathNoRouteDelta,
-			snap.Userspace.SlowPathNextTablePackets,
-			usSlowPathNextTableDelta,
-			snap.Userspace.SlowPathForwardBuildPackets,
-			usSlowPathBuildDelta)
+		writeRateDeltaLine(w, "  RX bytes:             %20d (", snap.Userspace.RxBytes, usRxBps,
+			usRxBytesDelta, "bps", usRxBytesRateReset, usRxBytesReset)
+		writeRateDeltaLine(w, "  TX bytes:             %20d (", snap.Userspace.TxBytes, usTxBps,
+			usTxBytesDelta, "bps", usTxBytesRateReset, usTxBytesReset)
+		writeRateDeltaLine(w, "  RX packets:           %20d (", snap.Userspace.RxPackets, usRxPps,
+			usRxPktsDelta, "pps", usRxPktsRateReset, usRxPktsReset)
+		writeRateDeltaLine(w, "  TX packets:           %20d (", snap.Userspace.TxPackets, usTxPps,
+			usTxPktsDelta, "pps", usTxPktsRateReset, usTxPktsReset)
+		writeDeltaLine(w, "  Direct TX packets:    %20d          [", snap.Userspace.DirectTXPackets, usDirectDelta, usDirectReset)
+		writeDeltaLine(w, "  Copy TX packets:      %20d          [", snap.Userspace.CopyTXPackets, usCopyDelta, usCopyReset)
+		writeDeltaLine(w, "  In-place TX packets:  %20d          [", snap.Userspace.InPlaceTXPackets, usInPlaceDelta, usInPlaceReset)
+		writeDeltaLine(w, "  TX completions:       %20d          [", snap.Userspace.TxCompletions, usTxCompletionsDelta, usTxCompletionsReset)
+		writeDeltaLine(w, "  Kernel RX dropped:    %20d          [", snap.Userspace.KernelRXDropped, usKernelRXDroppedDelta, usKernelRXDroppedReset)
+		writeDeltaLine(w, "  Kernel RX invalid:    %20d          [", snap.Userspace.KernelRXInvalidDescs, usKernelRXInvalidDelta, usKernelRXInvalidReset)
+		writeDeltaLine(w, "  Direct TX no-frame:   %20d          [", snap.Userspace.DirectTXNoFrameFallbackPackets, usDirectNoFrameDelta, usDirectNoFrameReset)
+		writeDeltaLine(w, "  Direct TX build-none: %20d          [", snap.Userspace.DirectTXBuildFallbackPackets, usDirectBuildDelta, usDirectBuildReset)
+		writeDeltaLine(w, "  Direct TX disallowed: %20d          [", snap.Userspace.DirectTXDisallowedFallbackPackets, usDirectDisallowedDelta, usDirectDisallowedReset)
+		writeDeltaLine(w, "  Pending fill frames:  %20d          [", snap.Userspace.DebugPendingFillFrames, usPendingFillDelta, usPendingFillReset)
+		writeDeltaLine(w, "  Spare fill frames:    %20d          [", snap.Userspace.DebugSpareFillFrames, usSpareFillDelta, usSpareFillReset)
+		writeDeltaLine(w, "  Free TX frames:       %20d          [", snap.Userspace.DebugFreeTXFrames, usFreeTXDelta, usFreeTXReset)
+		writeDeltaLine(w, "  Pending TX prepared:  %20d          [", snap.Userspace.DebugPendingTXPrepared, usPendingPreparedDelta, usPendingPreparedReset)
+		writeDeltaLine(w, "  Pending TX local:     %20d          [", snap.Userspace.DebugPendingTXLocal, usPendingLocalDelta, usPendingLocalReset)
+		writeDeltaLine(w, "  Outstanding TX:       %20d          [", snap.Userspace.DebugOutstandingTX, usOutstandingTXDelta, usOutstandingTXReset)
+		writeDeltaLine(w, "  In-flight recycles:   %20d          [", snap.Userspace.DebugInFlightRecycles, usInFlightRecycleDelta, usInFlightRecycleReset)
+		writeDeltaLine(w, "  Session misses:       %20d          [", snap.Userspace.SessionMisses, usSessionMissDelta, usSessionMissReset)
+		writeDeltaLine(w, "  Neighbor misses:      %20d          [", snap.Userspace.NeighborMissPackets, usNeighborMissDelta, usNeighborMissReset)
+		writeDeltaLine(w, "  Route misses:         %20d          [", snap.Userspace.RouteMissPackets, usRouteMissDelta, usRouteMissReset)
+		writeDeltaLine(w, "  Policy denied:        %20d          [", snap.Userspace.PolicyDeniedPackets, usPolicyDeniedDelta, usPolicyDeniedReset)
+		writeDeltaLine(w, "  Exception packets:    %20d          [", snap.Userspace.ExceptionPackets, usExceptionDelta, usExceptionReset)
+		fmt.Fprintf(w, "  Slow path packets:    %20d          [", snap.Userspace.SlowPathPackets)
+		writeCounterDelta(w, usSlowPathDelta, usSlowPathReset)
+		fmt.Fprintf(w, "]  local=%d[", snap.Userspace.SlowPathLocalDeliveryPackets)
+		writeCounterDelta(w, usSlowPathLocalDelta, usSlowPathLocalReset)
+		fmt.Fprintf(w, "] neigh=%d[", snap.Userspace.SlowPathMissingNeighborPackets)
+		writeCounterDelta(w, usSlowPathMissingNeighborDelta, usSlowPathMissingNeighborReset)
+		fmt.Fprintf(w, "] route=%d[", snap.Userspace.SlowPathNoRoutePackets)
+		writeCounterDelta(w, usSlowPathNoRouteDelta, usSlowPathNoRouteReset)
+		fmt.Fprintf(w, "] next=%d[", snap.Userspace.SlowPathNextTablePackets)
+		writeCounterDelta(w, usSlowPathNextTableDelta, usSlowPathNextTableReset)
+		fmt.Fprintf(w, "] build=%d[", snap.Userspace.SlowPathForwardBuildPackets)
+		writeCounterDelta(w, usSlowPathBuildDelta, usSlowPathBuildReset)
+		fmt.Fprintf(w, "]\n")
 		if len(snap.Userspace.LastErrors) > 0 {
 			fmt.Fprintf(w, "  Binding errors:\n")
 			for _, msg := range snap.Userspace.LastErrors {
@@ -890,150 +1029,190 @@ func RenderTrafficSummary(w io.Writer, hostname string, names []string, kernelNa
 		fmt.Fprintf(w, "  %-16s %16s %16s %16s\n", "iface", "Rx pps", "Tx pps", "Total pps")
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("=", 70))
 		var totalRxPps, totalTxPps uint64
+		var totalRxReset, totalTxReset bool
 		for _, name := range names {
 			snap := snaps[name]
 			if snap == nil {
 				continue
 			}
-			rxPps, txPps, _, _ := snapshotRates(snap, prevSnaps[name])
-			totalRxPps += rxPps
-			totalTxPps += txPps
+			rates := snapshotRates(snap, prevSnaps[name])
+			totalRxPps += rates.rxPps
+			totalTxPps += rates.txPps
+			totalRxReset = totalRxReset || rates.rxPktsReset
+			totalTxReset = totalTxReset || rates.txPktsReset
 			fmt.Fprintf(w, "  %-16s %16s %16s %16s\n",
-				name+":", formatPacketRate(rxPps), formatPacketRate(txPps), formatPacketRate(rxPps+txPps))
+				name+":",
+				formatCounterValue(formatPacketRate(rates.rxPps), rates.rxPktsReset),
+				formatCounterValue(formatPacketRate(rates.txPps), rates.txPktsReset),
+				formatCounterValue(formatPacketRate(rates.rxPps+rates.txPps), rates.rxPktsReset || rates.txPktsReset))
 		}
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("-", 70))
 		fmt.Fprintf(w, "  %-16s %16s %16s %16s\n",
-			"total:", formatPacketRate(totalRxPps), formatPacketRate(totalTxPps), formatPacketRate(totalRxPps+totalTxPps))
+			"total:",
+			formatCounterValue(formatPacketRate(totalRxPps), totalRxReset),
+			formatCounterValue(formatPacketRate(totalTxPps), totalTxReset),
+			formatCounterValue(formatPacketRate(totalRxPps+totalTxPps), totalRxReset || totalTxReset))
 	case SummaryModeBytes:
 		fmt.Fprintf(w, "  %-16s %20s %20s %20s\n", "iface", "Rx", "Tx", "Total")
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("=", 82))
 		var totalRxBytesPerSec, totalTxBytesPerSec uint64
+		var totalRxReset, totalTxReset bool
 		for _, name := range names {
 			snap := snaps[name]
 			if snap == nil {
 				continue
 			}
-			_, _, rxBytesPerSec, txBytesPerSec := snapshotRates(snap, prevSnaps[name])
-			totalRxBytesPerSec += rxBytesPerSec
-			totalTxBytesPerSec += txBytesPerSec
+			rates := snapshotRates(snap, prevSnaps[name])
+			totalRxBytesPerSec += rates.rxBytesPerSec
+			totalTxBytesPerSec += rates.txBytesPerSec
+			totalRxReset = totalRxReset || rates.rxBytesReset
+			totalTxReset = totalTxReset || rates.txBytesReset
 			fmt.Fprintf(w, "  %-16s %20s %20s %20s\n",
-				name+":", formatBytesRate(rxBytesPerSec), formatBytesRate(txBytesPerSec), formatBytesRate(rxBytesPerSec+txBytesPerSec))
+				name+":",
+				formatCounterValue(formatBytesRate(rates.rxBytesPerSec), rates.rxBytesReset),
+				formatCounterValue(formatBytesRate(rates.txBytesPerSec), rates.txBytesReset),
+				formatCounterValue(formatBytesRate(rates.rxBytesPerSec+rates.txBytesPerSec), rates.rxBytesReset || rates.txBytesReset))
 		}
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("-", 82))
 		fmt.Fprintf(w, "  %-16s %20s %20s %20s\n",
-			"total:", formatBytesRate(totalRxBytesPerSec), formatBytesRate(totalTxBytesPerSec), formatBytesRate(totalRxBytesPerSec+totalTxBytesPerSec))
+			"total:",
+			formatCounterValue(formatBytesRate(totalRxBytesPerSec), totalRxReset),
+			formatCounterValue(formatBytesRate(totalTxBytesPerSec), totalTxReset),
+			formatCounterValue(formatBytesRate(totalRxBytesPerSec+totalTxBytesPerSec), totalRxReset || totalTxReset))
 	case SummaryModeDelta:
 		fmt.Fprintf(w, "  %-16s %16s %16s %16s\n", "iface", "Rx delta", "Tx delta", "Total")
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("=", 70))
 		var totalRxDelta, totalTxDelta uint64
+		var totalRxReset, totalTxReset bool
 		for _, name := range names {
 			snap := snaps[name]
 			if snap == nil {
 				continue
 			}
-			var rxDelta, txDelta uint64
+			var deltas trafficDeltas
 			if prev := prevSnaps[name]; prev != nil {
-				rxDelta, txDelta, _, _, _ = snapshotTrafficDeltas(snap, prev)
+				deltas = snapshotTrafficDeltas(snap, prev)
 			}
-			totalRxDelta += rxDelta
-			totalTxDelta += txDelta
-			fmt.Fprintf(w, "  %-16s %16d %16d %16d\n",
-				name+":", rxDelta, txDelta, rxDelta+txDelta)
+			totalRxDelta += deltas.rxPkts
+			totalTxDelta += deltas.txPkts
+			totalRxReset = totalRxReset || deltas.rxPktsReset
+			totalTxReset = totalTxReset || deltas.txPktsReset
+			fmt.Fprintf(w, "  %-16s ", name+":")
+			writeSummaryCounterDelta(w, deltas.rxPkts, deltas.rxPktsReset)
+			_, _ = io.WriteString(w, " ")
+			writeSummaryCounterDelta(w, deltas.txPkts, deltas.txPktsReset)
+			_, _ = io.WriteString(w, " ")
+			writeSummaryCounterDelta(w, deltas.rxPkts+deltas.txPkts, deltas.rxPktsReset || deltas.txPktsReset)
+			_, _ = io.WriteString(w, "\n")
 		}
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("-", 70))
-		fmt.Fprintf(w, "  %-16s %16d %16d %16d\n",
-			"total:", totalRxDelta, totalTxDelta, totalRxDelta+totalTxDelta)
+		fmt.Fprintf(w, "  %-16s ", "total:")
+		writeSummaryCounterDelta(w, totalRxDelta, totalRxReset)
+		_, _ = io.WriteString(w, " ")
+		writeSummaryCounterDelta(w, totalTxDelta, totalTxReset)
+		_, _ = io.WriteString(w, " ")
+		writeSummaryCounterDelta(w, totalRxDelta+totalTxDelta, totalRxReset || totalTxReset)
+		_, _ = io.WriteString(w, "\n")
 	case SummaryModeRate:
 		fmt.Fprintf(w, "  %-16s %16s %16s %16s %12s %12s %12s\n", "iface", "Rx b/s", "Tx b/s", "Total b/s", "Rx pps", "Tx pps", "Total")
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("=", 106))
 		var totalRxPps, totalTxPps, totalRxBitsPerSec, totalTxBitsPerSec uint64
+		var totalRxPktsReset, totalTxPktsReset, totalRxBytesReset, totalTxBytesReset bool
 		for _, name := range names {
 			snap := snaps[name]
 			if snap == nil {
 				continue
 			}
-			rxPps, txPps, rxBytesPerSec, txBytesPerSec := snapshotRates(snap, prevSnaps[name])
-			rxBitsPerSec := rxBytesPerSec * 8
-			txBitsPerSec := txBytesPerSec * 8
-			totalRxPps += rxPps
-			totalTxPps += txPps
+			rates := snapshotRates(snap, prevSnaps[name])
+			rxBitsPerSec := rates.rxBytesPerSec * 8
+			txBitsPerSec := rates.txBytesPerSec * 8
+			totalRxPps += rates.rxPps
+			totalTxPps += rates.txPps
 			totalRxBitsPerSec += rxBitsPerSec
 			totalTxBitsPerSec += txBitsPerSec
+			totalRxPktsReset = totalRxPktsReset || rates.rxPktsReset
+			totalTxPktsReset = totalTxPktsReset || rates.txPktsReset
+			totalRxBytesReset = totalRxBytesReset || rates.rxBytesReset
+			totalTxBytesReset = totalTxBytesReset || rates.txBytesReset
 			fmt.Fprintf(w, "  %-16s %16s %16s %16s %12s %12s %12s\n",
 				name+":",
-				formatBitsRate(rxBitsPerSec),
-				formatBitsRate(txBitsPerSec),
-				formatBitsRate(rxBitsPerSec+txBitsPerSec),
-				formatPacketRate(rxPps),
-				formatPacketRate(txPps),
-				formatPacketRate(rxPps+txPps))
+				formatCounterValue(formatBitsRate(rxBitsPerSec), rates.rxBytesReset),
+				formatCounterValue(formatBitsRate(txBitsPerSec), rates.txBytesReset),
+				formatCounterValue(formatBitsRate(rxBitsPerSec+txBitsPerSec), rates.rxBytesReset || rates.txBytesReset),
+				formatCounterValue(formatPacketRate(rates.rxPps), rates.rxPktsReset),
+				formatCounterValue(formatPacketRate(rates.txPps), rates.txPktsReset),
+				formatCounterValue(formatPacketRate(rates.rxPps+rates.txPps), rates.rxPktsReset || rates.txPktsReset))
 		}
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("-", 106))
 		fmt.Fprintf(w, "  %-16s %16s %16s %16s %12s %12s %12s\n",
 			"total:",
-			formatBitsRate(totalRxBitsPerSec),
-			formatBitsRate(totalTxBitsPerSec),
-			formatBitsRate(totalRxBitsPerSec+totalTxBitsPerSec),
-			formatPacketRate(totalRxPps),
-			formatPacketRate(totalTxPps),
-			formatPacketRate(totalRxPps+totalTxPps))
+			formatCounterValue(formatBitsRate(totalRxBitsPerSec), totalRxBytesReset),
+			formatCounterValue(formatBitsRate(totalTxBitsPerSec), totalTxBytesReset),
+			formatCounterValue(formatBitsRate(totalRxBitsPerSec+totalTxBitsPerSec), totalRxBytesReset || totalTxBytesReset),
+			formatCounterValue(formatPacketRate(totalRxPps), totalRxPktsReset),
+			formatCounterValue(formatPacketRate(totalTxPps), totalTxPktsReset),
+			formatCounterValue(formatPacketRate(totalRxPps+totalTxPps), totalRxPktsReset || totalTxPktsReset))
 	default:
 		fmt.Fprintf(w, "  %-16s %20s %20s %20s %12s %12s %12s\n", "iface", "Rx", "Tx", "Total", "Rx pps", "Tx pps", "Total")
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("=", 108))
 		var totalRxPps, totalTxPps, totalRxBytesPerSec, totalTxBytesPerSec uint64
+		var totalRxPktsReset, totalTxPktsReset, totalRxBytesReset, totalTxBytesReset bool
 		for _, name := range names {
 			snap := snaps[name]
 			if snap == nil {
 				continue
 			}
-			rxPps, txPps, rxBytesPerSec, txBytesPerSec := snapshotRates(snap, prevSnaps[name])
-			totalRxPps += rxPps
-			totalTxPps += txPps
-			totalRxBytesPerSec += rxBytesPerSec
-			totalTxBytesPerSec += txBytesPerSec
+			rates := snapshotRates(snap, prevSnaps[name])
+			totalRxPps += rates.rxPps
+			totalTxPps += rates.txPps
+			totalRxBytesPerSec += rates.rxBytesPerSec
+			totalTxBytesPerSec += rates.txBytesPerSec
+			totalRxPktsReset = totalRxPktsReset || rates.rxPktsReset
+			totalTxPktsReset = totalTxPktsReset || rates.txPktsReset
+			totalRxBytesReset = totalRxBytesReset || rates.rxBytesReset
+			totalTxBytesReset = totalTxBytesReset || rates.txBytesReset
 			fmt.Fprintf(w, "  %-16s %20s %20s %20s %12s %12s %12s\n",
 				name+":",
-				formatBytesRate(rxBytesPerSec),
-				formatBytesRate(txBytesPerSec),
-				formatBytesRate(rxBytesPerSec+txBytesPerSec),
-				formatPacketRate(rxPps),
-				formatPacketRate(txPps),
-				formatPacketRate(rxPps+txPps))
+				formatCounterValue(formatBytesRate(rates.rxBytesPerSec), rates.rxBytesReset),
+				formatCounterValue(formatBytesRate(rates.txBytesPerSec), rates.txBytesReset),
+				formatCounterValue(formatBytesRate(rates.rxBytesPerSec+rates.txBytesPerSec), rates.rxBytesReset || rates.txBytesReset),
+				formatCounterValue(formatPacketRate(rates.rxPps), rates.rxPktsReset),
+				formatCounterValue(formatPacketRate(rates.txPps), rates.txPktsReset),
+				formatCounterValue(formatPacketRate(rates.rxPps+rates.txPps), rates.rxPktsReset || rates.txPktsReset))
 		}
 		fmt.Fprintf(w, "  %s\n", strings.Repeat("-", 108))
 		fmt.Fprintf(w, "  %-16s %20s %20s %20s %12s %12s %12s\n",
 			"total:",
-			formatBytesRate(totalRxBytesPerSec),
-			formatBytesRate(totalTxBytesPerSec),
-			formatBytesRate(totalRxBytesPerSec+totalTxBytesPerSec),
-			formatPacketRate(totalRxPps),
-			formatPacketRate(totalTxPps),
-			formatPacketRate(totalRxPps+totalTxPps))
+			formatCounterValue(formatBytesRate(totalRxBytesPerSec), totalRxBytesReset),
+			formatCounterValue(formatBytesRate(totalTxBytesPerSec), totalTxBytesReset),
+			formatCounterValue(formatBytesRate(totalRxBytesPerSec+totalTxBytesPerSec), totalRxBytesReset || totalTxBytesReset),
+			formatCounterValue(formatPacketRate(totalRxPps), totalRxPktsReset),
+			formatCounterValue(formatPacketRate(totalTxPps), totalTxPktsReset),
+			formatCounterValue(formatPacketRate(totalRxPps+totalTxPps), totalRxPktsReset || totalTxPktsReset))
 	}
 
 	fmt.Fprintf(w, "\nKeys: q=quit  c=combined  p=packets  b=bytes  d=delta  r=rate\n")
 }
 
-func snapshotRates(curr, prev *Snapshot) (rxPps, txPps, rxBytesPerSec, txBytesPerSec uint64) {
+func snapshotRates(curr, prev *Snapshot) trafficRates {
+	var rates trafficRates
 	if curr == nil || prev == nil {
-		return 0, 0, 0, 0
+		return rates
 	}
+	deltas := snapshotTrafficDeltas(curr, prev)
+	rates.rxPktsReset = deltas.rxPktsReset
+	rates.txPktsReset = deltas.txPktsReset
+	rates.rxBytesReset = deltas.rxBytesReset
+	rates.txBytesReset = deltas.txBytesReset
 	dt := curr.Timestamp.Sub(prev.Timestamp).Seconds()
 	if dt <= 0 {
-		return 0, 0, 0, 0
+		return rates
 	}
-	rxPktsDelta, txPktsDelta, rxBytesDelta, txBytesDelta, _ := snapshotTrafficDeltas(curr, prev)
-	return uint64(float64(rxPktsDelta) / dt),
-		uint64(float64(txPktsDelta) / dt),
-		uint64(float64(rxBytesDelta) / dt),
-		uint64(float64(txBytesDelta) / dt)
-}
-
-func deltaU64(curr, prev uint64) uint64 {
-	if curr < prev {
-		return 0
-	}
-	return curr - prev
+	rates.rxPps = uint64(float64(deltas.rxPkts) / dt)
+	rates.txPps = uint64(float64(deltas.txPkts) / dt)
+	rates.rxBytesPerSec = uint64(float64(deltas.rxBytes) / dt)
+	rates.txBytesPerSec = uint64(float64(deltas.txBytes) / dt)
+	return rates
 }
 
 func formatPacketRate(v uint64) string {
