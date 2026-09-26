@@ -560,8 +560,11 @@ func HostInboundServiceTokenExpansion(token string) []string {
 // is DHCPv4 (udp 67/68 over IPv4), `dhcpv6` is DHCPv6 (udp 546/547 over IPv6);
 // `protocols rip` is RIPv2 (IPv4), `ripng` is RIPng (IPv6); `protocols ospf` is
 // OSPFv2 (IPv4) while `ospf3` is OSPFv3 (IPv6) — both ride IP protocol 89 but on
-// different families; `igmp` is IPv4 group membership (the IPv6 equivalent is
-// MLD, carried over ICMPv6 / the always-accepted ND set).
+// different families; `igmp` is IPv4 group membership. MLD, the IPv6 equivalent,
+// uses ICMPv6 types 130-132 and 143, none of which are in the always-accepted
+// ND set (types 133-137). Queries target multicast destinations, so XDP passes
+// them to the kernel and daddr-scoped INPUT denies miss; Reports egress through
+// OUTPUT. Neither is a global host-inbound exception, #10859.
 //
 // Before #3225 both enforcement layers compiled these tokens into family-NEUTRAL
 // matches, so e.g. `system-services dhcp` opened udp/67-68 on the IPv6 path too

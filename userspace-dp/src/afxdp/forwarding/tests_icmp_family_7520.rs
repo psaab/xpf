@@ -66,6 +66,19 @@ fn matched_family_pairs_are_still_admitted_7520() {
 }
 
 #[test]
+fn mld_types_are_not_global_nd_accepts_10859() {
+    // MLD Query/Report/Done (130-132) and MLDv2 Report (143) are not ND
+    // (133-137). Query traffic reaches the kernel via multicast early-pass;
+    // reports are egress, so none belongs in this global INPUT exemption.
+    for t in [130u8, 131, 132, 143] {
+        assert!(
+            !accepts(58, true, t),
+            "ICMPv6 MLD type {t} must not bypass zone admission as a global ND accept"
+        );
+    }
+}
+
+#[test]
 fn non_error_icmp_types_stay_gated_7520() {
     // Echo-request (v4 8, v6 128) and IPv4 router-advert/solicit (9/10) are
     // deliberately NOT in the global set — they stay gated on the `ping` and

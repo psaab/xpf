@@ -244,6 +244,50 @@ func TestHostInboundFilterExemptsIPsecAndV6Errors(t *testing.T) {
 	}
 }
 
+// TestHostInboundMLDQueryAndReportPaths10859 pins the split MLD paths: XDP
+// passes multicast-destined Queries to the kernel, where this INPUT chain's
+// daddr-scoped unicast denies miss; kernel-originated Reports egress through
+// OUTPUT and never traverse this chain.
+func TestHostInboundMLDQueryAndReportPaths10859(t *testing.T) {
+	cfg := hostInboundTestConfig()
+	views := buildAndCheckViews(t, cfg)
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
+
+	const inputHook = "type filter hook input priority 10; policy accept;"
+	if !strings.Contains(payload, inputHook) {
+		t.Fatalf("host-inbound rules must remain an INPUT chain with ACCEPT policy:\n%s", payload)
+	}
+	if strings.Contains(payload, "hook output") {
+		t.Fatalf("host-inbound INPUT rules must not filter outbound MLD reports:\n%s", payload)
+	}
+	if want := hiDrop("ip6", "2001:db8:50::8", "wan"); !strings.Contains(payload, want) {
+		t.Fatalf("wan must retain its local-unicast IPv6 deny %q:\n%s", want, payload)
+	}
+
+	// Types 130-132 (MLD) and 143 (MLDv2 Report) are not global ICMPv6
+	// accepts. A multicast Query destination (ff02::1) is outside the
+	// daddr-scoped local-unicast drop above and therefore reaches kernel input
+	// under the chain's ACCEPT policy.
+	for _, line := range strings.Split(payload, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "icmpv6") || !strings.Contains(line, "accept") {
+			continue
+		}
+		for _, mldType := range []string{"130", "131", "132", "143"} {
+			if strings.Contains(line, mldType) {
+				t.Errorf("MLD type %s must not be globally or per-zone accepted: %s", mldType, line)
+			}
+		}
+	}
+	for _, line := range strings.Split(payload, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "ip6") && strings.HasSuffix(line, "drop") &&
+			(!strings.Contains(line, "daddr") || strings.Contains(line, "ff02::1")) {
+			t.Errorf("MLD Query destination must not match an IPv6 host-inbound deny: %s", line)
+		}
+	}
+}
+
 // TestHostInboundFilterNoStanzaDefaultDeny verifies #3405 (Junos/vSRX
 // default-deny parity): a zone with NO host-inbound-traffic stanza (lan) is now
 // enforced exactly like an empty stanza — its firewall-local address gets a
