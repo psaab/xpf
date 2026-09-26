@@ -15,7 +15,6 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
-	"github.com/vishvananda/netlink"
 )
 
 // errV6AddrInvalidated signals that a DHCPv6 Reply EXPLICITLY invalidated the
@@ -572,8 +571,8 @@ func (m *Manager) parseV6Reply(ctx context.Context, ifaceName string, adv *dhcpv
 		}
 	}
 
-	// DHCPv6 doesn't provide a default router — discover it from the
-	// kernel's IPv6 neighbor table (entries learned via Router Advertisements).
+	// DHCPv6 doesn't provide a default router; solicit and parse RAs
+	// directly because managed interfaces disable kernel RA acceptance.
 	if gw := m.discoverIPv6Router(ctx, ifaceName); gw.IsValid() {
 		lease.Gateway = gw
 	}
@@ -818,49 +817,27 @@ func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Ti
 	return live, withdrawn
 }
 
-// discoverIPv6Router finds the link-local address of an IPv6 router on the
-// given interface by inspecting the kernel neighbor table for entries with
-// the NTF_ROUTER flag (learned from Router Advertisements).
-// Retries a few times since RAs may not have been processed yet.
+// discoverIPv6Router sends Router Solicitations and chooses an eligible
+// Router Advertisement source. Unlike IPv6AcceptRA, this client-owned
+// exchange works on managed interfaces where kernel RA processing is off.
 func (m *Manager) discoverIPv6Router(ctx context.Context, ifaceName string) netip.Addr {
-	if m.nlHandle == nil {
+	var routers []observedRouter
+	if m.routerAdvertisementsForTest != nil {
+		routers = m.routerAdvertisementsForTest(ctx, ifaceName)
+	} else if m.nlHandle == nil {
+		// A nil netlink handle is the test-only Manager shape; preserve its
+		// no-I/O behavior unless a router-discovery seam is explicitly set.
 		return netip.Addr{}
+	} else {
+		routers = m.routerAdvertisements(ctx, ifaceName)
 	}
-	link, err := m.nlHandle.LinkByName(ifaceName)
-	if err != nil {
-		return netip.Addr{}
+	if gw := selectRAObservedRouter(routers); gw.IsValid() {
+		return gw
 	}
-
-	for attempt := 0; attempt < 10; attempt++ {
-		if attempt > 0 {
-			// Context-aware: Reconcile cancels clients and waits on
-			// done while applyConfigLocked holds applySem — a blind
-			// 10x1s sleep here wedged every commit for up to 10s
-			// (AGY review on PR #1815).
-			select {
-			case <-ctx.Done():
-				return netip.Addr{}
-			case <-time.After(time.Second):
-			}
-		}
-
-		neighbors, err := m.nlHandle.NeighList(link.Attrs().Index, netlink.FAMILY_V6)
-		if err != nil {
-			continue
-		}
-
-		for _, n := range neighbors {
-			// NTF_ROUTER = 0x80 (linux/neighbour.h)
-			if n.Flags&0x80 != 0 && n.IP.IsLinkLocalUnicast() {
-				if a, ok := netip.AddrFromSlice(n.IP); ok {
-					return a
-				}
-			}
-		}
+	if ctx.Err() == nil {
+		slog.Warn("DHCPv6: no eligible IPv6 default router found",
+			"interface", ifaceName)
 	}
-
-	slog.Warn("DHCPv6: no IPv6 router found in neighbor table",
-		"interface", ifaceName)
 	return netip.Addr{}
 }
 

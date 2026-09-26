@@ -148,6 +148,9 @@ type Manager struct {
 	// waitLinkLocalForTest replaces the DHCPv6 link-local wait so the v6
 	// run loop is drivable without a real interface. nil in production.
 	waitLinkLocalForTest func(ctx context.Context, ifaceName string, timeout time.Duration) error
+	// routerAdvertisementsForTest replaces live RS/RA I/O in router
+	// discovery tests. nil in production.
+	routerAdvertisementsForTest func(ctx context.Context, ifaceName string) []observedRouter
 }
 
 // RenewalBindingStats reports renewal replies that were ignored because
