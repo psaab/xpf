@@ -27,6 +27,7 @@ Hermetic: a throwaway minisign keypair, a `file://` base URL, no network.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -34,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -91,18 +93,22 @@ class ResolveChannelVersionTests(unittest.TestCase):
         self.sec = self.tmp / "img.sec"
         subprocess.run(["minisign", "-G", "-W", "-p", str(self.pub),
                         "-s", str(self.sec)], check=True, capture_output=True)
-        self._old_pub = os.environ.get("XPF_IMAGE_PUBKEY")
+        self._saved_env = {name: os.environ.get(name) for name in (
+            "XPF_IMAGE_PUBKEY", "XDG_STATE_HOME")}
         os.environ["XPF_IMAGE_PUBKEY"] = str(self.pub)
-        self.addCleanup(self._restore_pub)
+        self.state = self.tmp / "empty-state"
+        os.environ["XDG_STATE_HOME"] = str(self.state)
+        self.addCleanup(self._restore_env)
         self.host = self.tmp / "host"
         (self.host / "stable").mkdir(parents=True)
         self.base = self.host.as_uri()
 
-    def _restore_pub(self):
-        if self._old_pub is None:
-            os.environ.pop("XPF_IMAGE_PUBKEY", None)
-        else:
-            os.environ["XPF_IMAGE_PUBKEY"] = self._old_pub
+    def _restore_env(self):
+        for name, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     def _publish_pointer(self, channel="stable", body=None, sign_it=True,
                          raw=None):
@@ -114,7 +120,7 @@ class ResolveChannelVersionTests(unittest.TestCase):
         else:
             doc = {"channel": channel, "version": VER,
                    "manifest": f"xpf-{VER}.SHA256SUMS",
-                   "date": "2026-01-01T00:00:00Z"}
+                   "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
             if body:
                 doc.update(body)
             for k, v in list(doc.items()):
@@ -147,6 +153,21 @@ class ResolveChannelVersionTests(unittest.TestCase):
         self.assertEqual(self._resolve("edge"), "9.9.9")
 
     # ── fail-closed ──
+    def test_replayed_old_pointer_fails_on_empty_state_home(self):
+        self._publish_pointer(body={"date": "1999-01-01T00:00:00Z"})
+        args = argparse.Namespace(
+            version=None, image_url=self.base, out=str(self.tmp / "out"),
+            alias=None, channel="stable", allow_rollback=False,
+            allow_unvalidated=False, qcow2_only=True,
+            install_libvirt=False, no_import=True, dry_run=False, pubkey=None)
+        with self.assertRaises(SystemExit) as caught:
+            deploy.cmd_fetch(args)
+        self.assertIn("older than the 90-day freshness window",
+                      str(caught.exception))
+        self.assertFalse(self.state.exists(),
+                         "replayed pointer was not rejected before state setup")
+
+
     def test_an_absent_pointer_is_refused(self):
         self.assertIn("download failed", self._refused())
 
@@ -168,6 +189,12 @@ class ResolveChannelVersionTests(unittest.TestCase):
         # Signature stays; bytes change. This is the stale-mirror / swapped-
         # object case, and it must not resolve.
         p.write_text(p.read_text().replace(VER, "6.6.6"))
+        self.assertIn("FAILED signature verification", self._refused())
+
+    def test_tampering_with_the_unused_manifest_field_is_refused(self):
+        p = self._publish_pointer()
+        p.write_text(p.read_text().replace(
+            f"xpf-{VER}.SHA256SUMS", "xpf-tampered.SHA256SUMS"))
         self.assertIn("FAILED signature verification", self._refused())
 
     def test_a_signed_pointer_that_is_not_json_is_refused(self):
