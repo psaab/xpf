@@ -5,5 +5,5 @@
 # an UNLISTED red pair fails, and so does a listed pair that is no longer red
 # (shrink-only: remove the line when the gate is green again). Same contract
 # shape as test/incus/HARNESSES.unreached.
-test-dhcp-lease-failover loss-userspace-cluster newest-FAIL 2026-09-11, zero PASS ever in the tracked ledger (#10122); remove when green
+wire_conntrack_lifecycle loss-userspace-cluster newest-FAIL 2026-09-19 historical c930de01 measurement predates the #10419 pre-poll expiry-flush fix; live re-attestation is deferred under #10716
 wire_zone_matrix loss-userspace-cluster newest-FAIL 2026-09-18, deliberate broad-permit negative control for #10028; remove when the PASS baseline is newest and green
