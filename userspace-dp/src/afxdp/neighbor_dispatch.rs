@@ -542,6 +542,85 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
+        // A flowless non-first fragment can be parked before its NAT rules
+        // are knowable (notably blanket interface SNAT). Once the neighbor
+        // resolves, recover the wire protocol and reconstruct only a concrete
+        // source rewrite; never transmit a candidate with its internal source.
+        if super::poll_descriptor::frag_assoc::same_family_nat_configured(forwarding)
+            && pkt.flow_key.is_none()
+            && decision.nat == crate::nat::NatDecision::default()
+        {
+            let l3_start =
+                verified_l3_or_stamp(source_frame, pkt.meta.l3_offset, pkt.meta.addr_family);
+            if let Some(l3) = source_frame.get(l3_start..)
+                && crate::afxdp::frame::is_non_first_fragment(l3, pkt.meta.addr_family)
+            {
+                let Some((_, protocol)) = crate::afxdp::frame::packet_rel_l4_offset_and_protocol(
+                    l3,
+                    pkt.meta.addr_family,
+                ) else {
+                    counters.record_nat_frag_untranslated_dropped();
+                    binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                    continue;
+                };
+                let Some(mut flow) =
+                    crate::afxdp::frame::l3_enforcement_flow_from_frame(source_frame, pkt.meta)
+                else {
+                    counters.record_nat_frag_untranslated_dropped();
+                    binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                    continue;
+                };
+                let mut meta = pkt.meta;
+                meta.protocol = protocol;
+                flow.forward_key.protocol = protocol;
+                flow.forward_key.routing_domain = crate::afxdp::forwarding::ingress_routing_domain(
+                    forwarding,
+                    meta.ingress_ifindex as i32,
+                    meta.ingress_vlan_id,
+                    pkt.fabric_ingress_zone,
+                );
+                let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+                    forwarding,
+                    meta.ingress_ifindex as i32,
+                    meta.ingress_vlan_id,
+                )
+                .unwrap_or(meta.ingress_ifindex as i32);
+                let (from_zone_id, to_zone_id) =
+                    crate::afxdp::forwarding::zone_pair_ids_for_flow_with_override(
+                        forwarding,
+                        ingress_logical,
+                        None,
+                        decision.resolution.egress_ifindex,
+                    );
+                match super::poll_descriptor::frag_assoc::retry_flowless_fragment_nat(
+                    forwarding,
+                    &flow,
+                    meta,
+                    pkt.fabric_ingress_zone,
+                    from_zone_id,
+                    to_zone_id,
+                    decision.resolution.egress_ifindex,
+                    now_ns,
+                    binding.worker_id,
+                ) {
+                    super::poll_descriptor::frag_assoc::RetryFlowlessFragmentNat::Unchanged => {}
+                    super::poll_descriptor::frag_assoc::RetryFlowlessFragmentNat::Translate {
+                        decision: nat,
+                        counter,
+                    } => {
+                        if let Some(counter) = counter {
+                            counter.add(pkt.desc.len as u64);
+                        }
+                        decision.nat = nat;
+                    }
+                    super::poll_descriptor::frag_assoc::RetryFlowlessFragmentNat::Drop => {
+                        counters.record_nat_frag_untranslated_dropped();
+                        binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                        continue;
+                    }
+                }
+            }
+        }
         // #10659 (residual of #9950 F-035): retry-time overlap re-check. A
         // fragment admitted via the MissingNeighbor park-and-retry path was
         // transmitted here without planting its range in the overlap tracker

@@ -578,11 +578,14 @@ sync.
     counted as `nat_frag_untranslated_dropped` when a live forward NAT
     session's reverse identity matches the tail or a matching source-NAT
     rule has L4 selectors satisfied by the fragment's known attributes.
-    Native protocol 255 is an unknown-protocol wildcard for protocol selectors,
-    never recovered; missing L4 ports cannot satisfy port constraints. A
-    blanket-only rule without a live session is intentionally not sufficient,
-    because raw IPsec/passthrough is indistinguishable; that residual is
-    tracked as #10957. Plain no-NAT fragments still use the normal
+    At admission, native protocol 255 is an unknown-protocol wildcard for
+    protocol selectors; missing L4 ports cannot satisfy port constraints.
+    blanket-only rule without a live session is intentionally not sufficient
+    to drop at admission, because raw IPsec/passthrough is indistinguishable.
+    If such a tail parks for a missing neighbor, retry recovers its wire
+    protocol and rebuilds a concrete source-NAT decision before TX, dropping
+    any untranslatable candidate; raw ESP/AH remains unchanged for Stage-11
+    passthrough and reassembly. Plain no-NAT fragments still use the normal
     buffer-and-retry path.
   - **#5467 — egress `filter output` on the flowless TX path:** the #3291 gate
     above enforces the INGRESS input filter / PBR / zone policy on a flowless

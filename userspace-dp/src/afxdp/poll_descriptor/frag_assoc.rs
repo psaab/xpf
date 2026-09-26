@@ -309,6 +309,14 @@ pub(super) fn nat_consult_forward_fragment_assoc(
     Some(decision)
 }
 
+#[inline]
+pub(in crate::afxdp) fn same_family_nat_configured(forwarding: &ForwardingState) -> bool {
+    !forwarding.source_nat_rules.is_empty()
+        || !forwarding.static_nat.is_empty()
+        || !forwarding.dnat_table.is_empty()
+        || !forwarding.nptv6.is_empty()
+}
+
 /// #6122/#10679: fail-closed discriminator for a flowless packet whose
 /// ordinary same-family NAT / NPTv6 decision is unavailable. Answers "would this
 /// flow have been translated?" using ONLY its L3 identity — source / destination
@@ -341,13 +349,8 @@ pub(super) fn flowless_requires_nat_translation(
     egress_ifindex: i32,
     now_ns: u64,
 ) -> bool {
-    // Fast-out when NO same-family NAT is configured at all — the common case,
-    // and it keeps a NAT-free box's flowless path byte-identical to pre-#6122.
-    if forwarding.source_nat_rules.is_empty()
-        && forwarding.static_nat.is_empty()
-        && forwarding.dnat_table.is_empty()
-        && forwarding.nptv6.is_empty()
-    {
+    // Fast-out keeps the common NAT-free flowless path byte-identical.
+    if !same_family_nat_configured(forwarding) {
         return false;
     }
     let from_zone: &str = forwarding
@@ -394,11 +397,10 @@ pub(super) fn flowless_requires_nat_translation(
     ) {
         return true;
     }
-    if flowless_nat_rule_possible(
+    if flowless_source_nat_rule_possible(
         forwarding,
         l3_flow,
         meta,
-        ingress_zone_override,
         from_zone_id,
         to_zone_id,
         egress_ifindex,
@@ -407,10 +409,27 @@ pub(super) fn flowless_requires_nat_translation(
         return true;
     }
 
+    flowless_destination_nat_requires_translation(
+        forwarding,
+        l3_flow,
+        meta,
+        ingress_zone_override,
+        to_zone_id,
+        egress_ifindex,
+    )
+}
 
-    // --- Destination-based address-only translation (pre-NAT dst leak:
-    // DNAT / static-DNAT / NPTv6 inbound). Port-/protocol-scoped NAT candidates
-    // were checked above without inventing an L4 tuple. ---
+/// Probe destination-side address translations, including rules whose missing
+/// L4 fields are only a possible match. Shared by the flowless forwarding gate
+/// and the neighbor-retry NAT reconstruction so those paths cannot disagree.
+fn flowless_destination_nat_requires_translation(
+    forwarding: &ForwardingState,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+) -> bool {
     let scope = prerouting_ingress_scope(
         forwarding,
         meta.ingress_ifindex as i32,
@@ -438,9 +457,6 @@ pub(super) fn flowless_requires_nat_translation(
                 .has_unknown_protocol_translation_match_scoped(
                     l3_flow.src_ip,
                     l3_flow.dst_ip,
-                    // No L4 ports on a non-first fragment → 0. A
-                    // port-wildcard (address-only) DNAT rule still matches; a
-                    // port-specific one does not (documented residual).
                     0,
                     0,
                     scope.zone_name,
@@ -482,7 +498,14 @@ pub(super) fn flowless_requires_nat_translation(
     {
         return true;
     }
-    false
+    flowless_destination_nat_rule_possible(
+        forwarding,
+        l3_flow,
+        meta,
+        ingress_zone_override,
+        to_zone_id,
+        egress_ifindex,
+    )
 }
 /// #10679: a `NoRoute` disposition has no resolved egress, but a permitted
 /// flowless frame can still be reinjected to the kernel FIB. Probe every
@@ -557,6 +580,33 @@ pub(super) fn flowless_nat_rule_possible(
     egress_ifindex: i32,
     require_l4_selector: bool,
 ) -> bool {
+    flowless_source_nat_rule_possible(
+        forwarding,
+        l3_flow,
+        meta,
+        from_zone_id,
+        to_zone_id,
+        egress_ifindex,
+        require_l4_selector,
+    ) || flowless_destination_nat_rule_possible(
+        forwarding,
+        l3_flow,
+        meta,
+        ingress_zone_override,
+        to_zone_id,
+        egress_ifindex,
+    )
+}
+
+fn flowless_source_nat_rule_possible(
+    forwarding: &ForwardingState,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+    require_l4_selector: bool,
+) -> bool {
     let from_zone = forwarding
         .zone_id_to_name
         .get(&from_zone_id)
@@ -572,7 +622,7 @@ pub(super) fn flowless_nat_rule_possible(
         egress_ifindex,
         l3_flow.forward_key.routing_domain,
     );
-    let source_nat_possible = if require_l4_selector {
+    if require_l4_selector {
         forwarding.source_nat_rules.iter().any(|rule| {
             rule.matches_scoped_l4_non_first_fragment(
                 &nat_scope,
@@ -594,11 +644,17 @@ pub(super) fn flowless_nat_rule_possible(
             meta.protocol,
             false,
         )
-    };
-    if source_nat_possible {
-        return true;
     }
+}
 
+fn flowless_destination_nat_rule_possible(
+    forwarding: &ForwardingState,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+) -> bool {
     let ingress = prerouting_ingress_scope(
         forwarding,
         meta.ingress_ifindex as i32,
@@ -615,6 +671,13 @@ pub(super) fn flowless_nat_rule_possible(
     ) {
         return true;
     }
+    let nat_scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        egress_ifindex,
+        l3_flow.forward_key.routing_domain,
+    );
     forwarding.static_nat.flowless_l4_translation_possible(
         meta.protocol,
         l3_flow.src_ip,
@@ -622,10 +685,147 @@ pub(super) fn flowless_nat_rule_possible(
         ingress.zone_name,
         ingress.ifname,
         ingress.routing_instance,
-        to_zone,
+        forwarding
+            .zone_id_to_name
+            .get(&to_zone_id)
+            .map_or("", String::as_str),
         nat_scope.egress_ifname,
         nat_scope.egress_routing_instance,
     )
+}
+
+/// Result of retry-time NAT evaluation for a parked flowless non-first
+/// fragment. `Unchanged` is reserved for non-candidates and raw IPsec
+/// passthrough; candidates must either receive a concrete source rewrite or
+/// fail closed.
+pub(in crate::afxdp) enum RetryFlowlessFragmentNat {
+    Unchanged,
+    Translate {
+        decision: crate::nat::NatDecision,
+        counter: Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
+    },
+    Drop,
+}
+
+/// Re-evaluate a parked flowless fragment using the wire protocol recovered
+/// from its IP/extension headers. The admission gate deliberately cannot use a
+/// blanket rule as proof (raw IPsec tails must park), but after resolution a
+/// known UDP tail can receive an address-only SNAT rewrite. Any matching
+/// destination-side or otherwise unbuildable translation fails closed.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn retry_flowless_fragment_nat(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    fabric_ingress_zone: Option<u16>,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+    now_ns: u64,
+    worker_id: u32,
+) -> RetryFlowlessFragmentNat {
+    if matches!(
+        flow.forward_key.protocol,
+        crate::ip_proto::PROTO_ESP | crate::ip_proto::PROTO_AH
+    ) {
+        return RetryFlowlessFragmentNat::Unchanged;
+    }
+    if !same_family_nat_configured(forwarding) {
+        return RetryFlowlessFragmentNat::Unchanged;
+    }
+    // The stored fabric stamp is raw stage-9 identity, not the owner-RG-gated
+    // policy override used at admission. Without HA runtime state in the retry
+    // sweep, do not guess a NAT scope: refuse a potentially translated tail.
+    if fabric_ingress_zone.is_some() {
+        return RetryFlowlessFragmentNat::Drop;
+    }
+    if !flowless_requires_nat_translation(
+        forwarding,
+        flow,
+        meta,
+        None,
+        from_zone_id,
+        to_zone_id,
+        egress_ifindex,
+        now_ns,
+    ) {
+        return RetryFlowlessFragmentNat::Unchanged;
+    }
+    if flowless_destination_nat_requires_translation(
+        forwarding,
+        flow,
+        meta,
+        None,
+        to_zone_id,
+        egress_ifindex,
+    ) {
+        return RetryFlowlessFragmentNat::Drop;
+    }
+    // L4-selected source rules can be a possible match with missing fragment
+    // ports, but their concrete match cannot be proven from this tail.
+    if flowless_source_nat_rule_possible(
+        forwarding,
+        flow,
+        meta,
+        from_zone_id,
+        to_zone_id,
+        egress_ifindex,
+        true,
+    ) {
+        return RetryFlowlessFragmentNat::Drop;
+    }
+
+    let to_zone = forwarding
+        .zone_id_to_name
+        .get(&to_zone_id)
+        .map_or("", String::as_str);
+    if let IpAddr::V6(mut src_v6) = flow.src_ip {
+        match forwarding
+            .nptv6
+            .translate_outbound_result(&mut src_v6, to_zone)
+        {
+            crate::nptv6::Nptv6Translation::Translated => {
+                return RetryFlowlessFragmentNat::Translate {
+                    decision: crate::nat::NatDecision {
+                        rewrite_src: Some(IpAddr::V6(src_v6)),
+                        nptv6: true,
+                        ..crate::nat::NatDecision::default()
+                    },
+                    counter: None,
+                };
+            }
+            crate::nptv6::Nptv6Translation::Untranslatable => {
+                return RetryFlowlessFragmentNat::Drop;
+            }
+            crate::nptv6::Nptv6Translation::NoMatch => {}
+        }
+    }
+
+    let from_zone = forwarding
+        .zone_id_to_name
+        .get(&from_zone_id)
+        .map_or("", String::as_str);
+    let mut counter = None;
+    match super::nat_exception::source_nat_decision_for_flow(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        from_zone,
+        to_zone,
+        egress_ifindex,
+        flow,
+        now_ns,
+        true,
+        worker_id,
+        &mut counter,
+    ) {
+        Ok(decision) if decision.rewrite_src.is_some() => {
+            RetryFlowlessFragmentNat::Translate { decision, counter }
+        }
+        _ => RetryFlowlessFragmentNat::Drop,
+    }
 }
 
 /// #10130/#10674: session-gated reverse discriminator for a same-family reply

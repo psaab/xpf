@@ -2224,3 +2224,170 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
          only after explicit TX acceptance"
     );
 }
+
+/// Drive a flowless tail through neighbor parking and the real retry sweep
+/// with blanket interface SNAT. Returns the retry counters and wire frame.
+fn retry_blanket_nat_fragment_10957(proto: u8) -> (BatchCounters, Vec<u8>) {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors.clear();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-lan-wan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let tail = if proto == PROTO_UDP {
+        udp_frag_frame_5689(0x0001, 0xbeef)
+    } else {
+        raw_frag_frame_10957(proto, 0x0001, 0xbeef)
+    };
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &tail,
+        udp_native_frag_meta_5689(),
+        true,
+    );
+    assert_eq!(dbg.missing_neigh, 1, "tail must take MissingNeighbor");
+    assert_eq!(dbg.forward, 0, "tail must not forward before resolution");
+    assert_eq!(
+        batch.nat_frag_untranslated_dropped, 0,
+        "tail must park rather than be dropped at admission"
+    );
+    assert_eq!(
+        binding.pending_neigh.len(),
+        1,
+        "tail must be held by the pending-neighbor queue"
+    );
+    assert_eq!(sessions.len(), 0, "flowless tail must not create a session");
+    let pending_key = *binding.pending_neigh.keys().next().expect("pending key");
+    assert_eq!(pending_key.0, 12, "pending key uses route egress");
+    assert_eq!(
+        pending_key.1,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        "on-link destination is its own next hop"
+    );
+
+    let mut bindings = vec![binding, BindingWorker::new_for_mirror_test(1, 0, 11, 0)];
+    bindings[1].interface = Arc::<str>::from("ge-0-0-0.80");
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    learn_dynamic_neighbor(
+        &forwarding,
+        &dynamic_neighbors,
+        pending_key.0,
+        80,
+        pending_key.1,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    );
+    let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let mut shared_recycles = Vec::new();
+    let area = bindings[0].umem.area() as *const MmapArea;
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    let mut retry_counters = BatchCounters::default();
+    retry_pending_neigh(
+        ingress,
+        left,
+        0,
+        right,
+        &binding_lookup,
+        &mirror_targets,
+        &forwarding,
+        &dynamic_neighbors,
+        None,
+        123_000_000_100,
+        unsafe { &*area },
+        &mut shared_recycles,
+        None,
+        &mut retry_counters,
+    );
+    assert!(
+        bindings[0].pending_neigh.is_empty(),
+        "neighbor resolution must consume the pending tail"
+    );
+    assert_eq!(
+        retry_counters.nat_frag_untranslated_dropped, 0,
+        "blanket interface SNAT can translate this address-only tail"
+    );
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len(),
+        1,
+        "exactly one replay must reach the cross-UMEM egress queue"
+    );
+    (
+        retry_counters,
+        bindings[1]
+            .tx_pipeline
+            .pending_tx_local
+            .front()
+            .expect("replay request")
+            .bytes
+            .clone(),
+    )
+}
+
+fn raw_frag_frame_10957(proto: u8, frag_off: u16, id: u16) -> Vec<u8> {
+    let mut f = crate::afxdp::tests_support::TEST_LAN_MAC.to_vec();
+    f.extend_from_slice(&[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00]);
+    let payload = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0];
+    let mut ip = vec![0u8; 20];
+    ip[0] = 0x45;
+    ip[2..4].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+    ip[4..6].copy_from_slice(&id.to_be_bytes());
+    ip[6..8].copy_from_slice(&frag_off.to_be_bytes());
+    ip[8] = 64;
+    ip[9] = proto;
+    ip[12..16].copy_from_slice(&[10, 0, 61, 100]);
+    ip[16..20].copy_from_slice(&[172, 16, 80, 200]);
+    f.extend_from_slice(&ip);
+    f.extend_from_slice(&payload);
+    f
+}
+
+#[test]
+fn blanket_snat_udp_tail_is_translated_after_neighbor_resolution_10957() {
+    // #10957 RED before the fix: this is held with a default NatDecision and
+    // retry transmits source 10.0.61.100. The blanket interface-SNAT rule can
+    // translate an address-only tail, so the deferred path must re-run NAT.
+    let (retry_counters, replay) = retry_blanket_nat_fragment_10957(PROTO_UDP);
+    assert_eq!(
+        retry_counters.nat_frag_untranslated_dropped, 0,
+        "UDP tail can be translated; retry should not need the fail-closed drop"
+    );
+    assert_eq!(
+        &replay[30..34],
+        &[172, 16, 80, 8],
+        "#10957: a blanket-rule UDP tail must leave with the translated source, never 10.0.61.100"
+    );
+}
+
+#[test]
+fn stage11_raw_esp_tail_still_reassembles_after_neighbor_resolution_10957() {
+    // Stage-11 guard: raw ESP is not blanket-SNATed on retry. It keeps its
+    // passthrough source, parks while its neighbor is missing, then transmits
+    // for receiver-side reassembly. The companion Stage-11 poll test pins that
+    // this raw shape is not claimed by the IPsec SA gate.
+    let (retry_counters, replay) = retry_blanket_nat_fragment_10957(PROTO_ESP);
+    assert_eq!(
+        retry_counters.nat_frag_untranslated_dropped, 0,
+        "raw ESP tail must not be fail-closed as a translatable NAT tail"
+    );
+    assert_eq!(
+        &replay[30..34],
+        &[10, 0, 61, 100],
+        "raw ESP reassembly requires the original passthrough source"
+    );
+}
