@@ -664,7 +664,7 @@ func TestReconcileHTTPSReplacesADeadLeg_6827(t *testing.T) {
 
 	// The address is UNCHANGED — this is the reconcile an operator's next commit
 	// makes on a configuration they never touched.
-	s.certGen = func(string) (tls.Certificate, error) { return cert, nil }
+	s.certGen = func(string) (tls.Certificate, *x509.Certificate, error) { return cert, nil, nil }
 	s.listen = func(network, a string) (net.Listener, error) { return newStubLn(), nil }
 	if err := s.ReconcileHTTPS(true, addr); err != nil {
 		t.Fatalf("reconcile over a dead leg: %v", err)
@@ -801,7 +801,7 @@ func TestDeadLegConnectionCannotOutliveRevocation_6827(t *testing.T) {
 		sharedBase: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}),
-		certGen: func(string) (tls.Certificate, error) { return cert, nil },
+		certGen: func(string) (tls.Certificate, *x509.Certificate, error) { return cert, nil, nil },
 	}
 	firstBind := true
 	s.listen = func(network, a string) (net.Listener, error) {
@@ -951,7 +951,7 @@ func newStreamFixture(t *testing.T, ctx context.Context) *streamFixture {
 				time.Sleep(2 * time.Millisecond)
 			}
 		}),
-		certGen: func(string) (tls.Certificate, error) { return cert, nil },
+		certGen: func(string) (tls.Certificate, *x509.Certificate, error) { return cert, nil, nil },
 	}
 	s.listen = func(network, a string) (net.Listener, error) { return kln, nil }
 	s.httpsSlot = s.newAuthSlot()
@@ -1356,7 +1356,7 @@ func TestServeBoundSeversInFlightResponses_6827(t *testing.T) {
 	cert := mintCert(t, "fw", "127.0.0.1")
 	s := &Server{
 		sharedBase: endless,
-		certGen:    func(string) (tls.Certificate, error) { return cert, nil },
+		certGen:    func(string) (tls.Certificate, *x509.Certificate, error) { return cert, nil, nil },
 		httpServer: &http.Server{Addr: addr, Handler: endless},
 	}
 	s.httpsSlot = s.newAuthSlot()

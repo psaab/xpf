@@ -302,8 +302,8 @@ func (s *Server) serveLegLocked(plan legPlan, ln net.Listener, isTLS bool) *list
 		serveErr := make(chan error, 1)
 		go func() {
 			if isTLS {
-				// TLSConfig.Certificates is populated, so ServeTLS with empty
-				// file paths uses those in-memory certs.
+				// The selector validates the current in-memory pair on every
+				// handshake, including clients that omit SNI.
 				serveErr <- srv.ServeTLS(ln, "", "")
 			} else {
 				serveErr <- srv.Serve(ln)
@@ -447,6 +447,7 @@ func (s *Server) Start(ctx context.Context) error {
 			slog.Info("HTTPS API server listening", "addr", s.httpsServer.Addr)
 		}
 	}
+	s.startManagementTLSCertificateMonitor(ctx)
 	return nil
 }
 
@@ -456,8 +457,13 @@ func (s *Server) Start(ctx context.Context) error {
 // they complete while Wait holds it. Call after the root context is cancelled.
 func (s *Server) Wait() {
 	s.lifeMu.Lock()
-	defer s.lifeMu.Unlock()
 	s.wg.Wait()
+	monitorCancel := s.tlsMonitorCancel
+	s.lifeMu.Unlock()
+	if monitorCancel != nil {
+		monitorCancel()
+	}
+	s.tlsMonitorWG.Wait()
 }
 
 // EffectiveHTTPAddr returns the ACTUAL bound address of the live HTTP leg, or ""
@@ -566,10 +572,9 @@ func (s *Server) ReconcileHTTP(addr string) error {
 // for the whole-server rebuild that re-bound the still-held HTTP socket on a
 // TLS-enable (EADDRINUSE). useTLS=false or addr=="" disables HTTPS. A same-addr
 // call over a leg that is actually SERVING is a no-op. On enable/rebind the new
-// HTTPS listener (with its durable self-signed cert — loaded AS-IS from disk on
-// a rebind, freshly minted only when no on-disk pair exists, #1916 D6) is bound
-// and serving BEFORE any old one is retired. A cert or bind failure retains the
-// previous HTTPS state (fail-closed) and returns the error for retry debt.
+// listener with a validated current certificate is bound and serving BEFORE any
+// old one is retired. A cert or bind failure retains the previous HTTPS state
+// (fail-closed) and returns the error for retry debt.
 //
 // The default arm BINDS BEFORE IT BUILDS (#7041) — see the comment on that arm
 // for why, and for the two consequences it carries (the listener is closed if
@@ -588,6 +593,7 @@ func (s *Server) ReconcileHTTPS(useTLS bool, addr string) error {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
 	want := useTLS && addr != ""
+	s.tlsDesired.Store(want)
 	switch {
 	case !want:
 		if s.httpsLeg != nil {
@@ -598,23 +604,10 @@ func (s *Server) ReconcileHTTPS(useTLS bool, addr string) error {
 	case s.httpsLeg.serving() && s.httpsLeg.srv.Addr == addr:
 		return nil
 	default:
-		// BIND FIRST, BUILD SECOND (#7041). Building loads the durable
-		// certificate — certGen has no cache, so LoadX509KeyPair re-reads the
-		// on-disk pair and warnStaleLoadedCert re-runs on every call. The #6827
-		// liveness disjunct in the daemon's reconciler re-enters this arm on
-		// EVERY commit while HTTPS is wanted and not serving (that is the point
-		// of it), so with the old order a box whose bind fails persistently and
-		// whose cert is stale re-emitted the whole stale-cert diagnostic per
-		// commit, forever. A leg that cannot bind serves no client, so there is
-		// nothing a certificate can be stale FOR until the bind succeeds — the
-		// same reachability argument as #7039's loopback gate. The suppression
-		// is bounded in time, not permanent: the first commit that binds emits
-		// the diagnostic.
-		//
-		// The bind failure itself is unaffected — it is still returned on every
-		// attempt, so the caller's retry debt and the daemon's own reconcile
-		// warnings are untouched. Only the CERT diagnostic, which describes a
-		// client that cannot exist yet, stops repeating.
+		// Bind before resolving the certificate so repeated bind failures do not
+		// emit certificate diagnostics for a listener that cannot serve. After
+		// binding, build from the latest validated pair; a build failure closes
+		// this socket before returning.
 		ln, err := s.listen("tcp", addr)
 		if err != nil {
 			return fmt.Errorf("api: bind HTTPS listener %q: %w", addr, err)

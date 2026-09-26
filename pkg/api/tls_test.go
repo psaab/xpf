@@ -304,11 +304,8 @@ func TestGenerateSelfSignedCertMkdirFailureAborts(t *testing.T) {
 	}
 }
 
-// TestHTTPSInstalledOnPersistFailure is the server-level wiring test (#1916
-// D5 step 5 / Codex r2 MED#1): when the TLS pair generates but the disk
-// write fails, generateSelfSignedCert returns a usable cert + nil error, so
-// NewServer still installs the httpsServer. HTTPS is NOT disabled by a disk
-// error.
+// TestHTTPSInstalledOnPersistFailure verifies that HTTPS retains a usable
+// in-memory certificate even when durable storage is unavailable.
 func TestHTTPSInstalledOnPersistFailure(t *testing.T) {
 	resetTLSSeams(t)
 
@@ -325,7 +322,8 @@ func TestHTTPSInstalledOnPersistFailure(t *testing.T) {
 	if s.httpsServer == nil {
 		t.Fatal("httpsServer not installed on persistence failure — HTTPS wrongly disabled by a disk error")
 	}
-	if s.httpsServer.TLSConfig == nil || len(s.httpsServer.TLSConfig.Certificates) == 0 {
-		t.Fatal("httpsServer has no in-memory certificate")
+	cert := s.HTTPSCertForTest()
+	if cert == nil || !usableCert(*cert) {
+		t.Fatal("HTTPS selector has no usable in-memory certificate")
 	}
 }

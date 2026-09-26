@@ -192,6 +192,8 @@ func (m *managementReconciler) desired(cfg *config.Config) api.Config {
 	next.Addr = m.d.opts.APIAddr
 	next.HTTPSAddr = ""
 	next.TLS = false
+	next.TLSCertificate = ""
+	next.TLSPrivateKey = ""
 	next.Auth = nil
 	m.d.resolveAPIBinds(&next, cfg)
 	return next
@@ -425,6 +427,11 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	}
 
 	var errs []error
+	if next.TLS {
+		if err := m.srv.ReconcileTLSCertificate(next.TLSCertificate, next.TLSPrivateKey); err != nil {
+			errs = append(errs, err)
+		}
+	}
 
 	// Whether every listener that is CURRENTLY serving sits at an address `next`
 	// names. Read here, before any rebind, it says whether some live listener is
@@ -548,6 +555,12 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 			errs = append(errs, err)
 		} else {
 			m.cur.tls, m.cur.httpsAddr = next.TLS, next.HTTPSAddr
+		}
+	}
+
+	if !next.TLS {
+		if err := m.srv.ReconcileTLSCertificate(next.TLSCertificate, next.TLSPrivateKey); err != nil {
+			errs = append(errs, err)
 		}
 	}
 

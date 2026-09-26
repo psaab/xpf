@@ -389,6 +389,8 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 	if cfg != nil && cfg.System.Services != nil &&
 		cfg.System.Services.WebManagement != nil {
 		wm := cfg.System.Services.WebManagement
+		apiCfg.TLSCertificate = wm.TLSCertificate
+		apiCfg.TLSPrivateKey = wm.TLSPrivateKey
 		// #5715: an explicitly configured `web-management http` binds the
 		// canonical Junos J-Web port TCP/80 (webmgmt SSOT — the SAME port the
 		// host-inbound `http` service token admits, so the listener and the
