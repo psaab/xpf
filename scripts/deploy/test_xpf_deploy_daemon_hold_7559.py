@@ -203,6 +203,8 @@ def _run_roll(fake, args):
                           lambda *a, **k: None),
         mock.patch.object(xpf_deploy, "_verified_image_manifest_versions",
                           lambda *a, **k: dict(NEW_MANIFEST)),
+        mock.patch.object(xpf_deploy, "_verified_expected_qcow2_digest",
+                          lambda *a, **k: ("xpf-2.0.0-newimage.qcow2", "a" * 64)),
         mock.patch.object(xpf_deploy.os.path, "isfile", lambda p: True),
         mock.patch("time.sleep", lambda *a, **k: None),
         mock.patch("time.time", _Clock()),
@@ -483,8 +485,7 @@ class DaemonReadinessTests(unittest.TestCase):
 
 
 class HookContractTests(unittest.TestCase):
-    """The recreate hook is told what this roll expects and that the daemon
-    should be held. Purely additive: a pre-#7559 hook ignores the variables."""
+    """The recreate hook receives identity, daemon-hold, and image-integrity inputs."""
 
     def test_hook_env_carries_the_hold_contract(self):
         seen = {}
@@ -494,17 +495,22 @@ class HookContractTests(unittest.TestCase):
 
         def _fake_run(argv, env=None, **kw):
             seen.update(env or {})
+            Path(env["XPF_ROLL_ATTESTATION_FILE"]).write_text(
+                env["XPF_ROLL_EXPECT_SHA256"] + "\n")
             return _Proc()
 
         args = types.SimpleNamespace(recreate_hook="/bin/true")
         with mock.patch.object(xpf_deploy.subprocess, "run", _fake_run):
             xpf_deploy._recreate_node_from_image(
                 xpf_deploy.Runner(False), "ssh", "fw0", args,
-                expect_version=NEWVER, expect_node_id=0, daemon_hold=True)
+                expect_version=NEWVER, expect_node_id=0,
+                expect_sha256="a" * 64, daemon_hold=True)
         self.assertEqual(seen.get("XPF_ROLL_NODE"), "fw0")
         self.assertEqual(seen.get("XPF_ROLL_DAEMON_HOLD"), "1")
         self.assertEqual(seen.get("XPF_ROLL_EXPECT_VERSION"), NEWVER)
         self.assertEqual(seen.get("XPF_ROLL_EXPECT_NODE_ID"), "0")
+        self.assertEqual(seen.get("XPF_ROLL_EXPECT_SHA256"), "a" * 64)
+        self.assertIn("XPF_ROLL_ATTESTATION_FILE", seen)
 
     def test_node_id_zero_is_still_exported(self):
         # node-id 0 is falsy; an `if expect_node_id:` guard would silently drop

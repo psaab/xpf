@@ -159,6 +159,8 @@ def _patches(fake):
                           lambda *a, **k: None),
         mock.patch.object(xpf_deploy, "_verified_image_manifest_versions",
                           lambda *a, **k: dict(NEW_MANIFEST)),
+        mock.patch.object(xpf_deploy, "_verified_expected_qcow2_digest",
+                          lambda *a, **k: ("xpf-2.0.0-newimage.qcow2", "a" * 64)),
         mock.patch.object(xpf_deploy.os.path, "isfile", lambda p: True),
         mock.patch("time.sleep", lambda *a, **k: None),
         mock.patch("time.time", _Clock()),

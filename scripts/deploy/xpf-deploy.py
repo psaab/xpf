@@ -3186,6 +3186,40 @@ def _default_sums_for_manifest(manifest_path):
     return None
 
 
+def _verified_expected_qcow2_digest(manifest_path, sums_path, sig_path,
+                                   pubkey_path=None):
+    """#10852: resolve this image's qcow2 digest from the signed set."""
+    HERE_D = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE_D), "dist"))
+    import sign  # noqa: E402
+    verified = sign.verify_manifest_map(sums_path, sig_path, pubkey_path)
+    sidecar = os.path.basename(manifest_path)
+    qcow2_name = (sidecar[:-len(".manifest")] + ".qcow2"
+                  if sidecar.endswith(".manifest") else None)
+    if qcow2_name in verified:
+        return qcow2_name, verified[qcow2_name].lower()
+    # Only a single signed qcow2 can resolve a non-conventional sidecar name.
+    qcow2_entries = sorted(name for name in verified if name.endswith(".qcow2"))
+    if qcow2_name is None and len(qcow2_entries) == 1:
+        name = qcow2_entries[0]
+        return name, verified[name].lower()
+    if qcow2_name is not None:
+        raise sign.SignError(
+            f"signed manifest {os.path.basename(sums_path)} has no digest for "
+            f"the expected image {qcow2_name!r} (#10852)")
+    raise sign.SignError(
+        f"cannot resolve the expected qcow2 in signed manifest "
+        f"{os.path.basename(sums_path)}: found {len(qcow2_entries)} entries; "
+        f"refusing to guess (#10852)")
+
+
+def _parse_hook_attestation(text):
+    """Parse the recreate hook's installed-image digest, or return None."""
+    match = re.fullmatch(r"\s*([0-9a-fA-F]{64})\s*", text or "")
+    if match:
+        return match.group(1).lower()
+
+
 def _u16(s):
     """Parse a uint16 (matches the Go strconv.ParseUint(.,10,16) gate semantics —
     MEDIUM Codex: Python int() would accept -1 / 70000). Returns None on failure
@@ -3282,6 +3316,17 @@ def cmd_image_roll(args):
         die(f"image-roll: FAILED to verify {os.path.basename(args.manifest)} "
             f"against the signed {os.path.basename(sums_path)} — the mixed-base "
             f"gate must read signed bytes (#5042): {e}")
+    # #10852: bind the signed checksum set to the qcow2 bytes the hook installs.
+    # Resolve before the first node mutation; never infer an image from alias
+    # names, list order, or the hook's selection policy.
+    try:
+        expected_qcow2, expected_sha256 = _verified_expected_qcow2_digest(
+            args.manifest, sums_path, sig_path, args.pubkey)
+    except Exception as e:
+        die(f"image-roll: FAILED to resolve the signed qcow2 digest from "
+            f"{os.path.basename(sums_path)} (#10852): {e}")
+    print(f"   signed image bytes: {expected_qcow2} sha256={expected_sha256}")
+
 
     # #9325: the same signed sidecar says whether the image passed the in-guest
     # verify-dataplane gate. A --skip-validate bake signs `validated: false`, and
@@ -3448,6 +3493,7 @@ def cmd_image_roll(args):
                 keepalive_interval=max(5, lease_ttl // 3),
                 expect_version=new_img.get("xpf-version", ""),
                 expect_node_id=node_ids[node],
+                expect_sha256=expected_sha256,
                 daemon_hold=hold_supported)
             if recreate_lost:
                 die(f"{recreate_lost}: LOST the roll lease while the recreate hook "
@@ -3655,18 +3701,22 @@ def cmd_image_roll(args):
 
 def _recreate_node_from_image(runner, backend, node, args, keepalive=None,
                              keepalive_interval=None, expect_version=None,
-                             expect_node_id=None, daemon_hold=True):
+                             expect_node_id=None, expect_sha256=None,
+                             daemon_hold=True):
     """Recreate ONE node from the new image. Delegates to the operator-supplied
-    recreate hook (a script that does the backend-specific destroy+launch+day-0),
-    because the recreate mechanics differ per environment (incus launch, libvirt
+    recreate hook (a script that does backend-specific destroy+launch+day-0),
+    because the mechanics differ per environment (incus launch, libvirt
     redefine, bare-metal re-flash). The hook gets XPF_ROLL_NODE and
-    XPF_ROLL_BACKEND in the env, plus (#7559) XPF_ROLL_EXPECT_VERSION,
-    XPF_ROLL_EXPECT_NODE_ID and XPF_ROLL_DAEMON_HOLD=1 — the identity this roll
-    expects the recreated node to have, and the request that xpfd be kept from
-    auto-starting on its first boot so the driver can prove that identity
-    BEFORE the node is able to win an election. The extra variables are purely
-    additive: a pre-#7559 hook ignores them and behaves exactly as before, so
-    the caller VERIFIES the hold instead of assuming it.
+    XPF_ROLL_BACKEND, plus (#7559) XPF_ROLL_EXPECT_VERSION,
+    XPF_ROLL_EXPECT_NODE_ID and XPF_ROLL_DAEMON_HOLD=1 — the identity this
+    roll expects, and the request that xpfd be held before first boot. The
+    driver verifies the hold rather than assuming it.
+
+    For #10852 the hook also gets XPF_ROLL_EXPECT_SHA256, the signed qcow2
+    digest, and XPF_ROLL_ATTESTATION_FILE. It MUST compare the selected image's
+    digest and refuse BEFORE destroying the node; after installing those exact
+    bytes, it writes the same 64-hex digest to the attestation file. The driver
+    requires an exact match before polling or rejoining.
 
     LEASE RENEWAL RUNS *DURING* THE HOOK (#6762). The caller passes `keepalive`,
     a zero-argument callable returning the name of a target whose lease is
@@ -3697,28 +3747,48 @@ def _recreate_node_from_image(runner, backend, node, args, keepalive=None,
             f"This keeps the never-both-down sequencing here while the recreate "
             f"mechanics stay environment-specific.")
     env = dict(os.environ, XPF_ROLL_NODE=node, XPF_ROLL_BACKEND=backend)
-    # #7559: tell the hook what this roll expects of the node it is about to
-    # create, and ask it to hold the daemon. Purely ADDITIVE — a hook written
-    # before this change ignores the extra variables and behaves exactly as it
-    # did — which is why the driver VERIFIES the hold rather than assuming it.
+    # #7559: tell the hook what this roll expects of the recreated node and
+    # ask it to hold xpfd; the driver verifies the hold rather than assuming it.
     if expect_version is not None:
         env["XPF_ROLL_EXPECT_VERSION"] = str(expect_version)
     if expect_node_id is not None:
         env["XPF_ROLL_EXPECT_NODE_ID"] = str(expect_node_id)
+    attestation_dir = None
+    attestation_path = None
+    if expect_sha256 is not None:
+        env["XPF_ROLL_EXPECT_SHA256"] = str(expect_sha256)
+        attestation_dir = tempfile.mkdtemp(prefix="xpf-roll-attestation-")
+        os.chmod(attestation_dir, 0o700)
+        attestation_path = os.path.join(attestation_dir, "installed-sha256")
+        env["XPF_ROLL_ATTESTATION_FILE"] = attestation_path
     if daemon_hold:
         env["XPF_ROLL_DAEMON_HOLD"] = "1"
-    print(f"   recreating {node} via {hook}...")
-    if keepalive is None:
-        # No reservation to keep alive (dry-run / single-node paths).
-        r = subprocess.run([hook, node], env=env)
-        rc = r.returncode
-        lost = None
-    else:
-        rc, lost = _run_with_lease_keepalive([hook, node], env, keepalive,
-                                             keepalive_interval)
-    if rc != 0:
-        die(f"recreate hook for {node} failed (rc={rc}); STOPPING.")
-    return lost
+    try:
+        print(f"   recreating {node} via {hook}...")
+        if keepalive is None:
+            # No reservation to keep alive (dry-run / single-node paths).
+            r = subprocess.run([hook, node], env=env)
+            rc = r.returncode
+            lost = None
+        else:
+            rc, lost = _run_with_lease_keepalive(
+                [hook, node], env, keepalive, keepalive_interval)
+        if rc != 0:
+            die(f"recreate hook for {node} failed (rc={rc}); STOPPING.")
+        if expect_sha256 is not None:
+            try:
+                with open(attestation_path, encoding="ascii") as f:
+                    attested = _parse_hook_attestation(f.read())
+            except (OSError, UnicodeError):
+                attested = None
+            if attested != str(expect_sha256).lower():
+                die(f"recreate hook for {node} did not attest the signed image "
+                    f"bytes (#10852): expected SHA256 {expect_sha256}, got "
+                    f"{attested or 'no valid attestation'}; refusing to poll or rejoin")
+        return lost
+    finally:
+        if attestation_dir:
+            shutil.rmtree(attestation_dir, ignore_errors=True)
 
 
 def _run_with_lease_keepalive(argv, env, keepalive, interval):
@@ -3876,8 +3946,11 @@ def main():
                               "the node from the new image + re-apply day-0 "
                               "(backend-specific); receives XPF_ROLL_NODE, "
                               "XPF_ROLL_BACKEND, XPF_ROLL_EXPECT_VERSION, "
-                              "XPF_ROLL_EXPECT_NODE_ID and XPF_ROLL_DAEMON_HOLD "
-                              "in env")
+                              "XPF_ROLL_EXPECT_NODE_ID, XPF_ROLL_DAEMON_HOLD, "
+                              "XPF_ROLL_EXPECT_SHA256 and "
+                              "XPF_ROLL_ATTESTATION_FILE in env. The hook MUST "
+                              "verify the digest before destroying the node, "
+                              "then attest it to the provided file.")
         sub.add_argument("--allow-unvalidated", action="store_true",
                          dest="allow_unvalidated",
                          help="roll an image whose signed manifest records "
