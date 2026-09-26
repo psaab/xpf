@@ -3164,25 +3164,34 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         .unwrap_or_else(|_| screen_parse_error_info(&meta, flow));
                         let new_flow_screen_reason = (if packet_fabric_ingress {
                             // #4155: a fabric-redirected packet was already
-                            // scan/sweep-screened on the peer ingress node
-                            // before it crossed the fabric link. In the
-                            // session-sync race window it can arrive here as a
-                            // session MISS; re-running the per-(zone,src)
-                            // scan/sweep counter on the RG owner would
-                            // double-count the same new flow. The ingress node
-                            // owns scan/sweep for this packet — skip it here.
+                            // screened on the peer ingress node before it
+                            // crossed the fabric link. In the session-sync
+                            // race window it can arrive here as a session MISS;
+                            // re-running the miss-time SYN-flood and
+                            // scan/sweep counters on the RG owner would
+                            // double-count this new flow. The ingress node owns
+                            // those counters, so skip them here.
                             // (Session-limit enforcement below still runs: it
                             // guards the owner's own SessionTable, which the
                             // ingress node did not populate.)
                             None
                         } else {
-                            screen.scan_sweep_drop_on_new_flow(
-                                from_zone,
-                                from_zone_id,
-                                &screen_pkt,
-                                // #4114: scan/sweep windows are microseconds.
-                                now_ns / 1_000,
-                            )
+                            screen
+                                .syn_ack_flood_drop_on_new_flow(
+                                    from_zone,
+                                    &screen_pkt,
+                                    now_ns,
+                                    now_secs,
+                                )
+                                .or_else(|| {
+                                    screen.scan_sweep_drop_on_new_flow(
+                                        from_zone,
+                                        from_zone_id,
+                                        &screen_pkt,
+                                        // #4114: scan/sweep windows are microseconds.
+                                        now_ns / 1_000,
+                                    )
+                                })
                         })
                         // #2134: per-IP session-limit enforcement at the
                             // new-flow decision. This dominates BOTH counted
@@ -3194,8 +3203,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #2128). Keys on the pre-NAT original src/dst
                             // (`flow.src_ip`/`flow.dst_ip`), matching Junos
                             // per-source-IP semantics and the screen stage's
-                            // own tuple. Evaluated only if scan/sweep did not
-                            // already decide a drop.
+                            // own tuple. Evaluated only if miss-time flood or
+                            // scan/sweep screening did not already decide a drop.
                             .or_else(|| {
                                 new_flow_session_limit_drop(
                                     worker_ctx.forwarding,

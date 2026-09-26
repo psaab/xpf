@@ -8586,6 +8586,76 @@ fn completed_handshake_still_gets_the_established_window_6752() {
          fix trades a half-open leak for a reaped live session",
     );
 }
+/// #10891: a SYN-ACK-first pickup is embryonic, and without the peer ACK both
+/// directions must reap on the opening window rather than the 300 s idle
+/// timeout. Even a retransmitted SYN-ACK is not handshake completion.
+#[test]
+fn syn_ack_first_without_reverse_ack_reaps_on_opening_window_10891() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
+
+    for key in [&forward, &reverse] {
+        let entry = table.entry_by_key(key).expect("SYN-ACK-first half");
+        assert!(!entry.established);
+        assert!(entry.handshake_pending);
+        assert!(entry.syn_ack_first);
+        assert_eq!(entry.expires_after_ns, table.timeouts.tcp_opening_ns);
+    }
+    let retransmit = now + 15_000_000_000;
+    assert!(
+        table
+            .lookup(&forward, retransmit, TCP_SYN | TCP_ACK)
+            .is_some()
+    );
+    for key in [&forward, &reverse] {
+        let entry = table.entry_by_key(key).expect("SYN-ACK-first half");
+        assert!(!entry.established);
+        assert!(entry.handshake_pending);
+        assert!(entry.syn_ack_first);
+        assert_eq!(entry.expires_after_ns, table.timeouts.tcp_opening_ns);
+    }
+
+    let past = retransmit + table.timeouts.tcp_opening_ns + 5_000_000_000;
+    table.last_gc_ns = past - 2_000_000_000;
+    table.expire_stale_entries(past);
+    assert!(table.entry_by_key(&forward).is_none());
+    assert!(table.entry_by_key(&reverse).is_none());
+}
+
+/// #10891: for an asymmetric SYN-ACK-first pickup, the next ACK arrives on
+/// the reverse half and completes the handshake there. Promotion must clear
+/// the pending marker on both halves so the companion probe retains the
+/// established flow past the opening deadline.
+#[test]
+fn syn_ack_first_reverse_ack_promotes_to_established_10891() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
+
+    assert!(table.lookup(&reverse, now + 1_000_000, TCP_ACK).is_some());
+    for key in [&forward, &reverse] {
+        let entry = table.entry_by_key(key).expect("promoted handshake half");
+        assert!(entry.established);
+        assert!(!entry.handshake_pending);
+        assert!(!entry.syn_ack_first);
+    }
+    assert_eq!(
+        table
+            .entry_by_key(&reverse)
+            .expect("ACK half")
+            .expires_after_ns,
+        table.timeouts.tcp_established_ns
+    );
+
+    let past_opening = now + table.timeouts.tcp_opening_ns + 5_000_000_000;
+    table.last_gc_ns = past_opening - 2_000_000_000;
+    table.expire_stale_entries(past_opening);
+    assert!(table.entry_by_key(&forward).is_some());
+    assert!(table.entry_by_key(&reverse).is_some());
+}
 
 /// #6752, the second half of the fix: the companion probe must not resurrect a
 /// half-open flow that the SERVER keeps refreshing.

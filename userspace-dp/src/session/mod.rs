@@ -740,22 +740,23 @@ struct SessionEntry {
     /// set together with `closing`, the timeout selection uses the short
     /// `TCP_RST_TIMEOUT_NS` instead of the FIN close timeout.
     reset: bool,
-    /// #3152/#10889: per-entry promotion state used to derive the idle class.
-    /// For TCP, false means a bare SYN is OPENING; a reverse SYN-ACK sets this
-    /// true while `handshake_pending` keeps the entry on `tcp_opening_ns` until
-    /// the handshake completes. For non-TCP sessions with a custom app timeout,
-    /// false keeps the global protocol timeout until a genuine reverse packet
-    /// promotes both halves. Non-TCP sessions without an app override start
-    /// true because both states use the same global window.
+    /// #3152/#10889/#10891: per-entry promotion state used to derive the idle
+    /// class. For TCP, false means OPENING: bare-SYN and SYN-ACK-first pickups
+    /// start false. A reverse SYN-ACK promotes a SYN-first flow while
+    /// `handshake_pending` keeps it on `tcp_opening_ns`; SYN-ACK-first pickups
+    /// stay false until their reverse ACK completes the handshake. Other TCP
+    /// midstream pickups start true. For non-TCP sessions with a custom app
+    /// timeout, false keeps the global protocol timeout until a genuine reverse
+    /// packet promotes both halves; sessions without an app override start true.
     ///
-    /// Node-local derived state: this is not serialized. TCP peer-synced
-    /// entries remain established; a non-TCP app-timeout entry imports gated
-    /// because reply evidence is not carried on the HA wire.
+    /// Node-local derived state: this is not serialized. TCP peer-synced entries
+    /// remain established; non-TCP app-timeout imports remain gated because
+    /// reply evidence is not carried on the HA wire.
     established: bool,
-    /// #6752: `established` was set by the reverse SYN-ACK, so it does NOT mean
-    /// the three-way handshake COMPLETED. This bit is the gap: true from the
-    /// moment the SYN-ACK promotes the flow until the handshake-completing
-    /// forward segment arrives.
+    /// #6752/#10891: `handshake_pending` marks the gap after a SYN-ACK is seen
+    /// (or a SYN-ACK-first session is installed) but before its completing ACK.
+    /// For a SYN-first session that is the reverse SYN-ACK then the forward
+    /// ACK; a SYN-ACK-first pickup waits for the reverse ACK.
     ///
     /// It exists because two correct changes combined into an incorrect
     /// outcome. #4109 (2026-07-04) promoted on the SYN-ACK and deliberately did
@@ -787,6 +788,11 @@ struct SessionEntry {
     /// serialized, so this is not on any wire and an HA peer re-derives it from
     /// the segments it sees.
     handshake_pending: bool,
+    /// #10891: the OPENING session was installed from a SYN-ACK. While true,
+    /// only a non-SYN ACK on the reverse half completes the handshake; this
+    /// prevents a retransmitted SYN-ACK in the installing direction from
+    /// clearing `handshake_pending`.
+    syn_ack_first: bool,
     /// #965: absolute wheel tick at which this session is scheduled to
     /// be checked for expiration. Updated on every push to the wheel.
     /// A WheelEntry whose `scheduled_tick != entry.wheel_tick` is a
@@ -2807,9 +2813,9 @@ impl SessionTable {
         let mut rebucket = false;
         if let Some(entry) = self.entry_by_key_mut(&companion_key) {
             if established && matches!(companion_key.protocol, PROTO_TCP) {
-                // F16: mirror a genuine reverse SYN-ACK promotion onto the TCP
-                // forward companion. Its handshake-completing segment will
-                // stamp the established idle window later.
+                // A reverse SYN-ACK after SYN-first install, or a reverse ACK
+                // after SYN-ACK-first install, promotes the TCP half and its
+                // companion. A completing ACK clears the pending gap below.
                 //
                 // #6752: keep both halves in the opening class until the
                 // handshake completes, so a client that never ACKs the SYN-ACK
@@ -2834,11 +2840,11 @@ impl SessionTable {
                 rebucket = true;
             }
             if handshake_completed {
-                // #6752: the matched (forward) half saw the completing segment;
-                // clear the companion's gap too, so the probe may extend this
-                // flow again and the reverse half's next segment stamps the
-                // established window.
+                // #6752/#10891: the completing segment clears the matched half's
+                // gap; clear the companion too so the established half can
+                // retain its full idle window.
                 entry.handshake_pending = false;
+                entry.syn_ack_first = false;
             }
             if close {
                 // F17: a FIN/RST on one half kills the whole flow. Stamp the
