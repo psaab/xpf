@@ -112,7 +112,19 @@ export MAX_INTERFACES
 # Static checks cannot substitute: the 2026-06-10 incident objects
 # differed by 7 static insns; the blowup was the verifier state walk.
 SHIMVERIFY="$(mktemp -t shimverify.XXXXXX)"
-trap 'rm -f "${SHIMVERIFY}"' EXIT
+SHIMVERIFY_ATTESTATION=""
+cleanup() {
+	rm -f "${SHIMVERIFY}"
+	if [[ -z "${SHIMVERIFY_ATTESTATION}" ]]; then
+		return
+	fi
+	if [[ "$(id -u)" -eq 0 ]]; then
+		rm -f "${SHIMVERIFY_ATTESTATION}"
+	else
+		sudo -n rm -f "${SHIMVERIFY_ATTESTATION}" 2>/dev/null || true
+	fi
+}
+trap cleanup EXIT
 (
 	cd "${REPO_ROOT}"
 	"${GO_BIN}" build -o "${SHIMVERIFY}" ./cmd/shimverify
@@ -124,9 +136,12 @@ run_verifier() {
 	# documented override silently does nothing.
 	local allow_low="${XPF_SHIM_ALLOW_LOW_HEADROOM:-0}"
 	if [[ "$(id -u)" -eq 0 ]]; then
-		XPF_SHIM_ALLOW_LOW_HEADROOM="${allow_low}" "${SHIMVERIFY}" "${CANDIDATE}"
+		SHIMVERIFY_ATTESTATION="$(mktemp -t shimverify-attestation.XXXXXX)" || return 1
+		XPF_SHIM_ALLOW_LOW_HEADROOM="${allow_low}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	elif sudo -n true 2>/dev/null; then
-		sudo -n env "XPF_SHIM_ALLOW_LOW_HEADROOM=${allow_low}" "${SHIMVERIFY}" "${CANDIDATE}"
+		SHIMVERIFY_ATTESTATION="$(sudo -n mktemp -t shimverify-attestation.XXXXXX)" || return 99
+		sudo -n chmod 0644 "${SHIMVERIFY_ATTESTATION}" || return 99
+		sudo -n env "XPF_SHIM_ALLOW_LOW_HEADROOM=${allow_low}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	else
 		return 99
 	fi
@@ -193,7 +208,10 @@ if [[ "${UNPINNED}" -eq 1 && "${XPF_SHIM_ALLOW_UNPINNED_INSTALL:-0}" != "1" ]]; 
   the PR reproducibility gate regenerates with the pin and requires a clean git diff)."
 fi
 
+# Install the verifier's attestation beside the candidate object. Its hash
+# binds the verdict to the object bytes installed immediately after it.
 install -m 0644 "${CANDIDATE}" "${OUT_FILE}"
+install -m 0644 "${SHIMVERIFY_ATTESTATION}" "${SCRIPT_DIR}/userspace_xdp_gate_verdict.json"
 echo "build-userspace-xdp.sh: ${VERIFY_VERDICT} — installed ${OUT_FILE} (toolchain ${TOOLCHAIN}, bpf-linker ${BPF_LINKER_VERSION})"
 
 # --- Refresh the source→object freshness manifest (#4977). ---

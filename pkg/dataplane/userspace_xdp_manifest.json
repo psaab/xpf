@@ -20,7 +20,7 @@
     },
     {
       "path": "pkg/dataplane/build-userspace-xdp.sh",
-      "sha256": "41c0ea166157260d1da1839a8c9ed625ec7ad7503f9f2bb01b944c31fa2c332e"
+      "sha256": "9d252081a2f8bc2bc3153b22fd9bfbf3259c2e3fe0f411aef0402e7f9a4dd2df"
     },
     {
       "path": "userspace-xdp/.cargo/config.toml",

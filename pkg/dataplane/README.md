@@ -485,6 +485,15 @@ Guard layers (`build-userspace-xdp.sh`):
      it set prints a staleness note, because the variable lives in the
      ambient environment and a value exported once would otherwise
      disarm the gate forever.
+   - **Durable gate verdict (#10909)**: Every successful install writes
+     `pkg/dataplane/userspace_xdp_gate_verdict.json` with the UTC verification
+     time, PASS/OVERRIDDEN verdict, consumed-override bit, reason, measurement
+     status and verifier stats, plus the candidate object's SHA-256. This
+     run-specific record stays separate from the deterministic source-freshness
+     manifest. The `retain-shim-gate-verdict.yml` release-published workflow
+     validates the sidecar against the tagged object and attaches it to the
+     GitHub Release; missing or mismatched provenance fails closed. GitHub
+     retains the asset with its release until that release is deleted.
    - 3% is a tripwire, not a performance target: it says "the next change
      here will not fit" while there is still room to plan. The comparison
      is `<`, so an object leaving EXACTLY 3.00% passes;

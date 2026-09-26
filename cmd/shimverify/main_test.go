@@ -2,9 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 )
@@ -331,5 +337,118 @@ func TestShimverifyNeverPassesAnUnmeasuredObject(t *testing.T) {
 				t.Errorf("decide(unmeasured %+v, overridden=true) did not record the override as consumed, so the run would install without announcing itself", stats)
 			}
 		}
+	}
+}
+
+// The durable gate record is the only evidence left after the build log
+// expires. Exercise shimverify's actual output path for both a normal pass
+// and both override reasons, including the hash that binds the verdict to
+// the installed object.
+func TestShimverifyWritesGateVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stats      dataplane.ShimVerifierStats
+		override   string
+		wantExit   int
+		wantLabel  string
+		wantReason string
+	}{
+		{
+			name:       "measured pass",
+			stats:      dataplane.ShimVerifierStats{ProcessedInsns: 800000, InsnLimit: 1000000},
+			wantExit:   0,
+			wantLabel:  "PASS",
+			wantReason: "meets",
+		},
+		{
+			name:       "measured low-headroom override",
+			stats:      dataplane.ShimVerifierStats{ProcessedInsns: 990796, InsnLimit: 1000000},
+			override:   "1",
+			wantExit:   6,
+			wantLabel:  "OVERRIDDEN",
+			wantReason: "below",
+		},
+		{
+			name:       "unmeasured override",
+			override:   "1",
+			wantExit:   6,
+			wantLabel:  "OVERRIDDEN",
+			wantReason: "could not be measured",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			objectPath := filepath.Join(dir, "candidate.o")
+			object := []byte("candidate object for verdict binding")
+			if err := os.WriteFile(objectPath, object, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			verdictPath := filepath.Join(dir, "gate-verdict.json")
+			var stdout, stderr bytes.Buffer
+			gotExit := run(
+				[]string{"shimverify", objectPath, "--gate-verdict", verdictPath},
+				&stdout, &stderr,
+				func(string) string { return tc.override },
+				func(path string) (dataplane.ShimVerifierStats, error) {
+					if path != objectPath {
+						t.Fatalf("verifier path = %q, want %q", path, objectPath)
+					}
+					return tc.stats, nil
+				},
+			)
+			if gotExit != tc.wantExit {
+				t.Fatalf("run exit = %d, want %d; stdout=%q stderr=%q", gotExit, tc.wantExit, stdout.String(), stderr.String())
+			}
+
+			raw, err := os.ReadFile(verdictPath)
+			if err != nil {
+				t.Fatalf("read verdict: %v", err)
+			}
+			var got gateVerdict
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("decode verdict: %v", err)
+			}
+			sum := sha256.Sum256(object)
+			if got.SchemaVersion != 1 || got.ObjectSHA256 != hex.EncodeToString(sum[:]) {
+				t.Errorf("schema/object binding = (%d, %q), want schema 1 and candidate SHA-256", got.SchemaVersion, got.ObjectSHA256)
+			}
+			if _, err := time.Parse(time.RFC3339Nano, got.VerifiedAt); err != nil {
+				t.Errorf("verified_at %q is not a timestamp: %v", got.VerifiedAt, err)
+			}
+			if got.Verdict != tc.wantLabel || got.OverrideConsumed != (tc.override == "1") {
+				t.Errorf("verdict/override = (%q, %v), want (%q, %v)", got.Verdict, got.OverrideConsumed, tc.wantLabel, tc.override == "1")
+			}
+			if !strings.Contains(got.Reason, tc.wantReason) {
+				t.Errorf("reason %q does not explain %q", got.Reason, tc.wantReason)
+			}
+			if got.Stats.Measured != tc.stats.Measured() ||
+				got.Stats.ProcessedInsns != tc.stats.ProcessedInsns ||
+				got.Stats.InsnLimit != tc.stats.InsnLimit ||
+				got.Stats.HeadroomPct != tc.stats.HeadroomPct() ||
+				got.Stats.SlackToFloorInsns != tc.stats.SlackToFloorInsns(dataplane.UserspaceShimMinVerifierHeadroomPct) ||
+				got.Stats.FloorPct != dataplane.UserspaceShimMinVerifierHeadroomPct {
+				t.Errorf("recorded stats = %+v, want source stats %+v and floor %.1f",
+					got.Stats, tc.stats, dataplane.UserspaceShimMinVerifierHeadroomPct)
+			}
+		})
+	}
+}
+
+func TestShimverifyDoesNotPassWhenVerdictCannotBeRecorded(t *testing.T) {
+	dir := t.TempDir()
+	objectPath := filepath.Join(dir, "candidate.o")
+	if err := os.WriteFile(objectPath, []byte("candidate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	got := run(
+		[]string{"shimverify", objectPath, "--gate-verdict", filepath.Join(dir, "missing", "verdict.json")},
+		&stdout, &stderr, func(string) string { return "" },
+		func(string) (dataplane.ShimVerifierStats, error) {
+			return dataplane.ShimVerifierStats{ProcessedInsns: 800000, InsnLimit: 1000000}, nil
+		},
+	)
+	if got != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "write gate verdict") {
+		t.Fatalf("run = %d stdout=%q stderr=%q; want fail-closed verdict write error", got, stdout.String(), stderr.String())
 	}
 }

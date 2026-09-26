@@ -41,11 +41,9 @@
 // without comment. 6 still INSTALLS (the override means the operator
 // accepted the risk) but it is visible to the recipe and to CI as an exit
 // code and as the `OVERRIDDEN` status word on stdout, without anyone
-// parsing stderr. It is NOT recorded in
-// pkg/dataplane/userspace_xdp_manifest.json: that file carries the object
-// hash, the shim facts and the hashed inputs, and nothing about how the
-// gate was satisfied. An object installed under an override is therefore
-// indistinguishable from one that passed, ONCE THE BUILD LOG IS GONE.
+// parsing stderr. At install time the build recipe asks shimverify to write
+// a sidecar with the decision, override bit, verifier stats, reason and hash
+// of the candidate object.
 //
 // Exit codes: 0 PASS (measured, above the floor), 2 usage, 3 verifier
 // REJECT, 4 loads but headroom below the floor, 5 loads but headroom could
@@ -54,10 +52,14 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 )
@@ -89,16 +91,17 @@ func main() {
 //
 // It re-derives NOTHING. `decide` maps (stats, override) to a verdict; the
 // switch below picks the matching diagnostic off `decision.refusal` and every
-// path returns `decision.exit`. Adding a predicate here would reopen exactly
-// the divergence documented on `main`.
+// path returns `decision.exit`. The optional `--gate-verdict` path records the
+// same decision before it is presented.
 func run(
 	args []string,
 	stdout, stderr io.Writer,
 	getenv func(string) string,
 	verify func(string) (dataplane.ShimVerifierStats, error),
 ) int {
-	if len(args) != 2 {
-		fmt.Fprintln(stderr, "usage: shimverify <userspace_xdp_bpfel.o>")
+	withVerdict := len(args) == 4 && args[2] == "--gate-verdict" && args[3] != ""
+	if len(args) != 2 && !withVerdict {
+		fmt.Fprintln(stderr, "usage: shimverify <userspace_xdp_bpfel.o> [--gate-verdict path]")
 		return 2
 	}
 	path := args[1]
@@ -113,6 +116,12 @@ func run(
 	}
 
 	decision := decide(stats, getenv(allowLowHeadroomEnv) == "1")
+	if withVerdict && (decision.exit == 0 || decision.exit == 6) {
+		if err := writeGateVerdict(args[3], path, stats, decision); err != nil {
+			fmt.Fprintf(stderr, "shimverify: write gate verdict %s: %v\n", args[3], err)
+			return 1
+		}
+	}
 	// #6884: the banner carries the floor's remaining SLACK, not just the
 	// headroom. Headroom answers "how close to the 1M wall"; slack answers the
 	// question this gate's sensitivity actually rests on — "how much can still
@@ -339,4 +348,73 @@ func announceOverrideConsumed(w io.Writer, path, reason string) {
 			"shimverify:   environment — unset it and re-run.\n"+
 			"shimverify: ============================================================\n",
 		allowLowHeadroomEnv, path, reason)
+}
+
+type gateVerdictStats struct {
+	Measured          bool    `json:"measured"`
+	ProcessedInsns    int     `json:"processed_insns"`
+	InsnLimit         int     `json:"insn_limit"`
+	HeadroomPct       float64 `json:"headroom_pct"`
+	FloorPct          float64 `json:"floor_pct"`
+	SlackToFloorInsns int     `json:"slack_to_floor_insns"`
+}
+
+type gateVerdict struct {
+	SchemaVersion    int              `json:"schema_version"`
+	VerifiedAt       string           `json:"verified_at"`
+	ObjectSHA256     string           `json:"object_sha256"`
+	Verdict          string           `json:"verdict"`
+	OverrideConsumed bool             `json:"override_consumed"`
+	Reason           string           `json:"reason"`
+	Stats            gateVerdictStats `json:"stats"`
+}
+
+func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierStats, decision shimverifyDecision) error {
+	objectHash, err := shimCandidateSHA256(objectPath)
+	if err != nil {
+		return err
+	}
+	reason := fmt.Sprintf("measured headroom %.2f%% meets the %.1f%% floor",
+		stats.HeadroomPct(), dataplane.UserspaceShimMinVerifierHeadroomPct)
+	switch decision.refusal {
+	case refusalUnmeasured:
+		reason = "verifier statistics could not be measured; installed with " + allowLowHeadroomEnv + "=1"
+	case refusalLowHeadroom:
+		reason = fmt.Sprintf("measured headroom %.2f%% is below the %.1f%% floor; installed with %s=1",
+			stats.HeadroomPct(), dataplane.UserspaceShimMinVerifierHeadroomPct, allowLowHeadroomEnv)
+	}
+	verdict := gateVerdict{
+		SchemaVersion:    1,
+		VerifiedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+		ObjectSHA256:     objectHash,
+		Verdict:          decision.label,
+		OverrideConsumed: decision.overrideConsumed,
+		Reason:           reason,
+		Stats: gateVerdictStats{
+			Measured:          stats.Measured(),
+			ProcessedInsns:    stats.ProcessedInsns,
+			InsnLimit:         stats.InsnLimit,
+			HeadroomPct:       stats.HeadroomPct(),
+			FloorPct:          dataplane.UserspaceShimMinVerifierHeadroomPct,
+			SlackToFloorInsns: stats.SlackToFloorInsns(dataplane.UserspaceShimMinVerifierHeadroomPct),
+		},
+	}
+	b, err := json.MarshalIndent(verdict, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outPath, append(b, '\n'), 0o644)
+}
+
+func shimCandidateSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
