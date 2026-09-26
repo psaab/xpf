@@ -72,7 +72,8 @@ func (c *xpfCollector) initGlobalDescriptors() {
 		"xpf_authz_denials_total",
 		"Total authorization/authentication denials, by surface "+
 			"(grpc_login_class, fabric_auth, fabric_method_allowlist, "+
-			"fabric_stream_allowlist, rest_cross_site). Always emitted, "+
+			"fabric_stream_allowlist, rest_cross_site, rest_login_class, "+
+			"rest_api_auth_fail). Always emitted, "+
 			"including at zero (#9042).",
 		[]string{"surface"}, nil,
 	)

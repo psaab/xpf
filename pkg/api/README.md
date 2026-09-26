@@ -414,6 +414,16 @@ not), and prices the multiplexed `SystemAction` verb-by-verb because a unary
 interceptor is handed the decoded request that this middleware deliberately
 never reads.
 
+### Authorization audit visibility (#10832)
+
+REST login-class authorization denials and failed `api-auth` credential checks
+are counted on the `rest_login_class` and `rest_api_auth_fail` surfaces of
+`xpf_authz_denials_total`, including denials whose WARN is suppressed. Each
+surface emits rate-limited WARN records at the shipped Info log level, with
+subsequent events kept at Debug; credentials and request bodies are never
+logged. Successful `PermConfig` and `PermMaint` mutations instead emit an Info
+record with the principal, identity source, route, and required permission.
+
 ### The read surface (#6660)
 
 #5561 gated the 19 mutating routes and deliberately scoped reads out. That left
