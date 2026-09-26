@@ -1176,6 +1176,8 @@ fn established_hit_flag_contract_drops_ackless_anomalies_10887() {
             );
         }
     }
+}
+
 /// A foreign bare SYN must not retire either local close half or the HA copies
 /// before the normal authority/policy verdict; a policy-permitted foreign hit
 /// still forwards without taking ownership of the closing pair.
