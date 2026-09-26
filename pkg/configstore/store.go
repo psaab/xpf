@@ -633,6 +633,9 @@ func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, err
 	if err := crossCheckRAIntervals(compiled); err != nil {
 		return nil, err
 	}
+	if err := crossCheckLoginIdleTimeout10828(compiled); err != nil {
+		return nil, err
+	}
 	// #5876 + #4785: a chassis-cluster commit must adjudicate the REGISTERED
 	// peer-effective concerns on BOTH node-effective views before promotion, not
 	// only the submitting node's. "The registered concerns", because the registry
@@ -737,8 +740,8 @@ func crossCheckNodeID(compiled *config.Config, nodeID int) error {
 // over-narrowed window (min > 0.75*max) is the config that motivated #4525:
 // max-advertisement-interval 1|2 let the sender draw a 0-second periodic
 // delay and hot-loop; even within the new per-leaf floors an operator could
-// still author min close to max, which RFC 4861 forbids because it defeats
-// the desynchronizing jitter.
+// still author min close to max, which RFC 4861 forbids because it defeats the
+// desynchronizing jitter.
 //
 // Absent leaves (value 0 = "use default") never cross-check: a lone max or a
 // lone min is completed by the RA sender's own derivation (pkg/ra
@@ -766,6 +769,27 @@ func crossCheckRAIntervals(compiled *config.Config) error {
 				"%d must be <= 0.75 * max-advertisement-interval %d per RFC 4861 §6.2.1 — "+
 				"lower min-advertisement-interval or raise max-advertisement-interval",
 				ra.Interface, ra.MinAdvInterval, ra.MaxAdvInterval)
+		}
+	}
+	return nil
+}
+
+// crossCheckLoginIdleTimeout10828 rejects an explicitly configured
+// login-class idle-timeout because no supported session surface enforces its
+// deadline. It checks compiled leaf presence because schema validation can miss
+// some flat chained leaves; IdleTimeoutSet also distinguishes explicit zero
+// from an absent leaf. Strict commit callers reject this error, while tolerant
+// load/sync callers only warn so legacy configs continue to work.
+func crossCheckLoginIdleTimeout10828(compiled *config.Config) error {
+	if compiled == nil || compiled.System.Login == nil {
+		return nil
+	}
+	for _, class := range compiled.System.Login.Classes {
+		if class != nil && class.IdleTimeoutSet {
+			return fmt.Errorf("system login class %q: idle-timeout is not enforced by xpf "+
+				"(configured value %d minutes) on CLI, REST/gRPC, or SSH; refusing commit "+
+				"rather than silently accepting it",
+				class.Name, class.IdleTimeout)
 		}
 	}
 	return nil
@@ -845,6 +869,11 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 			slog.Warn("router-advertisement interval violation in tolerated config; continuing "+
 				"(a strict commit would reject this) — the RA sender floors the periodic timer at 1s",
 				"err", raErr, "issue", "#4525")
+		}
+		if timeoutErr := crossCheckLoginIdleTimeout10828(compiled); timeoutErr != nil {
+			slog.Warn("login-class idle-timeout in tolerated config; continuing "+
+				"(a strict commit would reject this)",
+				"err", timeoutErr, "issue", "#10828")
 		}
 	}
 	return compiled, err

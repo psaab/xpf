@@ -313,6 +313,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					case "permissions":
 						lc.Permissions = append(lc.Permissions, firewallMatchValues(prop)...)
 					case "idle-timeout":
+						lc.IdleTimeoutSet = true
 						if v := nodeVal(prop); v != "" {
 							if n, err := strconv.Atoi(v); err == nil {
 								lc.IdleTimeout = n
@@ -1612,9 +1613,10 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		// does not match, which is the "told the wrong reason, reaches for the
 		// wrong remedy" failure this file's advisories exist to avoid.
 		//
-		// idle-timeout genuinely remains recognized-but-unenforced.
+		// idle-timeout remains parsed only for legacy configs, where the
+		// tolerant load path must report that it is not enforced.
 		var inert []string
-		if lc.IdleTimeout > 0 {
+		if lc.IdleTimeoutSet {
 			inert = append(inert, "idle-timeout")
 		}
 		if len(inert) > 0 {
