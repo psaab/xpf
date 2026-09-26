@@ -227,7 +227,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "139ae03bbe6453ec099b5925519b588a35805bcd2036d44e4dd67e9c163d8944"
+	snapshotShapeGolden8892 = "e3d863be0cf2fc52c425a2ec12d6d60816258c9dcdc059ec15dfbf7647749d4f"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -383,7 +383,14 @@ const (
 	// v33 -> v34 BUMPED (#10703): TCP no-syn-check selectors become authoritative
 	// over transit session-miss admission; a v33 helper would ignore the opt-out
 	// and keep black-holing configured mid-stream TCP.
-	snapshotShapeVersion8892 = 34
+	// v34 -> v35 BUMPED (#10827 follow-up): `WebManagementConfig.TLSCertificate`
+	// / `TLSPrivateKey` ride the snapshot wire (siblings untagged, and the
+	// 7484 spelling gate keys comparability off struct tags, so `json:"-"`
+	// is not available for leaves whose values matter). A v34 helper ignores
+	// them, benign today, but the shape moved and the version must agree
+	// with it; exact equality refuses mixed pairings rather than letting a
+	// future helper-side consumer silently misread one.
+	snapshotShapeVersion8892 = 35
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

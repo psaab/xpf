@@ -139,8 +139,10 @@ const preSecureTunnelProtocolVersion = 4
 // #10512 moves session control to v31; #10683 moves the shared snapshot
 // contract to v32 for bind-less selector fencing; #10702 moves it to v33 so
 // post-teardown refusals cannot be mistaken for retained worker state.
-// #10703 moves it to v34 for TCP SYN-check session-miss admission.
-const secureTunnelSnapshotProtocolVersion = 34
+// #10703 moves it to v34 for TCP SYN-check session-miss admission; the
+// #10827 follow-up moves it to v35 for the web-management TLS credential
+// paths on the snapshot wire.
+const secureTunnelSnapshotProtocolVersion = 35
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state
