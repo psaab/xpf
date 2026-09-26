@@ -2,9 +2,10 @@
 """Build an xpf day-0 config drive ISO (#1879 Path C), in Python.
 
 The vSRX analog of "ISO with juniper.conf at the root": an ISO9660 volume
-labeled `xpf-config` carrying the config as `xpf.conf` (+ an optional
-`node-id` for cluster members). Attach it to the appliance VM as a CD-ROM
-(libvirt) or a disk device (incus); the first-boot loader applies it.
+labeled `xpf-config` carrying `xpf.conf` and, for HA cluster configs, a
+`node-id` file (`0` or `1`). Standalone configs may omit `node-id`. Attach the
+ISO to the appliance VM as a CD-ROM (libvirt) or a disk device (incus); the
+first-boot loader applies it.
 
 Importable: validate.py and other tooling call build_config_drive().
 CLI:

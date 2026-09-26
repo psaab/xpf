@@ -330,7 +330,7 @@ class TryDeviceTests(unittest.TestCase):
         self.assertEqual((self.xpf_dir / "node-id").read_text(), "1\n")
         self.assertIn("-node-id 1", self.args_file.read_text())
 
-    def test_rejects_bad_node_id(self):
+    def test_ignores_bad_node_id_for_standalone_config(self):
         self._medium("/dev/fake0", {
             "xpf.conf": CONF.format(name="day0-ok").encode(),
             "node-id": b"2\n",
@@ -340,7 +340,7 @@ class TryDeviceTests(unittest.TestCase):
         self.assertFalse((self.xpf_dir / "node-id").exists())
         self.assertIn("is not 0 or 1", out)
 
-    def test_absent_node_id_is_fine(self):
+    def test_absent_node_id_is_fine_for_standalone_config(self):
         self._medium("/dev/fake0",
                      {"xpf.conf": CONF.format(name="day0-ok").encode()})
         rc, out, _dt = self._try_device()
@@ -348,6 +348,34 @@ class TryDeviceTests(unittest.TestCase):
         self.assertFalse((self.xpf_dir / "node-id").exists())
         self.assertNotIn("node-id", out)
 
+
+    def test_ha_config_rejected_without_valid_node_id(self):
+        # The check-config command rejects cluster configs with no explicit
+        # node ID; model that command response and prove the loader does not
+        # install or stamp either an absent or invalid ID.
+        self.xpfd.write_text(
+            '#!/bin/sh\n'
+            'case " $* " in\n'
+            '  *" -node-id 0 "*|*" -node-id 1 "*) exit 0 ;;\n'
+            'esac\n'
+            'echo "FAIL HA cluster config requires -node-id 0 or 1"\n'
+            'exit 2\n')
+        self.xpfd.chmod(0o755)
+        cases = (
+            ("absent", {}),
+            ("invalid", {"node-id": b"2\n"}),
+        )
+        for index, (name, node_id_file) in enumerate(cases):
+            with self.subTest(node_id=name):
+                dev = f"/dev/fake{index}"
+                files = {"xpf.conf": b"chassis { cluster { cluster-id 1; } }\n"}
+                files.update(node_id_file)
+                self._medium(dev, files)
+                rc, out, _dt = self._try_device(dev)
+                self.assertEqual(rc, 1, out[-600:])
+                self.assertIn("REJECTED by commit-check", out)
+                self.assertIsNone(self._installed())
+                self.assertFalse((self.xpf_dir / ".day0-config-applied").exists())
 
 if __name__ == "__main__":
     unittest.main()
