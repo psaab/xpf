@@ -1658,10 +1658,14 @@ value, so no caller could have distinguished them even if it wanted to.
 
 This matters beyond diagnostics: `maybeReapplyConfigArrivalNaming` consumes
 the one-shot `emptyHANamingPending` marker only when
-`applyStartupNamingForConfig` returns nil. Positional mode always returned
-nil, so a #4179 config-less HA node whose renames all failed burned its
-single retry and stayed on standalone names until a restart — the failure
-#4956 had already fixed for the mapped path, still open on the default one.
+`applyStartupNamingForConfig` returns nil. #5842 makes positional mode
+propagate rename/reload failures, matching the mapped path's #4956 behavior,
+so a failed naming pass preserves the marker for a later accepted standalone
+config apply. A clustered config is not such an arrival: the topology preflight
+rejects adding `chassis cluster` when no HA runtime was built at boot, so the
+operator must restart xpfd into the clustered configuration. Directly calling
+the naming hook with a clustered config would not represent a reachable
+production path.
 
 `deriveKernelName()` synthesizes that predictable kernel name from a NIC's
 sysfs PCI address via `pciAddrToEnp()`, which mirrors systemd's

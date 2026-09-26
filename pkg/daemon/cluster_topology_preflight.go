@@ -76,10 +76,12 @@ func clusterTopologyConfigured(cfg *config.Config) bool {
 // clustered desire), just like standalone->cluster and cluster->standalone,
 // because that node cannot form the cluster live either: the HA runtime is
 // boot-only-constructed, so the honest fail-closed answer is "restart into the
-// clustered config", never a silent half-apply. The boot config LOAD does not
-// reach this guard (Store.Load -> applyConfigLocked, not commitAndApply), and a
-// bootstrap plain commit is refused earlier by the inBootstrap() gate, so no
-// legitimate boot/bootstrap path is falsely rejected.
+// clustered config", never a silent half-apply. Both local commits and peer
+// syncs pass this preflight before applyConfig, so neither can reach the
+// config-arrival naming hook to reconcile cluster names. The boot config LOAD
+// does not reach this guard (Store.Load -> applyConfigLocked, not commitAndApply),
+// and a bootstrap plain commit is refused earlier by the inBootstrap() gate,
+// so no legitimate boot/bootstrap path is falsely rejected.
 //
 // This restart/offline workflow is the TERMINAL answer, not a placeholder. Live
 // day-2 construction/teardown of the cluster runtime was tracked as #6187 and is

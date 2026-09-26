@@ -64,6 +64,7 @@ type Options struct {
 	// `cold_path_sample_mask` field on ConfigSnapshot.
 	ColdPathSampleMask *uint64
 }
+
 // nodeIDFile is the path to the cluster node ID file.
 // If this file exists and contains a valid integer (0 or 1), the daemon
 // runs in cluster mode with ${node} variable expansion. If the file does
@@ -1646,12 +1647,11 @@ type Daemon struct {
 	// EMPTY-config takeover. A node with /etc/xpf/node-id but no committed
 	// config resolves NOT-bootstrap (computeBootClass HA-node guard) and names
 	// its NICs with STANDALONE names at boot because the nil active config
-	// carries no cluster stanza (clusterMode=false). Set here so the FIRST
-	// non-empty config that arrives (a cluster SyncApply from the primary, or a
-	// local commit) re-runs startup naming with the config's real cluster
-	// identity — em0 + ge-<fpc>-0-X — instead of stranding the interfaces on
-	// standalone names until a daemon restart. Consumed once, then never again
-	// (a normal day-2 commit does not re-name).
+	// carries no cluster stanza. Set here so the first accepted standalone
+	// config can re-run naming with any interface mappings or naming settings
+	// it provides before reconcile. A clustered config cannot be accepted live
+	// without the boot-constructed HA runtime and requires restarting xpfd into
+	// the clustered configuration. Consumed after naming succeeds.
 	emptyHANamingPending atomic.Bool
 
 	// proxyARPEnabled tracks the (interface name → enabled families) set the

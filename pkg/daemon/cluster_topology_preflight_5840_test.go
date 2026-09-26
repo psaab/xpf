@@ -45,6 +45,23 @@ func clusterCfg() *config.Config {
 // commit path and that a rejected transition writes NO d.cluster and mutates NO
 // dataplane — including the #4179 config-less-node case (nil active config, nil
 // runtime) that an old-config proxy used to wrongly PERMIT.
+func TestConfiglessHANodeStartupDiagnosticRequiresRestart(t *testing.T) {
+	message := configlessHANodeStartupDiagnostic()
+	if !strings.Contains(message, "restart xpfd into that configuration") ||
+		!strings.Contains(message, "cluster config arrival cannot start it or reconcile interface naming") {
+		t.Fatalf("config-less HA startup must explain why a restart is required; got %q", message)
+	}
+	if strings.Contains(message, "automatically when that config arrives") ||
+		strings.Contains(message, "no restart required") {
+		t.Fatalf("config-less HA startup must not promise live cluster renaming; got %q", message)
+	}
+
+	err := clusterTopologyCommitPreflight(false /*runtimeClusterActive*/, clusterCfg())
+	if err == nil || !strings.Contains(err.Error(), "restart xpfd into the clustered configuration") {
+		t.Fatalf("adding cluster topology without an HA runtime must direct the operator to restart; got %v", err)
+	}
+}
+
 func TestClusterTopologyDay2TransitionRejected(t *testing.T) {
 	// --- Direct preflight: the precise binding (keyed on runtime state). ---
 	// No HA runtime (d.cluster == nil) + a clustered candidate: the #5840 bug.
@@ -59,7 +76,7 @@ func TestClusterTopologyDay2TransitionRejected(t *testing.T) {
 		t.Fatalf("rejection must wrap the restart-required sentinel; got %v", err)
 	}
 	if !strings.Contains(err.Error(), "chassis cluster") ||
-		!strings.Contains(err.Error(), "restart") {
+		!strings.Contains(err.Error(), "restart xpfd into the clustered configuration") {
 		t.Fatalf("rejection must carry an actionable operator diagnostic; got %q", err.Error())
 	}
 
