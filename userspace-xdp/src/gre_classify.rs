@@ -34,24 +34,60 @@
 
 /// Must the OUTER GRE frame be handed to the kernel?
 ///
-/// Two conditions, and both are load-bearing:
+/// Both inputs are load-bearing and refer to different packets: outer
+/// destination locality comes from the GRE frame, while the session action
+/// comes from classifying its inner tuple. A peer-synced inner
+/// `PASS_TO_KERNEL` row does not authorize kernel forwarding of a non-local
+/// outer frame.
+pub const USERSPACE_SESSION_ACTION_PASS_TO_KERNEL: u8 = 2;
+
+/// The output of the shim's OUTER packet locality check.
 ///
-/// * `outer_is_local_destination` is MANDATORY. It is the shim's own
-///   `is_local_destination` answer for the OUTER packet — which deliberately
-///   reports interface-mode-SNAT addresses as non-local, so those keep
-///   reaching the worker's reverse-NAT repair path (#290). It is passed in
-///   rather than computed here because the predicate reads BPF maps this
-///   module cannot see; what this function owns is that the answer is
-///   REQUIRED. An inner-tuple `PASS_TO_KERNEL` row (a peer-synced
-///   LocalDelivery session under HA) authorises kernel delivery of the INNER
-///   packet, not kernel forwarding of the OUTER frame.
-/// * `inner_is_pass_to_kernel` is whether the inner tuple classified to
-///   `PASS_TO_KERNEL`. Anything else — `REDIRECT`, or a miss — stays on the
-///   userspace path however local the outer is.
+/// Distinct from `InnerSessionAction` so a caller cannot silently exchange
+/// the two inputs at the GRE dispatch boundary.
+#[derive(Clone, Copy)]
+pub struct OuterDestinationLocal(bool);
+
+impl OuterDestinationLocal {
+    #[inline(always)]
+    pub fn from_is_local_destination(is_local: bool) -> Self {
+        Self(is_local)
+    }
+}
+
+/// The result of classifying the GRE INNER tuple.
+///
+/// This carries the classifier's action, not a caller-provided `true` from
+/// the `PASS_TO_KERNEL` match arm. Keeping the action distinct from outer
+/// locality makes a swapped dispatch argument a compile error.
+#[derive(Clone, Copy)]
+pub struct InnerSessionAction(u8);
+
+impl InnerSessionAction {
+    #[inline(always)]
+    pub fn from_classifier_action(action: u8) -> Self {
+        Self(action)
+    }
+}
+
+/// The core truth-table predicate, retained for its host-executed module test.
 #[inline(always)]
 pub fn native_gre_inner_pass_steers_to_kernel(
     outer_is_local_destination: bool,
     inner_is_pass_to_kernel: bool,
 ) -> bool {
     outer_is_local_destination && inner_is_pass_to_kernel
+}
+
+/// The production dispatch boundary. Distinct argument types reject a
+/// swapped outer-locality / inner-action call at compile time.
+#[inline(always)]
+pub fn native_gre_inner_pass_steers_to_kernel_typed(
+    outer_is_local_destination: OuterDestinationLocal,
+    inner_action: InnerSessionAction,
+) -> bool {
+    native_gre_inner_pass_steers_to_kernel(
+        outer_is_local_destination.0,
+        inner_action.0 == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
+    )
 }

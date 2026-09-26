@@ -216,12 +216,13 @@ test-shim-run:
 	# every `func Test...` in each covered file must appear as a `=== RUN` line.
 	# #9888: the QinQ disposition cells live in their own file and are covered
 	# too — same predicate extension, same by-name census over both files.
-	# #10655: S-tag disposition cells are included in the same predicate and by-name census.
-	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ|TestUserspaceXDPSTag' -v -count=1 2>&1); \
+# #10655: S-tag disposition cells are included in the same predicate and by-name census.
+# #10864: the GRE/NDP lib.rs dispatch oracle runs the retained XDP object here.
+	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ|TestUserspaceXDPSTag|TestUserspaceXDPDispatch' -v -count=1 2>&1); \
 	status=$$?; \
 	echo "$$out"; \
 	missing=''; \
-	for n in $$(grep -hoE '^func Test[A-Za-z0-9_]+' pkg/dataplane/userspace/fragment_disposition_7494_test.go pkg/dataplane/userspace/qinq_disposition_9888_test.go pkg/dataplane/userspace/stag_disposition_10655_test.go | sed 's/^func //'); do \
+	for n in $$(grep -hoE '^func Test[A-Za-z0-9_]+' pkg/dataplane/userspace/fragment_disposition_7494_test.go pkg/dataplane/userspace/qinq_disposition_9888_test.go pkg/dataplane/userspace/stag_disposition_10655_test.go pkg/dataplane/userspace/xdp_shim_dispatch_10864_test.go | sed 's/^func //'); do \
 		echo "$$out" | grep -q "^=== RUN   $$n$$" || missing="$$missing $$n"; \
 	done; \
 	if [ -n "$$missing" ]; then \

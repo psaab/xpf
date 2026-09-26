@@ -81,7 +81,10 @@ mod wg_classify;
 use binding_index::{
     BINDING_QUEUES_PER_IFACE, BINDING_SLOT_MAP_MAX_ENTRIES, RawRxQueue, binding_slot,
 };
-use gre_classify::native_gre_inner_pass_steers_to_kernel;
+use gre_classify::{
+    InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
+    native_gre_inner_pass_steers_to_kernel_typed,
+};
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
 use ipv6_ext_walk::{
     EH_CLASS_TERMINAL, FragHdr, MAX_EXT_HDRS, PROTO_FRAGMENT_NO_L4, eh_class, eh_class_table,
@@ -442,7 +445,7 @@ static DNAT_TABLE_V6: HashMap<DnatKeyV6, DnatValueV6> =
 static USERSPACE_SESSIONS: HashMap<UserspaceSessionKey, u8> = HashMap::with_max_entries(262144, 0);
 
 const USERSPACE_SESSION_ACTION_REDIRECT: u8 = 1;
-const USERSPACE_SESSION_ACTION_PASS_TO_KERNEL: u8 = 2;
+// PASS_TO_KERNEL's action value is shared with the GRE classifier.
 
 // Pinned-map compatibility exception: Go still reads this map name during
 // mixed-version upgrades, but status/docs expose it as degraded_path_counters.
@@ -880,39 +883,25 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             }
         }
     } else {
-        match classify_native_gre_inner(data, data_end, &parsed) {
-            USERSPACE_SESSION_ACTION_REDIRECT => {
-                // Transit GRE flow already belongs to the userspace dataplane.
-            }
-            USERSPACE_SESSION_ACTION_PASS_TO_KERNEL => {
-                // #10651: an inner-tuple PASS_TO_KERNEL hit — a peer-synced
-                // LocalDelivery row under HA — authorises kernel delivery of
-                // the INNER packet, not kernel forwarding of the OUTER frame.
-                // The outer frame reaches the kernel only when the OUTER
-                // destination is itself local (the #304 destination predicate
-                // the native arm never got); a non-local outer falls through
-                // to the XSK redirect for decap and adjudication. The outer
-                // predicate runs only on the PASS hit, never on the transit
-                // hot path.
-                if native_gre_inner_pass_steers_to_kernel(
-                    is_local_destination(&parsed),
-                    true, // This arm IS the inner PASS_TO_KERNEL hit.
-                ) {
-                    record_trace(
-                        ctrl.flags,
-                        ingress_ifindex,
-                        rx_queue_index,
-                        selected_queue,
-                        binding.slot,
-                        USERSPACE_TRACE_STAGE_LOCAL_DESTINATION,
-                        0,
-                        &parsed,
-                    );
-                    incr_fallback_stat(USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL);
-                    return Ok(cpumap_or_pass(ctrl));
-                }
-            }
-            _ => {}
+        let inner_action = classify_native_gre_inner(data, data_end, &parsed);
+        if inner_action == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
+            && native_gre_inner_pass_steers_to_kernel_typed(
+                OuterDestinationLocal::from_is_local_destination(is_local_destination(&parsed)),
+                InnerSessionAction::from_classifier_action(inner_action),
+            )
+        {
+            record_trace(
+                ctrl.flags,
+                ingress_ifindex,
+                rx_queue_index,
+                selected_queue,
+                binding.slot,
+                USERSPACE_TRACE_STAGE_LOCAL_DESTINATION,
+                0,
+                &parsed,
+            );
+            incr_fallback_stat(USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL);
+            return Ok(cpumap_or_pass(ctrl));
         }
     }
     let meta_len = mem::size_of::<UserspaceDpMeta>() as i32;
@@ -1448,13 +1437,16 @@ fn is_degraded_local_or_control(
     // gate. An inner PASS_TO_KERNEL hit must not kernel-forward a non-local
     // outer here either; the degraded path is cold, so the outer predicate
     // runs before the inner classify.
-    parsed.protocol == PROTO_GRE
-        && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0
-        && native_gre_inner_pass_steers_to_kernel(
-            is_local_destination(parsed),
-            classify_native_gre_inner(data, data_end, parsed)
-                == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
-        )
+    if parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0 {
+        let outer_is_local = is_local_destination(parsed);
+        return native_gre_inner_pass_steers_to_kernel_typed(
+            OuterDestinationLocal::from_is_local_destination(outer_is_local),
+            InnerSessionAction::from_classifier_action(classify_native_gre_inner(
+                data, data_end, parsed,
+            )),
+        );
+    }
+    false
 }
 
 #[inline(always)]
