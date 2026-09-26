@@ -270,9 +270,10 @@ func TestReconcileVIPsHonoursSuppression(t *testing.T) {
 // production goroutine just wraps the same call).
 func TestBecomeMasterGARPIsDampened(t *testing.T) {
 	vi := masterInstanceNoVIPs(t)
-	// A routine GARP completed 100ms ago for epoch 1.
+	// A routine GARP completed 100ms ago for epoch 1 in this same tenure.
 	vi.garpEpoch.Store(1)
 	vi.lastGARPEpoch.Store(1)
+	vi.lastGARPOwnerGen.Store(vi.ownerGen.Load())
 	vi.lastGARPTime.Store(time.Now().Add(-100 * time.Millisecond).UnixNano())
 	// A new transition bumps the epoch (mirrors becomeMaster) but does NOT
 	// change the MAC, so the non-forced path must dampen it.
@@ -297,6 +298,7 @@ func TestSendGARPForcedAdvancesStateWithinWindow(t *testing.T) {
 		vi := masterInstanceNoVIPs(t)
 		vi.garpEpoch.Store(2)
 		vi.lastGARPEpoch.Store(1)
+		vi.lastGARPOwnerGen.Store(vi.ownerGen.Load())
 		vi.lastGARPTime.Store(time.Now().Add(-100 * time.Millisecond).UnixNano())
 		return vi
 	}
@@ -313,5 +315,29 @@ func TestSendGARPForcedAdvancesStateWithinWindow(t *testing.T) {
 	if normal.lastGARPEpoch.Load() != 1 {
 		t.Fatalf("sendGARP(false) within window should be dampened (lastGARPEpoch "+
 			"stays 1), got %d", normal.lastGARPEpoch.Load())
+	}
+}
+
+// TestBecomeMasterGARPAfterAbdicationBypassesDampener covers the sub-500ms
+// failback case: while this node was BACKUP, the peer advertised its own MAC,
+// so the old routine GARP is no longer a duplicate from the neighbors' view.
+func TestBecomeMasterGARPAfterAbdicationBypassesDampener(t *testing.T) {
+	vi := masterInstanceNoVIPs(t)
+	vi.garpEpoch.Store(1)
+	vi.sendGARP(false)
+	if got := vi.lastGARPEpoch.Load(); got != 1 {
+		t.Fatalf("initial MASTER GARP epoch = %d, want 1", got)
+	}
+
+	// The first burst just completed; force an unambiguous 150ms dampening gap.
+	vi.lastGARPTime.Store(time.Now().Add(-150 * time.Millisecond).UnixNano())
+	vi.setState(StateBackup) // peer takes mastership and advertises its MAC
+	vi.setState(StateMaster) // this node fails back before 500ms
+	vi.garpEpoch.Store(2)
+	vi.sendGARP(false)
+
+	if got := vi.lastGARPEpoch.Load(); got != 2 {
+		t.Fatalf("failback MASTER GARP was dampened inside 500ms: lastGARPEpoch = %d, want 2",
+			got)
 	}
 }

@@ -2435,34 +2435,6 @@ func TestGARPEpochDedup(t *testing.T) {
 	}
 }
 
-func TestGARPDampeningTime(t *testing.T) {
-	// The lastGARPTime tracks Unix nanos of the last GARP send.
-	// sendGARP() skips if time.Since(lastGARPTime) < 500ms.
-	vi := &vrrpInstance{}
-
-	// Initial: no dampening (lastGARPTime == 0).
-	if vi.lastGARPTime.Load() != 0 {
-		t.Errorf("initial lastGARPTime = %d, want 0", vi.lastGARPTime.Load())
-	}
-
-	// Simulate a GARP send at now.
-	now := time.Now()
-	vi.lastGARPTime.Store(now.UnixNano())
-
-	// Check: too soon (< 500ms) → should be dampened.
-	last := vi.lastGARPTime.Load()
-	if last > 0 && time.Since(time.Unix(0, last)) >= 500*time.Millisecond {
-		t.Error("should be dampened — sent just now")
-	}
-
-	// Simulate time passing: set lastGARPTime to 600ms ago.
-	vi.lastGARPTime.Store(time.Now().Add(-600 * time.Millisecond).UnixNano())
-	last = vi.lastGARPTime.Load()
-	if last > 0 && time.Since(time.Unix(0, last)) < 500*time.Millisecond {
-		t.Error("should NOT be dampened — 600ms elapsed")
-	}
-}
-
 func TestManagerSetGARPSuppression(t *testing.T) {
 	// Test that SetGARPSuppression sets the flag on matching instances.
 	m := NewManager()
