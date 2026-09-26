@@ -300,6 +300,45 @@ func TestApplyConfigPublishesScheduleStateToNonUserspaceDataplane(t *testing.T) 
 	}
 }
 
+func TestInitialPolicySchedulerPublishFailureQueuesRetry(t *testing.T) {
+	dp := &policySchedulerApplyTestDP{}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	cfg := &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{
+			"workhours": {Name: "workhours", AllDay: true},
+		},
+	}
+	activeState := d.reconcilePolicySchedulerLockedAt(cfg, testPolicySchedulerApplyNow())
+	sched := d.scheduler.Load()
+	if sched == nil {
+		t.Fatal("reconcile did not install the scheduler")
+	}
+
+	dp.updateErr = errors.New("initial schedule publish failed")
+	d.publishInitialPolicySchedulerStateLocked(cfg, activeState, &dataplane.ApplyResult{})
+	if !sched.RepublishPending() || !d.SchedulerRepublishFailed() {
+		t.Fatal("failed initial publish did not latch scheduler retry and failure metric")
+	}
+
+	dp.updateErr = nil
+	d.publishInitialPolicySchedulerStateLocked(cfg, activeState, &dataplane.ApplyResult{})
+	if sched.RepublishPending() || d.SchedulerRepublishFailed() {
+		t.Fatal("successful initial publish did not clear scheduler retry and failure metric")
+	}
+
+	// A nil result means the initial state was skipped, not converged. It must
+	// take the same retry path even though UpdatePolicyScheduleState was not run.
+	callsBeforeSkippedPublish := dp.updateCalls
+	d.publishInitialPolicySchedulerStateLocked(cfg, activeState, nil)
+	if dp.updateCalls != callsBeforeSkippedPublish {
+		t.Fatalf("nil-result initial publish called updater %d times, want no call", dp.updateCalls-callsBeforeSkippedPublish)
+	}
+	if !sched.RepublishPending() || !d.SchedulerRepublishFailed() {
+		t.Fatal("skipped initial publish did not latch scheduler retry and failure metric")
+	}
+}
+
 func TestApplyConfigUsesRuntimeConfigSinkWithoutLegacyDataplane(t *testing.T) {
 	dp := &runtimeOnlyApplyTestDP{
 		applyErr: dpuserspace.ErrPolicySchedulerProtocolIncompatible,

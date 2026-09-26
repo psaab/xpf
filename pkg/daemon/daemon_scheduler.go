@@ -33,19 +33,17 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 		return sched.ActiveState()
 	}
 
+	previous := d.scheduler.Load()
 	if d.schedulerCancel != nil {
 		d.schedulerCancel()
 		d.schedulerCancel = nil
 	}
 	d.scheduler.Store(nil)
-	// #3780: the scheduler set is being removed or replaced. Clear any
-	// stale republish-failure metric from the outgoing scheduler; a new
-	// scheduler's initial state is published by the fallible apply path,
-	// and a removed scheduler set has nothing left to converge.
-	d.clearSchedulerRepublishFailure()
 	epoch := d.policySchedulerEpoch.Add(1)
 
 	if !hasSchedulers {
+		// A removed scheduler set has nothing left to converge.
+		d.clearSchedulerRepublishFailure()
 		d.policySchedulerConfigHash = [32]byte{}
 		return nil
 	}
@@ -58,6 +56,8 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 		// wedged apply and shutdown never reached HA relinquish.
 		return d.publishPolicyScheduleState(ctx, epoch, activeState)
 	}, now)
+	sched.CarryRecoveryStateFrom(previous, now)
+	activeState = sched.ActiveState()
 	d.scheduler.Store(sched)
 	d.policySchedulerConfigHash = hash
 	d.startPolicySchedulerLoopLocked()
@@ -303,6 +303,15 @@ func (d *Daemon) updatePolicyScheduleStateLocked(cfg *config.Config, activeState
 	return nil
 }
 
+// recordPolicySchedulerInitialPublishResult keeps apply-transaction publishes
+// and scheduler-tick publishes on the same recovery path.
+func (d *Daemon) recordPolicySchedulerInitialPublishResult(err error) {
+	if sched := d.scheduler.Load(); sched != nil {
+		sched.RecordRepublishResult(err, time.Now())
+	}
+	d.recordSchedulerRepublishResult(err)
+}
+
 // recordSchedulerRepublishResult latches or clears the scheduler
 // republish-failure metric from a republish result (#3780). This is the
 // observability side of the scheduler self-heal: while a
@@ -326,8 +335,8 @@ func (d *Daemon) recordSchedulerRepublishResult(err error) {
 	}
 }
 
-// clearSchedulerRepublishFailure resets the republish-failure metric.
-// Called when the scheduler set is torn down or replaced by a reconcile.
+// clearSchedulerRepublishFailure resets the republish-failure metric when the
+// scheduler set is removed.
 func (d *Daemon) clearSchedulerRepublishFailure() {
 	if d.schedulerRepublishFailing.Swap(false) {
 		d.schedulerRepublishFirstFailNanos.Store(0)

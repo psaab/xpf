@@ -743,17 +743,20 @@ func lldpConfigEqual(a, b *lldp.LLDPConfig) bool {
 
 func (d *Daemon) publishInitialPolicySchedulerStateLocked(cfg *config.Config, activeState map[string]bool, applyResult *dataplane.ApplyResult) {
 	rt := d.dataplane()
-	if rt == nil || activeState == nil || applyResult == nil {
+	if rt == nil || activeState == nil {
 		return
 	}
 	if _, isUserspace := rt.(userspaceRuntimeModeReporter); isUserspace {
 		return
 	}
-	// #3780: initial (eBPF-path) publish rides the apply transaction; a
-	// failure here is surfaced via the same republish-failure metric so
-	// it is not silently swallowed. The retired eBPF updater always
-	// reports success, so this is a no-op there today.
-	d.recordSchedulerRepublishResult(d.updatePolicyScheduleStateLocked(cfg, activeState))
+	// #3780: initial publication rides the apply transaction. Keep its retry
+	// latch in the scheduler too; otherwise a failed or skipped initial publish
+	// has no later state transition to trigger autonomous recovery.
+	if applyResult == nil {
+		d.recordPolicySchedulerInitialPublishResult(errors.New("initial policy schedule publication skipped because dataplane apply returned no result"))
+		return
+	}
+	d.recordPolicySchedulerInitialPublishResult(d.updatePolicyScheduleStateLocked(cfg, activeState))
 }
 
 // strictSessionAuthEnabled reads the legacy #7441 node-local setting from a

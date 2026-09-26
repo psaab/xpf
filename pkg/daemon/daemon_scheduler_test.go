@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -60,6 +61,56 @@ func TestReconcilePolicySchedulerLockedKeepsByteIdenticalScheduler(t *testing.T)
 	}
 	if first["always"] != second["always"] {
 		t.Fatalf("active state changed across identical reconcile: first=%v second=%v", first, second)
+	}
+}
+
+func TestReconcilePolicySchedulerCarriesFailedRecoveryState(t *testing.T) {
+	now := time.Date(2026, 2, 12, 12, 0, 0, 0, time.UTC)
+	oldCfg := &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{
+			"workhours": {Name: "workhours", StartTime: "09:00:00", StopTime: "17:00:00"},
+		},
+	}
+	newCfg := &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{
+			"workhours": {Name: "workhours", AllDay: true},
+		},
+	}
+	old, initial := scheduler.NewPrimed(oldCfg.Schedulers, func(context.Context, map[string]bool) error { return nil }, now)
+	if !initial["workhours"] {
+		t.Fatal("old scheduler must start with the permit active")
+	}
+	failErr := errors.New("republish unavailable")
+	old.RecordRepublishResult(failErr, now.Add(-6*time.Minute))
+	old.RecordRepublishResult(failErr, now)
+	if !old.RepublishFailClosed() || !old.RepublishPending() {
+		t.Fatal("test setup did not establish a five-minute fail-closed retry streak")
+	}
+
+	oldHash, _ := policySchedulerConfigHash(oldCfg)
+	d := &Daemon{policySchedulerConfigHash: oldHash}
+	d.setDataplane(&policySchedulerApplyTestDP{})
+	d.scheduler.Store(old)
+	d.recordSchedulerRepublishResult(failErr)
+
+	activeState := d.reconcilePolicySchedulerLockedAt(newCfg, now)
+	replacement := d.scheduler.Load()
+	if replacement == nil || replacement == old {
+		t.Fatal("changed scheduler config did not replace the scheduler")
+	}
+	if !replacement.RepublishPending() || !replacement.RepublishFailClosed() {
+		t.Fatal("scheduler reconciliation cleared the failed recovery streak")
+	}
+	if activeState["workhours"] || replacement.ActiveState()["workhours"] {
+		t.Fatal("scheduler reconciliation exposed an active permit after fail-closed inheritance")
+	}
+	if !d.SchedulerRepublishFailed() {
+		t.Fatal("scheduler replacement cleared the stale-republish metric")
+	}
+	d.publishInitialPolicySchedulerStateLocked(newCfg, activeState, nil)
+	if !replacement.RepublishPending() || !replacement.RepublishFailClosed() ||
+		replacement.ActiveState()["workhours"] {
+		t.Fatal("nil-result apply did not retain the inherited deny state and bounded retry")
 	}
 }
 
