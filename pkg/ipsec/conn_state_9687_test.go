@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // persistentManager9687 is newRecordingManager with the #9687 state file at
@@ -166,6 +168,48 @@ func TestReaddedVPNDischargesPersistedDebt9687(t *testing.T) {
 	}
 	if st := readState9687(t, path); len(st.Pending) != 0 || !reflect.DeepEqual(st.Loaded, []string{"site-a", "site-b"}) {
 		t.Fatalf("want loaded=[site-a site-b] and no debt, got %+v", st)
+	}
+}
+
+// TestRestartKeepsChangedConnectionDebt10878 proves a failed reauthentication
+// teardown retains both the loaded fingerprint and retry debt across xpfd
+// restart, then terminates and reinitiates the stale connection on retry.
+func TestRestartKeepsChangedConnectionDebt10878(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
+	rec := &swanctlRecorder{}
+	m1 := persistentManager9687(t, rec.run, path)
+	old := vpnCfg("site-a")
+	if err := m1.Apply(old); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+
+	rec.listSAs = liveSA("site-a")
+	rec.terminateErr = map[string]error{"site-a": errTerminate}
+	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
+	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
+	if err := m1.Apply(changed); err == nil {
+		t.Fatal("changed Apply must report a failed stale-SA termination")
+	}
+	st := readState9687(t, path)
+	if !reflect.DeepEqual(st.PendingChanged, []string{"site-a"}) || st.Fingerprints["site-a"] == "" {
+		t.Fatalf("changed teardown debt and promoted fingerprint must persist, got %+v", st)
+	}
+
+	rec2 := &swanctlRecorder{listSAs: liveSA("site-a")}
+	m2 := persistentManager9687(t, rec2.run, path)
+	if err := m2.Apply(changed); err != nil {
+		t.Fatalf("Apply after restart: %v", err)
+	}
+	if got := rec2.terminateCalls(); !reflect.DeepEqual(got, []string{"site-a"}) {
+		t.Fatalf("restarted manager must retry changed-SA teardown, got %v", got)
+	}
+	if got := rec2.initiateCalls(); !reflect.DeepEqual(got, []string{"site-a"}) {
+		t.Fatalf("successful changed-SA retry must reinitiate, got %v", got)
+	}
+	st = readState9687(t, path)
+	if len(st.PendingChanged) != 0 || len(st.Pending) != 0 {
+		t.Fatalf("settled changed-connection retry must clear teardown debt, got %+v", st)
 	}
 }
 

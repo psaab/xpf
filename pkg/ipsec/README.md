@@ -30,14 +30,13 @@ the apply path pays no fsync (the file is regenerated on every apply).
   error instead of a false success. **The empty-clear branch is symmetric
   (#4898/#10712):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which
   now RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
-  reported success) and restores the prior file on reload failure. Promotion of
-  `prevConnNames` and removed-SA termination are gated on reload SUCCESS — a failed
-  reload leaves the OLD config effective, so the applied-name set is preserved and
-  no SA is torn down, letting the next successful Apply/Clear retry the diff + teardown.
-  **A FAILED terminate is also load-bearing (#6542):** the failed subset becomes teardown DEBT
-  (`pendingTerminate`) that the next Apply folds back into its removed set,
-  and Apply RETURNS the failure instead of reporting success over a stale SA
-  that is still forwarding.
+  `prevConnNames`, rendered-content fingerprints, and stale-SA teardown are gated on
+  reload SUCCESS — a failed reload leaves the OLD config effective, so the applied
+  state is preserved and no SA is torn down; the next successful Apply/Clear retries
+  the diff + teardown. **A FAILED terminate is also load-bearing (#6542/#10878):**
+  failed removals become `pendingTerminate` debt, while failed same-name changes
+  become `pendingChanged` debt. Apply RETURNS a failed termination or reinitiation
+  error instead of reporting success over a stale SA or an un-reestablished tunnel.
 - `Clear() error` — `manager.go`. Remove the xpf snippet, reload, and
   terminate every previously-applied connection's live SAs (#3941). Like Apply,
   a reload failure is returned and skips promotion/termination (#4898), and a
@@ -57,9 +56,9 @@ the apply path pays no fsync (the file is regenerated on every apply).
     conservatively stops trusting its prior record and asks charon (#9511/#9641). It
     does not run on a render or write failure.
   - `Loaded` runs the moment strongSwan has LOADED the config: right after the loaded
-    connection set is promoted and before departed connections are torn down (#9511).
-    It does not run on a failed reload, and it does run when the apply then returns
-    teardown debt (#6542).
+    connection set is promoted and before removed or changed SAs are torn down or
+    changed live SAs reinitiated (#9511/#10878). It does not run on a failed reload,
+    and it does run when the apply then returns teardown debt (#6542).
   - The daemon records the loaded config for HA IPsec attribution from these hooks.
     `SetSwanctlForTesting` (`test_seams.go`) installs the swanctl exec double for other
     packages' tests.
@@ -152,75 +151,60 @@ all files stay in `package ipsec`, so the public API is unchanged.
 
 ## Gotchas
 
-- **Deleting a VPN must TERMINATE its live SAs, not just unload the
-  config (#3941).** `swanctl --load-all` UNLOADS a removed connection's
-  config but leaves its already-established IKE/child SAs installed — the
-  deleted tunnel keeps forwarding until rekey/lifetime expiry (a security
-  gap: a VPN removed for a compromised peer / decommissioned site stays
-  up). `Apply` therefore remembers the previous LOADED connection-name
-  set (`prevConnNames`) and on each apply diffs it against the set
-  `renderConfig` actually emitted. `Apply`/`Clear` reload FIRST and only on
-  reload success advance `prevConnNames` and tear down departed SAs
-  (`promoteConnNames`, #4898) — so the departed conn is unloaded and cannot
-  re-initiate before teardown, and a failed reload leaves the old set intact
-  rather than forgetting a still-loaded connection or disrupting a
-  still-effective tunnel. `terminateRemovedConns` then queries live SAs and
-  issues `swanctl --terminate --ike <conn>` only for a departed conn that
-  actually has a live SA — so deleting a VPN that was never up is a clean
-  no-op. If the live-SA query fails, it falls back to an unconditional
-  (idempotent) terminate. Modified/added connections are untouched — only
-  departures are torn down. All swanctl shell-outs route through the `sc`
-  seam so the diff→terminate path is unit-tested against recording doubles
-  (`delete_terminate_3941_test.go`, `manager_reload_ordering_4898_test.go`).
+- **Deleting or security-changing a VPN must TERMINATE its live SAs, not just
+  reload configuration (#3941/#10878).** `swanctl --load-all` unloads deleted
+  connection config but leaves established IKE/child SAs installed. It also
+  preserves existing SAs when a surviving connection changes authentication,
+  proposals, selectors, endpoints, identities, or lifetimes. Apply fingerprints
+  each rendered `connections{}` block together with its corresponding `secrets{}`
+  block, so the hash represents effective swanctl settings, not source-map order
+  or fields the renderer does not emit. After a successful reload it compares
+  names and hashes against the last successfully loaded set: deleted or
+  unrenderable connections are torn down, and same-name content changes are
+  terminated so stale credentials/selectors cannot keep forwarding. Changed live
+  connections are reinitiated through their rendered child names after successful
+  termination, forcing fresh authentication with the new settings. If initiation
+  fails, Apply returns that error; the new config remains loaded and the stale SA
+  stays down.
+  Cosmetic-only changes do not flap SAs. If the live-SA query fails, termination
+  falls back to an unconditional (idempotent) command, but no immediate
+  reinitiation is attempted because the prior live state is unknown. The
+  rendered-set and same-name diff paths are covered by `delete_terminate_3941_test.go`,
+  `manager_reload_ordering_4898_test.go`, and `terminate_debt_6542_test.go`.
+  The locked live-cluster regression is `make cluster-deploy` followed by
+  `make test-ipsec-content-change-10878`; it rotates the PSK and narrows a
+  same-name selector, then verifies the old SPI and selector are absent from
+  `swanctl --list-sas` and `ip xfrm state/policy`.
 
-- **A FAILED terminate is teardown DEBT, not a log line (#6542).**
-  `promoteConnNames` advances `prevConnNames` to the newly-loaded set the
-  moment the reload succeeds, so a departed name is gone from the only record
-  of "what was loaded" after exactly ONE apply. `terminateRemovedConns` was
-  fire-and-forget: a `swanctl --terminate` that errored was logged at WARN and
-  dropped, `Apply` still returned nil, and no later reconcile ever retried —
-  the departed VPN kept forwarding under its stale child SA until rekey /
-  lifetime expiry while the commit reported success. This is the
-  "advance-then-act, lose the debt" family: the marker advanced on a path that
-  was not verified-success.
+- **A FAILED terminate is teardown DEBT, not a log line (#6542/#10878).**
 
-  The failed subset is now recorded in `pendingTerminate` and UNIONED into the
-  next apply's removed set by `promoteConnNames`, so the teardown is retried
-  every reconcile until it succeeds. `Apply`/`Clear` return the failure
-  (`recordTerminateDebt`), which the commit path joins into its tail result the
-  same way it joins a failed reload (#4433) — the operator sees the degraded
-  IPsec state instead of a false success.
+  `promoteConnNames` advances loaded names and fingerprints only after reload
+  success. A failed terminate is recorded according to why that connection was
+  selected: `pendingTerminate` retries a departed connection only while its name
+  remains absent, so re-adding it discharges removal debt; `pendingChanged`
+  retries a same-name reauthentication even while the changed connection stays
+  loaded. Both debts are unioned rather than overwritten across concurrent
+  applies. A later apply lists active SAs, retries stale connections, and clears
+  debt silently if an SA disappeared in the meantime. A live-list failure falls
+  back to unconditional termination and the next successful listing discharges
+  an ambiguous no-match failure. `Apply`/`Clear` return teardown failures so the
+  operator sees degraded IPsec state instead of a false success.
 
-  Two properties keep the debt from latching or misfiring:
-  - It **discharges** when the departed connection is no longer live —
-    `terminateRemovedConns` only terminates (and only charges debt for) a
-    removed name that `--list-sas` actually reports, so an SA that died on its
-    own clears the debt silently rather than failing every future commit. The
-    ambiguous `--list-sas`-failed fallback (unconditional terminate, where a
-    "no matching SA" error is indistinguishable from a real failure) is
-    likewise self-clearing: the next apply enumerates and discharges.
-  - It **never terminates a LOADED connection** — both halves of the removed
-    set are filtered by the newly-loaded names, so an operator re-adding the
-    VPN discharges the debt instead of tearing the restored tunnel down.
-
-  Covered by `terminate_debt_6542_test.go`.
+  Covered by `terminate_debt_6542_test.go` and the changed-connection regression
+  in `delete_terminate_3941_test.go`.
 
 
-- **The teardown record survives an xpfd restart (#9687).** `prevConnNames`
-  and `pendingTerminate` were memory-only, and the daemon builds a fresh
-  `Manager` on every start. A restart between a failed terminate (#6542), a
-  failed reload that deferred a removal (#4898), or a teardown still running,
-  and its retry, forgot the departed connection; strongSwan's SAs survive the
-  restart, so its child SA kept forwarding. `New()` now persists both to
-  `DefaultConnStatePath` (`/var/lib/xpf/ipsec-conn-state.json`,
-  `conn_state_9687.go`) with a durable write at every promotion and every
-  settle. A removal counts as debt from its promotion until its terminate
-  settles, and a fresh `Manager` folds the file in once, at its first
-  promotion. The daemon applies IPsec on every config apply, even with no
-  VPNs, so the first apply after a restart retries the teardown. A missing,
-  unreadable or oversized file is ignored with a warning (the old behaviour),
-  and a failed write is logged rather than failing the apply.
-  `NewWithConfigDir` Managers do not persist.
+- **The teardown record survives an xpfd restart (#9687/#10878).** The daemon
+  builds a fresh Manager on every start while strongSwan's SAs survive. `New()`
+  durably persists loaded names, rendered-content fingerprints, removal debt,
+  and changed-connection debt in `DefaultConnStatePath`
+  (`/var/lib/xpf/ipsec-conn-state.json`, `conn_state_9687.go`). State is written
+  at each promotion and settle; an in-flight teardown is debt until it settles.
+  The first successful Apply after restart retries outstanding debt. Legacy
+  state files without fingerprints adopt the current rendered baseline without
+  forcing every existing tunnel down. Missing, unreadable, or oversized state
+  is ignored with a warning, and failed writes are logged rather than failing
+  Apply. `NewWithConfigDir` Managers do not persist.
 - **The diff keys off the RENDERED set, not the raw VPN name (#5494 —
   FLIPS the prior #3941 name-keyed behavior).** `renderConfig` returns the
   EXACT set of connection names it emitted; `Apply` diffs THAT. A VPN that
@@ -250,11 +234,9 @@ all files stay in `package ipsec`, so the public API is unchanged.
   false in the one direction that matters: a mid-line splice into an IKE header
   renames the connection (`vpn-corp` → `vpn-cowarning`).
   A lost name is a **fail-open**, not a cosmetic error. `terminateRemovedConns`
-  iterates `for name := range live`, so a removed connection absent from `live`
-  is neither terminated nor entered into `pendingTerminate` — and
-  `prevConnNames` has already advanced past it, so the teardown-debt record
-  #6542 exists to keep is never created and a deleted VPN's SA keeps forwarding
-  under an unloaded configuration with no retry.
+  iterates `for name := range live`, so an affected connection absent from `live`
+  is neither terminated nor recorded as teardown debt — and its stale SA keeps
+  forwarding under stale settings with no retry.
   Whether swanctl can splice mid-line on a *successful* listing was never
   established (stdout to a pipe is block-buffered, stderr unbuffered, so it
   needs a large listing plus a concurrent stderr write). `runSwanctlSplit`
@@ -619,9 +601,9 @@ all files stay in `package ipsec`, so the public API is unchanged.
     not resolve is SKIPPED (logged via `slog.Warn`) — its connection and
     secret are omitted — rather than emitting a proposal-less connection.
     Healthy VPNs always render, so one bad reference never zeroes a healthy
-    tunnel. A non-chain resolve error (e.g. an unknown auth-method token
-    from `authMethodToSwan`) is a different class and still aborts the
-    whole render.
+    tunnel. An unsupported auth-method token is also logged and skips only that
+    VPN (`errProposalUnresolved`); a malformed Junos `$9$` PSK similarly omits
+    both its connection and secret instead of aborting the entire render.
 - **Predefined proposal-set expansion (#4297, fable-167 V-1).** Junos
   `security ike policy P proposal-set <set>` and the `security ipsec policy`
   equivalent are the standard vSRX shorthand for "use a Juniper-curated
@@ -856,9 +838,9 @@ all files stay in `package ipsec`, so the public API is unchanged.
   validation-bypassed path (HA peer-sync of a pre-fix config, a
   directly-constructed `IPsecConfig`, or a config persisted before the
   fix), matching the #1798/#2126/#4098 belt doctrine. The remaining
-  interpolated slots are safe by construction: `auth` and `dpd_action`
-  are fixed enums (`authMethodToSwan` errors on any unknown token;
-  `deriveDPD` only emits `restart`/`clear`/`trap`), the `id`/`certs`/
+  interpolated slots are safe by construction: `auth` is rendered only after
+  `authMethodToSwan` accepts the token (otherwise the VPN is skipped), and
+  `deriveDPD` only emits `restart`/`clear`/`trap`; the `id`/`certs`/
   `secret` slots already carry the `sanitizeSwanctlValue` +
   `escapeSwanctlQuoted` belt, connection / child / secret NAMES are
   sanitized, and every `dpd_delay`/`rekey_time`/`if_id_*` slot is an

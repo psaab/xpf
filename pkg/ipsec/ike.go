@@ -889,7 +889,7 @@ func activeSANames(sas []SAStatus) []string {
 
 // InitiateConnection initiates a single IPsec connection by name.
 func (m *Manager) InitiateConnection(name string) error {
-	if out, err := runSwanctl("--initiate", "--child", name); err != nil {
+	if out, err := m.sc("--initiate", "--child", name); err != nil {
 		return fmt.Errorf("swanctl --initiate %s: %w: %s", name, err, termsafe.SanitizeForDisplay(string(out)))
 	}
 	return nil
