@@ -29,8 +29,8 @@ const FactoryResetPendingBase = Day0ConfigAppliedBase
 const FactoryResetPendingPrefix = "#xpf-zeroize-pending v=1\n"
 
 // FactoryResetPendingPath is the day-0 loader's fixed stamp path. A zeroize
-// must gate that loader even when xpfd uses a non-default config root.
-// Tests may point it at a temporary path; production code must never mutate it.
+// must gate that loader even when xpfd uses a non-default config root, and
+// Store.Load checks it while the configured-root marker is being cleared.
 var FactoryResetPendingPath = filepath.Join("/etc/xpf", FactoryResetPendingBase)
 
 func hasFactoryResetPendingMarker(path string) (bool, error) {
@@ -91,6 +91,13 @@ func (s *Store) Load() error {
 		} else if err != nil {
 			pendingPath := filepath.Join(configDir, FactoryResetPendingBase)
 			return fmt.Errorf("%w: inspect marker %s: %v", ErrFactoryResetPending, pendingPath, err)
+		}
+		// The loader-root copy keeps custom-root stores gated after the
+		// configured-root marker is durably removed. Load may run unprivileged,
+		// so only a readable intent prefix gates here; inaccessible or absent
+		// loader markers are not treated as reset intent.
+		if pending, err := hasFactoryResetPendingMarker(FactoryResetPendingPath); err == nil && pending {
+			return fmt.Errorf("%w: retry zeroize to complete the interrupted factory reset", ErrFactoryResetPending)
 		}
 	}
 

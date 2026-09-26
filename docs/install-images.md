@@ -464,6 +464,10 @@ in the factory `fxp0`-DHCP posture — which is the vSRX behaviour.
 The zeroize pending marker uses the reserved basename `.day0-config-applied`;
 a configured config file with that basename is rejected before the wipe begins.
 
+`Store.Load` also honors the readable loader-root pending marker while the
+configured-root marker is durably cleared, keeping custom-root resets fail-closed
+through marker cleanup.
+
 Build a config drive:
 
 ```bash

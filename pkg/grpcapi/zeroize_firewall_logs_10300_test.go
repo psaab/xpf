@@ -417,6 +417,55 @@ func TestZeroizeRejectsDay0MarkerBasenameCollision10742(t *testing.T) {
 	assertAbsent(t, configstore.FactoryResetPendingPath)
 }
 
+func TestCompleteZeroizeKeepsLoaderGateUntilConfigMarkerDurable10742(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "custom-config")
+	loaderDir := filepath.Join(root, "etc", "xpf")
+	hermeticWipe10100(t, root)
+
+	record, err := beginZeroize(configDir, "xpf.conf", "", ZeroizeLogInventory{})
+	if err != nil {
+		t.Fatalf("begin zeroize: %v", err)
+	}
+	loaderMarker := configstore.FactoryResetPendingPath
+	originalSync := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = originalSync })
+	syncFailure := errors.New("simulated config-marker directory sync failure")
+	var syncOrder []string
+	zeroizeSyncDir = func(dir string) error {
+		syncOrder = append(syncOrder, filepath.Clean(dir))
+		if filepath.Clean(dir) == filepath.Clean(configDir) {
+			if err := originalSync(dir); err != nil {
+				return err
+			}
+			return syncFailure
+		}
+		return originalSync(dir)
+	}
+
+	if err := completeZeroize(record); !errors.Is(err, syncFailure) {
+		t.Fatalf("complete zeroize error = %v, want config-marker sync failure", err)
+	}
+	if len(syncOrder) == 0 || syncOrder[0] != filepath.Clean(configDir) {
+		t.Fatalf("marker sync order = %v, want custom config root first", syncOrder)
+	}
+	if _, err := os.Stat(loaderMarker); err != nil {
+		t.Fatalf("loader gate was removed before config-marker durability: %v", err)
+	}
+	configMarker := filepath.Join(configDir, configstore.FactoryResetPendingBase)
+	if _, err := os.Lstat(configMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config-root marker error = %v, want marker durably removed", err)
+	}
+	store, err := configstore.New(filepath.Join(configDir, "xpf.conf"))
+	if err != nil {
+		t.Fatalf("create store for interrupted reset: %v", err)
+	}
+	if err := store.Load(); !errors.Is(err, configstore.ErrFactoryResetPending) {
+		t.Fatalf("Load with loader marker only = %v, want ErrFactoryResetPending", err)
+	}
+	assertDay0LoaderSkipsMedia(t, loaderDir)
+}
+
 func assertDay0LoaderSkipsMedia(t *testing.T, loaderDir string) {
 	t.Helper()
 	output := runDay0Loader(t, loaderDir)
@@ -443,6 +492,7 @@ func runDay0Loader(t *testing.T, loaderDir string) string {
 	script := `export XPF_DAY0_SOURCE_ONLY=1
 source "$1" || exit 99
 XPF_DIR="$2"
+REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
 MNT="$XPF_DIR/mnt"
 STAMP="$XPF_DIR/.day0-config-applied"
 XPFD=/bin/true
