@@ -397,6 +397,26 @@ func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.
 	})
 }
 
+func TestZeroizeRejectsDay0MarkerBasenameCollision10742(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "custom-config")
+	configBase := configstore.FactoryResetPendingBase
+	configFile := filepath.Join(configDir, configBase)
+	const contents = "operator config using the reserved marker basename"
+	mustWriteFile(t, configFile, []byte(contents))
+	hermeticWipe10100(t, root)
+
+	err := PerformZeroizeWipe(configDir, configBase, "")
+	if err == nil || !strings.Contains(err.Error(), "conflicts with the reset marker") {
+		t.Fatalf("zeroize error = %v, want reset-marker basename conflict", err)
+	}
+	data, err := os.ReadFile(configFile)
+	if err != nil || string(data) != contents {
+		t.Fatalf("config was changed before collision refusal: err=%v contents=%q", err, data)
+	}
+	assertAbsent(t, configstore.FactoryResetPendingPath)
+}
+
 func assertDay0LoaderSkipsMedia(t *testing.T, loaderDir string) {
 	t.Helper()
 	output := runDay0Loader(t, loaderDir)
@@ -423,6 +443,7 @@ func runDay0Loader(t *testing.T, loaderDir string) string {
 	script := `export XPF_DAY0_SOURCE_ONLY=1
 source "$1" || exit 99
 XPF_DIR="$2"
+MNT="$XPF_DIR/mnt"
 STAMP="$XPF_DIR/.day0-config-applied"
 XPFD=/bin/true
 regen_ssh_host_keys() { :; }

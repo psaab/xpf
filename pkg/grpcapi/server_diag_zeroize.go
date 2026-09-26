@@ -1425,6 +1425,9 @@ func beginZeroize(configDir, configBase, archiveDir string, inv ZeroizeLogInvent
 		return zeroizePendingRecord{}, err
 	}
 	configDir = resolved
+	if configBase == configstore.FactoryResetPendingBase {
+		return zeroizePendingRecord{}, fmt.Errorf("zeroize: configured config basename %q conflicts with the reset marker", configBase)
+	}
 	loaderMarker := configstore.FactoryResetPendingPath
 	configMarker := filepath.Join(configDir, configstore.FactoryResetPendingBase)
 	loaderRecord, loaderPending, err := readZeroizePendingRecord(loaderMarker, configDir, configBase)
