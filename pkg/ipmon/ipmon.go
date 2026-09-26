@@ -441,9 +441,11 @@ func (e *Engine) Stop() {
 }
 
 // Apply installs a new policy set, preserving FAIL state for policies
-// whose (name, probe) survives the commit, and seeds test state from
-// the supplied results snapshot. Called under the daemon apply path on
-// config change.
+// whose (name, probe) survives the commit, and seeds test state from the
+// supplied authoritative results snapshot. A nil snapshot means results are
+// unavailable and preserves the current test state; a non-nil empty snapshot
+// is authoritative and clears it.
+// Called under the daemon apply path on config change.
 func (e *Engine) Apply(cfg *config.IPMonitoringConfig, results []*rpm.ProbeResult) {
 	e.mu.Lock()
 	// Codex PR #1843 MED: actuate only when the overlay-relevant
@@ -528,9 +530,9 @@ func (e *Engine) HandleTransition(t rpm.Transition) {
 		}
 		e.lastTransitionGeneration = t.Generation
 	}
-	// The transition carries a full current-state snapshot — seed from
-	// it (authoritative) and overlay the transition itself (the
-	// snapshot already reflects it, but be explicit).
+	// RPM normally supplies a non-nil full current-state snapshot, which
+	// is authoritative even when empty. With no snapshot, preserve other
+	// known verdicts and apply only the transition below.
 	e.seedResultsLocked(t.Results)
 	if e.failedTests[t.ProbeName] == nil {
 		e.failedTests[t.ProbeName] = make(map[string]bool)
@@ -807,18 +809,13 @@ func (e *Engine) ActuationFailures() uint64 {
 	return e.actuationFailures
 }
 
-// seedResultsLocked rebuilds per-test fail state from a results
-// snapshot. A nil snapshot is treated identically to an empty one: it
-// CLEARS all known test state (no probe data ⇒ nothing failing) rather
-// than preserving a stale FAIL — keeping a policy FAILED (and its
-// failover route injected) off results the caller no longer has is wrong
-// (#4423 M8). Both production callers pass a full authoritative,
-// non-nil snapshot (Apply from rpm.Results(), always a non-nil slice;
-// HandleTransition from rpm's per-transition snapshot), so nil arrives
-// only from a direct package/API caller with no results — which now
-// resets cleanly to UNKNOWN instead of silently carrying the last
-// failure forward.
+// seedResultsLocked rebuilds per-test fail state from an authoritative results
+// snapshot. Nil means no snapshot is available, so preserve the last known
+// state; a non-nil empty snapshot is authoritative and clears all known state.
 func (e *Engine) seedResultsLocked(results []*rpm.ProbeResult) {
+	if results == nil {
+		return
+	}
 	fresh := make(map[string]map[string]bool)
 	for _, r := range results {
 		if r == nil {
