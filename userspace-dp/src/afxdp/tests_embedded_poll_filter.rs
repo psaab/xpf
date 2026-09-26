@@ -731,6 +731,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     outer_pmtud: bool,
     arrival_ifindex: u32,
     expect_related_admit: bool,
+    quote_reply_reverse_half: bool,
 ) {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
@@ -739,8 +740,33 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;
 
-    // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
-    let mut frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
+    // Forward quote: router -> SNAT address, quoting the SNAT'd client packet.
+    // Reply quote: router -> server, quoting the as-is reverse-half packet.
+    let mut frame = if quote_reply_reverse_half {
+        build_icmp_te_frame_v4_with_mac(
+            router_ip,
+            server_ip,
+            snat_ip,
+            80,
+            snat_port,
+            PROTO_TCP,
+            if arrival_ifindex == 24 {
+                TEST_LAN_MAC
+            } else {
+                TEST_WAN_MAC
+            },
+        )
+    } else {
+        build_icmp_te_frame_v4_with_mac(
+            router_ip,
+            snat_ip,
+            server_ip,
+            snat_port,
+            80,
+            PROTO_TCP,
+            TEST_WAN_MAC,
+        )
+    };
     if arrival_ifindex == 32 {
         frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
     }
@@ -898,17 +924,26 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     // Install the forward NAT session (client:client_port -> server:80 SNAT'd
     // to snat_ip:snat_port) so the embedded reversal can recover the client.
     let mut sessions = SessionTable::new();
+    let forward_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: client_port,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let forward_nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(snat_ip)),
+        rewrite_dst: None,
+        rewrite_src_port: Some(snat_port),
+        rewrite_dst_port: None,
+        nat64: false,
+        nptv6: false,
+    };
     assert!(sessions.install_with_protocol(
-        SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(client_ip),
-            dst_ip: IpAddr::V4(server_ip),
-            src_port: client_port,
-            dst_port: 80,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
+        forward_key.clone(),
         SessionDecision {
             resolution: ForwardingResolution {
                 disposition: ForwardingDisposition::ForwardCandidate,
@@ -921,14 +956,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
             },
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(snat_ip)),
-                rewrite_dst: None,
-                rewrite_src_port: Some(snat_port),
-                rewrite_dst_port: None,
-                nat64: false,
-                nptv6: false,
-            },
+            nat: forward_nat,
             install_table_domain: 0,
             install_table_check: 0,
         },
@@ -954,6 +982,55 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         PROTO_TCP,
         0x18,
     ));
+    if quote_reply_reverse_half {
+        let reverse_key = crate::session::reverse_session_key(&forward_key, forward_nat);
+        assert!(sessions.install_with_protocol_with_origin(
+            reverse_key,
+            SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 24,
+                    tx_ifindex: 24,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(IpAddr::V4(client_ip)),
+                    neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                    src_mac: Some(TEST_LAN_MAC),
+                    tx_vlan_id: 0,
+                },
+                nat: forward_nat.reverse(
+                    IpAddr::V4(client_ip),
+                    IpAddr::V4(server_ip),
+                    client_port,
+                    80,
+                ),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            SessionMetadata {
+                ingress_zone: TEST_WAN_ZONE_ID,
+                egress_zone: TEST_LAN_ZONE_ID,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                owner_rg_id: 0,
+                fabric_ingress: false,
+                is_reverse: true,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+            },
+            crate::session::SessionOrigin::ReverseFlow,
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+    }
     let sessions_before = sessions.len();
     if outer_ttl <= 1 {
         let outcome = try_reverse_embedded_icmp_error(
@@ -979,8 +1056,6 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         assert!(binding.scratch.scratch_forwards.is_empty());
         return;
     }
-
-
 
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
@@ -1078,7 +1153,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         assert!(
             binding.scratch.scratch_forwards.is_empty(),
             "a reversed embedded-ICMP error must not queue before zone policy \
-             permits its actual WAN->LAN delivery (RED on revert: bypasses policy)"
+             permits its actual arrival-to-egress delivery (RED on revert: \
+             bypasses policy)"
         );
         assert_eq!(
             binding.scratch.scratch_recycle.len(),
@@ -1100,12 +1176,29 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         );
         assert_eq!(
             event.ingress_zone_id,
-            if ingress_ifindex == 32 { TEST_UNTRUST_ZONE_ID } else { TEST_WAN_ZONE_ID }
+            match ingress_ifindex {
+                24 => TEST_LAN_ZONE_ID,
+                32 => TEST_UNTRUST_ZONE_ID,
+                _ => TEST_WAN_ZONE_ID,
+            }
         );
-        assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
+        assert_eq!(
+            event.egress_zone_id,
+            if quote_reply_reverse_half {
+                TEST_WAN_ZONE_ID
+            } else {
+                TEST_LAN_ZONE_ID
+            }
+        );
         assert_eq!(event.ingress_ifindex, ingress_ifindex as i32);
-        assert_eq!(event.src_ip, IpAddr::V4(router_ip));
-        assert_eq!(event.dst_ip, IpAddr::V4(client_ip));
+        assert_eq!(
+            event.dst_ip,
+            IpAddr::V4(if quote_reply_reverse_half {
+                server_ip
+            } else {
+                client_ip
+            })
+        );
         assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
         if !allow_reverse_policy {
             // #10667: the actual policy-refused reversal must refund the
@@ -1135,8 +1228,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         return;
     }
 
-    // The load-bearing #5690 assertion: the ICMP error was reverse-translated on
-    // the REAL poll path and queued as a prebuilt forward toward the client.
+    // The load-bearing #5690 assertion: the ICMP error was NAT-reversed on the
+    // REAL poll path and queued as a prebuilt forward to the quoted sender.
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
         1,
@@ -1148,40 +1241,69 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         PendingForwardFrame::Prebuilt(bytes) => bytes,
         _ => panic!("embedded-ICMP reversal must queue a PREBUILT reversed frame"),
     };
+    let (out_l3, out_l4) = if quote_reply_reverse_half {
+        (18, 38)
+    } else {
+        (14, 34)
+    };
     assert_eq!(
-        reversed[34],
+        reversed[out_l4],
         if outer_pmtud { 3 } else { 11 },
         "reversed frame preserves the ICMP error class"
     );
     assert_eq!(
-        reversed[35],
+        reversed[out_l4 + 1],
         if outer_pmtud { 4 } else { 0 },
         "reversed frame preserves the ICMP error code"
     );
-    let outer_dst = Ipv4Addr::new(reversed[30], reversed[31], reversed[32], reversed[33]);
-    assert_eq!(
-        outer_dst, client_ip,
-        "outer destination must be restored from the SNAT address to the client"
+    let expected_dst = if quote_reply_reverse_half {
+        server_ip
+    } else {
+        client_ip
+    };
+    let outer_dst = Ipv4Addr::new(
+        reversed[out_l3 + 16],
+        reversed[out_l3 + 17],
+        reversed[out_l3 + 18],
+        reversed[out_l3 + 19],
     );
-    // Embedded IP at eth(14)+outerIP(20)+ICMP(8)=42; inner src at +12 = 54.
-    let embedded_src = Ipv4Addr::new(reversed[54], reversed[55], reversed[56], reversed[57]);
     assert_eq!(
-        embedded_src, client_ip,
-        "embedded inner source must be reverse-translated from SNAT addr to client"
+        outer_dst, expected_dst,
+        "outer destination is the quoted sender"
     );
-    // Inner TCP source port at 42+20 = 62 restored to the pre-NAT client port.
-    let embedded_src_port = u16::from_be_bytes([reversed[62], reversed[63]]);
+    // Embedded IP starts after outer ICMP; its source identifies the quoted sender.
+    let embedded_ip = out_l4 + 8;
+    let embedded_src = Ipv4Addr::new(
+        reversed[embedded_ip + 12],
+        reversed[embedded_ip + 13],
+        reversed[embedded_ip + 14],
+        reversed[embedded_ip + 15],
+    );
     assert_eq!(
-        embedded_src_port, client_port,
-        "embedded inner source port must be reverse-translated to the client port"
+        embedded_src, expected_dst,
+        "embedded source stays the quoted sender"
+    );
+    let embedded_src_port =
+        u16::from_be_bytes([reversed[embedded_ip + 20], reversed[embedded_ip + 21]]);
+    assert_eq!(
+        embedded_src_port,
+        if quote_reply_reverse_half {
+            80
+        } else {
+            client_port
+        },
+        "embedded source port stays the quoted sender's port"
     );
     // #5690: the non-query error must NOT become a session/cache authority.
     assert!(
         fwd.flow_key.is_none(),
         "reversed ICMP error must carry flow_key=None (never seeds a session)"
     );
-    // Egress resolves toward the client on the LAN unit (ifindex 24).
-    assert_eq!(fwd.target_ifindex, 24, "reversed error egresses toward the client");
+    assert_eq!(
+        fwd.target_ifindex,
+        if quote_reply_reverse_half { 12 } else { 24 },
+        "reversed error egresses toward the quoted sender"
+    );
     // The error is stateless: it seeds no new session and is not recycled here.
     assert_eq!(
         sessions.len(),
@@ -1204,6 +1326,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
         false,
         12,
         false,
+        false,
     );
 }
 
@@ -1221,6 +1344,7 @@ fn poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948() {
         false,
         12,
         false,
+        false,
     );
 }
 
@@ -1236,6 +1360,7 @@ fn poll_descriptor_embedded_icmp_reversal_ha_inactive_denies_9948() {
         64,
         false,
         12,
+        false,
         false,
     );
 }
@@ -1254,6 +1379,7 @@ fn poll_descriptor_embedded_icmp_reversal_fabric_redirect_passthrough_9948() {
         false,
         12,
         false,
+        false,
     );
 }
 
@@ -1267,6 +1393,7 @@ fn poll_descriptor_same_family_reversal_ttl_one_is_dropped_10320() {
         1,
         false,
         12,
+        false,
         false,
     );
 }
@@ -1285,6 +1412,7 @@ fn poll_descriptor_snat_frag_needed_admitted_as_related_10666() {
         true,
         12,
         true,
+        false,
     );
 }
 
@@ -1301,9 +1429,43 @@ fn poll_descriptor_snat_frag_needed_from_wrong_zone_denied_10666() {
         true,
         32,
         false,
+        false,
+    );
+}
+/// #10929 fail-on-revert: an as-is hit on a NAT'd reverse half quotes the
+/// reply packet, so PMTUD is RELATED from the forward ingress (client) leg,
+/// not the forward egress (server) leg.
+#[test]
+fn poll_descriptor_snat_reverse_half_frag_needed_admitted_from_ingress_10929() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        false,
+        txn_ha_state(),
+        false,
+        false,
+        64,
+        true,
+        24,
+        true,
+        true,
     );
 }
 
+/// A live reply quote arriving from the server/egress leg is not RELATED:
+/// under default-deny it must hit the ordinary arrival-to-egress policy gate.
+#[test]
+fn poll_descriptor_snat_reverse_half_frag_needed_denied_from_egress_10929() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        false,
+        txn_ha_state(),
+        true,
+        false,
+        64,
+        true,
+        12,
+        false,
+        true,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // #6472: NAT64 (cross-family) ICMP error translation on the flowless arm.
