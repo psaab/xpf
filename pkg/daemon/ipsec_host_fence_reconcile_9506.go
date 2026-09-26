@@ -166,11 +166,16 @@ func (d *Daemon) holdIpsecHostInputFenceForDivertTransition(extraMasters []strin
 		return fmt.Errorf("host-input fence hold requires permit authority")
 	}
 	if permit.state == ipsecPermitOpen {
-		// Retain the current census and SAFE readiness while revoking. This
-		// permits only the fence ACK—not an OPEN transition—to use this key.
-		revoked, _ := d.ipsecS4.revokeTransitPermitNonblocking(ipsecTopologyEvent{
-			Key: permit.closeRequestKey,
+		// Retain the exact OPEN authority sampled above. If a watcher CAS wins
+		// first, leave the divert in place and let the next serialized pass
+		// reconcile that newer generation instead of fencing a stale census.
+		expected := permit
+		revoked, prior := d.ipsecS4.revokeTransitPermitNonblocking(ipsecTopologyEvent{
+			Key: expected.closeRequestKey,
 		})
+		if prior != expected {
+			return fmt.Errorf("host-input fence hold permit changed before OPEN-to-CLOSING transition")
+		}
 		permit = revoked
 	}
 	if permit == nil || permit.state != ipsecPermitClosing {
@@ -179,6 +184,9 @@ func (d *Daemon) holdIpsecHostInputFenceForDivertTransition(extraMasters []strin
 			state = permit.state
 		}
 		return fmt.Errorf("host-input fence hold requires CLOSING permit, got %v", state)
+	}
+	if d.ipsecS4.loadPermit() != permit {
+		return fmt.Errorf("host-input fence hold permit changed before overlay derivation")
 	}
 	desired, err := d.ipsecHostInputFenceOverlayForPermit(permit)
 	if err != nil {
@@ -197,7 +205,19 @@ func (d *Daemon) holdIpsecHostInputFenceForDivertTransition(extraMasters []strin
 	}
 	if sameHostInputFenceOverlay(d.activeHostInputFenceOverlay(), desired) &&
 		hostInputFenceOverlayAuthorityMatches(d.ipsecOverlayAcked.Load(), permit) {
-		return nil
+		// A prior ACK is not enough after a destructive operation can fail
+		// ambiguously. Read the exact live marker/rule again before reusing it.
+		if d.ipsecS4.loadPermit() != permit {
+			return fmt.Errorf("host-input fence hold permit changed before overlay readback")
+		}
+		if err := nftInstaller.VerifyHostInboundOverlay(*desired); err == nil {
+			if d.ipsecS4.loadPermit() != permit {
+				return fmt.Errorf("host-input fence hold permit changed during overlay readback")
+			}
+			return nil
+		}
+		// Re-install below; an old ACK cannot authorize divert removal when
+		// live kernel readback no longer proves this exact generation.
 	}
 	if d.store == nil {
 		return fmt.Errorf("host-input fence hold requires config store")
@@ -209,6 +229,9 @@ func (d *Daemon) holdIpsecHostInputFenceForDivertTransition(extraMasters []strin
 	d.ipsecS4.drainCommitLeases()
 	if err := d.applyHostInboundFilterWithOverlay(cfg, desired); err != nil {
 		return fmt.Errorf("install host-input fence before divert transition: %w", err)
+	}
+	if d.ipsecS4.loadPermit() != permit {
+		return fmt.Errorf("host-input fence hold permit changed during overlay install/readback")
 	}
 	d.ipsecOverlay.Store(desired)
 	d.ipsecOverlayAcked.Store(desired)

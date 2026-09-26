@@ -16,7 +16,11 @@ package daemon
 // (tagNftInstallErr) is deterministic and never opens a real netlink socket during
 // unit tests.
 
-import xnft "github.com/psaab/xpf/pkg/nftables"
+import (
+	"errors"
+
+	xnft "github.com/psaab/xpf/pkg/nftables"
+)
 
 func init() {
 	// Default every daemon unit test to a no-op installer (production defaults to
@@ -72,10 +76,15 @@ type fakeNftInstaller struct {
 	fenceCalls10302   []string
 	fenceSpecs10302   []xnft.ForwardFenceSpec
 	fenceInstall10302 func(xnft.ForwardFenceSpec) error
-	// #9506 S3: divert installation is a separate failure-injection seam.
-	divertInstall   func(xnft.IpsecDivertSpec) error
-	divertRemove    func() error
-	divertCalls     []string
+	// #9506 S3: divert install/remove failure-injection seams.
+	divertInstall func(xnft.IpsecDivertSpec) error
+	divertRemove  func() error
+	divertCalls   []string
+	// #9506 F1 ambiguity fallback: this hook succeeds only after the fake has
+	// observed the guard candidate, mirroring the production installer’s
+	// install+readback contract.
+	quarantineGuard func(xnft.IpsecDivertSpec) error
+	quarantineCalls []string
 	overlayReadback func(xnft.HostInputFenceOverlay) error
 }
 
@@ -268,6 +277,17 @@ func (f *fakeNftInstaller) InstallIpsecDivert(spec xnft.IpsecDivertSpec) error {
 	f.divertCalls = append(f.divertCalls, "install")
 	if f.divertInstall != nil {
 		return f.divertInstall(spec)
+	}
+	return nil
+}
+
+func (f *fakeNftInstaller) InstallIpsecQuarantineGuard(spec xnft.IpsecDivertSpec) error {
+	f.quarantineCalls = append(f.quarantineCalls, "install")
+	if !spec.QuarantineAll {
+		return errors.New("quarantine guard install was not DROP-only")
+	}
+	if f.quarantineGuard != nil {
+		return f.quarantineGuard(spec)
 	}
 	return nil
 }

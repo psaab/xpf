@@ -21,7 +21,6 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-
 func TestDaemonD11ArmGateFrozenAtConstruction10484(t *testing.T) {
 	const envName = "XPF_ATTEST_10484_ARM"
 	old, hadOld := os.LookupEnv(envName)
@@ -937,8 +936,10 @@ func TestCommitIpsecCaptureStageActorStartFailureRestoresDivert9506(t *testing.T
 	if err := d.commitIpsecCaptureStage(nil, staged); err == nil {
 		t.Fatal("actor start failure was swallowed")
 	}
-	if len(fake.divertCalls) != 2 || fake.divertCalls[0] != "install" || fake.divertCalls[1] != "install" {
-		t.Fatalf("divert calls=%v, want install then deny-only install", fake.divertCalls)
+	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "install" ||
+		len(fake.quarantineCalls) != 1 || fake.quarantineCalls[0] != "install" {
+		t.Fatalf("divert/quarantine calls = %v/%v, want staged divert then verified deny-only guard",
+			fake.divertCalls, fake.quarantineCalls)
 	}
 	if d.ipsecCapture != nil || d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
 		t.Fatalf("daemon state after actor failure = active=%p staged=%p pending=%v", d.ipsecCapture, d.ipsecCaptureStaged, d.ipsecCaptureStagePending)
@@ -1014,32 +1015,55 @@ func newF1CaptureFenceTestEnv(t *testing.T, withCapture bool, removeErr error) (
 	d := &Daemon{store: store, ipsecS4: supervisor, applySem: semaphore.NewWeighted(1)}
 	events := new([]string)
 	fake := &fakeNftInstaller{}
-	fake.hostInbound = func(spec xnft.HostInboundSpec) error {
-		if spec.Overlay == nil || spec.Overlay.State != "CLOSING" ||
-			len(spec.Overlay.MasterSet) != 1 || spec.Overlay.MasterSet[0] != "st0" {
-			return errors.New("host-input DROP overlay missing st0/CLOSING authority")
+	var installedOverlay *xnft.HostInputFenceOverlay
+	validateOverlay := func(overlay xnft.HostInputFenceOverlay) error {
+		current := supervisor.loadPermit()
+		canonical := xnft.CanonicalHostInputFenceOverlay(overlay)
+		if canonical.State != "CLOSING" || len(canonical.MasterSet) != 1 ||
+			canonical.MasterSet[0] != "st0" ||
+			!hostInputFenceOverlayAuthorityMatches(&canonical, current) {
+			return errors.New("host-input DROP overlay does not exactly match CLOSING permit authority")
 		}
+		return nil
+	}
+	fake.hostInbound = func(spec xnft.HostInboundSpec) error {
+		if spec.Overlay == nil {
+			return errors.New("host-input DROP overlay missing")
+		}
+		if err := validateOverlay(*spec.Overlay); err != nil {
+			return err
+		}
+		canonical := xnft.CanonicalHostInputFenceOverlay(*spec.Overlay)
+		installedOverlay = &canonical
 		*events = append(*events, "install")
 		return nil
 	}
 	fake.overlayReadback = func(overlay xnft.HostInputFenceOverlay) error {
-		if overlay.State != "CLOSING" || len(overlay.MasterSet) != 1 || overlay.MasterSet[0] != "st0" {
-			return errors.New("host-input DROP overlay readback did not cover st0")
+		if err := validateOverlay(overlay); err != nil {
+			return err
+		}
+		canonical := xnft.CanonicalHostInputFenceOverlay(overlay)
+		if installedOverlay == nil || !sameHostInputFenceOverlay(installedOverlay, &canonical) {
+			return errors.New("host-input DROP readback did not exactly match the installed generation")
 		}
 		*events = append(*events, "readback")
 		return nil
 	}
 	fake.divertRemove = func() error {
-		*events = append(*events, "remove")
+		if len(*events) == 0 || (*events)[len(*events)-1] != "readback" {
+			return errors.New("divert removal was not immediately preceded by exact fence readback")
+		}
 		current := supervisor.loadPermit()
 		if current == nil || current.state != ipsecPermitClosing {
 			return errors.New("divert removal crossed an OPEN permit")
 		}
 		acked := d.ipsecOverlayAcked.Load()
 		if acked == nil || !hostInputFenceOverlayAuthorityMatches(acked, current) ||
+			!sameHostInputFenceOverlay(acked, d.activeHostInputFenceOverlay()) ||
 			!d.ipsecCaptureRemovalPending.Load() {
-			return errors.New("divert removal began before acknowledged host-input DROP hold")
+			return errors.New("divert removal began before acknowledged exact host-input DROP hold")
 		}
+		*events = append(*events, "remove")
 		return removeErr
 	}
 	nftInstaller = fake
@@ -1098,20 +1122,218 @@ func TestIpsecCaptureRemovalFailureRestoresDivertBehindFence9506(t *testing.T) {
 	if err := commitIpsecCaptureStageF1(t, d, old); !errors.Is(err, injected) {
 		t.Fatalf("remove error = %v, want injected failure", err)
 	}
-	if got := strings.Join(*events, ","); got != "install,readback,remove" {
-		t.Fatalf("transition order = %s, want install/readback before failed remove", got)
+	if got := strings.Join(*events, ","); got != "install,readback,remove,readback" {
+		t.Fatalf("transition order = %s, want fence install/readback, failed removal, and fence re-readback", got)
 	}
 	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "remove" {
 		t.Fatalf("divert calls = %v, want one removal attempt", fake.divertCalls)
 	}
-	if d.ipsecCapture != old || d.ipsecCaptureStagePending || d.ipsecCaptureRemovalPending.Load() {
-		t.Fatalf("failed removal did not restore old capture: active %p pending-stage %v pending-remove %v",
+	if d.ipsecCapture != old || d.ipsecCaptureStagePending || !d.ipsecCaptureRemovalPending.Load() {
+		t.Fatalf("failed removal did not restore old capture behind a closed gate: active %p pending-stage %v pending-remove %v",
 			d.ipsecCapture, d.ipsecCaptureStagePending, d.ipsecCaptureRemovalPending.Load())
 	}
 	permit := d.ipsecS4.loadPermit()
+	acked := d.ipsecOverlayAcked.Load()
 	if permit == nil || permit.state != ipsecPermitClosing ||
-		!hostInputFenceOverlayAuthorityMatches(d.ipsecOverlayAcked.Load(), permit) {
-		t.Fatalf("failed removal lost fence hold authority: permit=%+v acked=%+v", permit, d.ipsecOverlayAcked.Load())
+		!hostInputFenceOverlayAuthorityMatches(acked, permit) ||
+		!sameHostInputFenceOverlay(acked, d.activeHostInputFenceOverlay()) {
+		t.Fatalf("failed removal lost re-verified fence hold authority: permit=%+v acked=%+v",
+			permit, acked)
+	}
+	d.tryOpenIpsecPermitAfterFenceAck(permit)
+	if got := d.ipsecS4.loadPermit(); got != permit {
+		t.Fatalf("ambiguous removal reopened permit before divert restoration: %+v", got)
+	}
+}
+func TestIpsecCaptureAmbiguousRemovalAndFenceReadbackFailureInstallsQuarantine9506(t *testing.T) {
+	removeErr := errors.New("remove ACK lost after flush")
+	readbackErr := errors.New("host-input fence readback unavailable")
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, removeErr)
+	old := d.ipsecCapture
+	originalRemove := fake.divertRemove
+	divertAbsent := false
+	fake.divertRemove = func() error {
+		err := originalRemove()
+		divertAbsent = true // model the ambiguous flush having removed the table
+		return err
+	}
+	verifyExact := fake.overlayReadback
+	readbacks := 0
+	fake.overlayReadback = func(overlay xnft.HostInputFenceOverlay) error {
+		readbacks++
+		if readbacks == 1 {
+			return verifyExact(overlay)
+		}
+		*events = append(*events, "readback")
+		if installed := d.activeHostInputFenceOverlay(); installed == nil ||
+			!sameHostInputFenceOverlay(installed, &overlay) {
+			return errors.New("fence retry did not target the exact active candidate")
+		}
+		return readbackErr
+	}
+	guardInstalled := false
+	fake.quarantineGuard = func(spec xnft.IpsecDivertSpec) error {
+		if !divertAbsent || !spec.QuarantineAll {
+			return errors.New("fallback did not install a DROP guard after ambiguous divert removal")
+		}
+		guardInstalled = true
+		*events = append(*events, "quarantine")
+		return nil
+	}
+	err := commitIpsecCaptureStageF1(t, d, old)
+	if !errors.Is(err, removeErr) || !errors.Is(err, readbackErr) {
+		t.Fatalf("ambiguous removal error = %v, want removal + fence readback failures", err)
+	}
+	if got := strings.Join(*events, ","); got != "install,readback,remove,readback,install,readback,quarantine" {
+		t.Fatalf("ambiguous removal sequence = %s, want verified quarantine after both readbacks fail", got)
+	}
+	if !guardInstalled || len(fake.quarantineCalls) != 1 || fake.quarantineCalls[0] != "install" {
+		t.Fatalf("verified quarantine guard not installed: installed=%v calls=%v", guardInstalled, fake.quarantineCalls)
+	}
+	if d.ipsecCapture != old || !d.ipsecCaptureRemovalPending.Load() ||
+		d.ipsecOverlayAcked.Load() != nil {
+		t.Fatalf("ambiguous removal trusted stale authority: runtime=%p pending=%v acked=%+v",
+			d.ipsecCapture, d.ipsecCaptureRemovalPending.Load(), d.ipsecOverlayAcked.Load())
+	}
+	permit := d.ipsecS4.loadPermit()
+	if permit == nil || permit.state != ipsecPermitClosing {
+		t.Fatalf("ambiguous removal permit = %+v, want CLOSING behind quarantine", permit)
+	}
+	d.tryOpenIpsecPermitAfterFenceAck(permit)
+	if got := d.ipsecS4.loadPermit(); got != permit {
+		t.Fatalf("ambiguous removal reopened permit despite quarantine recovery: %+v", got)
+	}
+}
+
+func TestIpsecCaptureShutdownHoldsFenceBeforeRetiringQueues9506(t *testing.T) {
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, nil)
+	d.shutdownIpsecCapture()
+	if got := strings.Join(*events, ","); got != "install,readback,remove" {
+		t.Fatalf("shutdown transition order = %s, want fence install/readback before divert removal", got)
+	}
+	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "remove" {
+		t.Fatalf("shutdown divert calls = %v, want one fenced removal", fake.divertCalls)
+	}
+	if d.ipsecCapture != nil || d.ipsecCaptureStagePending {
+		t.Fatalf("shutdown capture state = active %p pending %v, want retired", d.ipsecCapture, d.ipsecCaptureStagePending)
+	}
+	permit := d.ipsecS4.loadPermit()
+	acked := d.ipsecOverlayAcked.Load()
+	if permit == nil || permit.state != ipsecPermitClosing ||
+		!hostInputFenceOverlayAuthorityMatches(acked, permit) ||
+		!sameHostInputFenceOverlay(acked, d.activeHostInputFenceOverlay()) {
+		t.Fatalf("shutdown did not retain exact verified DROP authority: permit=%+v acked=%+v active=%+v",
+			permit, acked, d.activeHostInputFenceOverlay())
+	}
+	d.tryOpenIpsecPermitAfterFenceAck(permit)
+	if got := d.ipsecS4.loadPermit(); got != permit {
+		t.Fatalf("shutdown reopened permit after retiring the capture: %+v", got)
+	}
+}
+
+func TestIpsecCaptureShutdownRemoveFailureReverifiesFence9506(t *testing.T) {
+	injected := errors.New("shutdown remove failed")
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, injected)
+	d.shutdownIpsecCapture()
+	if got := strings.Join(*events, ","); got != "install,readback,remove,readback" {
+		t.Fatalf("shutdown failure order = %s, want fence verify, remove, then fence re-readback", got)
+	}
+	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "remove" {
+		t.Fatalf("shutdown divert calls = %v, want one removal attempt", fake.divertCalls)
+	}
+	permit := d.ipsecS4.loadPermit()
+	acked := d.ipsecOverlayAcked.Load()
+	if permit == nil || permit.state != ipsecPermitClosing ||
+		!hostInputFenceOverlayAuthorityMatches(acked, permit) ||
+		!sameHostInputFenceOverlay(acked, d.activeHostInputFenceOverlay()) {
+		t.Fatalf("shutdown remove failure lost verified fence authority: permit=%+v acked=%+v active=%+v",
+			permit, acked, d.activeHostInputFenceOverlay())
+	}
+	if d.ipsecCapture != nil {
+		t.Fatalf("shutdown remove failure retained published runtime %p", d.ipsecCapture)
+	}
+}
+
+func TestIpsecCaptureShutdownAmbiguousRemovalQuarantinesWhenFenceReadbackFails9506(t *testing.T) {
+	removeErr := errors.New("shutdown remove ACK lost")
+	readbackErr := errors.New("shutdown fence readback unavailable")
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, removeErr)
+	originalRemove := fake.divertRemove
+	divertAbsent := false
+	fake.divertRemove = func() error {
+		err := originalRemove()
+		divertAbsent = true
+		return err
+	}
+	verifyExact := fake.overlayReadback
+	readbacks := 0
+	fake.overlayReadback = func(overlay xnft.HostInputFenceOverlay) error {
+		readbacks++
+		if readbacks == 1 {
+			return verifyExact(overlay)
+		}
+		*events = append(*events, "readback")
+		return readbackErr
+	}
+	guardInstalled := false
+	fake.quarantineGuard = func(spec xnft.IpsecDivertSpec) error {
+		if !divertAbsent || !spec.QuarantineAll {
+			return errors.New("shutdown fallback did not install DROP guard after ambiguous removal")
+		}
+		guardInstalled = true
+		*events = append(*events, "quarantine")
+		return nil
+	}
+	d.shutdownIpsecCapture()
+	if got := strings.Join(*events, ","); got != "install,readback,remove,readback,install,readback,quarantine" {
+		t.Fatalf("shutdown ambiguous sequence = %s, want verified quarantine after both fence readbacks fail", got)
+	}
+	if !guardInstalled || len(fake.quarantineCalls) != 1 || fake.quarantineCalls[0] != "install" {
+		t.Fatalf("shutdown verified quarantine missing: installed=%v calls=%v", guardInstalled, fake.quarantineCalls)
+	}
+	permit := d.ipsecS4.loadPermit()
+	if d.ipsecCapture != nil || !d.ipsecCaptureRemovalPending.Load() ||
+		d.ipsecOverlayAcked.Load() != nil || permit == nil || permit.state != ipsecPermitClosing {
+		t.Fatalf("shutdown trusted ambiguous state: runtime=%p pending=%v acked=%+v permit=%+v",
+			d.ipsecCapture, d.ipsecCaptureRemovalPending.Load(), d.ipsecOverlayAcked.Load(), permit)
+	}
+	d.tryOpenIpsecPermitAfterFenceAck(permit)
+	if got := d.ipsecS4.loadPermit(); got != permit {
+		t.Fatalf("shutdown ambiguous removal reopened permit: %+v", got)
+	}
+}
+
+func TestIpsecCaptureHoldRejectsPermitGenerationChangeBeforeRemoval9506(t *testing.T) {
+	d, fake, events := newF1CaptureFenceTestEnv(t, true, nil)
+	old := d.ipsecCapture
+	verifyExact := fake.overlayReadback
+	fake.overlayReadback = func(overlay xnft.HostInputFenceOverlay) error {
+		if err := verifyExact(overlay); err != nil {
+			return err
+		}
+		current := *d.ipsecS4.loadPermit()
+		current.watchGeneration++
+		current.closeRequestKey = testKey(ipsecReadySafe, current.watchGeneration,
+			ipsecTopologyTuple{Kind: "xfrmi", Ifindex: 11, Name: "st0", Owner: "kernel"})
+		d.ipsecS4.watch.Store(&TransitWatchSnapshot{
+			Generation: current.watchGeneration,
+			Ready:      ipsecReadySafe,
+			Tuples:     current.closeRequestKey.Tuples,
+		})
+		d.ipsecS4.permit.Store(&current)
+		return nil
+	}
+	err := commitIpsecCaptureStageF1(t, d, old)
+	if err == nil || !strings.Contains(err.Error(), "permit changed during overlay install/readback") {
+		t.Fatalf("stale fence generation transition error = %v, want binding rejection", err)
+	}
+	if got := strings.Join(*events, ","); got != "install,readback" {
+		t.Fatalf("stale generation transition = %s, want no divert removal", got)
+	}
+	if len(fake.divertCalls) != 0 || d.ipsecCapture != old || d.ipsecCaptureStagePending ||
+		d.ipsecCaptureRemovalPending.Load() {
+		t.Fatalf("stale generation transition changed runtime authority: calls=%v active=%p pending-stage=%v pending-remove=%v",
+			fake.divertCalls, d.ipsecCapture, d.ipsecCaptureStagePending, d.ipsecCaptureRemovalPending.Load())
 	}
 }
 
