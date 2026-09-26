@@ -844,8 +844,9 @@ var OperationalTree = map[string]*Node{
 				}
 				return names
 			}},
-			"matching": {Desc: "Filter expression (tcpdump syntax)", AcceptsArgs: true},
-			"count":    {Desc: "Number of packets to capture", ValueType: ValueInteger},
+			"matching":             {Desc: "Filter expression (tcpdump syntax)", AcceptsArgs: true},
+			"count":                {Desc: "Number of packets to capture", ValueType: ValueInteger},
+			"allow-host-interface": {Desc: "Permit capture on an unconfigured host interface"},
 		}},
 		"interface": {Desc: "Show interface traffic statistics", DynamicFn: func(cfg *config.Config) []string {
 			if cfg == nil || cfg.Interfaces.Interfaces == nil {

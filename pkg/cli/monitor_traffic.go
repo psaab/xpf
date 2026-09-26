@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/termsafe"
 )
 
@@ -41,10 +43,154 @@ func (c *CLI) handleMonitor(args []string) error {
 // grammar recognizes. They terminate a greedy `matching <filter>`
 // expression so a multi-token filter never swallows a following option
 // (e.g. `matching tcp port 80 count 20`).
+const monitorTrafficHostInterfaceFlag = "allow-host-interface"
+
 var monitorTrafficKeywords = map[string]bool{
-	"interface": true,
-	"matching":  true,
-	"count":     true,
+	"interface":                     true,
+	"matching":                      true,
+	"count":                         true,
+	monitorTrafficHostInterfaceFlag: true,
+}
+
+// splitMonitorTrafficHostOverride removes the host-interface override flag
+// before the monitor-traffic parser sees its positional arguments.
+func splitMonitorTrafficHostOverride(args []string) ([]string, bool) {
+	hasOverride := false
+	for _, arg := range args {
+		if arg == monitorTrafficHostInterfaceFlag {
+			hasOverride = true
+			break
+		}
+	}
+	if !hasOverride {
+		return args, false
+	}
+	filtered := make([]string, 0, len(args)-1)
+	for _, arg := range args {
+		if arg != monitorTrafficHostInterfaceFlag {
+			filtered = append(filtered, arg)
+		}
+	}
+	return filtered, true
+}
+
+// resolveConfiguredMonitorTrafficInterface maps an operator-supplied
+// configured name or kernel spelling to its configured kernel device.
+func resolveConfiguredMonitorTrafficInterface(cfg *config.Config, requested string) (string, bool) {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return "", false
+	}
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		if requested == name || requested == config.LinuxIfName(name) ||
+			(ifc.Name != "" && (requested == ifc.Name || requested == config.LinuxIfName(ifc.Name))) {
+			return cfg.ResolveKernelIfName(name), true
+		}
+		for unit, unitConfig := range ifc.Units {
+			if unitConfig == nil {
+				continue
+			}
+			ref := name + "." + strconv.Itoa(unit)
+			if requested == ref || requested == config.LinuxIfName(ref) {
+				return cfg.ResolveKernelIfName(ref), true
+			}
+		}
+	}
+	return "", false
+}
+
+// resolveMonitorTrafficInterface enforces the configured-interface allowlist.
+// A host device is available only when the operator supplies the explicit
+// allow-host-interface override.
+func resolveMonitorTrafficInterface(cfg *config.Config, requested string, allowHost bool) (string, error) {
+	if kernelName, ok := resolveConfiguredMonitorTrafficInterface(cfg, requested); ok {
+		return kernelName, nil
+	}
+	if !allowHost {
+		return "", fmt.Errorf("monitor traffic: interface %q is not configured; use %q to capture a host interface",
+			requested, monitorTrafficHostInterfaceFlag)
+	}
+	if _, err := net.InterfaceByName(requested); err != nil {
+		return "", fmt.Errorf("monitor traffic: unknown host interface %q", requested)
+	}
+	return requested, nil
+}
+
+func monitorTrafficCaptureLine(captureInterface, requestedInterface string) string {
+	return fmt.Sprintf("Capturing on %s (requested %s) (Ctrl+C to stop)...",
+		captureInterface, requestedInterface)
+}
+
+// handleMonitorTraffic wraps tcpdump for live packet capture.
+func (c *CLI) handleMonitorTraffic(args []string) error {
+	ifaceArgs, allowHost := splitMonitorTrafficHostOverride(args)
+	iface, filter, count, err := parseMonitorTrafficArgs(ifaceArgs)
+	if err != nil {
+		return err
+	}
+
+	if iface == "" {
+		fmt.Printf("usage: monitor traffic interface <name> [matching <filter>] [count <N>] [%s]\n",
+			monitorTrafficHostInterfaceFlag)
+		return nil
+	}
+
+	// Defense-in-depth (#4524): reject a filter that smuggles a tcpdump
+	// option (`-w`, `-z`, ...) before it can reach the argv. The "--"
+	// separator in buildMonitorTrafficArgv already neutralizes it, but a
+	// clear rejection beats an opaque libpcap syntax error.
+	if err := validateMonitorFilter(filter); err != nil {
+		return err
+	}
+
+	var cfg *config.Config
+	if c.store != nil {
+		cfg = c.store.ActiveConfig()
+	}
+	kernelIface, err := resolveMonitorTrafficInterface(cfg, iface, allowHost)
+	if err != nil {
+		return err
+	}
+
+	// Resolve fabric IPVLAN overlays to physical parent (#136).
+	origName := iface
+	iface = resolveFabricParent(kernelIface)
+
+	// Warn about XDP redirect visibility on fabric interfaces (#138).
+	if strings.HasPrefix(origName, "fab") || strings.HasPrefix(origName, "em") {
+		fmt.Println("WARNING: XDP-redirected packets bypass AF_PACKET and will not appear in tcpdump.")
+		fmt.Println("For fabric redirect telemetry, use: show chassis cluster fabric statistics")
+		fmt.Println()
+	}
+
+	cmdArgs := buildMonitorTrafficArgv(iface, filter, count)
+
+	fmt.Println(monitorTrafficCaptureLine(iface, origName))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.cmdMu.Lock()
+	c.cmdCancel = cancel
+	c.cmdMu.Unlock()
+	defer func() {
+		c.cmdMu.Lock()
+		c.cmdCancel = nil
+		c.cmdMu.Unlock()
+	}()
+
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+	// #7389: sanitize this command's output before it reaches the
+	// terminal. See wireSanitizedOutput for why both streams go through one
+	// call.
+	defer wireSanitizedOutput(cmd)()
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		fmt.Println() // newline after ^C
+		return nil
+	}
+	return err
 }
 
 // parseMonitorTrafficArgs parses the `monitor traffic ...` argument
@@ -203,65 +349,6 @@ func validateMonitorFilter(filter string) error {
 		}
 	}
 	return nil
-}
-
-// handleMonitorTraffic wraps tcpdump for live packet capture.
-func (c *CLI) handleMonitorTraffic(args []string) error {
-	iface, filter, count, err := parseMonitorTrafficArgs(args)
-	if err != nil {
-		return err
-	}
-
-	if iface == "" {
-		fmt.Println("usage: monitor traffic interface <name> [matching <filter>] [count <N>]")
-		return nil
-	}
-
-	// Defense-in-depth (#4524): reject a filter that smuggles a tcpdump
-	// option (`-w`, `-z`, ...) before it can reach the argv. The "--"
-	// separator in buildMonitorTrafficArgv already neutralizes it, but a
-	// clear rejection beats an opaque libpcap syntax error.
-	if err := validateMonitorFilter(filter); err != nil {
-		return err
-	}
-
-	// Resolve fabric IPVLAN overlays to physical parent (#136).
-	origName := iface
-	iface = resolveFabricParent(iface)
-
-	// Warn about XDP redirect visibility on fabric interfaces (#138).
-	if strings.HasPrefix(origName, "fab") || strings.HasPrefix(origName, "em") {
-		fmt.Println("WARNING: XDP-redirected packets bypass AF_PACKET and will not appear in tcpdump.")
-		fmt.Println("For fabric redirect telemetry, use: show chassis cluster fabric statistics")
-		fmt.Println()
-	}
-
-	cmdArgs := buildMonitorTrafficArgv(iface, filter, count)
-
-	fmt.Printf("Monitoring traffic on %s (Ctrl+C to stop)...\n", iface)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	c.cmdMu.Lock()
-	c.cmdCancel = cancel
-	c.cmdMu.Unlock()
-	defer func() {
-		c.cmdMu.Lock()
-		c.cmdCancel = nil
-		c.cmdMu.Unlock()
-	}()
-
-	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
-	// #7389: sanitize this command's output before it reaches the
-	// terminal. See wireSanitizedOutput for why both streams go through one
-	// call.
-	defer wireSanitizedOutput(cmd)()
-	err = cmd.Run()
-	if ctx.Err() != nil {
-		fmt.Println() // newline after ^C
-		return nil
-	}
-	return err
 }
 
 // wireSanitizedOutput points cmd's stdout and stderr at line-wise sanitizing

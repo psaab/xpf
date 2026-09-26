@@ -22,5 +22,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Include responder node identity in chassis-forwarding RPC responses and
     flag divergence between peer response identity and heartbeat belief
     (#10841).
+  * Restrict `monitor traffic` to configured interfaces, require an explicit
+    host-interface override, and report the requested and resolved capture
+    devices (#10845).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
