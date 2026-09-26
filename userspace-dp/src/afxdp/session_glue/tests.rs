@@ -975,17 +975,12 @@ fn lookup_session_across_scopes_preserves_local_synced_origin() {
     assert_eq!(resolved.origin, SessionOrigin::SyncImport);
 }
 
-/// #10287: a bare SYN reusing a closing TCP 5-tuple is a NEW connection, not
-/// traffic for the dead incarnation. The cross-scope lookup must evict both
-/// local halves and MISS so the miss path admits it as a new flow with fresh
-/// OPENING state — never inherit the 30s FIN / 2s RST close window and reap
-/// while both endpoints consider the new connection established.
-///
-/// RED pre-fix: the SYN hits the closing entry (`Some`) and re-arms its close
-/// window. GREEN: `None`, both halves gone, and no synthetic replacement
-/// `Close` (the prior FIN state update was drained before the SYN).
+/// #10886: tuple-reuse detection is not itself authority to evict. The
+/// cross-scope lookup may find and refresh a closing hit, but it must leave
+/// both halves in place until the packet path establishes an owner verdict
+/// and the new-flow policy permits the replacement.
 #[test]
-fn syn_on_closing_tuple_evicts_both_halves_and_misses_10287() {
+fn syn_on_closing_tuple_lookup_preserves_pair_before_authority_10886() {
     use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN};
     let mut sessions = SessionTable::new();
     let forward = test_key();
@@ -1009,46 +1004,38 @@ fn syn_on_closing_tuple_evicts_both_halves_and_misses_10287() {
         PROTO_TCP,
         TCP_ACK,
     ));
-    // A FIN closes both halves (#4109 F17); drain the Open + Update deltas.
-    // Same-key replacement intentionally emits no Close: the prior FIN Update
-    // already announced the old state, and a synthetic Close could race the
-    // replacement Open in downstream consumers.
+    // A FIN closes both halves (#4109 F17). Drain the Open + Update deltas so
+    // the read-only SYN lookup below has no prior event to confuse the check.
     assert!(sessions.lookup(&forward, now + 1_000, TCP_FIN).is_some());
     let _ = sessions.drain_deltas(8);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let hit = lookup_session_across_scopes_for_test(
+        &mut sessions,
+        &shared_sessions,
+        &shared_forward_wire_sessions,
+        &forward,
+        now + 2_000,
+        TCP_SYN,
+    )
+    .expect("a closing SYN lookup remains a hit until authority is checked");
     assert!(
-        lookup_session_across_scopes_for_test(
-            &mut sessions,
-            &shared_sessions,
-            &shared_forward_wire_sessions,
-            &forward,
-            now + 2_000,
-            TCP_SYN,
-        )
-        .is_none(),
-        "a bare SYN on a closing tuple must MISS (evict-to-miss), not hit the dead entry"
+        hit.close_deferred,
+        "the local hit keeps the authority fence"
     );
-    assert!(
-        sessions.probe_with_origin(&forward).is_none(),
-        "eviction must remove the matched closing half"
-    );
-    assert!(
-        sessions.probe_with_origin(&reverse).is_none(),
-        "eviction must remove the companion closing half too, or the new flow reaps half-dead"
-    );
+    assert!(sessions.probe_with_origin(&forward).is_some());
+    assert!(sessions.probe_with_origin(&reverse).is_some());
     assert!(
         sessions.drain_deltas(8).is_empty(),
-        "same-key replacement must not emit a synthetic Close"
+        "a pre-verdict SYN lookup must not emit a synthetic Close"
     );
 }
 
-/// #10287: after a local SYN-evict, the cross-scope lookup must NOT fall
-/// through to the shared maps — the old closing `SyncedSessionEntry` there is
-/// the same dead incarnation and rematerializing it would resurrect the close
-/// window the eviction just removed.
+/// #10886: a shared closing copy remains available to normal lookup. Only the
+/// owner path may retire it after policy admission; foreign SYN lookup cannot
+/// destructively erase it before the later authority verdict.
 #[test]
-fn syn_on_closing_tuple_does_not_rematerialize_shared_close_10287() {
+fn syn_on_closing_tuple_preserves_shared_close_before_authority_10886() {
     use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN};
     let mut sessions = SessionTable::new();
     let forward = test_key();
@@ -1079,45 +1066,47 @@ fn syn_on_closing_tuple_does_not_rematerialize_shared_close_10287() {
             tcp_close_class: 1,
         },
     );
+    let first = lookup_session_across_scopes_for_test(
+        &mut sessions,
+        &shared_sessions,
+        &shared_forward_wire_sessions,
+        &forward,
+        now + 2_000,
+        TCP_SYN,
+    )
+    .expect("a shared closing SYN lookup remains a hit");
     assert!(
-        lookup_session_across_scopes_for_test(
-            &mut sessions,
-            &shared_sessions,
-            &shared_forward_wire_sessions,
-            &forward,
-            now + 2_000,
-            TCP_SYN,
-        )
-        .is_none(),
-        "eviction must gate the shared fallback: the dead shared copy must not resurface"
+        first.shared_entry.is_none(),
+        "the local close still wins lookup"
     );
-
-    // The stale shared copy must stay gone on a retransmitted SYN too. This
-    // catches an implementation that only gates the first lookup while
-    // leaving the shared map populated.
-    assert!(
-        lookup_session_across_scopes_for_test(
-            &mut sessions,
-            &shared_sessions,
-            &shared_forward_wire_sessions,
-            &forward,
-            now + 3_000,
-            TCP_SYN,
-        )
-        .is_none(),
-        "a retransmitted SYN must not rematerialize the retired shared close"
+    assert_eq!(
+        shared_sessions
+            .lock()
+            .expect("shared lock")
+            .get(&forward)
+            .expect("shared close copy")
+            .tcp_close_class,
+        1,
+        "lookup must not retire the shared closing copy"
     );
-    assert!(
-        sessions.probe_with_origin(&forward).is_none(),
-        "no local entry may be rematerialized from the dead shared copy"
-    );
+    let second = lookup_session_across_scopes_for_test(
+        &mut sessions,
+        &shared_sessions,
+        &shared_forward_wire_sessions,
+        &forward,
+        now + 3_000,
+        TCP_SYN,
+    )
+    .expect("a retransmitted SYN still sees the closing hit");
+    assert!(second.shared_entry.is_none());
+    assert!(sessions.probe_with_origin(&forward).is_some());
 }
 
-/// #10287 production transition: the full `resolve_flow_session_decision` path
-/// (not only the bare table lookup) must MISS on a SYN reusing a closing
-/// tuple, handing the packet to the miss path for fresh admission.
+/// #10886: the session resolver itself has no authority verdict. It must
+/// preserve a closing SYN hit so the poll path can check ownership before
+/// deciding whether to take the policy-gated new-flow path.
 #[test]
-fn resolve_flow_syn_on_closing_tuple_misses_10287() {
+fn resolve_flow_syn_on_closing_tuple_preserves_pair_before_authority_10886() {
     use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN};
     let mut sessions = SessionTable::new();
     let forward = test_key();
@@ -1177,13 +1166,13 @@ fn resolve_flow_syn_on_closing_tuple_misses_10287() {
         0,
     );
     assert!(
-        resolved.is_none(),
-        "resolve_flow must MISS on a SYN reusing a closing tuple (evict-to-miss)"
+        resolved.is_some(),
+        "the low-level resolver must preserve the closing hit before authority"
     );
     assert!(
-        sessions.probe_with_origin(&forward).is_none()
-            && sessions.probe_with_origin(&reverse).is_none(),
-        "the production transition must evict both closing halves"
+        sessions.probe_with_origin(&forward).is_some()
+            && sessions.probe_with_origin(&reverse).is_some(),
+        "the resolver cannot evict either half before the poll authority verdict"
     );
 }
 
