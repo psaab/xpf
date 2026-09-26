@@ -585,7 +585,12 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			"http": {desc: "HTTP service", children: map[string]*schemaNode{
 				"interface": {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
 			}},
-			"https": {desc: "HTTPS service", children: map[string]*schemaNode{
+			// #10827: both the commit gate and compiler expand packed HTTPS
+			// certificate tails and nested SetPath chains through their shared
+			// schema-declared readers.
+			"https": {desc: "HTTPS service", packedTail: true, packedFlatRun: true, children: map[string]*schemaNode{
+				"certificate":                  {desc: "PEM server certificate chain file", args: 1, placeholder: "<path>", children: nil},
+				"private-key":                  {desc: "PEM server private key file", args: 1, placeholder: "<path>", children: nil},
 				"system-generated-certificate": {desc: "Use system-generated certificate", children: nil},
 				"interface":                    {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
 			}},

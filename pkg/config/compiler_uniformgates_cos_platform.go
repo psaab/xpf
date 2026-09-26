@@ -148,5 +148,16 @@ func runUniformGatesCoSPlatform(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// Custom HTTPS credentials are an all-or-nothing pair and cannot coexist
+	// with the explicit system-generated-certificate choice.
+	if err := validateWebManagementTLSCertificateStrict(cfg); err != nil {
+		if opts.lenientWebManagementAuth {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("web-management TLS certificate (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

@@ -530,6 +530,8 @@ type WebManagementConfig struct {
 	HTTPInterface       string         // interface binding for HTTP
 	HTTPSInterface      string         // interface binding for HTTPS
 	SystemGeneratedCert bool           // auto-generated TLS certificate
+	TLSCertificate      string         // PEM server certificate chain file; leaf first
+	TLSPrivateKey       string         // PEM server private key file
 	APIAuth             *APIAuthConfig // REST API authentication
 }
 
@@ -1451,12 +1453,12 @@ type FirewallFilter struct {
 
 // FirewallFilterTerm is a single match/action term within a filter.
 type FirewallFilterTerm struct {
-	Name              string
+	Name string
 	// unknownChildren records direct term-body children other than `from` and
 	// `then` (and compact tail keywords after the term name). The compiler
 	// records them so strict commit cannot silently widen a term by dropping
 	// an unmodeled sibling.
-	unknownChildren []string
+	unknownChildren   []string
 	SourceAddresses   []string        // CIDRs
 	DestAddresses     []string        // CIDRs
 	SourcePrefixLists []PrefixListRef // source-prefix-list references
