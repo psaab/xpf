@@ -10,5 +10,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Keep transit forwarding closed when the armed bridge-family barrier
     leg is unsupported; reject malformed SSH authorized_keys entries at
     apply (#10725).
+  * Install live-address host-input fences on #1960/#10297 fail-closed
+    cold boots, preserving management addresses while blocking data addresses
+    until a valid config can be applied (#10732).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

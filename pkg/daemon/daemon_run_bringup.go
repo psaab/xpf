@@ -32,8 +32,9 @@ import (
 // (#4662 Increment 4); the creation order is load-bearing (e.g. the
 // event-options engine registers an RPM callback and must exist before the
 // first applyConfig reconciles RPM). failClosed is the #1960/#10297
-// fail-closed flag threaded from PHASE 1 (read-only here, at
-// clearFRRForFailClosedBoot). Returns a non-nil error only on a fatal DHCP
+// fail-closed flag threaded from PHASE 1 and used to clear stale FRR policy
+// and install live-address host-input fences before runtime managers start.
+// Returns a non-nil error only on a fatal DHCP
 // manager-create failure (the sole early return in the original block), which
 // Run propagates unchanged.
 // initManagers constructs the routing/FRR/IPsec/RPM/ipmon/event-engine/DHCP/
@@ -73,6 +74,11 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// forwarding). Freeze-in-last-known-good for management (#1960) is
 		// preserved: no .network/.link removal, no link-cycle.
 		d.clearFRRForFailClosedBoot(failClosed)
+		// #10732: bootstrap suppresses applyConfig, so its cold-boot nft
+		// fences never see the retained addresses that networkd brought up.
+		// Fence their live destinations now, preserving the management
+		// lifeline, before the daemon starts its control surfaces.
+		d.installFailClosedBootHostFences(failClosed)
 		d.ipsec = ipsec.New()
 		d.ra = ra.New()
 		d.networkd = networkd.New()
