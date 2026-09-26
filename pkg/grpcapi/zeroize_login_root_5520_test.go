@@ -63,6 +63,7 @@ func TestZeroizeRevokesManagedRootInPlace(t *testing.T) {
 	rootMarker := filepath.Join(provDir, "root")
 	aliceMarker := filepath.Join(provDir, "alice")
 	mustWriteFile(t, rootMarker, []byte("0"))
+	mustWriteFile(t, filepath.Join(filepath.Dir(provDir), "provisioned-passwords", "root"), []byte("0"))
 	mustWriteFile(t, aliceMarker, []byte("1001"))
 
 	// Root's REAL authorized_keys at /root/.ssh (the prior tenant's key). This
@@ -109,6 +110,43 @@ func TestZeroizeRevokesManagedRootInPlace(t *testing.T) {
 	assertAbsent(t, aliceMarker)
 }
 
+// TestZeroizeKeysOnlyRootPreservesPassword pins #10741: the account-registry
+// marker is written for a keys-only root-authentication, but only a separate
+// provisioned-passwords marker proves xpf owns the console password. Zeroize
+// must remove the xpf root key without locking the factory/operator password.
+//
+// RED on revert: restoring the unconditional zeroizeLockRootPassword call makes
+// this record one lock (want zero), despite the missing password marker.
+func TestZeroizeKeysOnlyRootPreservesPassword(t *testing.T) {
+	root := t.TempDir()
+	provDir := filepath.Join(root, "provisioned-users")
+	sudoersDir := filepath.Join(root, "sudoers.d")
+	homeBase := filepath.Join(root, "home")
+	passwdPath := filepath.Join(root, "passwd")
+	rootSSHDir := filepath.Join(root, "rootssh")
+
+	mustWriteFile(t, passwdPath, []byte("root:x:0:0:root:/root:/bin/bash\n"))
+	rootMarker := filepath.Join(provDir, "root")
+	rootKeyMarker := filepath.Join(filepath.Dir(provDir), "provisioned-keys", "root")
+	rootKeys := filepath.Join(rootSSHDir, "authorized_keys")
+	mustWriteFile(t, rootMarker, []byte("0"))
+	mustWriteFile(t, rootKeyMarker, []byte("0"))
+	mustWriteFile(t, rootKeys, []byte("ssh-ed25519 AAAAprior prior-operator\n"))
+
+	setZeroizeLoginPaths(t, provDir, sudoersDir, homeBase, passwdPath)
+	locks := setZeroizeRootPaths(t, rootSSHDir, nil)
+	if err := zeroizeLoginAccounts(); err != nil {
+		t.Fatalf("zeroizeLoginAccounts returned error: %v", err)
+	}
+
+	if *locks != 0 {
+		t.Errorf("root password lock invoked %d times for keys-only root, want zero", *locks)
+	}
+	assertAbsent(t, rootKeys)
+	assertAbsent(t, rootMarker)
+	assertAbsent(t, rootKeyMarker)
+}
+
 // TestZeroizeRootRevocationFailsClosed pins the fail-closed contract for root
 // (mirrors the #5496 non-root userdel-failure retention): if locking the root
 // password fails, zeroizeLoginAccounts must (a) surface the error so the
@@ -127,6 +165,7 @@ func TestZeroizeRootRevocationFailsClosed(t *testing.T) {
 	mustWriteFile(t, passwdPath, []byte("root:x:0:0:root:/root:/bin/bash\n"))
 	rootMarker := filepath.Join(provDir, "root")
 	mustWriteFile(t, rootMarker, []byte("0"))
+	mustWriteFile(t, filepath.Join(filepath.Dir(provDir), "provisioned-passwords", "root"), []byte("0"))
 	rootKeys := filepath.Join(rootSSHDir, "authorized_keys")
 	mustWriteFile(t, rootKeys, []byte("ssh-ed25519 AAAAprior prior-operator\n"))
 
