@@ -120,6 +120,72 @@ scenario_main_active_json_skips() (
 	echo "PASS E: committed active.json -> main skips the day-0 probe"
 )
 
+# F: an already-applied stamp must short-circuit even when a medium is attached.
+# If the guard is removed, the stand-in medium attempt records that main reached it.
+scenario_main_stamp_skips() (
+	XPF_DIR=$(mktemp -d)
+	STAMP="$XPF_DIR/.day0-config-applied"
+	REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
+	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
+	ATTEMPTS="$XPF_DIR/attempts"
+	: >"$STAMP"
+	regen_ssh_host_keys() { :; }
+	probe_devices() { printf 'probe\n' >>"$ATTEMPTS"; printf '/dev/mock\n'; }
+	try_device() { printf 'try\n' >>"$ATTEMPTS"; return 0; }
+	out=$(main 2>&1)
+	echo "$out" | grep -q "already applied" || \
+		fail "F: main did not report the already-applied stamp"
+	[ ! -e "$ATTEMPTS" ] || fail "F: main probed an attached medium despite the stamp"
+	rm -rf "$XPF_DIR"
+	echo "PASS F: applied stamp -> skip attached medium"
+)
+
+# G: a preseeded operator config must survive a first-boot medium. The fake
+# device applies its config if reached, making guard removal an observable clobber.
+scenario_main_preseed_skips() (
+	XPF_DIR=$(mktemp -d)
+	STAMP="$XPF_DIR/.day0-config-applied"
+	REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
+	XPFD="$XPF_DIR/xpfd"; make_stub_xpfd "$XPFD"
+	ATTEMPTS="$XPF_DIR/attempts"
+	printf 'operator config\n' >"$XPF_DIR/xpf.conf"
+	regen_ssh_host_keys() { :; }
+	probe_devices() { printf 'probe\n' >>"$ATTEMPTS"; printf '/dev/mock\n'; }
+	try_device() { printf 'drive config\n' >"$XPF_DIR/xpf.conf"; printf 'try\n' >>"$ATTEMPTS"; return 0; }
+	out=$(main 2>&1)
+	echo "$out" | grep -q "preseeded .*xpf.conf exists" || \
+		fail "G: main did not report the preseeded config"
+	[ "$(cat "$XPF_DIR/xpf.conf")" = "operator config" ] || \
+		fail "G: attached medium overwrote the preseeded operator config"
+	[ ! -e "$ATTEMPTS" ] || fail "G: main probed a medium with preseeded config present"
+	rm -rf "$XPF_DIR"
+	echo "PASS G: preseeded config -> skip attached medium without clobber"
+)
+
+# H: exercise the ConditionPathExists negation from the actual unit through
+# systemd's condition evaluator, using a temporary marker for both states.
+scenario_unit_condition_tracks_stamp() (
+	command -v systemd-analyze >/dev/null 2>&1 || fail "H: systemd-analyze is required"
+	UNIT="$HERE/../../scripts/image/xpf-day0-config.service"
+	condition=$(awk -F= '$1 == "ConditionPathExists" { print substr($0, index($0, "=") + 1); exit }' "$UNIT")
+	[ "$condition" = "!/etc/xpf/.day0-config-applied" ] || \
+		fail "H: unexpected day-0 unit condition: '$condition'"
+	tmp=$(mktemp -d)
+	marker="$tmp/.day0-config-applied"
+	condition_for_marker=${condition/\/etc\/xpf\/.day0-config-applied/$marker}
+	if ! systemd-analyze condition "ConditionPathExists=$condition_for_marker" >/dev/null 2>&1; then
+		rm -rf "$tmp"
+		fail "H: unit condition should pass when stamp is absent"
+	fi
+	: >"$marker"
+	if systemd-analyze condition "ConditionPathExists=$condition_for_marker" >/dev/null 2>&1; then
+		rm -rf "$tmp"
+		fail "H: unit condition should skip when stamp exists"
+	fi
+	rm -rf "$tmp"
+	echo "PASS H: unit condition runs without stamp and skips with stamp"
+)
+
 # Each scenario runs in a subshell; `fail` exits that subshell non-zero, so
 # propagate it to the overall exit status (a swallowed subshell exit would
 # let CI see a green run despite FAIL lines).
@@ -128,4 +194,7 @@ scenario_active_json_skips       || exit 1
 scenario_no_configdb_reprobes    || exit 1
 scenario_main_empty_dir_probes   || exit 1
 scenario_main_active_json_skips  || exit 1
+scenario_main_stamp_skips        || exit 1
+scenario_main_preseed_skips      || exit 1
+scenario_unit_condition_tracks_stamp || exit 1
 echo "ALL DAY-0 CONFIGDB GUARD SCENARIOS PASSED"
