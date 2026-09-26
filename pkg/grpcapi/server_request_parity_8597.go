@@ -1,9 +1,11 @@
 package grpcapi
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"google.golang.org/grpc/codes"
@@ -64,6 +66,12 @@ func (s *Server) rescueAction(action string) (*pb.SystemActionResponse, error) {
 	switch action {
 	case "rescue-save":
 		if err := s.store.SaveRescueConfig(); err != nil {
+			// #10769 d05-F8: a save refused by the reset fence reports the
+			// state, not a server failure — FailedPrecondition, like the
+			// "no configuration store" guard above.
+			if errors.Is(err, configstore.ErrRescueSaveFenced) {
+				return nil, status.Errorf(codes.FailedPrecondition, "save rescue configuration: %v", err)
+			}
 			return nil, status.Errorf(codes.Internal, "save rescue configuration: %v", err)
 		}
 		return &pb.SystemActionResponse{Message: "Rescue configuration saved"}, nil
