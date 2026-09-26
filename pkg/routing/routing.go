@@ -247,8 +247,8 @@ func (m *Manager) ApplyPBRRules(rules []PBRRule) error { return m.pbr.Apply(rule
 func (m *Manager) ApplyProbePins(pins []ProbePin) map[string]error { return m.probePin.Apply(pins) }
 
 // ClearProbePins removes all probe pin rules and flushes the reserved
-// probe tables. Run at daemon startup so a crashed daemon never leaks
-// stale pins.
+// probe tables. The daemon calls it at startup only when xpf owns host
+// routing posture, preserving shared bands on uncommitted foreign hosts.
 func (m *Manager) ClearProbePins() error { return m.probePin.clear() }
 
 // --- Bond domain ---
