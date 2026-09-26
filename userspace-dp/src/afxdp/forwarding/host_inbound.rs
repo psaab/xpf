@@ -542,8 +542,12 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         "ripng" => {
             hi.udp_ports_v6.insert(521);
         }
-        // #3225: IGMP is IPv4 group membership; the IPv6 equivalent is MLD over
-        // ICMPv6 (the always-accepted ND set), so igmp is IPv4-only here.
+        // #3225/#10859: IGMP is IPv4 group membership; the IPv6 equivalent is
+        // MLD over ICMPv6 (types 130-132 and 143), none of which are in the
+        // always-accepted ND set (types 133-137). Queries target multicast
+        // destinations, so XDP passes them to the kernel and daddr-scoped
+        // INPUT denies miss; Reports egress through OUTPUT. Neither is a global
+        // host-inbound exception, so igmp stays IPv4-only here.
         "igmp" => {
             hi.ip_protocols_v4.insert(2);
         }

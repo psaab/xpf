@@ -141,3 +141,16 @@ fn broadcast_multicast_and_v6_link_local_still_pass_early_10640() {
         "fec0:: is outside fe80::/10 and must fall through"
     );
 }
+
+/// MLD Queries target multicast (the general-query destination is ff02::1),
+/// so the XDP early filter hands them to the kernel before AF_XDP admission.
+/// The actual packet type is irrelevant to this destination-only verdict.
+#[test]
+fn mld_general_query_to_kernel_10859() {
+    let all_nodes = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+    assert!(is_ipv6_multicast(all_nodes), "ff02::1 must be multicast");
+    assert!(
+        ipv6_early_pass_to_kernel(all_nodes),
+        "an MLD general query to ff02::1 must pass to the kernel before AF_XDP"
+    );
+}

@@ -830,8 +830,11 @@ host-inbound tokens are family-SPECIFIC in intent: `system-services dhcp` is
 DHCPv4 (udp 67/68 over IPv4) while `dhcpv6` is DHCPv6 (udp 546/547 over IPv6);
 `protocols rip` is RIPv2 (IPv4) and `ripng` is RIPng (IPv6); `protocols ospf` is
 OSPFv2 (IPv4) and `ospf3` is OSPFv3 (IPv6) — both ride IP protocol 89 but on
-different families; `igmp` is IPv4 group membership (the IPv6 equivalent is MLD,
-carried over ICMPv6 / the always-accepted ND set). Before #3225 both enforcement
+different families; `igmp` is IPv4 group membership. MLD, the IPv6 equivalent,
+uses ICMPv6 types 130-132 and 143, none of which are in the always-accepted ND
+set (types 133-137). Queries target multicast destinations, so XDP passes them
+to the kernel and daddr-scoped INPUT denies miss; Reports egress through OUTPUT
+(#10859). Neither is a global host-inbound exception. Before #3225 both
 layers compiled these into family-NEUTRAL matches, so a v4-only `dhcp` opened
 udp/67-68 on the IPv6 path and `ripng` opened udp/521 on IPv4 — wrong-family host
 exposure. `ZoneHostInbound` now carries family-scoped sets (`udp_ports_v4` /
