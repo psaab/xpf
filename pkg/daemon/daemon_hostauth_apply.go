@@ -576,15 +576,16 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 	return err
 }
 
-// sshdConfPath is the xpf-managed sshd drop-in. Overridable in tests so the
-// remove/revert side effects can be exercised against a temp dir.
-//
-// #7609: it is the SOLE seam for the drop-in's location. applySSHConfig
-// derives the directory it creates from this path (filepath.Dir) rather than
-// repeating the literal, so pointing this one var at a throwaway tree relocates
-// the file AND its parent together. Before that the parent was hard-coded, so a
-// relocated path had no directory to be written into.
-var sshdConfPath = "/etc/ssh/sshd_config.d/xpf.conf"
+// sshdConfPath is the xpf-managed sshd drop-in. The 00 prefix makes xpf policy
+// precede the image's 10-xpf-factory.conf, since sshd uses the first value for
+// most directives. Overridable in tests so filesystem effects can use a temp dir.
+var sshdConfPath = "/etc/ssh/sshd_config.d/00-xpf.conf"
+
+// sshdLegacyConfPath derives the former xpf drop-in location, which shipped
+// after the factory file and therefore could not override its PermitRootLogin.
+func sshdLegacyConfPath() string {
+	return filepath.Join(filepath.Dir(sshdConfPath), "xpf.conf")
+}
 
 // FS + reload seam (#2062). applySSHConfig owns three real-world side effects
 // — write the drop-in, remove the drop-in, reload sshd — and the
@@ -650,6 +651,19 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	prior, priorErr := sshdReadFile(sshdConfPath)
 	priorReadable := priorErr == nil
 	hadDropIn := priorReadable || !os.IsNotExist(priorErr)
+	// Remove the former, later-sorting drop-in during the cutover. A failed
+	// removal must fail the apply rather than silently leave an inert policy.
+	legacyPath := sshdLegacyConfPath()
+	legacyPresent := false
+	if legacyPath != sshdConfPath {
+		if err := sshdRemoveFile(legacyPath); err == nil {
+			legacyPresent = true
+		} else if !os.IsNotExist(err) {
+			slog.Warn("failed to remove legacy sshd config drop-in", "err", err)
+			fail(fmt.Errorf("remove legacy sshd config drop-in: %w", err))
+			return
+		}
+	}
 
 	if content == "" {
 		// No xpf-managed ssh settings. Remove any existing drop-in and reload
@@ -666,7 +680,7 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 		// manual restart or a reboot. The retained debt is the only record, so
 		// it joins the gate here and is re-driven by
 		// serviceReloadDebtReassertLoop.
-		if !hadDropIn && !d.sshdReloadOwed() {
+		if !hadDropIn && !legacyPresent && !d.sshdReloadOwed() {
 			return nil
 		}
 		if err := sshdRemoveFile(sshdConfPath); err != nil && !os.IsNotExist(err) {
@@ -689,7 +703,7 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 		return nil
 	}
 
-	if priorReadable && string(prior) == content {
+	if priorReadable && string(prior) == content && !legacyPresent {
 		return nil // no change
 	}
 
@@ -700,7 +714,7 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	//
 	// #7609: derived from sshdConfPath rather than repeated as a literal.
 	// Byte-identical in production — filepath.Dir("/etc/ssh/sshd_config.d/
-	// xpf.conf") IS "/etc/ssh/sshd_config.d" — so this changes no behaviour on
+	// 00-xpf.conf") IS "/etc/ssh/sshd_config.d" — so this changes no behaviour on
 	// a real box. What it fixes is the SEAM: sshdConfPath is a package var
 	// precisely so a test can point the drop-in at a throwaway tree, and a
 	// hard-coded parent meant relocating it created the file path without its

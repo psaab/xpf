@@ -86,7 +86,7 @@ func TestRelocatingSSHDConfPathRelocatesItsDirectory7609(t *testing.T) {
 // derivation could be wrong in production and every relocated test would still
 // pass, because no test uses the production path.
 func TestProductionDropInDirIsUnchanged7609(t *testing.T) {
-	const wantPath = "/etc/ssh/sshd_config.d/xpf.conf"
+	const wantPath = "/etc/ssh/sshd_config.d/00-xpf.conf"
 	const wantDir = "/etc/ssh/sshd_config.d"
 	if sshdConfPath != wantPath {
 		t.Fatalf("sshdConfPath = %q, want %q — the production location is part of "+

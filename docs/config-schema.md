@@ -15707,7 +15707,7 @@ blocking the whole config. This is accept-with-advisory now:
 
 The SSH compiler read only `root-login` + `key-exchange`, so the standard
 sshd-hardening knobs committed clean (unknown-key accepted-inert) and never
-reached the `sshd_config.d/xpf.conf` drop-in — the box kept base-image cipher/
+reached the `sshd_config.d/00-xpf.conf` drop-in — the box kept base-image cipher/
 MAC defaults even when the operator configured hardened algorithms.
 
 - **schema** (`schema_system.go`) — `services ssh` gains `ciphers` (multi),
