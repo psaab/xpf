@@ -478,6 +478,80 @@ func TestCapturePipelineFragmentCompletionOneClass9506(t *testing.T) {
 		}
 	}
 }
+func TestCapturePipelineFragmentExpiryRemovesRefreshedPoolSet10862(t *testing.T) {
+	sink := new(pipelineTestSink)
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: sink,
+		HandoffCap: 8, BatchCap: 8, FragmentSlots: 2, FragmentDeadline: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := FragmentKey{Version: 4, Tunnel: 1, VRF: 1, Generation: 1, ID: 10862}
+	fragments := []Fragment{
+		{Offset: 0, More: true, Data: []byte("ab")},
+		{Offset: 2, More: true, Data: []byte("cd")},
+	}
+	started := time.Now().Add(-2 * time.Minute)
+	for i := range fragments {
+		if i == 1 {
+			p.mu.Lock()
+			p.fragTimes[key] = started
+			p.fragPool.mu.Lock()
+			set := p.fragPool.flows[key]
+			if set == nil {
+				p.fragPool.mu.Unlock()
+				p.mu.Unlock()
+				t.Fatal("fragment set missing before late fragment")
+			}
+			set.createdAt = started
+			p.fragPool.mu.Unlock()
+			p.mu.Unlock()
+		}
+		frag := fragments[i]
+		if err := p.Enqueue(CaptureFrame{
+			Packet: pipelineTestPacket(77, 2, 2, 7, uint32(i+1)), FlowKey: "frag-expiry",
+			FragmentKey: &key, Fragment: &frag,
+		}); err != nil {
+			t.Fatalf("Enqueue fragment %d: %v", i, err)
+		}
+		if n := p.Drain(1); n != 1 {
+			t.Fatalf("Drain fragment %d consumed %d, want 1", i, n)
+		}
+	}
+	now := time.Now()
+	if expired := p.expireFragments(now); expired != len(fragments) {
+		t.Fatalf("expired holds = %d, want %d", expired, len(fragments))
+	}
+	if len(sink.verdicts) != len(fragments) {
+		t.Fatalf("expired verdicts = %d, want %d", len(sink.verdicts), len(fragments))
+	}
+	for _, verdict := range sink.verdicts {
+		if verdict.v != VerdictDrop {
+			t.Fatalf("expired fragment verdict = %v, want DROP", verdict.v)
+		}
+	}
+	if got := p.fragPool.Stats(); got.Flows != 0 || got.Fragments != 0 || got.Expired != 1 {
+		t.Fatalf("pool stats after hold expiry = %+v, want empty pool and one expired set", got)
+	}
+
+	late := Fragment{Offset: 4, More: false, Data: []byte("ef")}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 3), FlowKey: "frag-expiry",
+		FragmentKey: &key, Fragment: &late,
+	}); err != nil {
+		t.Fatalf("Enqueue late terminal fragment: %v", err)
+	}
+	if n := p.Drain(1); n != 1 {
+		t.Fatalf("Drain late fragment = %d, want 1", n)
+	}
+	if got := p.fragPool.Stats(); got.Flows != 1 || got.Fragments != 1 || got.Completed != 0 {
+		t.Fatalf("pool stats after late fragment = %+v, want a new incomplete one-piece set", got)
+	}
+	if len(sink.verdicts) != len(fragments) {
+		t.Fatalf("late fragment unexpectedly released expired holds: verdicts=%d", len(sink.verdicts))
+	}
+}
 
 func TestCapturePipelineAdmittedEchoMismatchCancelsUncertain9506(t *testing.T) {
 	sink := new(pipelineTestSink)

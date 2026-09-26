@@ -73,7 +73,6 @@ type fragmentSet struct {
 	lastEnd   uint32
 	haveLast  bool
 	createdAt time.Time
-	updatedAt time.Time
 }
 
 // FragPool is a bounded, mutex-protected fragment reassembly pool. A flow
@@ -115,6 +114,12 @@ func NewFragPool(perFlowCap, maxDatagrams int) (*FragPool, error) {
 // and returns complete=true. Capacity and overlap errors are fail-closed: the
 // whole flow set is removed and the caller must drop that datagram.
 func (p *FragPool) Insert(key FragmentKey, frag Fragment) (complete bool, err error) {
+	return p.insertAt(key, frag, time.Time{})
+}
+
+// insertAt uses the caller's first-seen time when the flow is new, keeping
+// expiry aligned with pipeline-held frames.
+func (p *FragPool) insertAt(key FragmentKey, frag Fragment, createdAt time.Time) (complete bool, err error) {
 	if len(frag.Data) == 0 {
 		return false, ErrFragmentMalformed
 	}
@@ -130,8 +135,10 @@ func (p *FragPool) Insert(key FragmentKey, frag Fragment) (complete bool, err er
 			p.capacityDrops.Add(1)
 			return false, ErrFragmentCapacity
 		}
-		now := time.Now()
-		set = &fragmentSet{createdAt: now, updatedAt: now}
+		if createdAt.IsZero() {
+			createdAt = time.Now()
+		}
+		set = &fragmentSet{createdAt: createdAt}
 		p.flows[key] = set
 	}
 	if len(set.pieces) >= p.perFlowCap {
@@ -139,7 +146,6 @@ func (p *FragPool) Insert(key FragmentKey, frag Fragment) (complete bool, err er
 		p.capacityDrops.Add(1)
 		return false, ErrFragmentCapacity
 	}
-	set.updatedAt = time.Now()
 	before := len(set.pieces)
 	if key.Version == 6 {
 		if err := p.insertIPv6Locked(set, frag); err != nil {
@@ -150,13 +156,12 @@ func (p *FragPool) Insert(key FragmentKey, frag Fragment) (complete bool, err er
 	} else {
 		p.insertIPv4FirstWinsLocked(set, frag)
 	}
-	added := len(set.pieces) - before
+	p.fragments += len(set.pieces) - before
 	if len(set.pieces) > p.perFlowCap || set.bytes > p.maxDatagramBytes {
 		p.dropSetLocked(key, set)
 		p.capacityDrops.Add(1)
 		return false, ErrFragmentCapacity
 	}
-	p.fragments += added
 	if !set.haveLast || !p.isCompleteLocked(set) {
 		return false, nil
 	}
@@ -194,12 +199,12 @@ func (p *FragPool) insertIPv6Locked(set *fragmentSet, frag Fragment) error {
 		}
 		return ErrFragmentOverlap
 	}
+	if !frag.More && set.haveLast && set.lastEnd != end {
+		return ErrFragmentOverlap
+	}
 	set.pieces = append(set.pieces, fragmentPiece{offset: start, data: append([]byte(nil), frag.Data...), more: frag.More})
 	set.bytes += len(frag.Data)
 	if !frag.More {
-		if set.haveLast && set.lastEnd != end {
-			return ErrFragmentOverlap
-		}
 		set.haveLast = true
 		set.lastEnd = end
 	}
@@ -333,14 +338,14 @@ func (p *FragPool) PopCompleted() (CompletedDatagram, bool) {
 	return out, true
 }
 
-// Expire drops flow sets untouched since before cutoff and returns the number
-// of sets removed. It is the bounded sweep hook used by the measurement cell.
+// Expire drops flow sets first seen before cutoff and returns the number of
+// sets removed. It shares the absolute deadline used for held pipeline frames.
 func (p *FragPool) Expire(cutoff time.Time) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	removed := 0
 	for key, set := range p.flows {
-		if set.updatedAt.Before(cutoff) {
+		if set.createdAt.Before(cutoff) {
 			p.dropSetLocked(key, set)
 			removed++
 		}

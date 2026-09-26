@@ -122,3 +122,28 @@ func TestFragPoolExpireReclaimsStalledFlows(t *testing.T) {
 		t.Fatalf("expiry stats = %+v", got)
 	}
 }
+func TestFragPoolConflictingTerminalPreservesOtherFragmentCounts(t *testing.T) {
+	pool, err := NewFragPool(8, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	survivor := testFragmentKey(6, 30)
+	if _, err := pool.Insert(survivor, Fragment{Offset: 0, More: true, Data: []byte("ab")}); err != nil {
+		t.Fatal(err)
+	}
+	conflict := testFragmentKey(6, 31)
+	for _, frag := range []Fragment{
+		{Offset: 0, More: true, Data: []byte("ab")},
+		{Offset: 4, More: false, Data: []byte("ef")},
+	} {
+		if _, err := pool.Insert(conflict, frag); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if complete, err := pool.Insert(conflict, Fragment{Offset: 6, More: false, Data: []byte("gh")}); complete || !errors.Is(err, ErrFragmentOverlap) {
+		t.Fatalf("conflicting terminal: complete=%t err=%v, want overlap error", complete, err)
+	}
+	if got := pool.Stats(); got.Flows != 1 || got.Fragments != 1 {
+		t.Fatalf("stats after dropping one of two sets = %+v, want one surviving flow and fragment", got)
+	}
+}
