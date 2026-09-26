@@ -227,12 +227,10 @@ func TestActiveSANamesPublishesResolvableChildNames9511(t *testing.T) {
 	}
 }
 
-// One VPN whose render fails OUTRIGHT (an unsupported IKE authentication method
-// aborts the whole production render) must not empty the index. A failed Apply
-// leaves the previously loaded swanctl config in force, so the other VPNs are
-// still live and their child names still need attributing; and the broken VPN's
-// own names stay candidates, because it may still be loaded too.
-func TestSANameIndexSurvivesAnUnrelatedRenderError9511(t *testing.T) {
+// A VPN skipped for an unsupported IKE auth method is absent from the loaded
+// names and SA-name index, while its healthy sibling remains indexed. The
+// per-VPN skip keeps the bad config from making healthy names unavailable.
+func TestSANameIndexSkipsUnsupportedAuthVPN9511(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		IKEProposals: map[string]*config.IKEProposal{
 			"prop-bad": {Name: "prop-bad", AuthMethod: "bogus"},
@@ -254,21 +252,20 @@ func TestSANameIndexSurvivesAnUnrelatedRenderError9511(t *testing.T) {
 		Policies:  saIndexPolicies9511(),
 		Proposals: saIndexProposals9511(),
 	}
-	if _, _, err := (&Manager{}).renderConfig(cfg); err == nil {
-		t.Fatal("FIXTURE: the whole render must fail on the unsupported auth method, " +
-			"or this cell does not exercise the error path")
+	if _, rendered, err := (&Manager{}).renderConfig(cfg); err != nil {
+		t.Fatalf("one unsupported-auth VPN must not abort render: %v", err)
+	} else if !rendered["site-a"] || rendered["bad"] {
+		t.Fatalf("rendered VPN set = %v, want site-a only", rendered)
 	}
 
 	idx := BuildSANameIndex(cfg)
 	for _, name := range []string{"site-a-ts1", "site-a-ts2", "site-a"} {
 		if got := strings.Join(idx.VPNs(name), ","); got != "site-a" {
-			t.Errorf("an unrelated VPN's render error emptied the index: idx.VPNs(%q) = [%s], "+
-				"want [site-a] — every name would fall back to the pre-#9511 lookup", name, got)
+			t.Errorf("healthy name %q indexed to [%s], want [site-a]", name, got)
 		}
 	}
-	if got := strings.Join(idx.VPNs("bad"), ","); got != "bad" {
-		t.Errorf("a VPN whose render fails outright may still be loaded from the previous "+
-			"apply; its names must stay candidates. idx.VPNs(bad) = [%s], want [bad]", got)
+	if got := idx.VPNs("bad"); len(got) != 0 {
+		t.Errorf("skipped VPN must not contribute a loaded SA-name candidate, got %v", got)
 	}
 }
 
