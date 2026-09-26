@@ -2065,10 +2065,10 @@ mod try_refresh_9629_tests {
             watchdog_timestamp: now_secs,
             lease: crate::afxdp::HAForwardingLease::ActiveUntil(now_secs.saturating_add(2)),
         };
-        coordinator.ha.rg_runtime.store(Arc::new(BTreeMap::from([
-            (1, expired),
-            (2, healthy),
-        ])));
+        coordinator
+            .ha
+            .rg_runtime
+            .store(Arc::new(BTreeMap::from([(1, expired), (2, healthy)])));
         let domain = coordinator.session_domain().clone();
         assert_eq!(
             domain.try_refresh_ha_leases(&[group(1, true, 0), group(2, true, 0)]),
