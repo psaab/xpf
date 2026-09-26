@@ -197,13 +197,17 @@ var markerFiles7343 = map[string]markerFile{
 	// declaration naming the driver rather than a suppression — a `//nolint` here
 	// is the failure mode #6533 was killed for.
 	"pkg/dhcpserver/dhcpserver.go": {
-		Driver: "ClaimApplyRetry", DriverPkg: "pkg/dhcpserver",
-		Why: "ADVANCES ON FAILURE BY DESIGN (#6535). The marker is stamped with errors still " +
-			"accumulated, because a retry allocates a FRESH generation so the superseded " +
-			"guard never blocks it. Convergence is carried by ClaimApplyRetry, not by the " +
-			"marker. This is the ONLY site in the population with a live unreturned error " +
-			"in scope at the stamp.",
-		Stmts: []markerStmt{{`m.lastAppliedGen = gen`, 1}},
+		Driver: "apply", DriverPkg: "pkg/dhcpserver",
+		Why: "the shared apply body drives every Apply path: clearFamilyLocked resets both " +
+			"family stamps when config removes a family, and a later configured apply reaches " +
+			"reconcileFamilyRestart with a nil applied config, so it enforces the new rendered " +
+			"bytes. Apply failures still advance lastAppliedGen; ClaimApplyRetry lets the " +
+			"converger enter the same apply body again (#6535).",
+		Stmts: []markerStmt{
+			{`m.appliedConfig4 = nil`, 1},
+			{`m.appliedConfig6 = nil`, 1},
+			{`m.lastAppliedGen = gen`, 1},
+		},
 	},
 }
 

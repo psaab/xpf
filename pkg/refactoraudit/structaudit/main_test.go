@@ -24,6 +24,7 @@ func TestMissingConfiguredRootsFailWithoutPartialOutput10901(t *testing.T) {
 		rsRoots  string
 	}{
 		{language: "Go", path: missingGoRoot, goRoots: missingGoRoot, rsRoots: rsRoot},
+		{language: "Go after scanned root", path: missingGoRoot, goRoots: goRoot + " " + missingGoRoot, rsRoots: rsRoot},
 		{language: "Rust", path: missingRSRoot, goRoots: goRoot, rsRoots: missingRSRoot},
 	} {
 		t.Run(missing.language, func(t *testing.T) {

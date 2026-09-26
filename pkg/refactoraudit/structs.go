@@ -3,9 +3,10 @@ package refactoraudit
 // Struct-heterogeneity signal for the modularity audit (#6937).
 //
 // The LOC heatmap measures one dimension: production file LOC. That
-// dimension cannot see field accretion, and a god-struct hides in a small
-// file — `Daemon` reached 255 fields inside a 1167-LOC file, legitimately
-// under the [WATCH] floor, and would still be invisible if it doubled.
+// dimension cannot see field accretion: `Daemon` reached 255 fields inside
+// a 1167-LOC file, legitimately under the [WATCH] floor. The struct census
+// below adds a second, advisory signal, but undercounts anonymous nesting
+// and is not a complete measure of struct heterogeneity.
 //
 // # Why this counts DISTINCT FIELD TYPES and not fields (#6937)
 //
