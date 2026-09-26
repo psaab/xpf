@@ -2195,14 +2195,19 @@ node from a new baked image ONE AT A TIME (built on the existing per-node
 
    **Hook contract.** The hook is invoked as `<hook> <node>` with
    `XPF_ROLL_NODE`, `XPF_ROLL_BACKEND`, and — since #7559 —
-   `XPF_ROLL_EXPECT_VERSION`, `XPF_ROLL_EXPECT_NODE_ID` and
-   `XPF_ROLL_DAEMON_HOLD=1` in the environment. The last three are the
-   identity this roll expects of the node the hook is about to create, and
-   the request that `xpfd` be kept from auto-starting on its FIRST boot so
-   the driver can prove that identity before the node can win an election
-   (see the #7559 note above). They are purely additive: a hook written
-   before #7559 ignores them and behaves exactly as it did, which is why
-   the driver verifies the hold rather than assuming it.
+   `XPF_ROLL_EXPECT_VERSION`, `XPF_ROLL_EXPECT_NODE_ID`, and
+   `XPF_ROLL_DAEMON_HOLD=1` in the environment. For #10852, the driver also
+   passes `XPF_ROLL_EXPECT_SHA256`, the digest of `xpf-<ver>.qcow2` selected
+   by the versioned sidecar name from the VERIFIED signed `SHA256SUMS`, and
+   `XPF_ROLL_ATTESTATION_FILE`, a private path for the hook's receipt.
+   Before destroying the node, the hook MUST hash its selected qcow2 and
+   refuse unless it matches `XPF_ROLL_EXPECT_SHA256`. It then installs those
+   exact bytes and writes the same 64-hex digest to the attestation file.
+   The driver requires an exact receipt before polling or rejoining; a hook
+   that does not implement this integrity contract is not safe for image-roll.
+   The #7559 values still identify the expected node and request that `xpfd`
+   be kept from auto-starting on its FIRST boot so the driver can prove
+   identity before the node can win an election (see the note above).
 4. **poll** until it is back **as the EXPECTED node on the EXPECTED
    build**, then **rejoin** + confirm sync BEFORE touching node[1]
    (never-both-down; the INC-2 `rejoin` verb). Repeat for node[1].

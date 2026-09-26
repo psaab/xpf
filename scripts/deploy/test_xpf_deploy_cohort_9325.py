@@ -431,6 +431,8 @@ class ImageRollReadsValidated9325(unittest.TestCase):
             raise _Reached()
 
         with mock.patch.object(xd, "_verified_image_manifest_versions", lambda *a, **k: dict(fields)), \
+             mock.patch.object(xd, "_verified_expected_qcow2_digest",
+                                lambda *a, **k: ("xpf-2.0.0.qcow2", "a" * 64)), \
              mock.patch.object(xd.os.path, "isfile", lambda p: True), \
              mock.patch.object(xd, "_node_exec", side_effect=reached), \
              mock.patch.object(xd, "_node_exec_result", side_effect=reached), \
