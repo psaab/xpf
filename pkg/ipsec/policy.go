@@ -426,8 +426,11 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			case "clear":
 				fmt.Fprintf(&b, "        copy_df = no\n")
 			}
-			if vpn.EstablishTunnels == "immediately" {
+			switch vpn.EstablishTunnels {
+			case "immediately":
 				fmt.Fprintf(&b, "        start_action = start\n")
+			case "on-traffic":
+				fmt.Fprintf(&b, "        start_action = trap\n")
 			}
 			if dpd.Action != "" {
 				fmt.Fprintf(&b, "        dpd_action = %s\n", dpd.Action)

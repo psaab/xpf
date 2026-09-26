@@ -64,7 +64,7 @@ func renderImmediateVPN(t *testing.T) string {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-prop"}, PFSGroup: 14},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			// `immediately` is the setting that triggers start_action at all.
+			// `immediately` requests start_action = start.
 			"vpn-a": {
 				Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol",
 				BindInterface: "st0.0", EstablishTunnels: "immediately",
@@ -104,10 +104,10 @@ func TestStartActionIsChildOnly7165(t *testing.T) {
 		requireSetting(t, "start_action", "start")
 }
 
-// Control: with establish-tunnels NOT set to immediately, start_action must not
-// appear at all. Without this, a renderer that emitted the child-level line
-// unconditionally would pass the test above while ignoring the setting.
-func TestStartActionAbsentWhenNotImmediate7165(t *testing.T) {
+// Control: when establish-tunnels is unset, start_action must not appear.
+// This distinguishes the default responder behavior from the explicit
+// on-demand `trap` mode.
+func TestStartActionAbsentWhenEstablishTunnelsUnset7165(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		IKEProposals: map[string]*config.IKEProposal{
