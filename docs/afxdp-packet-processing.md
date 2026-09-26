@@ -223,6 +223,11 @@ The shim checks several conditions before redirecting a packet to userspace:
    for local/control-plane delivery; the shim no longer tail-calls through
    `userspace_fallback_progs`.
 6. Local-destination traffic (matching `userspace_local_v4`/`userspace_local_v6`) passes to kernel.
+   ICMPv6 Neighbor Discovery (types 133–137) has no type-only kernel-pass
+   exception: multicast or link-local destinations use the early destination
+   path, and unicast NDP passes only when its destination is configured local.
+   Transit-destination NDP continues to AF_XDP adjudication while healthy and
+   is dropped, never passed to the kernel, in a degraded state (#10863).
 7. A session MISS is **not** decided by the shim. It redirects the packet to the
    userspace dataplane, which evaluates policy and either creates a session or
    drops (`lib.rs`: *"Let all session misses through to the userspace dataplane"*).

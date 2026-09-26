@@ -2263,6 +2263,11 @@ mod tests_shim_wg_classify_8274;
 #[cfg(test)]
 #[path = "tests_shim_early_filter_10640.rs"]
 mod tests_shim_early_filter_10640;
+// #10863: execute the degraded shim's NDP destination-qualified kernel-pass
+// predicate on the host rather than modelling the degraded-only gate.
+#[cfg(test)]
+#[path = "tests_shim_degraded_ndp_10863.rs"]
+mod tests_shim_degraded_ndp_10863;
 // #10651: the shim's native-GRE kernel-pass decision, executed rather than
 // modelled — same shape as above.
 #[cfg(test)]
