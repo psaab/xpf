@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -216,49 +217,9 @@ func (c *CLI) showChassisClusterStatus() error {
 	}
 	c.appendClockSkewAlarm()
 
-	// Show VRRP status if any
-	cfg := c.store.ActiveConfig()
-	if cfg != nil && cfg.Security.Zones != nil {
-		for _, zone := range cfg.Security.Zones {
-			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
-				continue
-			}
-			for _, ifaceRef := range zone.Interfaces {
-				// #4908 (C175-HC-116): a zone binds a LOGICAL interface such as
-				// "ge-0/0/0.0" or "reth0.50", but cfg.Interfaces.Interfaces is
-				// keyed by the BASE interface name ("ge-0/0/0" / "reth0"). The
-				// prior direct lookup missed every unit-qualified reference and
-				// silently dropped its VRRP rows. Split off the unit suffix,
-				// look up the base, and (when a unit was named) show only that
-				// unit's groups.
-				base := ifaceRef
-				wantUnit := -1
-				if parts := strings.SplitN(ifaceRef, ".", 2); len(parts) == 2 {
-					base = parts[0]
-					if u, err := strconv.Atoi(parts[1]); err == nil {
-						wantUnit = u
-					}
-				}
-				ifCfg, ok := config.LookupInterface(cfg, base)
-				if !ok {
-					continue
-				}
-				for _, unit := range ifCfg.Units {
-					if unit == nil { // #5886: skip present-but-nil InterfaceUnit
-						continue
-					}
-					if wantUnit >= 0 && unit.Number != wantUnit {
-						continue
-					}
-					for addr, vg := range unit.VRRPGroups {
-						fmt.Printf("VRRP on %s.%d: group %d, priority %d, VIP %s, address %s\n",
-							base, unit.Number, vg.ID, vg.Priority,
-							strings.Join(vg.VirtualAddresses, ","), addr)
-					}
-				}
-			}
-		}
-	}
+	// Show config-derived VRRP group details. The rows are explicitly qualified
+	// as configured, rather than implied to be live mastership (#10844).
+	fmt.Print(cluster.FormatVRRPConfigRows(c.store.ActiveConfig()))
 	return nil
 }
 

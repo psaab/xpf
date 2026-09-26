@@ -27,5 +27,7 @@ xpf (0.0.0) unstable; urgency=medium
     devices (#10845).
   * Show config-sync divergence alarms without active configuration and report
     remote flow-monitor state as unknown (#10846).
+  * Label cluster VRRP rows as configured and include per-group detail in
+    gRPC cluster status (#10844).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
