@@ -328,10 +328,8 @@ func validateIPsecProposalProtocolStrict(cfg *Config) error {
 	return nil
 }
 
-// IsSafeIPsecAlgorithmValue is the shared allowlist predicate for algorithm
-// leaves that reach swanctl's unquoted proposal lists. Empty means the leaf
-// was omitted and is therefore safe for this predicate; callers that require
-// an algorithm (such as non-AEAD ESP integrity) enforce presence separately.
+// IsSafeIPsecAlgorithmValue rejects bytes that alter an unquoted swanctl
+// proposal. Domain validation is provided by IsSupportedIPsec*Algorithm.
 func IsSafeIPsecAlgorithmValue(value string) bool {
 	if value == "" {
 		return true
@@ -339,18 +337,15 @@ func IsSafeIPsecAlgorithmValue(value string) bool {
 	return ipsecname.SectionSafe(value)
 }
 
-// validateIPsecProposalAlgorithmsStrict rejects algorithm values that are not
-// safe to interpolate into swanctl's unquoted proposal lists. SectionSafe is
-// an allowlist (ASCII letters, digits, '-' and '_'), rather than a denylist:
-// strongSwan parses '#' as a comment and '{', '}', '=' as structure, so an
-// operator or peer-synced algorithm must never carry those bytes into the
-// rendered `proposals` or `esp_proposals` value.
+// validateIPsecProposalAlgorithmsStrict checks both the lexical safety and
+// the Junos/swanctl domain of algorithm leaves. SectionSafe alone admits
+// tokens such as aes-512-cbc that charon cannot load.
 //
-// A non-AEAD ESP proposal also requires an authentication algorithm. Without
-// one, buildESPProposal emits only the cipher (and optional PFS), leaving
-// integrity absent. Empty encryption means the renderer's default aes256,
-// which is non-AEAD and therefore requires authentication too. AH proposals
-// have no ESP render path and are handled by validateIPsecProposalProtocolStrict.
+// Non-AEAD IKE and ESP proposals both require integrity. Without it, the
+// renderer emits an incomplete proposal and charon discards the connection.
+// Empty encryption means the renderer's default aes256, which is non-AEAD.
+// AH proposals have no ESP render path and are handled by
+// validateIPsecProposalProtocolStrict.
 //
 // The tolerant load path downgrades this error to a warning, while the
 // renderer independently skips each affected proposal so legacy/persisted
@@ -360,10 +355,16 @@ func validateIPsecProposalAlgorithmsStrict(cfg *Config) error {
 		return nil
 	}
 	var bad []string
-	check := func(scope, name, field, value string) {
+	check := func(scope, name, field, value string, supported bool) {
 		if !IsSafeIPsecAlgorithmValue(value) {
 			bad = append(bad, fmt.Sprintf(
 				"%s proposal %q %s %q contains a character outside letters, digits, '-' and '_'",
+				scope, name, field, value))
+			return
+		}
+		if !supported {
+			bad = append(bad, fmt.Sprintf(
+				"%s proposal %q %s %q is not a supported Junos/swanctl algorithm",
 				scope, name, field, value))
 		}
 	}
@@ -377,8 +378,16 @@ func validateIPsecProposalAlgorithmsStrict(cfg *Config) error {
 		if p == nil {
 			continue
 		}
-		check("security ike", name, "encryption-algorithm", p.EncryptionAlg)
-		check("security ike", name, "authentication-algorithm", p.AuthAlg)
+		check("security ike", name, "encryption-algorithm", p.EncryptionAlg,
+			IsSupportedIPsecEncryptionAlgorithm(p.EncryptionAlg))
+		check("security ike", name, "authentication-algorithm", p.AuthAlg,
+			IsSupportedIPsecAuthenticationAlgorithm(p.AuthAlg))
+		if !IsIPsecAEADEncryptionAlgorithm(p.EncryptionAlg) && p.AuthAlg == "" {
+			bad = append(bad, fmt.Sprintf(
+				"security ike proposal %q is non-AEAD IKE without authentication-algorithm "+
+					"(set authentication-algorithm for integrity)",
+				name))
+		}
 	}
 
 	espNames := make([]string, 0, len(cfg.Security.IPsec.Proposals))
@@ -391,10 +400,12 @@ func validateIPsecProposalAlgorithmsStrict(cfg *Config) error {
 		if p == nil {
 			continue
 		}
-		check("security ipsec", name, "encryption-algorithm", p.EncryptionAlg)
-		check("security ipsec", name, "authentication-algorithm", p.AuthAlg)
+		check("security ipsec", name, "encryption-algorithm", p.EncryptionAlg,
+			IsSupportedIPsecEncryptionAlgorithm(p.EncryptionAlg))
+		check("security ipsec", name, "authentication-algorithm", p.AuthAlg,
+			IsSupportedIPsecAuthenticationAlgorithm(p.AuthAlg))
 		if !strings.EqualFold(p.Protocol, "ah") &&
-			!strings.Contains(p.EncryptionAlg, "gcm") && p.AuthAlg == "" {
+			!IsIPsecAEADEncryptionAlgorithm(p.EncryptionAlg) && p.AuthAlg == "" {
 			bad = append(bad, fmt.Sprintf(
 				"security ipsec proposal %q is non-AEAD ESP without authentication-algorithm "+
 					"(set authentication-algorithm for integrity)",

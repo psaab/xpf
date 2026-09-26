@@ -22,8 +22,10 @@ func multiProposalsFlat(t *testing.T) *Config {
 	tree := buildTree(t, []string{
 		"set security ike proposal ike-a authentication-method pre-shared-keys",
 		"set security ike proposal ike-a encryption-algorithm aes-256-cbc",
+		"set security ike proposal ike-a authentication-algorithm sha-256",
 		"set security ike proposal ike-b authentication-method pre-shared-keys",
 		"set security ike proposal ike-b encryption-algorithm aes-128-cbc",
+		"set security ike proposal ike-b authentication-algorithm sha-256",
 		"set security ike policy ike-pol proposals [ ike-a ike-b ]",
 		"set security ipsec proposal esp-a protocol esp",
 		"set security ipsec proposal esp-a encryption-algorithm aes-256-cbc",
@@ -64,10 +66,12 @@ func TestIKEIPsecProposalsMultiValueHierarchical(t *testing.T) {
         proposal ike-a {
             authentication-method pre-shared-keys;
             encryption-algorithm aes-256-cbc;
+            authentication-algorithm sha-256;
         }
         proposal ike-b {
             authentication-method pre-shared-keys;
             encryption-algorithm aes-128-cbc;
+            authentication-algorithm sha-256;
         }
         policy ike-pol {
             proposals [ ike-a ike-b ];

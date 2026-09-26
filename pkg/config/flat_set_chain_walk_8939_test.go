@@ -97,6 +97,10 @@ func flatSetSyntheticValue(name string) string {
 		strings.Contains(name, "metric"), strings.Contains(name, "mtu"),
 		strings.Contains(name, "ttl"), strings.Contains(name, "timeout"):
 		return "10"
+	case name == "encryption-algorithm":
+		return "aes-256-cbc"
+	case name == "authentication-algorithm":
+		return "sha-256"
 	default:
 		return "xpfval"
 	}

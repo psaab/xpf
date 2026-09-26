@@ -188,7 +188,7 @@ func TestExpectedLoadedConnsExcludesSkippedVPN9641(t *testing.T) {
 // charon never ran.
 func TestExpectedLoadedConnsDisqualifiesACandidateWithARenderError9641(t *testing.T) {
 	cfg := proofConfig9641()
-	cfg.IKEProposals = map[string]*config.IKEProposal{"prop-bad": {Name: "prop-bad", AuthMethod: "bogus"}}
+	cfg.IKEProposals = map[string]*config.IKEProposal{"prop-bad": {Name: "prop-bad", AuthMethod: "bogus", EncryptionAlg: "aes-256-cbc", AuthAlg: "sha-256"}}
 	cfg.IKEPolicies = map[string]*config.IKEPolicy{"pol-bad": {Proposals: []string{"prop-bad"}}}
 	cfg.Gateways = map[string]*config.IPsecGateway{"gw-bad": {Address: "172.16.9.9", IKEPolicy: "pol-bad"}}
 	cfg.VPNs["broken"] = &config.IPsecVPN{Name: "broken", Gateway: "gw-bad"}

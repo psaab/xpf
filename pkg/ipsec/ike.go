@@ -71,8 +71,8 @@ var errProposalUnresolved = errors.New(
 	"IPsec proposal cannot be rendered safely")
 
 // renderAlgorithmValueSafe is the renderer's second belt for already-persisted
-// values. It uses the same SectionSafe allowlist as the strict commit gate so
-// no swanctl-significant byte can reach an unquoted proposal slot.
+// values. It rejects swanctl-significant characters; the shared domain
+// predicates below reject alphabetic but unsupported algorithm tokens.
 func renderAlgorithmValueSafe(value string) bool {
 	return config.IsSafeIPsecAlgorithmValue(value)
 }
@@ -82,15 +82,30 @@ func algorithmValuesBad(kind, name, encryption, auth string) (bool, string) {
 		return true, fmt.Sprintf("%s %q encryption-algorithm %q contains "+
 			"a swanctl-significant character", kind, name, encryption)
 	}
+	if !config.IsSupportedIPsecEncryptionAlgorithm(encryption) {
+		return true, fmt.Sprintf("%s %q uses unsupported encryption-algorithm %q",
+			kind, name, encryption)
+	}
 	if !renderAlgorithmValueSafe(auth) {
 		return true, fmt.Sprintf("%s %q authentication-algorithm %q contains "+
 			"a swanctl-significant character", kind, name, auth)
+	}
+	if !config.IsSupportedIPsecAuthenticationAlgorithm(auth) {
+		return true, fmt.Sprintf("%s %q uses unsupported authentication-algorithm %q",
+			kind, name, auth)
 	}
 	return false, ""
 }
 
 func ikeProposalBad(name string, prop *config.IKEProposal) (bool, string) {
-	return algorithmValuesBad("ike-proposal", name, prop.EncryptionAlg, prop.AuthAlg)
+	if bad, detail := algorithmValuesBad("ike-proposal", name, prop.EncryptionAlg, prop.AuthAlg); bad {
+		return true, detail
+	}
+	if !config.IsIPsecAEADEncryptionAlgorithm(prop.EncryptionAlg) && prop.AuthAlg == "" {
+		return true, fmt.Sprintf("ike-proposal %q is non-AEAD IKE without "+
+			"authentication-algorithm", name)
+	}
+	return false, ""
 }
 
 func espProposalBad(name string, prop *config.IPsecProposal) (bool, string) {
@@ -98,7 +113,7 @@ func espProposalBad(name string, prop *config.IPsecProposal) (bool, string) {
 		return true, detail
 	}
 	if !strings.EqualFold(prop.Protocol, "ah") &&
-		!strings.Contains(prop.EncryptionAlg, "gcm") && prop.AuthAlg == "" {
+		!config.IsIPsecAEADEncryptionAlgorithm(prop.EncryptionAlg) && prop.AuthAlg == "" {
 		return true, fmt.Sprintf("ipsec-proposal %q is non-AEAD ESP without "+
 			"authentication-algorithm", name)
 	}
@@ -507,6 +522,7 @@ func hasIKEChain(cfg *config.IPsecConfig, ikePolicyName string) bool {
 // keep rendering as before. Non-GCM algorithms return ("", false) and
 // the caller applies the historical "-cbc"/"-" normalization.
 func normalizeEncAlg(enc string) (token string, isGCM bool) {
+	enc = strings.ToLower(enc)
 	switch enc {
 	case "aes-128-gcm", "aes128gcm":
 		return "aes128gcm16", true
@@ -516,8 +532,8 @@ func normalizeEncAlg(enc string) (token string, isGCM bool) {
 		return "aes256gcm16", true
 	}
 	if strings.Contains(enc, "gcm") {
-		// Already carries an ICV suffix (or some other GCM spelling);
-		// strip Junos punctuation but otherwise leave it intact.
+		// Already carries an ICV suffix; strip Junos punctuation but
+		// otherwise leave the supported lower-case token intact.
 		t := strings.ReplaceAll(enc, "-cbc", "")
 		t = strings.ReplaceAll(t, "-", "")
 		return t, true
@@ -532,6 +548,7 @@ func normalizeEncAlg(enc string) (token string, isGCM bool) {
 // auth/integrity algorithm we mirror it as the PRF; otherwise we default
 // to prfsha256.
 func gcmPRF(authAlg string) string {
+	authAlg = strings.ToLower(authAlg)
 	switch {
 	case strings.Contains(authAlg, "512"):
 		return "prfsha512"
@@ -610,6 +627,7 @@ func buildIKEProposalFromIKE(prop *config.IKEProposal) string {
 	if enc == "" {
 		enc = "aes256"
 	}
+	enc = strings.ToLower(enc)
 	if tok, isGCM := normalizeEncAlg(enc); isGCM {
 		parts = append(parts, tok)
 		// IKEv2 AEAD proposals require an explicit PRF.
@@ -638,6 +656,7 @@ func buildIKEProposal(prop *config.IPsecProposal) string {
 	if enc == "" {
 		enc = "aes256"
 	}
+	enc = strings.ToLower(enc)
 	if tok, isGCM := normalizeEncAlg(enc); isGCM {
 		parts = append(parts, tok)
 		// IKEv2 AEAD proposals require an explicit PRF — there is no
@@ -667,6 +686,7 @@ func buildESPProposal(prop *config.IPsecProposal, pfsGroup int) string {
 	if enc == "" {
 		enc = "aes256"
 	}
+	enc = strings.ToLower(enc)
 	// Normalize Junos names to swanctl names. AEAD (GCM) ciphers carry
 	// an ICV suffix and take no separate integrity algorithm and no PRF.
 	if tok, isGCM := normalizeEncAlg(enc); isGCM {

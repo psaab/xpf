@@ -169,6 +169,7 @@ func TestProposalSetYieldsToExplicitProposals_4297(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security ike proposal ike-x authentication-method pre-shared-keys",
 		"set security ike proposal ike-x encryption-algorithm aes-256-cbc",
+		"set security ike proposal ike-x authentication-algorithm sha-256",
 		"set security ike policy ike-pol proposal-set standard",
 		"set security ike policy ike-pol proposals ike-x",
 	})

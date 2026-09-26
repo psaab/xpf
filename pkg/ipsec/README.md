@@ -853,6 +853,8 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `escapeSwanctlQuoted` belt, connection / child / secret NAMES are
   sanitized, and every `dpd_delay`/`rekey_time`/`if_id_*` slot is an
   integer (`%d`).
+- **Proposal algorithm domains and integrity (#10880).** Strict Junos commit validation and the tolerant renderer share the supported IKE/ESP encryption and integrity vocabularies; character-safe but unknown tokens (including `null` encryption) are rejected at commit and skipped at render. Non-AEAD IKE proposals, like ESP, require an integrity algorithm. GCM matching is case-insensitive, and the renderer canonicalizes uppercase GCM spellings before writing swanctl proposals.
+
 - **Injective child-section naming (#5122).** Each traffic selector
   renders one swanctl child section named `<conn>-<sanitizeChildName(ts)>`
   (`effectiveTrafficSelectors` in `policy.go`). `sanitizeChildName` maps

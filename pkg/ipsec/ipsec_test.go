@@ -1170,6 +1170,7 @@ func TestGenerateConfig_DPDBareAndTuningForms(t *testing.T) {
 		`set security ike proposal ike-p1 authentication-method pre-shared-keys`,
 		`set security ike proposal ike-p1 dh-group group14`,
 		`set security ike proposal ike-p1 encryption-algorithm aes-256-cbc`,
+		`set security ike proposal ike-p1 authentication-algorithm sha-256`,
 		`set security ike policy pol1 mode main`,
 		`set security ike policy pol1 proposals ike-p1`,
 		`set security ike policy pol1 pre-shared-key ascii-text mysecret`,
