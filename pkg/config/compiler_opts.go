@@ -2904,6 +2904,11 @@ type compileOpts struct {
 	// Keys. Existing persisted or peer-synced names must still boot (#1960).
 	lenientSystemHostname bool
 
+	// lenientSystemAAA10831 preserves boot and peer-sync behavior for an
+	// already-persisted unsupported AAA stanza while surfacing the local-only
+	// authentication limitation as a warning. New strict compiles reject it.
+	lenientSystemAAA10831 bool
+
 	// nodeAware / stampNodeID (#4329) carry the runtime cluster node
 	// identity (from /etc/xpf/node-id, or `-node-id` on `xpfd
 	// check-config`) into compileExpanded so it can be stamped onto the
@@ -3125,5 +3130,6 @@ func lenientCompileOpts() compileOpts {
 		lenientInterfaceNumericBounds:          true,
 		lenientBareLeafInstance9838:            true,
 		lenientSystemHostname:                  true,
+		lenientSystemAAA10831:                  true,
 	}
 }

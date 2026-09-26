@@ -15,6 +15,43 @@ import (
 
 const sharedUMEMPhase0ArtifactMaxBytes = 16 << 20
 
+// These exact Junos AAA leaves have no runtime consumer. Refuse them narrowly
+// while keeping the surrounding open-world system tree unchanged.
+var unimplementedSystemAAALeaves10831 = map[string]struct{}{
+	"radius-server":        {},
+	"tacplus-server":       {},
+	"authentication-order": {},
+}
+
+func systemAAARefusal10831(leaf string) string {
+	return fmt.Sprintf(
+		"local-only authentication is the only supported mode; Junos system %s is not implemented and is refused rather than silently ignored (#10831)",
+		leaf)
+}
+
+func systemAAAWarningsOrError10831(systemNode *Node, lenient bool) ([]string, error) {
+	if systemNode == nil {
+		return nil, nil
+	}
+	var warnings []string
+	for _, child := range systemNode.Children {
+		if child == nil {
+			continue
+		}
+		leaf := child.Name()
+		if _, unsupported := unimplementedSystemAAALeaves10831[leaf]; !unsupported {
+			continue
+		}
+		message := systemAAARefusal10831(leaf)
+		if !lenient {
+			return nil, fmt.Errorf("%s", message)
+		}
+		warnings = append(warnings,
+			message+" (strict commit would reject this)")
+	}
+	return warnings, nil
+}
+
 // syslogHostCoalesce9854 is the per-address merge record for the #9854
 // syslog host coalescing: the destination being built, which scalars have
 // been recorded (so an inherited value never overwrites an inline one),
@@ -27,6 +64,14 @@ type syslogHostCoalesce9854 struct {
 }
 
 func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts) error {
+	aaaWarnings, aaaErr := systemAAAWarningsOrError10831(node, opts.lenientSystemAAA10831)
+	if aaaErr != nil {
+		return aaaErr
+	}
+	if cfg != nil {
+		cfg.Warnings = append(cfg.Warnings, aaaWarnings...)
+	}
+
 	dpType, err := compileSystemDataplaneType(node)
 	if err != nil {
 		return err
