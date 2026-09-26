@@ -322,10 +322,11 @@ the userspace dataplane admission boundary is in
   Put other VRRP on VRIDs 1-100 or 116-255, or on another segment.
 - **Session sync**: incremental 1s sweep + ring buffer + GC delete
   callbacks, TCP on fabric link.
-- **Config sync**: primary → secondary with `${node}` variable expansion,
-  reverse-sync on reconnect. Each push carries a monotonic config generation
-  and applies through a single-consumer ordered queue, so a rapid commit pair
-  cannot leave the standby on the older config (#3931).
+- **Config sync**: RG0 primary → secondary with `${node}` variable expansion;
+  only the RG0 primary pushes, including on peer reconnect (#78). Each push
+  carries a monotonic config generation and applies through a single-consumer
+  ordered queue, so a rapid commit pair cannot leave the standby on the older
+  config (#3931).
 - **IPsec SA sync**: shared IKE/ESP state across cluster nodes.
 - **Dual fabric links**: independent fab0/fab1 for redundancy (no
   bonding).

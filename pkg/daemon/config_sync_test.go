@@ -188,60 +188,24 @@ func TestHandleConfigSync_SkipsWhenConfigAlreadyMatchesActive(t *testing.T) {
 	}
 }
 
-// TestOnPeerConnected_PrimaryPushesConfig verifies that an RG0 primary with
-// sufficient uptime reaches pushConfigToPeer (which safely no-ops on nil
-// sessionSync).
-func TestOnPeerConnected_PrimaryPushesConfig(t *testing.T) {
-	d := &Daemon{
-		cluster:   newClusterManager(true),
-		startTime: time.Now().Add(-60 * time.Second), // running >30s
+// TestConfigSyncPeerConnectUsesRG0Reconciler verifies reconnect push behavior
+// through the production reconciler rather than a test-only replica of the
+// removed callback logic.
+func TestConfigSyncPeerConnectUsesRG0Reconciler(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		primary  bool
+		wantPush int64
+	}{
+		{name: "RG0 primary pushes", primary: true, wantPush: 1},
+		{name: "secondary does not push", primary: false, wantPush: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, pushes := newReconcileDaemon(t, tc.primary, 60*time.Second)
+			d.reconcileConfigSyncToPeer("peer-connect")
+			if got := pushes.Load(); got != tc.wantPush {
+				t.Fatalf("peer-connect reconciler push count = %d, want %d", got, tc.wantPush)
+			}
+		})
 	}
-	if !d.cluster.IsLocalPrimary(0) {
-		t.Fatal("test setup error: should be primary")
-	}
-	// pushConfigToPeer returns early when sessionSync is nil — safe no-op.
-	d.onPeerConnectedHandler()
-}
-
-// onPeerConnectedHandler replicates the OnPeerConnected callback logic
-// for testability (same checks as daemon.go:3476-3484).
-func (d *Daemon) onPeerConnectedHandler() {
-	if d.cluster == nil || !d.cluster.IsLocalPrimary(0) {
-		return
-	}
-	if time.Since(d.startTime) < 30*time.Second {
-		return
-	}
-	d.pushConfigToPeer()
-}
-
-// TestOnPeerConnected_SecondarySkips verifies that a secondary does NOT
-// push config to a reconnecting peer.
-func TestOnPeerConnected_SecondarySkips(t *testing.T) {
-	d := &Daemon{
-		cluster:   newClusterManager(false),
-		startTime: time.Now().Add(-60 * time.Second),
-	}
-	// Should return early (not RG0 primary). If it proceeded to pushConfigToPeer,
-	// that's also safe (nil sessionSync), but we verify the guard fires by
-	// checking the logic directly.
-	if d.cluster.IsLocalPrimary(0) {
-		t.Fatal("test setup error: should be secondary")
-	}
-	d.onPeerConnectedHandler()
-}
-
-// TestOnPeerConnected_FreshDaemonSkips verifies that even the primary skips
-// config push if daemon just started (<30s uptime).
-func TestOnPeerConnected_FreshDaemonSkips(t *testing.T) {
-	d := &Daemon{
-		cluster:   newClusterManager(true),
-		startTime: time.Now(), // just started
-	}
-	if !d.cluster.IsLocalPrimary(0) {
-		t.Fatal("test setup error: should be primary")
-	}
-	// Uptime < 30s → should skip. If it proceeded to pushConfigToPeer with
-	// nil sessionSync, that's safe but undesired.
-	d.onPeerConnectedHandler()
 }
