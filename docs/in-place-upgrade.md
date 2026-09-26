@@ -1228,13 +1228,16 @@ Three things it answers that previously needed a root shell or journald:
   The annotation is node-scoped and sits **above** every `Redundancy group:`
   header so the rolling-deploy node parser (`deploy_rolling_secondary_node`,
   `test/incus/deploy-lib.sh`) cannot read it as a table row.
-- **Did the last candidate promote or revert, and why?** `revert()` clears the
-  journal by design (the next boot must be a clean ordinary boot) and the
-  promotion marker is written only on PROMOTE, so a rejected candidate used to
-  leave `promoted=none` / `armed=none`: correct, and indistinguishable from a
-  box that never tried, with the reason surviving only in journald. A durable
+- **Did the last candidate promote, revert, or get discarded after firmware
+  returned to known-good—and why?** `revert()` clears the journal by design
+  (the next boot must be a clean ordinary boot) and the promotion marker is
+  written only on PROMOTE, so a rejected candidate used to leave
+  `promoted=none` / `armed=none`: correct, and indistinguishable from a box
+  that never tried, with the reason surviving only in journald. A durable
   last-roll record at `/var/lib/xpf/kernel-last-roll` (version, known-good,
-  outcome, reason, timestamp) now survives the clear.
+  outcome, reason, timestamp) now survives the clear. If firmware ignored
+  BootNext and this gate cleans up on the already-booted known-good slot, the
+  outcome is `discarded` rather than `promoted`; the CLI reports that result.
 
 The last-roll record is deliberately **not** cleared at arm time, unlike the
 promotion marker. The marker is cleared on `Arm` because a stale "promoted"
@@ -1242,11 +1245,11 @@ from a prior same-version roll would false-satisfy the HA orchestrator's
 post-reboot version check. This record answers no such check — it is history,
 overwritten by the next roll's outcome, and clearing it on arm would destroy
 the previous answer exactly when an operator re-arming after a failure wants
-it. Both writes are best-effort: a failed history write never changes what the
-channel does, and a revert that could not record itself is still a revert. It
-is written at the TOP of `revert()`, before that function's two early exits (a
-journal that cannot be persisted, and the attempt-cap give-up), because those
-are the states an operator most needs explained.
+it. Writes are best-effort: a failed history write never changes what the
+channel does, and a revert that could not record itself is still a revert. The
+revert outcome is written at the TOP of `revert()`, before that function's two
+early exits (a journal that cannot be persisted, and the attempt-cap give-up);
+known-good cleanup records `discarded` before clearing its journal.
 
 `show system kernel-upgrade`, the console CLI, and the remote `cli` all render
 through `upgrade.RenderChannelStatus`, and the read path

@@ -472,35 +472,34 @@ func (r *KernelRunner) newArmNonce(j *KernelJournal) string {
 
 // Promote runs the POST-REBOOT promotion gate from the candidate boot. It is
 // invoked by the promotion oneshot systemd unit early on the candidate boot
-// (before xpfd admits traffic). On a PASS it makes the candidate slot the
-// durable default and clears the journal; on a FAIL it reverts (clean reboot ->
-// firmware falls through BootOrder to the known-good slot, BootNext already
-// consumed). It returns nil on a clean promote, and a non-nil error describing
-// the revert reason on a revert (the oneshot then issues the reboot).
-func (r *KernelRunner) Promote() error {
+// (before xpfd admits traffic). It returns the completed outcome on a clean
+// promote or known-good cleanup, and a non-nil error on a revert or infra
+// failure. The outcome lets the CLI distinguish promotion from a discarded
+// candidate and from an ordinary no-op boot.
+func (r *KernelRunner) Promote() (KernelRollOutcome, error) {
 	sys := r.cfg.Sys
 	j, err := r.loadKernelJournal()
 	if err != nil {
-		return err
+		return KernelRollOutcome{}, err
 	}
 	if !j.State.atLeast(KernelStateArmed) {
 		// Nothing armed -> this is an ordinary boot, not a candidate trial.
 		r.logf("kernel-upgrade: no armed candidate (state=%s); ordinary boot, nothing to promote", j.State)
-		return nil
+		return KernelRollOutcome{}, nil
 	}
 	if j.State == KernelStatePromoted || j.State == KernelStateReverted {
 		r.logf("kernel-upgrade: already terminal (%s); nothing to do", j.State)
-		return nil
+		return KernelRollOutcome{}, nil
 	}
 
 	// Gate 1: did the firmware actually boot the candidate slot?
 	entries, err := sys.BootEntries()
 	if err != nil {
-		return r.revert(j, fmt.Errorf("read boot entries: %w", err))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("read boot entries: %w", err))
 	}
 	candID, ok := entries[j.InactiveSlot]
 	if !ok {
-		return r.revert(j, fmt.Errorf("candidate slot %s vanished from NVRAM", j.InactiveSlot))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("candidate slot %s vanished from NVRAM", j.InactiveSlot))
 	}
 	cur, err := sys.BootCurrent()
 	if err != nil {
@@ -520,7 +519,7 @@ func (r *KernelRunner) Promote() error {
 			// Preserve the journal + candidate untouched and surface the error;
 			// the next boot re-runs this gate, and any reboot meanwhile lands on
 			// the known-good BootOrder front (BootNext already consumed).
-			return r.recoverIndeterminate(j, fmt.Errorf(
+			return KernelRollOutcome{}, r.recoverIndeterminate(j, fmt.Errorf(
 				"read BootCurrent: %v; running kernel also unreadable: %w", err, rkErr))
 		case running == j.CandidateVersion:
 			// We ARE running the candidate despite the BootCurrent read error.
@@ -552,10 +551,10 @@ func (r *KernelRunner) Promote() error {
 	// Gate 2: is the running kernel actually the candidate?
 	running, err := sys.RunningKernel()
 	if err != nil {
-		return r.revert(j, fmt.Errorf("uname -r: %w", err))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("uname -r: %w", err))
 	}
 	if running != j.CandidateVersion {
-		return r.revert(j, fmt.Errorf("running kernel %s != candidate %s", running, j.CandidateVersion))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("running kernel %s != candidate %s", running, j.CandidateVersion))
 	}
 	return r.verifyAndPromote(j, candID, running)
 }
@@ -567,7 +566,7 @@ func (r *KernelRunner) Promote() error {
 // BootCurrent==candidate path or the #4872-A fail-closed path where BootCurrent
 // was unreadable but RunningKernel positively identified the candidate — so it
 // never prunes the kernel it is validating.
-func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string) error {
+func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string) (KernelRollOutcome, error) {
 	sys := r.cfg.Sys
 
 	// Gate 2b: the binary running this gate must be the one the ARMING
@@ -577,25 +576,25 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	// REVERTS — an undesignated binary must not authorize the promotion, and
 	// reverting is the safe direction on an A/B kernel trial.
 	if err := VerifyPromoteBinaryMatchesRecord(j.PromoteBinary); err != nil {
-		return r.revert(j, fmt.Errorf("arm-record mismatch: %w", err))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("arm-record mismatch: %w", err))
 	}
 
 	// Gate 3: verify-dataplane (the #1864 kernel verifier) on the candidate.
 	ok, err := sys.VerifyDataplane()
 	if err != nil {
-		return r.revert(j, fmt.Errorf("verify-dataplane error: %w", err))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("verify-dataplane error: %w", err))
 	}
 	if !ok {
-		return r.revert(j, fmt.Errorf("verify-dataplane REJECT on candidate kernel %s", running))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("verify-dataplane REJECT on candidate kernel %s", running))
 	}
 
 	// Gate 4: forward health beacon (structural verify != actually forwards).
 	ok, err = sys.ForwardBeacon(r.cfg.BeaconDeadline)
 	if err != nil {
-		return r.revert(j, fmt.Errorf("forward beacon error: %w", err))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("forward beacon error: %w", err))
 	}
 	if !ok {
-		return r.revert(j, fmt.Errorf("forward beacon FAILED on candidate kernel %s", running))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("forward beacon FAILED on candidate kernel %s", running))
 	}
 
 	// PASS: promote — non-destructive BootOrder reorder (candidate first). If
@@ -605,7 +604,7 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	// and continue booting an un-promoted candidate — r1 Copilot). revert()
 	// restores the known-good BootOrder front + reboots.
 	if err := sys.SetBootOrderFront(candID); err != nil {
-		return r.revert(j, fmt.Errorf("promote: set BootOrder front %s failed: %w", candID, err))
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("promote: set BootOrder front %s failed: %w", candID, err))
 	}
 	if err := sys.DisarmWatchdog(); err != nil {
 		r.logf("kernel-upgrade promote: WARNING disarm watchdog: %v", err)
@@ -623,14 +622,17 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	// orchestrator's "did THIS node promote version X"; this answers the
 	// operator's "what happened to the last roll", which on a REVERT the marker
 	// cannot answer at all (it is not written, and is cleared).
-	r.recordRollOutcome(j, RollOutcomePromoted, "")
+	outcome := r.recordRollOutcome(j, RollOutcomePromoted, "")
 	// The candidate slot is now the active/known-good slot; the OTHER slot
 	// (the former active) becomes the rollback target and keeps its kernel.
 	if err := r.ktransition(j, KernelStatePromoted); err != nil {
-		return err
+		return KernelRollOutcome{}, err
 	}
 	r.logf("kernel-upgrade: PROMOTED candidate %s (slot %s now default)", running, j.InactiveSlot)
-	return r.clearKernelJournal()
+	if err := r.clearKernelJournal(); err != nil {
+		return KernelRollOutcome{}, err
+	}
+	return outcome, nil
 }
 
 // recoverIndeterminate handles the post-reboot case where NEITHER the booted
@@ -749,11 +751,15 @@ func (r *KernelRunner) restoreKnownGood(j *KernelJournal) {
 // already safe), so this must NOT request a reboot (r1 AGY: a reboot here is
 // redundant, and loops forever if the journal can't be cleared on a read-only
 // root, bypassing the SAFE-BOOTSTRAP lifeline). It best-effort prunes the
-// un-promoted candidate + clears the journal and returns nil (exit 0 — continue
-// THIS boot). Journal-clear failure is non-fatal: on the next boot we are still
-// on known-good and this same no-reboot path runs again.
-func (r *KernelRunner) cleanupAlreadyOnKnownGood(j *KernelJournal, why error) error {
+// un-promoted candidate + clears the journal and returns the discarded outcome
+// for the CLI (exit 0 — continue THIS boot). Journal-clear failure is
+// non-fatal: on the next boot we are still on known-good and this same
+// no-reboot path runs again.
+func (r *KernelRunner) cleanupAlreadyOnKnownGood(j *KernelJournal, why error) (KernelRollOutcome, error) {
 	r.logf("kernel-upgrade: already on a known-good slot (%v); cleaning up, NO reboot", why)
+	// Record the candidate as discarded rather than promoted or reverted: the
+	// firmware already left the box on known-good, so no revert reboot is needed.
+	outcome := r.recordRollOutcome(j, RollOutcomeDiscarded, fmt.Sprintf("%v", why))
 	// Restore the safest reachable state (BootOrder known-good front + disarm
 	// watchdog + prune candidate), then clear the journal.
 	r.restoreKnownGood(j)
@@ -761,7 +767,7 @@ func (r *KernelRunner) cleanupAlreadyOnKnownGood(j *KernelJournal, why error) er
 		r.logf("kernel-upgrade: WARNING could not clear journal on known-good cleanup: %v "+
 			"(non-fatal: next boot re-runs this no-reboot path)", err)
 	}
-	return nil
+	return outcome, nil
 }
 
 // IsArmed reports whether a candidate is currently armed (used by the
