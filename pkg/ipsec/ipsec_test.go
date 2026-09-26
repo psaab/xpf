@@ -1042,17 +1042,36 @@ func TestGenerateConfig_EstablishTunnels(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "10.0.0.1", EstablishTunnels: "immediately"},
+			"tun": {Gateway: "10.0.0.1", BindInterface: "st0.0"},
 		},
 	}
-	childSA_3904(t, m.generateConfig(cfg), "tun").
-		requireSetting(t, "start_action", "start")
-
-	// on-traffic should NOT produce start_action
-	cfg.VPNs["tun"].EstablishTunnels = "on-traffic"
-	offDoc := m.generateConfig(cfg)
-	childSA_3904(t, offDoc, "tun")
-	parseSwanctlDoc(t, offDoc).hasNoSettingAnywhere(t, "start_action")
+	tests := []struct {
+		mode, wantAction string
+	}{
+		{"immediately", "start"},
+		{"on-traffic", "trap"},
+		{"responder-only", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			cfg.VPNs["tun"].EstablishTunnels = tt.mode
+			doc := parseSwanctlDoc(t, m.generateConfig(cfg))
+			conn := doc.at(t, "connections", "tun")
+			conn.hasNoSetting(t, "start_action")
+			child := conn.at(t, "children", "tun")
+			if tt.wantAction == "" {
+				child.hasNoSetting(t, "start_action")
+			} else {
+				child.requireSetting(t, "start_action", tt.wantAction)
+			}
+			if tt.mode == "on-traffic" {
+				// The on-traffic trap and XFRM interface must coexist so the
+				// first matching packet can reach charon to initiate the CHILD.
+				child.requireSetting(t, "if_id_in", "1")
+				child.requireSetting(t, "if_id_out", "1")
+			}
+		})
+	}
 }
 
 func TestGenerateConfig_IKELifetime(t *testing.T) {

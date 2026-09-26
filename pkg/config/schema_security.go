@@ -1415,9 +1415,10 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				valueExamples: []string{"copy", "set", "clear"},
 				validator:     ValidateEnum([]string{"copy", "set", "clear"}), children: nil},
 			// #4301 (V-5): type the enum so a typo (`on-tarffic`) fails closed
-			// at commit instead of storing verbatim and silently degrading to
-			// on-traffic. Only `immediately` is acted on (start_action =
-			// start); on-traffic / responder-only are the initiate-later modes.
+			// at commit instead of silently selecting a different tunnel-
+			// establishment mode. `immediately` starts the child, `on-traffic`
+			// installs a trap for first-packet initiation, and responder-only
+			// omits start_action.
 			"establish-tunnels": {desc: "Tunnel establishment (immediately|on-traffic|responder-only)", args: 1, placeholder: "<mode>",
 				valueType: ValueEnumOf, valueDesc: "tunnel establishment mode",
 				valueExamples: []string{"immediately", "on-traffic", "responder-only"},
