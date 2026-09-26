@@ -1668,6 +1668,12 @@ The annotation appears on `show security nat source rule detail`,
 emitted ONLY for a rule the dataplane is not enforcing, so output for a
 healthy configuration is unchanged.
 
+In the source and destination rule-detail views, a present but unarmed dataplane
+renders `Translation hits` as `n/a (dataplane not armed)`. An armed rule
+without an assigned counter ID renders `unknown (no counter assigned)`; if
+reading an assigned counter fails, the detail view emits a warning with the
+error instead of silently omitting the measurement.
+
 **It does NOT yet appear on the source/destination SUMMARY topics.**
 `show security nat source`, `... source summary`, `... source pool`,
 `... source rule-set`, `... source rule` (without `detail`) and their
@@ -1740,17 +1746,6 @@ shape printed one zone-pair total under every rule in the set, so five rules
 over four hundred sessions printed `400` five times and summing the column gave
 five times the truth. xpf reports the number it can actually measure, once per
 rule-set, labelled as the zone-pair aggregate it is.
-
-`Translation hits` renders `n/a (dataplane not armed)` when the dataplane has
-not reported. `Manager.ReadNATRuleCounter` is a map read with no error path, so
-an unarmed read returns `(zero, nil)` and is indistinguishable from a measured
-zero; the REST sibling already refuses rather than printing one (#5046).
-
-When the dataplane is armed but the apply result has not assigned a counter ID
-to a rule, its hit count renders `unknown (no counter assigned)`. If reading
-an assigned counter fails, the detail view emits a warning with the read error
-instead of silently omitting the measurement.
-
 
 ---
 
