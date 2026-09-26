@@ -3,6 +3,8 @@ package daemon
 import (
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -552,4 +554,96 @@ func TestApplySSHConfig_ValidationPassesThenReloads(t *testing.T) {
 	if r.present == nil || !strings.Contains(string(r.present), "Ciphers aes256-ctr") {
 		t.Fatalf("valid drop-in should be applied; got %q", r.present)
 	}
+}
+
+// TestSSHDFactoryRootLoginPrecedence10755 proves the generated xpf drop-in
+// overrides the image's earlier-loaded factory policy for both root-login
+// directions. It also checks migration removes the old, later-sorting file.
+func TestSSHDFactoryRootLoginPrecedence10755(t *testing.T) {
+	sshdBin, err := exec.LookPath("/usr/sbin/sshd")
+	if err != nil {
+		t.Skipf("sshd is unavailable: %v", err)
+	}
+	keygenBin, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skipf("ssh-keygen is unavailable: %v", err)
+	}
+	productionPath := sshdConfPath
+	if filepath.Base(productionPath) != "00-xpf.conf" {
+		t.Fatalf("managed drop-in = %q, want 00-xpf.conf before the factory drop-in", productionPath)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		rootLogin string
+		want      string
+	}{
+		{name: "deny", rootLogin: "deny", want: "no"},
+		{name: "allow", rootLogin: "allow", want: "yes"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dropInDir := filepath.Join(dir, "sshd_config.d")
+			if err := os.MkdirAll(dropInDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			hostKey := filepath.Join(dir, "ssh_host_ed25519_key")
+			if out, err := exec.Command(keygenBin, "-q", "-t", "ed25519", "-N", "", "-f", hostKey).CombinedOutput(); err != nil {
+				t.Fatalf("ssh-keygen: %v: %s", err, out)
+			}
+			mainConfig := filepath.Join(dir, "sshd_config")
+			mainBody := "Include " + filepath.Join(dropInDir, "*.conf") + "\n" +
+				"HostKey " + hostKey + "\n" +
+				"PidFile " + filepath.Join(dir, "sshd.pid") + "\n"
+			if err := os.WriteFile(mainConfig, []byte(mainBody), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dropInDir, "10-xpf-factory.conf"),
+				[]byte("PermitRootLogin prohibit-password\nPermitEmptyPasswords no\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			legacyPath := filepath.Join(dropInDir, "xpf.conf")
+			if err := os.WriteFile(legacyPath, []byte("PermitRootLogin yes\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			origPath, origValidate, origReload := sshdConfPath, sshdValidateCmd, sshdReloadCmd
+			sshdConfPath = filepath.Join(dropInDir, filepath.Base(productionPath))
+			sshdValidateCmd = func() ([]byte, error) {
+				return exec.Command(sshdBin, "-t", "-f", mainConfig).CombinedOutput()
+			}
+			sshdReloadCmd = func() ([]byte, error) { return nil, nil }
+			t.Cleanup(func() {
+				sshdConfPath, sshdValidateCmd, sshdReloadCmd = origPath, origValidate, origReload
+			})
+
+			if got := effectiveRootLogin10755(t, sshdBin, mainConfig); got != "prohibit-password" {
+				t.Fatalf("control effective PermitRootLogin = %q, want factory value prohibit-password", got)
+			}
+			if err := (&Daemon{}).applySSHConfig(sshConfig(&config.SSHServiceConfig{RootLogin: tt.rootLogin})); err != nil {
+				t.Fatalf("applySSHConfig(%q): %v", tt.rootLogin, err)
+			}
+			if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("legacy drop-in still exists after migration: %v", err)
+			}
+			if got := effectiveRootLogin10755(t, sshdBin, mainConfig); got != tt.want {
+				t.Fatalf("effective PermitRootLogin = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func effectiveRootLogin10755(t *testing.T, sshdBin, configPath string) string {
+	t.Helper()
+	out, err := exec.Command(sshdBin, "-T", "-f", configPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sshd -T: %v: %s", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if value, ok := strings.CutPrefix(line, "permitrootlogin "); ok {
+			return value
+		}
+	}
+	t.Fatalf("sshd -T output lacks permitrootlogin: %s", out)
+	return ""
 }
