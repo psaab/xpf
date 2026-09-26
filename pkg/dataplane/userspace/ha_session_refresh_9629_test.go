@@ -1051,6 +1051,78 @@ func TestSessionHAContendedDemotionIntentDoesNotRenewExpiredOwner9629(t *testing
 	}
 }
 
+// A demotion waiting behind a long m.mu holder must suppress degraded refreshes
+// until it can publish the inactive ownership snapshot. Otherwise a watchdog
+// tick renews the expired helper lease from the prior Active=true snapshot.
+func TestSessionHAQueuedDemotionSuppressesDegradedRefresh9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: 1},
+	})
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.xskLivenessProven = true
+
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+
+	oracle := newHARefreshOracle9629([]HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+	}, 10)
+	oracle.leaseUntil[1] = 9
+	var sent [][]HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append(sent, append([]HAGroupStatus(nil), req.HAState.Groups...))
+			oracle.apply(req.HAState.Groups)
+		}
+		return nil
+	}
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "update_ha_state" {
+			*status = *readyHelperStatus()
+		}
+		return nil
+	}
+
+	m.mu.Lock()
+	demoteDone := make(chan error, 1)
+	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for m.haWatchdogPendingDemotions.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	pendingPublished := m.haWatchdogPendingDemotions.Load() != 0
+	if !pendingPublished {
+		t.Errorf("queued demotion did not publish its pending state before waiting on m.mu")
+	}
+
+	if err := m.UpdateHAWatchdog(1, 100); err != nil {
+		m.mu.Unlock()
+		<-demoteDone
+		t.Fatalf("watchdog tick during queued demotion: %v", err)
+	}
+	if len(sent) != 0 {
+		t.Errorf("queued demotion sent a stale helper refresh: %+v", sent)
+	}
+	if oracle.forwardingActive(1) || oracle.leaseUntil[1] != 9 {
+		t.Errorf("queued demotion oracle state = active=%v lease_until=%d, want expired unchanged lease",
+			oracle.forwardingActive(1), oracle.leaseUntil[1])
+	}
+	m.mu.Unlock()
+	if err := <-demoteDone; err != nil {
+		t.Fatalf("authoritative demotion: %v", err)
+	}
+}
+
 // The locked session arm uses the same helper-compatible inventory as the
 // degraded arm. This covers the pending-XSK-startup/deferred-apply window
 // where m.haGroups has already been reseeded but the helper still owns 16 keys.

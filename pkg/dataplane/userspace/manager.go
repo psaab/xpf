@@ -326,6 +326,10 @@ type Manager struct {
 	// process epoch so a request queued on sessionMu cannot send stale Active
 	// bits after a demotion or config removal publishes a newer intent.
 	haWatchdogIntentGen atomic.Uint64
+	// haWatchdogPendingDemotions covers demotions that have started but are
+	// still waiting to publish their state under m.mu. The degraded watchdog
+	// must not refresh the older ownership snapshot during that window.
+	haWatchdogPendingDemotions atomic.Int32
 
 	// haDegradedMu is a leaf held only across the degraded merge/throttle
 	// decision, never across socket I/O, so snapshot application cannot wedge

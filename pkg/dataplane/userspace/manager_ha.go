@@ -861,6 +861,20 @@ func (m *Manager) syncDesiredForwardingStateLocked() error {
 }
 
 func (m *Manager) UpdateRGActive(rgID int, active bool) error {
+	// Publish the pending demotion before waiting for m.mu so watchdog ticks
+	// blocked by another manager operation cannot renew an old Active snapshot.
+	pendingDemotion := !active
+	if pendingDemotion {
+		m.haWatchdogPendingDemotions.Add(1)
+	}
+	finishPendingDemotion := func() {
+		if pendingDemotion {
+			m.haWatchdogPendingDemotions.Add(-1)
+			pendingDemotion = false
+		}
+	}
+	defer finishPendingDemotion()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -894,7 +908,9 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	if !known || prior.Active != active {
 		m.haWatchdogIntentGen.Add(1)
 	}
+	// Keep the degraded path suppressed until the matching snapshot is ready.
 	m.publishHAWatchdogSnapshotLocked()
+	finishPendingDemotion()
 	m.sessionMu.Unlock()
 
 	// Only log on real transitions. The reconcile loop retries this
@@ -1088,6 +1104,10 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 	rgID int,
 	timestamp uint64,
 ) (bool, error) {
+	if m.haWatchdogPendingDemotions.Load() != 0 {
+		return true, nil
+	}
+
 	snapshot := m.haWatchdogSnapshot.Load()
 	if snapshot == nil {
 		return false, nil
@@ -1095,6 +1115,10 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 	if snapshot.processGen != m.haWatchdogProcessGen.Load() {
 		return true, nil
 	}
+	if snapshot.intentGen != m.haWatchdogIntentGen.Load() {
+		return true, nil
+	}
+
 	// Mirror the locked path's proc-nil no-op without waiting for m.mu. This
 	// also prevents a stale capability snapshot from talking to a departed
 	// helper during the reset publication window.
@@ -1315,6 +1339,11 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 		}
 		m.mu.Lock()
 	}
+	if m.haWatchdogPendingDemotions.Load() != 0 {
+		m.mu.Unlock()
+		return nil
+	}
+
 	group := m.haGroups[rgID]
 	group.RGID = rgID
 	group.WatchdogTimestamp = timestamp

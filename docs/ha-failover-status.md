@@ -656,6 +656,14 @@ goes stale and the peer takes over. That timestamp lands in two places with
   retries), and `UpdateRGActive` records it too so the heartbeat does not
   redundantly re-fire right after a failover.
 
+**Pending demotions while the manager lock is held (#10781):** `UpdateRGActive(false)`
+announces a pending demotion before waiting for `m.mu`. While one is pending,
+watchdog ticks keep writing the BPF map but do not refresh the helper over the
+session socket; queued session sends recheck before dialing. Once the inactive
+snapshot is published, refreshes resume from that state. This preserves helper
+lease expiry as the fail-closed behavior while a demotion is waiting on manager
+work.
+
 **Threshold rationale:** 3s gives a >3x margin under the helper's ~10s
 stale-lease and drops the heartbeat's control-socket load from 2/s per RG to at
 most ~0.33/s per RG (≈6x reduction), while the kernel-level liveness (the map

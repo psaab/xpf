@@ -514,6 +514,13 @@ func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
 	}
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
+	// A demotion is announced before it can acquire m.mu. Recheck while holding
+	// sessionMu so refreshes already queued on the session socket cannot renew
+	// the pre-demotion snapshot.
+	if m.haWatchdogPendingDemotions.Load() != 0 {
+		return errHARefreshStaleIntent
+	}
+
 	if m.haWatchdogProcessGen.Load() != processGen {
 		return errHARefreshStaleProcess
 	}
