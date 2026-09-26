@@ -307,9 +307,6 @@ func setEventPlantClass9984(tree *ConfigTree, name, class string) {
 // their fire-time authority; the engine then quarantines the empty marker.
 func QuarantineUntrustedEventPlantClasses(tree *ConfigTree) {
 	for _, policies := range eventPolicyNodes9984(tree) {
-		if !eventPolicyHasCommands9984(policies) {
-			continue
-		}
 		hasSuperuserMarker := false
 		for _, policy := range policies {
 			if policy == nil {

@@ -236,3 +236,57 @@ event-options {
 		t.Fatalf("uncompileable provenance change did not restamp PlantClass=%q, want alice", got)
 	}
 }
+func TestUntrustedSuperuserWithInheritedCommandsIsQuarantined10870(t *testing.T) {
+	const source = `groups {
+    remediation {
+        event-options {
+            policy <*> {
+                then {
+                    change-configuration {
+                        commands "set system host-name inherited";
+                    }
+                }
+            }
+        }
+    }
+}
+apply-groups remediation;
+event-options {
+    policy p {
+        events ping_test_failed;
+        plant-class super-user;
+    }
+}`
+	tree, errs := NewParser(source).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("grouped event policy parse failed: %v", errs)
+	}
+	compiled, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("grouped event policy compile failed: %v", err)
+	}
+	if len(compiled.EventOptions) != 1 {
+		t.Fatalf("fixture compiled %d event policies, want one", len(compiled.EventOptions))
+	}
+	if pol := compiled.EventOptions[0]; pol.PlantClass != EventPlantClassSuperuser ||
+		len(pol.ThenCommands) != 1 {
+		t.Fatalf("fixture PlantClass=%q commands=%q, want executable super-user policy",
+			pol.PlantClass, pol.ThenCommands)
+	}
+
+	QuarantineUntrustedEventPlantClasses(tree)
+	compiled, err = CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("quarantined event policy compile failed: %v", err)
+	}
+	if len(compiled.EventOptions) != 1 {
+		t.Fatalf("quarantined fixture compiled %d event policies, want one", len(compiled.EventOptions))
+	}
+	if got := compiled.EventOptions[0].PlantClass; got != "" {
+		t.Fatalf("inherited-command policy PlantClass=%q, want empty quarantine marker", got)
+	}
+	if len(compiled.EventOptions[0].ThenCommands) != 1 ||
+		compiled.EventOptions[0].ThenCommands[0] != "set system host-name inherited" {
+		t.Fatalf("quarantine disturbed inherited commands: %q", compiled.EventOptions[0].ThenCommands)
+	}
+}
