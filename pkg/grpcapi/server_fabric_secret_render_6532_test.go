@@ -101,8 +101,8 @@ var fabricSecretConfig = []string{
 	"set system services dynamic-dns provider dy password FAB6532-DDNS-HTTP-PW",
 	"set interfaces wg0 tunnel wireguard private-key FAB6532-WG-PRIVKEY",
 	"set interfaces wg0 tunnel wireguard peer p1 preshared-key FAB6532-WG-PSK",
-	`set system root-authentication encrypted-password "$6$FABr$rootHASH6532rootHASH"`,
-	`set system login user op authentication encrypted-password "$6$FABl$loginHASH6532loginHASH"`,
+	`set system root-authentication encrypted-password "$6$FABr6532$rootHASH6532rootHASH000000000000000000000000000000000000000000000000000000000000000000"`,
+	`set system login user op authentication encrypted-password "$6$FABl6532$loginHASH6532loginHASH0000000000000000000000000000000000000000000000000000000000000000"`,
 }
 
 // fabricSecretSentinels is the cleartext token of each staged secret. Any of

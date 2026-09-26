@@ -34,8 +34,8 @@ var secretSentinels = []string{
 // EncryptedPassword sentinels must be well-formed $6$ hashes. They are
 // still secrets that must not leak.
 const (
-	rootCryptSentinel  = "$6$LEAKsalt$rootHASHrootHASHrootHASHrootHASHrootHASHrootHASHrootHASHrootHASHro0"
-	loginCryptSentinel = "$6$LEAKsalt$loginHASHloginHASHloginHASHloginHASHloginHASHloginHASHloginHASHl1"
+	rootCryptSentinel  = "$6$LEAKsalt$rootHASHrootHASHrootHASHrootHASHrootHASHrootHASHrootHASHrootHASHro00000000000000000000"
+	loginCryptSentinel = "$6$LEAKsalt$loginHASHloginHASHloginHASHloginHASHloginHASHloginHASHloginHASHl1000000000000000000000"
 	tsigSecretSentinel = "LEAKTSIGc2VjcmV0"                                                 // RFC2136 TSIG HMAC key (base64-ish)
 	wgPrivkeySentinel  = "a01010101010101010101010101010101010101010101010101010101010101a" // 64-hex X25519 privkey
 )
