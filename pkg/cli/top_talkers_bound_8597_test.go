@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
@@ -106,6 +107,25 @@ func TestTopTalkersOutputIsUnchangedByTheBound_8597(t *testing.T) {
 	}
 	if rows != topTalkerLimit {
 		t.Errorf("printed %d session rows, want %d", rows, topTalkerLimit)
+	}
+}
+
+func TestTopTalkersClusterOutputIsNodeQualifiedAndLocalOnly_10837(t *testing.T) {
+	const n = 3
+	const nodeID = 1
+	c := newTopTalkerCLI(t, n)
+	c.cluster = cluster.NewManager(nodeID, 1)
+
+	out := captureStdout(t, func() {
+		if err := c.showTopTalkers(sessionFilter{sortBy: "bytes"}); err != nil {
+			t.Fatalf("showTopTalkers: %v", err)
+		}
+	})
+
+	want := fmt.Sprintf("Top %d sessions by bytes on node%d (local only; of %d total):",
+		n, nodeID, n)
+	if got := firstLine(out); got != want {
+		t.Errorf("cluster top-talkers header = %q, want %q", got, want)
 	}
 }
 
