@@ -52,16 +52,19 @@ you set `XPF_ALLOW_UNPINNED_BASE=1` (a non-publishable dev bake) or supply a
 reviewed `XPF_BASE_SHA256=<digest>`. The authenticated base digest + source URL
 + `base_image_pinned` flag are bound into the signed `xpf-<ver>.manifest`.
 
-**`--skip-validate` is marked non-publishable (#4904 A).** A `--skip-validate`
-bake still signs, but the signed `xpf-<ver>.manifest` records `validated: false`
-(a full bake records `validated: true`). `scripts/dist/publish.py` refuses any
-image whose provenance is not `validated: true`, so an unvalidated dev/emergency
-image can never carry a release signature past the fail-closed publish boundary.
-The deploy side reads the same signed field (#9325): `xpf-deploy.py fetch`
-refuses to download, and `image-roll` refuses to roll, an image whose sidecar
-records `validated: false` unless `--allow-unvalidated` is passed, so a dev
-image that reaches a host outside the publish boundary is not installed or
-rolled silently.
+**`--skip-validate` is marked non-publishable (#4904 A).** It omits the
+in-guest boot matrix, but the bake still runs the mandatory offline image-seal
+check (#6547). The signed `xpf-<ver>.manifest` remains `validated: false` (a
+full bake records `validated: true`), and the direct bake signer applies the
+same strict `assert_bake_set` gate as `sign-manifest`, so it refuses to create
+a signature for the skipped bake. With no signing key, the result is unsigned.
+`scripts/dist/publish.py` also refuses any image whose provenance is not
+`validated: true`, so an unvalidated dev/emergency image cannot pass the
+fail-closed publish boundary. The deploy side reads the same signed field
+(#9325): `xpf-deploy.py fetch` refuses to download, and `image-roll` refuses
+to roll, an image whose sidecar records `validated: false` unless
+`--allow-unvalidated` is passed, so a dev image that reaches a host outside the
+publish boundary is not installed or rolled silently.
 
 **An `XPF_ALLOW_UNPINNED_BASE=1` (unpinned) bake is likewise non-publishable
 (#5815).** Such a bake signs `base_image_pinned: false` into the same

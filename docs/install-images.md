@@ -558,10 +558,19 @@ is a clean no-op.
   clone's authenticated SNMPv3 requests.
 - Verify artifacts with their minisign-signed per-version manifest
   (#1924): `xpf-deploy.py fetch` verifies the exact bytes against
-  `xpf-<ver>.SHA256SUMS` + `.minisig`, or verify manually with
-  `minisign -V -p scripts/dist/xpf-image.pub -m xpf-<ver>.SHA256SUMS
-  -x xpf-<ver>.SHA256SUMS.minisig` then check each file's hash. The signed
-  apt repo + `install.sh` are the package path — see `docs/distribution.md`.
+  `xpf-<ver>.SHA256SUMS` + `.minisig`. To verify manually, verify the minisign
+  signature, check every listed hash, and confirm the signed provenance
+  sidecar says `validated: true`:
+
+  ```sh
+  minisign -V -p scripts/dist/xpf-image.pub -m xpf-<ver>.SHA256SUMS \
+    -x xpf-<ver>.SHA256SUMS.minisig &&
+  sha256sum -c xpf-<ver>.SHA256SUMS &&
+  grep -qx 'validated: true' xpf-<ver>.manifest
+  ```
+
+  The signed apt repo + `install.sh` are the package path — see
+  `docs/distribution.md`.
 
 ## Upgrades
 

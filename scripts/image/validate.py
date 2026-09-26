@@ -1984,12 +1984,13 @@ def _skip_verdict(skipped, allow_skip):
 
 
 def main():
-    maybe_reexec_incus_admin()
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--qcow2", required=True)
     p.add_argument("--metadata", required=True)
     p.add_argument("--keep", action="store_true")
+    p.add_argument("--seal-only", action="store_true",
+                   help="verify the offline image seal without booting scenarios")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--verify-sig", dest="verify_sig", action="store_const",
                    const="force", help="require a signed manifest (#1924)")
@@ -2005,6 +2006,8 @@ def main():
     p.add_argument("scenario", nargs="?", default="all",
                    choices=SCENARIO_ORDER + ["all"])
     a = p.parse_args()
+    if not a.seal_only:
+        maybe_reexec_incus_admin()
     if not os.path.isfile(a.qcow2):
         fail(f"--qcow2 not found: {a.qcow2}")
     if not os.path.isfile(a.metadata):
@@ -2021,6 +2024,8 @@ def main():
         # clone-identity regression fails the gate cheaply rather than after
         # six VM boots.
         h.assert_image_sealed()
+        if a.seal_only:
+            return 0
         h.ensure_network()
         h.import_image()
         keys = SCENARIO_ORDER if a.scenario == "all" else [a.scenario]

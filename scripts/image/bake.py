@@ -716,14 +716,18 @@ def virt_customize(work_qcow, xpf_deb):
 
 
 def validation_gate_step(skip_validate, qcow_out, meta_out):
-    """Run the in-guest verify-dataplane validation gate (validate.py).
+    """Run the in-guest validation gate, or the mandatory offline seal gate.
 
-    Returns true only when the gate completed successfully. --skip-validate
-    downgrades to a loud warning and returns false; a failed gate aborts the
-    bake. The provenance sidecar starts as validated:false and is changed to
-    true only after this function returns true.
+    --skip-validate omits the in-guest boot matrix, not the #6547 check on the
+    exported artifact. It returns false so provenance stays validated:false;
+    only a complete validation pass makes the bake set eligible for signing.
     """
     if skip_validate:
+        info("running mandatory offline image seal gate (#6547)...")
+        if subprocess.run([sys.executable, os.path.join(HERE, "validate.py"),
+                           "--qcow2", qcow_out, "--metadata", meta_out,
+                           "--seal-only"]).returncode != 0:
+            die("image seal gate FAILED — artifacts are NOT signable (#6547)")
         print("WARNING: --skip-validate — artifacts have NOT passed the in-guest "
               "verify-dataplane gate; do not publish them.", file=sys.stderr)
         return False
@@ -793,16 +797,14 @@ def render_snapshot_manifest(snapshot):
 def sign_manifest_step_from_snapshot(out_dir, sums, ver, snapshot, work):
     """Sign the in-memory `snapshot` via a PRIVATE manifest file (#1924 §5.1).
 
-    #4017: the signature is a TRUST artifact — downstream publish and
-    operators read a signed image as a validated one — so this step is
-    ordered strictly AFTER the validation gate (see finalize_artifacts). A
-    bake that fails validation never reaches this step, so no
-    signed-but-invalid image can exist. Fail-OPEN at bake (a dev bake
-    without a key still produces artifacts); fail-CLOSED at publish
-    (scripts/dist/publish.py refuses unsigned artifacts). XPF_SIGN_SECKEY
-    is a PATH to the secret key; the bytes never enter this process. The
-    pinned public key is copied into dist/ so the published tree is
-    self-describing (its trust root remains the in-repo checked-in copy,
+    #4017 ordering and #9920: validation runs before signing, and the same bake
+    set/provenance refusal used by sign-manifest is repeated here because bake
+    signs directly through sign.sign_manifest rather than that CLI.
+    Fail-OPEN at bake (a dev bake without a key still produces artifacts);
+    fail-CLOSED at publish (scripts/dist/publish.py refuses unsigned artifacts).
+    XPF_SIGN_SECKEY is a PATH to the secret key; the bytes never enter this
+    process. The pinned public key is copied into dist/ so the published tree
+    is self-describing (its trust root remains the in-repo checked-in copy,
     not this convenience copy).
 
     #9921 F-068 (parent review): the signed bytes MUST come from memory,
@@ -824,6 +826,10 @@ def sign_manifest_step_from_snapshot(out_dir, sums, ver, snapshot, work):
               "sign (#1924).", file=sys.stderr)
         return
     try:
+        bake_files = [os.path.join(out_dir, name)
+                      for name in sign.bake_set_basenames(ver)]
+        sign.assert_bake_set(sums, bake_files)
+        assert_live_matches_manifest(bake_files, sums, snapshot)
         sign.require_minisign()
         stage = os.path.join(work, "signing")
         os.makedirs(stage, mode=0o700, exist_ok=True)
@@ -1225,7 +1231,6 @@ def main():
                     manifest, sums, manifest_inputs, snapshot)
 
         def sign_step():
-            assert_live_matches_manifest(live_inputs, sums, snapshot)
             sign_manifest_step_from_snapshot(a.out, sums, ver, snapshot, work)
 
         finalize_artifacts(

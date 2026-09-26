@@ -15,8 +15,8 @@ The joint-tamper cell is the key for the assert: rewriting the live sums to
 match swapped live artifacts must STILL die, because the snapshot (not the
 live sums) is ground truth. The post-parse-swap cell is the key for the
 signer: a live-sums replacement landing AFTER the assert's parse (during
-the multi-GB rehash) must not reach the signature — the installed pair must
-equal the snapshot bytes.
+the multi-GB rehash) must be refused by the strict bake-set gate before any
+signature is created.
 
 RED on revert: no helpers (AttributeError); signing the live pathname fails
 the swap cells.
@@ -155,7 +155,8 @@ class SignFromSnapshotTests(unittest.TestCase):
         Path(self.meta).write_bytes(b"M" * 100)
         self.manifest = os.path.join(self.out, "xpf-9.manifest")
         self.pkgs = os.path.join(self.out, "xpf-9.pkgs")
-        Path(self.manifest).write_text("validated: true\n")
+        Path(self.manifest).write_text(
+            "validated: true\nbase_image_pinned: true\nguest_kernel: 6.18.0\n")
         Path(self.pkgs).write_text("pkg-a\n")
 
     def _hash_and_snapshot(self):
@@ -205,28 +206,27 @@ class SignFromSnapshotTests(unittest.TestCase):
         self.assertEqual(bake.render_snapshot_manifest(snap),
                          Path(sums).read_text())
 
-    def test_sign_ignores_attacker_live_sums(self):
-        # Live sums already replaced with attacker bytes BEFORE the sign
-        # step: the installed pair must still equal the snapshot rendering.
-        # (Pre-fix code signing the live pathname captures attacker bytes.)
+    def test_sign_refuses_attacker_live_sums(self):
+        # Live sums already replaced with attacker bytes BEFORE the sign step;
+        # the bake-set gate must refuse instead of signing a stale or altered
+        # record.
         _live, snap, sums = self._hash_and_snapshot()
         expected = Path(sums).read_bytes()
-        Path(sums).write_text(self._evil_sums_text(expected.decode()))
+        evil = self._evil_sums_text(expected.decode())
+        Path(sums).write_text(evil)
         captured = {}
-        self._run_sign_step(sums, snap, captured)
-        self.assertEqual(captured["bytes"], expected)
-        self.assertTrue(captured["path"].startswith(self.work + os.sep),
-                        f"signer opened {captured['path']} — not private")
-        self.assertEqual(captured["seckey"], "dummy.sec")
-        self.assertEqual(Path(sums).read_bytes(), expected,
-                         "live sums not healed to snapshot bytes")
-        self.assertEqual(Path(sums + ".minisig").read_bytes(), b"DUMMY-SIG")
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_sign_step(sums, snap, captured)
+        self.assertIn("bytes differ from recorded hash", str(ctx.exception))
+        self.assertEqual(captured, {}, "attacker bytes reached the signer")
+        self.assertEqual(Path(sums).read_text(), evil)
+        self.assertFalse(os.path.exists(sums + ".minisig"))
 
     def test_post_parse_live_swap_cannot_reach_signature(self):
         # The parent-review interleaving: the assert parses good live bytes,
         # then a writer swaps the sums file DURING the rehash (multi-GB work
-        # takes seconds). The assert passes on the good bytes — and the
-        # signature must still cover the snapshot, not the replacement.
+        # takes seconds). The following strict bake-set gate must reject it
+        # before the signer sees any bytes.
         live_inputs, snap, sums = self._hash_and_snapshot()
         expected = Path(sums).read_bytes()
         evil = self._evil_sums_text(expected.decode())
@@ -248,10 +248,13 @@ class SignFromSnapshotTests(unittest.TestCase):
         self.assertEqual(Path(sums).read_text(), evil,
                          "race setup failed: live sums not replaced")
         captured = {}
-        self._run_sign_step(sums, snap, captured)
-        self.assertEqual(captured["bytes"], expected,
-                         "replacement bytes reached the signer!")
-        self.assertEqual(Path(sums).read_bytes(), expected)
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_sign_step(sums, snap, captured)
+        self.assertIn("bytes differ from recorded hash", str(ctx.exception))
+        self.assertEqual(captured, {}, "replacement bytes reached the signer")
+        self.assertEqual(Path(sums).read_text(), evil)
+        self.assertFalse(os.path.exists(sums + ".minisig"))
+
 
     def test_sign_without_seckey_warns_and_leaves_live_untouched(self):
         _live, snap, sums = self._hash_and_snapshot()
@@ -263,15 +266,12 @@ class SignFromSnapshotTests(unittest.TestCase):
                 self.out, sums, "9", snap, self.work)
         self.assertEqual(Path(sums).read_bytes(), expected)
         self.assertFalse(os.path.exists(sums + ".minisig"))
-
     @unittest.skipUnless(_HAVE_MINISIGN, "minisign not installed")
     def test_sign_e2e_installed_pair_verifies_snapshot_bytes(self):
-        # Real minisign end-to-end: live sums replaced with attacker bytes
-        # before signing; the installed pair must verify AND equal the
-        # snapshot rendering.
+        # Real minisign end-to-end: the installed signature verifies the
+        # snapshot rendered into the private manifest.
         _live, snap, sums = self._hash_and_snapshot()
         expected = Path(sums).read_bytes()
-        Path(sums).write_text(self._evil_sums_text(expected.decode()))
         pub = os.path.join(self.dir, "t.pub")
         sec = os.path.join(self.dir, "t.sec")
         subprocess.run(["minisign", "-G", "-W", "-p", pub, "-s", sec],

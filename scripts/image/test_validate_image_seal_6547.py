@@ -207,21 +207,18 @@ class SealWiringTests(unittest.TestCase):
     against a recording Harness double and bind the CALL SITE.
     """
 
-    def _drive_main(self, scenario):
+    def _drive_main(self, scenario="all", seal_only=False):
         calls = []
 
         class RecordingHarness:
             def __init__(self, *a, **kw):
-                # #7347: main() now reads the skip LEDGER after running the
-                # scenarios. __getattr__ below answers EVERY attribute with a
-                # recording callable, so without a real list here `h.skipped`
-                # comes back as a function and _skip_verdict raises
-                # TypeError: 'function' object is not iterable.
+                # #7347: main() reads the skip LEDGER after running scenarios.
+                # __getattr__ below answers EVERY attribute with a recording
+                # callable, so without a real list here h.skipped comes back
+                # as a function and _skip_verdict raises TypeError.
                 #
                 # Modelling it is the right fix rather than making the verdict
-                # tolerant of a non-list: a double is a stand-in for Harness,
-                # and Harness genuinely has this attribute now. A verdict that
-                # shrugged at the wrong type would also shrug on the real gate.
+                # tolerant of a non-list: Harness genuinely has this list.
                 self.skipped = []
 
             def __getattr__(self, name):
@@ -238,9 +235,13 @@ class SealWiringTests(unittest.TestCase):
             orig_reexec = validate.maybe_reexec_incus_admin
             orig_argv = sys.argv
             validate.Harness = RecordingHarness
-            validate.maybe_reexec_incus_admin = lambda: None
+            validate.maybe_reexec_incus_admin = lambda: calls.append("maybe_reexec")
             sys.argv = ["validate.py", "--qcow2", str(qcow),
-                        "--metadata", str(meta), scenario]
+                        "--metadata", str(meta)]
+            if seal_only:
+                sys.argv.append("--seal-only")
+            else:
+                sys.argv.append(scenario)
             try:
                 rc = validate.main()
             finally:
@@ -249,6 +250,17 @@ class SealWiringTests(unittest.TestCase):
                 sys.argv = orig_argv
         self.assertEqual(rc, 0)
         return calls
+
+    def test_seal_only_cli_stops_before_import_or_scenarios(self):
+        calls = self._drive_main(seal_only=True)
+        self.assertIn("freeze_artifacts", calls)
+        self.assertIn("assert_image_sealed", calls)
+        self.assertIn("cleanup", calls)
+        self.assertNotIn("maybe_reexec", calls)
+        self.assertNotIn("ensure_network", calls)
+        self.assertNotIn("import_image", calls)
+        for method in validate.SCENARIO_METHODS.values():
+            self.assertNotIn(method, calls)
 
     def test_main_calls_the_seal_gate(self):
         calls = self._drive_main("all")
