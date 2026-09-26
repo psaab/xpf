@@ -26,10 +26,11 @@ import (
 // actionQueueDepth bounds the worker's pending-action channel. Dedup-by-policy
 // (a newer trigger supersedes an older queued one) keeps at most one pending
 // action per policy, so this is also an upper bound on distinct policies with
-// a remediation in flight while the config lock is held. #5853: the dedup runs
-// on EVERY enqueue (not only when the channel is full), so a burst from ONE
-// policy occupies at most ONE slot — it can never fill the queue with redundant
-// duplicates and starve an unrelated policy's remediation into a queue-full drop.
+// a remediation in flight while the config lock is held.
+//
+// #5853: dedup runs on EVERY enqueue, not only when full. A flapping policy's
+// same-policy burst is a benign replacement rather than 64 redundant slots that
+// can starve an unrelated policy into a queue-full drop.
 const actionQueueDepth = 64
 
 // enqueue adds an action with dedup-by-policy. A critical security/firewall
@@ -42,7 +43,16 @@ const actionQueueDepth = 64
 // event (#6810). The new critical action remains admitted.
 //
 // The whole body runs under enqueueMu (#5062) so concurrent producers cannot
-// interleave supersede's drain-and-refill.
+// interleave supersede's drain-and-refill. #5062 closed the drain/steal window:
+// without producer serialization, a second enqueue could take a drain-freed
+// slot and force an already-accepted survivor to drop during refill. The worker
+// remains a remove-only consumer, so the serialized refill cannot lose survivors.
+//
+// #6810: evaluation arms an edge latch before admission. A false verdict means
+// no equivalent action will run, so the caller rolls that latch back; a
+// same-policy replacement is admitted because its newer action still runs.
+// Critical displacement is a real capacity loss, so enqueue releases the
+// displaced action's latch only after enqueueMu is dropped.
 //
 // enqueue reports whether the action now has a queued equivalent. The caller
 // rolls back the current action's latch when admission fails; enqueue handles
@@ -130,6 +140,12 @@ func criticalAction(a plannedAction) bool {
 // action and keeping critical actions before ordinary actions. It returns
 // whether the new action was placed and (if so) any ordinary action displaced
 // to make room for a critical one. It is the SOLE enqueue path (#5853).
+//
+// #2869's tail-placement fairness rule still holds within each class: a newer
+// ordinary action cannot jump ahead of older ordinary work. #10877 deliberately
+// exempts critical actions from global FIFO by placing them first; only a full
+// queue can evict work, and then it drops the newest ordinary action and releases
+// that action's latch outside enqueueMu.
 //
 // CALLER MUST HOLD enqueueMu (#5062). No other producer can refill a slot
 // during drain->refill; the only concurrent actor is the consumer, which only
