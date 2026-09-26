@@ -41,14 +41,15 @@ func TestResolvePCIMatchMACMismatchRefuses(t *testing.T) {
 }
 
 func TestResolvePCIOnlyWhenNoPermMAC(t *testing.T) {
-	// V-5: empty perm-MAC (common on VFs/virtio) => PCI-only unverified bind.
+	// V-5 / #4884: when the operator keys ONLY on PCI, no perm-MAC still
+	// yields the intended PCI-only bind.
 	nics := []PresentNIC{nic("enp9s0", "0000:09:00.0", "")}
 	entries := []config.DeviceMapEntry{
-		{LogicalName: "ge-0/0/3", PCIAddr: "0000:09:00.0", MAC: "00:11:22:33:44:55"},
+		{LogicalName: "ge-0/0/3", PCIAddr: "0000:09:00.0"},
 	}
 	got := Resolve(entries, nics, nil)
 	if got[0].Status != BindBoundPCIOnly {
-		t.Fatalf("want PCI-only bind when no perm-MAC, got %v", got[0].Status)
+		t.Fatalf("want PCI-only bind when entry does not pin a MAC, got %v", got[0].Status)
 	}
 }
 

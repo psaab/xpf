@@ -291,6 +291,16 @@ func enumerateAndRenameMapped(dm *config.DeviceMapConfig, cfg *config.Config, pr
 				"(topology changed). Refusing to bind to avoid hijacking the wrong NIC; re-pin "+
 				"the device-map.",
 				"logical", b.Entry.LogicalName, "pci", b.Entry.PCIAddr, "mac", b.Entry.MAC)
+		case b.Status == devicemap.BindRefusedPinnedMACAbsent:
+			// #10905: this NIC's identity was read successfully but it has no
+			// permanent MAC, so the pinned MAC cannot be verified. Unlike an
+			// unread identity, retrying the read will not establish a MAC; the
+			// operator must verify the replacement in the slot, then remove
+			// the MAC pin only if PCI-only binding is intentional.
+			slog.Error("device-map: entry REFUSED — the NIC at this pinned PCI identity reports no "+
+				"permanent MAC, so the pinned MAC cannot be verified. Verify the replacement at the "+
+				"slot; remove the MAC pin only if PCI-only binding is intentional.",
+				"logical", b.Entry.LogicalName, "pci", b.Entry.PCIAddr, "mac", b.Entry.MAC)
 		case b.Status == devicemap.BindRefusedIdentityUnknown:
 			// #6786: distinct from the topology-change refusal above — the card
 			// may be entirely correct; its identity just could not be read, so
@@ -535,10 +545,10 @@ func deviceMapStrandsManagement(cfg *config.Config, nics []presentNIC, protected
 	for _, b := range bindings {
 		// A REFUSED binding on ANY entry is a hard stop: the operator's intent
 		// cannot be realized, so refuse while they are still connected. The
-		// two refusal reasons carry OPPOSITE remedies, so each gets its own
-		// message — telling an operator who typed a duplicate name to "re-pin
-		// the entry" sends them to a fix that changes nothing (#6546). Tested
-		// through Status.Refused() rather than a single sentinel so a future
+		// Refusal reasons can carry different remedies, so exceptional cases
+		// get their own messages — telling an operator who typed a duplicate
+		// name to "re-pin the entry" sends them to a fix that changes nothing.
+		// The hard stop uses Status.Refused() rather than a single sentinel so a future
 		// refusal reason cannot slip past this hard stop as a clean result.
 		if b.Status == devicemap.BindRefusedDupName {
 			return fmt.Sprintf("device-map entry %q refuses to bind: more than one entry claims "+
@@ -551,6 +561,12 @@ func deviceMapStrandsManagement(cfg *config.Config, nics []presentNIC, protected
 		// operator to "re-pin the entry" sends them to a fix that changes
 		// nothing (the same wrong-remedy trap #6546 named), and would have them
 		// re-pin against a MAC they cannot currently read.
+		if b.Status == devicemap.BindRefusedPinnedMACAbsent {
+			return fmt.Sprintf("device-map entry %q refuses to bind: the NIC at its pinned PCI identity "+
+				"reports no permanent MAC, so the pinned MAC cannot be verified. Verify the replacement "+
+				"at the slot; remove the MAC pin only if PCI-only binding is intentional.",
+				b.Entry.LogicalName)
+		}
 		if b.Status == devicemap.BindRefusedIdentityUnknown {
 			return fmt.Sprintf("device-map entry %q refuses to bind: the NIC at its pinned identity "+
 				"could not be read, so its permanent MAC is UNKNOWN and the pinned MAC cannot be "+

@@ -112,6 +112,17 @@ const (
 	// entry — and distinct from BindBoundPCIOnly, which asserts the positive
 	// fact that the hardware HAS no permanent MAC to check.
 	BindRefusedIdentityUnknown
+	// BindRefusedPinnedMACAbsent: the NIC at this entry's pinned PCI identity
+	// was READ successfully and reports NO permanent MAC (known-absent, e.g. a
+	// replacement card without a factory-MAC attribute), while the entry pins
+	// one (#10905). Binding PCI-only would rename an unverified NIC into the
+	// pinned logical name (and its zone) and persist it via .link — the same
+	// durable wrong-device binding #6786 fixed for the unreadable case. Distinct
+	// from BindRefusedIdentityUnknown (unknown vs known-absent: retry/repair vs
+	// verify-replacement-then-drop-the-pin), from BindRefusedAmbig (no MAC was
+	// read to mismatch), and from BindBoundPCIOnly (which remains correct for
+	// PCI-only entries that never asked for MAC verification, #4884).
+	BindRefusedPinnedMACAbsent
 )
 
 func (s BindStatus) String() string {
@@ -130,15 +141,16 @@ func (s BindStatus) String() string {
 		return "REFUSED (logical name claimed by more than one device-map entry)"
 	case BindRefusedIdentityUnknown:
 		return "REFUSED (identity unreadable — cannot verify pinned MAC)"
+	case BindRefusedPinnedMACAbsent:
+		return "REFUSED (pinned MAC unavailable — NIC reports no permanent MAC)"
 	default:
 		return "unknown"
 	}
 }
 
 // Decisive reports whether the status is a final outcome (bound or refused),
-// vs an unbound result that should fall through to the next key. Both refusal
-// statuses are decisive: a refusal means the pinned identity WAS matched, it
-// just must not be acted on.
+// Refusal statuses are decisive: a refusal means the pinned identity WAS
+// matched, it just must not be acted on.
 func (s BindStatus) Decisive() bool {
 	return s != BindUnbound
 }
@@ -149,7 +161,7 @@ func (s BindStatus) Decisive() bool {
 // check and be silently treated as a clean result (#6546).
 func (s BindStatus) Refused() bool {
 	return s == BindRefusedAmbig || s == BindRefusedDupName ||
-		s == BindRefusedIdentityUnknown
+		s == BindRefusedIdentityUnknown || s == BindRefusedPinnedMACAbsent
 }
 
 // Bound reports whether the status is one of the three bound variants.
@@ -235,6 +247,19 @@ func Resolve(entries []config.DeviceMapEntry, nics []PresentNIC, rethMembers map
 			// operator never requested MAC verification.
 			if e.MAC != "" && !isRETH && len(pm) == 1 && pm[0].IdentityUnread {
 				rb.Status, rb.CurrentNIC, rb.Logical = BindRefusedIdentityUnknown, "", ""
+				out = append(out, rb)
+				continue
+			}
+			// (d) #10905: the identity read SUCCEEDED, but the hardware
+			// positively reports no permanent MAC. A MAC-pinned entry must not
+			// silently degrade to a PCI-only bind here: that would adopt a
+			// replacement whose hardware identity cannot be verified. This is
+			// narrower than refusing all MAC-less PCI bindings (#4884): a
+			// PCI-only entry never asked for this MAC cross-check, and unread
+			// identities have the distinct refusal above.
+			if e.MAC != "" && !isRETH && len(pm) == 1 &&
+				!pm[0].IdentityUnread && pm[0].PermMAC == "" {
+				rb.Status, rb.CurrentNIC, rb.Logical = BindRefusedPinnedMACAbsent, "", ""
 				out = append(out, rb)
 				continue
 			}

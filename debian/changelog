@@ -43,5 +43,7 @@ xpf (0.0.0) unstable; urgency=medium
   * Bound IKE/ESP rekey lifetimes and clamp tolerant DPD timers (#10882).
   * Escape helper errors and recent exception text in monitor terminal output
     (#10904).
+  * Refuse MAC-pinned PCI bindings when a known-absent permanent MAC prevents
+    identity verification (#10905).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
