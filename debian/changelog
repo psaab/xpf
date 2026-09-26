@@ -35,5 +35,7 @@ xpf (0.0.0) unstable; urgency=medium
     preserving translated reassembly geometry (#10860).
   * Quarantine super-user event planting received over unauthenticated
     session-sync; preserve it for verified peers (#10870).
+  * Send match-all XFRM SA dump requests with the iproute2 address-filter
+    attribute, avoiding malformed netlink attribute warnings (#11225).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
