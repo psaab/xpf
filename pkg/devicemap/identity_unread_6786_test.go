@@ -18,46 +18,48 @@ func pinnedEntry(mac string) config.DeviceMapEntry {
 	return config.DeviceMapEntry{LogicalName: "ge-0/0/3", PCIAddr: "0000:09:00.0", MAC: mac}
 }
 
-// TestPinnedMACRefusesWhenIdentityUnread6786 is the #6786 fail-on-revert test.
+// TestPinnedMACRefusesWhenPermanentMACCannotBeVerified covers unread identity
+// (#6786) and known-absent permanent MAC (#10905) for MAC-pinned entries.
 //
-// EnumeratePresentNICs used to read each NIC's attributes under
-// `if link, err := netlink.LinkByName(name); err == nil` with the error
-// DISCARDED, so a failed read left PermMAC == "" — the SAME value hardware
-// with no permanent-MAC attribute produces. Resolve's card-swap refusal is
-// conditioned on `PermMAC != ""`, so the failed read did not merely lose
-// information: it silently disabled the refusal and bound the entry as
-// BindBoundPCIOnly, whose own String() asserts "no permanent MAC" — a positive
-// claim the failed read cannot support. A swapped card at the pinned slot was
-// then renamed into the logical name (and hence the security zone) the
-// operator had pinned away from it.
+// EnumeratePresentNICs used to discard LinkByName errors, so a failed read left
+// PermMAC == "" — the SAME value hardware with no permanent-MAC attribute
+// produces. That bound the pinned entry as PCI-only and could rename an
+// unchecked card into the operator's logical name. Both states now refuse,
+// with distinct statuses because one is unknown and the other is known-absent.
 //
-// The table's THIRD row is the one that makes this test able to fail. Rows that
-// only cover "unread refuses" would stay green under a fix that refuses every
-// NIC lacking a permanent MAC — which would regress #4884 (MAC-less hardware
-// binding by PCI) and turn a benign state into a refusal. The middle row holds
-// that behaviour still.
-func TestPinnedMACRefusesWhenIdentityUnread6786(t *testing.T) {
+// The PCI-only control remains in TestResolvePCIOnlyWhenNoPermMAC: an entry
+// that does not pin a MAC must still bind on PCI when no permanent MAC exists
+// (#4884).
+func TestPinnedMACRefusesWhenPermanentMACCannotBeVerified(t *testing.T) {
 	const pinned = "aa:bb:cc:dd:ee:01"
 	tests := []struct {
-		name string
-		nic  PresentNIC
-		want BindStatus
+		name     string
+		nic      PresentNIC
+		keyOrder string
+		want     BindStatus
 	}{
 		{
-			// The defect: the read FAILED, so the permanent MAC is UNKNOWN and
-			// the pinned MAC cannot be verified. Must refuse.
+			// The #6786 defect: the read FAILED, so the permanent MAC is
+			// UNKNOWN and the pinned MAC cannot be verified. Must refuse.
 			name: "identity-unread",
 			nic:  PresentNIC{Name: "enp9s0", PCIAddr: "0000:09:00.0", IdentityUnread: true},
 			want: BindRefusedIdentityUnknown,
 		},
 		{
-			// REGRESSION CONTROL (#4884): the read SUCCEEDED and the hardware
-			// genuinely has no permanent-MAC attribute. This is a positive
-			// fact, not an unknown, and it must still bind PCI-only exactly as
-			// before. A fix that refuses on `PermMAC == ""` reds here.
-			name: "no-perm-mac-hardware",
+			// #10905: the read succeeded, but the hardware reports no
+			// permanent MAC. A pinned entry must not silently degrade to the
+			// PCI-only bind; its MAC identity remains unverifiable.
+			name: "known-absent-perm-mac",
 			nic:  PresentNIC{Name: "enp9s0", PCIAddr: "0000:09:00.0"},
-			want: BindBoundPCIOnly,
+			want: BindRefusedPinnedMACAbsent,
+		},
+		{
+			// The order-independent guard must also protect MAC-first entries,
+			// whose key loop could otherwise bind via PCI after a MAC miss.
+			name:     "known-absent-perm-mac-mac-first",
+			nic:      PresentNIC{Name: "enp9s0", PCIAddr: "0000:09:00.0"},
+			keyOrder: config.DeviceMapKeyMACThenPCI,
+			want:     BindRefusedPinnedMACAbsent,
 		},
 		{
 			// The read succeeded and the MAC matches the pin.
@@ -77,13 +79,23 @@ func TestPinnedMACRefusesWhenIdentityUnread6786(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Resolve([]config.DeviceMapEntry{pinnedEntry(pinned)}, []PresentNIC{tc.nic}, nil)
+			entry := pinnedEntry(pinned)
+			entry.KeyOrder = tc.keyOrder
+			got := Resolve([]config.DeviceMapEntry{entry}, []PresentNIC{tc.nic}, nil)
 			if len(got) != 1 {
 				t.Fatalf("Resolve returned %d bindings, want 1", len(got))
 			}
 			if got[0].Status != tc.want {
 				t.Errorf("status = %v (%s), want %v (%s)",
 					got[0].Status, got[0].Status.String(), tc.want, tc.want.String())
+			}
+			if got[0].Status == BindRefusedPinnedMACAbsent {
+				display := got[0].Status.String()
+				if !strings.Contains(display, "REFUSED") ||
+					!strings.Contains(display, "no permanent MAC") ||
+					display == BindRefusedIdentityUnknown.String() {
+					t.Errorf("known-absent refusal status display = %q, want a distinct refusal reason", display)
+				}
 			}
 			// A refusal must carry NO binding: an entry that refuses and still
 			// names a NIC would be renamed by the daemon's rename loop, which
@@ -143,12 +155,13 @@ func TestRefusedAgreesWithStatusString6786(t *testing.T) {
 	all := []BindStatus{
 		BindBound, BindBoundPCIOnly, BindBoundViaMAC, BindUnbound,
 		BindRefusedAmbig, BindRefusedDupName, BindRefusedIdentityUnknown,
+		BindRefusedPinnedMACAbsent,
 	}
 	// Premise: the list covers every declared status, so a new one added
 	// without updating this test cannot hide behind a short list.
-	if got := len(all); BindStatus(got-1) != BindRefusedIdentityUnknown {
+	if got := len(all); BindStatus(got-1) != BindRefusedPinnedMACAbsent {
 		t.Fatalf("premise broken: %d statuses listed but the last declared one is %d — "+
-			"a status was added without extending this table", got, BindRefusedIdentityUnknown)
+			"a status was added without extending this table", got, BindRefusedPinnedMACAbsent)
 	}
 	for _, s := range all {
 		saysRefused := strings.HasPrefix(s.String(), "REFUSED")
