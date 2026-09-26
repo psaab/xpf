@@ -29,7 +29,7 @@ import (
 // host-name sentinel rides along to prove redaction is surgical.
 var cliSecretSet = []string{
 	"set system host-name XPF-NONSECRET-HOST",
-	`set system root-authentication encrypted-password "$6$CLILEAK$ROOTPWHASH000000"`,
+	`set system root-authentication encrypted-password "$6$CLILEAK00$ROOTPWHASH0000000000000000000000000000000000000000000000000000000000000000000000000000"`,
 	"set security ike policy pol1 pre-shared-key ascii-text CLI-LEAK-IKE-PSK",
 	"set snmp community CLI-LEAK-SNMP-COMMUNITY authorization read-only",
 	"set protocols bgp group ext authentication-key CLI-LEAK-BGP-AUTHPW",
