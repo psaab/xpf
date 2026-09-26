@@ -498,7 +498,7 @@ func newValidationResult() *CompileResult {
 		ifCache:             make(map[string]*net.Interface),
 		linkCache:           make(map[string]netlink.Link),
 		linkIdxMap:          make(map[int]netlink.Link),
-		rxVlanOffCache:      make(map[string]bool),
+		rxTagStripOffCache:  make(map[string]bool),
 		ethtoolApplied:      make(map[string]bool),
 		genericXDPIfindexes: make(map[int]bool),
 	}

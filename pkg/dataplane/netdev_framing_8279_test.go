@@ -103,6 +103,8 @@ func TestCompileZonesRefusesShimOnNonEthernetNetdev8279(t *testing.T) {
 			result := newValidationResult()
 			assignZoneIDs(result, cfg)
 			assignScreenIDs(result, cfg)
+			// This fixture isolates the framing decision, not NIC offload state.
+			result.rxTagStripOffCache[phys] = true
 			link := &netlink.Device{LinkAttrs: netlink.LinkAttrs{
 				Name: phys, Index: idx, EncapType: arm.encap,
 			}}

@@ -397,6 +397,9 @@ func TestCompileZonesRecordsNoMutationWhenConverged(t *testing.T) {
 	}
 
 	result := newValidationResult()
+	// This cell exercises address-reconcile convergence on loopback, not NIC
+	// offload behavior; hold both tag-strip preconditions satisfied.
+	result.rxTagStripOffCache["lo"] = true
 	assignZoneIDs(result, cfg)
 	assignScreenIDs(result, cfg)
 

@@ -964,19 +964,21 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			return fmt.Errorf("add tx port %s: %w", physName, err)
 		}
 
-		// Disable VLAN RX offload so XDP sees VLAN tags in packet data
-		// (otherwise NIC strips them into skb->vlan_tci which XDP can't read).
-		// Check current state first — toggling rxvlan on iavf VFs causes a
-		// driver reset that drops in-flight packets (kills active TCP sessions).
-		// #5268: if the offload cannot be disabled AND this parent carries
-		// configured VLAN subinterfaces, FAIL ACTIVATION CLOSED — proceeding
-		// to shim attachment would let HW-stripped tagged traffic inherit the
-		// parent's zone (cross-zone bypass). A plain parent (no 802.1Q units)
-		// tolerates the failure (the disable-failure is still logged inside
-		// ensureRxVlanOff).
-		if err := rxVlanOffloadActivationError(
-			cfg, cfgName, physName, result.ensureRxVlanOff(physName),
-		); err != nil {
+		// Disable both RX offloads that can remove tag bytes before XDP:
+		// the 802.1Q rxvlan control and the S-tag rx-vlan-stag-hw-parse
+		// feature. The NIC puts stripped tags in skb->vlan_tci, which XDP
+		// cannot read. Query each feature first; toggling iavf offloads
+		// drives a driver reset that drops in-flight packets.
+		//
+		// #5268: a C-tag offload that cannot be disabled is activation-fatal
+		// only when this parent carries configured VLAN subinterfaces, the
+		// surfaces whose zone identity depends on in-frame 802.1Q tags.
+		// #10915: an S-tag offload that cannot be disabled is activation-fatal
+		// on EVERY XDP-adjudicated parent: the in-frame S-tag drop is the
+		// security boundary, and a HW-stripped S-tag bypasses it even on a
+		// parent with no configured VLAN subinterfaces.
+		rxvlanErr, stagErr := result.ensureRxVlanParsePreconditions(physName)
+		if err := rxVlanOffloadActivationError(cfg, cfgName, physName, rxvlanErr); err != nil {
 			return err
 		}
 
@@ -1106,6 +1108,14 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			result.recordUnarmedSurface(
 				nonEthernetSurfaceRecord(physName, physIface.Index, encap))
 		} else {
+			// #10915: only an interface that passed the disabled/non-Ethernet
+			// checks above will receive the userspace XDP shim. Its in-frame
+			// S-tag drop is load-bearing on every such parent, so failure to
+			// disable rx-vlan-stag-hw-parse must fail closed here, including a
+			// plain parent with no configured 802.1Q VLAN subinterfaces.
+			if err := rxVlanStagHwParseActivationError(physName, stagErr); err != nil {
+				return err
+			}
 			// Defer actual XDP/TC attachment to after all compile phases
 			// so link.Update() switches to programs with fully-populated maps.
 			if !st.attachedXDP[physIface.Index] {

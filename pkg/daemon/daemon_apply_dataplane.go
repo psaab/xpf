@@ -778,20 +778,15 @@ func (d *Daemon) finishRethMemberLinkTail(linuxName string, mac net.HardwareAddr
 		ensureRethLinkLocal(linuxName)
 	}
 
-	// Re-disable VLAN RX offload after MAC programming.
-	// The iavf VF driver resets ethtool features (including
-	// rx-vlan-offload) during the link down/up cycle that
-	// programRethMAC requires. Without this, XDP cannot see
-	// VLAN tags in the packet data and drops VLAN traffic.
-	//
-	// #9946: a failed re-disable now fails the apply on a parent that carries
-	// configured VLAN units — but it must NOT skip the rest of this tail. The MAC
-	// propagation below is what #6980 made mandatory, and returning early here
-	// would reintroduce exactly the stale-MAC blackhole that fix exists to
-	// prevent — trading one silent misforwarding for another. So it joins the
-	// same "fail-closed but complete" accumulator the rest of this file uses:
-	// the tail keeps going and the operator still sees the commit fail.
-	rxvlanErr := d.reDisableRxVlanAfterLinkCycle(linuxName, rethCfg)
+	// Re-disable the RX tag-strip offloads after MAC programming. The iavf
+	// VF driver resets ethtool features during the link down/up cycle:
+	// rx-vlan-offload can strip C-tags and rx-vlan-stag-hw-parse can strip
+	// S-tags, both into skb->vlan_tci which XDP cannot read. #5268 makes a
+	// failed C-tag re-disable fatal for VLAN-carrying parents; #10915 makes a
+	// failed S-tag re-disable fatal on every XDP-adjudicated parent. Either
+	// failure must not skip the MAC propagation below, so it joins the same
+	// fail-closed-but-complete accumulator.
+	tagStripErr := d.reDisableRxVlanAfterLinkCycle(linuxName, rethCfg)
 
 	// Propagate MAC change to VLAN sub-interfaces.
 	// Linux VLAN sub-interfaces don't always inherit the
@@ -804,7 +799,7 @@ func (d *Daemon) finishRethMemberLinkTail(linuxName string, mac net.HardwareAddr
 				"every VLAN sub-interface keeps its STALE MAC while the parent has the new one, "+
 				"so peers ARP to an address this node no longer answers on until the entry ages out",
 				"parent", linuxName, "mac", mac, "err", err)
-			return errors.Join(rxvlanErr,
+			return errors.Join(tagStripErr,
 				fmt.Errorf("enumerate links to propagate RETH MAC from %s: %w", linuxName, err))
 		}
 		for _, l := range links {
@@ -837,83 +832,96 @@ func (d *Daemon) finishRethMemberLinkTail(linuxName string, mac net.HardwareAddr
 		}
 	}
 	d.renewLinkCycleLease()
-	return rxvlanErr
+	return tagStripErr
 }
 
-// reDisableRxVlanAfterLinkCycle re-asserts `rx-vlan-offload off` on a RETH
-// member after programRethMAC's link down/up cycle, and reports whether failing
-// to do so must fail the apply (#9946).
+// reDisableRxVlanAfterLinkCycle re-asserts the 802.1Q and S-tag RX offloads
+// after programRethMAC's link down/up cycle, and reports whether failing to do
+// so must fail the apply (#9946, #10915).
 //
-// Why this is a fail-closed condition and not a warning. The XDP dataplane
-// derives 802.1Q identity SOLELY from the in-frame tag. A NIC whose RX-VLAN
-// offload strips the tag into skb->vlan_tci — which XDP cannot read — makes
-// every tagged frame parse as vlan_id=0, so resolve_ingress_logical_ifindex
-// falls back to the PHYSICAL parent ifindex and the frame is classified into the
-// parent's zone. Untrusted VLAN traffic lands in a trusted zone. #5268
-// established that as an activation PRECONDITION at compile time; the link cycle
-// this tail follows RESETS the member NIC's ethtool features, so the offload
-// comes back on precisely where #5268 said it must not be, and until #9946 that
-// re-assertion failing was a log line under a successful commit.
+// The C-tag path preserves #5268/#9946's existing scope: 802.1Q identity comes
+// solely from the in-frame tag, so a NIC that strips it into skb->vlan_tci
+// makes tagged traffic fall back to the parent ifindex and zone. It is fatal
+// only when that parent carries configured VLAN units; without tag-based zone
+// classification, a C-tag offload failure is irrelevant.
 //
-// The window is unbounded, which is what settles the severity. ensureRxVlanOff
-// has exactly one production caller (the per-phys compile setup in
-// pkg/dataplane/compiler_iface.go) and no daemon ticker reaches applyConfigLocked
-// — the periodic work is per-subsystem (DDNS, IPsec rebind, RA, HA reconcile)
-// and none of it re-runs the config apply. So after a failed re-disable the NIC
-// keeps stripping tags until the next apply EVENT: an operator commit, a reboot,
-// or a peer's config sync. Not one reconcile tick.
+// The S-tag path has a different and broader scope. The #10655 XDP guard drops
+// a single outer S-tag only while 0x88a8 is visible in-frame. If
+// rx-vlan-stag-hw-parse strips the S-tag into skb->vlan_tci, the frame bypasses
+// that drop and adjudicates as untagged/unit-0 into the physical parent's zone
+// on a dataplane with no S-tag identity to steer by. Every XDP-adjudicated
+// parent is exposed, including one with no 802.1Q VLAN units, so a failed
+// S-tag re-disable is always fail-closed. A NIC whose query lists no such
+// feature, or reports it `off`/`off [fixed]`, is not exposed and is not probed
+// with `-K`.
 //
-// Scope is the same predicate the compile-time gate uses, deliberately:
-// config.InterfaceHasVlanSubinterface. It must match in BOTH directions. Wider,
-// and every plain-parent deploy — and every NIC that legitimately lacks the knob
-// — starts failing commits over a setting that cannot misroute anything there.
-// Narrower, and the bypass stays open on exactly the parents that have it.
-//
-// The query is not optional. Running `ethtool -K` blind (what this did before)
-// cannot distinguish "the NIC refused" from "the NIC has no such feature": on
-// virtio `-K` fails "not supported", so a blind probe would red a VLAN parent
-// that is incapable of stripping a tag. ClassifyRxVlanOffload is shared with
-// ensureRxVlanOff so that reasoning exists once.
+// The query and each needed disable are distinct 20s-ceiling external commands
+// (15s timeout plus 5s WaitDelay). Renew the link-cycle lease between them:
+// when both features need disabling, each command gets its own interval, so
+// the 60s lease never holds multiple ethtool ceilings before the unbounded
+// per-VLAN-child netlink loop.
 func (d *Daemon) reDisableRxVlanAfterLinkCycle(linuxName string, rethCfg *config.InterfaceConfig) error {
-	switch dataplane.ClassifyRxVlanOffload(runCommandTimeout("ethtool", "-k", linuxName)) {
-	case dataplane.RxVlanOffloadOff:
+	out, queryErr := runCommandTimeout("ethtool", "-k", linuxName)
+	rxvlanState := dataplane.ClassifyRxVlanOffload(out, queryErr)
+	stagState := dataplane.ClassifyRxVlanStagHwParse(out, queryErr)
+	if rxvlanState == dataplane.RxVlanOffloadOff {
 		slog.Debug("VLAN RX offload survived the RETH link cycle", "interface", linuxName)
-		return nil
-	case dataplane.RxVlanOffloadAbsent:
-		slog.Debug("NIC has no rx-vlan-offload feature; nothing strips tags",
+	} else if rxvlanState == dataplane.RxVlanOffloadAbsent {
+		slog.Debug("NIC has no rx-vlan-offload feature; nothing strips C-tags",
 			"interface", linuxName)
+	}
+	if stagState == dataplane.RxVlanStagHwParseOff {
+		slog.Debug("S-tag HW-parse offload survived the RETH link cycle", "interface", linuxName)
+	} else if stagState == dataplane.RxVlanStagHwParseAbsent {
+		slog.Debug("NIC has no rx-vlan-stag-hw-parse feature; nothing strips S-tags",
+			"interface", linuxName)
+	}
+	if rxvlanState != dataplane.RxVlanOffloadNeedsDisable &&
+		stagState != dataplane.RxVlanStagHwParseNeedsDisable {
 		return nil
 	}
 
-	// #6871's invariant, stated in this file's header and in docs/reth-mac.md:
-	// each link-cycle-lease renewal window holds AT MOST ONE 20s-ceiling external
-	// command (externalCommandTimeout 15s + the 5s WaitDelay in exec_timeout.go).
-	// The query above and the disable below are two, so the window is split here
-	// — exactly as finishRethMemberLinkTail's own renewal splits the MAC set from
-	// this tail. Without this the needs-disable path would put 40s of ceiling in
-	// one 60s TTL and leave the per-VLAN-child netlink loop, whose length is
-	// operator-unbounded, under 20s.
-	d.renewLinkCycleLease()
-
-	out, err := runCommandTimeout("ethtool", "-K", linuxName, "rxvlan", "off")
-	if err == nil {
-		slog.Info("re-disabled VLAN RX offload after RETH MAC", "interface", linuxName)
-		return nil
+	var rxvlanErr, stagErr error
+	if rxvlanState == dataplane.RxVlanOffloadNeedsDisable {
+		// #6871: renew after the preceding query and before this 20s command.
+		d.renewLinkCycleLease()
+		out, err := runCommandTimeout("ethtool", "-K", linuxName, "rxvlan", "off")
+		if err != nil {
+			if !config.InterfaceHasVlanSubinterface(rethCfg) {
+				// This parent has no 802.1Q units, so it does not classify by
+				// C-tag and the offload state cannot misroute traffic on it.
+				slog.Warn("failed to re-disable rxvlan after RETH MAC (tolerated: no VLAN units configured)",
+					"interface", linuxName, "err", err, "output", strings.TrimSpace(string(out)))
+			} else {
+				slog.Error("failed to re-disable rxvlan after RETH MAC on a parent carrying configured "+
+					"VLAN units; the NIC keeps stripping 802.1Q tags, so tagged frames parse as vlan_id=0 "+
+					"and fall back to the parent ifindex — untrusted VLAN traffic classified into the "+
+					"parent's zone. Nothing re-asserts this knob until the next commit, so the apply fails",
+					"interface", linuxName, "err", err, "output", strings.TrimSpace(string(out)))
+				rxvlanErr = fmt.Errorf("re-disable rx-vlan-offload on RETH member %s after MAC link cycle: %w (output: %s)",
+					linuxName, err, strings.TrimSpace(string(out)))
+			}
+		} else {
+			slog.Info("re-disabled VLAN RX offload after RETH MAC", "interface", linuxName)
+		}
 	}
-	if !config.InterfaceHasVlanSubinterface(rethCfg) {
-		// Tolerated: this parent has no 802.1Q units, so it does not classify by
-		// in-frame tag and the offload state cannot misroute anything on it.
-		slog.Warn("failed to re-disable rxvlan after RETH MAC (tolerated: no VLAN units configured)",
-			"interface", linuxName, "err", err, "output", strings.TrimSpace(string(out)))
-		return nil
+	if stagState == dataplane.RxVlanStagHwParseNeedsDisable {
+		// This is another external command when the C-tag knob also needed
+		// disabling; renew again so one lease interval never contains both.
+		d.renewLinkCycleLease()
+		out, err := runCommandTimeout("ethtool", "-K", linuxName, "rx-vlan-stag-hw-parse", "off")
+		if err != nil {
+			slog.Error("failed to re-disable S-tag HW-parse after RETH MAC; the NIC may strip 0x88a8 "+
+				"into skb->vlan_tci before XDP, so the single-S-tag in-frame drop is bypassed and "+
+				"the frame adjudicates as untagged/unit-0 in the parent's zone; failing apply closed",
+				"interface", linuxName, "err", err, "output", strings.TrimSpace(string(out)))
+			stagErr = fmt.Errorf("re-disable rx-vlan-stag-hw-parse on RETH member %s after MAC link cycle: %w (output: %s)",
+				linuxName, err, strings.TrimSpace(string(out)))
+		} else {
+			slog.Info("re-disabled S-tag HW-parse offload after RETH MAC", "interface", linuxName)
+		}
 	}
-	slog.Error("failed to re-disable rxvlan after RETH MAC on a parent carrying configured "+
-		"VLAN units; the NIC keeps stripping 802.1Q tags, so tagged frames parse as vlan_id=0 "+
-		"and fall back to the parent ifindex — untrusted VLAN traffic classified into the "+
-		"parent's zone. Nothing re-asserts this knob until the next commit, so the apply fails",
-		"interface", linuxName, "err", err, "output", strings.TrimSpace(string(out)))
-	return fmt.Errorf("re-disable rx-vlan-offload on RETH member %s after MAC link cycle: %w (output: %s)",
-		linuxName, err, strings.TrimSpace(string(out)))
+	return errors.Join(rxvlanErr, stagErr)
 }
 
 // reconcileAfterRethLinkCycle re-adds the VRRP VIPs and stable link-locals that

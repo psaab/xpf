@@ -235,12 +235,12 @@ func TestRefusedVLANNeverEntersTheDelegatedChildSet_6916(t *testing.T) {
 		return &CompileResult{
 			ifCache:       map[string]*net.Interface{physName: {Index: provParentIdx, Name: physName}},
 			hostMutations: map[string]bool{},
-			// Pre-seeded so the #5268 fail-closed rx-vlan gate is already
+			// Pre-seeded so both #5268 and #10915 tag-strip checks are
 			// satisfied: this fixture is about adoption provenance, and a
-			// missing ethtool on the test host would otherwise abort the
-			// SUCCESS cell before it reaches the delegated-child append.
-			rxVlanOffCache: map[string]bool{physName: true},
-			ethtoolApplied: map[string]bool{},
+			// missing ethtool on the test host would otherwise abort it
+			// before reaching the delegated-child append.
+			rxTagStripOffCache: map[string]bool{physName: true},
+			ethtoolApplied:     map[string]bool{},
 			// High, otherwise-unused ifindexes so the netlink fallbacks in
 			// cachedLinkByIndex MISS on the test host instead of resolving a
 			// real local interface into this fixture.

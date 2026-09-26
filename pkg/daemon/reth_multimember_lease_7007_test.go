@@ -443,6 +443,14 @@ func TestAbortOnlyApplyStillReleasesTheLease7007(t *testing.T) {
 // deferred abandon, and turn its ERROR into routine noise on every such commit.
 func TestAllMembersCyclingReleasesExactlyOnce7007(t *testing.T) {
 	var events []string
+	origRun := runCommandTimeout
+	runCommandTimeout = func(name string, args ...string) ([]byte, error) {
+		if name == "ethtool" && len(args) > 0 && args[0] == "-k" {
+			return []byte("rx-vlan-offload: off\nrx-vlan-stag-hw-parse: off\n"), nil
+		}
+		return origRun(name, args...)
+	}
+	t.Cleanup(func() { runCommandTimeout = origRun })
 	var mu sync.Mutex
 	withRethOps(t, perNameRethOps(t, curMAC5103, map[string]bool{
 		"ge-0-0-1": true, "ge-0-0-2": true,

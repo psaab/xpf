@@ -161,6 +161,8 @@ func applyOnce8119(t *testing.T, h *fakeHost8119, cfg *config.Config) {
 	result := newValidationResult()
 	assignZoneIDs(result, cfg)
 	assignScreenIDs(result, cfg)
+	// Offload state is outside this MTU/address-union fixture.
+	result.rxTagStripOffCache[convergePhys8119] = true
 	idx := h.index[convergePhys8119]
 	result.ifCache[convergePhys8119] = &net.Interface{Index: idx, Name: convergePhys8119}
 	link := h.link(convergePhys8119)
