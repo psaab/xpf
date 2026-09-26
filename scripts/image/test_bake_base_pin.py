@@ -17,10 +17,13 @@ enforcement / return True unconditionally) the mismatch + unpinned tests go RED.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SPEC = importlib.util.spec_from_file_location(
     "bake", Path(__file__).with_name("bake.py")
@@ -36,7 +39,10 @@ FAKE = "a" * 64
 class _EnvGuard(unittest.TestCase):
     """Isolate the env vars this feature reads so tests never leak state."""
 
-    _KEYS = ("XPF_BASE_SHA256", "XPF_ALLOW_UNPINNED_BASE")
+    _KEYS = (
+        "XPF_BASE_SHA256", "XPF_ALLOW_UNPINNED_BASE",
+        "XPF_BASE_URL", "XPF_BASE_RELEASE", "XPF_UBUNTU_RELEASES_URL",
+    )
 
     def setUp(self):
         self._saved = {k: os.environ.pop(k, None) for k in self._KEYS}
@@ -76,6 +82,10 @@ class PinnedConstantTests(_EnvGuard):
         self.assertEqual(
             bake.PINNED_BASE_SHA256.get("26.04"),
             "9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05")
+
+    def test_2604_pin_uses_the_serial_directory_that_holds_its_bytes(self):
+        self.assertEqual(
+            bake.PINNED_BASE_SERIAL.get("26.04"), "release-20260731")
 
 
 class ResolveBasePinTests(_EnvGuard):
@@ -120,6 +130,82 @@ class AuthenticateBaseDigestTests(_EnvGuard):
         self.assertTrue(bake.authenticate_base_digest("99.99", FAKE))
         with self.assertRaises(SystemExit):
             bake.authenticate_base_digest("99.99", "b" * 64)
+
+
+
+class FetchBaseTests(_EnvGuard):
+    def test_fetch_uses_the_pinned_serial_url(self):
+        image = b"verified serial image"
+        digest = hashlib.sha256(image).hexdigest()
+        releases_url = "https://mirror.invalid/releases"
+        base_url = f"{releases_url}/26.04/release-20260731"
+        img = "ubuntu-26.04-server-cloudimg-amd64.img"
+        os.environ["XPF_BASE_SHA256"] = digest
+        os.environ["XPF_UBUNTU_RELEASES_URL"] = releases_url
+        urls = []
+
+        def fake_run(argv, **_kwargs):
+            output = Path(argv[argv.index("-o") + 1])
+            url = argv[-1]
+            urls.append(url)
+            if url.endswith("/SHA256SUMS"):
+                output.write_text(f"{digest} *{img}\n", encoding="utf-8")
+            else:
+                output.write_bytes(image)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            work_dir = Path(tmp) / "work"
+            cache_dir.mkdir()
+            work_dir.mkdir()
+            with mock.patch.object(
+                    bake, "discover_base_release", return_value="26.04"), \
+                    mock.patch.object(bake, "run", side_effect=fake_run):
+                result = bake.fetch_base(str(cache_dir), str(work_dir))
+
+            self.assertEqual(result[1], base_url)
+            self.assertEqual(urls, [f"{base_url}/{img}",
+                                    f"{base_url}/SHA256SUMS"])
+            self.assertEqual(Path(result[3]).read_bytes(), image)
+            self.assertEqual(result[4], digest)
+            self.assertTrue(result[5])
+
+    def test_pin_matching_cache_survives_mirror_sums_mismatch(self):
+        image = b"reviewed cached image"
+        img = "ubuntu-26.04-server-cloudimg-amd64.img"
+        sums_url = "https://mirror.invalid/26.04/release/SHA256SUMS"
+        urls = []
+
+        def fake_run(argv, **_kwargs):
+            urls.append(argv[-1])
+            output = Path(argv[argv.index("-o") + 1])
+            output.write_text(f"{'0' * 64} *{img}\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            work_dir = Path(tmp) / "work"
+            cache_dir.mkdir()
+            work_dir.mkdir()
+            cached = cache_dir / img
+            cached.write_bytes(image)
+            digest = bake.sha256(cached)
+            os.environ["XPF_BASE_SHA256"] = digest
+            os.environ["XPF_BASE_URL"] = sums_url.removesuffix("/SHA256SUMS")
+
+            with mock.patch.object(
+                    bake, "discover_base_release", return_value="26.04"), \
+                    mock.patch.object(bake, "run", side_effect=fake_run), \
+                    mock.patch.object(
+                        bake, "authenticate_base_digest",
+                        wraps=bake.authenticate_base_digest) as authenticate:
+                with self.assertRaises(SystemExit):
+                    bake.fetch_base(str(cache_dir), str(work_dir))
+
+            self.assertEqual(
+                cached.read_bytes(), image,
+                "a SUMS mismatch must not remove a cache matching the pinned digest")
+            self.assertEqual(urls, [sums_url])
+            authenticate.assert_called_once_with("26.04", digest)
 
 
 class ManifestProvenanceBindingTests(_EnvGuard):

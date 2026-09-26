@@ -271,6 +271,13 @@ def ensure_memlock():
 # XPF_UBUNTU_AUTODISCOVER=1 opts back into mirror-latest discovery.
 PINNED_BASE_RELEASE = "26.04"
 
+# Keep each trusted digest paired with its Canonical serial directory. The
+# `release/` path is a moving alias and can point at a respin whose bytes do
+# not match the reviewed digest.
+PINNED_BASE_SERIAL = {
+    "26.04": "release-20260731",
+}
+
 # #4904 B — supply-chain trust anchor for the Ubuntu base image. The image AND
 # its SHA256SUMS are fetched from the SAME configurable mirror endpoint
 # (base_url), so a same-endpoint checksum authenticates nothing against a
@@ -371,14 +378,25 @@ def fetch_base(cache_dir, work_dir):
     releases_url = os.environ.get("XPF_UBUNTU_RELEASES_URL",
                                   "https://cloud-images.ubuntu.com/releases")
     rel = discover_base_release()
-    base_url = os.environ.get("XPF_BASE_URL", f"{releases_url}/{rel}/release")
+    serial = PINNED_BASE_SERIAL.get(rel, "release")
+    base_url = os.environ.get(
+        "XPF_BASE_URL", f"{releases_url}/{rel}/{serial}")
     img = f"ubuntu-{rel}-server-cloudimg-amd64.img"
     info(f"fetching Ubuntu {rel} server cloud image base ({base_url})")
     cached = os.path.join(cache_dir, img)
     if not os.path.isfile(cached):
         run(["curl", "-fsSL", "-o", cached + ".tmp", f"{base_url}/{img}"])
         os.replace(cached + ".tmp", cached)
-    # Re-verify the cache against the upstream checksum (cache not trusted).
+
+    # Authenticate cached bytes BEFORE consulting the same-endpoint checksum.
+    # The pin is the trust anchor; a moving or stale mirror checksum must not
+    # remove a cached copy that still matches it.
+    actual = sha256(cached)
+    pinned = authenticate_base_digest(rel, actual)
+
+    # This same-endpoint SHA256SUMS only catches transport corruption; it is
+    # fetched from the SAME mirror as the image and is NOT an authenticator
+    # against a malicious mirror.
     sums = os.path.join(work_dir, "SHA256SUMS.upstream")
     run(["curl", "-fsSL", "-o", sums, f"{base_url}/SHA256SUMS"])
     expected = None
@@ -390,17 +408,12 @@ def fetch_base(cache_dir, work_dir):
                 break
     if not expected:
         die(f"no SHA256 for {img} in upstream SHA256SUMS")
-    actual = sha256(cached)
     if expected != actual:
-        os.remove(cached)
-        die("base image SHA256 mismatch (cache removed — re-run)")
-    # The same-endpoint SHA256SUMS above only catches transport corruption — it
-    # is fetched from the SAME mirror as the image, so it is NOT an authenticator
-    # against a malicious mirror. #4904 B: authenticate the bytes against the
-    # repo-pinned digest (a trust anchor the mirror does not control). A mismatch
-    # (or an unpinned base without XPF_ALLOW_UNPINNED_BASE=1) aborts BEFORE the
-    # image is ever customized/signed.
-    pinned = authenticate_base_digest(rel, actual)
+        if not pinned:
+            os.remove(cached)
+            die("base image SHA256 mismatch (cache removed — re-run)")
+        die("base image SHA256 mismatch despite the pinned digest; "
+            "pin-matching cache retained")
     if pinned:
         info("base image checksum verified + matches the pinned digest "
              "(trust anchor).")
