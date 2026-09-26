@@ -40,12 +40,14 @@ const (
 	// failures (one corrupt batch among clean ones) continue past.
 	policyDeleteSemanticBreaker = 3
 )
+
 // Clear-all single-shot bound (#10512 P4/P8): the one clear RPC is
 // already bounded by the transport round-trip deadline; this absolute
 // deadline (checked before AND after the call) bounds a transport that
 // outlives its own deadlines. A var (not const) so the overrun cell can
 // shrink it like the 5380 deadline vars.
 var clearAllDeadline = 30 * time.Second
+
 // ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
 // session authority. It deliberately uses the control socket: this request is
 // the commit-time discovery boundary and must not be accepted on the dedicated
@@ -112,18 +114,20 @@ func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlRes
 		seenContinuations[page.SessionPolicyContinuation] = struct{}{}
 		pageReq.Continuation = page.SessionPolicyContinuation
 	}
-	}
+}
 
 // PolicyDeleteResult records helper outcomes for one policy READ capture.
 // Stale rows are successful conditional no-ops; partial companion outcomes
-// remove the forward row but retain a replacement companion and therefore
-// remain visible to the caller. Refused-identity outcomes remove nothing
-// while the revoked forward is still live, so they surface as a gap error
-// instead of a count (#10650).
+// remove the forward row but retain a replacement companion. Refused-identity
+// outcomes remove nothing while the revoked forward is still live, so the
+// result retains their count and RT_FLOW identities even if a later batch
+// fails (#10866).
 type PolicyDeleteResult struct {
-	Applied int
-	Stale   int
-	Partial int
+	Applied           int
+	Stale             int
+	Partial           int
+	Refused           int
+	RefusedSessionIDs []uint64
 }
 
 // DeletePolicySessions performs helper-first, identity-conditional deletes for
@@ -164,7 +168,6 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 	m.mu.Unlock()
 	deadline := time.Now().Add(policyDeleteDeadline)
 	var firstErr error
-	refused := 0
 	confirmed := 0
 	consecutiveSemantic := 0
 	for start := 0; start < len(matches); {
@@ -265,7 +268,7 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 					resp.PolicyDeleteComplete, resp.PolicyDeleteErrors),
 				result, confirmed, len(matches))
 		}
-		for _, outcome := range resp.PolicyDeleteOutcomes {
+		for i, outcome := range resp.PolicyDeleteOutcomes {
 			switch outcome {
 			case "applied":
 				result.Applied++
@@ -280,7 +283,8 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 				// survived — a surfaced persistent gap (#5578), never silent
 				// success. Unlike stale ("already gone"), refused means
 				// "still forwarding": counted separately, gapped loud below.
-				refused++
+				result.Refused++
+				result.RefusedSessionIDs = append(result.RefusedSessionIDs, batch[i].ExpectedRTFlowSessionID)
 			case "partial_companion":
 				result.Applied++
 				result.Partial++
@@ -298,9 +302,9 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 	if firstErr != nil {
 		return result, policyDeleteGapError(firstErr, result, confirmed, len(matches))
 	}
-	if refused != 0 {
+	if result.Refused != 0 {
 		return result, policyDeleteGapError(
-			fmt.Errorf("%d refused identity outcome(s): revoked forward survived (companion mismatch)", refused),
+			fmt.Errorf("%d refused identity outcome(s): revoked forward survived (companion mismatch)", result.Refused),
 			result, confirmed, len(matches))
 	}
 	if result.Partial != 0 {
@@ -314,13 +318,14 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 // gap it is: `confirmed` counts only fully-resolved batches (a later success
 // never jumps over an earlier failed range), and every unconfirmed match will
 // NOT be re-captured by a recommit (the config is already active). Survivors
-// among them persist until idle timeout. Loud by construction (#5578).
+// among them persist until idle timeout. Refused identities are also reported
+// independently so a later error cannot hide known live survivors (#10866).
 func policyDeleteGapError(err error, result PolicyDeleteResult, confirmed, total int) error {
 	return fmt.Errorf(
-		"policy session delete INCOMPLETE: %v (applied %d, stale %d, partial %d of %d matches, %d without confirmed outcomes; "+
+		"policy session delete INCOMPLETE: %v (applied %d, stale %d, partial %d, refused %d session(s) of %d matches, %d without confirmed outcomes; "+
 			"survivors persist until idle timeout — recommit does not re-capture; "+
 			"clear sessions or recommit an touching change to force)",
-		err, result.Applied, result.Stale, result.Partial, total, total-confirmed)
+		err, result.Applied, result.Stale, result.Partial, result.Refused, total, total-confirmed)
 }
 
 // policyDeleteBatchFallback numbers the unreachable digest fallback below.
@@ -459,7 +464,6 @@ func (m *Manager) SetClusterSyncedSessionV4(key dataplane.SessionKey, val datapl
 	return nil
 }
 
-
 func (m *Manager) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -515,7 +519,6 @@ func (m *Manager) mirrorSessionV6(key dataplane.SessionKeyV6, val dataplane.Sess
 	}
 	_ = m.syncSessionV6Locked(op, key, &val)
 }
-
 
 func shouldMirrorUserspaceSession(isReverse uint8) bool {
 	return isReverse == 0
