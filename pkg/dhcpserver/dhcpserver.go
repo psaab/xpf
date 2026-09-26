@@ -2,6 +2,7 @@
 package dhcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -134,6 +135,15 @@ type Manager struct {
 	mu        sync.Mutex
 	confPath4 string
 	confPath6 string
+
+	// renderedConfig{4,6} are the bytes most recently written for each
+	// family. appliedConfig{4,6} are the exact bytes last successfully loaded
+	// into an active unit; unchanged, active families need no restart. Guarded
+	// by mu.
+	renderedConfig4 []byte
+	renderedConfig6 []byte
+	appliedConfig4  []byte
+	appliedConfig6  []byte
 
 	// Seams for tests (see test_seams.go). Production instances get
 	// the package-level implementations from New().
@@ -313,11 +323,11 @@ func New() *Manager {
 }
 
 // Apply reconciles the Kea DHCP servers with the xpf DHCP server
-// config. For each address family that is configured it regenerates
-// the Kea config and restarts the unit; for each family that is NOT
-// configured (including cfg == nil) it stops the unit if systemd
-// reports it active — regardless of whether this process started it —
-// and removes the generated config file.
+// config. For each configured family it regenerates the Kea config and
+// restarts unless the unit is active with the exact same config already
+// loaded successfully. For each unconfigured family (including cfg == nil)
+// it stops the unit if systemd reports it active — regardless of whether this
+// process started it — and removes the generated config file.
 //
 // Fail-closed (#1778): a restart failure (or a failure to stop an
 // active unit that is no longer in config) is returned to the caller
@@ -341,13 +351,13 @@ func (m *Manager) ApplyWithLeaseAuthority(cfg *config.DHCPServerConfig, authorit
 // (#1835 F3). Configured families ALWAYS get a freshly generated
 // config file — so a dhcp-server config change is not lost until the
 // next VRRP transition — but the unit is restarted only when systemd
-// reports it active: an active unit means this node is currently
-// serving (VRRP MASTER for the relevant RGs), so the change must
-// reach the running Kea now. Inactive units stay stopped with the
-// fresh config on disk; the next VRRP MASTER transition's Apply
-// starts them. Unconfigured families are cleared exactly as in Apply.
-// Fail-closed like Apply: generate/restart/stop failures are returned
-// so the commit surfaces them.
+// reports it active and the active unit has not already loaded these
+// exact config bytes: an active unit means this node is currently serving
+// (VRRP MASTER for the relevant RGs), so a change must reach Kea now.
+// Inactive units stay stopped with the fresh config on disk; the next
+// VRRP MASTER transition's Apply starts them. Unconfigured families are
+// cleared exactly as in Apply. Fail-closed like Apply: generate/restart/stop
+// failures are returned so the commit surfaces them.
 func (m *Manager) ApplyClusterCommit(cfg *config.DHCPServerConfig) error {
 	return m.apply(m.applyGen.Add(1), cfg, false)
 }
@@ -435,7 +445,7 @@ func (m *Manager) apply(gen uint64, cfg *config.DHCPServerConfig, restartInactiv
 		if err4 = m.generateKea4Config(cfg); err4 != nil {
 			err4 = fmt.Errorf("generate kea4 config: %w", err4)
 		} else {
-			err4, applied4 = m.reconcileFamilyRestart(kea4Svc, restartInactive)
+			err4, applied4 = m.reconcileFamilyRestart(kea4Svc, restartInactive, m.renderedConfig4, &m.appliedConfig4)
 		}
 		if err4 != nil {
 			errs = append(errs, err4)
@@ -454,7 +464,7 @@ func (m *Manager) apply(gen uint64, cfg *config.DHCPServerConfig, restartInactiv
 		if err6 = m.generateKea6Config(cfg); err6 != nil {
 			err6 = fmt.Errorf("generate kea6 config: %w", err6)
 		} else {
-			err6, applied6 = m.reconcileFamilyRestart(kea6Svc, restartInactive)
+			err6, applied6 = m.reconcileFamilyRestart(kea6Svc, restartInactive, m.renderedConfig6, &m.appliedConfig6)
 		}
 		if err6 != nil {
 			errs = append(errs, err6)
@@ -661,11 +671,10 @@ func (m *Manager) applyAsyncWorker() {
 	}
 }
 
-// reconcileFamilyRestart restarts a Kea unit whose config was just
-// regenerated. It returns whether the new config was actually loaded into
-// the running unit. Cluster commits deliberately leave inactive units
-// stopped, so those configured families are not authority-proof-bearing until
-// their MASTER apply starts Kea.
+// reconcileFamilyRestart ensures a Kea unit has loaded the config just
+// regenerated. It returns whether the new config is active. Cluster commits
+// deliberately leave inactive units stopped, so those configured families
+// are not authority-proof-bearing until their MASTER apply starts Kea.
 // Caller must hold m.mu.
 //
 // Fail-closed (#4870 A): if the `systemctl is-active` query itself fails
@@ -677,7 +686,7 @@ func (m *Manager) applyAsyncWorker() {
 // this authoritatively loads the freshly generated config) AND the query
 // error is surfaced so a synchronous commit does not report success on an
 // unverified enforcement.
-func (m *Manager) reconcileFamilyRestart(svc string, restartInactive bool) (error, bool) {
+func (m *Manager) reconcileFamilyRestart(svc string, restartInactive bool, rendered []byte, appliedConfig *[]byte) (error, bool) {
 	var errs []error
 	active, qerr := m.unitActive(svc)
 	if qerr != nil {
@@ -685,10 +694,20 @@ func (m *Manager) reconcileFamilyRestart(svc string, restartInactive bool) (erro
 		slog.Warn("could not query Kea unit state; restarting to enforce config",
 			"service", svc, "err", qerr)
 	}
+
+	// A sibling family's apply failure can cause the converger to retry this
+	// family too. Do not restart an active unit when its exact rendered config
+	// was already loaded successfully; an inactive or uncertain unit still
+	// follows the normal enforcement path.
+	if qerr == nil && active && bytes.Equal(rendered, *appliedConfig) {
+		return nil, true
+	}
 	enforced := restartInactive || active || qerr != nil
 	if enforced {
 		if err := m.restartClearingStartLimit(svc); err != nil {
 			errs = append(errs, err)
+		} else {
+			*appliedConfig = rendered
 		}
 	}
 	return errors.Join(errs...), enforced && len(errs) == 0
@@ -739,6 +758,13 @@ func (m *Manager) restartClearingStartLimit(svc string) error {
 // config lets a later manual/boot start of Kea resurrect the removed
 // subnet); an already-absent file is success.
 func (m *Manager) clearFamilyLocked(svc, confPath string) error {
+	if svc == kea4Svc {
+		m.renderedConfig4 = nil
+		m.appliedConfig4 = nil
+	} else if svc == kea6Svc {
+		m.renderedConfig6 = nil
+		m.appliedConfig6 = nil
+	}
 	var errs []error
 	active, qerr := m.unitActive(svc)
 	if qerr != nil {
@@ -1429,7 +1455,12 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	m.addLeaseSyncStanza(dhcp4, 4)
 	keaCfg := map[string]any{"Dhcp4": dhcp4}
 
-	return m.writeKeaConfig(m.confPath4, keaCfg)
+	rendered, err := m.writeKeaConfig(m.confPath4, keaCfg)
+	if err != nil {
+		return err
+	}
+	m.renderedConfig4 = rendered
+	return nil
 }
 
 func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
@@ -1589,7 +1620,12 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 	m.addLeaseSyncStanza(dhcp6, 6)
 	keaCfg := map[string]any{"Dhcp6": dhcp6}
 
-	return m.writeKeaConfig(m.confPath6, keaCfg)
+	rendered, err := m.writeKeaConfig(m.confPath6, keaCfg)
+	if err != nil {
+		return err
+	}
+	m.renderedConfig6 = rendered
+	return nil
 }
 
 // addLeaseSyncStanza injects the unix control-socket + lease_cmds hook into a
@@ -1613,16 +1649,19 @@ func (m *Manager) addLeaseSyncStanza(dhcp map[string]any, family int) {
 	}
 }
 
-func (m *Manager) writeKeaConfig(path string, keaCfg map[string]any) error {
+func (m *Manager) writeKeaConfig(path string, keaCfg map[string]any) ([]byte, error) {
 	data, err := json.MarshalIndent(keaCfg, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
 	// AtomicGeneratedConfig (#1894): regenerated on apply; Kea must
 	// never parse a torn file, but the apply path pays no fsync.
-	return fsatomic.WriteFileAtomic(path, data, 0644)
+	if err := fsatomic.WriteFileAtomic(path, data, 0644); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
