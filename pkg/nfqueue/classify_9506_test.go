@@ -208,3 +208,74 @@ func TestClassifyMalformedFailsLoud9506(t *testing.T) {
 		t.Fatalf("full packet: %v", err)
 	}
 }
+
+func TestClassifyV6NonTransportProtocols10897(t *testing.T) {
+	src, dst := net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2")
+	for _, tc := range []struct {
+		name  string
+		proto byte
+	}{
+		{name: "hop-by-hop", proto: 0},
+		{name: "destination-options", proto: 60},
+		{name: "icmpv6", proto: 58},
+		{name: "esp", proto: 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			packet := classifyV6Packet(t, tc.proto, src, dst, 1, 2, 3, 4)
+			got, err := ClassifyCapturePayload(packet)
+			if err != nil {
+				t.Fatalf("ClassifyCapturePayload: %v", err)
+			}
+			if got.Version != 6 || got.Proto != tc.proto || got.IsFragment {
+				t.Fatalf("classification = %+v, want v6 proto %d unfragmented", got, tc.proto)
+			}
+			if got.HasPorts {
+				t.Fatalf("non-TCP/UDP proto %d unexpectedly has ports: %+v", tc.proto, got)
+			}
+			if got.FlowKey == "" {
+				t.Fatal("non-TCP/UDP packet has no flow key")
+			}
+		})
+	}
+}
+
+func TestClassifyV6FragmentNonTransportProtocols10897(t *testing.T) {
+	src, dst := net.ParseIP("2001:db8::3"), net.ParseIP("2001:db8::4")
+	for _, tc := range []struct {
+		name  string
+		proto byte
+	}{
+		{name: "icmpv6", proto: 58},
+		{name: "destination-options", proto: 60},
+		{name: "esp", proto: 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fragmentHeader := make([]byte, 8)
+			fragmentHeader[0] = tc.proto
+			binary.BigEndian.PutUint16(fragmentHeader[2:4], 1)
+			binary.BigEndian.PutUint32(fragmentHeader[4:8], 10897)
+			packet := classifyV6Packet(t, 44, src, dst,
+				append(fragmentHeader, 1, 2, 3, 4)...)
+
+			got, err := ClassifyCapturePayload(packet)
+			if err != nil {
+				t.Fatalf("ClassifyCapturePayload: %v", err)
+			}
+			if got.Version != 6 || got.Proto != tc.proto || !got.IsFragment ||
+				!got.FragMore || got.FragOffset != 0 || got.FragID != 10897 {
+				t.Fatalf("classification = %+v, want first v6 fragment proto %d", got, tc.proto)
+			}
+			if got.HasPorts {
+				t.Fatalf("non-TCP/UDP fragment proto %d unexpectedly has ports: %+v", tc.proto, got)
+			}
+			if _, ok := got.FragmentKey(7, 2, 9); !ok {
+				t.Fatal("fragment classification has no fragment key")
+			}
+			piece, ok := got.FragmentPiece(packet)
+			if !ok || !piece.More || piece.Offset != 0 ||
+				string(piece.Data) != string([]byte{1, 2, 3, 4}) {
+				t.Fatalf("fragment piece = %+v, ok=%v", piece, ok)
+			}
+		})
+	}
+}

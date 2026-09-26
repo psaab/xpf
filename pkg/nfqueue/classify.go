@@ -135,7 +135,7 @@ func classifyIPv6(payload []byte) (CaptureClassification, error) {
 	copy(c.Dst[:], payload[24:40])
 	next := payload[6]
 	headerEnd := 40
-	if next == 44 { // Fragment header; extension-chain parsing is deliberately strict.
+	if next == 44 { // Fragment parsing is limited to an immediate Fragment header.
 		if payloadLength < 8 {
 			return CaptureClassification{}, errors.New("nfqueue: truncated IPv6 fragment header")
 		}
@@ -147,9 +147,11 @@ func classifyIPv6(payload []byte) (CaptureClassification, error) {
 		c.FragID = binary.BigEndian.Uint32(frag[4:8])
 		c.IsFragment = true // atomic fragments (offset=0, M=0) remain fragments.
 		headerEnd = 48
-	} else if !isTransportProtocol(next) {
-		return CaptureClassification{}, fmt.Errorf("nfqueue: unsupported IPv6 next header %d", next)
 	}
+	// IPv6 headers other than TCP and UDP have no ports to extract. Like the
+	// IPv4 classifier, retain their protocol number and classify them by
+	// endpoints so they can reach policy and reinjection (#10897).
+	// Extension chains after an immediate Fragment header remain unparsed.
 	c.Proto = next
 	c.payloadOffset = headerEnd
 	c.payloadLength = end - headerEnd
