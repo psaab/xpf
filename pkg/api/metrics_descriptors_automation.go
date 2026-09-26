@@ -104,6 +104,12 @@ func (c *xpfCollector) initAutomationDescriptors() {
 			"via the record's monotonic BufSeq and an Overrun flag.",
 		nil, nil,
 	)
+	c.eventStreamSubscriberRefusals = prometheus.NewDesc(
+		"xpf_event_stream_subscriber_refusals_total",
+		"Total EventBuffer TrySubscribe requests rejected at the shared "+
+			"subscriber cap across REST SSE and gRPC event streams (#10910).",
+		nil, nil,
+	)
 	c.feedSecondsSinceSuccess = prometheus.NewDesc(
 		"xpf_feed_seconds_since_last_success",
 		"Seconds since a dynamic-address feed last fetched successfully. "+

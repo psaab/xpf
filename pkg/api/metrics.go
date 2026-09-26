@@ -386,6 +386,7 @@ type xpfCollector struct {
 	eventPlantClassInvalid        *prometheus.Desc
 	eventActionQueueDepth         *prometheus.Desc
 	eventStreamSubscriberDropped  *prometheus.Desc
+	eventStreamSubscriberRefusals *prometheus.Desc
 
 	// #2050: dynamic-address feed staleness. seconds-since-last-success
 	// climbs while a feed cannot be refreshed (retain-forever default
@@ -1078,6 +1079,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.eventAttributesInvalid
 	ch <- c.eventActionQueueDepth
 	ch <- c.eventStreamSubscriberDropped
+	ch <- c.eventStreamSubscriberRefusals
 	ch <- c.feedSecondsSinceSuccess
 	ch <- c.feedStale
 	ch <- c.syslogMessagesDropped

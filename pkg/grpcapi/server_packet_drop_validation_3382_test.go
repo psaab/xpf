@@ -287,7 +287,7 @@ func TestMonitorPacketDropReportsSubscriberOverrun_10834(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- s.MonitorPacketDrop(&pb.MonitorPacketDropRequest{Node: "local"}, stream)
+		done <- s.MonitorPacketDrop(&pb.MonitorPacketDropRequest{Node: "local", Count: 2}, stream)
 	}()
 
 	startDeadline := time.Now().Add(2 * time.Second)
@@ -325,11 +325,10 @@ func TestMonitorPacketDropReportsSubscriberOverrun_10834(t *testing.T) {
 	for !stream.hasLine(marker) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	cancel()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("packet-drop stream did not stop after cancellation")
+		t.Fatal("packet-drop stream did not finish after reporting the gap")
 	}
 
 	lines := stream.lines()

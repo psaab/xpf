@@ -95,6 +95,65 @@ var monitorInterfaceLimiter = diagcmd.MonitorInterfaceLimiter
 // compress it without a real slow reader.
 var monitorInterfaceSendTimeout = 30 * time.Second
 
+// monitorPacketDropSendTimeout bounds each downstream MonitorPacketDrop write.
+// Like MonitorInterface, gRPC Send has no socket deadline, so a stuck Send runs
+// in a worker and the handler returns on timeout or stream-context cancellation.
+// The EventBuffer subscription transfers to that worker until handler teardown
+// cancels the transport Send; the worker then closes it, keeping admission
+// bounded while allowing the next SSE/gRPC subscriber once the Send exits.
+var monitorPacketDropSendTimeout = 30 * time.Second
+
+func sendMonitorPacketDropFrame(
+	stream grpc.ServerStreamingServer[pb.MonitorPacketDropResponse],
+	resp *pb.MonitorPacketDropResponse,
+	release func(),
+) (error, bool) {
+	ctx := stream.Context()
+	select {
+	case <-ctx.Done():
+		return ctx.Err(), false
+	default:
+	}
+
+	var transferred atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		err := stream.Send(resp)
+		done <- err
+		if transferred.Load() {
+			release()
+		}
+	}()
+	timer := time.NewTimer(monitorPacketDropSendTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err, false
+	case <-ctx.Done():
+		transferred.Store(true)
+		select {
+		case <-done:
+			release()
+			return ctx.Err(), false
+		default:
+			return ctx.Err(), true
+		}
+	case <-timer.C:
+		transferred.Store(true)
+		select {
+		case <-done:
+			// The timeout won the select but Send completed at the boundary.
+			// Release here as well as from the worker: Close is idempotent, and
+			// the worker may have observed transferred before this Store.
+			release()
+			return status.Error(codes.DeadlineExceeded, "monitor packet-drop client is not reading; handler severed"), false
+		default:
+			return status.Error(codes.DeadlineExceeded, "monitor packet-drop client is not reading; handler severed"), true
+		}
+	}
+}
+
 // monitorInterfacePeerIdleTimeout bounds how long the proxy forwarding loop
 // waits for the next peer frame. The peer ticks every 1s by construction, so
 // 10 missed ticks means it is stalled (wedged handler, wedged transport —
@@ -412,33 +471,53 @@ func (s *Server) MonitorPacketDrop(req *pb.MonitorPacketDropRequest, stream grpc
 		return status.Error(codes.ResourceExhausted, "too many concurrent event subscribers")
 	}
 	var gaps logging.EventGapTracker
+	ctx := stream.Context()
+	transferred := false
+	sendFailed := false
+	send := func(line string) error {
+		err, xfer := sendMonitorPacketDropFrame(stream, &pb.MonitorPacketDropResponse{Line: line}, sub.Close)
+		if xfer {
+			transferred = true
+		}
+		if err != nil {
+			sendFailed = true
+		}
+		return err
+	}
 	defer func() {
-		sub.Close()
-		if lost := gaps.Finish(sub); lost > 0 {
-			if err := stream.Send(&pb.MonitorPacketDropResponse{Line: logging.OverrunLine(lost)}); retErr == nil {
-				retErr = err
+		// A failed write or canceled/re-authenticated stream is terminal. Do
+		// not attempt gap summaries over a transport that is already wedged.
+		if !transferred && !sendFailed && ctx.Err() == nil {
+			if lost := gaps.Finish(sub); lost > 0 {
+				if err := send(logging.OverrunLine(lost)); err != nil && retErr == nil {
+					retErr = err
+				}
+			}
+			if !transferred && !sendFailed {
+				if dropped := sub.Dropped(); dropped > 0 {
+					if err := send(fmt.Sprintf("dropped=%d", dropped)); err != nil && retErr == nil {
+						retErr = err
+					}
+				}
 			}
 		}
-		if dropped := sub.Dropped(); dropped > 0 {
-			if err := stream.Send(&pb.MonitorPacketDropResponse{Line: fmt.Sprintf("dropped=%d", dropped)}); retErr == nil {
-				retErr = err
-			}
+		if !transferred {
+			sub.Close()
 		}
 	}()
 
-	if err := stream.Send(&pb.MonitorPacketDropResponse{Line: "Starting packet drop:"}); err != nil {
+	if err := send("Starting packet drop:"); err != nil {
 		return err
 	}
 
 	seen := 0
-	ctx := stream.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case rec := <-sub.C:
 			if lost, gap := gaps.Observe(sub, rec); gap {
-				if err := stream.Send(&pb.MonitorPacketDropResponse{Line: logging.OverrunLine(lost)}); err != nil {
+				if err := send(logging.OverrunLine(lost)); err != nil {
 					return err
 				}
 			}
@@ -514,7 +593,7 @@ func (s *Server) MonitorPacketDrop(req *pb.MonitorPacketDropRequest, stream grpc
 				strings.ToLower(rec.Protocol),
 				rec.IngressIface, reason)
 
-			if err := stream.Send(&pb.MonitorPacketDropResponse{Line: line}); err != nil {
+			if err := send(line); err != nil {
 				return err
 			}
 			seen++
