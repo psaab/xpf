@@ -33,8 +33,9 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // (#9919 F-161), an unsupported IKE authentication method, a malformed PSK,
 // a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
 // VPN name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
-// ESP/PFS DH group (#9919 F-161), or a non-empty bind-interface that resolves
-// to no XFRM if_id (#10681) — is NOT in
+// ESP/PFS DH group (#9919 F-161), a non-empty bind-interface that resolves to
+// no XFRM if_id (#10681), or an explicit selector set with no renderable
+// children (#10884) — is NOT in
 // the returned set even though renderConfig still returns success. Apply
 // diffs THIS rendered set (not the raw VPN map keys) so a previously-loaded
 // connection that dropped out of the render is treated as a removal and its
@@ -66,6 +67,16 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 	b.WriteString("connections {\n")
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
 		vpn := ipsecCfg.VPNs[name]
+		// Expand once before writing the connection so an explicit selector set
+		// with no renderable children skips this VPN rather than loading a
+		// connection whose malformed local_ts/remote_ts made charon discard it.
+		children := effectiveTrafficSelectors(name, vpn)
+		if len(children) == 0 {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: no traffic-selector child has renderable local/remote selectors",
+				"vpn", name)
+			continue
+		}
 
 		// Resolve the remote gateway endpoint. remote_addrs must be a
 		// real IP / hostname strongSwan can use — never a bare gateway
@@ -399,19 +410,14 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 		ifID := xfrmiIfID(vpn.BindInterface)
 
 		fmt.Fprintf(&b, "    children {\n")
-		for _, child := range effectiveTrafficSelectors(name, vpn) {
+		for _, child := range children {
 			fmt.Fprintf(&b, "      %s {\n", sanitizeSwanctlValue(child.Name))
 			// local_ts / remote_ts carry the traffic-selector prefixes
 			// (`traffic-selector local-ip/remote-ip`, or the
-			// local-identity/remote-identity fallback). Run them through
-			// sanitizeSwanctlValue for parity with child.Name above: an
-			// embedded control character — a newline in particular — would
-			// otherwise inject an arbitrary `key = value` line (e.g.
-			// `updown = /tmp/x.sh`, executed by charon as ROOT) or an extra
-			// swanctl section into the children{} block. The commit-time
-			// gate (validateIPsecTrafficSelectorsStrict, #4098) rejects such
-			// a value; this render-side belt keeps an already-persisted /
-			// peer-synced value inert on the lenient load path (#1798/#4098).
+			// local-identity/remote-identity fallback). The shared shape
+			// predicate omits malformed values before they reach charon;
+			// sanitizeSwanctlValue remains the final line-injection belt.
+			// Keep it here as defense in depth for every rendered value.
 			if child.LocalTS != "" {
 				fmt.Fprintf(&b, "        local_ts = %s\n", sanitizeSwanctlValue(child.LocalTS))
 			}
@@ -700,6 +706,16 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 		if ts.RemoteIP != "" {
 			remoteTS = ts.RemoteIP
 		}
+		// The explicit-selector branch also reaches the identity fallback for a
+		// side it leaves empty. Keep only selector-shaped values so a tolerant
+		// load cannot pass an FQDN/DN to charon as local_ts/remote_ts.
+		if (localTS != "" && !config.IsTrafficSelectorShape(localTS)) ||
+			(remoteTS != "" && !config.IsTrafficSelectorShape(remoteTS)) {
+			slog.Warn("omitting IPsec traffic-selector with an unrenderable local/remote selector",
+				"vpn", connName, "traffic_selector", name)
+			continue
+		}
+
 		children = append(children, childSelector{
 			Name:     childNames[name],
 			LocalTS:  localTS,
@@ -747,9 +763,10 @@ type SANameIndex map[string][]string
 //   - the renderer SKIPS it (an unrenderable gateway, an unresolved
 //     ike-policy chain, an unusable DH group, an unsupported auth method,
 //     a malformed PSK, an AH proposal, a section-breaking name, an
-//     unresolved ipsec-policy chain, or an invalid bind-interface): it
-//     loads nothing and contributes no name, so it cannot make a loaded VPN's
-//     name look ambiguous;
+//     unresolved ipsec-policy chain, an invalid bind-interface, or an
+//     explicit selector set with no renderable children): it loads nothing
+//     and contributes no name, so it cannot make a loaded VPN's name look
+//     ambiguous;
 //   - it renders: its connection name and every child the renderer emits for it
 //     (effectiveTrafficSelectors + sanitizeSwanctlValue, the render's own
 //     expansion) are indexed;

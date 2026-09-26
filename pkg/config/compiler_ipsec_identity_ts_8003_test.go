@@ -6,10 +6,10 @@ import (
 )
 
 // Tests for #8003: `security ipsec vpn <v> local-identity / remote-identity`
-// are rendered as the swanctl local_ts / remote_ts when the VPN declares no
-// traffic-selector (pkg/ipsec effectiveTrafficSelectors), but the #4098 walk
-// only ever descended into `traffic-selector` children, so nothing examined
-// them at commit.
+// can become swanctl local_ts / remote_ts values either as the fallback when
+// no explicit traffic-selector exists or per-side when an explicit child
+// omits local-ip / remote-ip (`pkg/ipsec/effectiveTrafficSelectors`). These
+// VPN-level leaves are checked separately from traffic-selector children.
 //
 // Measured on strongSwan 6.0.5, a non-selector value here does not degrade the
 // child SA — it discards the ENTIRE connection:
