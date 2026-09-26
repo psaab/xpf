@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/ra"
 )
@@ -80,5 +81,73 @@ func TestStartupGoodbyeBeginSerializesInFlight(t *testing.T) {
 	}
 	if d.startupGoodbyeNeeded(3) {
 		t.Fatal("an in-flight RG must not be reported as needing a goodbye")
+	}
+}
+
+func TestRunStartupGoodbyeSkipsSharedRouterIdentity10789(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1::/64")
+	d := &Daemon{
+		store:                  store,
+		startupGoodbyeInflight: map[int]bool{1: true},
+	}
+	called := false
+	d.startupGoodbyeWithdrawFn = func(configs []*config.RAInterfaceConfig) []ra.GoodbyeResult {
+		called = true
+		if len(configs) != 1 {
+			t.Errorf("WithdrawOnce received %d configs, want one", len(configs))
+			return nil
+		}
+		return []ra.GoodbyeResult{{Interface: configs[0].Interface, Sent: true}}
+	}
+
+	cfg := d.buildRAConfigs(store.ActiveConfig())
+	if len(cfg) != 1 {
+		t.Fatalf("buildRAConfigs returned %d entries, want one", len(cfg))
+	}
+	wantLL := cluster.StableRethLinkLocal(1, 1).String()
+	if cfg[0].SourceLinkLocal != wantLL {
+		t.Fatalf("test precondition: SourceLinkLocal=%q, want shared identity %q",
+			cfg[0].SourceLinkLocal, wantLL)
+	}
+
+	d.runStartupGoodbye(1, cfg)
+	if called {
+		t.Fatal("WithdrawOnce ran for the cluster-shared router identity")
+	}
+	if !d.startupGoodbyeRA[1] {
+		t.Fatal("shared-identity suppression did not mark startup cleanup complete")
+	}
+	if d.startupGoodbyeInflight[1] {
+		t.Fatal("startup goodbye in-flight marker remained set")
+	}
+}
+
+func TestRunStartupGoodbyeKeepsDistinctIdentityWithdraw10789(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1::/64")
+	d := &Daemon{
+		store:                  store,
+		startupGoodbyeInflight: map[int]bool{1: true},
+	}
+	called := false
+	d.startupGoodbyeWithdrawFn = func(configs []*config.RAInterfaceConfig) []ra.GoodbyeResult {
+		called = true
+		if len(configs) != 1 {
+			t.Errorf("WithdrawOnce received %d configs, want one distinct source fe80::1234", len(configs))
+			return nil
+		}
+		if configs[0].SourceLinkLocal != "fe80::1234" {
+			t.Errorf("WithdrawOnce source=%q, want distinct source fe80::1234", configs[0].SourceLinkLocal)
+		}
+		return []ra.GoodbyeResult{{Interface: configs[0].Interface, Sent: true}}
+
+	}
+	cfg := d.buildRAConfigs(store.ActiveConfig())
+	cfg[0].SourceLinkLocal = "fe80::1234"
+	d.runStartupGoodbye(1, cfg)
+	if !called {
+		t.Fatal("WithdrawOnce was suppressed for a distinct router identity")
+	}
+	if !d.startupGoodbyeRA[1] {
+		t.Fatal("successful distinct-identity goodbye did not complete startup cleanup")
 	}
 }

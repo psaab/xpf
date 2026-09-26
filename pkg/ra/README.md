@@ -410,6 +410,12 @@ never retried and the stale IPv6 default-router identity lingered on hosts
   explicit no-goodbye primitive for a forced/unsafe stop. NOTE: config-driven
   removal no longer uses this; the daemon's standalone reconcile now withdraws
   gracefully (`Withdraw()`) when all RA config is removed (#5092).
+- `ClearInterfacesWithoutGoodbye(names []string) error` — `ra.go`. Silent per-interface stop;
+  leaves unrelated senders running, supersedes pending starts, and drops
+  existing or late goodbye retry debt for those names. Cluster demotion uses it
+  when the stable RETH source is shared with the peer, because a goodbye would
+  withdraw that peer's live router. If both members are BACKUP, an old route
+  may remain until Router Lifetime expiry; a new master's RA refresh repairs it.
 - `Status()` — `ra.go`. Per-interface `SenderInfo`. A running sender has
   `State == "active"`; an interface whose sender is tearing down /
   emitting its goodbye is reported with `State == "draining"` (distinct

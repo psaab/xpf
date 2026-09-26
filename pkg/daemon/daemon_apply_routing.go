@@ -31,9 +31,8 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 	}
 
 	// 5. Apply RA config (Router Advertisements)
-	// In cluster mode, RA/kea are managed by watchVRRPEvents — only
-	// the MASTER runs these services to prevent dual-RA / dual-DHCP.
-	// The VRRP event fires shortly after startup and calls applyRethServices().
+	// Cluster RA/Kea are managed per RG and run only on current owners.
+	// RA ownership is applied by reconcileClusterRAServices below.
 	isCluster := cfg.Chassis.Cluster != nil
 	raConfigs := d.buildRAConfigs(cfg)
 	if !isCluster {
@@ -52,11 +51,11 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 			}
 		}
 	}
-	// Cluster startup: RA senders start on the active owner after VRRP election.
-	// The stable RETH source is shared across peers, so an inactive node must
-	// not send a lifetime-0 goodbye for an identity the active peer continues
-	// to advertise. Demotion hard-stops only that shared-identity sender;
-	// explicitly configured per-node sources retain their graceful withdrawal.
+	// Cluster startup: after VRRP election settles, reconcile starts RA only on
+	// active RGs. Stable RETH link-local sources are shared by the peers, so an
+	// inactive sender for that identity is stopped silently; a lifetime-zero RA
+	// would withdraw the active peer's route. Explicit per-node sources keep
+	// graceful withdrawal, including cold-backup cleanup for distinct identities.
 	//
 	// Stable link-local cleanup: handled by reconcile after election.
 	//
