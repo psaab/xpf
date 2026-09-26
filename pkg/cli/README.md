@@ -388,12 +388,15 @@ presenter's rendered output is byte-identical:
   `cli_show_dhcp_escape_6468_test.go` and their `pkg/grpcapi` mirrors; all ten
   parsed-row sites (five per renderer) are individually bound.
 
-  Not guarded, deliberately: LLDP neighbor fields are already sanitized at the
-  ingest boundary (`lldp.sanitizeTLVString`); the DHCPv6 DUID view and the
-  Surface A DDNS *name* are firewall-self/operator-authored, not
-  device-controlled. (The Surface A `LastError` in the table above is a
-  different field on the same view — its bytes come from the provider, not from
-  us.) `frr.FormatRouteDetail` is JSON-typed with no free-text cell (prefix,
+  LLDP neighbor fields are an explicit row exception: `lldp.sanitizeTLVString`
+  neutralizes control, bidi/Cf, and line-separator input at ingest, and both
+  local and gRPC `show lldp neighbors` renderers quote and bound every string
+  cell with `termsafe.QuoteFieldForDisplay` (#10899). The DHCPv6 DUID view and
+  Surface A DDNS *name* remain deliberately unguarded because they are
+  firewall-self/operator-authored, not device-controlled. (The Surface A
+  `LastError` in the table above is a different field on the same view — its
+  bytes come from the provider, not from us.)
+  `frr.FormatRouteDetail` is JSON-typed with no free-text cell (prefix,
   protocol enum, local interface name, integer distance/metric), and
   `routing.RouteEntry` comes from netlink rather than from a peer. The
   `pkg/api` REST handlers render the same FRR tables into a JSON

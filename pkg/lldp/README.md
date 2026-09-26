@@ -220,22 +220,20 @@ Two properties keep this safe (#2372 review findings 3 + 6):
   interface, the per-interface count on the new-neighbor path iterates a
   small, bounded set. The warn dampener is reset alongside the neighbor
   table in `Stop()`, so a fresh `Apply` generation warns again.
-- **Control-char sanitization on receive (#4043):** LLDP is an
-  unauthenticated L2 protocol — any device on the segment can craft a frame
-  whose free-text TLVs carry ANSI escape sequences, CR/LF, or other control
-  characters. `ParseTLVs` runs every operator-visible received string
-  (system-name, system-description, port-description, port-id, and the
-  non-MAC chassis-id) through `sanitizeTLVString` at the store boundary
-  before it lands in the neighbor table, so both the expiry log line and the
-  `show lldp neighbors` table read already-clean strings. Each Unicode
-  control rune (C0 `0x00-0x1F` including ESC/CR/LF, DEL `0x7F`, and C1
-  `0x80-0x9F`) is replaced by a space; a legitimate multi-byte UTF-8 name is
-  preserved unchanged (`strings.Map` is rune-aware). A **raw invalid-UTF-8
-  byte** (e.g. a bare `0x9B`, the 8-bit CSI introducer an 8-bit terminal acts
-  on like `ESC[`) is folded to `U+FFFD`: it is not a control *rune*, so the
-  fast-path skip now also gates on `utf8.ValidString` to force the
-  `strings.Map` slow path for any invalid-UTF-8 input — an `IsControl`-only
-  skip returned such a byte verbatim (#6482). This is the LLDP-receive
-  counterpart of the #1798/#3900 free-text sanitizer and neutralizes
-  terminal-escape spoofing (`show lldp neighbors`) and syslog log-injection (a
-  forged/split log line) from a hostile neighbor.
+- **Control and display-format sanitization on receive (#4043, #10899):** LLDP
+  is an unauthenticated L2 protocol — any device on the segment can craft a
+  frame whose free-text TLVs carry ANSI escapes, CR/LF, bidi overrides,
+  zero-width format characters, or Unicode line separators. `ParseTLVs` runs
+  every operator-visible received string (system-name, system-description,
+  port-description, port-id, and the non-MAC chassis-id) through
+  `sanitizeTLVString` before storing it. C0/C1 controls, DEL, Unicode format
+  runes (Cf), and U+2028/U+2029 become spaces; valid ordinary UTF-8 survives,
+  while invalid UTF-8 becomes U+FFFD. This protects expiry logs and the stored
+  neighbor table from terminal/log injection and display-order spoofing.
+
+  Both `show lldp neighbors` renderers also quote every string cell through
+  `termsafe.QuoteFieldForDisplay` and cap it at its column width. This is a
+  separate display-boundary guarantee: whitespace cannot make a cell
+  ambiguous, long peer names cannot shift TTL/Age, and Unicode display controls
+  from any `Neighbor` source render as visible ASCII escapes. The local CLI and
+  remote `ShowText` path use the same policy (#10899).

@@ -50,12 +50,65 @@
 package termsafe
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
 const hexDigits = "0123456789abcdef"
+
+// QuoteFieldForDisplay returns an ASCII-quoted representation of an untrusted
+// single-line table cell, bounded to maxWidth terminal columns. Non-ASCII text,
+// terminal controls, invalid UTF-8, Unicode line separators, and non-printing
+// format characters such as bidi overrides are escaped, so the quoted byte
+// length also matches its terminal width.
+//
+// Long values are shortened only between complete Go escape sequences and end
+// with an ellipsis inside the quotes, so a peer-controlled value cannot move
+// later columns or leave a partial escape that looks like data.
+func QuoteFieldForDisplay(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	quoted := strconv.QuoteToASCII(s)
+	if len(quoted) <= maxWidth {
+		return quoted
+	}
+	if maxWidth < 5 {
+		return strings.Repeat(".", maxWidth)
+	}
+
+	content := quoted[1 : len(quoted)-1]
+	budget := maxWidth - 5 // opening/closing quote plus the three dots
+	end := 0
+	for end < len(content) {
+		size := 1
+		if content[end] == '\\' {
+			switch content[end+1] {
+			case 'x':
+				size = 4
+			case 'u':
+				size = 6
+			case 'U':
+				size = 10
+			default:
+				if content[end+1] >= '0' && content[end+1] <= '7' {
+					size = 4
+				} else {
+					size = 2
+				}
+			}
+		} else {
+			_, size = utf8.DecodeRuneInString(content[end:])
+		}
+		if end+size > budget {
+			break
+		}
+		end += size
+	}
+	return `"` + content[:end] + "..." + `"`
+}
 
 // SanitizeForDisplay escapes the terminal-protocol control bytes in a
 // device-originated string so the terminal does not ACT on embedded escape
