@@ -916,7 +916,7 @@ func (s *Server) authorizeRESTRead(r *http.Request, required config.LoginClassPe
 	return p, nil
 }
 func logRESTLoginDenial(r *http.Request, p authz.Principal, required, decision string) {
-	if emit, suppressed := denyaudit.Note(denyaudit.SurfaceRESTLoginClass, "rest-login-class"); emit {
+	if emit, suppressed := denyaudit.Note(denyaudit.SurfaceRESTLoginClass, p.String()); emit {
 		slog.Warn("api: REST request denied by authorization",
 			"method", r.Method, "path", r.URL.Path,
 			"principal", p.String(), "source", p.Source.String(),
@@ -925,8 +925,8 @@ func logRESTLoginDenial(r *http.Request, p authz.Principal, required, decision s
 			"denials_total", denyaudit.Total(denyaudit.SurfaceRESTLoginClass))
 		return
 	}
-	// The caller controls denial rate. Count every decision, but bound WARNs to
-	// the fixed REST-login-class bucket rather than emitting one per request.
+	// The caller controls denial rate. Note counts every decision and hashes the
+	// server-derived principal into the fixed bucket array to bound WARN output.
 	slog.Debug("api: REST request denied by authorization",
 		"method", r.Method, "path", r.URL.Path,
 		"principal", p.String(), "source", p.Source.String(),
