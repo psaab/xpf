@@ -15,17 +15,17 @@ import (
 //
 // The kernel channel deliberately forgets. `revert()` clears the journal by
 // design — the next boot must be a clean ordinary boot — and the promotion
-// marker is written only on PROMOTE. So after a candidate is rejected,
-// `xpfd upgrade kernel status` prints `promoted=none` / `armed=none`: correct,
-// and indistinguishable from a box that never tried. The reason a candidate
-// was rejected survived only in journald, which on an appliance may not be
+// marker is written only on PROMOTE. So after a candidate is rejected or
+// firmware falls back before the candidate boots, `xpfd upgrade kernel status`
+// prints `promoted=none` / `armed=none`: correct, and indistinguishable from a
+// box that never tried. The reason for a rejection or known-good fallback
+// otherwise survives only in journald, which on an appliance may not be
 // persistent at all.
 //
-// That is the wrong thing to forget. A reverted roll is exactly the moment an
-// operator needs to know WHAT was tried and WHY it failed, and it is the moment
-// the box has just rebooted. So the outcome — and only the outcome, a few
-// bytes, never the in-flight state — is recorded durably alongside the
-// promotion marker.
+// That is the wrong thing to forget. Operators need to know WHAT was tried,
+// WHY it failed, or that firmware discarded the trial by returning to
+// known-good. So the outcome — and only the outcome, a few bytes, never the
+// in-flight state — is recorded durably alongside the promotion marker.
 //
 // Deliberately NOT cleared at arm time, unlike the promotion marker. The marker
 // is cleared on Arm because a stale "promoted" from a prior same-version roll

@@ -620,8 +620,8 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	// #6495: durable last-roll outcome, alongside the marker and for the same
 	// reason — the journal is about to be cleared. The marker answers the HA
 	// orchestrator's "did THIS node promote version X"; this answers the
-	// operator's "what happened to the last roll", which on a REVERT the marker
-	// cannot answer at all (it is not written, and is cleared).
+	// operator's "what happened to the last roll", which a cleared marker cannot
+	// answer on a revert or known-good discard.
 	outcome := r.recordRollOutcome(j, RollOutcomePromoted, "")
 	// The candidate slot is now the active/known-good slot; the OTHER slot
 	// (the former active) becomes the rollback target and keeps its kernel.

@@ -304,11 +304,12 @@ type KernelSystem interface {
 	// TTL after a dead roll (r2 AGY).
 	ClearRollLease() error
 
-	// WriteLastRoll durably records the outcome of a COMPLETED roll — promoted
-	// or reverted, with the reason — so it survives the journal clear (#6495).
-	// Unlike the promotion marker this is written on BOTH outcomes and is NOT
-	// cleared at arm time: it is history, overwritten by the next roll. See
-	// kernel_lastroll.go for why the asymmetry with the marker is deliberate.
+	// WriteLastRoll durably records the outcome of a COMPLETED roll — promoted,
+	// reverted, or discarded on known-good — so it survives the journal clear
+	// (#6495, #10772 x1-F6). Unlike the promotion marker this is written for
+	// every outcome and is NOT cleared at arm time: it is history, overwritten
+	// by the next roll. See kernel_lastroll.go for the deliberate asymmetry
+	// with the marker.
 	WriteLastRoll(rec KernelRollOutcome) error
 	// ReadLastRoll returns the last recorded roll outcome (a zero record when
 	// no roll has completed on this box).
