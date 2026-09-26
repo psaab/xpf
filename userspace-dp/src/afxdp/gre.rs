@@ -1112,6 +1112,15 @@ pub(super) fn encapsulate_native_gre_frame(
     // `out`. `inner_frame` outlives the borrow and `out` is a distinct
     // allocation, so there is no aliasing.
     let inner_slice = inner_frame.get(inner_l3..)?;
+    // #10865 producer audit: RX's `parse_ipv4`/`parse_ipv6` validates the
+    // nibble before stamping family; NAT64 rebuilds the translated bytes and
+    // family together; local TUN and injected packets derive/validate family
+    // from the same wire tuple used to build bytes. Still, GRE must not trust
+    // metadata alone: refuse a stale stamp rather than emitting a
+    // peer-rejected PT/nibble mismatch.
+    if !gre_inner_nibble_matches(inner_slice, inner_meta.addr_family) {
+        return None;
+    }
     let inner_len = packet_trimmed_len(inner_slice, inner_meta.addr_family)?;
     let inner_packet = &inner_slice[..inner_len];
     // #2303: copy the inner DSCP+ECN onto the outer header (uniform
