@@ -216,13 +216,52 @@ func (vi *vrrpInstance) handleMasterRx(pkt *VRRPPacket, masterDownTimer, advertT
 	if pktPri > pri {
 		// Higher priority — step down unconditionally.
 		vi.becomeBackup(masterDownTimer, advertTimer)
-	} else if pktPri == pri && pkt.SrcIP != nil {
+		return
+	}
+	if pktPri < pri {
+		// This peer briefly claimed MASTER but loses to our higher priority.
+		// Refresh ARP/NDP now that it has advertised its own node MAC.
+		vi.reaffirmMaster()
+		return
+	}
+	if pkt.SrcIP != nil {
 		// Equal priority — RFC 5798 §6.4.3 tie-break: higher source IP wins.
 		// The comparison is anchored to ONE address family so both nodes
 		// decide off the SAME ordering (#4376) — see resolveEqualPriorityMaster.
 		vi.resolveEqualPriorityMaster(pkt, masterDownTimer, advertTimer)
 	}
-	// Lower priority, or equal with our IP higher: stay Master.
+	// An equal-priority packet from an unrelated address family or with no
+	// source IP cannot establish that this node won the tie-break.
+}
+
+// reaffirmMaster refreshes neighbor mappings after a losing peer briefly
+// claimed MASTER and announced its per-node MAC. VRRP advertisements refresh
+// bridge forwarding state, not host ARP/NDP caches, so the stable winner must
+// announce its VIPs without a state transition.
+func (vi *vrrpInstance) reaffirmMaster() {
+	if vi.suppressGARP.Load() {
+		return
+	}
+	now := time.Now().UnixNano()
+	for {
+		last := vi.lastMasterReaffirmTime.Load()
+		if garpDampened(last, now) {
+			return
+		}
+		if vi.lastMasterReaffirmTime.CompareAndSwap(last, now) {
+			break
+		}
+	}
+
+	epoch := vi.garpEpoch.Add(1)
+	go func() {
+		// A later winner refresh supersedes this one, and a demotion must
+		// not emit an asynchronous burst after ownership has moved away.
+		if vi.getState() != StateMaster || vi.garpEpoch.Load() != epoch {
+			return
+		}
+		vi.sendGARP(true)
+	}()
 }
 
 // resolveEqualPriorityMaster runs the RFC 5798 §6.4.3 MASTER-MASTER tie-break
@@ -287,6 +326,8 @@ func (vi *vrrpInstance) resolveEqualPriorityMaster(pkt *VRRPPacket, masterDownTi
 			"key", vi.key(), "our_ip", localCmp, "peer_ip", pkt.SrcIP,
 			"priority", vi.getPriority())
 		vi.becomeBackup(masterDownTimer, advertTimer)
+		return
 	}
-	// Peer lower/equal: stay Master.
+	// We win the tie-break; repair any neighbor cache changed by the claimant.
+	vi.reaffirmMaster()
 }
