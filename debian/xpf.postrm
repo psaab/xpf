@@ -70,6 +70,13 @@ CURRENT="$VERSIONS/current"
 # violation) and on a pre-B downgrade (the old postrm never learns about it).
 STAGED_GEN=/var/lib/xpf/staged-gen
 DROPIN=/etc/systemd/system/xpfd.service.d/10-xpf-version.conf
+# #10758 legacy Requires-link cleanup. The pre-fix fence unit used
+# RequiredBy=systemd-networkd.service, creating this link under /etc/systemd.
+# Its Requires edge propagated the generated prerm stop to networkd, and a
+# remove without purge left the link dangling. xpf.prerm removes it before the
+# generated stop hook; this postrm cleanup is an idempotent fallback for older
+# script flows. Only a symlink is ours.
+TRANSIT_CLOSED_REQUIRES_LINK=/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service
 # apt source that the Tailscale-style install.sh writes (#1924, H-16). It is
 # NOT a dpkg payload file (install.sh writes it, not the package), so dpkg
 # never removes it — but its Signed-By keyring IS package payload
@@ -211,6 +218,20 @@ remove_runtime_dropin() {
     fi
 }
 
+# remove_legacy_transit_requires_link scrubs the pre-#10758 networkd Requires
+# link if an older script flow reaches postrm without the new prerm having
+# removed it before the generated stop hook. Only the symlink created by systemd
+# enablement is ours; leave a regular operator file and foreign entries alone.
+remove_legacy_transit_requires_link() {
+    [ -L "$TRANSIT_CLOSED_REQUIRES_LINK" ] || return 0
+    echo "xpf: removing legacy systemd-networkd .requires link for xpf-transit-closed (#10758)" >&2
+    rm -f "$TRANSIT_CLOSED_REQUIRES_LINK"
+    rmdir "$(dirname "$TRANSIT_CLOSED_REQUIRES_LINK")" 2>/dev/null || true
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+}
+
 # repoint_owned_sbin_to_staged points each OWNED sbin link back at staged/
 # (atomic). It SKIPS a foreign/operator-repointed link (Codex) — a downgrade
 # must not clobber an operator's custom target.
@@ -263,6 +284,10 @@ case "$1" in
         # drop-in pins ExecStart to a deleted versions/<ver>/xpfd path and
         # leaves a broken unit. Safe if absent (legacy/never-seeded hosts).
         remove_runtime_dropin
+        # Clear the pre-#10758 networkd Requires link too. xpf.prerm normally
+        # removes it before the generated stop hook; this is an idempotent
+        # postrm fallback so remove-without-purge cannot leave it dangling.
+        remove_legacy_transit_requires_link
         # Purge the install.sh-written apt source (#1924, H-16): the keyring it
         # references is package payload dpkg is deleting now, so leaving the
         # source would break `apt update`. Marker-gated so operator sources are

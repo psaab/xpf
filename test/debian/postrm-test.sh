@@ -14,7 +14,9 @@ set -e
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 POSTRM="${1:-$HERE/../../debian/xpf.postrm}"
+PRERM="${PRERM:-$HERE/../../debian/xpf.prerm}"
 [ -f "$POSTRM" ] || { echo "postrm not found: $POSTRM" >&2; exit 1; }
+[ -f "$PRERM" ] || { echo "prerm not found: $PRERM" >&2; exit 1; }
 
 # Run the REAL postrm with overridden absolute path vars by editing the
 # script's var assignments to point under a temp ROOT. We do this by
@@ -27,11 +29,24 @@ patched_postrm() {
       -e "s#^CURRENT=.*#CURRENT=\"\$VERSIONS/current\"#" \
       -e "s#^STAGED_GEN=.*#STAGED_GEN=$ROOT/var/lib/xpf/staged-gen#" \
       -e "s#^DROPIN=.*#DROPIN=$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf#" \
+      -e "s#^TRANSIT_CLOSED_REQUIRES_LINK=.*#TRANSIT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service#" \
       -e "s#^TRANSIT_IPV4_SYSCTL=.*#TRANSIT_IPV4_SYSCTL=$ROOT/proc/sys/net/ipv4/ip_forward#" \
       -e "s#^TRANSIT_IPV6_SYSCTL=.*#TRANSIT_IPV6_SYSCTL=$ROOT/proc/sys/net/ipv6/conf/all/forwarding#" \
       -e "s#\\[ -d /run/systemd/system \\]#false#" \
       "$POSTRM" > "$ROOT/postrm"
     chmod +x "$ROOT/postrm"
+}
+
+# Patch the real pre-removal hook into the same isolated tree and replace
+# #DEBHELPER# with a stop-hook sentinel: it fails if the legacy Requires link
+# still exists when the generated stop hook would run.
+patched_prerm() {
+    sed \
+      -e "s|^    requires_link=.*|    requires_link=\"$REQUIRES_LINK\"|" \
+      -e "s|\[ -d /run/systemd/system \]|false|" \
+      -e "s@^#DEBHELPER#\$@test ! -L \"$REQUIRES_LINK\" || { echo \"FAIL: legacy .requires link remained before generated stop hook\"; exit 1; }@" \
+      "$PRERM" > "$ROOT/prerm"
+    chmod +x "$ROOT/prerm"
 }
 
 run_scenario() {
@@ -43,6 +58,8 @@ run_scenario() {
     CURRENT="$VERSIONS/current"
     STAGED_GEN="$ROOT/var/lib/xpf/staged-gen"
     DROPIN="$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf"
+    REQUIRES_DIR="$ROOT/etc/systemd/system/systemd-networkd.service.requires"
+    REQUIRES_LINK="$REQUIRES_DIR/xpf-transit-closed.service"
     TRANSIT_IPV4_SYSCTL="$ROOT/proc/sys/net/ipv4/ip_forward"
     TRANSIT_IPV6_SYSCTL="$ROOT/proc/sys/net/ipv6/conf/all/forwarding"
     mkdir -p "$(dirname "$TRANSIT_IPV4_SYSCTL")" "$(dirname "$TRANSIT_IPV6_SYSCTL")"
@@ -197,6 +214,28 @@ scenario_remove_no_dropin_ok() {
     for b in $BINS; do
         [ -L "$SBIN/$b" ] && { echo "FAIL: legacy sbin $b not removed"; exit 1; } || true
     done
+}
+
+# #10758: the new prerm removes the legacy Requires edge before the generated
+# debhelper stop hook, so stopping the fence cannot stop systemd-networkd.
+scenario_prerm_scrubs_legacy_requires_before_stop() {
+    mkdir -p "$REQUIRES_DIR"
+    ln -sf "/lib/systemd/system/xpf-transit-closed.service" "$REQUIRES_LINK"
+    patched_prerm
+    "$ROOT/prerm" remove
+    [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: legacy .requires link not removed before generated stop hook"; exit 1; }
+    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty .requires directory not removed by prerm"; exit 1; }
+}
+
+# #10758: postrm is a fallback for older maintainer-script flows, and must
+# remove the legacy symlink on apt remove (not just purge).
+scenario_postrm_scrubs_legacy_requires_link() {
+    build_hardened "1.0.0"
+    mkdir -p "$REQUIRES_DIR"
+    ln -sf "/lib/systemd/system/xpf-transit-closed.service" "$REQUIRES_LINK"
+    "$ROOT/postrm" remove
+    [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: legacy .requires link not removed by postrm remove"; exit 1; }
+    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty .requires directory not removed by postrm"; exit 1; }
 }
 
 # downgrade to a pre-hardened package: drop-in removed, sbin repointed to
@@ -478,6 +517,8 @@ run_scenario remove_barrier_failure_keeps_sysctls_closed
 run_scenario purge_removes_versions
 run_scenario remove_keeps_foreign_dropin
 run_scenario remove_no_dropin_ok
+run_scenario prerm_scrubs_legacy_requires_before_stop
+run_scenario postrm_scrubs_legacy_requires_link
 run_scenario downgrade_to_prehardened
 run_scenario downgrade_skips_foreign_link
 run_scenario upgrade_to_hardened_noop
