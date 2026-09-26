@@ -101,6 +101,26 @@ func TestBootstrapFromFileRejectsUnkeyedCluster_6611(t *testing.T) {
 	}
 }
 
+// TestBootstrapFromFileRejectsEmptyConfig_10735 ensures a torn day-0 config
+// cannot be committed as an empty configuration and mark a fresh store
+// configured.
+//
+// RED on revert: without the empty-file guard, the store commits an empty tree
+// and EverCommitted becomes true.
+func TestBootstrapFromFileRejectsEmptyConfig_10735(t *testing.T) {
+	d, hasActive := bootstrapDaemon(t, "", -1)
+	err := d.bootstrapFromFile()
+	if err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("bootstrapFromFile(empty config) error = %v, want empty-config rejection", err)
+	}
+	if hasActive() {
+		t.Fatal("empty config was committed as an active configuration")
+	}
+	if d.store.EverCommitted() {
+		t.Fatal("empty config marked the fresh store ever-committed")
+	}
+}
+
 // TestBootstrapFromFileAcceptsKeyedCluster_6611 is the NEGATIVE CONTROL: the
 // same unattended path accepts a keyed cluster and promotes it, so the guard
 // above cannot be passing by rejecting every bootstrap. It is also the

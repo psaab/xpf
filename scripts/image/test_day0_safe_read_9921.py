@@ -17,6 +17,9 @@ pattern). Static-media skip outcomes pass on base too and are kept as
 documented regression guards; the perl-stub and function-override legs are
 the wiring proofs that diverge on base.
 
+The valid-install case also checks #10735's same-directory staged replacement:
+the installed bytes match and the temporary name is consumed by the rename.
+
 RED on revert: helper cells fail (command not found / wrong rc) and the
 wiring legs install where they must skip.
 """
@@ -69,6 +72,7 @@ while (( $# )); do
     *) args+=("$1"); shift ;;
   esac
 done
+printf '%s\\n' "${args[-1]}" >> "$MOCK_INSTALLLOG"
 exec /usr/bin/install "${args[@]}"
 """
 
@@ -202,6 +206,7 @@ class TryDeviceTests(unittest.TestCase):
         self.xpfd.write_text("#!/bin/sh\nexit 0\n")
         self.xpfd.chmod(0o755)
         self.args_file = self.tmp / "xpfd-args.txt"
+        self.installlog = self.tmp / "install.log"
 
     def _medium(self, dev, files):
         """Create fixture medium for `dev`: {name: bytes} plus {'link:NAME':
@@ -222,6 +227,7 @@ class TryDeviceTests(unittest.TestCase):
             "PATH": f"{self.bin}:{env.get('PATH', '')}",
             "MOCK_MEDIA": str(self.media),
             "MOCK_RUN": str(self.run),
+            "MOCK_INSTALLLOG": str(self.installlog),
             "XPF_DAY0_SOURCE_ONLY": "1",
         })
         return env
@@ -252,6 +258,13 @@ class TryDeviceTests(unittest.TestCase):
         self.assertEqual(self._installed(), body)
         self.assertEqual(oct((self.xpf_dir / "xpf.conf").stat().st_mode & 0o777),
                          "0o600")
+        # #10735: install stages beside the destination and rename consumes
+        # the staging name after replacing xpf.conf.
+        staged = Path(self.installlog.read_text().strip())
+        self.assertEqual(staged.parent, self.xpf_dir)
+        self.assertRegex(staged.name, r"\.xpf\.conf\.[^/]+")
+        self.assertFalse(staged.exists(),
+                         "successful install did not rename its staged file")
         stamp = (self.xpf_dir / ".day0-config-applied").read_text()
         self.assertIn("/dev/fake0", stamp)
 
