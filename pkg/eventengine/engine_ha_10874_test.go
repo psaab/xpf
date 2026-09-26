@@ -75,3 +75,84 @@ func TestReadOnlySecondaryDefersActionUntilPromotion10874(t *testing.T) {
 		t.Fatalf("remediation history detail=%+v, want explicit local-only divergence notation", entries)
 	}
 }
+
+func TestReadOnlyDemotionDuringCandidateMutationDefersAction10874(t *testing.T) {
+	s := newStore(t)
+	e := New(s, nil)
+	defer e.Close()
+	pol := &config.EventPolicy{
+		Name:         "wan-failover",
+		Events:       []string{"ping_test_failed"},
+		ThenCommands: []string{"set system host-name remediated"},
+	}
+	applyPolicies9984(e, []*config.EventPolicy{pol})
+	ops, ok := e.classifyPlan(pol)
+	if !ok {
+		t.Fatal("classifyPlan rejected test policy")
+	}
+	a := plannedAction{
+		policyName: pol.Name,
+		semRev:     policySemanticRevision(pol),
+		plantClass: pol.PlantClass,
+		event:      "ping_test_failed",
+		testOwner:  "WAN",
+		testName:   "test",
+		ops:        ops,
+	}
+	if !e.PublishEnabled() {
+		t.Fatal("publication gate starts closed")
+	}
+
+	// Block applyOnce after EnterConfigure and staleReason's first lock, so
+	// the store can become read-only while the candidate is already open.
+	e.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			e.mu.Unlock()
+		}
+	}()
+	finished := make(chan struct{})
+	go func() {
+		e.runAction(a)
+		close(finished)
+	}()
+	waitFor(t, "candidate entered configure", func() bool { return s.InConfigMode() })
+	s.SetClusterReadOnly(true)
+	e.mu.Unlock()
+	locked = false
+
+	deadline := time.Now().Add(2 * time.Second)
+	for e.PublishEnabled() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if e.PublishEnabled() {
+		t.Fatalf("mid-batch ErrClusterReadOnly was not deferred: stats=%+v", e.Stats())
+	}
+	if stats := e.Stats(); stats.Rejected != 0 || stats.Committed != 0 {
+		t.Fatalf("mid-batch read-only action was consumed: stats=%+v", stats)
+	}
+	if s.InConfigMode() {
+		t.Fatal("failed candidate was not discarded")
+	}
+	if got := s.ActiveConfig().System.HostName; got != "base" {
+		t.Fatalf("host-name=%q during deferral, want base", got)
+	}
+
+	s.SetClusterReadOnly(false)
+	e.SetPublishEnabled(true)
+	waitFor(t, "deferred mid-batch remediation commit", func() bool {
+		return e.Stats().Committed == 1
+	})
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runAction did not finish after promotion")
+	}
+	if got := s.ActiveConfig().System.HostName; got != "remediated" {
+		t.Fatalf("host-name=%q after promotion, want remediated", got)
+	}
+	if stats := e.Stats(); stats.Rejected != 0 || stats.Committed != 1 {
+		t.Fatalf("promotion stats=%+v, want one commit and no rejection", stats)
+	}
+}

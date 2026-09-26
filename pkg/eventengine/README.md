@@ -374,12 +374,14 @@ in-flight deferred action.
 
 Preserving the action matters because RPM emits `ping_test_failed` on a
 pass-to-fail edge, not on every failed cycle. A failure edge consumed on the
-standby does not recur merely because that node becomes primary. Relying on a
-new probe failure instead would cost approximately `successive-loss threshold ×
-test-interval`: with the current defaults (3 successive losses and a 60 s test
-interval), that is about 180 s, a material delay for then-commands intended to
-remediate a failure. The deferred action resumes as soon as promotion opens the
-gate, without waiting for another probe threshold.
+standby does not recur merely because that node becomes primary. Without
+intervening recovery or an explicit probe reset, the persistent FAIL produces
+no new edge, so waiting for one has no finite bound. If a fresh re-trip is
+forced, the defaults are probe-count 1, successive-loss threshold 3, and test
+interval 60 s: a new failure then takes approximately `3 × 60 s = 180 s` to
+cross the threshold. That is material for then-commands intended to remediate a
+failure. The deferred action resumes as soon as promotion opens the gate,
+avoiding both the indefinite missed-edge wait and any forced re-trip delay.
 
 Event-options changes remain deliberately node-local and use `peerSyncNever`
 (#5962); this fix does not push them to the peer. Commit history now marks each
