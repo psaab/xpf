@@ -127,6 +127,35 @@ func TestLoadAbsentActiveWithoutHistoryStartsFresh_10297(t *testing.T) {
 	}
 }
 
+func TestLoadIgnoresUnreadableLoaderMarker10742(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStoreAt(t, filepath.Join(root, "xpf.conf"))
+	loaderDir := filepath.Join(root, "loader-root")
+	if err := os.Mkdir(loaderDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalMarkerPath := FactoryResetPendingPath
+	FactoryResetPendingPath = filepath.Join(loaderDir, FactoryResetPendingBase)
+	t.Cleanup(func() {
+		FactoryResetPendingPath = originalMarkerPath
+		_ = os.Chmod(loaderDir, 0o700)
+	})
+	if err := os.Chmod(loaderDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, probeErr := hasFactoryResetPendingMarker(FactoryResetPendingPath)
+	if !errors.Is(probeErr, os.ErrPermission) && !errors.Is(probeErr, os.ErrNotExist) {
+		t.Fatalf("loader marker probe error = %v, want permission denied or absent", probeErr)
+	}
+	if os.Geteuid() != 0 && !errors.Is(probeErr, os.ErrPermission) {
+		t.Fatalf("unprivileged loader marker probe error = %v, want permission denied", probeErr)
+	}
+
+	if err := store.Load(); err != nil {
+		t.Fatalf("unreadable loader marker blocked configured-root Load: %v", err)
+	}
+}
+
 // TestLoadAbsentActiveWithKeyOnlyStartsFresh_10297 pins the encrypted
 // first-boot boundary: a failed first active write can leave master.key, but
 // that key alone is not proof of a prior commit and must not block bootstrap.

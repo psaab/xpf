@@ -1478,21 +1478,22 @@ func beginZeroize(configDir, configBase, archiveDir string, inv ZeroizeLogInvent
 
 func completeZeroize(record zeroizePendingRecord) error {
 	loaderMarker := configstore.FactoryResetPendingPath
+	configMarker := filepath.Join(record.ConfigDir, configstore.FactoryResetPendingBase)
+	if filepath.Clean(configMarker) != filepath.Clean(loaderMarker) {
+		// Keep the loader-visible gate until the config-root marker removal is
+		// durable, so a reboot cannot re-import day-0 media mid-reset.
+		if err := os.Remove(configMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("zeroize: remove config-root marker for %s: %w", record.ConfigDir, err)
+		}
+		if err := zeroizeSyncDir(record.ConfigDir); err != nil {
+			return fmt.Errorf("zeroize: sync config-root marker removal: %w", err)
+		}
+	}
 	if err := os.Remove(loaderMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("zeroize: remove loader marker for %s: %w", record.ConfigDir, err)
 	}
 	if err := zeroizeSyncDir(filepath.Dir(loaderMarker)); err != nil {
 		return fmt.Errorf("zeroize: sync loader-marker removal: %w", err)
-	}
-	configMarker := filepath.Join(record.ConfigDir, configstore.FactoryResetPendingBase)
-	if filepath.Clean(configMarker) == filepath.Clean(loaderMarker) {
-		return nil
-	}
-	if err := os.Remove(configMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("zeroize: remove config-root marker for %s: %w", record.ConfigDir, err)
-	}
-	if err := zeroizeSyncDir(record.ConfigDir); err != nil {
-		return fmt.Errorf("zeroize: sync config-root marker removal: %w", err)
 	}
 	return nil
 }
