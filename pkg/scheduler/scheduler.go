@@ -29,6 +29,12 @@ type Scheduler struct {
 	// obligation: the next updateFn is handed the right ctx instead of having
 	// to know which of two to reach for, which is the defect itself.
 	updateFn func(ctx context.Context, activeState map[string]bool) error
+	// #10949: a committed system time-zone change must not depend on Go's
+	// process-cached time.Local. The daemon supplies the committed location,
+	// which stays fixed for this scheduler generation. Ticks convert their
+	// instants into it before evaluating date and time windows.
+	loc             *time.Location
+	zoneUnavailable bool
 	// #8660: the tick interval, defaulting to defaultTickInterval. It exists
 	// so a test can bind `Run`'s ctx-threading END TO END rather than calling
 	// `evaluate` directly — a cell that calls `evaluate` cannot see `Run`
@@ -94,10 +100,25 @@ const (
 // apply paths use this when they already hold their own serialization lock and
 // must publish the initial state as part of the same apply transaction.
 func NewPrimed(schedulers map[string]*config.SchedulerConfig, updateFn func(ctx context.Context, activeState map[string]bool) error, now time.Time) (*Scheduler, map[string]bool) {
+	return NewPrimedInLocation(schedulers, updateFn, now, now.Location())
+}
+
+// NewPrimedInLocation is NewPrimed with an explicit committed system time zone.
+// A nil location means the configured zone could not be loaded, so scheduled
+// policies stay inactive rather than inheriting this process's stale time.Local.
+func NewPrimedInLocation(schedulers map[string]*config.SchedulerConfig, updateFn func(ctx context.Context, activeState map[string]bool) error, now time.Time, loc *time.Location) (*Scheduler, map[string]bool) {
+	zoneUnavailable := loc == nil
+	if zoneUnavailable {
+		// Keep the internal time representation total; evaluate fails closed
+		// while this flag is set and does not use the placeholder for windows.
+		loc = time.UTC
+	}
 	s := &Scheduler{
-		schedulers: schedulers,
-		active:     make(map[string]bool),
-		updateFn:   updateFn,
+		schedulers:      schedulers,
+		active:          make(map[string]bool),
+		updateFn:        updateFn,
+		loc:             loc,
+		zoneUnavailable: zoneUnavailable,
 	}
 	// notify=false: updateFn is not fired from the constructor, so this ctx
 	// is never observed by a callback.
@@ -183,6 +204,7 @@ func (s *Scheduler) Update(schedulers map[string]*config.SchedulerConfig) {
 // evaluate checks each scheduler against the current time and fires the
 // callback if any state changed.
 func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
+	now = now.In(s.loc)
 	s.mu.Lock()
 
 	changed := false
@@ -207,7 +229,7 @@ func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 	failClosed := s.republishFailClosed
 	for name, sched := range s.schedulers {
 		cur := false
-		if !wallClockUnsafe {
+		if !wallClockUnsafe && !s.zoneUnavailable {
 			cur = isWithinWindow(now, sched)
 		}
 		if failClosed {
@@ -476,17 +498,16 @@ func isWithinWindow(now time.Time, sched *config.SchedulerConfig) bool {
 // withinDateRange reports whether now is inside sched's calendar range.
 // ok is false when a configured date fails to parse (caller fails closed).
 //
-// #3988: the calendar boundary is interpreted in the SYSTEM LOCAL time zone,
-// matching the Junos convention that a scheduler start-date/stop-date is a
-// local wall-clock date. The date is parsed in now.Location() rather than with
-// time.Parse (which defaults to UTC): every production caller supplies now from
-// time.Now() or the evaluation ticker, both of which carry time.Local, so the
-// date boundary lands on LOCAL midnight. Parsing as UTC shifted the boundary by
-// the local UTC offset (e.g. a start-date 2026-07-01 range under UTC-7 went
-// active at 17:00 local on 2026-06-30 — 7h early). Deriving the zone from now
-// keeps the boundary consistent with the same clock the window is compared
-// against, needs no global seam, and leaves a UTC-offset-0 host unchanged
-// (local == UTC).
+// #3988/#10949: the calendar boundary is interpreted in the scheduler's
+// local zone, matching the Junos convention that a start-date/stop-date is a
+// local wall-clock date. Production evaluate converts each tick into the
+// committed system time zone before calling this function; direct/package
+// callers retain the location carried by now. Parsing with
+// time.ParseInLocation("2006-01-02", ..., now.Location()) places the boundary
+// on local midnight. Parsing as UTC shifted the boundary by the local offset
+// (e.g. a start-date 2026-07-01 range under UTC-7 went active at 17:00 local
+// on 2026-06-30 — 7h early). Deriving the zone from now keeps the boundary
+// consistent with the same clock the time-of-day comparison uses.
 func withinDateRange(now time.Time, sched *config.SchedulerConfig) (inRange, ok bool) {
 	loc := now.Location()
 	if sched.StartDate != "" {
@@ -597,13 +618,12 @@ func parseTimeOfDay(s string) (tod, error) {
 
 // timeOfDay extracts t's wall-clock hour/minute/second in t's own location.
 //
-// #3988 audit: the daily start-time/stop-time window is zone-safe as-is. Both
-// sides of the comparison use wall-clock components — parseTimeOfDay reads the
-// H/M/S of the configured "HH:MM:SS", and timeOfDay reads now's LOCAL H/M/S
-// (now carries time.Local in every production caller). No instant is formed, so
-// the configured 09:00:00 is compared against 09:00:00 local regardless of the
-// UTC offset. Only the calendar date-range parse (withinDateRange) formed a
-// UTC instant and had to move to now.Location().
+// #3988/#10949 audit: the daily start-time/stop-time window is zone-safe.
+// Both sides are wall-clock components — parseTimeOfDay reads the configured
+// H/M/S and timeOfDay reads now's H/M/S in its location. Production evaluation
+// converts now into the committed system zone before this comparison; no
+// instant is formed, and the configured 09:00:00 stays 09:00:00 local
+// regardless of UTC offset.
 func timeOfDay(t time.Time) tod {
 	return tod{h: t.Hour(), m: t.Minute(), s: t.Second()}
 }

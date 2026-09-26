@@ -402,3 +402,32 @@ func TestParseTimeOfDay(t *testing.T) {
 		}
 	}
 }
+
+func TestCommittedLocationWindowBoundaryTakesEffectOnNextEvaluation10949(t *testing.T) {
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("LoadLocation(America/Los_Angeles): %v", err)
+	}
+	beforeBoundary := time.Date(2026, 2, 12, 12, 59, 59, 0, time.UTC) // 04:59:59 local
+	var published map[string]bool
+	s, initial := NewPrimedInLocation(map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", StartTime: "04:00:00", StopTime: "05:00:00"},
+	}, func(_ context.Context, state map[string]bool) error {
+		published = state
+		return nil
+	}, beforeBoundary, loc)
+	if !initial["workhours"] {
+		t.Fatal("window should be active at 04:59:59 in the committed zone")
+	}
+
+	// A real scheduler tick carries an instant in the process location. The
+	// committed location must still put that instant at 05:00:00 and close the
+	// window without restarting the process.
+	s.evaluate(context.Background(), beforeBoundary.Add(time.Second), true)
+	if s.IsActive("workhours") {
+		t.Fatal("window remained active after its 05:00 boundary in the committed zone")
+	}
+	if published == nil || published["workhours"] {
+		t.Fatalf("published tick state = %v, want workhours inactive", published)
+	}
+}
