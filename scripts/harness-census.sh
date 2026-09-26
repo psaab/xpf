@@ -135,6 +135,7 @@ test/incus/cluster-lock.sh
 test/incus/cos-apply-lib.sh
 test/incus/deploy-lib.sh
 test/incus/fbf-steering-lib.sh
+test/incus/failover-client-lib.sh
 test/incus/host-inbound-lib.sh
 test/incus/iperf-throughput-lib.sh
 test/incus/mouse-elephant-lib.sh
