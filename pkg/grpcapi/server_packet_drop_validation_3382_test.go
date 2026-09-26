@@ -2,7 +2,9 @@ package grpcapi
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,5 +229,117 @@ func TestMonitorPacketDropInterfaceAliasMatches(t *testing.T) {
 	matched, _ := runPacketDropUntilMatch(t, s, eb, &pb.MonitorPacketDropRequest{Interface: "ge-0/0/0"}, rec)
 	if !matched {
 		t.Fatal("config-key interface ge-0/0/0 did not match a record with IngressIface ge-0-0-0; matcher is accepted-but-never-matches")
+	}
+}
+
+type blockingOverrunPacketDropStream struct {
+	ctx     context.Context
+	mu      sync.Mutex
+	sent    []string
+	blocked bool
+	parked  chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingOverrunPacketDropStream) Send(r *pb.MonitorPacketDropResponse) error {
+	m.mu.Lock()
+	m.sent = append(m.sent, r.Line)
+	block := r.Line != "Starting packet drop:" && !m.blocked
+	if block {
+		m.blocked = true
+	}
+	m.mu.Unlock()
+	if block {
+		close(m.parked)
+		<-m.release
+	}
+	return nil
+}
+func (m *blockingOverrunPacketDropStream) Context() context.Context     { return m.ctx }
+func (m *blockingOverrunPacketDropStream) SetHeader(metadata.MD) error  { return nil }
+func (m *blockingOverrunPacketDropStream) SendHeader(metadata.MD) error { return nil }
+func (m *blockingOverrunPacketDropStream) SetTrailer(metadata.MD)       {}
+func (m *blockingOverrunPacketDropStream) SendMsg(any) error            { return nil }
+func (m *blockingOverrunPacketDropStream) RecvMsg(any) error            { return nil }
+func (m *blockingOverrunPacketDropStream) hasLine(line string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sent := range m.sent {
+		if sent == line {
+			return true
+		}
+	}
+	return false
+}
+func (m *blockingOverrunPacketDropStream) lines() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.sent...)
+}
+
+func TestMonitorPacketDropReportsSubscriberOverrun_10834(t *testing.T) {
+	eb := logging.NewEventBuffer(512)
+	s := &Server{store: packetDropTestStore(t), eventBuf: eb}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := &blockingOverrunPacketDropStream{
+		ctx: ctx, parked: make(chan struct{}), release: make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- s.MonitorPacketDrop(&pb.MonitorPacketDropRequest{Node: "local"}, stream)
+	}()
+
+	startDeadline := time.Now().Add(2 * time.Second)
+	for !stream.hasLine("Starting packet drop:") && time.Now().Before(startDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !stream.hasLine("Starting packet drop:") {
+		t.Fatal("packet-drop stream did not start")
+	}
+
+	eb.Add(logging.EventRecord{
+		Time: time.Now(), Type: "POLICY_DENY", SrcAddr: "10.0.1.1:1000",
+		DstAddr: "10.0.2.1:80", Protocol: "TCP", Action: "deny",
+	})
+	select {
+	case <-stream.parked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("packet-drop stream did not park on its first event")
+	}
+	const storm = 300
+	for range storm {
+		eb.Add(logging.EventRecord{
+			Time: time.Now(), Type: "POLICY_DENY", SrcAddr: "10.0.1.1:1000",
+			DstAddr: "10.0.2.1:80", Protocol: "TCP", Action: "deny",
+		})
+	}
+	dropped := eb.DroppedTotal()
+	if dropped == 0 {
+		t.Fatal("bounded event storm did not overrun the blocked packet-drop subscriber")
+	}
+	close(stream.release)
+
+	marker := logging.OverrunLine(dropped)
+	deadline := time.Now().Add(2 * time.Second)
+	for !stream.hasLine(marker) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("packet-drop stream did not stop after cancellation")
+	}
+
+	lines := stream.lines()
+	if !stream.hasLine(marker) {
+		t.Fatalf("packet-drop stream omitted gap marker %q: %v", marker, lines)
+	}
+	if final := fmt.Sprintf("dropped=%d", dropped); !stream.hasLine(final) {
+		t.Errorf("packet-drop stream omitted final drop count %q: %v", final, lines)
+	}
+	if got := uint64(storm+1) - dropped; got != 257 {
+		t.Errorf("published accounting: expected 257 delivered and %d dropped, got 301 published", dropped)
 	}
 }

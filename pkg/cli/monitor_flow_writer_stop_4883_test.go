@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,4 +101,72 @@ func TestMonitorFlowWriterErrorClearsState_4883(t *testing.T) {
 		t.Error("monitor not Active after a successful restart")
 	}
 	_ = c.handleMonitorSecurityFlowStop()
+}
+func TestMonitorFlowTraceReportsSubscriberOverrun_10834(t *testing.T) {
+	origDir := traceLogDir
+	dir := t.TempDir()
+	traceLogDir = dir
+	defer func() { traceLogDir = origDir }()
+
+	const name = "trace"
+	eventBuf := logging.NewEventBuffer(512)
+	c := &CLI{eventBuf: eventBuf}
+	c.monitorFlow = newMonitorFlowState()
+	c.monitorFlow.filename = name
+	c.monitorFlow.fileSize = 1
+	c.monitorFlow.files = 512
+	c.monitorFlow.filters["all"] = &monitorFlowFilter{Name: "all", Protocol: "tcp"}
+	if err := c.handleMonitorSecurityFlowStart(); err != nil {
+		t.Fatalf("start flow trace: %v", err)
+	}
+	t.Cleanup(func() { _ = c.handleMonitorSecurityFlowStop() })
+	c.monitorFlow.mu.Lock()
+	sub := c.monitorFlow.sub
+	c.monitorFlow.mu.Unlock()
+
+	const storm = 10000
+	rec := logging.EventRecord{
+		Type: "POLICY_DENY", SrcAddr: "10.0.1.1:1000",
+		DstAddr: "10.0.2.1:80", Protocol: "TCP", Action: "deny",
+	}
+	for range storm {
+		eventBuf.Add(rec)
+	}
+	dropped := sub.Dropped()
+	if dropped == 0 {
+		t.Fatal("bounded event storm did not overrun the flow-trace subscriber")
+	}
+	marker := "records lost (overrun)"
+
+	containsMarker := func() bool {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read trace directory: %v", err)
+		}
+		for _, entry := range entries {
+			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if os.IsNotExist(err) {
+				continue // the active file may be between atomic rename and reopen
+			}
+			if err != nil {
+				t.Fatalf("read trace file %s: %v", entry.Name(), err)
+			}
+			if strings.Contains(string(data), marker) {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !containsMarker() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !containsMarker() {
+		t.Fatalf("flow trace omitted gap marker %q", marker)
+	}
+
+	status := captureStdout(t, func() { _ = c.showMonitorSecurityFlow() })
+	if count := fmt.Sprintf("Monitor security flow records dropped: %d", dropped); !strings.Contains(status, count) {
+		t.Errorf("flow status omitted trace-sub drop count %q: %s", count, status)
+	}
 }

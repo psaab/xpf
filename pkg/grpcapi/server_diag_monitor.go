@@ -14,6 +14,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/diagcmd"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/monitoriface"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -285,7 +286,7 @@ func forwardMonitorInterfaceFrames(peerStream monitorInterfacePeerStream, stream
 }
 
 // MonitorPacketDrop streams packet drop events matching the request filters.
-func (s *Server) MonitorPacketDrop(req *pb.MonitorPacketDropRequest, stream grpc.ServerStreamingServer[pb.MonitorPacketDropResponse]) error {
+func (s *Server) MonitorPacketDrop(req *pb.MonitorPacketDropRequest, stream grpc.ServerStreamingServer[pb.MonitorPacketDropResponse]) (retErr error) {
 	if s.eventBuf == nil {
 		return status.Error(codes.Unavailable, "event buffer not available")
 	}
@@ -410,7 +411,20 @@ func (s *Server) MonitorPacketDrop(req *pb.MonitorPacketDropRequest, stream grpc
 	if sub == nil {
 		return status.Error(codes.ResourceExhausted, "too many concurrent event subscribers")
 	}
-	defer sub.Close()
+	var gaps logging.EventGapTracker
+	defer func() {
+		sub.Close()
+		if lost := gaps.Finish(sub); lost > 0 {
+			if err := stream.Send(&pb.MonitorPacketDropResponse{Line: logging.OverrunLine(lost)}); retErr == nil {
+				retErr = err
+			}
+		}
+		if dropped := sub.Dropped(); dropped > 0 {
+			if err := stream.Send(&pb.MonitorPacketDropResponse{Line: fmt.Sprintf("dropped=%d", dropped)}); retErr == nil {
+				retErr = err
+			}
+		}
+	}()
 
 	if err := stream.Send(&pb.MonitorPacketDropResponse{Line: "Starting packet drop:"}); err != nil {
 		return err
@@ -423,6 +437,11 @@ func (s *Server) MonitorPacketDrop(req *pb.MonitorPacketDropRequest, stream grpc
 		case <-ctx.Done():
 			return ctx.Err()
 		case rec := <-sub.C:
+			if lost, gap := gaps.Observe(sub, rec); gap {
+				if err := stream.Send(&pb.MonitorPacketDropResponse{Line: logging.OverrunLine(lost)}); err != nil {
+					return err
+				}
+			}
 			if rec.Type != "POLICY_DENY" && rec.Type != "SCREEN_DROP" {
 				continue
 			}

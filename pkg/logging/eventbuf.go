@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -248,6 +249,59 @@ func (eb *EventBuffer) DroppedTotal() uint64 { return eb.droppedTotal.Load() }
 // the stream this subscriber observed is gapped; the gaps are locatable via
 // the BufSeq discontinuities on the records it did receive.
 func (s *Subscription) Dropped() uint64 { return s.dropped.Load() }
+
+// OverrunLine formats the in-band gap marker a consumer emits when it observes
+// the #5064 loss signal. Consumers pass the increment in Dropped() since the
+// last marker, so consecutive overruns preserve exact loss accounting.
+func OverrunLine(dropped uint64) string {
+	return fmt.Sprintf("** %d records lost (overrun) **", dropped)
+}
+
+// EventGapTracker reports each newly observed subscriber loss exactly once.
+// Dropped() can advance before the consumer reaches the first Overrun-flagged
+// record already queued, so it remembers that marker and does not report the
+// same gap a second time when the flagged record arrives.
+type EventGapTracker struct {
+	dropped        uint64
+	overrunPending bool
+}
+
+// Observe returns the newly lost record count and whether the current record
+// reveals a gap. Call it before applying consumer filters so a dropped event
+// outside the selected filter still marks the stream as incomplete.
+func (g *EventGapTracker) Observe(sub *Subscription, rec EventRecord) (uint64, bool) {
+	dropped := sub.Dropped()
+	if dropped > g.dropped {
+		lost := dropped - g.dropped
+		g.dropped = dropped
+		if rec.Overrun {
+			g.overrunPending = false
+		} else {
+			g.overrunPending = true
+		}
+		return lost, true
+	}
+	if rec.Overrun {
+		if g.overrunPending {
+			g.overrunPending = false
+			return 0, false
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+// Finish returns drops that were not followed by a delivered record before
+// the consumer stopped, allowing terminal consumers to report trailing loss.
+func (g *EventGapTracker) Finish(sub *Subscription) uint64 {
+	dropped := sub.Dropped()
+	if dropped <= g.dropped {
+		return 0
+	}
+	lost := dropped - g.dropped
+	g.dropped = dropped
+	return lost
+}
 
 // Subscribe returns a Subscription that receives new events.
 // Call Close() on the subscription when done.
