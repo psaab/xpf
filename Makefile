@@ -663,7 +663,7 @@ image:
 
 # ── signed, hosted distribution (#1924) ───────────────────────────────────
 # Hosting URL + signing key are CONFIG INPUTS, never hardcoded:
-#   XPF_SIGN_SECKEY    path to the minisign image secret key (sign step)
+#   XPF_SIGN_SECKEYS   optional os.pathsep-separated additional image keys
 #   XPF_GPG_KEY        OpenPGP key id that signs the apt Release
 #   XPF_IMAGE_BASE_URL / XPF_APT_BASE_URL   publish destinations
 #   XPF_PUBLISH_CMD    backend shim: $CMD <local-dir> <dest-base-url>
@@ -681,12 +681,17 @@ image:
 # and the trailing test fails the recipe iff any failed. Without it the
 # recipe's status was the LAST iteration's: a failed rotation reported
 # success and left the tree half-signed.
+
+empty :=
+space := $(empty) $(empty)
+DIST_SIGN_SECKEY_ARGS = $(if $(XPF_SIGN_SECKEY),--seckey "$(XPF_SIGN_SECKEY)") \
+	$(foreach key,$(subst :,$(space),$(XPF_SIGN_SECKEYS)),--seckey "$(key)")
 dist-sign:
-	@test -n "$(XPF_SIGN_SECKEY)" || { echo "set XPF_SIGN_SECKEY=<minisign seckey path>"; exit 1; }
+	@test -n "$(XPF_SIGN_SECKEY)$(XPF_SIGN_SECKEYS)" || { echo "set XPF_SIGN_SECKEY and/or XPF_SIGN_SECKEYS=<minisign seckey path(s)>"; exit 1; }
 	@set -e; fail=; for m in dist/xpf-*.SHA256SUMS; do \
 	    [ -f "$$m" ] || { echo "no dist/xpf-*.SHA256SUMS (run 'make image' first)"; exit 1; }; \
 	    python3 scripts/dist/sign.py sign-manifest --manifest "$$m" \
-	        --seckey "$(XPF_SIGN_SECKEY)" \
+	        $(DIST_SIGN_SECKEY_ARGS) \
 	        $$(awk '{print "dist/" $$2}' "$$m") || { echo "dist-sign: $$m: FAILED" >&2; fail=1; }; \
 	done; test -z "$$fail"
 

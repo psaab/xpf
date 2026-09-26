@@ -1648,7 +1648,8 @@ def validate_channel(value, field="--channel"):
     return value
 
 
-def _resolve_channel_version(base, channel, sign_mod, dry_run=False):
+def _resolve_channel_version(base, channel, sign_mod, dry_run=False,
+                             pubkey_path=None):
     """Fetch + minisign-verify <base>/<channel>/latest.json and return the
     version it names (#6504).
 
@@ -1660,18 +1661,20 @@ def _resolve_channel_version(base, channel, sign_mod, dry_run=False):
     exactly what was signed.
 
     Fail-CLOSED at every step. A missing pointer, a missing signature, a
-    signature that does not verify against the pinned pubkey, unparseable
-    JSON, or a version that is not filename-safe all abort — an operator who
-    typed no version is trusting this pointer completely, so there is no
-    best-effort path where an unverified answer is used anyway.
+    signature that does not verify against any pinned/overlap key, unparseable
+    JSON, or a version that is not filename-safe all abort.
     """
     url = f"{base}/{channel}/latest.json"
     if dry_run:
-        print(f"  (dry-run) curl -fsSL {url} (+ .minisig) -> minisign-verify "
-              "against the pinned image pubkey -> take its `version` -> then "
-              "fetch + verify + import that version's artifacts as if it had "
-              "been passed to --version")
+        print(f"  (dry-run) curl -fsSL {url} (+ key-addressed .minisig files) "
+              "-> minisign-verify against the pinned image-key set -> take its "
+              "`version` -> then fetch + verify + import that version's "
+              "artifacts as if it had been passed to --version")
         return None
+    try:
+        pubkeys = sign_mod.resolve_image_pubkeys(pubkey_path)
+    except sign_mod.SignError as e:
+        die(f"cannot resolve image verification keys: {e}")
     tmp = tempfile.mkdtemp(prefix="xpf-latest-")
     os.chmod(tmp, 0o700)
     try:
@@ -1680,11 +1683,17 @@ def _resolve_channel_version(base, channel, sign_mod, dry_run=False):
         print(f"==> resolving channel '{channel}': {url}")
         _download_to(url, latest, tmp)
         _download_to(url + ".minisig", sig, tmp)
+        canonical_key_id = sign_mod.minisign_key_id(sig)
+        for alternate in sign_mod.signature_paths(latest, pubkeys)[1:]:
+            suffix = alternate[len(latest):]
+            if alternate.rsplit(".", 1)[-1] == canonical_key_id:
+                continue
+            _download_optional_to(url + suffix, alternate, tmp)
         try:
-            data = sign_mod.verify_and_read(latest, sig)
+            data = sign_mod.verify_and_read(latest, sig, pubkeys)
         except sign_mod.SignError as e:
             die(f"channel pointer {channel}/latest.json FAILED signature "
-                f"verification against the pinned image pubkey: {e}. Refusing "
+                f"verification against the pinned image-key set: {e}. Refusing "
                 "to fetch a version named by an unauthenticated pointer.")
         try:
             doc = json.loads(data.decode("utf-8"))
@@ -1698,17 +1707,14 @@ def _resolve_channel_version(base, channel, sign_mod, dry_run=False):
             die(f"channel pointer {channel}/latest.json names no version "
                 f"(got {doc!r})")
         # The pointer's own channel field must agree with the one requested:
-        # a stable pointer served at edge/ (a mis-sync, or a swapped object on
-        # the host) would otherwise silently deliver the wrong channel while
-        # verifying perfectly — both files are signed by the same key.
+        # a stable pointer served at edge/ could otherwise silently deliver the
+        # wrong channel even when its signature is valid.
         got_chan = doc.get("channel")
         if got_chan is not None and got_chan != channel:
             die(f"channel pointer at {channel}/latest.json says it is for "
                 f"channel {got_chan!r} — refusing (a mis-synced or swapped "
                 "pointer verifies fine; the signature says who wrote it, not "
                 "where it belongs).")
-        # #5992: this string is about to name artifact FILES. Validate BEFORE
-        # it reaches any path, exactly as an operator-supplied --version is.
         ver = validate_version(ver, f"version from {channel}/latest.json")
         print(f"==> channel '{channel}' -> version {ver} (signature OK)")
         return ver
@@ -1738,8 +1744,30 @@ def _download_to(url, dst, workdir):
     os.replace(tmp, dst)
 
 
+def _download_optional_to(url, dst, workdir):
+    """Fetch an optional key-addressed signature sidecar atomically."""
+    try:
+        os.unlink(dst)
+    except FileNotFoundError:
+        pass
+    fd, tmp = tempfile.mkstemp(
+        prefix="." + os.path.basename(dst) + ".", suffix=".tmp", dir=workdir)
+    os.close(fd)
+    r = subprocess.run(["curl", "-fsSL", "-o", tmp, url],
+                       capture_output=True)
+    if r.returncode != 0:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    os.replace(tmp, dst)
+    return True
+
+
 @contextlib.contextmanager
-def _verified_private_artifacts(sign_mod, out, names, keys, manifest, sig):
+def _verified_private_artifacts(sign_mod, out, names, keys, manifest, sig,
+                                pubkey_path=None):
     """Yield a {key: path} map of artifacts COPIED into a private 0700 staging
     dir and re-verified there — closing the verify-by-name / use-by-name TOCTOU
     (#5817).
@@ -1771,7 +1799,8 @@ def _verified_private_artifacts(sign_mod, out, names, keys, manifest, sig):
             dst = os.path.join(stage, name)
             shutil.copyfile(src, dst)
             try:
-                sign_mod.verify_image_artifact(dst, manifest, sig)
+                sign_mod.verify_image_artifact(
+                    dst, manifest, sig, pubkey_path)
             except sign_mod.SignError as e:
                 die(f"VERIFICATION FAILED for {name}: {e}")
             staged[k] = dst
@@ -1797,7 +1826,8 @@ def _validation_verdict(fields):
                      f"did not pass (a --skip-validate bake)")
 
 
-def _require_validated_fetch(sign, out, names, ver, fetch_one, allow_unvalidated):
+def _require_validated_fetch(sign, out, names, ver, fetch_one,
+                             allow_unvalidated, pubkey_path=None):
     """#9325: refuse to fetch an image whose SIGNED provenance sidecar says it
     was not validated, before the image itself is downloaded.
 
@@ -1817,7 +1847,8 @@ def _require_validated_fetch(sign, out, names, ver, fetch_one, allow_unvalidated
     sig = os.path.join(out, names["sig"])
     sidecar = f"xpf-{ver}.manifest"
     try:
-        listed = sidecar in sign.verify_manifest_map(manifest, sig)
+        listed = sidecar in sign.verify_manifest_map(
+            manifest, sig, pubkey_path)
     except sign.SignError as e:
         die(f"VERIFICATION FAILED for {names['manifest']}: {e}")
     if not listed:
@@ -1827,7 +1858,8 @@ def _require_validated_fetch(sign, out, names, ver, fetch_one, allow_unvalidated
         return
     path = fetch_one(sidecar)
     try:
-        data = sign.verify_listed_artifact_bytes(path, manifest, sig)
+        data = sign.verify_listed_artifact_bytes(
+            path, manifest, sig, pubkey_path)
     except sign.SignError as e:
         die(f"VERIFICATION FAILED for {sidecar}: {e}")
     state, reason = _validation_verdict(
@@ -1867,8 +1899,9 @@ def cmd_fetch(args):
     # gates. The resolved string then takes the identical path an operator's
     # --version takes, validation included.
     if args.version is None:
-        resolved = _resolve_channel_version(base, args.channel, sign,
-                                            dry_run=args.dry_run)
+        resolved = _resolve_channel_version(
+            base, args.channel, sign, dry_run=args.dry_run,
+            pubkey_path=getattr(args, "pubkey", None))
         if resolved is None:      # dry-run: nothing to name yet
             return 0
         args.version = resolved
@@ -1933,9 +1966,26 @@ def cmd_fetch(args):
     want = ["qcow2"] if args.qcow2_only else ["qcow2", "metadata"]
     fetch_one(names["manifest"])
     fetch_one(names["sig"])
+    pubkeys = None
     if not args.dry_run:
-        _require_validated_fetch(sign, out, names, ver, fetch_one,
-                                 getattr(args, "allow_unvalidated", False))
+        try:
+            pubkeys = sign.resolve_image_pubkeys(
+                getattr(args, "pubkey", None))
+        except sign.SignError as e:
+            die(f"cannot resolve image verification keys: {e}")
+        manifest_path = os.path.join(out, names["manifest"])
+        canonical_key_id = sign.minisign_key_id(
+            os.path.join(out, names["sig"]))
+        for alternate in sign.signature_paths(manifest_path, pubkeys)[1:]:
+            if alternate.rsplit(".", 1)[-1] == canonical_key_id:
+                continue
+            signature_name = os.path.basename(alternate)
+            _download_optional_to(
+                f"{base}/{signature_name}",
+                contained_join(out, signature_name, "signature"), out)
+        _require_validated_fetch(
+            sign, out, names, ver, fetch_one,
+            getattr(args, "allow_unvalidated", False), pubkeys)
     for w in want:
         fetch_one(names[w])
 
@@ -1954,8 +2004,8 @@ def cmd_fetch(args):
     for w in want:
         path = os.path.join(out, names[w])
         try:
-            verified_sha[w] = sign.verify_image_artifact(path, manifest, sig)
-            print(f"==> signature OK: {names[w]}")
+            verified_sha[w] = sign.verify_image_artifact(
+                path, manifest, sig, pubkeys)
         except sign.SignError as e:
             die(f"VERIFICATION FAILED for {names[w]}: {e}")
 
@@ -2031,7 +2081,8 @@ def cmd_fetch(args):
             # #5817: install the qcow2 to the golden from the private staging copy,
             # so a post-verify swap in --out cannot poison the golden.
             with _verified_private_artifacts(
-                    sign, out, names, ["qcow2"], manifest, sig) as staged:
+                    sign, out, names, ["qcow2"], manifest, sig,
+                    pubkeys) as staged:
                 _install_libvirt_golden(staged["qcow2"], img_name)
             print(f"==> done. Deploy with: xpf-deploy.py --hypervisor libvirt "
                   f"deploy <appliance.yaml>  (image: {img_name})")
@@ -2071,14 +2122,15 @@ def cmd_fetch(args):
             return 0
 
         alias = img_name
-        subprocess.run(["incus", "image", "delete", alias],
-                       capture_output=True, text=True)
         print(f"==> importing verified image as incus alias '{alias}'")
-        # #5817: import from the private staging dir so a post-verify swap of the
-        # public metadata/qcow2 in --out cannot feed unauthenticated bytes to
-        # `incus image import`. The dir is rmtree'd once the import returns.
+        # Stage and re-verify all bytes BEFORE deleting the existing alias.
+        # Capacity exhaustion or swap detection therefore preserves the last
+        # verified image and leaves new deploys usable.
         with _verified_private_artifacts(
-                sign, out, names, ["metadata", "qcow2"], manifest, sig) as staged:
+                sign, out, names, ["metadata", "qcow2"], manifest, sig,
+                pubkeys) as staged:
+            subprocess.run(["incus", "image", "delete", alias],
+                           capture_output=True, text=True)
             r = subprocess.run(["incus", "image", "import",
                                 staged["metadata"], staged["qcow2"], "--alias", alias])
         if r.returncode != 0:
@@ -3686,6 +3738,8 @@ def main():
         # #6504: OPTIONAL. Omitted means "this channel's current release",
         # resolved from the signed <channel>/latest.json pointer.
         sub.add_argument("--version")
+        sub.add_argument("--pubkey", action="append", default=None,
+                         help="trusted image public key (repeat for rotation overlap)")
         sub.add_argument("--image-url", dest="image_url")
         sub.add_argument("--out")
         sub.add_argument("--alias")
@@ -3763,9 +3817,9 @@ def main():
         sub.add_argument("--sig", default=None,
                          help="minisign signature over --sha256sums "
                               "(default: <sha256sums>.minisig)")
-        sub.add_argument("--pubkey", default=None,
-                         help="image signing public key (default: pinned "
-                              "scripts/dist/xpf-image.pub or $XPF_IMAGE_PUBKEY)")
+        sub.add_argument("--pubkey", action="append", default=None,
+                         help="trusted image public key (repeat for rotation overlap; "
+                              "default pinned key set or $XPF_IMAGE_PUBKEYS)")
         sub.add_argument("--recreate-hook", dest="recreate_hook",
                          help="script invoked as <hook> <node> to destroy+launch "
                               "the node from the new image + re-apply day-0 "

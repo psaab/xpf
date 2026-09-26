@@ -77,17 +77,11 @@ def die(m):
 
 
 def image_pubkey():
-    """Resolve the minisign IMAGE pubkey ONCE, honoring XPF_IMAGE_PUBKEY
-    (Codex-r2-3). Fail-CLOSED on the placeholder (Codex-r2-2): the gate must
-    never verify against a key whose secret is held by no one."""
-    pub = os.environ.get("XPF_IMAGE_PUBKEY") or sign.DEFAULT_IMAGE_PUBKEY
-    if sign.is_placeholder_pubkey(pub):
-        die("image pubkey is the #1924 PLACEHOLDER — cannot verify image "
-            "signatures. Supply the real key (XPF_IMAGE_PUBKEY / "
-            "scripts/dist/xpf-image.pub) before publishing.")
-    if not os.path.isfile(pub):
-        die(f"image pubkey not found: {pub}")
-    return pub
+    """Resolve the trusted image-key set, honoring singular and plural config."""
+    try:
+        return sign.resolve_image_pubkeys()
+    except sign.SignError as e:
+        die(str(e))
 
 
 # Image artifact basenames we sweep for orphans (Codex-r2-1): any of these in
@@ -97,26 +91,10 @@ IMAGE_ARTIFACT_SUFFIXES = (".qcow2", ".incus-metadata.tar.gz")
 
 
 def _is_allowed_publish_file(name, at_top):
-    """Default-deny allowlist for NON-image files in the image publish tree
-    (HB165 H-5). The whole dist tree is uploaded RECURSIVELY, so a file that is
-    neither a verified image artifact nor an expected sidecar must NOT ride
-    along — an unsigned `dist/deb/*.deb` (or any stray file) is the motivating
-    case: `make image` stages debs under the publish root and the suffix-shaped
-    orphan sweep skipped every non-`.qcow2`/`.incus-metadata.tar.gz` file.
-
-    Allowed (everything else is refused):
-      - `*.minisig` / `*.SHA256SUMS` — inert signature + checksum material,
-        anywhere in the tree;
-      - top-level bake outputs: `install.sh` (its minisign signature is
-        verified in gate_images), `xpf-image.pub` (the pinned pubkey convenience
-        copy), `xpf-<ver>.manifest` (build metadata read by
-        `xpf-deploy image-roll`), and `xpf-<ver>.pkgs` (the #6500 image
-        inventory — guest kernel + installed package versions — covered by the
-        signed SHA256SUMS and REQUIRED by gate_provenance);
-      - a per-channel `latest.json` in a channel subdir — gate_latest verifies
-        its signature.
-    """
+    """Default-deny allowlist for NON-image files in the image publish tree."""
     if name.endswith((".minisig", ".SHA256SUMS")):
+        return True
+    if re.search(r"\.minisig\.[0-9A-Fa-f]{16}\Z", name):
         return True
     if at_top:
         return (name in ("install.sh", "xpf-image.pub")
@@ -914,10 +892,14 @@ def make_latest(dist, channel, version):
     manifest = os.path.join(dist, f"xpf-{version}.SHA256SUMS")
     if not os.path.isfile(manifest):
         die(f"no manifest for version {version} in {dist}")
-    seckey = os.environ.get("XPF_SIGN_SECKEY")
-    if not seckey:
-        die("XPF_SIGN_SECKEY (path to the minisign secret key) is required to "
-            "sign latest.json.")
+    seckeys = []
+    for value in (os.environ.get("XPF_SIGN_SECKEY"),
+                  os.environ.get("XPF_SIGN_SECKEYS")):
+        if value:
+            seckeys.extend(path for path in value.split(os.pathsep) if path)
+    if not seckeys:
+        die("XPF_SIGN_SECKEY or XPF_SIGN_SECKEYS (path(s) to minisign "
+            "secret key(s)) is required to sign latest.json.")
     cdir = os.path.join(dist, channel)
     os.makedirs(cdir, exist_ok=True)
     latest = os.path.join(cdir, "latest.json")
@@ -930,8 +912,12 @@ def make_latest(dist, channel, version):
     with open(latest, "w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
-    sign.sign_manifest(latest, seckey, comment=f"xpf {channel} latest {version}")
-    info(f"wrote + signed {latest} -> {version}")
+    try:
+        sign.sign_manifest(
+            latest, seckeys, comment=f"xpf {channel} latest {version}")
+    except sign.SignError as e:
+        die(f"could not sign {channel}/latest.json: {e}")
+    info(f"wrote + signed {latest} -> {version} ({len(seckeys)} key(s))")
 
 
 def _fsync_tree(root):

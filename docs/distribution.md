@@ -15,20 +15,20 @@ Two independent trust roots, by design:
 
 | Artifact | Tool | Public key (pinned) | Consumer |
 |---|---|---|---|
-| Appliance image (qcow2 + incus metadata) + its `.manifest` / `.pkgs` sidecars, via `xpf-<ver>.SHA256SUMS` | **minisign** (Ed25519) | `scripts/dist/xpf-image.pub` | `validate.py`, `xpf-deploy.py fetch`, `publish.py gate_provenance` + the operator |
-| `install.sh` | **minisign** (Ed25519) | `scripts/dist/xpf-image.pub` | `publish.py gate_images` + the operator (Tier B, before running it) |
-| `latest.json` (per-channel pointer) | **minisign** (Ed25519) | `scripts/dist/xpf-image.pub` | `xpf-deploy.py fetch` (the channel default, #6504), `publish.py gate_latest` + the operator |
+| Appliance image (qcow2 + incus metadata) + its `.manifest` / `.pkgs` sidecars, via `xpf-<ver>.SHA256SUMS` | **minisign** (Ed25519) | `scripts/dist/xpf-image.pub` (+ configured overlap keys) | `validate.py`, `xpf-deploy.py fetch`, `publish.py gate_provenance` + the operator |
+| `install.sh` | **minisign** (Ed25519) | `scripts/dist/xpf-image.pub` (+ configured overlap keys) | `publish.py gate_images` + the operator (Tier B, before running it) |
+| `latest.json` (per-channel pointer) | **minisign** (Ed25519) | `scripts/dist/xpf-image.pub` (+ configured overlap keys) | `xpf-deploy.py fetch` (the channel default, #6504), `publish.py gate_latest` + the operator |
 | Apt repository (`Release`/`InRelease`) | **OpenPGP** | `scripts/dist/xpf-archive-keyring.asc` | `apt` itself |
 
 minisign and OpenPGP are NOT redundant — they authenticate different artifacts
 to different consumers. apt mandates OpenPGP for `Release`; the image consumers
-are scripts we control, so minisign's single pinned pubkey is the smaller trust
-surface there.
+are scripts we control, so they accept one or more explicitly pinned keys;
+the trust set comes from the source repository, never from the image host.
 
 **Root of trust for the image pubkey:** the in-repo checked-in copy obtained
 via `git clone` / GitHub — **independent of any hosting URL**. The copy served
 from the dist host is a convenience, never the root. To verify `install.sh`
-before running it (Tier B), get `xpf-image.pub` from the source repo, NOT from
+before running it (Tier B), get the active image public-key set from the source repo, NOT from
 `XPF_IMAGE_BASE_URL`.
 
 ## The two operator inputs (decide at release time)
@@ -57,10 +57,11 @@ placeholder in place, verification FAILS — the correct fail-safe. See
 ## Publisher runbook
 
 ```bash
-# 1. Build a signed image (signs inline when XPF_SIGN_SECKEY is set).
+# 1. Build a signed image (XPF_SIGN_SECKEY signs inline).
+# For overlap signing, run make dist-sign with both secret keys (see below).
 XPF_SIGN_SECKEY=/secure/xpf-image.sec make image
 #    -> dist/xpf-<ver>.qcow2, .incus-metadata.tar.gz,
-#       .SHA256SUMS, .SHA256SUMS.minisig, xpf-image.pub
+#       .SHA256SUMS, .SHA256SUMS.minisig[.<key-id>], xpf-image.pub
 
 # 2. Build the signed apt repo (flat default; reprepro opt-in).
 XPF_GPG_KEY=<keyid> make dist-repo
@@ -131,8 +132,8 @@ channel.
   an automated re-sign job.
 - Images: `latest.json` (signed) names the current version per channel, and
   `xpf-deploy.py fetch` **consumes** it: with no `--version` it fetches
-  `<channel>/latest.json`, minisign-verifies it against the pinned image
-  pubkey, and then fetches + verifies exactly the version it names (#6504).
+  `<channel>/latest.json`, minisign-verifies it against any configured image
+  trust key, and then fetches + verifies exactly the version it names (#6504).
   Until then the pointer had no reader outside `publish.py`'s own gate, so a
   day-zero operator could not ask for "current stable" without already knowing
   a version string.
@@ -190,9 +191,45 @@ channel.
 The archive keyring ships BOTH inline in `install.sh` (new installs) AND in the
 `xpf` package payload at `/usr/share/keyrings/xpf-archive-keyring.asc` (via
 `debian/rules`). During a dual-sign window, a normal `apt upgrade`
-delivers the rotated key to EXISTING hosts before the old key retires — so
-rotation is not a fleet lockout. Image-pubkey rotation: publish the new
-`xpf-image.pub`, dual-sign during overlap, retire the old.
+delivers the rotated key to EXISTING hosts before the old key retires.
+
+Image-key rotation supports overlap instead of a flag day. Keep both the old
+and new public keys in the source-repo trust set. Consumers accept any trusted
+key from repeatable `--pubkey` options or `XPF_IMAGE_PUBKEYS` (an
+`os.pathsep`-separated list); the singular `XPF_IMAGE_PUBKEY` remains valid.
+The publisher signs with both secret keys. The first signature keeps the
+legacy `.minisig` name; each additional signature is published beside it as
+`.minisig.<minisign-key-id>`. Fetch downloads the matching key-addressed
+sidecar, so a checkout trusting only the new key can verify it too. Publish
+gates verify the same signatures against any key in their configured trust set.
+
+For example, keep the keys out of the repository and make an overlap release:
+
+```bash
+# Sign all already-baked manifests with both keys.
+XPF_SIGN_SECKEY=/secure/old.sec XPF_SIGN_SECKEYS=/secure/new.sec make dist-sign
+
+# Sign a directly-signed file such as install.sh with both keys.
+python3 scripts/dist/sign.py sign-file \
+  --seckey /secure/old.sec --seckey /secure/new.sec dist/install.sh
+
+# Sign the channel pointer with the same pair.
+XPF_SIGN_SECKEY=/secure/old.sec XPF_SIGN_SECKEYS=/secure/new.sec \
+  python3 scripts/dist/publish.py make-latest --channel stable \
+  --version <ver> --dist dist
+
+# Verify during overlap using source-repo public keys, never host-provided keys.
+python3 scripts/dist/sign.py verify-file --pubkey scripts/dist/xpf-image.pub \
+  --pubkey scripts/dist/xpf-image-next.pub --sig dist/install.sh.minisig \
+  dist/install.sh
+```
+
+Set `XPF_IMAGE_PUBKEYS=/path/old.pub:/path/new.pub` on `publish.py` and
+operators' fetch/image-roll commands during overlap, or repeat `--pubkey` on
+those commands. A signature accepted by one configured key is sufficient for
+verification; signing with both is the publisher's overlap step. After every
+operator checkout trusts the new key, stop signing with the old key and remove
+it from the trust set.
 
 `publish.py gate_apt` cross-checks that these three key sources AGREE by
 fingerprint (#4203) — previously each was only checked for placeholder-ness
@@ -235,11 +272,17 @@ it wrote, so a failed install never leaves a dangling repo that breaks
 ### Install (Tier B — verify before run)
 
 ```bash
-# get the image pubkey from the SOURCE REPO, not the dist host
-git clone https://github.com/psaab/xpf && cp xpf/scripts/dist/xpf-image.pub .
+# Get the trusted image pubkeys from the SOURCE REPO, never the dist host.
+git clone https://github.com/psaab/xpf
 curl -fsSLO https://dl.example.com/xpf/install.sh
 curl -fsSLO https://dl.example.com/xpf/install.sh.minisig
-minisign -V -p xpf-image.pub -m install.sh -x install.sh.minisig
+# During overlap, also fetch the key-addressed sidecar; replace <KEY-ID>
+# with the final field from the new source-repo public-key comment:
+# curl -fsSLO https://dl.example.com/xpf/install.sh.minisig.<KEY-ID>
+# During overlap, also add --pubkey xpf/scripts/dist/xpf-image-next.pub; the
+# verifier then locates and checks that key-addressed signature sidecar.
+python3 xpf/scripts/dist/sign.py verify-file \
+  --pubkey xpf/scripts/dist/xpf-image.pub --sig install.sh.minisig install.sh
 # read install.sh, then (the fetched installer is baked — no env needed):
 sudo sh install.sh
 ```

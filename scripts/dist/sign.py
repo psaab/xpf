@@ -14,10 +14,11 @@ Design contract (docs/research/1924-signed-hosted-dist/plan.md §5.1/§5.2):
 - The signing tool is `minisign` (Ed25519). We shell out to the system
   binary rather than reimplement Ed25519 — `require_minisign()` preflights
   it with an apt-install hint.
-- The secret key is referenced by PATH via XPF_SIGN_SECKEY (or an explicit
-  argument); the key bytes are NEVER embedded, logged, or committed.
-- The public key is a checked-in, pinned file (scripts/dist/xpf-image.pub);
-  its root of trust is the in-repo git copy, independent of any hosting URL.
+- Secret keys are referenced by PATH via XPF_SIGN_SECKEY / XPF_SIGN_SECKEYS
+  or explicit arguments; key bytes are NEVER embedded, logged, or committed.
+- The default public key is scripts/dist/xpf-image.pub. Rotation can pin an
+  explicit set through XPF_IMAGE_PUBKEYS or repeated --pubkey options; trust
+  roots come from the in-repo git copy, never a hosting URL.
 - Verification is PER-FILE: the signed manifest authenticates a {basename:
   sha256} map; each consumer hashes the EXACT file it is about to use and
   compares to the manifest entry for that file's basename. A file absent
@@ -32,6 +33,7 @@ Design contract (docs/research/1924-signed-hosted-dist/plan.md §5.1/§5.2):
 #the publish-negative fixtures call them directly); publish.py remains the
 #full downstream gate.
 
+import base64
 import hashlib
 import os
 import re
@@ -40,9 +42,8 @@ import subprocess
 import sys
 import tempfile
 
-# Pinned, checked-in public key (the trust root for image artifacts).
-# Overridable via XPF_IMAGE_PUBKEY for rotation/testing — the override is a
-# PATH, and the pinned in-repo copy remains the documented default root.
+# Checked-in default public key for image artifacts. XPF_IMAGE_PUBKEY keeps
+# its legacy singular override; XPF_IMAGE_PUBKEYS supplies a rotation set.
 # Until OQ-2 supplies a real key, only `xpf-image.pub.placeholder` ships (its
 # secret was shredded at generation, held by no one — so verify FAILS until
 # the operator drops in the real `xpf-image.pub`, the correct fail-safe).
@@ -62,6 +63,87 @@ DEFAULT_IMAGE_PUBKEY = default_image_pubkey()
 class SignError(Exception):
     """Signing/verification failure — fatal to the caller's gate."""
 
+
+
+def _key_paths(value):
+    """Normalize one public-key path or an ordered collection of paths."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [os.fspath(p) for p in value if p]
+    value = os.fspath(value)
+    return [p for p in value.split(os.pathsep) if p] if os.pathsep in value else [value]
+
+
+def resolve_image_pubkeys(pubkey_path=None):
+    """Resolve the trusted image-key set; legacy singular configuration remains valid.
+
+    XPF_IMAGE_PUBKEYS is an os.pathsep-separated set. XPF_IMAGE_PUBKEY may
+    still be used alone, and is included when both variables are set.
+    """
+    if pubkey_path is None:
+        keys = _key_paths(os.environ.get("XPF_IMAGE_PUBKEYS"))
+        singular = os.environ.get("XPF_IMAGE_PUBKEY")
+        if singular:
+            keys.extend(_key_paths(singular))
+        if not keys:
+            keys = [DEFAULT_IMAGE_PUBKEY]
+    else:
+        keys = _key_paths(pubkey_path)
+    unique = []
+    seen = set()
+    for key in keys:
+        full = os.path.abspath(key)
+        if full in seen:
+            continue
+        seen.add(full)
+        if not os.path.isfile(full):
+            raise SignError(
+                f"image public key not found: {key} "
+                "(set XPF_IMAGE_PUBKEY or XPF_IMAGE_PUBKEYS, or ship scripts/dist/xpf-image.pub).")
+        require_real_pubkey(full)
+        unique.append(full)
+    if not unique:
+        raise SignError("no image public keys configured")
+    return unique
+
+
+def _key_id(path):
+    """Read minisign's eight-byte key id from a public-key or signature file."""
+    try:
+        with open(path, "rt", encoding="ascii") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith(("untrusted comment:", "trusted comment:")):
+                    continue
+                raw = base64.b64decode(line, validate=True)
+                if len(raw) >= 10:
+                    return raw[2:10][::-1].hex().upper()
+    except (OSError, UnicodeError, ValueError):
+        pass
+    return None
+
+
+def minisign_key_id(path):
+    """Return a minisign key id, or None for a malformed signature."""
+    return _key_id(path)
+
+
+def signature_paths(signed_path, pubkey_path=None):
+    """Return canonical and key-addressed minisign sidecars for trusted keys.
+
+    Multi-key signing keeps the first signature at the legacy `.minisig` path;
+    each additional signature is `.minisig.<key-id>`, allowing a checkout
+    pinned only to a newly rotated key to find its signature without listing
+    the publish directory.
+    """
+    canonical = signed_path + ".minisig"
+    paths = [canonical]
+    for key in resolve_image_pubkeys(pubkey_path):
+        key_id = _key_id(key)
+        if key_id:
+            paths.append(canonical + "." + key_id)
+    return list(dict.fromkeys(paths))
 
 # The bake's four-file signed set (#9920 F-063 SSOT). bake.py builds its
 # write_manifest file list from bake_set_basenames(), and the sign-manifest
@@ -265,7 +347,7 @@ def require_real_pubkey(pubkey_path):
         raise SignError(
             f"image public key {os.path.basename(pubkey_path)} is the #1924 "
             "PLACEHOLDER — refusing to verify against it. Supply the real key "
-            "(XPF_IMAGE_PUBKEY or scripts/dist/xpf-image.pub) — see "
+            "(XPF_IMAGE_PUBKEY or XPF_IMAGE_PUBKEYS, or scripts/dist/xpf-image.pub) — see "
             "scripts/dist/README.md.")
 
 
@@ -309,59 +391,86 @@ def write_manifest(manifest_path, files, recorded_hashes=None):
     return manifest_path
 
 
-def sign_manifest(manifest_path, seckey_path, comment=None, sig_path=None):
-    """minisign-sign `manifest_path` with the secret key at `seckey_path`.
+def _seckey_paths(value):
+    if isinstance(value, (list, tuple)):
+        return [os.fspath(path) for path in value]
+    return [os.fspath(value)]
 
-    Returns the .minisig path. The secret key is passed by PATH to the
-    minisign binary; its bytes never touch this process's memory. minisign
-    prompts for a passphrase on a TTY; for unattended signing the key must be
-    passwordless (operator policy, OQ-2) — we pass an empty passphrase on
-    stdin so a passwordless key signs non-interactively and a
-    password-protected key fails loudly rather than hanging.
+
+def sign_manifest(manifest_path, seckey_path, comment=None, sig_path=None):
+    """Sign with one or more minisign keys, preserving the legacy first sidecar.
+
+    The first key writes `<file>.minisig`; later keys write
+    `<file>.minisig.<key-id>`. Returns the legacy path for a single key and
+    every generated path for multiple keys.
     """
     exe = require_minisign()
     if sig_path is None:
         sig_path = manifest_path + ".minisig"
-    argv = [exe, "-S", "-s", seckey_path, "-m", manifest_path, "-x", sig_path]
-    if comment:
-        argv += ["-t", comment]
-    r = subprocess.run(argv, input="\n", capture_output=True, text=True)
-    if r.returncode != 0:
-        raise SignError(
-            f"minisign sign failed (rc={r.returncode}): {r.stderr.strip()}\n"
-            "(a password-protected key cannot sign unattended — OQ-2 requires "
-            "a passwordless image-signing key or an interactive signer).")
-    return sig_path
+    seckeys = _seckey_paths(seckey_path)
+    if not seckeys:
+        raise SignError("at least one minisign secret key is required")
+    sig_dir = os.path.dirname(os.path.abspath(sig_path))
+    staged = []
+    targets = []
+    key_ids = set()
+    try:
+        for index, seckey in enumerate(seckeys):
+            fd, tmp_sig = tempfile.mkstemp(
+                prefix="." + os.path.basename(sig_path) + ".",
+                suffix=".tmp", dir=sig_dir)
+            os.close(fd)
+            os.unlink(tmp_sig)
+            argv = [exe, "-S", "-s", seckey, "-m", manifest_path,
+                    "-x", tmp_sig]
+            if comment:
+                argv += ["-t", comment]
+            r = subprocess.run(argv, input="\n", capture_output=True, text=True)
+            if r.returncode != 0:
+                raise SignError(
+                    f"minisign sign failed (rc={r.returncode}): "
+                    f"{r.stderr.strip()} (a password-protected key cannot sign "
+                    "unattended — OQ-2 requires a passwordless image-signing "
+                    "key or an interactive signer).")
+            key_id = _key_id(tmp_sig)
+            if not key_id:
+                raise SignError(f"could not read minisign key id from {tmp_sig}")
+            if key_id in key_ids:
+                raise SignError(f"duplicate minisign signing key id: {key_id}")
+            key_ids.add(key_id)
+            target = sig_path if index == 0 else sig_path + "." + key_id
+            staged.append(tmp_sig)
+            targets.append(target)
+        for source, target in zip(staged, targets):
+            os.replace(source, target)
+        staged.clear()
+        keep = set(targets)
+        sig_base = os.path.basename(sig_path)
+        for entry in os.scandir(sig_dir):
+            if (entry.name.startswith(sig_base + ".")
+                    and re.fullmatch(re.escape(sig_base) + r"\.[0-9A-Fa-f]{16}",
+                                     entry.name)
+                    and entry.path not in keep):
+                try:
+                    os.unlink(entry.path)
+                except OSError:
+                    pass
+    finally:
+        for path in staged:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return targets[0] if len(targets) == 1 else targets
 
 
 def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None,
-                             recorded_hashes=None):
-    """Write + minisign-sign `manifest_path`, committing atomically (#10119).
-
-    write_manifest() then sign_manifest() leaves a NEW manifest beside a
-    STALE-or-absent .minisig when signing fails (safe — a stale signature
-    cannot verify the new bytes — but confusing: the tree looks half-signed
-    and the previous manifest bytes are gone). Write + sign temp siblings in
-    the same directory and os.replace() both over only on success, so a
-    signing failure leaves the live manifest and the live .minisig
-    byte-identical (mtime included). Existing permission bits are preserved
-    across the replace.
-
-    `recorded_hashes`, when supplied by the strict bake re-sign gate, is
-    passed to write_manifest so the already-checked hashes are signed rather
-    than re-reading live artifact bytes after the check.
-
-    Two renames cannot be one atomic step: a crash between them leaves a new
-    manifest beside the OLD .minisig — which fails closed downstream (the old
-    signature cannot verify the new bytes). Temp names start with '.' so
-    publish discovery (xpf-*.SHA256SUMS) never sees a stray on unclean exit;
-    leftovers are removed best-effort. (bake.py keeps its split-phase
-    write → validate → sign flow, where the gap is structural, not a bug.)
-    """
+                            recorded_hashes=None):
+    """Write + sign `manifest_path` and its one-or-many signatures atomically."""
     manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
     base = os.path.basename(manifest_path)
     tmp_manifest = None
-    tmp_sig = None
+    tmp_sigs = []
     try:
         fd, tmp_manifest = tempfile.mkstemp(prefix="." + base + ".",
                                             suffix=".tmp", dir=manifest_dir)
@@ -370,34 +479,68 @@ def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None,
         if os.path.exists(manifest_path):
             shutil.copymode(manifest_path, tmp_manifest)
         tmp_sig = tmp_manifest + ".minisig"
-        sign_manifest(tmp_manifest, seckey_path, comment, sig_path=tmp_sig)
-        if os.path.exists(manifest_path + ".minisig"):
-            shutil.copymode(manifest_path + ".minisig", tmp_sig)
+        generated = sign_manifest(tmp_manifest, seckey_path, comment,
+                                  sig_path=tmp_sig)
+        tmp_sigs = generated if isinstance(generated, list) else [generated]
+        final_sigs = []
+        for source in tmp_sigs:
+            target = manifest_path + ".minisig" + source[len(tmp_sig):]
+            if os.path.exists(target):
+                shutil.copymode(target, source)
+            final_sigs.append(target)
         os.replace(tmp_manifest, manifest_path)
-        os.replace(tmp_sig, manifest_path + ".minisig")
-        tmp_manifest = None  # committed; do not unlink below
-        tmp_sig = None
+        tmp_manifest = None
+        for source, target in zip(tmp_sigs, final_sigs):
+            os.replace(source, target)
+        tmp_sigs = []
+        _remove_stale_signatures(manifest_path + ".minisig", final_sigs)
     finally:
-        for tmp in (tmp_manifest, tmp_sig):
-            if tmp is not None:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+        for path in ([tmp_manifest] if tmp_manifest else []) + tmp_sigs:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     return manifest_path + ".minisig"
 
 
-def verify_signature(manifest_path, sig_path, pubkey_path):
-    """minisign-verify the manifest's signature. Raise on failure."""
-    exe = require_minisign()
-    r = subprocess.run(
-        [exe, "-V", "-p", pubkey_path, "-m", manifest_path, "-x", sig_path],
-        capture_output=True, text=True)
-    if r.returncode != 0:
-        raise SignError(
-            f"minisign signature verification FAILED for "
-            f"{os.path.basename(manifest_path)}: {r.stderr.strip() or r.stdout.strip()}")
+def _remove_stale_signatures(sig_path, keep):
+    directory = os.path.dirname(os.path.abspath(sig_path))
+    base = os.path.basename(sig_path)
+    keep = {os.path.abspath(path) for path in keep}
+    for entry in os.scandir(directory):
+        if (entry.name.startswith(base + ".")
+                and re.fullmatch(re.escape(base) + r"\.[0-9A-Fa-f]{16}",
+                                 entry.name)
+                and os.path.abspath(entry.path) not in keep):
+            try:
+                os.unlink(entry.path)
+            except OSError:
+                pass
 
+
+def verify_signature(manifest_path, sig_path, pubkey_path=None):
+    """Verify a signature against any configured key and matching sidecars."""
+    pubkeys = resolve_image_pubkeys(pubkey_path)
+    candidates = [sig_path]
+    if os.path.abspath(sig_path) == os.path.abspath(manifest_path + ".minisig"):
+        candidates = signature_paths(manifest_path, pubkeys)
+    errors = []
+    exe = require_minisign()
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        for pub in pubkeys:
+            r = subprocess.run(
+                [exe, "-V", "-p", pub, "-m", manifest_path, "-x", candidate],
+                capture_output=True, text=True)
+            if r.returncode == 0:
+                return
+            errors.append(r.stderr.strip() or r.stdout.strip())
+    if not errors:
+        raise SignError(f"no minisign signature found for {os.path.basename(manifest_path)}")
+    raise SignError(
+        f"minisign signature verification FAILED for "
+        f"{os.path.basename(manifest_path)}: {'; '.join(errors)}")
 
 def parse_manifest(manifest_path):
     """Parse a sha256sum-format manifest into {basename: hexhash}.
@@ -434,43 +577,59 @@ def parse_manifest(manifest_path):
     return result
 
 
+def _resolve_pubkeys(pubkey_path):
+    return resolve_image_pubkeys(pubkey_path)
+
+
 def _resolve_pubkey(pubkey_path):
-    if pubkey_path is None:
-        pubkey_path = os.environ.get("XPF_IMAGE_PUBKEY", DEFAULT_IMAGE_PUBKEY)
-    if not os.path.isfile(pubkey_path):
-        raise SignError(
-            f"image public key not found: {pubkey_path} "
-            "(set XPF_IMAGE_PUBKEY or ship scripts/dist/xpf-image.pub).")
-    require_real_pubkey(pubkey_path)
-    return pubkey_path
+    """Compatibility helper for callers that still need the primary key."""
+    return _resolve_pubkeys(pubkey_path)[0]
 
 
 def verify_and_read(signed_path, sig_path, pubkey_path=None):
-    """minisign-verify `signed_path` and return its VERIFIED bytes.
+    """Verify signed bytes against any configured key and return those bytes.
 
-    TOCTOU-safe (Codex-M5/AGY-A4/AGY-r3): the file may live in a user-writable
-    dir, so a concurrent process could swap its bytes between the signature
-    check and a later read. Copy the file + its signature into a private 0700
-    temp dir, verify the COPY, and return the COPY's bytes — so what the caller
-    parses/uses is exactly what was verified. Use this for every signed text
-    artifact (the per-version manifest, latest.json, ...).
+    The manifest, canonical signature, and key-addressed rotation signatures
+    are copied into private staging before verification, preserving the
+    existing verify-then-read TOCTOU boundary.
     """
-    pubkey_path = _resolve_pubkey(pubkey_path)
+    pubkeys = _resolve_pubkeys(pubkey_path)
     import shutil as _sh
     import tempfile as _tf
     tmp = _tf.mkdtemp(prefix="xpf-verify-")
     try:
         os.chmod(tmp, 0o700)
         f_copy = os.path.join(tmp, os.path.basename(signed_path))
-        s_copy = f_copy + ".minisig"
         _sh.copyfile(signed_path, f_copy)
-        _sh.copyfile(sig_path, s_copy)
-        verify_signature(f_copy, s_copy, pubkey_path)
-        with open(f_copy, "rb") as fh:
-            return fh.read()
+        canonical = os.path.abspath(signed_path + ".minisig")
+        sources = [sig_path] + signature_paths(signed_path, pubkeys)
+        sources = list(dict.fromkeys(sources))
+        copied = []
+        for index, source in enumerate(sources):
+            if not os.path.isfile(source):
+                continue
+            source_abs = os.path.abspath(source)
+            if source_abs == canonical:
+                dest = f_copy + ".minisig"
+            elif source_abs.startswith(canonical + "."):
+                dest = f_copy + ".minisig" + source_abs[len(canonical):]
+            else:
+                dest = os.path.join(tmp, f"extra-{index}.minisig")
+            _sh.copyfile(source, dest)
+            copied.append(dest)
+        if not copied:
+            raise SignError(f"no minisign signature found for {os.path.basename(signed_path)}")
+        errors = []
+        for signature in copied:
+            try:
+                verify_signature(f_copy, signature, pubkeys)
+                with open(f_copy, "rb") as fh:
+                    return fh.read()
+            except SignError as e:
+                errors.append(str(e))
+        raise SignError("; ".join(errors))
     finally:
         _sh.rmtree(tmp, ignore_errors=True)
-
 
 def verify_manifest_map(manifest_path, sig_path, pubkey_path=None):
     """Verify a signed manifest and return its {basename: hash} map, parsed
@@ -571,18 +730,41 @@ def _main(argv):
 
     s = sub.add_parser("sign-manifest", help="write+sign a per-version manifest")
     s.add_argument("--manifest", required=True)
-    s.add_argument("--seckey", required=True)
+    s.add_argument("--seckey", action="append", required=True,
+                   help="minisign secret key (repeat to dual-sign during rotation)")
     s.add_argument("--comment", default=None)
     s.add_argument("files", nargs="+")
+
+    sf = sub.add_parser("sign-file", help="sign a directly-signed publish file")
+    sf.add_argument("--seckey", action="append", required=True,
+                    help="minisign secret key (repeat to dual-sign)")
+    sf.add_argument("--comment", default=None)
+    sf.add_argument("--sig", default=None)
+    sf.add_argument("file")
+
+    vf = sub.add_parser("verify-file", help="verify a directly-signed publish file")
+    vf.add_argument("--sig", default=None)
+    vf.add_argument("--pubkey", action="append", default=None,
+                    help="trusted image public key (repeat to accept rotation overlap)")
+    vf.add_argument("file")
 
     v = sub.add_parser("verify", help="verify ONE artifact against a signed manifest")
     v.add_argument("--manifest", required=True)
     v.add_argument("--sig", default=None)
-    v.add_argument("--pubkey", default=None)
+    v.add_argument("--pubkey", action="append", default=None,
+                   help="trusted image public key (repeat to accept rotation overlap)")
     v.add_argument("file")
 
     a = p.parse_args(argv)
     try:
+        if a.cmd == "sign-file":
+            signatures = sign_manifest(a.file, a.seckey, a.comment, a.sig)
+            print(f"signed: {a.file} -> {signatures}")
+            return 0
+        if a.cmd == "verify-file":
+            verify_signature(a.file, a.sig or (a.file + ".minisig"), a.pubkey)
+            print(f"OK: {os.path.basename(a.file)} signature verified")
+            return 0
         if a.cmd == "sign-manifest":
             # #9920 F-063: fail-CLOSED for bake manifests. An xpf-<ver>.SHA256SUMS
             # feeds publish discovery, so its set + provenance flags are asserted
