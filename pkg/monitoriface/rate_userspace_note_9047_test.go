@@ -27,8 +27,8 @@ func TestRateReportsDroppedUserspaceComponent9047(t *testing.T) {
 	prev := snap9047(false, 100, 10)
 	curr := snap9047(true, 500, 50)
 
-	_, _, _, _, dropped := snapshotTrafficDeltas(curr, prev)
-	if !dropped {
+	deltas := snapshotTrafficDeltas(curr, prev)
+	if !deltas.userspaceDropped {
 		t.Error("#9047: the userspace component was dropped from the rate and NOT reported. " +
 			"The total beside it includes userspace, so the operator sees a rate that " +
 			"under-reports forwarding with no indication — the 'silently render 0' shape " +
@@ -42,11 +42,11 @@ func TestRateReportsDroppedUserspaceComponent9047(t *testing.T) {
 func TestDroppedComponentIsNotFoldedInAsZero9047(t *testing.T) {
 	prev := snap9047(false, 100, 10)
 	curr := snap9047(true, 500, 50)
-	_, _, rxBytes, _, _ := snapshotTrafficDeltas(curr, prev)
-	if rxBytes != 400 {
+	deltas := snapshotTrafficDeltas(curr, prev)
+	if deltas.rxBytes != 400 {
 		t.Errorf("#9047: rx byte delta = %d, want 400 (kernel only). Including the userspace "+
 			"cumulative would attribute the helper's entire lifetime to this one window and "+
-			"render a spike that never happened.", rxBytes)
+			"render a spike that never happened.", deltas.rxBytes)
 	}
 }
 
@@ -55,12 +55,12 @@ func TestDroppedComponentIsNotFoldedInAsZero9047(t *testing.T) {
 func TestNoNoteWhenBothSamplesHaveUserspace9047(t *testing.T) {
 	prev := snap9047(true, 100, 10)
 	curr := snap9047(true, 500, 50)
-	_, _, rxBytes, _, dropped := snapshotTrafficDeltas(curr, prev)
-	if dropped {
+	deltas := snapshotTrafficDeltas(curr, prev)
+	if deltas.userspaceDropped {
 		t.Error("#9047: reported a dropped component when both samples had one")
 	}
-	if rxBytes != 800 {
-		t.Errorf("#9047: rx byte delta = %d, want 800 (400 kernel + 400 userspace)", rxBytes)
+	if deltas.rxBytes != 800 {
+		t.Errorf("#9047: rx byte delta = %d, want 800 (400 kernel + 400 userspace)", deltas.rxBytes)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestNoNoteWhenBothSamplesHaveUserspace9047(t *testing.T) {
 func TestNoNoteWhenTheInterfaceHasNoUserspaceAtAll9047(t *testing.T) {
 	prev := snap9047(false, 100, 10)
 	curr := snap9047(false, 500, 50)
-	if _, _, _, _, dropped := snapshotTrafficDeltas(curr, prev); dropped {
+	if snapshotTrafficDeltas(curr, prev).userspaceDropped {
 		t.Error("#9047: a kernel-only interface reported a dropped userspace component. " +
 			"It never had one to drop, and a note on every window is one nobody reads.")
 	}

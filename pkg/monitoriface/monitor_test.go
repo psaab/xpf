@@ -167,9 +167,9 @@ func TestDisplayTrafficCountersIncludeUserspaceXSKTraffic(t *testing.T) {
 	}
 }
 
-func TestSnapshotRatesCounterResetReturnsZero(t *testing.T) {
+func TestSnapshotRatesMarksCounterReset(t *testing.T) {
 	now := time.Now()
-	rxPps, txPps, rxBps, txBps := snapshotRates(&Snapshot{
+	rates := snapshotRates(&Snapshot{
 		RxBytes:   100,
 		TxBytes:   200,
 		RxPkts:    10,
@@ -182,14 +182,17 @@ func TestSnapshotRatesCounterResetReturnsZero(t *testing.T) {
 		TxPkts:    200,
 		Timestamp: now.Add(-1 * time.Second),
 	})
-	if rxPps != 0 || txPps != 0 || rxBps != 0 || txBps != 0 {
-		t.Fatalf("snapshotRates should clamp counter resets to zero, got rxPps=%d txPps=%d rxBps=%d txBps=%d", rxPps, txPps, rxBps, txBps)
+	if rates.rxPps != 0 || rates.txPps != 0 || rates.rxBytesPerSec != 0 || rates.txBytesPerSec != 0 {
+		t.Fatalf("snapshotRates() returned nonzero rates after reset: %+v", rates)
+	}
+	if !rates.rxPktsReset || !rates.txPktsReset || !rates.rxBytesReset || !rates.txBytesReset {
+		t.Fatalf("snapshotRates() did not mark all reset counters invalid: %+v", rates)
 	}
 }
 
 func TestSnapshotRatesIncludeUserspaceXSKTraffic(t *testing.T) {
 	now := time.Now()
-	rxPps, txPps, rxBps, txBps := snapshotRates(&Snapshot{
+	rates := snapshotRates(&Snapshot{
 		RxBytes:   1000,
 		TxBytes:   2000,
 		RxPkts:    10,
@@ -214,14 +217,14 @@ func TestSnapshotRatesIncludeUserspaceXSKTraffic(t *testing.T) {
 			TxPackets: 7,
 		},
 	})
-	if rxPps != 20 || txPps != 38 || rxBps != 2000 || txBps != 3800 {
-		t.Fatalf("snapshotRates() = rxPps=%d txPps=%d rxBps=%d txBps=%d, want 20/38/2000/3800", rxPps, txPps, rxBps, txBps)
+	if rates.rxPps != 20 || rates.txPps != 38 || rates.rxBytesPerSec != 2000 || rates.txBytesPerSec != 3800 {
+		t.Fatalf("snapshotRates() = %+v, want 20/38/2000/3800", rates)
 	}
 }
 
 func TestSnapshotRatesPreserveInterfaceDeltaWhenUserspaceDisappears(t *testing.T) {
 	now := time.Now()
-	rxPps, txPps, rxBps, txBps := snapshotRates(&Snapshot{
+	rates := snapshotRates(&Snapshot{
 		RxBytes:   2000,
 		TxBytes:   3000,
 		RxPkts:    20,
@@ -240,8 +243,136 @@ func TestSnapshotRatesPreserveInterfaceDeltaWhenUserspaceDisappears(t *testing.T
 			Bindings:  1,
 		},
 	})
-	if rxPps != 10 || txPps != 15 || rxBps != 1000 || txBps != 1500 {
-		t.Fatalf("snapshotRates() = rxPps=%d txPps=%d rxBps=%d txBps=%d, want interface-only 10/15/1000/1500 when userspace disappears", rxPps, txPps, rxBps, txBps)
+	if rates.rxPps != 10 || rates.txPps != 15 || rates.rxBytesPerSec != 1000 || rates.txBytesPerSec != 1500 {
+		t.Fatalf("snapshotRates() = %+v, want interface-only 10/15/1000/1500 when userspace disappears", rates)
+	}
+}
+
+func TestRenderSingleInterfaceCounterResetMarksInvalidAndRebaselines(t *testing.T) {
+	start := time.Now().Add(-2 * time.Second)
+	baseline := &Snapshot{
+		RxBytes: 1000, TxBytes: 2000, RxPkts: 100, TxPkts: 200, RxErrors: 7,
+		Timestamp: start,
+		Userspace: &UserspaceSnapshot{
+			Bindings: 1, RxBytes: 3000, TxBytes: 4000, RxPackets: 300, TxPackets: 400,
+			DirectTXPackets: 9,
+		},
+	}
+	previous := *baseline
+	previous.Userspace = &*baseline.Userspace
+	current := &Snapshot{
+		RxBytes: 10, TxBytes: 20, RxPkts: 1, TxPkts: 2, RxErrors: 1,
+		Timestamp: start.Add(time.Second),
+		Userspace: &UserspaceSnapshot{
+			Bindings: 1, RxBytes: 30, TxBytes: 40, RxPackets: 3, TxPackets: 4,
+			DirectTXPackets: 1,
+		},
+	}
+
+	line := func(output, prefix string) string {
+		for _, candidate := range strings.Split(output, "\n") {
+			if strings.Contains(candidate, prefix) {
+				return candidate
+			}
+		}
+		return ""
+	}
+	var first bytes.Buffer
+	RenderSingleInterface(&first, "host", "lo", "lo", current, &previous, baseline, start)
+	for _, prefix := range []string{"Input  bytes:", "Input  packets:", "Input  errors:", "RX bytes:", "Direct TX packets:"} {
+		if got := line(first.String(), prefix); !strings.Contains(got, "[n/a]") {
+			t.Errorf("reset delta for %q = %q, want n/a", prefix, got)
+		}
+	}
+	for _, prefix := range []string{"Input  bytes:", "Input  packets:", "RX bytes:"} {
+		if got := line(first.String(), prefix); !strings.Contains(got, "(n/a)") {
+			t.Errorf("reset rate for %q = %q, want n/a", prefix, got)
+		}
+	}
+	if baseline.RxBytes != current.RxBytes || baseline.TxBytes != current.TxBytes ||
+		baseline.RxPkts != current.RxPkts || baseline.TxPkts != current.TxPkts ||
+		baseline.RxErrors != current.RxErrors || baseline.Userspace.RxBytes != current.Userspace.RxBytes ||
+		baseline.Userspace.RxPackets != current.Userspace.RxPackets ||
+		baseline.Userspace.DirectTXPackets != current.Userspace.DirectTXPackets {
+		t.Fatalf("counter reset did not rebaseline: %+v", baseline)
+	}
+
+	next := &Snapshot{
+		RxBytes: 17, TxBytes: 29, RxPkts: 5, TxPkts: 8, RxErrors: 3,
+		Timestamp: current.Timestamp.Add(time.Second),
+		Userspace: &UserspaceSnapshot{
+			Bindings: 1, RxBytes: 35, TxBytes: 47, RxPackets: 7, TxPackets: 9,
+			DirectTXPackets: 3,
+		},
+	}
+	var second bytes.Buffer
+	RenderSingleInterface(&second, "host", "lo", "lo", next, current, baseline, start)
+	for prefix, want := range map[string]string{
+		"Input  bytes:":      "(96 bps)    [12]",
+		"Input  packets:":    "(8 pps)    [8]",
+		"Input  errors:":     "[2]",
+		"RX bytes:":          "(40 bps)    [5]",
+		"Direct TX packets:": "[2]",
+	} {
+		if got := line(second.String(), prefix); !strings.Contains(got, want) {
+			t.Errorf("rebased delta for %q = %q, want it to contain %q", prefix, got, want)
+		}
+	}
+}
+
+func TestRenderSingleInterfaceRebaselinesOnlyResetCounterSource(t *testing.T) {
+	start := time.Now().Add(-time.Second)
+	baseline := &Snapshot{
+		RxBytes: 100, TxBytes: 200, RxPkts: 10, TxPkts: 20, Timestamp: start,
+		Userspace: &UserspaceSnapshot{
+			Bindings: 1, RxBytes: 1000, TxBytes: 2000, RxPackets: 100, TxPackets: 200,
+		},
+	}
+	previous := *baseline
+	previous.Userspace = &*baseline.Userspace
+	current := &Snapshot{
+		RxBytes: 110, TxBytes: 220, RxPkts: 11, TxPkts: 22, Timestamp: start.Add(time.Second),
+		Userspace: &UserspaceSnapshot{
+			Bindings: 1, RxBytes: 5, TxBytes: 2005, RxPackets: 5, TxPackets: 205,
+		},
+	}
+	var buf bytes.Buffer
+	RenderSingleInterface(&buf, "host", "lo", "lo", current, &previous, baseline, start)
+
+	if baseline.RxBytes != 100 || baseline.RxPkts != 10 {
+		t.Errorf("userspace reset rebaselined unchanged interface counters: rxBytes=%d rxPkts=%d", baseline.RxBytes, baseline.RxPkts)
+	}
+	if baseline.Userspace.RxBytes != current.Userspace.RxBytes ||
+		baseline.Userspace.RxPackets != current.Userspace.RxPackets {
+		t.Errorf("userspace reset was not rebaselined: %+v", baseline.Userspace)
+	}
+	if baseline.TxBytes != 200 || baseline.Userspace.TxBytes != 2000 {
+		t.Errorf("unreset TX baselines changed: interface=%d userspace=%d", baseline.TxBytes, baseline.Userspace.TxBytes)
+	}
+}
+
+func TestRenderTrafficSummaryCounterResetMarksRatesNA(t *testing.T) {
+	now := time.Now()
+	snaps := map[string]*Snapshot{
+		"wan0": {RxBytes: 10, TxBytes: 20, RxPkts: 1, TxPkts: 2, Timestamp: now},
+	}
+	previous := map[string]*Snapshot{
+		"wan0": {RxBytes: 100, TxBytes: 200, RxPkts: 10, TxPkts: 20, Timestamp: now.Add(-time.Second)},
+	}
+	var buf bytes.Buffer
+	RenderTrafficSummary(&buf, "xpf", []string{"wan0"}, map[string]string{"wan0": "wan0"},
+		snaps, previous, SummaryModeRate, now.Add(-time.Second))
+	for _, prefix := range []string{"wan0:", "total:"} {
+		var row string
+		for _, candidate := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(candidate, prefix) {
+				row = candidate
+				break
+			}
+		}
+		if got := strings.Count(row, "n/a"); got != 6 {
+			t.Errorf("rate summary %q has %d n/a cells, want 6: %q", prefix, got, row)
+		}
 	}
 }
 
