@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/upgrade/manifest"
 	"github.com/psaab/xpf/pkg/upgrade/stagedgen"
@@ -699,6 +700,12 @@ func (r *Runner) Run(opts Options) (err error) {
 			"would leave the daemon offline with no recovery target. Re-seed the "+
 			"versioned runtime (xpfd seed-runtime), then re-run the upgrade", j.TargetVersion)
 	}
+	if !j.State.atLeast(StateStopped) {
+		if err := r.validateForwardEnvelopeCompatibility(j.TargetVersion,
+			filepath.Join(r.versionDir(j.TargetVersion), "xpfd")); err != nil {
+			return fmt.Errorf("refuse-before-STOP: %w", err)
+		}
+	}
 	// ---- STOP + CUT-BOUNDARY DB SNAPSHOT (live mutation #1) ----
 	//
 	// PREFLIGHT, COPY and VERIFY all run while the old daemon is live, so a
@@ -839,6 +846,39 @@ func (r *Runner) versionDirComplete(ver string) error {
 	return nil
 }
 
+// envelopeCompatibleWithReader applies the same grammar and minimum-reader
+// floors used by forward cuts and operator rollback.
+func envelopeCompatibleWithReader(compat configstore.EnvelopeCompatibility, reader int) bool {
+	return compat.FormatVersion <= reader && compat.MinReader <= reader
+}
+
+func (r *Runner) validateForwardEnvelopeCompatibility(targetVersion, targetBin string) error {
+	data, err := os.ReadFile(filepath.Join(r.cfg.ConfigDBDir, "active.json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read live config DB envelope: %w", err)
+	}
+	compat, enveloped, err := configstore.InspectEnvelopeHeader(data)
+	if err != nil {
+		return fmt.Errorf("malformed live config DB envelope: %w", err)
+	}
+	if !enveloped {
+		return nil
+	}
+	reader, err := r.cfg.Sys.EnvelopeReaderVersion(targetBin)
+	if err != nil {
+		return fmt.Errorf("cannot prove target %s envelope reader (live envelope v=%d min-reader=%d): %w",
+			targetVersion, compat.FormatVersion, compat.MinReader, err)
+	}
+	if !envelopeCompatibleWithReader(compat, reader) {
+		return fmt.Errorf("live config DB envelope v=%d min-reader=%d exceeds target %s reader v=%d; "+
+			"booting the target would fail closed", compat.FormatVersion, compat.MinReader, targetVersion, reader)
+	}
+	return nil
+}
+
 // firstNonNil returns the first non-nil error.
 func firstNonNil(errs ...error) error {
 	for _, e := range errs {
@@ -860,6 +900,10 @@ var statConfigDBDir = os.Stat
 // eligible versions if short, and takes the pre-upgrade DB snapshot. Pure:
 // no live mutation.
 func (r *Runner) preflight(j *Journal) error {
+	if err := r.validateForwardEnvelopeCompatibility(j.TargetVersion,
+		filepath.Join(r.sourceDir(j), "xpfd")); err != nil {
+		return fmt.Errorf("refuse-before-PREFLIGHT: %w", err)
+	}
 	if err := fsatomic.MkdirAllDurable(r.cfg.VersionsDir, 0755); err != nil {
 		return fmt.Errorf("create versions dir: %w", err)
 	}
