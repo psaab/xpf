@@ -26,8 +26,9 @@ import (
 // on-disk persistence + rollback (configstore) and the on-box CLI, none of
 // which may lose the real secret.
 //
-// The secret-leaf set is exactly #2053's Secret-typed field set, resolved to
-// its AST leaf signatures (verified against the compiler's Secret(...) sites):
+// #2053's Secret-typed field set is the baseline, resolved to its AST leaf
+// signatures (verified against compiler Secret(...) sites), plus the unmodeled
+// identity/access bind-password paths from #10948:
 //
 //	pre-shared-key            IKE policy / IPsec VPN PSK   (keeps ascii-text|hexadecimal qualifier)
 //	authentication-key        OSPF/IS-IS/RIP/BGP/VRRP auth key + BGP TCP-MD5
@@ -37,7 +38,8 @@ import (
 //	privacy-password          SNMPv3 USM privacy password
 //	encrypted-password        root / login crypt(3) hash
 //	api-key                   REST API bearer/X-API-Key token(s)
-//	password (under api-auth | dynamic-dns)  REST basic-auth / DDNS HTTP password
+//	password (under api-auth | dynamic-dns | archive-sites | identity | access)
+//	                          REST basic-auth / DDNS HTTP / archival / AD-LDAP bind password
 //	tsig-secret               RFC 2136 / DDNS TSIG HMAC key
 //	api-token                 Cloudflare / DuckDNS DDNS API token
 //	aws-secret-key            Route 53 DDNS AWS secret access key
@@ -104,11 +106,11 @@ func redactNodes(nodes []*Node, base []string) {
 }
 
 // secretIndices returns the indices into the flattened key path fp that carry
-// a secret value and must be masked. It reuses #2053's secret-leaf set (see
-// the file header) resolved to keyword signatures; generic keywords (key,
-// password, community) are disambiguated by required ancestor context so a
-// GRE tunnel `key`, a chassis identity `key` or a routing-policy `community`
-// (all non-secret) are never masked.
+// a secret value and must be masked. It reuses #2053's secret-leaf signatures
+// (see the file header) and adds the unmodeled AD/LDAP bind-password contexts
+// from #10948. Generic keywords (key, password, community) are disambiguated by
+// required ancestor context so a GRE tunnel `key`, a chassis identity `key` or
+// a routing-policy `community` (all non-secret) are never masked.
 func secretIndices(fp []string) []int {
 	var out []int
 	for i, k := range fp {
@@ -133,10 +135,11 @@ func secretIndices(fp []string) []int {
 				out = append(out, j)
 			}
 		case "password":
-			// Generic keyword — secret only under REST api-auth, a DDNS
-			// provider, or an archive-site transfer credential (#7511); other
-			// `password` uses do not exist today but the context gate keeps a
-			// future non-secret `password` unmasked.
+			// Generic keyword — secret under REST api-auth, a DDNS
+			// provider, an archive-site transfer credential (#7511), or an
+			// AD/LDAP identity stanza (#10948); other `password` uses do
+			// not exist today but the context gate keeps a future non-secret
+			// `password` unmasked.
 			//
 			// #7511: `system archival configuration archive-sites <url>
 			// password <secret>` rendered the secret IN FULL. `archive-sites`
@@ -144,7 +147,18 @@ func secretIndices(fp []string) []int {
 			// neither of the two scopes this pass knew about — the name-keyed
 			// design's limitation, seen on the raw-AST surface after #7510
 			// fixed the typed one.
-			if containsAnyOf(fp[:i], "api-auth", "dynamic-dns", "archive-sites") {
+			//
+			// #10948: same shape, new unenclosed context. `services
+			// user-identification ...` (and the same identity stanzas spelled
+			// directly under `services`) is unmodeled — absent from
+			// schemaServices, accepted-only per #10947, AST the sole carrier —
+			// so an AD/LDAP bind `password` under it matched no scope and
+			// rendered in cleartext to PermView on every AST-display surface.
+			// `user-identification` covers the wrapped spelling at any depth;
+			// the three stanza names cover the direct-under-services spelling
+			// the compiler also accepts.
+			if containsAnyOf(fp[:i], "api-auth", "dynamic-dns", "archive-sites", "user-identification", "access",
+				"active-directory-access", "identity-management", "local-authentication-table") {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
 				}
