@@ -429,12 +429,12 @@ func buildScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef
 	sort.Strings(zoneNames)
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
-		if zone == nil || zone.ScreenProfile == "" {
+		if zone == nil || (zone.ScreenProfile == "" && !zone.ScreenProfileConfigured) {
 			// No screen configured for this zone — legit Pass, not a
 			// missing reference.
 			continue
 		}
-		if cfg.Security.Screen[zone.ScreenProfile] != nil {
+		if zone.ScreenProfile != "" && cfg.Security.Screen[zone.ScreenProfile] != nil {
 			// Reference resolves to a defined profile.
 			continue
 		}

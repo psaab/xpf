@@ -44,8 +44,16 @@ func validateScreenProfileReferencesStrict(cfg *Config) error {
 	sort.Strings(names)
 	for _, name := range names {
 		zone := cfg.Security.Zones[name]
-		if zone == nil || zone.ScreenProfile == "" {
+		if zone == nil {
 			continue
+		}
+		if zone.ScreenProfile == "" {
+			if !zone.ScreenProfileConfigured {
+				continue
+			}
+			return fmt.Errorf(
+				"security zone %q has an empty screen profile reference; specify a non-empty profile with `screen <name>`",
+				name)
 		}
 		if _, ok := cfg.Security.Screen[zone.ScreenProfile]; !ok {
 			return fmt.Errorf(

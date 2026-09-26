@@ -118,3 +118,35 @@ func TestScreenUnresolvedProfileLinesSilentWhenResolved(t *testing.T) {
 		t.Fatalf("nil config must render nothing; got %v", lines)
 	}
 }
+
+// TestQuotedEmptyScreenProfileIsUnresolved10973 ensures tolerant compilation
+// retains an explicitly empty binding as a missing reference, not an
+// unconfigured zone. That entry feeds both operator diagnostics and the
+// dataplane's conservative-default warning path.
+func TestQuotedEmptyScreenProfileIsUnresolved10973(t *testing.T) {
+	path, quoted, grouped, err := config.ParseSetCommandGrouped(`set security zones security-zone trust screen ""`)
+	if err != nil {
+		t.Fatalf("parse set command: %v", err)
+	}
+	tree := &config.ConfigTree{}
+	if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+		t.Fatalf("SetPathQuotedGrouped: %v", err)
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if !strings.Contains(strings.Join(cfg.Warnings, "\n"), `security zone "trust" has an empty screen profile reference`) {
+		t.Fatalf("lenient compile did not warn about the empty zone binding: %v", cfg.Warnings)
+	}
+	refs := ScreenMissingProfileRefs(cfg)
+	if len(refs) != 1 || refs[0].Zone != "trust" || refs[0].Profile != "" {
+		t.Fatalf("quoted-empty binding refs = %+v, want [{Zone:trust Profile:}]", refs)
+	}
+	lines := ScreenUnresolvedProfileLines(cfg)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, `Zone trust references undefined screen profile ''`) ||
+		!strings.Contains(joined, ScreenUnresolvedDisposition) {
+		t.Fatalf("operator status did not identify the empty profile and its disposition: %v", lines)
+	}
+}

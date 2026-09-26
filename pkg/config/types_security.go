@@ -414,11 +414,12 @@ type PreIDDefaultPolicy struct {
 
 // ZoneConfig represents a security zone.
 type ZoneConfig struct {
-	Name               string
-	Description        string
-	Interfaces         []string
-	ScreenProfile      string // reference to screen profile name
-	HostInboundTraffic *HostInboundTraffic
+	Name                    string
+	Description             string
+	Interfaces              []string
+	ScreenProfile           string // reference to screen profile name
+	ScreenProfileConfigured bool   `json:"-"` // distinguishes an authored empty binding from no screen statement (#10973)
+	HostInboundTraffic      *HostInboundTraffic
 	// InterfaceHostInbound holds per-interface host-inbound-traffic overrides
 	// (#3362), keyed by the interface ref exactly as it appears under
 	// `security zones security-zone <z> interfaces <ref>` (e.g. "ge-0/0/0.0").

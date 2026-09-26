@@ -533,6 +533,7 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 				}
 			case "screen":
 				zone.ScreenProfile = nodeVal(prop)
+				zone.ScreenProfileConfigured = true
 			case "host-inbound-traffic":
 				// #4544: MERGE repeated zone-level host-inbound-traffic blocks
 				// rather than overwrite (Junos merge semantics). This case
