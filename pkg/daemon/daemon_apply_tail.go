@@ -707,6 +707,9 @@ func (d *Daemon) initEventEngine() {
 		// the zero authority, which is rejected.
 		return d.commitAndApply(ctx, configstore.InternalCommitterAs("system:event-engine"), comment, peerSyncNever)
 	})
+	if d.store != nil {
+		d.eventEngine.SetPublishEnabled(!d.store.ClusterReadOnly())
+	}
 	if d.rpm != nil {
 		d.rpm.SetEventCallback(d.eventEngine.HandleEvent)
 	}

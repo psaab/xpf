@@ -420,7 +420,7 @@ func TestRemediation_StandaloneCommitDescription(t *testing.T) {
 		policyName: "p", event: "ping_test_failed", testOwner: "owner", testName: "tname",
 		ops: []plannedOp{{}, {}},
 	})
-	want := "event-options policy p: ping_test_failed/owner/tname (2 commands)"
+	want := "event-options policy p: ping_test_failed/owner/tname (2 commands) [local-only; not peer-synced]"
 	if got != want {
 		t.Fatalf("remediationDescription = %q, want %q", got, want)
 	}
