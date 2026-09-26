@@ -119,7 +119,6 @@ func TestChassisClusterExtendedFields(t *testing.T) {
         redundancy-group 0 {
             node 0 priority 200;
             node 1 priority 100;
-            preempt;
         }
         redundancy-group 1 {
             node 0 priority 200;
@@ -160,15 +159,15 @@ func TestChassisClusterExtendedFields(t *testing.T) {
 	if len(cl.RedundancyGroups) != 2 {
 		t.Fatalf("RedundancyGroups = %d, want 2", len(cl.RedundancyGroups))
 	}
-	for i, rg := range cl.RedundancyGroups {
-		if !rg.Preempt {
-			t.Errorf("rg%d.Preempt = false, want true", i)
+	for _, rg := range cl.RedundancyGroups {
+		if rg.Preempt != (rg.ID == 1) {
+			t.Errorf("rg%d.Preempt = %v, want %v", rg.ID, rg.Preempt, rg.ID == 1)
 		}
 		if rg.NodePriorities[0] != 200 {
-			t.Errorf("rg%d node 0 priority = %d, want 200", i, rg.NodePriorities[0])
+			t.Errorf("rg%d node 0 priority = %d, want 200", rg.ID, rg.NodePriorities[0])
 		}
 		if rg.NodePriorities[1] != 100 {
-			t.Errorf("rg%d node 1 priority = %d, want 100", i, rg.NodePriorities[1])
+			t.Errorf("rg%d node 1 priority = %d, want 100", rg.ID, rg.NodePriorities[1])
 		}
 	}
 	if cl.RedundancyGroups[1].GratuitousARPCount != 4 {
@@ -177,7 +176,7 @@ func TestChassisClusterExtendedFields(t *testing.T) {
 }
 
 func TestChassisClusterExtendedFieldsSet(t *testing.T) {
-	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster heartbeat-interval 500", "set chassis cluster heartbeat-threshold 5", "set chassis cluster reth-count 2", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster redundancy-group 0 preempt", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 node 1 priority 100", "set chassis cluster redundancy-group 1 preempt", "set chassis cluster redundancy-group 1 gratuitous-arp-count 4"}
+	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster heartbeat-interval 500", "set chassis cluster heartbeat-threshold 5", "set chassis cluster reth-count 2", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster redundancy-group 1 node 0 priority 200", "set chassis cluster redundancy-group 1 node 1 priority 100", "set chassis cluster redundancy-group 1 preempt", "set chassis cluster redundancy-group 1 gratuitous-arp-count 4"}
 	tree := &ConfigTree{}
 	for _, cmd := range commands {
 		path, err := ParseSetCommand(cmd)
@@ -214,15 +213,15 @@ func TestChassisClusterExtendedFieldsSet(t *testing.T) {
 	if len(cl.RedundancyGroups) != 2 {
 		t.Fatalf("RedundancyGroups = %d, want 2", len(cl.RedundancyGroups))
 	}
-	for i, rg := range cl.RedundancyGroups {
-		if !rg.Preempt {
-			t.Errorf("rg%d.Preempt = false, want true", i)
+	for _, rg := range cl.RedundancyGroups {
+		if rg.Preempt != (rg.ID == 1) {
+			t.Errorf("rg%d.Preempt = %v, want %v", rg.ID, rg.Preempt, rg.ID == 1)
 		}
 		if rg.NodePriorities[0] != 200 {
-			t.Errorf("rg%d node 0 priority = %d, want 200", i, rg.NodePriorities[0])
+			t.Errorf("rg%d node 0 priority = %d, want 200", rg.ID, rg.NodePriorities[0])
 		}
 		if rg.NodePriorities[1] != 100 {
-			t.Errorf("rg%d node 1 priority = %d, want 100", i, rg.NodePriorities[1])
+			t.Errorf("rg%d node 1 priority = %d, want 100", rg.ID, rg.NodePriorities[1])
 		}
 	}
 	if cl.RedundancyGroups[1].GratuitousARPCount != 4 {

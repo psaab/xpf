@@ -169,10 +169,10 @@ func ClampInterfaceMonitorWeight(w int) (int, bool) {
 // validateChassisClusterStrict hard-rejects, at commit / commit-check, a
 // chassis-cluster config whose redundancy-group cardinality or ids exceed
 // what the HA heartbeat wire format can encode (#4434, codex-172 C172-H02),
-// whose per-RG node priority is out of the VRRP range (#4880), or whose
-// interface-monitor weight (#6549) or ip-monitoring global-weight /
-// global-threshold / per-target weight (#6588) is out of the [0,255] heartbeat
-// weight domain.
+// whose per-RG node priority is out of the VRRP range (#4880), whose RG0 has
+// unsupported `preempt` configured (#10754), or whose interface-monitor weight
+// (#6549) or ip-monitoring global-weight / global-threshold / per-target weight
+// (#6588) is out of the [0,255] heartbeat weight domain.
 //
 // The heartbeat count byte and per-group id byte are both uint8. There is
 // no schema-level value validation on the `redundancy-group <id>` instance
@@ -281,6 +281,10 @@ func validateChassisClusterStrict(cfg *Config) error {
 	}
 	sort.Slice(rgByID, func(i, j int) bool { return rgByID[i].ID < rgByID[j].ID })
 	for _, rg := range rgByID {
+		if rg.ID == 0 && rg.Preempt {
+			return fmt.Errorf("chassis cluster: redundancy-group 0 preempt is unsupported; " +
+				"it can bypass the cold-boot peer wait — remove `preempt` from redundancy-group 0")
+		}
 		nodeIDs := make([]int, 0, len(rg.NodePriorities))
 		for nodeID := range rg.NodePriorities {
 			nodeIDs = append(nodeIDs, nodeID)

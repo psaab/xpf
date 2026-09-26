@@ -192,7 +192,6 @@ func TestTolerantPathKeepsLegitimateZeroIdentities_10002(t *testing.T) {
 	cfg, err := CompileConfigLenient(flatTreeFromSets(t,
 		"set chassis cluster redundancy-group 0 node 0 priority 200",
 		"set chassis cluster redundancy-group 00 node 1 priority 100",
-		"set chassis cluster redundancy-group 00 preempt",
 	))
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
@@ -204,10 +203,43 @@ func TestTolerantPathKeepsLegitimateZeroIdentities_10002(t *testing.T) {
 	if got := rgs[0].NodePriorities; len(got) != 2 || got[0] != 200 || got[1] != 100 {
 		t.Fatalf("legitimate zero identities lost priorities: %v", got)
 	}
-	if !rgs[0].Preempt {
-		t.Fatal("legitimate zero spelling lost preempt")
+}
+
+// FAIL-ON-REVERT: without the compiled RG0 preempt gate, this strict config
+// passes and CheckText's commit-check path would accept the day-0 config too.
+func TestStrictPathRejectsRG0Preempt_10754(t *testing.T) {
+	_, err := CompileConfig(flatTreeFromSets(t,
+		"set chassis cluster authentication-key test-cluster-psk-10754",
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster redundancy-group 0 node 0 priority 200",
+		"set chassis cluster redundancy-group 0 node 1 priority 100",
+		"set chassis cluster redundancy-group 0 preempt",
+	))
+	if err == nil || !strings.Contains(err.Error(), "redundancy-group 0 preempt") {
+		t.Fatalf("strict compile must reject RG0 preempt with a specific error, got %v", err)
 	}
 }
+
+// Existing persisted configs remain bootable, but RG0 preempt must not reach
+// cluster election; supported RG1 preempt remains active.
+func TestTolerantPathIgnoresRG0Preempt_10754(t *testing.T) {
+	cfg, err := CompileConfigLenient(flatTreeFromSets(t,
+		"set chassis cluster redundancy-group 00 preempt",
+		"set chassis cluster redundancy-group 1 preempt",
+	))
+	if err != nil {
+		t.Fatalf("tolerant compile must keep legacy config bootable: %v", err)
+	}
+	if findRG(t, cfg, 0).Preempt {
+		t.Fatal("RG0 preempt must be ignored on the tolerant path")
+	}
+	if !findRG(t, cfg, 1).Preempt {
+		t.Fatal("supported RG1 preempt was not preserved")
+	}
+	assertWarns(t, cfg.Warnings, "redundancy-group 0 preempt", "ignored on tolerant path")
+}
+
 // TestTolerantPathDropsQuotedEmptyNodeIdentity_10002 covers the explicit empty
 // token shape (`node "" priority <v>`), which nodeVal intentionally represents
 // as "". A real node-0 sentinel must survive both flat-set and packed forms,

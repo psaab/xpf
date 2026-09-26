@@ -2479,17 +2479,16 @@ Step 2 is what makes this work: with that node's `xpfd` down there is
 nobody for the promoted peer's reconciliation to push to, so the deletion
 survives the promotion.
 
-Two details worth stating rather than leaving to be discovered. The
-restarted node comes back as SECONDARY only in the normal non-preempt
-case — with RG0 preemption enabled a returning higher-priority node can
-reclaim primary (`election.go`), so expect a failback. It does not matter
-for this procedure, because sync is absent on both sides by then, but it
-does change what you will see. And the promoted peer may attempt
-reconciliation before it has detected the disconnect; that is harmless
-here, because config transmission writes directly to the active
-connection rather than queueing for replay, the stopped node cannot apply
-it, and during teardown it still considers itself RG0 primary and rejects
-incoming config.
+Two details worth stating rather than leaving to be discovered. RG0 `preempt`
+is unsupported: strict commits and `xpfd check-config` reject it, while
+tolerant load / peer-sync warns and ignores it. On supported RGs 1+, a
+returning higher-priority node can reclaim primary, so expect a failback.
+This does not matter for this procedure because sync is absent on both sides
+by then. The promoted peer may still attempt reconciliation before detecting
+the disconnect; that is harmless because config transmission writes directly
+to the active connection rather than queueing for replay. The stopped node
+cannot apply it, and during teardown it still considers itself RG0 primary
+and rejects incoming config.
 
 **Do NOT sever the link instead.** An earlier version of this section
 suggested cutting "the session-sync/fabric segment" before promoting.
