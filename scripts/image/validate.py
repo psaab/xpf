@@ -1243,6 +1243,8 @@ class Harness:
             fail("sshd effective config does not refuse root password auth")
         if not guest_sh(a, '/usr/sbin/sshd -T | grep -qx "permitemptypasswords no"'):
             fail("sshd effective config does not pin PermitEmptyPasswords no")
+        if not guest_sh(a, '/usr/sbin/sshd -T | grep -qx "passwordauthentication no"'):
+            fail("sshd effective config does not pin PasswordAuthentication no")
         self.assert_ab_kernel_channel(a)
         self.assert_ab_slot_boot(a, "xpf-A")
         if not guest_absent(a, "/etc/xpf/xpf.conf"):

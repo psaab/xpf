@@ -541,12 +541,14 @@ is a clean no-op.
 - No default password over the network, ever. The root password is
   empty: login works on the hypervisor console only. The image pins
   this explicitly — `/etc/ssh/sshd_config.d/10-xpf-factory.conf` sets
-  `PermitRootLogin prohibit-password` + `PermitEmptyPasswords no`
-  (not relying on distro defaults), and the validation harness
-  asserts the effective `sshd -T` output.
-- Headless/SSH access comes from the day-0 config (`system
-  root-authentication`, `system login user ...`) — set credentials
-  there, or use the console once and `commit` a config.
+  `PermitRootLogin prohibit-password`, `PermitEmptyPasswords no`, and
+  `PasswordAuthentication no` (not relying on distro defaults), and the
+  validation harness asserts the effective `sshd -T` output.
+- Headless SSH access requires a public key in day-0 config:
+  `system root-authentication ssh-ed25519` or
+  `system login user <name> authentication ssh-ed25519`. Encrypted passwords
+  support console login only because password authentication is disabled for
+  SSH.
 - The image ships no ssh host keys, no machine-id, no SNMPv3 EngineID and
   no random-seed, and no logs; each is regenerated per-instance at first
   boot, so no per-device identity is shared across clones. This is
