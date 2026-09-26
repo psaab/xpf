@@ -28,6 +28,10 @@
 //     goroutine (removing the cross-probe EnterConfigure race) with bounded
 //     backoff retry on a held config lock (configstore.ErrConfigLocked) and
 //     drop/retry/commit counters, instead of silently dropping on lock-held.
+//   - #10874 HA publication gate: an RG0 secondary keeps accepted event-options
+//     remediation actions pending until promotion reopens publication. A
+//     read-only rejection is deferred, not consumed; this is necessary because
+//     RPM emits failure events on status edges, not on every failed cycle.
 //   - #3750 revalidate-before-commit: a pre-classified action carries the
 //     policy's semantic revision AS OF EVALUATE TIME. Immediately before it
 //     commits — under e.mu and while holding the config lock (EnterConfigure),
@@ -346,6 +350,10 @@ type Engine struct {
 	retryInitial  time.Duration
 	retryMax      time.Duration
 	retryDeadline time.Duration
+	// publishEnabled is the HA publication gate. A standby keeps accepted
+	// remediations pending until RG0 promotion opens the gate.
+	publishEnabled atomic.Bool
+	publishWake    chan struct{}
 }
 
 func (e *Engine) lockRetryInitial() time.Duration {
@@ -379,7 +387,7 @@ func (e *Engine) lockRetryDeadline() time.Duration {
 // goroutine. Call Close() from the daemon shutdown path to stop it.
 func New(store *configstore.Store, commitFn CommitFn) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Engine{
+	e := &Engine{
 		store:         store,
 		commitFn:      commitFn,
 		runtime:       make(map[string]*policyRuntime),
@@ -390,9 +398,12 @@ func New(store *configstore.Store, commitFn CommitFn) *Engine {
 		invalidWarnAt: make(map[string]int64),
 		actions:       make(chan plannedAction, actionQueueDepth),
 		stopCh:        make(chan struct{}),
+		publishWake:   make(chan struct{}, 1),
 		lifeCtx:       ctx,
 		lifeCancel:    cancel,
 	}
+	e.publishEnabled.Store(true)
+	return e
 }
 
 func (e *Engine) now() time.Time {
@@ -791,14 +802,30 @@ func (e *Engine) actionWorker() {
 // cooldown (#2140 SMR finding 3 — arm on commit, not at evaluate, so a
 // dropped/rejected action never consumes the cooldown).
 func (e *Engine) runAction(a plannedAction) {
-	if !e.globalBudgetAvailable() {
-		e.dropGlobalBudget(a)
-		return
-	}
-	deadline := e.now().Add(e.lockRetryDeadline())
+	deadline := time.Time{}
+	budgetChecked := false
 	backoff := e.lockRetryInitial()
 	maxBackoff := e.lockRetryMax()
 	for {
+		if !e.waitForPublishEnabled() {
+			e.counters.droppedShutdown.Add(1)
+			slog.Info("event-options: remediation abandoned on shutdown (HA publication gate)",
+				"policy", a.policyName)
+			return
+		}
+		if !budgetChecked {
+			if !e.globalBudgetAvailable() {
+				e.dropGlobalBudget(a)
+				return
+			}
+			budgetChecked = true
+		}
+		if deadline.IsZero() {
+			// Read-only HA deferral is unbounded and must not consume the
+			// separate deadline for a transient operator-held config lock.
+			deadline = e.now().Add(e.lockRetryDeadline())
+			backoff = e.lockRetryInitial()
+		}
 		err := e.applyOnce(e.commitContext(), a)
 		if err == nil {
 			e.counters.committed.Add(1)
@@ -840,6 +867,29 @@ func (e *Engine) runAction(a plannedAction) {
 				"policy", a.policyName, "err", err)
 			return
 		}
+		if errors.Is(err, configstore.ErrClusterReadOnly) {
+			// A standby may remain read-only longer than the normal config-lock
+			// retry deadline. Start a fresh bounded lock-retry window after
+			// publication resumes.
+			deadline = time.Time{}
+			backoff = e.lockRetryInitial()
+			budgetChecked = false
+			// A read-only secondary is not a permanent remediation failure.
+			// Keep this accepted action in flight until RG0 promotion reopens
+			// the publication gate; a still-FAILING probe emits no new edge.
+			if e.store.ClusterReadOnly() {
+				e.SetPublishEnabled(false)
+				if e.store.ClusterReadOnly() {
+					slog.Info("event-options: remediation deferred on read-only secondary",
+						"policy", a.policyName)
+					continue
+				}
+				// Promotion may have raced the gate close. Reopen on the
+				// current writable state rather than stranding the action.
+				e.SetPublishEnabled(true)
+			}
+			continue
+		}
 		if errors.Is(err, errGlobalActionBudget) {
 			e.dropGlobalBudget(a)
 			return
@@ -877,8 +927,7 @@ func (e *Engine) runAction(a plannedAction) {
 			}
 			continue
 		}
-		// Permanent failure (bad apply / CommitCheck reject / read-only
-		// secondary): do not retry.
+		// Permanent failure (bad apply / CommitCheck reject): do not retry.
 		e.counters.rejected.Add(1)
 		slog.Warn("event-options: remediation rejected",
 			"policy", a.policyName, "err", err)
@@ -889,8 +938,8 @@ func (e *Engine) runAction(a plannedAction) {
 // applyOnce is the transactional batch (#2139): enter configure (the candidate
 // IS the rollback), apply every planned op, validate the WHOLE candidate with
 // CommitCheck, then commit. ANY failure discards the candidate (ExitConfigure)
-// — never a half-applied config. Returns ErrConfigLocked unwrapped (caller
-// retries) or another error (caller treats as permanent).
+// — never a half-applied config. Returns ErrConfigLocked for bounded retry and
+// ErrClusterReadOnly for HA deferral until the publication gate reopens.
 // commitContext returns the engine-lifetime context threaded into the
 // remediation commit (#2868). An Engine built via New always has lifeCtx set;
 // the nil guard covers a zero-value Engine (defensive — no test constructs one)
@@ -947,9 +996,8 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		return errBatch("no config store: cannot apply event-options remediation")
 	}
 	if err := e.store.EnterConfigure(); err != nil {
-		// Lock-held is the retryable case; bubble it up verbatim so the
-		// caller can errors.Is it. Any other EnterConfigure error (read-only
-		// secondary) is permanent.
+		// ErrConfigLocked is retried; ErrClusterReadOnly is deferred until the
+		// daemon reopens the publication gate on RG0 promotion.
 		return err
 	}
 	// From here, any early return MUST ExitConfigure to discard the candidate.
@@ -989,13 +1037,13 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 					continue
 				}
 				e.store.ExitConfigure()
-				return errBatch("delete target failed: %v", err)
+				return errBatch("delete target failed: %w", err)
 			}
 			continue
 		}
 		if err := e.store.SetFromInputAsPlantClass("", a.plantClass, op.setInput); err != nil {
 			e.store.ExitConfigure()
-			return errBatch("set target failed: %v", err)
+			return errBatch("set target failed: %w", err)
 		}
 	}
 
@@ -1003,7 +1051,7 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 	// cleanly instead of relying on Commit's failure path.
 	if _, err := e.store.CommitCheck(); err != nil {
 		e.store.ExitConfigure()
-		return errBatch("commit-check: %v", err)
+		return errBatch("commit-check: %w", err)
 	}
 	// Reserve the cross-policy budget only when this action is ready to commit.
 	// Queue-time admission would let a held worker accumulate expired budget
@@ -1023,7 +1071,7 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		// daemon path.
 		if _, err := e.store.CommitWithDescriptionAs("system:event-engine", desc); err != nil {
 			e.store.ExitConfigure()
-			return errBatch("commit: %v", err)
+			return errBatch("commit: %w", err)
 		}
 		e.store.ExitConfigure()
 		return nil
@@ -1045,18 +1093,18 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		if compiled != nil {
 			return &commitDebtError{err: err}
 		}
-		return errBatch("commit: %v", err)
+		return errBatch("commit: %w", err)
 	}
 	return nil
 }
 
 // remediationDescription builds the deterministic audit string stamped on an
 // autonomous event-options remediation commit (#3754). It names the policy,
-// the triggering event/owner/test, and the command-batch size so an operator
-// reading commit/rollback history can tell which policy mutated the config and
-// why.
+// the triggering event/owner/test, the command-batch size, and the deliberate
+// node-local/non-peer-synced scope so operators can identify HA divergence in
+// commit history.
 func remediationDescription(a plannedAction) string {
-	return fmt.Sprintf("event-options policy %s: %s/%s/%s (%d commands)",
+	return fmt.Sprintf("event-options policy %s: %s/%s/%s (%d commands) [local-only; not peer-synced]",
 		a.policyName, a.event, a.testOwner, a.testName, len(a.ops))
 }
 

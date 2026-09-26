@@ -114,14 +114,17 @@ A `delete` of a missing path is a **tolerated exception** (logged at Debug):
 Junos `change-configuration` semantics, and a missing delete target is not a
 half-applied batch.
 
-**Audit description (#3754):** the remediation commit carries a deterministic
-description — `event-options policy <name>: <event>/<owner>/<test> (<n>
-commands)` — built by `remediationDescription` from the triggering-event
-context captured on the `plannedAction` at evaluate time. It is threaded into
-both the `CommitFn` (daemon `commitAndApply` → `CommitWithDescription`) and the
-standalone `store.CommitWithDescription` branch, so an autonomous config
-mutation lands in commit/rollback history ATTRIBUTED to the policy and event
-that made it — not as an anonymous unattributed commit. Regression-locked by
+**Audit description (#3754/#10874):** the remediation commit carries a
+deterministic description — `event-options policy <name>:
+<event>/<owner>/<test> (<n> commands) [local-only; not peer-synced]` — built by
+`remediationDescription` from the triggering-event context captured on the
+`plannedAction` at evaluate time. It is threaded into both the `CommitFn` (daemon
+`commitAndApply` → `CommitWithDescription`) and the standalone
+`store.CommitWithDescription` branch, so an autonomous config mutation lands in
+commit/rollback history attributed to the policy and event that made it and
+explicitly notes its deliberate node-local scope. Event-options changes are
+intentionally not synchronized to the HA peer (#5962).
+Regression-locked by
 `TestRemediation_CommitCarriesAuditDescription` (fail-on-revert: reverting to
 `commitFn(ctx, "")` leaves the comment empty and the test goes RED).
 
@@ -358,6 +361,31 @@ cannot occur.
   removed (a survivor is dropped).
 - A non-lock error (bad apply / CommitCheck reject) is a permanent failure: no
   retry, bumps `xpf_event_actions_rejected_total`.
+
+## HA event-remediation publication (#10874)
+
+The event engine's publication gate follows RG0 config writability. The daemon
+closes it on RG0 demotion and opens it after the config store becomes writable
+on promotion. An action already accepted by the worker stays pending while the
+gate is closed; `ErrClusterReadOnly` is deferred rather than counted as a
+permanent rejection. Closing the gate before demotion also avoids repeatedly
+entering configure mode on the standby. Shutdown still abandons and counts an
+in-flight deferred action.
+
+Preserving the action matters because RPM emits `ping_test_failed` on a
+pass-to-fail edge, not on every failed cycle. A failure edge consumed on the
+standby does not recur merely because that node becomes primary. Relying on a
+new probe failure instead would cost approximately `successive-loss threshold ×
+test-interval`: with the current defaults (3 successive losses and a 60 s test
+interval), that is about 180 s, a material delay for then-commands intended to
+remediate a failure. The deferred action resumes as soon as promotion opens the
+gate, without waiting for another probe threshold.
+
+Event-options changes remain deliberately node-local and use `peerSyncNever`
+(#5962); this fix does not push them to the peer. Commit history now marks each
+such remediation `[local-only; not peer-synced]` so the expected divergence is
+visible rather than mistaken for a replicated commit. The marker documents the
+sync policy; it does not change it.
 
 ## Cancellable remediation commit (#2868)
 

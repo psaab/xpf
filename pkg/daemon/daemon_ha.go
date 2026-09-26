@@ -924,6 +924,9 @@ func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState) {
 	case cluster.StatePrimary:
 		slog.Info("cluster: became primary for RG0, enabling config writes")
 		d.store.SetClusterReadOnly(false)
+		if d.eventEngine != nil {
+			d.eventEngine.SetPublishEnabled(true)
+		}
 
 		// #5863: becoming the RG0 config authority is a desired-state change.
 		// A peer that connected while this node was secondary had its config
@@ -948,6 +951,9 @@ func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState) {
 		}
 
 	case cluster.StateSecondary, cluster.StateSecondaryHold:
+		if d.eventEngine != nil {
+			d.eventEngine.SetPublishEnabled(false)
+		}
 		slog.Info("cluster: became secondary for RG0, disabling config writes")
 		// #4378: confirm any pending commit-confirmed before going read-only
 		// so its rollback timer does not fire on the demoted standby and
