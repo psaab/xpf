@@ -224,6 +224,12 @@ func (c *CLI) showFlowSession(args []string) error {
 
 	// In cluster mode, print node header before local sessions.
 	clusterMode := c.cluster != nil
+	// Cluster node IDs are 0 and 1; derive the peer label locally so it stays
+	// valid when heartbeat liveness is down or flapping.
+	peerNodeID := -1
+	if clusterMode {
+		peerNodeID = 1 - c.cluster.NodeID()
+	}
 	if clusterMode && !f.summary {
 		fmt.Printf("node%d:\n", c.cluster.NodeID())
 		fmt.Println("--------------------------------------------------------------------------")
@@ -576,10 +582,20 @@ func (c *CLI) showFlowSession(args []string) error {
 		flushSessionBriefWriter(briefWriter)
 	}
 
+	var peerSummary *pb.GetSessionSummaryResponse
+	var peerSummaryErr error
+	if f.summary && clusterMode {
+		peerSummary, peerSummaryErr = c.fetchPeerSessionSummary()
+	}
+
 	if f.summary {
 		// In cluster mode, print dual-node Junos-style output.
-		if c.cluster != nil {
-			fmt.Printf("node%d:\n", c.cluster.NodeID())
+		if clusterMode {
+			fmt.Printf("node%d", c.cluster.NodeID())
+			if peerSummaryErr != nil {
+				fmt.Printf(" (LOCAL-ONLY)")
+			}
+			fmt.Println(":")
 			fmt.Println("--------------------------------------------------------------------------")
 		}
 		// Junos-style session summary format
@@ -647,19 +663,35 @@ func (c *CLI) showFlowSession(args []string) error {
 			}
 		}
 
-		// Fetch and display peer node summary in cluster mode.
-		if c.cluster != nil && c.cluster.PeerAlive() {
-			if peerResp := c.fetchPeerSessionSummary(); peerResp != nil {
-				fmt.Print(renderPeerSessionSummary(peerResp))
+		// A peer block is required in cluster mode even when heartbeat state
+		// says the peer is down: heartbeat liveness does not guarantee that the
+		// fabric RPC is reachable, and can flap independently of this fetch.
+		if clusterMode {
+			if peerSummaryErr != nil {
+				printPeerSessionUnreachable(peerNodeID, peerSummaryErr)
+			} else {
+				fmt.Print(renderPeerSessionSummary(peerSummary))
 			}
 		}
 		return nil
 	}
-	fmt.Printf("Total sessions: %d\n", count)
+	var peerResp *pb.GetSessionsResponse
+	var peerErr error
+	if clusterMode {
+		peerResp, peerErr = c.fetchPeerSessions(f)
+	}
+	if peerErr != nil {
+		fmt.Printf("Total sessions (LOCAL-ONLY): %d\n", count)
+	} else {
+		fmt.Printf("Total sessions: %d\n", count)
+	}
+	if clusterMode && peerErr != nil {
+		printPeerSessionUnreachable(peerNodeID, peerErr)
+	}
 
 	// Fetch and display peer node sessions in cluster mode.
-	if clusterMode && c.cluster.PeerAlive() {
-		if peerResp := c.fetchPeerSessions(f); peerResp != nil {
+	if clusterMode {
+		if peerResp != nil {
 			// Sort peer sessions by SessionID for deterministic order.
 			sort.Slice(peerResp.Sessions, func(i, j int) bool {
 				return peerResp.Sessions[i].SessionId < peerResp.Sessions[j].SessionId
@@ -1298,15 +1330,10 @@ func (c *CLI) showFlowMonitoringStatistics() error {
 // renderPeerSessionSummary renders the cluster-peer half of
 // `show security flow session summary`.
 //
-// EXTRACTED so it can be tested (#6565 row 3 / #7422). `c.cluster` is a
-// concrete `*cluster.Manager` and the peer block is gated on
-// `c.cluster != nil && c.cluster.PeerAlive()`, so a CLI-level fixture cannot
-// reach it without a live cluster — which is exactly why the #5323 regression
-// test could not catch this row. That test greps its output for "10000000",
-// but its fixture leaves `cluster` nil, so the peer branch never runs and the
-// assertion is physically unable to see the literal it was written to catch.
-// A guard that cannot reach its subject is not a guard; pulling the render out
-// is what makes the fail-on-revert cell real.
+// EXTRACTED so it can be tested (#6565 row 3 / #7422). Cluster mode attempts the
+// peer RPC even when heartbeat state is down (#10836); keeping rendering
+// independent lets tests pin the peer's own summary values without a live
+// cluster connection.
 func renderPeerSessionSummary(peerResp *pb.GetSessionSummaryResponse) string {
 	var b strings.Builder
 	fmt.Fprintln(&b)
@@ -1338,6 +1365,10 @@ func renderPeerSessionSummary(peerResp *pb.GetSessionSummaryResponse) string {
 		fmt.Fprintf(&b, "Maximum-sessions: unknown\n")
 	}
 	return b.String()
+}
+
+func printPeerSessionUnreachable(peerNodeID int, err error) {
+	fmt.Printf("\nnode%d: unreachable (%v)\n", peerNodeID, err)
 }
 
 // flowServerNotInstalledSuffix returns the `[NOT INSTALLED: <reason>]` suffix

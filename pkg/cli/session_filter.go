@@ -691,10 +691,10 @@ func buildPeerShowRequest(f sessionFilter) *pb.GetSessionsRequest {
 	return req
 }
 
-func (c *CLI) fetchPeerSessions(f sessionFilter) *pb.GetSessionsResponse {
+func (c *CLI) fetchPeerSessions(f sessionFilter) (*pb.GetSessionsResponse, error) {
 	conn := c.dialPeer()
 	if conn == nil {
-		return nil
+		return nil, fmt.Errorf("cluster peer not reachable")
 	}
 	defer conn.Close()
 
@@ -707,7 +707,10 @@ func (c *CLI) fetchPeerSessions(f sessionFilter) *pb.GetSessionsResponse {
 	resp, err := client.GetSessions(ctx, req)
 	if err != nil {
 		slog.Warn("failed to fetch peer sessions", "err", err)
-		return nil
+		return nil, fmt.Errorf("fetch peer sessions: %w", err)
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("peer returned no session response")
 	}
 	// #6851/#4626: the on-box CLI dials the peer DIRECTLY (dialPeer above), so
 	// it never passes through the grpcapi fan-out that sanitizes reserved
@@ -722,7 +725,7 @@ func (c *CLI) fetchPeerSessions(f sessionFilter) *pb.GetSessionsResponse {
 	// CLI's own single ingress for peer sessions, so a future render site
 	// cannot reintroduce the bypass by forgetting to call the helper.
 	sanitizePeerSessionPolicyNames(resp)
-	return resp
+	return resp, nil
 }
 
 // sanitizePeerSessionPolicyNames rewrites the policy name of every peer session
@@ -777,10 +780,10 @@ func peerSessionsTotal(resp *pb.GetSessionsResponse) int32 {
 }
 
 // fetchPeerSessionSummary dials the cluster peer's gRPC and returns its session summary.
-func (c *CLI) fetchPeerSessionSummary() *pb.GetSessionSummaryResponse {
+func (c *CLI) fetchPeerSessionSummary() (*pb.GetSessionSummaryResponse, error) {
 	conn := c.dialPeer()
 	if conn == nil {
-		return nil
+		return nil, fmt.Errorf("cluster peer not reachable")
 	}
 	defer conn.Close()
 
@@ -790,7 +793,10 @@ func (c *CLI) fetchPeerSessionSummary() *pb.GetSessionSummaryResponse {
 	resp, err := client.GetSessionSummary(ctx, &pb.GetSessionSummaryRequest{})
 	if err != nil {
 		slog.Warn("failed to fetch peer session summary", "err", err)
-		return nil
+		return nil, fmt.Errorf("fetch peer session summary: %w", err)
 	}
-	return resp
+	if resp == nil {
+		return nil, fmt.Errorf("peer returned no session summary")
+	}
+	return resp, nil
 }
