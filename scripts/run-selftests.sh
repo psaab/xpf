@@ -10,10 +10,11 @@
 # breaking the grow-root stamp discipline (#2047) merged green.
 #
 # This runner DISCOVERS and runs every hermetic self-test with one command
-# (`make selftest`). It is fast (<a few seconds) and needs no root, no incus, no
-# cluster, no network. A leg whose external tool is missing SKIPs (exit 77 from
-# a shell leg, or unittest skips) instead of failing, so the runner is green on
-# a minimal host and only goes RED on a genuine regression.
+# (`make selftest`). It is fast (<a few seconds), needs no incus, no cluster,
+# and no network. The #6923 BPF probe uses `sudo -n` whenever passwordless
+# sudo exists, and SKIPs otherwise. A leg whose external tool is missing SKIPs
+# (exit 77 from a shell leg, or unittest skips) instead of failing, so the
+# runner is green on a minimal host and only goes RED on a genuine regression.
 #
 # Scope: the pure/hermetic self-tests only. The incus/QEMU image boot matrix
 # (scripts/image/validate.py) and the loss-cluster smoke targets need a
@@ -341,12 +342,17 @@ run_shell test/routing/selftest-routing-kernel_9812.sh
 # The leg's own probes, hermetically: missing go/unshare/ip/bash/netns must
 # SKIP (77), never false-FAIL under the forcing env. Six cells, fixtures only.
 run_shell test/routing/selftest-routing-probes_9812.sh
+# #10771: prove the BPF leg's privilege contract with fake tools: without
+# passwordless sudo it SKIPs; when available, the compiled probe is invoked as
+# `sudo -n`. The fixture never creates a BPF map or uses host sudo.
+run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh --selftest
 # #6923: the chokepoint argument for the v6 conntrack publish path rests on
 # `refresh_bpf_conntrack_last_seen` being unable to CREATE a key, because it
 # updates with BPF_EXIST. "The flag is named EXIST" and "the kernel refuses
 # creation under this flag" are different claims; this asks the kernel, with a
 # BPF_ANY positive control so an ENOENT cannot come from a broken fixture.
-# SKIPs without cc, passwordless sudo, or CAP_BPF.
+# The probe runs via `sudo -n` when available. SKIPs without cc, passwordless
+# sudo, or CAP_BPF; it never prompts for a password.
 run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh
 # #6936: FBF two-upstream steering verdicts. Hermetic — no incus, no cluster,
 # no network. Guards a negative cell that used to fail to a HEALTHY value:
