@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/exec"
 	"sort"
@@ -90,6 +91,18 @@ func newDNSReconciler() *dnsReconciler {
 	}
 }
 
+// validLeaseDNSServer reports whether a DHCP-learned DNS server address may
+// be installed as the host's own resolver (#10857). Only global-unicast
+// addresses are usable there: multicast (ff02::1), loopback (::1),
+// link-local (fe80::1 — zoneless and unusable from the host context) and
+// unspecified addresses are dropped. netip's IsGlobalUnicast still returns
+// true for IPv4 private space and IPv6 ULA, so LAN resolvers (192.168.x.x,
+// fd00::/8) keep working. Static `system name-server` entries are NOT gated
+// here — loopback-for-local-resolver stays a product decision on that path.
+func validLeaseDNSServer(ip netip.Addr) bool {
+	return ip.IsValid() && ip.IsGlobalUnicast()
+}
+
 // mergeDNSInput builds the renderer input from static config plus the
 // DHCP leases the manager currently holds. Precedence: static
 // `system name-server` first, then DHCPv4, then DHCPv6, de-duplicated
@@ -164,9 +177,12 @@ func mergeDNSInput(cfg *config.Config, leases []*dhcp.Lease) system.ResolvedDrop
 		// name-server here and fail-closed skip a value that is not a bare IP
 		// address (an embedded space would inject a second resolver token).
 		// This mirrors the domain-name / domain-search belt below (#4902).
-		// The DHCP-learned servers appended after this loop are already
-		// net.IP.String() output, so only the operator-supplied static list
-		// needs re-validation.
+		// The DHCP-learned servers appended after this loop are
+		// netip.Addr.String() output (no render injection), but they still
+		// need CLASS validation at the append site below (#10857): a rogue
+		// server can supply multicast, loopback, link-local or unspecified
+		// resolvers without any bad leased address — a DNS-only hijack of
+		// host resolution, retained across transient renew failures.
 		for _, ns := range cfg.System.NameServers {
 			if err := config.ValidateIPAddress(ns, nil); err != nil {
 				slog.Warn("skipping invalid name-server", "server", ns, "err", err)
@@ -205,6 +221,11 @@ func mergeDNSInput(cfg *config.Config, leases []*dhcp.Lease) system.ResolvedDrop
 				continue
 			}
 			for _, ip := range l.DNS {
+				if !validLeaseDNSServer(ip) {
+					slog.Warn("skipping non-global-unicast DHCP name-server",
+						"interface", l.Interface, "server", ip.String())
+					continue
+				}
 				add(ip.String())
 			}
 		}

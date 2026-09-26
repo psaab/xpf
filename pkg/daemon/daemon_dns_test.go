@@ -227,6 +227,25 @@ func TestMergeDNSInputPrecedenceAndDedup(t *testing.T) {
 	}
 }
 
+func TestMergeDNSInputFiltersNonGlobalUnicastLeaseDNS10857(t *testing.T) {
+	lease := &dhcp.Lease{
+		Interface: "ge-0-0-1",
+		Family:    dhcp.AFInet6,
+		DNS: []netip.Addr{
+			netip.MustParseAddr("ff02::1"),
+			netip.MustParseAddr("::1"),
+			netip.MustParseAddr("fe80::1"),
+			netip.MustParseAddr("2001:4860:4860::8888"),
+		},
+	}
+
+	in := mergeDNSInput(nil, []*dhcp.Lease{lease})
+	want := []string{"2001:4860:4860::8888"}
+	if len(in.NameServers) != len(want) || in.NameServers[0] != want[0] {
+		t.Fatalf("lease name-servers = %v, want only global-unicast %v", in.NameServers, want)
+	}
+}
+
 func TestMergeDNSInputNilConfigEmptyLeases(t *testing.T) {
 	in := mergeDNSInput(nil, nil)
 	if !in.Empty() {
