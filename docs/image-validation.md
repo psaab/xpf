@@ -266,10 +266,17 @@ mirror `xpf-uefi-slots`' own shell regexes on purpose: a gate that disagreed
 with the script about what "registered" means would certify a state the script
 would not accept.
 
-Both verdicts are pure functions over captured command output
-(`_efibootmgr_slot_verdict`, `_oneshot_clean_verdict`), unit-tested without a
-hypervisor in `scripts/image/test_validate_ab_slots_6494.py` (run by `make
-selftest`), in the same idiom as `_qemu_img_verdict`.
+Registration and reachability alone still do not prove that the slot boot path
+works: factory boot normally starts through Ubuntu, and firmware can fall
+through from a broken xpf entry. Scenario A therefore sets `BootNext` to xpf-A,
+reads it back, restarts the guest, and requires `efibootmgr`'s `BootCurrent` to
+identify the xpf-A entry after Linux returns. A fallback boot fails even when
+both slots are registered and reachable.
+
+The pure verdicts (`_efibootmgr_slot_verdict`,
+`_efibootmgr_bootcurrent_slot_verdict`, `_oneshot_clean_verdict`) are unit-tested
+without a hypervisor in `scripts/image/test_validate_ab_slots_6494.py` (run by
+`make selftest`), in the same idiom as `_qemu_img_verdict`.
 
 ### The rest of the first-boot substrate (#6498)
 

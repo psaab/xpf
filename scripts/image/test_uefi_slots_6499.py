@@ -23,18 +23,19 @@ hypotheticals:
     would emit `--bootorder <A>,<B>`, WIPING every other entry: PXE, recovery,
     the firmware's own (r1 AGY destructive-wipe).
 
-Method: the REAL script, run by a REAL /bin/sh, with PATH shadowed by a mock
-`efibootmgr` that models NVRAM as two state files and a mock `findmnt` — the
-`test-grow-root.sh` pattern, moved to Python so `run-selftests.sh:139` picks it
-up by glob (the shell self-test list at :146-160 is hand-enumerated; #7296).
+Method: the REAL script, run by a REAL /bin/sh, with PATH shadowed by mocks:
+`efibootmgr` models NVRAM as two state files, and `findmnt`/`lsblk` provide the
+mounted source and its PKNAME/PARTN. The `test-grow-root.sh` pattern, moved to
+Python so `run-selftests.sh:139` picks it up by glob (the shell self-test list
+at :146-160 is hand-enumerated; #7296).
 
 Non-tautological by construction: every assertion reads the mock's NVRAM state
 or its recorded argv AFTER the real script ran. Nothing here re-implements the
 script's logic.
 
-`[ -b "$ESP_DISK" ]` is NOT relaxed by a test hook — the mock `findmnt` names a
-partition of a REAL host block device, so the script's own device sanity check
-is exercised rather than bypassed.
+`[ -b "$ESP_DEV_ROOT/$ESP_DISK_NAME" ]` is NOT relaxed: the test symlinks the
+resolved device name into a temporary device root, targeting a REAL host block
+device, so the script's block-device sanity check is exercised.
 """
 
 from __future__ import annotations
@@ -116,6 +117,16 @@ render)
     ;;
 esac
 exit 0
+
+"""
+
+MOCK_LSBLK = """#!/bin/sh
+# Only `lsblk -no PKNAME|PARTN <source>` is used by the registrar.
+case "$2" in
+    PKNAME) printf '%s\\n' "${MOCK_PKNAME:-}" ;;
+    PARTN) printf '%s\\n' "${MOCK_PARTN:-}" ;;
+    *) exit 1 ;;
+esac
 """
 
 MOCK_FINDMNT = """#!/bin/sh
@@ -125,12 +136,11 @@ printf '%s\\n' "${MOCK_ESP_SRC:-}"
 
 
 def _real_block_device():
-    """A REAL host block device, so `[ -b "$ESP_DISK" ]` is exercised for real.
+    """Return a plausible partition source and a REAL host block device.
 
-    Returns (esp_src, esp_disk). The partition suffix mirrors the kernel's own
-    naming — `p1` when the device name ends in a digit (nvme0n1p1, loop0p1),
-    plain `1` otherwise (sda1) — which is exactly the shape the script's
-    `s/p?[0-9]+$//` parse handles.
+    findmnt and lsblk are mocked, so the source need not exist. The host disk
+    is symlinked into the test's device root, preserving the registrar's real
+    `-b` sanity check while allowing arbitrary PKNAME fixtures.
     """
     try:
         names = sorted(os.listdir("/dev"))
@@ -158,9 +168,15 @@ class _SlotsBase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="xpf-uefi-slots-test."))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
 
+        self.devroot = self.tmp / "dev"
+        self.devroot.mkdir()
+        (self.devroot / Path(self.esp_disk).name).symlink_to(self.esp_disk)
+
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        for name, body in (("efibootmgr", MOCK_EFIBOOTMGR), ("findmnt", MOCK_FINDMNT)):
+        for name, body in (("efibootmgr", MOCK_EFIBOOTMGR),
+                           ("findmnt", MOCK_FINDMNT),
+                           ("lsblk", MOCK_LSBLK)):
             f = self.bin / name
             f.write_text(body)
             f.chmod(0o755)
@@ -213,6 +229,9 @@ class _SlotsBase(unittest.TestCase):
             "PATH": f"{self.bin}:{env.get('PATH', '')}",
             "MOCK_NVRAM": str(self.nvram),
             "MOCK_ESP_SRC": self.esp_src,
+            "MOCK_PKNAME": Path(self.esp_disk).name,
+            "MOCK_PARTN": "1",
+            "XPF_UEFI_SLOTS_DEV_ROOT": str(self.devroot),
             "XPF_UEFI_SLOTS_EFIVARS": str(self.efivars),
             "XPF_UEFI_SLOTS_ESP": str(self.esp),
         })
@@ -233,6 +252,25 @@ class FreshBoxTests(_SlotsBase):
         got = {l: ldr for _, l, ldr in self.entries()}
         self.assertEqual(got.get("xpf-A"), "\\EFI\\xpf-A\\shimx64.efi")
         self.assertEqual(got.get("xpf-B"), "\\EFI\\xpf-B\\shimx64.efi")
+
+    def test_disk_name_ending_in_p_is_not_truncated(self):
+        # The old sed parse turned /dev/sdap1 into /dev/sda when /dev/sda
+        # happened to exist. The mocked lsblk result is authoritative, and the
+        # device-root symlink keeps the real `-b` validation in the path.
+        alias = self.devroot / "sdap"
+        if not alias.exists():
+            alias.symlink_to(self.esp_disk)
+        self.env_extra.update({
+            "MOCK_ESP_SRC": "/dev/sdap1",
+            "MOCK_PKNAME": "sdap",
+            "MOCK_PARTN": "1",
+        })
+        self.seed([UBUNTU], "0000")
+        self.run_slots()
+        creates = [c for c in self.calls() if "--create" in c]
+        self.assertEqual(len(creates), 2)
+        for call in creates:
+            self.assertIn("--disk /dev/sdap --part 1", call)
 
     def test_fresh_box_seeds_a_first_then_b_and_keeps_the_other_entries(self):
         # efibootmgr --create PREPENDS, so creating A then B would leave B in
@@ -413,10 +451,14 @@ class NonFatalDegradeTests(_SlotsBase):
         res = self.run_slots()
         self.assertIn("no ESP mounted", res.stderr)
 
-    def test_unparseable_esp_source_skips(self):
-        # A source with no trailing partition number, or whose disk half is
-        # not a block device, must not reach efibootmgr --create with garbage.
-        self.env_extra["MOCK_ESP_SRC"] = "/dev/does-not-exist9"
+    def test_unresolved_esp_parent_skips(self):
+        # If lsblk cannot resolve the source to a partition with a parent disk,
+        # no efibootmgr --create may be attempted.
+        self.env_extra.update({
+            "MOCK_ESP_SRC": "/dev/does-not-exist9",
+            "MOCK_PKNAME": "",
+            "MOCK_PARTN": "",
+        })
         res = self.run_slots()
         self.assertIn("could not parse ESP disk/part", res.stderr)
         self.assertEqual([c for c in self.calls() if "--create" in c], [])

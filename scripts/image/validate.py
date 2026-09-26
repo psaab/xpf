@@ -7,10 +7,11 @@ never the shared loss cluster) and proves the first-boot contract:
   a  no config drive  -> factory bootstrap: boots UNDER SECURE BOOT (the
      production posture, asserted not inherited — #6497), xpfd active,
      fxp0 DHCP, sshd listening, in-guest `xpfd verify-dataplane` PASSES
-     against the image's own kernel (the bake gate), AND the #1930 LANE-1
-     A/B kernel channel actually came up in the guest (#6494): both slots
-     registered with their own signed shim and reachable in BootOrder, and
-     both first-boot oneshots ran clean.
+    against the image's own kernel (the bake gate), AND the #1930 LANE-1
+    A/B kernel channel actually came up in the guest (#6494): both slots
+    registered with their own signed shim and reachable in BootOrder, both
+    first-boot oneshots ran clean, AND a BootNext reboot observes BootCurrent
+    identifying an xpf slot entry.
   b  valid day-0 drive -> config validated + installed + committed at first
      boot (hostname applied); a reboot does NOT re-apply (stamp).
   c  invalid day-0 drive -> commit-check REJECT logged, nothing installed,
@@ -18,9 +19,9 @@ never the shared loss cluster) and proves the first-boot contract:
      swaps in a VALID drive and reboots and the config now applies (the
      fix->reboot->applied retry contract, #4209 H-9 / pairs with H-1).
   d  resized disk (#1925) -> first-boot root auto-grow fills a LARGER root
-     disk (partition + ext4), stamps, is idempotent on reboot, and leaves the
-     ESP/boot substrate intact; a control boot at the bake size is a clean
-     no-op.
+     disk (partition + ext4), stamps, is idempotent on reboot, preserves the
+     partition count against the bake-size control and leaves the ESP mounted;
+     the control boot at bake size is a clean no-op.
   e  cluster node-id drive (#4209 H-9) -> a node-id=1 day-0 drive persists
      /etc/xpf/node-id=1, boots into cluster mode, and (with >=3 NICs) the
      daemon assigns the node-1 vSRX names em0 + ge-7/0/N (FPC 7).
@@ -272,6 +273,44 @@ _AB_SLOTS = ("xpf-A", "xpf-B")
 _EFIBOOT_ENTRY_RE = re.compile(
     r"^Boot([0-9A-Fa-f]{4})\*?[ \t]+(?P<label>\S+)[ \t]+(?P<rest>.*)$")
 _BOOTORDER_RE = re.compile(r"^BootOrder:\s*(?P<order>\S*)\s*$", re.MULTILINE)
+_BOOTCURRENT_RE = re.compile(
+    r"^BootCurrent:[ \t]*(?P<id>[0-9A-Fa-f]{4})[ \t]*$", re.MULTILINE)
+_BOOTNEXT_RE = re.compile(
+    r"^BootNext:[ \t]*(?P<id>[0-9A-Fa-f]{4})[ \t]*$", re.MULTILINE)
+
+
+def _efibootmgr_slot_id(out, slot):
+    """Return the unique Boot#### ID for a slot with its expected shim."""
+    if slot not in _AB_SLOTS:
+        return None
+    ids = []
+    entries = 0
+    want = re.compile(r"EFI.%s.shimx64\.efi" % re.escape(slot), re.IGNORECASE)
+    for line in (out or "").splitlines():
+        m = _EFIBOOT_ENTRY_RE.match(line.rstrip())
+        if m and m.group("label") == slot:
+            entries += 1
+            if want.search(m.group("rest")):
+                ids.append(m.group(1))
+    return ids[0] if entries == 1 and len(ids) == 1 else None
+
+
+def _efibootmgr_bootcurrent_slot_verdict(out, slot):
+    """Does efibootmgr report that this boot came through `slot`'s shim?"""
+    if slot not in _AB_SLOTS:
+        return False, f"{slot!r} is not an A/B slot"
+    current = _BOOTCURRENT_RE.search(out or "")
+    if current is None:
+        return False, ("efibootmgr reported no valid BootCurrent — cannot "
+                       "prove the firmware booted through an xpf slot")
+    slot_id = _efibootmgr_slot_id(out, slot)
+    if slot_id is None:
+        return False, (f"{slot}: no unique entry with the expected signed shim "
+                       "loader, so BootCurrent cannot identify an xpf slot boot")
+    if current.group("id").upper() != slot_id.upper():
+        return False, (f"BootCurrent is {current.group('id')}, not {slot_id} "
+                       f"({slot}) — firmware did not boot through this xpf slot")
+    return True, f"BootCurrent={slot_id} identifies the {slot} UEFI boot entry"
 
 
 def _efibootmgr_slot_verdict(out, slots=_AB_SLOTS):
@@ -1205,6 +1244,7 @@ class Harness:
         if not guest_sh(a, '/usr/sbin/sshd -T | grep -qx "permitemptypasswords no"'):
             fail("sshd effective config does not pin PermitEmptyPasswords no")
         self.assert_ab_kernel_channel(a)
+        self.assert_ab_slot_boot(a, "xpf-A")
         if not guest_absent(a, "/etc/xpf/xpf.conf"):
             fail("unexpected /etc/xpf/xpf.conf")
         if not guest_absent(a, "/etc/xpf/.day0-config-applied"):
@@ -1396,6 +1436,50 @@ class Harness:
                  "unverified on a later boot")
         info("  promotion gate ran clean on this ordinary boot")
 
+    def assert_ab_slot_boot(self, inst, slot="xpf-A"):
+        """Boot once through an xpf UEFI entry and assert BootCurrent names it.
+
+        The factory BootOrder normally starts at ubuntu, so registration and
+        reachability alone do not prove that shim/grub/$cmdpath can boot a
+        slot. Arm a one-shot BootNext, restart the VM, and inspect firmware's
+        BootCurrent after Linux is back up.
+        """
+        got = guest(inst, "efibootmgr", check=False, capture=True)
+        if got.returncode != 0:
+            fail("cannot read efibootmgr before slot-boot probe: "
+                 f"{(got.stderr or '').strip()}")
+        slot_id = _efibootmgr_slot_id(got.stdout, slot)
+        if slot_id is None:
+            fail(f"cannot force {slot} boot: no unique registered entry with "
+                 "its expected shim loader")
+
+        armed = guest(inst, "efibootmgr", "--bootnext", slot_id,
+                      check=False, capture=True)
+        if armed.returncode != 0:
+            fail(f"could not set BootNext={slot_id} for {slot}: "
+                 f"{(armed.stderr or '').strip()}")
+        state = guest(inst, "efibootmgr", check=False, capture=True)
+        next_id = _BOOTNEXT_RE.search(state.stdout or "")
+        if state.returncode != 0 or next_id is None or \
+                next_id.group("id").upper() != slot_id.upper():
+            fail(f"efibootmgr did not read back BootNext={slot_id} for {slot}: "
+                 f"{(state.stdout or '').strip()}")
+
+        info(f"restarting {inst} with BootNext={slot_id} ({slot})...")
+        incus("restart", inst)
+        self.wait_agent(inst)
+        self.wait_xpfd(inst)
+
+        current = guest(inst, "efibootmgr", check=False, capture=True)
+        if current.returncode != 0:
+            fail("cannot read efibootmgr after slot boot: "
+                 f"{(current.stderr or '').strip()}")
+        ok, reason = _efibootmgr_bootcurrent_slot_verdict(current.stdout, slot)
+        if not ok:
+            fail(f"#1930 {slot} boot FAILED: {reason}\n"
+                 f"--- efibootmgr ---\n{current.stdout}")
+        info(f"#1930 slot boot OK: {reason}")
+
     def scenario_b(self):
         info("── Scenario B: first boot WITH valid day-0 config drive ──")
         b = self.iname("b")   # run-namespaced instance name (#4905-D)
@@ -1513,6 +1597,21 @@ class Harness:
                     f"lsblk -bno SIZE {src} | head -n1", capture=True).stdout.strip()
         return int(out) / (1024.0 ** 3)
 
+    def _root_partition_count(self, name):
+        """Count partitions on the disk that backs the guest's root filesystem."""
+        src = guest(name, "sh", "-c", "findmnt -no SOURCE /",
+                    capture=True).stdout.strip()
+        if not src:
+            fail(f"{name}: could not resolve the root source for partition count")
+        disk = guest(name, "lsblk", "-no", "PKNAME", src,
+                     capture=True).stdout.strip()
+        if not disk:
+            fail(f"{name}: could not resolve the root disk for partition count "
+                 f"(root source {src})")
+        types = guest(name, "lsblk", "-ln", "-o", "TYPE", f"/dev/{disk}",
+                      capture=True).stdout
+        return sum(line.strip() == "part" for line in types.splitlines())
+
     def scenario_d(self):
         info("── Scenario D: first-boot root auto-grow on a resized disk (#1925) ──")
         d = self.iname("d")     # run-namespaced instance names (#4905-D)
@@ -1550,10 +1649,11 @@ class Harness:
         if guest(d, "nice", "-n", "19", "/usr/local/sbin/xpfd",
                  "verify-dataplane", check=False).returncode != 0:
             fail("verify-dataplane REJECTED after root grow")
-        # Boot/ESP partitions intact: exactly the root partition grew, the
-        # partition count is unchanged, and the ESP is still mounted.
+        # Confirm the ESP remains mounted, and record the partition count. The
+        # bake-size control below provides the unchanged-layout baseline.
         if not guest_sh(d, 'mountpoint -q /boot/efi'):
             fail("ESP (/boot/efi) not mounted after grow — boot substrate disturbed")
+        partition_count = self._root_partition_count(d)
 
         # ── Idempotency: reboot must NOT re-grow / re-stamp. ──
         info("D1 idempotency: rebooting — second boot must skip the grow...")
@@ -1567,6 +1667,10 @@ class Harness:
         part2 = self._root_part_gib(d)
         if abs(part2 - part) > 0.1:
             fail(f"root partition changed across reboot ({part:.1f} -> {part2:.1f}GiB)")
+        partition_count2 = self._root_partition_count(d)
+        if partition_count2 != partition_count:
+            fail("partition count changed across reboot "
+                 f"({partition_count} -> {partition_count2})")
         info("D1 PASS (grew once, idempotent on reboot, boot substrate intact)")
         self.drop(d)
 
@@ -1587,7 +1691,11 @@ class Harness:
         if guest(d2, "nice", "-n", "19", "/usr/local/sbin/xpfd",
                  "verify-dataplane", check=False).returncode != 0:
             fail("verify-dataplane REJECTED on the control boot")
-        info("D2 PASS (clean boot, grow was a no-op at bake size)")
+        control_partition_count = self._root_partition_count(d2)
+        if control_partition_count != partition_count:
+            fail("resized disk partition count differs from bake-size control "
+                 f"({partition_count} -> {control_partition_count})")
+        info("D2 PASS (clean no-op boot; partition count matches resized case)")
         self.drop(d2)
         info("Scenario D PASS")
 

@@ -24,6 +24,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
@@ -107,6 +109,32 @@ class OvmfDiscoveryTests(unittest.TestCase):
             self.assertIsNone(validate._find_first(["/x", "/y"]))
         finally:
             validate.os.path.isfile = orig
+
+
+class ScenarioDPartitionCountTests(unittest.TestCase):
+    def test_root_partition_count_counts_only_partition_rows_on_parent_disk(self):
+        with patch.object(validate, "guest", side_effect=[
+                SimpleNamespace(stdout="/dev/sdap2\n"),
+                SimpleNamespace(stdout="sdap\n"),
+                SimpleNamespace(stdout="disk\npart\npart\n"),
+        ]) as run:
+            count = validate.Harness._root_partition_count(object(), "instance")
+        self.assertEqual(count, 2)
+        self.assertEqual(run.call_args_list[1].args,
+                         ("instance", "lsblk", "-no", "PKNAME", "/dev/sdap2"))
+        self.assertEqual(run.call_args_list[2].args,
+                         ("instance", "lsblk", "-ln", "-o", "TYPE", "/dev/sdap"))
+
+    def test_scenario_d_checks_grown_restart_and_control_partition_counts(self):
+        src = (_HERE / "validate.py").read_text()
+        body = src.split("def scenario_d(self):", 1)[1].split(
+            "def scenario_e(self):", 1)[0]
+        self.assertIn("partition_count = self._root_partition_count(d)", body)
+        self.assertIn("partition_count2 = self._root_partition_count(d)", body)
+        self.assertIn("control_partition_count = self._root_partition_count(d2)", body)
+        self.assertIn("part2 = self._root_part_gib(d)", body)
+        self.assertIn("abs(part2 - part) > 0.1", body)
+        self.assertIn("control_partition_count != partition_count", body)
 
 
 # ── scenario registry wiring (single source of truth for CLI + dispatch) ──
