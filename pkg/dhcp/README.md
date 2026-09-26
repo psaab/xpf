@@ -122,6 +122,14 @@ the debounced `onAddressChange` callback when content changed.
   `LeaseTime == 0 → 3600s` default in `parseV6Reply` is NOT this path — it
   only applies to a degenerate no-IA config; the explicit-0 invalidation
   is handled before it.
+- **DHCPv6 default-router discovery (#10763)**: because DHCPv6 carries no
+  default-router option and managed interfaces disable kernel RA
+  acceptance, the client sends Router Solicitations and reads the
+  answering RAs directly. Only link-local RA sources with a positive
+  Router Lifetime are eligible; among them the highest RFC 4191 router
+  preference wins. A router-flagged neighbor entry alone is not enough to
+  install a default gateway.
+
 - **Successful T1 renew / T2 rebind is committed**, and the run loop
   returns to the T1 wait with timers recomputed from the renewed
   lease. Pre-#1777 the renewal result was dead-assigned and the loop
