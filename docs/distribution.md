@@ -188,13 +188,15 @@ rotation is not a fleet lockout. Image-pubkey rotation: publish the new
 `publish.py gate_apt` cross-checks that these three key sources AGREE by
 fingerprint (#4203) — previously each was only checked for placeholder-ness
 independently, so a stale `install.sh` embedding an old-but-real, retired key
-published cleanly and bricked every new Tier-A install at `apt-get update`. The
-gate captures the InRelease signer's primary fingerprint and requires: the
-signer is covered by the packaged keyring; and, when `install.sh` is in the
-publish set, its embedded key is a SUBSET of the packaged keyring (a keyring
-superset is allowed during dual-sign) and the signer is covered by the embedded
-key (so a fresh install's first `apt-get update`, which runs against the
-embedded key before the packaged keyring lands, verifies the published repo).
+published cleanly and bricked every new Tier-A install at `apt-get update`.
+It verifies `InRelease` with the repo archive pubkey, then extracts
+`/usr/share/keyrings/xpf-archive-keyring.asc` from each pooled `.deb`; that
+payload keyring, not the repo-side file, is the key-agreement input (#10737).
+The gate captures the InRelease signer's primary fingerprint and requires the
+signer to be covered by each packaged keyring; when `install.sh` is in the
+publish set, its embedded key must be a SUBSET of each packaged keyring (a
+superset is allowed during dual-sign) and cover the signer (so a fresh install's
+first `apt-get update`, before the packaged keyring lands, verifies the repo).
 Any mismatch fails the publish. `selftest.sh` (§5d) exercises the gate.
 
 ## Operator runbook
@@ -362,7 +364,8 @@ Generates a throwaway keypair, signs, verifies, proves tamper-detection (4
 ways), builds a flat signed apt repo + verifies `InRelease` (and that a
 tampered `InRelease` fails), asserts per-suite channel isolation (§5c, a stable
 rebuild after edge does not list edge), exercises the publish key-agreement gate
-(§5d, rejects a non-signer `install.sh` key and a signer absent from the
-keyring), checks that the kernel-promote `OnFailure=` recovery unit ships in the
-`.deb` (§5e), and dry-runs `install.sh`. Exits non-zero if any positive check
-fails or any tamper/negative check passes.
+(§5d, rejects a non-signer `install.sh`, a signer absent from the packaged
+keyring, and a stale-but-real pooled `.deb` keyring even while repo-side
+verification uses the current key), checks that the kernel-promote `OnFailure=`
+recovery unit ships in the `.deb` (§5e), and dry-runs `install.sh`. Exits
+non-zero if any positive check fails or any tamper/negative check passes.
