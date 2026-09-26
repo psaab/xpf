@@ -2,9 +2,12 @@ package grpcapi
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -68,36 +71,62 @@ func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
 	}
 }
 
-// Control: with archival DISABLED the wipe must be handed "", not a stale or
-// defaulted path. Without this, an implementation that always passed some
-// non-empty directory would satisfy the cell above while erasing a path the
-// operator never configured.
-func TestZeroizePassesEmptyWhenArchivalDisabled7173(t *testing.T) {
+// An empty store archive dir does not prove that the default archive is empty:
+// snapshots survive archival disable, and applyConfig may not have run yet.
+// Exercise the real archive eraser through the gRPC zeroize path so this cell
+// fails if the default path is skipped again.
+func TestZeroizeErasesDefaultArchiveWhenArchiveDirUnset10739(t *testing.T) {
 	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
+	origArchive := configstore.DefaultArchiveDir
 	t.Cleanup(func() {
 		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
+		configstore.DefaultArchiveDir = origArchive
 	})
 
-	var gotArchive string
+	// Keep this integration at the affected archive boundary: use the actual
+	// ownership-guarded eraser while avoiding the unrelated system wipe legs.
 	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory) error {
-		gotArchive = archiveDir
-		return nil
+		return configstore.FactoryResetArchiveDir(archiveDir)
 	}
 	scheduleStopDaemon = func() {}
 
-	dir := t.TempDir()
-	store := newConfigStore(t, filepath.Join(dir, "site.conf"))
-	store.SetArchiveConfig("", 0) // archival off
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+	}{
+		{name: "apply not run"},
+		{name: "archival disabled", disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			archiveDir := filepath.Join(dir, "archive")
+			configstore.DefaultArchiveDir = archiveDir
 
-	s := &Server{store: store}
-	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
-		t.Fatalf("SystemAction(zeroize): %v", err)
-	}
-	if gotArchive != "" {
-		t.Errorf("with archival disabled the wipe must be handed \"\", got %q — erasing a "+
-			"directory the operator did not configure is not this operation's business",
-			gotArchive)
+			store := newConfigStore(t, filepath.Join(dir, "site.conf"))
+			if tc.disabled {
+				store.SetArchiveConfig("", 0)
+			}
+			if got := store.ArchiveDir(); got != "" {
+				t.Fatalf("test setup has archive dir %q, want empty", got)
+			}
+
+			snapshot := filepath.Join(archiveDir, "config-20260925.1.conf")
+			if err := os.MkdirAll(archiveDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(snapshot, []byte("system { authentication-key SECRET; }\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			s := &Server{store: store}
+			if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
+				t.Fatalf("SystemAction(zeroize): %v", err)
+			}
+			if _, err := os.Stat(snapshot); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("default archive snapshot still exists after zeroize (stat err: %v)", err)
+			}
+		})
 	}
 }

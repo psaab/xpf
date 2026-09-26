@@ -145,14 +145,16 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// #7173: the CONFIGURED archive dir, from the store this server owns.
-	// Hardcoding the default here meant a box with a custom
-	// `system archival archive-dir` had that archive — and the cleartext PSKs
-	// in it — survive a zeroize that reported success. "" means archival is
-	// disabled and there is nothing to erase.
-	archiveDir := ""
+	// #7173: use the store's configured archive dir when set. Custom paths are
+	// passed through so FactoryResetArchiveDir can refuse paths xpf does not
+	// own. The default archive remains xpf-owned even when archival is disabled
+	// (existing snapshots are not pruned on disable) or before applyConfig has
+	// initialized the store, so an empty configured dir must fall back to it.
+	archiveDir := configstore.DefaultArchiveDir
 	if s.store != nil {
-		archiveDir = s.store.ArchiveDir()
+		if configuredArchiveDir := s.store.ArchiveDir(); configuredArchiveDir != "" {
+			archiveDir = configuredArchiveDir
+		}
 	}
 	// Snapshot configured firewall-log names immediately before the shared wipe
 	// runs. This closure executes inside ZeroizeFn's apply gate, so a commit
