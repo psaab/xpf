@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
@@ -30,7 +29,26 @@ type DB struct {
 	// §6.4 / D1). Empty => "unknown". Set via SetWriterVersion from the
 	// daemon's ldflags version before the first write.
 	writerVersion string
+
+	// confirmRecoveryClockSkewCheck is supplied by the daemon before Load.
+	// It samples the loaded active config while confirm.json recovery holds the
+	// Store lock; implementations must not call back into Store.
+	confirmRecoveryClockSkewCheck func(*config.Config) bool
 }
+
+var (
+	// confirmWallNow and confirmBootID are the wall-clock and OS-incarnation
+	// sources persisted with a commit-confirmed arm. Tests replace them to
+	// model downtime clock steps without changing the host clock.
+	confirmWallNow = time.Now
+	confirmBootID  = func() string {
+		data, err := ReadBoundedFile("/proc/sys/kernel/random/boot_id", 64)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(data))
+	}
+)
 
 // SetWriterVersion sets the build version stamped into the config-DB
 // compatibility envelope on write (#1917). Call once at startup before
@@ -279,7 +297,12 @@ func (db *DB) DeleteRollback(n int) error {
 type confirmRecord struct {
 	// Deadline is the absolute wall-clock time the confirm window expires.
 	Deadline time.Time `json:"deadline"`
-	// PrevTree is the rollback target — the config that was active BEFORE the
+	// ArmedAt and ArmedBootID identify the wall-clock/OS incarnation at arm
+	// time. They let recovery diagnose a deadline that crossed a reboot or a
+	// wall-clock step; neither value is used as a substitute for a monotonic
+	// deadline, which cannot survive reboot.
+	ArmedAt     time.Time `json:"armed_at,omitempty"`
+	ArmedBootID string    `json:"armed_boot_id,omitempty"`
 	// still-unconfirmed commit-confirmed. For a NESTED confirmed commit it
 	// stays the ORIGINAL last-confirmed config (mirrors confirmPrevTree).
 	PrevTree *config.ConfigTree `json:"prev_tree"`
@@ -362,7 +385,6 @@ func stripConfirmEnvelope(data []byte) ([]byte, error) {
 	}
 	return data[nl+1:], nil
 }
-
 
 // confirmPath returns the path to the pending commit-confirmed state file.
 func (db *DB) confirmPath() string {

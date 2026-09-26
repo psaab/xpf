@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #4577: the commit-confirmed rollback deadline used to be an IN-MEMORY
@@ -145,6 +147,91 @@ func TestConfirmRecovery_WithinWindowReArmsOnLoad_4577(t *testing.T) {
 	}
 	if r, err := s.db.ReadConfirm(); err != nil || r != nil {
 		t.Fatalf("confirm.json must be removed after the re-armed timer fires: rec=%v err=%v", r, err)
+	}
+}
+
+// A reboot-time wall-clock step can make a still-live deadline look farther
+// away. When chrony reports an active clock-skew alarm, recovery must roll back
+// instead of trusting that shifted deadline and re-arming it (#10875).
+func TestConfirmRecovery_ClockSkewAlarmRollsBackAfterWallStep_10875(t *testing.T) {
+	originalNow, originalBootID := confirmWallNow, confirmBootID
+	if systemBootID := originalBootID(); systemBootID == "" {
+		t.Fatal("the kernel boot-id source did not yield an identifier")
+	}
+	armWall := time.Date(2030, 4, 5, 6, 7, 8, 0, time.UTC)
+	now := armWall
+	bootID := "boot-before"
+	confirmWallNow = func() time.Time { return now }
+	confirmBootID = func() string { return bootID }
+	t.Cleanup(func() {
+		confirmWallNow = originalNow
+		confirmBootID = originalBootID
+	})
+
+	for _, alarmActive := range []bool{true, false} {
+		name := "alarm-clear"
+		if alarmActive {
+			name = "alarm-active"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config")
+			now = armWall
+			bootID = "boot-before"
+			armed := armedConfirmStore(t, path, 10)
+			t.Cleanup(func() {
+				if armed.confirmTimer != nil {
+					armed.confirmTimer.Stop()
+				}
+			})
+
+			rec, err := armed.db.ReadConfirm()
+			if err != nil || rec == nil {
+				t.Fatalf("ReadConfirm: rec=%v err=%v", rec, err)
+			}
+			if !rec.ArmedAt.Equal(armWall) || rec.ArmedBootID != "boot-before" {
+				t.Fatalf("arm anchor = (%v, %q), want (%v, boot-before)",
+					rec.ArmedAt, rec.ArmedBootID, armWall)
+			}
+
+			// Model a reboot during downtime followed by a backward wall-clock
+			// step. The persisted deadline is still in the future, but its
+			// apparent remaining duration has grown from ten to fifteen minutes.
+			now = armWall.Add(-5 * time.Minute)
+			bootID = "boot-after"
+			recovered := newTestStoreAt(t, path)
+			recovered.SetConfirmRecoveryClockSkewCheck(func(*config.Config) bool {
+				return alarmActive
+			})
+			if err := recovered.Load(); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+
+			if alarmActive {
+				if recovered.IsConfirmPending() {
+					t.Fatal("active clock-skew alarm must not re-arm the shifted confirm deadline")
+				}
+				if got := recovered.ActiveConfig().System.HostName; got != "Base" {
+					t.Fatalf("active config after skew recovery = %q, want rollback target Base", got)
+				}
+				if r, err := recovered.db.ReadConfirm(); err != nil || r != nil {
+					t.Fatalf("confirm.json must be removed after alarm rollback: rec=%v err=%v", r, err)
+				}
+				return
+			}
+
+			if !recovered.IsConfirmPending() {
+				t.Fatal("without a clock-skew alarm, a future deadline must still re-arm")
+			}
+			if got := recovered.ActiveConfig().System.HostName; got != "Confirmed" {
+				t.Fatalf("active config without alarm = %q, want Confirmed", got)
+			}
+			if r, err := recovered.db.ReadConfirm(); err != nil || r == nil {
+				t.Fatalf("confirm.json must remain while the window is re-armed: rec=%v err=%v", r, err)
+			}
+			if recovered.confirmTimer != nil {
+				recovered.confirmTimer.Stop()
+			}
+		})
 	}
 }
 

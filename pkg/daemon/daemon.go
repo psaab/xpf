@@ -1961,6 +1961,7 @@ func New(opts Options) (*Daemon, error) {
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 		applySem:                   semaphore.NewWeighted(1),
 	}
+	store.SetConfirmRecoveryClockSkewCheck(d.confirmRecoveryClockSkewActive)
 	d.d11Ledger = nfqueue.NewD11AttestationLedger()
 	d.d11Armer = nfqueue.NewD11AttestationArmer(d11NodeID, d.d11Ledger, func(runID string, permitEpoch uint64) error {
 		// Serialize D11 publication with runtime swaps, but do not hold

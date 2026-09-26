@@ -440,11 +440,17 @@ func TestCommitConfirmedReservesTombstoneHeadroom_9617(t *testing.T) {
 	// tombstone EXACTLY one byte over the ceiling, so the cell also pins the
 	// stand-in's width: one byte narrower and that tombstone fits, and the
 	// window arms.
+	// Include the widest arm timestamp and full boot ID, matching the record
+	// shape the commit path now preflights.
 	maxDeadline := time.Date(2030, 1, 1, 0, 0, 0, 123456789, time.FixedZone("", -5*60*60))
 	measure := func(resolved bool) int {
 		t.Helper()
-		data, err := s.db.encodeConfirm(&confirmRecord{Deadline: maxDeadline, PrevTree: s.active,
-			GuardedHash: guardedConfigHash(s.active), Resolved: resolved})
+		data, err := s.db.encodeConfirm(&confirmRecord{
+			Deadline: maxDeadline, ArmedAt: maxDeadline,
+			ArmedBootID: "00000000-0000-0000-0000-000000000000",
+			PrevTree:    s.active,
+			GuardedHash: guardedConfigHash(s.active), Resolved: resolved,
+		})
 		if err != nil {
 			t.Fatalf("measure(resolved=%v): %v", resolved, err)
 		}

@@ -52,16 +52,17 @@ var (
 // before a factory reset erases the archive directory. Never mutated by
 // production code.
 var archiveWriteBarrier = func() {}
+
 type commitConfirmedCrashStage string
 
 const (
-	commitConfirmedStageRecord        commitConfirmedCrashStage = "record"
-	commitConfirmedStageActive        commitConfirmedCrashStage = "active"
-	commitConfirmedStagePromote       commitConfirmedCrashStage = "promote"
-	commitConfirmedStageJournal       commitConfirmedCrashStage = "journal"
-	commitConfirmedStageHistory       commitConfirmedCrashStage = "rollback"
-	commitConfirmedStageArm           commitConfirmedCrashStage = "arm"
-	commitConfirmedStageBind          commitConfirmedCrashStage = "bind"
+	commitConfirmedStageRecord  commitConfirmedCrashStage = "record"
+	commitConfirmedStageActive  commitConfirmedCrashStage = "active"
+	commitConfirmedStagePromote commitConfirmedCrashStage = "promote"
+	commitConfirmedStageJournal commitConfirmedCrashStage = "journal"
+	commitConfirmedStageHistory commitConfirmedCrashStage = "rollback"
+	commitConfirmedStageArm     commitConfirmedCrashStage = "arm"
+	commitConfirmedStageBind    commitConfirmedCrashStage = "bind"
 )
 
 // commitConfirmedCrashHook is a package-local fault seam used to emulate a
@@ -74,7 +75,6 @@ func runCommitConfirmedCrashHook(stage commitConfirmedCrashStage) {
 		commitConfirmedCrashHook(stage)
 	}
 }
-
 
 // maxCommitDescriptionBytes bounds the operator-supplied commit description
 // (the `commit comment` text) that is recorded verbatim in the in-memory
@@ -548,7 +548,9 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	// no record to recover. Preflight the largest record shape first, then
 	// write the provisional record with the candidate's guarded hash.
 	duration := time.Duration(minutes) * time.Minute
-	provisionalDeadline := time.Now().Add(duration)
+	provisionalArmedAt := confirmWallNow()
+	provisionalDeadline := provisionalArmedAt.Add(duration)
+	armBootID := confirmBootID()
 	prevTree, prevFirst := s.active, !everCommittedOnEntry
 	if s.confirmTimer != nil {
 		prevTree, prevFirst = s.confirmPrevTree, s.confirmPrevFirst
@@ -597,6 +599,8 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	if s.db != nil {
 		if _, err := s.db.encodeConfirm(&confirmRecord{
 			Deadline:         widestConfirmDeadline,
+			ArmedAt:          widestConfirmDeadline,
+			ArmedBootID:      "00000000-0000-0000-0000-000000000000",
 			PrevTree:         prevTree,
 			FirstCommit:      prevFirst,
 			GuardedHash:      guardedConfigHash(s.candidate),
@@ -608,6 +612,8 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		}
 		provisional := &confirmRecord{
 			Deadline:         provisionalDeadline,
+			ArmedAt:          provisionalArmedAt,
+			ArmedBootID:      armBootID,
 			PrevTree:         prevTree,
 			FirstCommit:      prevFirst,
 			GuardedHash:      guardedConfigHash(s.candidate),
@@ -717,8 +723,9 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	// finalization, and the live timer uses the same remaining interval.
 	s.confirmGen++
 	gen := s.confirmGen
-	deadline := time.Now().Add(duration)
-	s.confirmTimer = time.AfterFunc(time.Until(deadline), func() {
+	armedAt := confirmWallNow()
+	deadline := armedAt.Add(duration)
+	s.confirmTimer = time.AfterFunc(deadline.Sub(confirmWallNow()), func() {
 		s.fireConfirmTimer(gen)
 	})
 	s.confirmDeadline = deadline // #9615
@@ -731,6 +738,8 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	// can start at the end of commit work.
 	finalRecord := &confirmRecord{
 		Deadline:    deadline,
+		ArmedAt:     armedAt,
+		ArmedBootID: armBootID,
 		PrevTree:    s.confirmPrevTree,
 		FirstCommit: s.confirmPrevFirst,
 		GuardedHash: guardedConfigHash(s.active),
