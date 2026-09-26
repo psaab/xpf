@@ -1196,6 +1196,15 @@ const keaSubnetIDMax = 0xFFFFFFFE
 // target we build, which is the dead-guard class #6780 exists to prevent.
 const _ = int(keaSubnetIDMax)
 
+// canonicalSubnetKey returns the canonical CIDR identity used by subnet-id
+// hashing. Masking host bits makes respellings of one prefix stable (#10892).
+func canonicalSubnetKey(subnet string) string {
+	if p, err := netip.ParsePrefix(subnet); err == nil {
+		return p.Masked().String()
+	}
+	return subnet
+}
+
 // stableSubnetID derives a DETERMINISTIC Kea subnet-id from the subnet's
 // canonical CIDR identity (#5041). The prior scheme was a positional counter
 // (subnetID := 1; subnetID++) over each node's list of subnets. In an HA
@@ -1206,16 +1215,15 @@ const _ = int(keaSubnetIDMax)
 // (Kea rejected it or bound it to the wrong subnet), defeating the
 // duplicate-allocation protection lease sync exists to provide.
 //
-// Hashing the CIDR string makes the id a pure function of the subnet identity:
-// the same subnet gets the same id on both nodes regardless of the
-// MASTER-filtered subset, group ordering, or failover generation — the #5041
-// invariant. The #2668 property (stable across reloads of an unchanged config)
-// is subsumed. Distinct id spaces per family are irrelevant here: v4 and v6 are
-// separate Kea daemons with independent subnet_id spaces, and a synced lease is
-// seeded into the daemon matching its family, so we hash the CIDR alone.
+// Hashing the canonical prefix returned by canonicalSubnetKey makes the id a
+// pure function of subnet identity: the same subnet gets the same id on both
+// nodes regardless of the MASTER-filtered subset, group ordering, or failover
+// generation — the #5041 invariant. #2668 (stable across reloads of an
+// unchanged config) is subsumed. v4 and v6 have separate Kea subnet_id spaces,
+// so the family does not need to be part of the hash.
 func stableSubnetID(subnet string) int {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(subnet))
+	_, _ = h.Write([]byte(canonicalSubnetKey(subnet)))
 	// Fold uint32 into [1, keaSubnetIDMax].
 	return int(h.Sum32()%keaSubnetIDMax) + 1
 }
@@ -1241,10 +1249,11 @@ func stableSubnetID(subnet string) int {
 // residue.
 func subnetProbeStep(subnet string) uint32 {
 	h := fnv.New32a()
-	// Distinct seed from stableSubnetID (which hashes the raw CIDR bytes): the
-	// salt makes this an INDEPENDENT hash so base and step do not correlate.
+	// Distinct seed from stableSubnetID (which hashes the canonical prefix):
+	// the salt makes this an INDEPENDENT hash so base and step do not
+	// correlate. Both hashes canonicalize identically (#10892).
 	_, _ = h.Write([]byte("xpf-subnet-probe\x00"))
-	_, _ = h.Write([]byte(subnet))
+	_, _ = h.Write([]byte(canonicalSubnetKey(subnet)))
 	step := h.Sum32() % uint32(keaSubnetIDMax) // [0, keaSubnetIDMax-1]
 	step |= 1                                  // odd -> coprime with the 2 factor
 	if step == 0x7FFFFFFF {                    // == 2^31-1, the only odd non-coprime residue
