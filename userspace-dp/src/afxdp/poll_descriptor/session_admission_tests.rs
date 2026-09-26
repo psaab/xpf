@@ -461,11 +461,9 @@ mod tcp_syn_check_tests {
 
     #[test]
     fn rst_for_existing_session_is_unaffected() {
-        // The guard gates ONLY the session-MISS install path. A RST for a flow
-        // that already has a session is a session HIT (normal teardown) and
-        // never consults the guard. Model the established in-place teardown
-        // refresh by installing directly (as the hit path does), NOT through
-        // `install_on_miss`.
+        // The strict SYN gate applies only to session misses. Existing-session
+        // FIN/RST packets retain the teardown path; #10887 separately gates
+        // ACK-less non-SYN, non-closing anomalies before hit lookup.
         let mut table = SessionTable::new();
         let key = tcp_key(40200);
         assert!(install_on_miss(&mut table, key.clone(), TCP_SYN));

@@ -1029,3 +1029,91 @@ fn an_owner_fin_still_closes_gracefully_10636() {
         "on the 30s graceful close window, not the 2s RST one"
     );
 }
+
+/// #10887: established TCP hits require a session-valid control flag before
+/// lookup can refresh/forward. This reaches the real descriptor path, with a
+/// completed three-way handshake before exercising each hit combination.
+#[test]
+fn established_hit_flag_contract_drops_ackless_anomalies_10887() {
+    let fw = forwarding(WAN_ONLY);
+    for (flags, should_drop) in [
+        (TCP_SYN, false),
+        (0, true),
+        (crate::tcp_flags::TCP_PSH, true),
+        (crate::tcp_flags::TCP_URG, true),
+        (TCP_SYN | crate::tcp_flags::TCP_PSH, false),
+        (TCP_ACK, false),
+    ] {
+        let mut sessions = admitted(&fw);
+        let syn_ack = drive(
+            &fw,
+            &mut sessions,
+            tcp(
+                REAL,
+                CLIENT,
+                REAL_PORT,
+                CLIENT_PORT,
+                TCP_SYN | TCP_ACK,
+                LAN_IFINDEX,
+            ),
+        );
+        assert_eq!(syn_ack.session_hit, 1, "the server SYN-ACK must hit");
+        assert_eq!(syn_ack.tx, 1, "the server SYN-ACK must forward");
+        let final_ack = drive(&fw, &mut sessions, client_ack(WAN_IFINDEX));
+        assert_eq!(final_ack.session_hit, 1, "the final ACK must hit");
+        assert_eq!(final_ack.tx, 1, "the final ACK must forward");
+
+        let mut forward_key = None;
+        sessions.iter_with_origin(|key, _decision, metadata, _origin| {
+            if !metadata.is_reverse {
+                forward_key = Some(key.clone());
+            }
+        });
+        let forward_key = forward_key.expect("handshake must leave its forward entry");
+        let last_seen_before = sessions
+            .last_seen_ns(&forward_key)
+            .expect("forward session must be installed");
+
+        let (frame, meta) = tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, flags, WAN_IFINDEX);
+        let mut binding = binding(WAN_IFINDEX);
+        let (batch, dbg) = txn_run_descriptor_at(
+            &mut binding,
+            &mut sessions,
+            &fw,
+            &txn_ha_state(),
+            &frame,
+            meta,
+            last_seen_before + 1_000_000,
+        );
+        assert_eq!(batch.validated_packets, 1);
+        assert_eq!(
+            dbg.tx,
+            if should_drop { 0 } else { 1 },
+            "unexpected established-hit forwarding decision for flags 0x{flags:02x}"
+        );
+        assert_eq!(
+            dbg.session_hit,
+            if should_drop { 0 } else { 1 },
+            "malformed hits must drop before session resolution"
+        );
+        assert_eq!(
+            session_count(&sessions),
+            2,
+            "an anomalous hit must not replace the established pair"
+        );
+        let last_seen_after = sessions
+            .last_seen_ns(&forward_key)
+            .expect("the established session must remain installed");
+        if should_drop {
+            assert_eq!(
+                last_seen_after, last_seen_before,
+                "ACK-less non-SYN anomalies must not refresh established state"
+            );
+        } else {
+            assert!(
+                last_seen_after > last_seen_before,
+                "valid SYN-/ACK-bearing hits must refresh established state"
+            );
+        }
+    }
+}

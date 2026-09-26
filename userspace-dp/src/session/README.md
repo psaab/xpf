@@ -2414,13 +2414,21 @@ session misses such as ACK/PSH may seed a policy-permitted transit session for
 mid-stream pickup after failover or on asymmetric routes. `strict-syn-check`
 is also carried; it forces SYN-first admission and takes precedence if both
 selectors are set. Absent either knob, xpf keeps its fail-closed SYN-first
-default. Existing and HA-synced session hits never reach this gate.
+default. Existing and HA-synced hits do not reach the miss gate; a separate
+pre-lookup hit guard drops TCP packets that carry none of ACK, SYN, FIN, or RST.
+This covers NULL, PSH-only, and other ACK-less non-SYN/non-closing anomalies
+before they refresh `last_seen` or complete a pending handshake. ACK-bearing
+control/data, SYN-bearing packets (including SYN+PSH), and FIN/RST teardown
+packets retain their normal hit behavior. The guard applies independently of
+the opt-in stateless flag screens; `no-syn-check` remains a new-flow/miss
+selector and does not admit ACK-less anomalies on an existing hit.
 
-The drop is counted in aggregate `screen_drops` flow statistics (no per-reason
+Both drops are counted in aggregate `screen_drops` flow statistics (no per-reason
 ordinal and no per-packet event, to avoid a flood becoming a log storm). The
-gate applies only to transit dispositions. Host-inbound `LocalDelivery` still
-declines to cache non-SYN first packets but delivers them to the local kernel
-stack, so a peer teardown for a firewall-originated connection is not lost.
+session-MISS gate applies only to transit dispositions. Host-inbound
+`LocalDelivery` still declines to cache non-SYN first packets but delivers them
+to the local kernel stack, so a peer teardown for a firewall-originated
+connection is not lost.
 Fabric-ingress session misses take the same policy path as local transit; a
 legitimate cross-chassis flow arrives as an existing synced-session hit.
 

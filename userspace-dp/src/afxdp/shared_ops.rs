@@ -896,6 +896,36 @@ fn shared_closing_tcp_entry_for_syn(
     }
 }
 
+/// Reject a malformed TCP packet before session lookup can refresh or mutate a
+/// hit. Established traffic needs ACK; SYN-bearing segments (including SYN+PSH)
+/// and FIN/RST teardown packets retain their normal hit path. This is a
+/// flag-contract guard, not one of the opt-in stateless TCP-flag screens.
+///
+/// Probe only for the ACK-less, non-SYN, non-closing case. The normal session
+/// miss gate handles a miss; a live local or shared hit is dropped here so it
+/// cannot refresh, complete a handshake, or proceed as a miss and replace the
+/// established state.
+pub(super) fn should_drop_tcp_session_hit_for_flags(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> bool {
+    if !matches!(key.protocol, PROTO_TCP)
+        || crate::tcp_flags::has_syn(tcp_flags)
+        || crate::tcp_flags::has_ack(tcp_flags)
+        || crate::tcp_flags::is_closing(tcp_flags)
+    {
+        return false;
+    }
+
+    sessions.has_session_hit_at(key, now_ns)
+        || lock_shared_recover(shared_sessions).contains_key(key)
+        || lock_shared_recover(shared_forward_wire_sessions).contains_key(key)
+}
+
 pub(super) fn lookup_session_across_scopes_with_shared(
     sessions: &mut SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
