@@ -157,7 +157,7 @@ func shimResult9821(ifaces map[string]int, zones ...string) *CompileResult {
 	result := newValidationResult()
 	for name, idx := range ifaces {
 		result.ifCache[name] = &net.Interface{Index: idx, Name: name}
-		result.rxVlanOffCache[name] = true
+		result.rxTagStripOffCache[name] = true
 	}
 	for _, z := range zones {
 		result.ZoneIDs[z] = config.StableZoneID(z)

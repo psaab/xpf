@@ -29,7 +29,14 @@ func mockEthtool(t *testing.T, fn func(args ...string) ([]byte, error)) {
 }
 
 func newRxVlanResult() *CompileResult {
-	return &CompileResult{rxVlanOffCache: make(map[string]bool)}
+	return &CompileResult{rxTagStripOffCache: make(map[string]bool)}
+}
+
+// ensureRxVlanForTest extracts the 802.1Q result from the production combined
+// check; these #5268 cases pin its existing error contract.
+func ensureRxVlanForTest(r *CompileResult, iface string) error {
+	rxvlanErr, _ := r.ensureRxVlanParsePreconditions(iface)
+	return rxvlanErr
 }
 
 func cfgWithVlanSubif() *config.Config {
@@ -78,9 +85,9 @@ func TestEnsureRxVlanOffErrorWhenOnAndDisableFails_5268(t *testing.T) {
 		}
 		return nil, errors.New("unexpected ethtool " + args[0])
 	})
-	err := newRxVlanResult().ensureRxVlanOff("ge-0-0-0")
+	err := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0")
 	if err == nil {
-		t.Fatal("ensureRxVlanOff must return an error when the offload is ON and cannot be disabled")
+		t.Fatal("combined precondition check must return a C-tag error when the 802.1Q offload is ON and cannot be disabled")
 	}
 	if calls != 2 {
 		t.Fatalf("expected -k then -K (2 calls), got %d", calls)
@@ -97,7 +104,7 @@ func TestEnsureRxVlanOffNilWhenAlreadyOffFixed_5268(t *testing.T) {
 		t.Fatalf("must NOT call ethtool %v when already off", args)
 		return nil, nil
 	})
-	if err := newRxVlanResult().ensureRxVlanOff("ge-0-0-0"); err != nil {
+	if err := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0"); err != nil {
 		t.Fatalf("already-off must return nil, got %v", err)
 	}
 }
@@ -113,7 +120,7 @@ func TestEnsureRxVlanOffNilWhenFeatureAbsent_5268(t *testing.T) {
 		t.Fatalf("must NOT call ethtool %v when the feature is absent", args)
 		return nil, nil
 	})
-	if err := newRxVlanResult().ensureRxVlanOff("ge-0-0-0"); err != nil {
+	if err := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0"); err != nil {
 		t.Fatalf("feature-absent must return nil, got %v", err)
 	}
 }
@@ -129,7 +136,7 @@ func TestEnsureRxVlanOffNilWhenQueryFailsButDisableOk_5268(t *testing.T) {
 		}
 		return nil, errors.New("unexpected")
 	})
-	if err := newRxVlanResult().ensureRxVlanOff("ge-0-0-0"); err != nil {
+	if err := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0"); err != nil {
 		t.Fatalf("query-fail + disable-ok must return nil, got %v", err)
 	}
 }
@@ -139,7 +146,7 @@ func TestEnsureRxVlanOffErrorWhenQueryAndDisableFail_5268(t *testing.T) {
 	mockEthtool(t, func(args ...string) ([]byte, error) {
 		return nil, errors.New("ethtool unavailable")
 	})
-	if err := newRxVlanResult().ensureRxVlanOff("ge-0-0-0"); err == nil {
+	if err := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0"); err == nil {
 		t.Fatal("query-fail + disable-fail must return an error")
 	}
 }
@@ -151,8 +158,8 @@ func TestEnsureRxVlanOffCachedShortCircuits_5268(t *testing.T) {
 		return nil, nil
 	})
 	r := newRxVlanResult()
-	r.rxVlanOffCache["ge-0-0-0"] = true
-	if err := r.ensureRxVlanOff("ge-0-0-0"); err != nil {
+	r.rxTagStripOffCache["ge-0-0-0"] = true
+	if err := ensureRxVlanForTest(r, "ge-0-0-0"); err != nil {
 		t.Fatalf("cached-off must return nil, got %v", err)
 	}
 }
@@ -193,9 +200,9 @@ func TestRxVlanFailClosedOnVlanParent_5268(t *testing.T) {
 		}
 		return nil, errors.New("unexpected")
 	})
-	ensureErr := newRxVlanResult().ensureRxVlanOff("ge-0-0-0")
+	ensureErr := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0")
 	if ensureErr == nil {
-		t.Fatal("precondition: ensureRxVlanOff must fail for an ON-and-undisable-able offload")
+		t.Fatal("precondition: combined check must return a C-tag error for an ON-and-undisable-able offload")
 	}
 	if err := rxVlanOffloadActivationError(cfgWithVlanSubif(), "ge-0-0-0", "ge-0-0-0", ensureErr); err == nil {
 		t.Fatal("#5268: a VLAN-subinterface parent whose rxvlan offload cannot be disabled MUST fail activation closed")
@@ -215,9 +222,9 @@ func TestRxVlanTolerantOnPlainParent_5268(t *testing.T) {
 		}
 		return nil, errors.New("unexpected")
 	})
-	ensureErr := newRxVlanResult().ensureRxVlanOff("ge-0-0-0")
+	ensureErr := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0")
 	if ensureErr == nil {
-		t.Fatal("precondition: ensureRxVlanOff must fail here too")
+		t.Fatal("precondition: combined check must return a C-tag error here too")
 	}
 	if err := rxVlanOffloadActivationError(cfgPlainParent(), "ge-0-0-0", "ge-0-0-0", ensureErr); err != nil {
 		t.Fatalf("#5268 negative scope: a plain parent must NOT fail activation on a rxvlan disable failure, got %v", err)
@@ -226,21 +233,22 @@ func TestRxVlanTolerantOnPlainParent_5268(t *testing.T) {
 
 // ---- COMPILE-LEVEL FAIL-ON-REVERT: call-site wiring (#5268 / #6124) --------
 //
-// TestRxVlanFailClosedOnVlanParent_5268 above binds only the DECISION FUNCTION
-// (rxVlanOffloadActivationError called directly). NOTHING there binds the
-// CALL-SITE WIRING at compiler_iface.go:489 that actually turns the decision
-// into a fail-closed compile abort:
+// TestRxVlanFailClosedOnVlanParent_5268 above binds only the C-tag DECISION
+// FUNCTION (rxVlanOffloadActivationError called directly). NOTHING there binds
+// the CALL-SITE WIRING in compiler_iface.go that turns the decision into a
+// fail-closed compile abort:
 //
-//	if err := rxVlanOffloadActivationError(
-//		cfg, cfgName, physName, result.ensureRxVlanOff(physName),
-//	); err != nil {
+//	rxvlanErr, stagErr := result.ensureRxVlanParsePreconditions(physName)
+//	if err := rxVlanOffloadActivationError(cfg, cfgName, physName, rxvlanErr); err != nil {
+//		return err
+//	}
+//	if err := rxVlanStagHwParseActivationError(physName, stagErr); err != nil {
 //		return err
 //	}
 //
-// A revert that drops the `if err != nil { return err }` (back to a bare
-// `result.ensureRxVlanOff(physName)` whose error is discarded) would
-// reintroduce the cross-zone security bypass with every unit test still green.
-// The test below closes that gap by driving the REAL compileZones() path.
+// A revert that drops the C-tag `if err != nil { return err }` would reopen
+// the cross-zone bypass with every decision-function test still green. The
+// test below drives the REAL compileZones() path.
 
 // errCompileStopBeforeReconcile is a sentinel returned by the stub's AddTxPort
 // for the SECOND (guard) interface. compileZones cannot be driven to completion
@@ -318,22 +326,18 @@ func cfgVlanParentInZone() *config.Config {
 }
 
 // TestRxVlanFailClosedWiredIntoCompile_5268 is the COMPILE-LEVEL fail-on-revert
-// that binds the CALL-SITE wiring at compiler_iface.go:489, not merely the
+// that binds the C-tag CALL-SITE wiring in compiler_iface.go, not merely its
 // decision function. It drives the real compileZones() over a VLAN-parent
 // config with a mocked ethtool that reports rx-vlan-offload ON and fails
 // `-K rxvlan off`, then asserts compileZones ABORTS with the specific #5268
 // fail-closed error while processing the VLAN parent.
 //
-// RED-on-revert: if the call site is reverted from
-//
-//	if err := rxVlanOffloadActivationError(...); err != nil { return err }
-//
-// back to a bare `result.ensureRxVlanOff(physName)` (error discarded), the gate
-// no longer short-circuits: execution falls through to the ge-0-0-1 guard whose
-// AddTxPort trips errCompileStopBeforeReconcile, so compileZones returns THAT
-// error instead of the fail-closed one — the signature assertion fails and this
-// test goes RED, while TestRxVlanFailClosedOnVlanParent_5268 (decision function
-// only) stays GREEN. Target-count 1: only this test binds the propagation.
+// RED-on-revert: if the C-tag gate is reverted back to ignoring `rxvlanErr`,
+// execution falls through to the ge-0-0-1 guard whose AddTxPort trips
+// errCompileStopBeforeReconcile, so compileZones returns THAT error instead of
+// the fail-closed one — the signature assertion fails and this test goes RED,
+// while TestRxVlanFailClosedOnVlanParent_5268 (decision function only) stays
+// GREEN. Target-count 1: only this test binds the propagation.
 func TestRxVlanFailClosedWiredIntoCompile_5268(t *testing.T) {
 	mockEthtool(t, func(args ...string) ([]byte, error) {
 		switch args[0] {
@@ -348,7 +352,7 @@ func TestRxVlanFailClosedWiredIntoCompile_5268(t *testing.T) {
 	result := &CompileResult{
 		ZoneIDs:             map[string]uint16{"trust": 1},
 		ScreenIDs:           make(map[string]uint16),
-		rxVlanOffCache:      make(map[string]bool),
+		rxTagStripOffCache:  make(map[string]bool),
 		ifCache:             make(map[string]*net.Interface),
 		ethtoolApplied:      make(map[string]bool),
 		genericXDPIfindexes: make(map[int]bool),
@@ -383,9 +387,9 @@ func TestRxVlanNoErrorOnVlanParentWhenDisableOk_5268(t *testing.T) {
 		}
 		return nil, errors.New("unexpected")
 	})
-	ensureErr := newRxVlanResult().ensureRxVlanOff("ge-0-0-0")
+	ensureErr := ensureRxVlanForTest(newRxVlanResult(), "ge-0-0-0")
 	if ensureErr != nil {
-		t.Fatalf("disable succeeded, ensureRxVlanOff must return nil, got %v", ensureErr)
+		t.Fatalf("disable succeeded, the C-tag precondition must return nil, got %v", ensureErr)
 	}
 	if err := rxVlanOffloadActivationError(cfgWithVlanSubif(), "ge-0-0-0", "ge-0-0-0", ensureErr); err != nil {
 		t.Fatalf("a successful disable must not fail activation, got %v", err)

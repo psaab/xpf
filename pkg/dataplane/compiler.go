@@ -129,10 +129,10 @@ type CompileResult struct {
 	linkCache  map[string]netlink.Link // by name
 	linkIdxMap map[int]netlink.Link    // by ifindex
 
-	// rxVlanOffCache caches per-interface rxvlan state to avoid redundant
-	// ethtool -k subprocess calls. Key is interface name, value is true
-	// when rxvlan is confirmed off.
-	rxVlanOffCache map[string]bool
+	// rxTagStripOffCache caches interfaces where both XDP-invisible VLAN RX
+	// strip offloads are confirmed disabled or absent. The checks are shared
+	// so a cache hit cannot skip either the 802.1Q or S-tag precondition.
+	rxTagStripOffCache map[string]bool
 	// ethtoolApplied tracks which interfaces have already had speed/duplex
 	// settings applied via ethtool -s, keyed by "iface:speed:duplex".
 	ethtoolApplied map[string]bool
@@ -1612,50 +1612,6 @@ func parsePortRange(spec string) (uint16, uint16, error) {
 		return 0, 0, err
 	}
 	return uint16(port), uint16(port), nil
-}
-
-// ensureRxVlanOff disables rx-vlan-offload on iface so the XDP parser sees the
-// 802.1Q tag in packet data (a NIC that strips the tag into skb->vlan_tci,
-// which XDP cannot read, would make every tagged frame parse as vlan_id=0).
-// Results are cached to avoid redundant ethtool subprocess calls. Toggling
-// rxvlan on iavf VFs causes a driver reset that drops in-flight packets, so we
-// check current state before changing.
-//
-// #5268: returns an error when the offload is ACTIVE and could NOT be turned
-// off (or the state cannot be determined and disabling failed). A NIC whose
-// query reports the feature ABSENT, or already `off`/`off [fixed]` (e.g.
-// virtio), never strips tags, so it returns nil without touching `-K`. The
-// caller (compiler_iface.go) uses `rxVlanOffloadActivationError` to fail the
-// compile CLOSED on a returned error ONLY when the parent carries configured
-// VLAN subinterfaces (see the security rationale there) — a plain parent with
-// no 802.1Q units is unaffected.
-func (r *CompileResult) ensureRxVlanOff(iface string) error {
-	if r.rxVlanOffCache[iface] {
-		return nil
-	}
-	// Check current state via ethtool -k. The classification — including why a
-	// NIC that lists no such feature must NOT be probed with `-K`, and why a
-	// failed query counts as "needs disable" rather than "safe" — lives in
-	// ClassifyRxVlanOffload, shared with the post-link-cycle re-disable in
-	// pkg/daemon so the two cannot drift (#9946).
-	switch ClassifyRxVlanOffload(runEthtool("-k", iface)) {
-	case RxVlanOffloadOff, RxVlanOffloadAbsent:
-		// Already off (includes "off [fixed]"), or the NIC has no such offload
-		// at all: no tags stripped either way.
-		r.rxVlanOffCache[iface] = true
-		return nil
-	}
-	// Either the offload is ON, or the query failed (state unknown): attempt to
-	// disable. Success => off; failure => the caller may fail closed.
-	if out, err := runEthtool("-K", iface, "rxvlan", "off"); err != nil {
-		slog.Warn("failed to disable rxvlan offload (HW-stripped tags cannot be parsed by XDP)",
-			"interface", iface, "err", err, "output", strings.TrimSpace(string(out)))
-		return fmt.Errorf("disable rx-vlan-offload on %s: %w (output: %s)",
-			iface, err, strings.TrimSpace(string(out)))
-	}
-	r.rxVlanOffCache[iface] = true
-	slog.Info("disabled VLAN RX offload for XDP", "interface", iface)
-	return nil
 }
 
 // parentHasVlanSubinterface resolves cfgName in cfg and asks

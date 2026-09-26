@@ -138,13 +138,14 @@ func TestRethMemberMACSkipsRenewWithNoDataplane_6871(t *testing.T) {
 // consecutive members" was wrong.
 //
 // programRethMemberMAC renews at the end of the MAC SET. Everything expensive in
-// a member's turn happens AFTER that: the `ethtool -K <if> rxvlan off` with its
-// 20s hard ceiling, the child-netdev loop (one netlink round trip per VLAN
-// sub-interface, cardinality operator-controlled), and — after the LAST member —
-// step 2.6b's VIP/link-local reconcile followed by NotifyLinkCycle's own 1s NIC
-// settle. So the interval between two consecutive renewals actually spanned
-// member N's whole tail plus member N+1's MAC set, and the final tail ran to the
-// release with no renewal in it at all.
+// a member's turn happens AFTER that: the RX-offload query and up to two
+// `ethtool -K` disables (each with a 20s hard ceiling), the child-netdev loop
+// (one netlink round trip per VLAN sub-interface, cardinality
+// operator-controlled), and — after the LAST member — step 2.6b's VIP/link-local
+// reconcile followed by NotifyLinkCycle's own 1s NIC settle. So the interval
+// between two consecutive renewals actually spanned member N's whole tail plus
+// member N+1's MAC set, and the final tail ran to the release with no renewal in
+// it at all.
 //
 // The two cells below bind the renewals that close those spans. Both extracted
 // functions exist to BE bindable, for the same reason programRethMemberMAC does:
@@ -200,17 +201,16 @@ func stubRethTailEthtool(t *testing.T, kOut string, err error) {
 // — so "one command, one renewal" and "want 1" were the same assertion and the
 // cell was written as the latter. #9946 made the re-disable QUERY first (it must
 // distinguish "the NIC refused" from "the NIC has no such feature", which on
-// virtio both surface as a failing `-K`), so the path that needs a disable now
-// runs two commands and renews between them. Widening the TTL instead would have
-// been the same defect with a bigger number, which is the reasoning round 6
-// already applied to this span.
+// virtio both surface as a failing `-K`). #10915 adds the S-tag knob: each
+// feature that needs disabling has its own bounded `-K` command and renewal,
+// so a NIC with both unknown/on must renew before both disables.
 //
 // RED-on-revert, both directions, each verified by actually deleting the call:
 //   - delete `d.renewLinkCycleLease()` at the end of finishRethMemberLinkTail
 //     and EVERY row fails (each expects that final renewal);
-//   - delete the one inside reDisableRxVlanAfterLinkCycle and the two
-//     two-command rows fail, while the one-command rows stay green — which is
-//     what makes the count, rather than a `>= 1`, the thing worth asserting.
+//   - delete the one before each needed `-K` in reDisableRxVlanAfterLinkCycle
+//     and the corresponding two- and three-command rows fail, while one-query
+//     rows stay green — which makes the renewal count worth asserting.
 //
 // The wedged-ethtool row is still the load-bearing one. A wedged ethtool is
 // exactly the scenario the renewal exists for, so a renewal placed on the
@@ -225,22 +225,29 @@ func TestRethMemberLinkTailRenewsTheLease_6871(t *testing.T) {
 		why        string
 	}{{
 		name: "offload_survived_the_cycle", kOut: "rx-vlan-offload: off\n", wantRenews: 1,
-		why: "one command (`ethtool -k`); the offload is already off so no disable runs",
+		why: "one command (`ethtool -k`); both offloads are already off or absent",
 	}, {
-		name: "offload_off_fixed", kOut: "rx-vlan-offload: off [fixed]\n", wantRenews: 1,
-		why: "one command; a NIC that cannot enable the offload never strips a tag",
+		name: "offload_off_fixed", kOut: "rx-vlan-offload: off [fixed]\nrx-vlan-stag-hw-parse: off [fixed]\n", wantRenews: 1,
+		why: "one query; both offloads are already off and no driver-resetting toggle runs",
 	}, {
 		name: "feature_absent", kOut: "rx-checksumming: on\n", wantRenews: 1,
-		why: "one command; the NIC has no such offload, and probing it with `-K` would " +
-			"fail \"not supported\" and be indistinguishable from a refusal",
+		why: "one query; neither offload exists, and probing an absent feature with `-K` " +
+			"would fail \"not supported\" and be indistinguishable from a refusal",
 	}, {
-		name: "cycle_reset_the_offload", kOut: "rx-vlan-offload: on\n", wantRenews: 2,
-		why: "TWO commands (`-k` then `-K`), so the window is split between them — this " +
-			"is the path the link cycle actually produces on an iavf VF",
+		name: "cycle_reset_the_c_tag_offload", kOut: "rx-vlan-offload: on\n", wantRenews: 2,
+		why: "the query and one needed C-tag disable are separate commands",
 	}, {
-		name: "ethtool_failed", ethtoolErr: errors.New("ethtool: operation timed out"), wantRenews: 2,
-		why: "TWO commands: an unreadable NIC is UNKNOWN, not safe, so the disable is " +
-			"still attempted — and a wedged ethtool is the scenario this renewal exists for",
+		name: "cycle_reset_the_s_tag_offload",
+		kOut: "rx-vlan-offload: off\nrx-vlan-stag-hw-parse: on\n", wantRenews: 2,
+		why: "the query and one needed S-tag disable are separate commands",
+	}, {
+		name: "cycle_reset_both_offloads",
+		kOut: "rx-vlan-offload: on\nrx-vlan-stag-hw-parse: on\n", wantRenews: 3,
+		why: "the query and each of two needed disables occupy separate lease intervals",
+	}, {
+		name: "ethtool_failed", ethtoolErr: errors.New("ethtool: operation timed out"), wantRenews: 3,
+		why: "an unreadable NIC is UNKNOWN, not safe, so both disables are attempted; " +
+			"a wedged ethtool is the scenario these renewals exist for",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubRethTailEthtool(t, tc.kOut, tc.ethtoolErr)
@@ -257,12 +264,11 @@ func TestRethMemberLinkTailRenewsTheLease_6871(t *testing.T) {
 
 			if lc.renewCalls != tc.wantRenews {
 				t.Errorf("RenewLinkCycle calls = %d, want %d — %s.\n"+
-					"The member tail did not renew the link-cycle lease once per 20s-ceiling "+
-					"command. This span holds the ethtool work and one netlink round trip per "+
-					"VLAN sub-interface, and the renewal in programRethMemberMAC lands BEFORE "+
-					"all of it — so without these calls the 60s TTL has to cover a member's "+
-					"whole tail plus the next member's MAC set (#6871), and after #9946 a "+
-					"single window would hold 40s of ethtool ceiling",
+					"Expected one renewal per bounded ethtool command plus the tail's final "+
+					"renewal. The state query, up to two feature disables, and one netlink "+
+					"round trip per VLAN child must not share a 60s window; without these "+
+					"renewals the lease would cover the member's whole tail plus the next "+
+					"member's MAC set (#6871)",
 					lc.renewCalls, tc.wantRenews, tc.why)
 			}
 		})

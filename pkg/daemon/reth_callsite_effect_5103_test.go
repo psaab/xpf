@@ -55,6 +55,14 @@ import (
 // minimalApplyCtxDaemon.
 func rethCallsiteDaemon(t *testing.T, prepareErr error) (*Daemon, *abortRecoveryLinkController) {
 	t.Helper()
+	origRun := runCommandTimeout
+	runCommandTimeout = func(name string, args ...string) ([]byte, error) {
+		if name == "ethtool" && len(args) > 0 && args[0] == "-k" {
+			return []byte("rx-vlan-offload: off\nrx-vlan-stag-hw-parse: off\n"), nil
+		}
+		return origRun(name, args...)
+	}
+	t.Cleanup(func() { runCommandTimeout = origRun })
 	installFakeNetworkctl(t)
 	lc := &abortRecoveryLinkController{prepareErr: prepareErr}
 	d := &Daemon{

@@ -435,13 +435,13 @@ That distinction was a defect before #6871's round 6. Only a member that actuall
 cycles re-arms the lease, so the exposure was the tail of members visited *after*
 the last cycling one. `reth-count` is operator-settable to 128
 (`pkg/config/schema_chassis.go`), step 2.6 walks the members serially, and the
-dominant per-member cost — `ethtool -K <if> rxvlan off` — has a **20s** hard
-ceiling, not 15: `externalCommandTimeout` is 15s and `runCommandStdinTimeout` adds
-a 5s `WaitDelay` on top (`pkg/daemon/exec_timeout.go`). Four wedging members in
-that tail already exceed 60s. Worse, `rethToPhys` is a Go **map**, so which
-members land in the tail differs between runs — the same config would pass or
-fail at random. A larger constant would have been the same defect with a bigger
-number.
+dominant per-member cost — each `ethtool -K <if> <feature> off` — has a
+**20s** hard ceiling, not 15: `externalCommandTimeout` is 15s and
+`runCommandStdinTimeout` adds a 5s `WaitDelay` on top
+(`pkg/daemon/exec_timeout.go`). Four wedging members in that tail already
+exceed 60s. Worse, `rethToPhys` is a Go **map**, so which members land in the
+tail differs between runs — the same config would pass or fail at random. A
+larger constant would have been the same defect with a bigger number.
 
 So the daemon renews instead. `LinkController.RenewLinkCycle()` extends a lease
 that is **already held** and can never create one from the `0` sentinel
@@ -461,25 +461,48 @@ are now four renewal points, all through `Daemon.renewLinkCycleLease`:
 | renewal point | what the preceding interval contains |
 |---|---|
 | `programRethMemberMAC` | 3 netlink calls (down / set / up) |
-| `reDisableRxVlanAfterLinkCycle` *(only when the offload came back on)* | **one** `ethtool -k` query |
-| `finishRethMemberLinkTail` | **one** `ethtool -K rxvlan off` (only when the offload came back on) + one netlink round trip per VLAN child |
+| `reDisableRxVlanAfterLinkCycle` *(only when an offload needs disabling)* | one `ethtool -k` query; renew before each required `-K` |
+| `finishRethMemberLinkTail` | the last needed `-K` + one netlink round trip per VLAN child |
 | `reconcileAfterRethLinkCycle` | netlink, one pass per redundancy group |
 | *(release: `NotifyLinkCycle`)* | its 1s NIC settle + one control round trip |
 
 The invariant the table encodes is that **no interval holds more than one
 20s-ceiling external command**. #9946 is why the second row exists: making the
-post-cycle re-disable fail the apply meant first *querying* the offload state
-(`ethtool -k`) rather than running `ethtool -K` blind, and a query plus a disable
-are two such commands. Put in one window they would spend 40s of a 60s TTL and
-leave the per-VLAN-child loop — whose length is operator-unbounded — under 20s.
-The renewal between them keeps the invariant true instead of making the constant
-bigger, which is the same reasoning round 6 applied to the member tail.
+post-cycle re-disable fail the apply meant first *querying* the offload states
+(`ethtool -k`) rather than running `ethtool -K` blind. The query and each
+needed feature disable are separate commands, so the daemon renews between
+them. When both C-tag and S-tag offloads need disabling, the query plus two
+disables each occupy their own interval; the unbounded per-VLAN-child loop
+still has its existing renewal after the tail.
+
+### S-tag offload probe (#10915)
+
+`rx-vlan-stag-hw-parse` is PF-advertised on iavf VFs, so probe each physical
+VF on each appliance; the driver name alone does not establish support:
+
+```sh
+ethtool -k <vf> | grep '^rx-vlan-stag-hw-parse:'
+```
+
+No output means the feature is absent; `off` and `off [fixed]` mean no S-tag
+stripping is active, so xpf does not issue a toggle. An `on` state (including
+`on [fixed]`) or a failed query is treated as needing a disable attempt. If
+that attempt fails, XDP activation fails closed because the in-frame S-tag drop
+cannot see a tag stripped into `skb->vlan_tci`.
+
+In the available environment, every locally visible iavf VF reported
+`rx-vlan-stag-hw-parse: off [fixed]`; no enabled state was observed. The
+`TestEnsureRxVlanStagHwParse_10915` and
+`TestPostCycleStagFailureFailsPlainParent_10915` regression tests pin the
+query/disable and fail-closed paths without relying on a VF exposing the
+conditional PF capability.
+
 
 `finishRethMemberLinkTail`'s and `reconcileAfterRethLinkCycle`'s renewals are
 *unconditional* on whether the member cycled, and that is safe because the
-renewal cannot create a lease. The `reDisableRxVlanAfterLinkCycle` one is the
-only conditional renewal, and it is safe for the same reason: on a NIC that needs
-no disable it never runs, and on one that does, the lease is either held (so it
+renewal cannot create a lease. The `reDisableRxVlanAfterLinkCycle` renewal(s)
+are conditional, and it is safe for the same reason: on a NIC that needs no
+disable they never run, and on one that does, the lease is either held (so it
 extends) or already released (so `RenewLinkCycle` refuses from the `0` sentinel).
 
 **It buys nothing on the abort path, and this table used to say it did (#6871

@@ -20,7 +20,7 @@ func compileZoneMaps10216(t *testing.T, cfg *config.Config) *CompileResult {
 		ZoneIDs:             make(map[string]uint16),
 		ScreenIDs:           make(map[string]uint16),
 		ifCache:             make(map[string]*net.Interface),
-		rxVlanOffCache:      make(map[string]bool),
+		rxTagStripOffCache:  make(map[string]bool),
 		ethtoolApplied:      make(map[string]bool),
 		genericXDPIfindexes: make(map[int]bool),
 	}

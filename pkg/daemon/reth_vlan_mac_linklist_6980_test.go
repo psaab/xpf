@@ -20,6 +20,14 @@ import (
 // stayed unbound long enough for the discarded error to survive (#6980).
 func stubRethLinkSeams6980(t *testing.T, parentIdx int, listErr error) {
 	t.Helper()
+	origRun := runCommandTimeout
+	runCommandTimeout = func(name string, args ...string) ([]byte, error) {
+		if name == "ethtool" && len(args) > 0 && args[0] == "-k" {
+			return []byte("rx-vlan-offload: off\nrx-vlan-stag-hw-parse: off\n"), nil
+		}
+		return origRun(name, args...)
+	}
+	t.Cleanup(func() { runCommandTimeout = origRun })
 	origByName, origList := rethParentLinkByName, rethLinkLister
 	rethParentLinkByName = func(string) (netlink.Link, error) {
 		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Index: parentIdx, Name: "xpf6980-parent"}}, nil
