@@ -154,6 +154,9 @@ type engineCounters struct {
 // plannedOp is one classified ThenCommand: a candidate set or delete.
 type plannedOp struct {
 	isDelete bool
+	// critical marks mutations under security or firewall; they may pass
+	// ordinary queued actions to bound security-remediation latency.
+	critical bool
 	// raw "set" input (without the leading "set ") for store.SetFromInput.
 	setInput string
 	// parsed delete path for store.Delete.

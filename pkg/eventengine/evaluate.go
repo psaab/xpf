@@ -21,11 +21,19 @@ import (
 // call into queue admission while holding e.mu. See the matching note in
 // queue.go and on the Engine struct in engine.go.
 
+// maxThenCommands bounds clone-and-stamp work for each remediation batch.
+const maxThenCommands = 8
+
 // classifyPlan pre-parses a policy's ThenCommands into a typed plan WITHOUT
 // touching the candidate (#2139 step 1). An unknown command prefix, an
 // unparseable set, or an unparseable delete makes the WHOLE plan invalid
 // (ok=false) — the cheapest place to reject (no lock taken, no queue slot).
 func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
+	if len(pol.ThenCommands) > maxThenCommands {
+		slog.Warn("event-options: remediation batch exceeds command limit",
+			"policy", pol.Name, "commands", len(pol.ThenCommands), "limit", maxThenCommands)
+		return nil, false
+	}
 	ops := make([]plannedOp, 0, len(pol.ThenCommands))
 	for _, cmd := range pol.ThenCommands {
 		cmd = strings.TrimSpace(cmd)
@@ -36,13 +44,15 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 		case strings.HasPrefix(cmd, "set "):
 			input := strings.TrimPrefix(cmd, "set ")
 			// Validate it parses now so a typo rejects the batch before any
-			// candidate mutation.
-			if _, err := config.ParseSetCommand("set " + input); err != nil {
+			// candidate mutation. The parsed path also labels security changes
+			// for the worker's critical queue lane.
+			path, err := config.ParseSetCommand("set " + input)
+			if err != nil {
 				slog.Warn("event-options: set parse failed (batch rejected)",
 					"policy", pol.Name, "cmd", cmd, "err", err)
 				return nil, false
 			}
-			ops = append(ops, plannedOp{setInput: input, raw: cmd})
+			ops = append(ops, plannedOp{setInput: input, critical: criticalConfigPath(path), raw: cmd})
 		case strings.HasPrefix(cmd, "delete "):
 			input := strings.TrimPrefix(cmd, "delete ")
 			path, err := config.ParseSetCommand("set " + input)
@@ -51,7 +61,7 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 					"policy", pol.Name, "cmd", cmd, "err", err)
 				return nil, false
 			}
-			ops = append(ops, plannedOp{isDelete: true, delPath: path, raw: cmd})
+			ops = append(ops, plannedOp{isDelete: true, delPath: path, critical: criticalConfigPath(path), raw: cmd})
 		default:
 			slog.Warn("event-options: unsupported command type (batch rejected)",
 				"policy", pol.Name, "cmd", cmd)
@@ -59,6 +69,12 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 		}
 	}
 	return ops, true
+}
+
+// criticalConfigPath identifies configuration whose queued remediation gets
+// priority over ordinary settings while preserving FIFO within each class.
+func criticalConfigPath(path []string) bool {
+	return len(path) > 0 && (path[0] == "security" || path[0] == "firewall")
 }
 
 // evaluateEvent checks policies under lock and returns any that should trigger.
