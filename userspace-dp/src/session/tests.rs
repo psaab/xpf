@@ -859,10 +859,10 @@ fn metadata_with_app_timeout(ns: u64) -> SessionMetadata {
     }
 }
 
-/// #3227 unit: `session_timeout_ns` uses the per-application override for an
-/// ESTABLISHED flow on every protocol, and `None` falls back byte-identically
-/// to the global per-protocol timeout. A closing/RST TCP flow ignores the
-/// override (short reap window preserved).
+/// #3227/#10889 unit: `session_timeout_ns` uses the per-application override
+/// for established TCP and reverse-promoted non-TCP flows; a bare SYN or an
+/// unreplied app-managed datagram stays on its short/global window. A
+/// closing/RST TCP flow keeps its short reap window.
 #[test]
 fn session_timeout_ns_honors_app_override() {
     let to = SessionTimeouts::default();
@@ -885,16 +885,36 @@ fn session_timeout_ns_honors_app_override() {
         session_timeout_ns(PROTO_TCP, crate::tcp_flags::TCP_SYN, false, &to, None, None),
         DEFAULT_TCP_OPENING_TIMEOUT_NS
     );
-    // UDP / ICMP: override wins; None -> global. `established` is ignored.
-    assert_eq!(session_timeout_ns(PROTO_UDP, 0, true, &to, Some(app), None), app);
+    // Non-TCP app overrides apply only after reverse-packet promotion.
     assert_eq!(
-        session_timeout_ns(PROTO_UDP, 0, true, &to, None, None),
+        session_timeout_ns(PROTO_UDP, 0, true, &to, Some(app), None),
+        app
+    );
+    assert_eq!(
+        session_timeout_ns(PROTO_UDP, 0, false, &to, Some(app), None),
         DEFAULT_UDP_SESSION_TIMEOUT_NS
     );
-    assert_eq!(session_timeout_ns(PROTO_ICMP, 0, true, &to, Some(app), None), app);
     assert_eq!(
-        session_timeout_ns(PROTO_ICMP, 0, true, &to, None, None),
-        DEFAULT_ICMP_SESSION_TIMEOUT_NS
+        session_timeout_ns(PROTO_UDP, 0, false, &to, None, None),
+        DEFAULT_UDP_SESSION_TIMEOUT_NS
+    );
+    for protocol in [PROTO_ICMP, PROTO_ICMPV6] {
+        assert_eq!(
+            session_timeout_ns(protocol, 0, true, &to, Some(app), None),
+            app
+        );
+        assert_eq!(
+            session_timeout_ns(protocol, 0, false, &to, Some(app), None),
+            DEFAULT_ICMP_SESSION_TIMEOUT_NS
+        );
+    }
+    assert_eq!(
+        session_timeout_ns(u8::MAX, 0, false, &to, Some(app), None),
+        OTHER_SESSION_TIMEOUT_NS
+    );
+    assert_eq!(
+        session_timeout_ns(u8::MAX, 0, true, &to, Some(app), None),
+        app
     );
     // Closing/RST TCP: the override never extends the short reap window
     // (and the closing branch is consulted before the OPENING branch).
@@ -4443,12 +4463,13 @@ fn reference_update_session(
     // plain `=`, the in-place-vs-reference parity sweep would stay blind to the
     // #3489 bug (both sides would agree on the wrong non-sticky behavior).
     entry.closing |= matches!(protocol, PROTO_TCP) && (tcp_flags & (TCP_FIN | TCP_RST)) != 0;
-    // #3152/#4109: mirror update_session — promote OPENING -> ESTABLISHED only
-    // on a genuine reverse SYN-ACK (is_syn_ack + is_reverse), then select the
-    // timeout consulting the state. Keeping this in lock-step with the
-    // production gate keeps the in-place-vs-reference parity sweep honest.
+    // #3152/#4109/#10889: mirror update_session's TCP SYN-ACK and non-TCP
+    // reverse-packet promotion gates for the in-place/reference parity sweep.
     entry.established |=
-        matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && metadata.is_reverse;
+        (matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && metadata.is_reverse)
+            || (!matches!(protocol, PROTO_TCP)
+                && metadata.is_reverse
+                && metadata.inactivity_timeout_ns.is_some());
     entry.expires_after_ns = if entry.closing {
         if entry.reset {
             TCP_RST_TIMEOUT_NS

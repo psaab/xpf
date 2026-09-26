@@ -268,30 +268,30 @@ impl SessionTable {
             } else {
                 false
             };
-            // #3152/#4109: promote OPENING -> ESTABLISHED only on a genuine
-            // reverse SYN-ACK. Forward and reverse are two independent entries;
-            // the server's handshake response is a SYN-ACK on the REVERSE half,
-            // so ONLY a SYN-ACK (`is_syn_ack`, not merely any ACK) on the reverse
-            // entry (`is_reverse`) promotes — and it promotes both this reverse
-            // entry and its forward companion (after the borrow ends, below). A
-            // client-only forward ACK never promotes a half-open session: before
-            // #4109 any ACK did, so a bare SYN + a bare ACK pinned a 300s
-            // established entry with no peer replying, turning the #3152 half-open
-            // reap into a 2-packet bypass. Requiring the SYN bit too (not just
-            // has_ack on the reverse tuple) closes the residual where a
-            // server-spoofed bare reverse ACK could still promote — a legit
-            // 3-way handshake's only pre-established reverse segment IS the
-            // SYN-ACK, and xpf is inline so it always sees it (control segments
-            // bypass the flow cache and reach this slow-path site). Sticky — an
-            // already-established entry (e.g. a mid-stream pickup seeded
-            // ESTABLISHED at install) is never demoted.
-            let promote_from_reverse = is_tcp && is_syn_ack(tcp_flags) && entry.metadata.is_reverse;
+            // #3152/#4109: TCP OPENING promotes only on a genuine reverse
+            // SYN-ACK. Forward and reverse are two independent entries, so the
+            // server's handshake response promotes this reverse entry and its
+            // forward companion; a client-only ACK never promotes it.
+            //
+            // #10889: for a non-TCP entry with an application override, only
+            // the first packet observed on the pre-installed reverse half
+            // opens the app-timeout gate. Forward-only traffic remains on the
+            // global per-protocol window.
+            let promote_from_reverse = if is_tcp {
+                is_syn_ack(tcp_flags) && entry.metadata.is_reverse
+            } else {
+                !entry.established
+                    && entry.metadata.is_reverse
+                    && entry.metadata.inactivity_timeout_ns.is_some()
+            };
             if promote_from_reverse {
                 entry.established = true;
-                // #6752: promotion is on the SYN-ACK, which is NOT handshake
-                // completion. Mark the gap so the idle window below stays on the
-                // OPENING class until the completing forward segment arrives.
-                entry.handshake_pending = true;
+                if is_tcp {
+                    // #6752: TCP promotion is on the SYN-ACK, not handshake
+                    // completion. Keep both halves on the OPENING class until
+                    // the completing forward segment arrives.
+                    entry.handshake_pending = true;
+                }
             }
             // #6752: the handshake-completing forward segment. Any FORWARD-
             // direction TCP segment ends the gap — the final ACK normally, and a
@@ -318,11 +318,10 @@ impl SessionTable {
                     // formula.
                     tcp_close_window_ns(entry.tcp_close_class(), &timeouts)
                 } else {
-                    // #3227: re-apply the admitting application's per-app idle
-                    // timeout on every established refresh so the session keeps
-                    // aging on the app's value, not the global per-protocol one.
-                    // #3152: an un-established (OPENING) TCP session ages on the
-                    // short opening window via session_timeout_ns(established=…).
+                    // #3227/#10889: re-apply the per-app idle timeout on every
+                    // refresh only after the protocol's promotion gate opens.
+                    // TCP half-opens and unreplied app-managed datagrams use their
+                    // short/global window instead.
                     session_timeout_ns(
                         key.protocol,
                         // #10636: a deferring lookup withholds the close, so the

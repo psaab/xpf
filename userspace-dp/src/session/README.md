@@ -158,13 +158,15 @@ single authority both the config-snapshot path and the HA session-sync
 receive funnel through, a corrupt / mixed-version wire value (e.g.
 `4294967295`) is clamped rather than stamping an effectively
 never-expiring idle timeout that would diverge session GC from the
-commit-time contract. `session_timeout_ns` then prefers that override
-for the established TCP / UDP / ICMP idle window on install AND on every
-real-traffic refresh (`lookup.rs` / `update_session`), so the conntrack
-GC ages the flow out on the app's value. It deliberately does NOT extend
-the short TCP closing/RST reap windows (a FIN/RST close still reaps on
-`TCP_CLOSING_TIMEOUT_NS` / `TCP_RST_TIMEOUT_NS`), matching Junos, where
-`inactivity-timeout` is the idle timeout of an established session.
+commit-time contract. `session_timeout_ns` then uses the override for
+established TCP and reply-promoted UDP / ICMP / other-protocol sessions on
+install and every real-traffic refresh (`lookup.rs` / `update_session`).
+For a non-TCP session with a custom app timeout, both halves start on the
+global per-protocol timeout; only a genuine reverse packet opens the app
+timeout gate (#10889). The short TCP closing/RST reap windows remain unchanged
+(a FIN/RST close still reaps on `TCP_CLOSING_TIMEOUT_NS` /
+`TCP_RST_TIMEOUT_NS`), matching Junos, where `inactivity-timeout` is the idle
+timeout of an established session.
 **Precedence:** the first matching policy rule wins (policy order), and
 within that rule the first matching application term supplies the timeout
 — the exact destination-port term is consulted first, then range terms in
@@ -176,10 +178,11 @@ like `policy_id` and `policy_counter_idx`, the override now rides the
 cross-node session-sync wire — the helper emits it (in seconds) on the
 SESSION_OPEN delta and on `SessionSyncRequest.inactivity_timeout`, and
 `build_synced_session_entry` re-applies it via `app_inactivity_timeout_ns`.
-A peer-promoted session therefore ages out on the app's idle window after
-failover without waiting for a real-traffic refresh. An old peer omits the
-field (`serde(default)` 0 → `None` → the global timeout), bit-identical to
-pre-#3301 (rolling-upgrade safe).
+A peer-promoted TCP session still uses the app's idle window after failover.
+Non-TCP reply history is not carried on the wire, so a custom app timeout stays
+gated on the imported session until this node observes a genuine reverse packet.
+An old peer omits the field (`serde(default)` 0 → `None` → the global timeout),
+bit-identical to pre-#3301 (rolling-upgrade safe).
 
 **Not every `SyncImport` entry is a wire import (#6224).** The local-origin
 GRE encapsulation path (`build_local_origin_tunnel_tx_request`, tunnel.rs)
@@ -242,10 +245,11 @@ always observes it (control segments bypass the flow cache and reach this
 slow-path promotion site). The promotion is sticky (a later segment never demotes an
 established session back to OPENING) and is applied on all three
 timeout-selection sites (`install` / `upsert_synced`, `lookup`,
-`update_session`). The state is initialised
-ESTABLISHED for every non-TCP session and for any TCP session whose
-creating packet is NOT a bare SYN (a mid-stream pickup such as a SYN-ACK
-or data segment), so those paths are byte-identical to pre-#3152.
+`update_session`). `established` starts true for non-TCP sessions without a
+custom app timeout and TCP sessions not created by a bare SYN. A non-TCP
+session with a custom app timeout starts false and promotes only after a
+genuine reverse packet; HA imports also start gated because reply history is
+not on the wire (#10889).
 
 Without this, a bare SYN landed on the full established timeout, so a
 low-rate bare-SYN flood (SYN with no follow-up ACK) could pin half-open
