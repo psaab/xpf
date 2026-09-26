@@ -199,6 +199,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		// remains the completeness guarantee outside this path.
 		d.reassertTransitGate("apply")
 		if err != nil {
+			d.recordCompileFailure(err)
 			// #9637-D1: the dataplane still runs the previous snapshot while
 			// the tail below renders from the NEW config — clear the
 			// reinject-accept gate so the render omits the accept (abort-class
@@ -1256,6 +1257,7 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	// covers changes outside this caller.
 	d.reassertTransitGate("deferred-mac-reapply")
 	if err != nil {
+		d.recordCompileFailure(err)
 		slog.Warn("failed to re-apply after deferred MAC; recording worker-arm debt for retry",
 			"err", err)
 		d.recordDataplaneWorkerArmDebt()
