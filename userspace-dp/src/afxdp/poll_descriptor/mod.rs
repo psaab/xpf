@@ -4235,18 +4235,40 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // a fitting replacement never kills embryos
                                     // gratuitously. Conservative: the shed check
                                     // does not re-credit the closing pair.
-                                    let session_capacity_available = if needed_sessions > 0
-                                        && !reuse_fits
-                                    {
-                                        sessions.can_admit_new_syn(
-                                            needed_sessions,
-                                            meta.protocol,
-                                            meta.tcp_flags,
-                                        )
-                                    } else {
-                                        reuse_fits
-                                    };
-                                    if needed_sessions > 0 && !session_capacity_available {
+                                    let (admission_allowed, pressure_shed_sessions) =
+                                        if needed_sessions == 0 || reuse_fits {
+                                            (true, crate::session::PressureShedSessions::new())
+                                        } else {
+                                            sessions.can_admit_new_syn(
+                                                needed_sessions,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                            )
+                                        };
+                                    // #10890: pressure removal is a real session
+                                    // teardown, not just a table deletion. Release
+                                    // this worker's NAT holds exactly as the GC reap
+                                    // does, including when the new SYN is later refused.
+                                    for shed in pressure_shed_sessions {
+                                        crate::nat::release_source_nat_allocation_for_worker(
+                                            &worker_ctx.forwarding.iface_nat_allocators,
+                                            &worker_ctx.forwarding.source_nat_rules,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                        crate::nat64::release_nat64_allocation_for_worker(
+                                            &worker_ctx.forwarding.nat64,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                    }
+                                    if needed_sessions > 0 && !admission_allowed {
                                         sessions.note_admission_refused();
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,

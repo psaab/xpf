@@ -258,6 +258,127 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
     assert!(sessions.probe_with_origin(&admitted_reverse).is_some());
 }
 
+/// #10890: shedding a pool-SNAT opening must release its worker-local port
+/// reservation just like the ordinary session reaper does.
+#[test]
+fn txn_pressure_shed_releases_source_nat_pool_port_10890() {
+    fn key(port: u16) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            src_port: port,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        }
+    }
+
+    fn metadata() -> SessionMetadata {
+        let mut metadata = icmp_err_metadata();
+        metadata.is_reverse = false;
+        metadata
+    }
+
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "pressure-snat-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "pressure-pool".to_string(),
+        pool_addresses: vec!["172.16.80.100".to_string()],
+        port_low: 20_000,
+        port_high: 20_001,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(10);
+
+    let victim_key = key(31_001);
+    let victim_frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        victim_key.src_port,
+        victim_key.dst_port,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let victim_meta = txn_meta_v4(24, TCP_FLAG_SYN, victim_frame.len() as u16);
+    let (victim_batch, victim_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &victim_frame,
+        victim_meta,
+        true,
+    );
+    assert_eq!(victim_dbg.tx, 1);
+    assert_eq!(victim_batch.session_creates, 2);
+    let pool_before = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
+    assert_eq!(pool_before[0].live_flows, 1);
+    assert_eq!(pool_before[0].used_ports, 1);
+
+    let established = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+    for port in 31_002..31_009 {
+        assert!(sessions.install_with_protocol(
+            key(port),
+            established,
+            metadata(),
+            1_001_000_000,
+            PROTO_TCP,
+            crate::tcp_flags::TCP_ACK,
+        ));
+    }
+    assert_eq!(sessions.len(), 9);
+
+    let admitted_key = key(31_010);
+    let admitted_frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        admitted_key.src_port,
+        admitted_key.dst_port,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let admitted_meta = txn_meta_v4(24, TCP_FLAG_SYN, admitted_frame.len() as u16);
+    let (admitted_batch, admitted_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &admitted_frame,
+        admitted_meta,
+        true,
+    );
+
+    assert_eq!(admitted_dbg.tx, 1, "the new SYN must be admitted");
+    assert_eq!(admitted_batch.session_creates, 2);
+    assert_eq!(sessions.len(), 9);
+    assert!(sessions.probe_with_origin(&victim_key).is_none());
+    let (admitted_session, _) = sessions
+        .probe_with_origin(&admitted_key)
+        .expect("new pool-SNAT forward session");
+    let admitted_reverse =
+        crate::session::reverse_session_key(&admitted_key, admitted_session.decision.nat);
+    assert!(sessions.probe_with_origin(&admitted_reverse).is_some());
+    let pool_after = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
+    assert_eq!(
+        pool_after[0].live_flows, 1,
+        "only the admitted NAT flow should retain an allocator hold"
+    );
+    assert_eq!(
+        pool_after[0].used_ports, 1,
+        "pressure shedding must release the victim port reservation"
+    );
+}
+
 
 /// #4800 RED-on-revert: the per-binding `new_flow_installs` counter must be
 /// bumped by the REAL transit-install path, not merely carried by the

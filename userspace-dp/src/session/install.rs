@@ -66,26 +66,32 @@ impl SessionTable {
     /// established and peer-owned sessions are never pressure victims. The
     /// caller remains responsible for refusing/rolling back the packet if the
     /// remaining table cannot fit the full install group.
-    pub fn can_admit_new_syn(&mut self, needed: usize, protocol: u8, tcp_flags: u8) -> bool {
+    pub fn can_admit_new_syn(
+        &mut self,
+        needed: usize,
+        protocol: u8,
+        tcp_flags: u8,
+    ) -> (bool, Vec<PressureShedSession>) {
+        let mut shed_sessions = Vec::new();
         let high_watermark = self.max_sessions.saturating_sub(self.max_sessions / 10);
         if needed == 0
             || protocol != PROTO_TCP
             || !is_initial_syn(tcp_flags)
             || self.len() < high_watermark
         {
-            return self.can_admit(needed);
+            return (self.can_admit(needed), shed_sessions);
         }
         if needed > self.max_sessions {
-            return false;
+            return (false, shed_sessions);
         }
 
         let mut shed = false;
         loop {
             if shed && self.can_admit(needed) {
-                return true;
+                return (true, shed_sessions);
             }
-            if !self.shed_one_opening_flow() {
-                return self.can_admit(needed);
+            if !self.shed_one_opening_flow(&mut shed_sessions) {
+                return (self.can_admit(needed), shed_sessions);
             }
             shed = true;
         }
@@ -93,7 +99,10 @@ impl SessionTable {
 
     /// Remove one indexed local opening flow (both halves when the matching
     /// reverse companion is present). Returns false when no safe victim remains.
-    fn shed_one_opening_flow(&mut self) -> bool {
+    fn shed_one_opening_flow(
+        &mut self,
+        shed_sessions: &mut Vec<PressureShedSession>,
+    ) -> bool {
         loop {
             let Some(key) = self.pressure_shed_openings.keys().next().cloned() else {
                 return false;
@@ -137,9 +146,24 @@ impl SessionTable {
                 continue;
             }
 
-            self.delete(&key);
+            let Some(forward_entry) = self.remove_entry(&key, RemovalKind::Terminal) else {
+                continue;
+            };
+            shed_sessions.push(PressureShedSession {
+                key: key.clone(),
+                decision: forward_entry.decision,
+                is_reverse: forward_entry.metadata.is_reverse,
+            });
             if companion_is_opening == Some(true) {
-                self.delete(&companion_key);
+                if let Some(companion_entry) =
+                    self.remove_entry(&companion_key, RemovalKind::Terminal)
+                {
+                    shed_sessions.push(PressureShedSession {
+                        key: companion_key.clone(),
+                        decision: companion_entry.decision,
+                        is_reverse: companion_entry.metadata.is_reverse,
+                    });
+                }
             }
             self.emit_close_delta_with_origin(
                 key,

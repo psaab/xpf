@@ -1131,6 +1131,13 @@ pub(crate) enum RemovalKind {
     Transfer,
 }
 
+/// One removed entry returned to the worker for per-session NAT teardown.
+pub(crate) struct PressureShedSession {
+    pub(crate) key: SessionKey,
+    pub(crate) decision: SessionDecision,
+    pub(crate) is_reverse: bool,
+}
+
 pub(crate) struct SessionTable {
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///

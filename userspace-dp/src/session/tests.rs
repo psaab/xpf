@@ -5765,7 +5765,10 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
     let under_pressure = key_with_port(30_000);
     let under_reverse =
         install_forward_reverse_pair(&mut below_pressure, &under_pressure, now, TCP_SYN);
-    assert!(below_pressure.can_admit_new_syn(2, PROTO_TCP, TCP_SYN));
+    let (under_pressure_admitted, under_pressure_shed) =
+        below_pressure.can_admit_new_syn(2, PROTO_TCP, TCP_SYN);
+    assert!(under_pressure_admitted);
+    assert!(under_pressure_shed.is_empty());
     assert_eq!(below_pressure.len(), 2);
     assert!(below_pressure.entry_by_key(&under_pressure).is_some());
     assert!(below_pressure.entry_by_key(&under_reverse).is_some());
@@ -5815,17 +5818,18 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
     assert_eq!(table.len(), 9);
     assert_eq!(table.pressure_shed_openings.len(), 2);
 
-    assert!(
-        !table.can_admit_new_syn(2, PROTO_TCP, TCP_ACK),
-        "a non-initial-SYN flow must retain the hard cap without shedding"
-    );
+    let (non_syn_admitted, non_syn_shed) = table.can_admit_new_syn(2, PROTO_TCP, TCP_ACK);
+    assert!(!non_syn_admitted, "a non-initial SYN retains the hard cap");
+    assert!(non_syn_shed.is_empty(), "a non-initial SYN cannot shed sessions");
     assert_eq!(table.len(), 9, "non-SYN admission must not mutate the table");
     assert_eq!(table.pressure_shed_openings.len(), 2);
 
+    let (syn_admitted, shed_sessions) = table.can_admit_new_syn(2, PROTO_TCP, TCP_SYN);
     assert!(
-        table.can_admit_new_syn(2, PROTO_TCP, TCP_SYN),
+        syn_admitted,
         "a legitimate initial SYN at 90% pressure should free an opening pair"
     );
+    assert_eq!(shed_sessions.len(), 2, "return both removed session halves");
     assert_eq!(table.len(), 7, "one opening pair supplies the two slots");
     assert_eq!(table.pressure_shed_openings.len(), 1);
     let opening_pair_removed = table.entry_by_key(&opening).is_none();
