@@ -443,9 +443,14 @@ func (c *CLI) SetFabricPeer(addrFn func() []string, vrfDevice string) {
 func (c *CLI) Run() error {
 	var err error
 	completer := &cliCompleter{cli: c}
+	historyFile := filepath.Join(os.Getenv("HOME"), ".xpf_history")
+	if err := cliterm.SecureReadlineHistory(historyFile); err != nil {
+		return fmt.Errorf("secure readline history: %w", err)
+	}
+
 	c.rl, err = readline.NewEx(cliterm.DisableReadlineHistoryAutoSave(&readline.Config{
 		Prompt:          c.operationalPrompt(),
-		HistoryFile:     filepath.Join(os.Getenv("HOME"), ".xpf_history"),
+		HistoryFile:     historyFile,
 		HistoryLimit:    10000,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",

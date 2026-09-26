@@ -197,10 +197,16 @@ func main() {
 		return
 	}
 
+	historyFile := filepath.Join(os.Getenv("HOME"), ".xpf_cli_history")
+	if err := cliterm.SecureReadlineHistory(historyFile); err != nil {
+		fmt.Fprintf(os.Stderr, "cli: secure history file: %v\n", err)
+		os.Exit(1)
+	}
+
 	rc := &remoteCompleter{ctl: c}
 	rl, err := readline.NewEx(cliterm.DisableReadlineHistoryAutoSave(&readline.Config{
 		Prompt:          c.operationalPrompt(),
-		HistoryFile:     filepath.Join(os.Getenv("HOME"), ".xpf_cli_history"),
+		HistoryFile:     historyFile,
 		HistoryLimit:    10000,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",

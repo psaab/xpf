@@ -219,8 +219,12 @@ Pre-flight any config on a build host with
 
 - **Local CLI**: run `cli` on the firewall for the interactive
   Junos-style shell.
-- **Remote CLI**: `cli -addr <host>:50051` connects via gRPC with full
-  tab/`?` parity.
+- **Remote CLI**: SSH to the firewall and run `cli` there — the daemon's
+  gRPC listener is loopback-only with no TLS, so `-addr <host>:50051`
+  cannot reach a remote host (#5035). Port-forwarding
+  (`ssh -L 50051:127.0.0.1:50051 user@fw`) plus a local `cli` also works;
+  either way the daemon authorizes the firewall-local account owning the
+  connection (#5278), never anything the client claims.
 - **gRPC API**: 48+ RPCs on port 50051 (config, sessions, stats, routes,
   IPsec, DHCP, cluster).
 - **REST API**: HTTP on port 8080 (health, Prometheus `/metrics`, config
