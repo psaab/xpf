@@ -727,22 +727,7 @@ func (vi *vrrpInstance) run() {
 		case StateMaster:
 			select {
 			case <-vi.stopCh:
-				// Send burst of priority-0 advertisements to signal resignation.
-				// Multiple adverts improve reliability if one is lost on the wire.
-				for i := 0; i < 3; i++ {
-					vi.sendAdvert(0)
-				}
-				// Best-effort at process exit: log a removal failure but do not
-				// schedule a reconcile (stopCh is closed, the run-loop is ending).
-				err := vi.removeVIPs()
-				if err != nil {
-					slog.Warn("vrrp: VIP removal failed during resignation shutdown",
-						"key", vi.key(), "err", err)
-				}
-				// #6177: the run loop is ending, so this is the last VIP
-				// release it will ever perform. Report it rather than
-				// stranding a barrier armed just before the shutdown.
-				vi.notifyResigned(err)
+				vi.resignForShutdown()
 				return
 			case pkt := <-vi.rxCh:
 				vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
@@ -750,27 +735,19 @@ func (vi *vrrpInstance) run() {
 				vi.sendAdvert(vi.getPriority())
 				advertTimer.Reset(vi.advertInterval())
 			case <-vi.resignCh:
-				// Forced resignation (manual failover / cluster Primary→Secondary).
+				// Forced resignation removes and publishes BACKUP before telling
+				// the peer to take over. A failed removal is surfaced by
+				// becomeBackup and deliberately does not send priority zero.
 				slog.Info("vrrp: forced resignation", "key", vi.key())
-				for i := 0; i < 3; i++ {
-					vi.sendAdvert(0)
+				if err := vi.becomeBackup(masterDownTimer, advertTimer); err == nil {
+					for range 3 {
+						vi.sendAdvert(0)
+					}
 				}
-				vi.becomeBackup(masterDownTimer, advertTimer)
 				// Use an extended safety-net timer instead of stopping entirely.
-				// With short RETH intervals (30ms), masterDownInterval() at
-				// priority 0 is only ~120ms, which re-elects the resigned node
-				// before the peer can take over. We use 3× the normal
-				// masterDownInterval to give the peer time to become MASTER
-				// and start advertising, while still providing a recovery path
-				// if the peer crashes without sending priority-0.
-				//
-				// Normal recovery paths (faster than the safety timer):
-				//   - preemptNowCh (cluster ForceRGMaster after failover reset)
-				//   - priority-0 from peer (peer resigning) → 1ms takeover
-				//   - peer advert received → resets timer to masterDownInterval
-				//
-				// The safety timer only fires if the peer is completely gone
-				// (crash without priority-0, network partition).
+				// With short RETH intervals (30ms), the normal masterDown timer
+				// at priority 0 is only ~120ms, which can re-elect us before the
+				// peer starts advertising.
 				safetyTimeout := 3 * vi.masterDownInterval()
 				if safetyTimeout < 500*time.Millisecond {
 					safetyTimeout = 500 * time.Millisecond
@@ -779,6 +756,46 @@ func (vi *vrrpInstance) run() {
 			}
 		}
 	}
+}
+
+// resignForShutdown makes the final VIP removal before publishing BACKUP or
+// sending priority-zero advertisements. Netlink removal can fail transiently
+// during interface teardown, so keep vipMu held and retry before surrendering.
+// If every attempt fails, retain MASTER publication and do not expedite peer
+// takeover; the release barrier receives the failure instead.
+func (vi *vrrpInstance) resignForShutdown() {
+	vi.vipMu.Lock()
+	backoff := vi.vipReconcileBackoff
+	if backoff <= 0 {
+		backoff = defaultVIPReconcileBackoff
+	}
+	var err error
+	for attempt := 0; attempt <= vipRemoveReconcileMax; attempt++ {
+		if attempt > 0 {
+			time.Sleep(backoff)
+		}
+		err = vi.removeVIPsLocked(nil)
+		if err == nil {
+			vi.setState(StateBackup)
+			vi.vipDiverged.Store(false)
+			break
+		}
+	}
+	vi.vipMu.Unlock()
+
+	if err != nil {
+		vi.vipDiverged.Store(true)
+		slog.Error("vrrp: VIP removal failed during resignation shutdown after retries; "+
+			"withholding BACKUP publication and priority-zero advertisements",
+			"key", vi.key(), "err", err, "attempts", vipRemoveReconcileMax+1)
+		vi.notifyResigned(err)
+		return
+	}
+	vi.emitEvent()
+	for range 3 {
+		vi.sendAdvert(0)
+	}
+	vi.notifyResigned(nil)
 }
 
 // stop signals the instance goroutine to stop and waits for it to finish.
