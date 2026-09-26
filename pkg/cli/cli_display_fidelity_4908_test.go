@@ -4,14 +4,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // TestShowChassisClusterStatus_VRRPLogicalZoneInterface is the #4908
-// (C175-HC-116) RED-on-revert guard. A security zone binds a LOGICAL interface
-// ("ge-0-0-0.0"), but cfg.Interfaces.Interfaces is keyed by the BASE name
-// ("ge-0-0-0"). The prior direct `cfg.Interfaces.Interfaces[iface]` lookup
-// missed the unit-qualified reference and silently dropped the VRRP row.
-// Reverting to the direct lookup makes this test fail (no "VRRP on ..." line).
+// (C175-HC-116) and #10844 RED-on-revert guard. A security zone binds a
+// LOGICAL interface ("ge-0-0-0.0"), but cfg.Interfaces.Interfaces is keyed by
+// the BASE name ("ge-0-0-0"), so the old direct lookup silently dropped the
+// VRRP row. The fixture also reports its configured VRRP group as non-master:
+// both facts must be visible, and the row must be labelled `configured:`.
 func TestShowChassisClusterStatus_VRRPLogicalZoneInterface(t *testing.T) {
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	if err := store.EnterConfigure(); err != nil {
@@ -48,19 +51,30 @@ security {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	c := &CLI{store: store} // cluster nil: prints "Cluster not configured", then the VRRP loop
+	manager := cluster.NewManager(0, 1)
+	manager.UpdateConfig(&config.ClusterConfig{
+		RedundancyGroups: []*config.RedundancyGroup{{
+			ID:             7,
+			NodePriorities: map[int]int{0: 200, 1: 100},
+		}},
+	})
+	manager.SetRGForwardingFunc(func(rgID int) (cluster.RGForwarding, bool) {
+		return cluster.RGForwarding{}, rgID == 7
+	})
+	c := &CLI{store: store, cluster: manager}
 	out := captureStdout(t, func() {
 		if err := c.showChassisClusterStatus(); err != nil {
 			t.Fatalf("showChassisClusterStatus: %v", err)
 		}
 	})
 
-	if !strings.Contains(out, "VRRP on ge-0-0-0.0:") {
-		t.Fatalf("VRRP row for the logical zone interface ge-0-0-0.0 was dropped "+
-			"(#4908/C175-HC-116 — base-keyed lookup missed the unit-qualified ref):\n%s", out)
-	}
-	if !strings.Contains(out, "group 7") || !strings.Contains(out, "VIP 10.0.61.254") {
-		t.Fatalf("VRRP row missing group/VIP details:\n%s", out)
+	for _, want := range []string{
+		"vrrp-master=none",
+		"VRRP on ge-0-0-0.0: configured: group 7, priority 200, VIP 10.0.61.254/24",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("configured non-master VRRP detail missing %q:\n%s", want, out)
+		}
 	}
 }
 

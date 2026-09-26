@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
@@ -87,6 +88,9 @@ func (s *Server) showChassisClusterStatus(buf *strings.Builder) {
 		fmt.Fprintln(buf, "Cluster not configured")
 	}
 	s.appendClockSkewAlarm(buf)
+	if s.store != nil {
+		buf.WriteString(cluster.FormatVRRPConfigRows(s.store.ActiveConfig()))
+	}
 }
 
 // appendFabricClockSkew surfaces the #6708 measured peer wall-clock skew.
