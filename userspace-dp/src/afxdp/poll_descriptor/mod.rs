@@ -4199,18 +4199,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             decision,
                                             fabric_ingress,
                                         );
-                                    // #1861 §5.2: transaction boundary for the
-                                    // forward+reverse install pair. The table is
-                                    // per-worker single-threaded, so a passing
-                                    // preflight makes both installs below
-                                    // infallible within this descriptor
-                                    // iteration. On refusal: roll back the SNAT
-                                    // allocation (same call shape as the old
-                                    // failure arm), count, and DROP the trigger
-                                    // packet (Junos parity: session-creation
-                                    // failure ⇒ packet dropped) — skipping the
-                                    // reverse install, the forwarding block,
-                                    // and the flow-cache population.
+                                    // #1861 §5.2 / #10890: transaction boundary
+                                    // for the forward+reverse install pair. The
+                                    // table is per-worker single-threaded, so a
+                                    // passing preflight makes both installs below
+                                    // infallible within this descriptor iteration.
+                                    // Once validated policy admits a TCP initial
+                                    // SYN, #10890 sheds local handshake-incomplete
+                                    // TCP sessions first at 90% capacity; no
+                                    // established session is evicted. Any
+                                    // remaining refusal follows the normal
+                                    // rollback/drop path below.
                                     // `needed == 0` is the tracking-not-required
                                     // case (DNS fast-path, LocalDelivery): no
                                     // install is attempted and nothing changes.
@@ -4220,7 +4219,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // only after this read-only capacity check,
                                     // so account for exactly the slots the
                                     // authorized tuple reuse can release.
-                                    let session_capacity_available =
+                                    let reuse_fits =
                                         if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
                                             sessions.can_admit_after_closing_tcp_pair_for_syn(
                                                 needed_sessions,
@@ -4230,7 +4229,46 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         } else {
                                             sessions.can_admit(needed_sessions)
                                         };
-                                    if needed_sessions > 0 && !session_capacity_available {
+                                    // #10890: if the reuse-aware check does not
+                                    // fit, shed handshake-incomplete flows
+                                    // before refusing. Shed only on failure so
+                                    // a fitting replacement never kills embryos
+                                    // gratuitously. Conservative: the shed check
+                                    // does not re-credit the closing pair.
+                                    let (admission_allowed, pressure_shed_sessions) =
+                                        if needed_sessions == 0 || reuse_fits {
+                                            (true, crate::session::PressureShedSessions::new())
+                                        } else {
+                                            sessions.can_admit_new_syn(
+                                                needed_sessions,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                            )
+                                        };
+                                    // #10890: pressure removal is a real session
+                                    // teardown, not just a table deletion. Release
+                                    // this worker's NAT holds exactly as the GC reap
+                                    // does, including when the new SYN is later refused.
+                                    for shed in pressure_shed_sessions {
+                                        crate::nat::release_source_nat_allocation_for_worker(
+                                            &worker_ctx.forwarding.iface_nat_allocators,
+                                            &worker_ctx.forwarding.source_nat_rules,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                        crate::nat64::release_nat64_allocation_for_worker(
+                                            &worker_ctx.forwarding.nat64,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                    }
+                                    if needed_sessions > 0 && !admission_allowed {
                                         sessions.note_admission_refused();
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,

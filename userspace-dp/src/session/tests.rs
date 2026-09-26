@@ -5752,6 +5752,164 @@ fn can_admit_boundary_matches_install_cap() {
     assert!(table.can_admit(0));
 }
 
+/// #10890: once a worker reaches 90% of capacity, an admitted initial SYN
+/// sheds one handshake-incomplete local TCP flow before admission. The
+/// established mix remains intact; a non-SYN cannot trigger shedding.
+#[test]
+fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
+    let now = 1_000_000_000u64;
+    let mut below_pressure = SessionTable::new();
+    below_pressure.set_max_sessions_for_test(10);
+
+    // Below the 90% threshold, a new SYN preflight leaves opening state alone.
+    let under_pressure = key_with_port(30_000);
+    let under_reverse =
+        install_forward_reverse_pair(&mut below_pressure, &under_pressure, now, TCP_SYN);
+    let (under_pressure_admitted, under_pressure_shed) =
+        below_pressure.can_admit_new_syn(2, PROTO_TCP, TCP_SYN);
+    assert!(under_pressure_admitted);
+    assert!(under_pressure_shed.is_empty());
+    assert_eq!(below_pressure.len(), 2);
+    assert!(below_pressure.entry_by_key(&under_pressure).is_some());
+    assert!(below_pressure.entry_by_key(&under_reverse).is_some());
+
+    let mut table = SessionTable::new();
+    table.set_max_sessions_for_test(10);
+
+    // Fill to exactly 90% with two half-open flows, two established pairs,
+    // and one established single entry. One half-open has seen a SYN-ACK but
+    // not the completing ACK, so its stable handshake_pending bit keeps it
+    // eligible alongside a bare-SYN opening.
+    let opening = key_with_port(30_001);
+    let opening_reverse = install_forward_reverse_pair(&mut table, &opening, now, TCP_SYN);
+    let pending = key_with_port(30_002);
+    let pending_reverse = install_forward_reverse_pair(&mut table, &pending, now, TCP_SYN);
+    assert!(
+        table
+            .lookup(
+                &pending_reverse,
+                now + 1_000_000,
+                TCP_SYN | TCP_ACK,
+            )
+            .is_some()
+    );
+    assert!(
+        table
+            .entry_by_key(&pending)
+            .expect("forward half after SYN-ACK")
+            .handshake_pending
+    );
+    let established_a = key_with_port(30_003);
+    let established_a_reverse =
+        install_forward_reverse_pair(&mut table, &established_a, now, TCP_ACK);
+    let established_b = key_with_port(30_004);
+    let established_b_reverse =
+        install_forward_reverse_pair(&mut table, &established_b, now, TCP_ACK);
+    let established_single = key_with_port(30_005);
+    assert!(table.install_with_protocol(
+        established_single.clone(),
+        decision(),
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let _ = table.drain_deltas(16);
+    assert_eq!(table.len(), 9);
+    assert_eq!(table.pressure_shed_openings.len(), 2);
+
+    let (non_syn_admitted, non_syn_shed) = table.can_admit_new_syn(2, PROTO_TCP, TCP_ACK);
+    assert!(!non_syn_admitted, "a non-initial SYN retains the hard cap");
+    assert!(non_syn_shed.is_empty(), "a non-initial SYN cannot shed sessions");
+    assert_eq!(table.len(), 9, "non-SYN admission must not mutate the table");
+    assert_eq!(table.pressure_shed_openings.len(), 2);
+
+    let (syn_admitted, shed_sessions) = table.can_admit_new_syn(2, PROTO_TCP, TCP_SYN);
+    assert!(
+        syn_admitted,
+        "a legitimate initial SYN at 90% pressure should free an opening pair"
+    );
+    assert_eq!(shed_sessions.len(), 2, "return both removed session halves");
+    assert_eq!(table.len(), 7, "one opening pair supplies the two slots");
+    assert_eq!(table.pressure_shed_openings.len(), 1);
+    let opening_pair_removed = table.entry_by_key(&opening).is_none();
+    let pending_pair_removed = table.entry_by_key(&pending).is_none();
+    assert_ne!(
+        opening_pair_removed, pending_pair_removed,
+        "exactly one handshake-incomplete flow should be shed"
+    );
+    if opening_pair_removed {
+        assert!(table.entry_by_key(&opening_reverse).is_none());
+    } else {
+        assert!(table.entry_by_key(&opening_reverse).is_some());
+    }
+    if pending_pair_removed {
+        assert!(table.entry_by_key(&pending_reverse).is_none());
+    } else {
+        assert!(table.entry_by_key(&pending_reverse).is_some());
+    }
+    for key in [
+        &established_a,
+        &established_a_reverse,
+        &established_b,
+        &established_b_reverse,
+        &established_single,
+    ] {
+        assert!(
+            table.entry_by_key(key).is_some(),
+            "pressure shedding must preserve established sessions"
+        );
+    }
+    let closes: Vec<_> = table
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|delta| delta.kind == SessionDeltaKind::Close)
+        .collect();
+    assert_eq!(closes.len(), 1, "the shed forward session must sync its close");
+    assert!(
+        closes[0].key == opening || closes[0].key == pending,
+        "the close delta must name the selected half-open victim"
+    );
+
+    // A passing pressure preflight still makes the complete new install group
+    // infallible, as in the ordinary can_admit contract.
+    let admitted = key_with_port(30_006);
+    let admitted_reverse = install_forward_reverse_pair(&mut table, &admitted, now, TCP_SYN);
+    assert_eq!(table.len(), 9);
+    assert!(table.entry_by_key(&admitted).is_some());
+    assert!(table.entry_by_key(&admitted_reverse).is_some());
+}
+
+/// #10890: keep SYN-ACK-pending flows eligible, then retire their candidate
+/// index entry when the final ACK completes the handshake.
+#[test]
+fn pressure_shed_index_tracks_handshake_completion() {
+    let mut table = SessionTable::new();
+    let forward = key_with_port(31_000);
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table.pressure_shed_openings.contains_key(&forward));
+
+    assert!(
+        table
+            .lookup(&reverse, now + 1_000_000, TCP_SYN | TCP_ACK)
+            .is_some()
+    );
+    assert!(
+        table.pressure_shed_openings.contains_key(&forward),
+        "a SYN-ACK without the final ACK remains pressure-sheddable"
+    );
+    assert!(
+        table
+            .lookup(&forward, now + 2_000_000, TCP_ACK)
+            .is_some()
+    );
+    assert!(
+        !table.pressure_shed_openings.contains_key(&forward),
+        "completed handshakes must leave the pressure-shed index"
+    );
+}
+
 #[test]
 fn can_admit_is_conservative_for_replacements() {
     // Matches install_with_protocol_with_origin's own cap check, which
