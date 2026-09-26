@@ -699,18 +699,21 @@ func zeroizeRootAuthorizedKeysPath() string {
 //     whole reset. Root is the appliance's own superuser, never a disposable
 //     provisioned account, so it is revoked IN PLACE, never deleted.
 //
-// Revocation kills both root login vectors: remove /root/.ssh/authorized_keys
-// (key-based login) and lock the root password (passwd -l root — console/
-// password login). No userdel. The SSH-key removal runs FIRST so that vector
-// dies even if the password lock later fails (mirrors the generic path's
-// keys-before-userdel ordering).
+// Revocation kills root login vectors only when xpf owns them: remove
+// /root/.ssh/authorized_keys when a root account marker exists, and lock the
+// password only when the separate provisioned-passwords marker proves xpf set
+// it. A keys-only root-authentication must preserve the pre-existing console
+// password. The SSH-key removal runs FIRST so that vector dies even if the
+// password lock later fails (mirrors the generic path's keys-before-userdel
+// ordering).
 //
-// Fail CLOSED (#5496/#5493 discipline): if EITHER revocation fails, surface the
-// error (so performZeroizeWipe reports the reset INCOMPLETE) and RETAIN the
-// provenance marker so a retried zeroize re-attempts. The marker is dropped
-// (removeMarker=true) only when BOTH revocations succeeded — an already-absent
-// authorized_keys (os.ErrNotExist) is the goal, not a failure, and does not
-// block marker removal.
+// Fail CLOSED (#5496/#5493 discipline): if an owned revocation fails or the
+// password marker cannot be read/resolved, surface the error (so
+// performZeroizeWipe reports the reset INCOMPLETE) and RETAIN the provenance
+// marker so a retried zeroize re-attempts. An absent password marker means xpf
+// never provisioned that password; it is intentionally left untouched. An
+// already-absent authorized_keys (os.ErrNotExist) is the goal, not a failure.
+// The account marker is dropped only when each owned revocation succeeds.
 func zeroizeRootLoginAccount(fail func(error), attest func(string)) (removeMarker bool) {
 	removeMarker = true
 	// Kill the SSH-key vector first (survives a password-lock failure). An
@@ -723,7 +726,31 @@ func zeroizeRootLoginAccount(fail func(error), attest func(string)) (removeMarke
 		fail(err)
 		removeMarker = false
 	}
-	// Lock the root password so console/password root login is revoked too.
+
+	// The account-registry marker also covers keys-only root-authentication.
+	// Do not infer password ownership from it: only the resource-specific
+	// password marker proves xpf set root's password (#5841, #10741).
+	passwordUID, err := readProvisionedMarkerUID(filepath.Join(zeroizeProvisionedPasswordsDir(), "root"))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// Keys-only root: preserve the factory/operator password.
+		slog.Info("zeroize: left root password untouched (not xpf-managed)")
+		return removeMarker
+	case err != nil:
+		slog.Error("zeroize: cannot resolve root password ownership; retaining marker, reset incomplete",
+			"err", err)
+		fail(err)
+		return false
+	case passwordUID != 0:
+		err := fmt.Errorf("zeroize: root password marker UID %d != live UID 0; password left untouched", passwordUID)
+		slog.Error("zeroize: root password ownership mismatch; retaining marker, reset incomplete",
+			"markerUID", passwordUID)
+		fail(err)
+		return false
+	}
+
+	// Lock the root password only after its resource-specific marker proves
+	// xpf provisioned it. If locking fails, keep the registry marker for retry.
 	if out, err := zeroizeLockRootPassword(); err != nil {
 		slog.Error("zeroize: failed to lock root password; retaining marker, reset incomplete",
 			"err", err, "output", strings.TrimSpace(string(out)))
