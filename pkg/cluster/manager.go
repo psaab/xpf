@@ -50,6 +50,11 @@ type RedundancyGroupState struct {
 	Weight           int       // current effective weight (255 - sum of down monitor weights)
 	FailoverCount    int
 	MonitorFails     []string // names of currently-failed monitors
+	// transferCommitRolePinned preserves the role granted by the last completed
+	// transfer against ordinary election until peer state or operator action
+	// establishes a new ownership decision.
+	transferCommitRolePinned bool
+	transferCommitRole       NodeState
 
 	// Readiness gate: blocks promotion to primary until interfaces + VRRP
 	// are confirmed ready. TakeoverHoldTime is an optional extra delay.
@@ -181,8 +186,8 @@ type Manager struct {
 	kernelUpgradeHoldReason string
 
 	// Peer state tracking (heartbeat).
-	peerAlive           bool
-	peerEverSeen        bool // true once first heartbeat received; distinguishes "never heard" from "lost"
+	peerAlive    bool
+	peerEverSeen bool // true once first heartbeat received; distinguishes "never heard" from "lost"
 	// peerConfirmedAbsent is set by handlePeerNeverSeen once the cold-boot
 	// grace elapses with no heartbeat ever received. It releases the
 	// non-preempt hold WITHOUT rewriting peerEverSeen, so the #7161

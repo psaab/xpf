@@ -3591,6 +3591,14 @@ outside the monitor loop:
     as before. Crash takeover stays ungated by design.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
+- **A committed requested transfer wins over `preempt` (#10776).** Once the
+  remote owner acknowledges commit, the requester keeps primary through the
+  post-commit heartbeat grace and while the peer is not primary; the old owner
+  stays secondary while it sees the requester primary, including its local
+  transfer grace against a stale heartbeat. A peer-primary heartbeat returns
+  the requester to normal election, and `ResetFailover` on the old owner clears
+  its secondary pin so its higher priority may reclaim. Weight-zero, peer loss,
+  and a new explicit transfer retain their normal precedence.
 - **Removing an RG must stop its armed hold timer (#5245).** `SetRGReady`
   arms a per-RG `time.AfterFunc` takeover-hold timer whose closure captures
   the `*RedundancyGroupState` and re-runs election on expiry. `UpdateConfig`'s
