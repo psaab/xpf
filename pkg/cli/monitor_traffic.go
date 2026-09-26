@@ -80,21 +80,30 @@ func resolveConfiguredMonitorTrafficInterface(cfg *config.Config, requested stri
 	if cfg == nil || cfg.Interfaces.Interfaces == nil {
 		return "", false
 	}
+	if _, ok := config.LookupInterface(cfg, requested); ok {
+		return cfg.ResolveKernelIfName(requested), true
+	}
+	base, unitText, hasUnit := strings.Cut(requested, ".")
+	unit, unitErr := strconv.Atoi(unitText)
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil {
 			continue
 		}
-		if requested == name || requested == config.LinuxIfName(name) ||
-			(ifc.Name != "" && (requested == ifc.Name || requested == config.LinuxIfName(ifc.Name))) {
+		linuxName := config.LinuxIfName(name)
+		interfaceName := ifc.Name
+		linuxInterfaceName := ""
+		if interfaceName != "" {
+			linuxInterfaceName = config.LinuxIfName(interfaceName)
+		}
+		if !hasUnit && (requested == name || requested == linuxName ||
+			requested == interfaceName || requested == linuxInterfaceName) {
 			return cfg.ResolveKernelIfName(name), true
 		}
-		for unit, unitConfig := range ifc.Units {
-			if unitConfig == nil {
-				continue
-			}
-			ref := name + "." + strconv.Itoa(unit)
-			if requested == ref || requested == config.LinuxIfName(ref) {
-				return cfg.ResolveKernelIfName(ref), true
+		baseMatches := base == name || base == linuxName ||
+			base == interfaceName || base == linuxInterfaceName
+		if hasUnit && unitErr == nil && baseMatches {
+			if _, ok := config.LookupUnit(ifc, unit); ok {
+				return cfg.ResolveKernelIfName(name + "." + unitText), true
 			}
 		}
 	}
