@@ -90,6 +90,10 @@ pub(super) struct PendingNeighPacket {
     /// retry from `retry_pending_neigh` increments this. Capped by
     /// `PROBE_SCHEDULE_NS.len()`.
     pub(super) probe_attempts: u8,
+    /// #10917: the validated fabric zone stamp is needed by the retry-time
+    /// fragment-overlap key, which must use the same routing domain as inline
+    /// fabric-ingress siblings.
+    pub(super) fabric_ingress_zone: Option<u16>,
 }
 
 // Compile-time size guard: pending-neighbor retry carries the session key so
@@ -120,6 +124,8 @@ pub(super) struct PendingNeighPacket {
 // meters the right session. Dropping it here to save the bytes would mean a
 // retried packet metered against a DIFFERENT tunnel's session than the one it
 // belongs to.
+// #10917: the fabric stamp uses the existing tail padding, so this packet
+// remains 288 B and the bounded queue's maximum memory does not grow.
 const _: () = assert!(
     core::mem::size_of::<PendingNeighPacket>() == 288,
     "PendingNeighPacket size changed — update afxdp.rs MAX_PENDING_NEIGH commentary",

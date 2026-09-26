@@ -8531,6 +8531,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     addr: desc.addr,
                                                     desc,
                                                     meta,
+                                                    // Preserve the stage-9 raw validated stamp,
+                                                    // before the later RG-gated policy copy.
+                                                    fabric_ingress_zone: fabric_arrival_zone,
                                                     decision: pending_decision,
                                                     flow_key: pending_flow_key,
                                                     queued_ns: now_ns,

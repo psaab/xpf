@@ -151,6 +151,7 @@ fn flush_one(
             options: 0,
         },
         meta,
+        fabric_ingress_zone: None,
         decision: deferred_decision(),
         flow_key,
         queued_ns: 0,

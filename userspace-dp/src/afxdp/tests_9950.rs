@@ -401,7 +401,179 @@ fn f035_parked_fragment_overlap_is_rechecked_on_retry_10659() {
         );
     }
 }
+/// A fabric-ingress fragment parked on an unresolved neighbor must use the
+/// encoded zone's overlap domain when retried, matching an inline sibling.
+#[test]
+fn f035_fabric_parked_fragment_uses_encoded_zone_overlap_domain_10917() {
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+    let ident = 0x1091;
+    let stamped = |mut frame: Vec<u8>| {
+        let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+        frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, 0xfe, hi, lo]);
+        frame
+    };
+    let udp_header = [0x82, 0x35, 0x01, 0xbb, 0x00, 0x08, 0x00, 0x00];
+    let head = stamped(ipv4_frag_frame_9950_with_mac(
+        src,
+        dst,
+        PROTO_UDP,
+        ident,
+        0x2000,
+        &udp_header,
+        TEST_FABRIC_MAC,
+    ));
+    let sibling_payload = [
+        0x82, 0x35, 0x01, 0xbb, 0x00, 0x10, 0x00, 0x00, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+        0xbb,
+    ];
+    let sibling = stamped(ipv4_frag_frame_9950_with_mac(
+        src,
+        dst,
+        PROTO_UDP,
+        ident,
+        0x2000,
+        &sibling_payload,
+        TEST_FABRIC_MAC,
+    ));
 
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.neighbors.clear();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.has_routing_domains = true;
+    const FABRIC_LINK_DOMAIN: u32 = 0x10917;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(21, FABRIC_LINK_DOMAIN);
+    assert_eq!(
+        crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 21, 0, None),
+        FABRIC_LINK_DOMAIN,
+        "fixture: an unstamped fabric ingress uses the link's routing domain"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::ingress_routing_domain(
+            &forwarding,
+            21,
+            0,
+            Some(TEST_LAN_ZONE_ID),
+        ),
+        0,
+        "fixture: the encoded lan zone uses the default routing domain"
+    );
+
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 21, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 21, 0),
+    ];
+    for binding in &mut bindings {
+        binding.interface = Arc::<str>::from("ge-0-0-0");
+    }
+    let mut sessions = SessionTable::new();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+        },
+    )]);
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_for_ip(&forwarding, IpAddr::V4(dst),),
+        ForwardingDisposition::MissingNeighbor,
+        "the fixture must leave the default-route gateway unresolved"
+    );
+
+    let head_meta = frag_meta_9950(21, PROTO_UDP, 0, src, dst, head.len() as u16);
+    let (_park_batch, parked_dbg) = txn_run_descriptor_checked(
+        &mut bindings[0],
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &head,
+        head_meta,
+        true,
+    );
+    assert_eq!(bindings[0].pending_neigh.len(), 1);
+    assert_eq!(
+        parked_dbg.missing_neigh, 1,
+        "the stamped fabric-ingress head must take the real MissingNeighbor park path"
+    );
+
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+    let sibling_meta = frag_meta_9950(21, PROTO_UDP, 0, src, dst, sibling.len() as u16);
+    let (sibling_batch, sibling_dbg) = txn_run_descriptor_checked(
+        &mut bindings[1],
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &sibling,
+        sibling_meta,
+        true,
+    );
+    assert_eq!(
+        sibling_dbg.rx, 1,
+        "the inline sibling must reach the poll path"
+    );
+    assert_eq!(
+        sibling_batch.validated_packets, 1,
+        "the sibling must validate"
+    );
+    assert_eq!(
+        sibling_dbg.forward, 1,
+        "the overlapping fabric-ingress sibling must pass inline before retry"
+    );
+
+    let retry_output_before: usize = bindings
+        .iter()
+        .map(|b| b.tx_pipeline.pending_tx_prepared.len() + b.tx_pipeline.pending_tx_local.len())
+        .sum();
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut shared_recycles = Vec::new();
+    let area = bindings[0].umem.area() as *const MmapArea;
+    let (left, rest) = bindings.split_at_mut(0);
+    let (binding, right) = rest.split_first_mut().expect("parked fabric binding");
+    let mut retry_counters = BatchCounters::default();
+    retry_pending_neigh(
+        binding,
+        left,
+        0,
+        right,
+        &lookup,
+        &mirror_targets,
+        &forwarding,
+        &dynamic_neighbors,
+        None,
+        123_000_000_100,
+        // SAFETY: the pointer comes from bindings[0]'s Rc-backed UMEM;
+        // this test is single-threaded and the split borrows are disjoint.
+        unsafe { &*area },
+        &mut shared_recycles,
+        None,
+        &mut retry_counters,
+    );
+
+    assert!(bindings[0].pending_neigh.is_empty());
+    assert_eq!(
+        retry_counters.frag_overlap_dropped, 1,
+        "retry must re-check the parked range under the encoded zone's domain"
+    );
+    let retry_output_after: usize = bindings
+        .iter()
+        .map(|b| b.tx_pipeline.pending_tx_prepared.len() + b.tx_pipeline.pending_tx_local.len())
+        .sum();
+    assert_eq!(
+        retry_output_after, retry_output_before,
+        "the overlapping parked fragment must not enqueue a retry TX"
+    );
+}
 
 /// A queued fragment that fails the production TTL rewrite must fail its
 /// overlap admission. Otherwise the late overlap check can reclaim the
