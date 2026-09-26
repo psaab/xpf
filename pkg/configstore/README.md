@@ -1126,11 +1126,13 @@ per-path:
 - **Ownership-scoped deletion (#5768).** The top-level sweep matches ONLY
   the artifacts xpf itself created/tracks — the live config file (by EXACT
   name, `configBase`, so a non-`.conf` `-config` base like `site.cfg` is
-  erased too), `rescue.conf` (`RescueConfigBase`), `.config.journal[.N]`,
-  the numbered text rollback slots `<configBase>.<N>`, and fsatomic crash
-  temps — NEVER a broad `*.conf` suffix or `rollback*` prefix glob. The old
-  globs deleted UNOWNED siblings when a custom `-config` resolved the config
-  root to a shared directory or a subdir that slipped past the
+  erased too), `rescue.conf` (`RescueConfigBase`), the day-0 loader stamp
+  `.day0-config-applied` (removed so a factory-default device can provision
+  from new media after reset, #10740), `.config.journal[.N]`, the numbered
+  text rollback slots `<configBase>.<N>`, and fsatomic crash temps — NEVER a
+  broad `*.conf` suffix or `rollback*` prefix glob. The old globs deleted
+  UNOWNED siblings when a custom `-config` resolved the config root to a
+  shared directory or a subdir that slipped past the
   `FactoryResetForbiddenRoots` denylist (`/data/xpf.conf` → wipes `/data/*`;
   `/etc/frr/x.conf` → deletes xpf's own rendered `frr.conf`). A denylist is
   inherently incomplete on a wildcard wipe; ownership scoping bounds the

@@ -25,13 +25,15 @@ import (
 // The config root here is a throwaway dir that PASSES ValidateFactoryResetRoot
 // (a TempDir subdir is absolute and not an exact FactoryResetForbiddenRoots
 // entry), seeded with both xpf-owned artifacts and unowned siblings. After the
-// wipe: every owned artifact is gone (no secret-retention regression) and every
-// unowned sibling survives.
+// wipe: every owned artifact is gone (including the day-0 stamp, so the loader's
+// ConditionPathExists=!stamp gate permits a fresh medium) and every unowned
+// sibling survives.
 //
 // RED on revert: restore the `strings.HasSuffix(name, ".conf")` /
 // `strings.HasPrefix(name, "rollback")` globs and the unowned other.conf /
 // frr.conf / rollback / rollback.bak siblings are deleted — the "survives"
-// assertions fail.
+// assertions fail. Omitting the #10740 stamp match likewise fails the owned-
+// artifact absence assertion.
 func TestZeroizeConfigDirScopedToOwnedArtifacts5768(t *testing.T) {
 	dir := t.TempDir()
 	configBase := "xpf.conf"
@@ -46,15 +48,16 @@ func TestZeroizeConfigDirScopedToOwnedArtifacts5768(t *testing.T) {
 	}
 	// xpf-owned config-state artifacts (must be erased — no secret retention).
 	owned := []string{
-		filepath.Join(dir, configBase),                   // the live config file
-		filepath.Join(dir, configstore.RescueConfigBase), // rescue.conf
-		filepath.Join(dir, configBase+".1"),              // <base>.<N> text rollback slot
-		filepath.Join(dir, ".config.journal"),            // audit journal
-		filepath.Join(dir, ".config.journal.1"),          // rotated journal segment
-		filepath.Join(dir, ".xpf.conf.tmp-abc123"),       // fsatomic crash temp
-		filepath.Join(dir, ".configdb", "master.key"),    // AES-GCM key
-		filepath.Join(dir, ".configdb", "active.json"),   // SSOT
-		filepath.Join(dir, "tls", "key.pem"),             // self-signed REST key
+		filepath.Join(dir, configBase),                        // the live config file
+		filepath.Join(dir, configstore.RescueConfigBase),      // rescue.conf
+		filepath.Join(dir, configstore.Day0ConfigAppliedBase), // day-0 loader stamp (#10740)
+		filepath.Join(dir, configBase+".1"),                   // <base>.<N> text rollback slot
+		filepath.Join(dir, ".config.journal"),                 // audit journal
+		filepath.Join(dir, ".config.journal.1"),               // rotated journal segment
+		filepath.Join(dir, ".xpf.conf.tmp-abc123"),            // fsatomic crash temp
+		filepath.Join(dir, ".configdb", "master.key"),         // AES-GCM key
+		filepath.Join(dir, ".configdb", "active.json"),        // SSOT
+		filepath.Join(dir, "tls", "key.pem"),                  // self-signed REST key
 	}
 	for _, p := range owned {
 		if err := os.WriteFile(p, secret, 0o600); err != nil {
