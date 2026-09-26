@@ -3319,6 +3319,15 @@ mechanism (PATH C of `docs/research/2239-dhcp-ha-lease-sync/plan.md`):
     are at most about 4.2x the frame (plus its string bytes), and an impossible frame
     allocates nothing. `dhcp_lease_decode_bound_9507_test.go` pins it, including a
     full-frame legitimate set that must still decode completely.
+- **Semantic lease validation (#10893)** — after framing decode, the receiver
+  rejects rows with a wrong family, an unparseable/non-servable address scope,
+  or an IA_PD prefix length outside 1..128. Valid rows have `ValidLife`,
+  `Remaining`, and `PreferredRemaining` clamped to five years (with
+  preferred<=remaining preserved); an invalid row is dropped without losing
+  valid siblings, while an all-invalid nonempty set retains the prior held set.
+  The same sanitizer runs again at socket seed and both memfile writers, so
+  callers outside the wire receive path cannot bypass the boundary.
+
 - **Full-set ordering (#5706)** — like IPsec SA sync, each v4/v6 lease push is a
   wholesale REPLACE, so a reorder across the two concurrent fabric `receiveLoop`s
   could regress the held set. `QueueDHCPLeases` appends a per-family

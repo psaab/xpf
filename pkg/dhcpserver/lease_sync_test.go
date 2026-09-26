@@ -3,6 +3,7 @@ package dhcpserver
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -634,6 +635,84 @@ func TestSeedAndPreSeed_DropExpiredLeases(t *testing.T) {
 	})
 }
 
+// #10893: the socket and memfile sinks independently validate direct callers,
+// not just rows that passed the cluster decoder. Invalid family/address/scope
+// and zero-length IA_PD rows never reach Kea; extreme lifetimes are capped.
+func TestSeedAndPreSeedRejectInvalidSyncLeases10893(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	sock4 := tmpSocket(t, "k4semantic.sock")
+	var added4, added6 []keaLeaseJSON
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		var lease keaLeaseJSON
+		b, _ := json.Marshal(cmd.Arguments)
+		_ = json.Unmarshal(b, &lease)
+		switch cmd.Command {
+		case "lease4-add":
+			added4 = append(added4, lease)
+		case "lease6-add":
+			added6 = append(added6, lease)
+		default:
+			return keaResponse{Result: keaResultError, Text: "unexpected"}
+		}
+		return keaResponse{Result: keaResultSuccess}
+	}}
+	dial, stop := startStubKea(t, sock4, stub)
+	defer stop()
+	m := New()
+	file4 := filepath.Join(t.TempDir(), "kea-leases4.csv")
+	file6 := filepath.Join(t.TempDir(), "kea-leases6.csv")
+	m.SetLeaseSyncSeamsForTesting(dial, sock4, sock4, file4, file6)
+
+	v4 := []SyncLease{
+		{Family: 4, Address: "10.0.0.5", HWAddress: "aa", ValidLife: 3600, Remaining: 600},
+		{Family: 4, Address: "2001:db8::5", HWAddress: "bb", ValidLife: 3600, Remaining: 600},
+		{Family: 4, Address: "127.0.0.1", HWAddress: "cc", ValidLife: 3600, Remaining: 600},
+		{Family: 6, Address: "2001:db8::6", DUID: "00:01:06", LeaseType: "IA_NA", Remaining: 600},
+		{Family: 4, Address: "10.0.0.10", HWAddress: "dd", ValidLife: math.MaxUint32, Remaining: math.MaxUint32},
+	}
+	n, err := m.SeedSyncLeases4(context.Background(), v4, now)
+	if err != nil || n != 2 || len(added4) != 2 {
+		t.Fatalf("v4 seed = (%d, %d adds, %v), want 2 valid rows", n, len(added4), err)
+	}
+	if added4[0].IPAddress != "10.0.0.5" || added4[1].IPAddress != "10.0.0.10" ||
+		added4[1].ValidLft != maxSyncLeaseLifetime {
+		t.Fatalf("v4 seed admitted invalid data or failed to cap lifetime: %+v", added4)
+	}
+
+	v6 := []SyncLease{
+		{Family: 6, Address: "2001:db8::6", DUID: "00:01:06", LeaseType: "IA_NA", ValidLife: 3600, Remaining: 600},
+		{Family: 6, Address: "2001:db8:1::", DUID: "00:01:07", LeaseType: "IA_PD", PrefixLen: 0, Remaining: 600},
+		{Family: 6, Address: "fe80::1", DUID: "00:01:08", LeaseType: "IA_NA", Remaining: 600},
+		{Family: 4, Address: "10.0.0.9", HWAddress: "ee", Remaining: 600},
+		{Family: 6, Address: "2001:db8::10", DUID: "00:01:10", LeaseType: "IA_NA", ValidLife: math.MaxUint32, Remaining: math.MaxUint32},
+	}
+	n, err = m.SeedSyncLeases6(context.Background(), v6, now)
+	if err != nil || n != 2 || len(added6) != 2 {
+		t.Fatalf("v6 seed = (%d, %d adds, %v), want 2 valid rows", n, len(added6), err)
+	}
+	if added6[0].IPAddress != "2001:db8::6" || added6[1].IPAddress != "2001:db8::10" ||
+		added6[1].ValidLft != maxSyncLeaseLifetime {
+		t.Fatalf("v6 seed admitted invalid data or failed to cap lifetime: %+v", added6)
+	}
+
+	if err := m.PreSeedMemfile4(v4, now); err != nil {
+		t.Fatalf("PreSeedMemfile4: %v", err)
+	}
+	got4, err := parseActiveLeases4(file4, now)
+	if err != nil || len(got4) != 2 || got4[0].Address != "10.0.0.5" ||
+		got4[1].Address != "10.0.0.10" || got4[1].Expire != now.Unix()+int64(maxSyncLeaseLifetime) {
+		t.Fatalf("v4 memfile retained invalid row or uncapped lifetime: %+v (err=%v)", got4, err)
+	}
+	if err := m.PreSeedMemfile6(v6, now); err != nil {
+		t.Fatalf("PreSeedMemfile6: %v", err)
+	}
+	got6, err := parseActiveLeases6(file6, now)
+	if err != nil || len(got6) != 2 || got6[0].Address != "2001:db8::6" ||
+		got6[1].Address != "2001:db8::10" || got6[1].Expire != now.Unix()+int64(maxSyncLeaseLifetime) {
+		t.Fatalf("v6 memfile retained invalid row or uncapped lifetime: %+v (err=%v)", got6, err)
+	}
+}
+
 // TestPreSeedMemfileMerged4_PreservesLocalLeases is the #5040 regression guard.
 // On active-active takeover this node is ALREADY MASTER for one RG (its lease is
 // live in local Kea) and takes over a second RG (the peer's lease). The pre-seed
@@ -1082,7 +1161,7 @@ func TestPreSeedMemfile6_RoundTrip_PreservesIATA(t *testing.T) {
 	in := []SyncLease{
 		{Family: 6, Address: "2001:db8::1", DUID: "00:01:00:01", IAID: 10,
 			LeaseType: "IA_NA", SubnetID: 1, Remaining: 1200, State: keaStateDefault},
-		{Family: 6, Address: "2001:db8::ta", DUID: "00:01:00:02", IAID: 20,
+		{Family: 6, Address: "2001:db8::2a", DUID: "00:01:00:02", IAID: 20,
 			LeaseType: "IA_TA", SubnetID: 1, Remaining: 1800, State: keaStateDefault},
 		{Family: 6, Address: "2001:db8:abcd::", DUID: "00:01:00:03", IAID: 30,
 			LeaseType: "IA_PD", PrefixLen: 56, SubnetID: 1, Remaining: 2400, State: keaStateDefault},
@@ -1101,7 +1180,7 @@ func TestPreSeedMemfile6_RoundTrip_PreservesIATA(t *testing.T) {
 	}
 	var sawTAColumn bool
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		if !strings.HasPrefix(line, "2001:db8::ta,") {
+		if !strings.HasPrefix(line, "2001:db8::2a,") {
 			continue
 		}
 		cols := strings.Split(line, ",")
@@ -1135,7 +1214,7 @@ func TestPreSeedMemfile6_RoundTrip_PreservesIATA(t *testing.T) {
 		byAddr[l.Address] = l
 	}
 
-	ta, ok := byAddr["2001:db8::ta"]
+	ta, ok := byAddr["2001:db8::2a"]
 	if !ok {
 		t.Fatalf("IA_TA lease missing after round trip: %+v", got)
 	}
@@ -1750,13 +1829,13 @@ func TestPreSeedMemfile6_PreferredLifetime(t *testing.T) {
 	m.SetLeaseSyncSeamsForTesting(nil, "", "", "", memfile6)
 
 	if err := m.PreSeedMemfile6([]SyncLease{
-		{Family: 6, Address: "2001:db8::dep", DUID: "00:01:00:01", IAID: 1,
+		{Family: 6, Address: "2001:db8::d", DUID: "00:01:00:01", IAID: 1,
 			LeaseType: "IA_NA", SubnetID: 1, Remaining: 1800, PreferredRemaining: 0,
 			State: keaStateDefault}, // deprecated
-		{Family: 6, Address: "2001:db8::par", DUID: "00:01:00:02", IAID: 2,
+		{Family: 6, Address: "2001:db8::a", DUID: "00:01:00:02", IAID: 2,
 			LeaseType: "IA_NA", SubnetID: 1, Remaining: 1800, PreferredRemaining: 600,
 			State: keaStateDefault}, // partially deprecated
-		{Family: 6, Address: "2001:db8::ok", DUID: "00:01:00:03", IAID: 3,
+		{Family: 6, Address: "2001:db8::b", DUID: "00:01:00:03", IAID: 3,
 			LeaseType: "IA_NA", SubnetID: 1, Remaining: 1800, PreferredRemaining: 1800,
 			State: keaStateDefault}, // healthy
 	}, localNow); err != nil {
@@ -1775,9 +1854,9 @@ func TestPreSeedMemfile6_PreferredLifetime(t *testing.T) {
 	// v6 column order: address(0),duid(1),valid_lifetime(2),expire(3),
 	// subnet_id(4),pref_lifetime(5),lease_type(6),...
 	want := map[string]struct{ valid, pref string }{
-		"2001:db8::dep": {"1800", "0"},
-		"2001:db8::par": {"1800", "600"},
-		"2001:db8::ok":  {"1800", "1800"},
+		"2001:db8::d": {"1800", "0"},
+		"2001:db8::a": {"1800", "600"},
+		"2001:db8::b": {"1800", "1800"},
 	}
 	for addr, w := range want {
 		f, ok := rows[addr]

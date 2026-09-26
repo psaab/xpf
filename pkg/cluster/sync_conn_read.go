@@ -796,6 +796,13 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// the filter judges records, not senders. Legacy (untrailered) only
 		// affects ordering (admit-always, never advances the mark).
 		origCount := len(leases)
+		var semanticallyDropped int
+		leases, semanticallyDropped = filterDHCPLeasesBySemantics(4, leases)
+		if semanticallyDropped > 0 {
+			s.stats.MalformedRecordsDropped.Add(uint64(semanticallyDropped))
+			slog.Warn("cluster sync: dropping semantically invalid DHCP v4 lease records — keeping the rest",
+				"dropped", semanticallyDropped, "kept", len(leases), "incarnation", incarnation, "seq", seq)
+		}
 		leases, dropped := filterDHCPLeasesByIdentity(4, leases)
 		if dropped > 0 {
 			s.stats.DHCPLeasesDroppedNoIdentity.Add(uint64(dropped))
@@ -880,6 +887,13 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		}
 		// Every decoded set is filtered: see the v4 twin.
 		origCount := len(leases)
+		var semanticallyDropped int
+		leases, semanticallyDropped = filterDHCPLeasesBySemantics(6, leases)
+		if semanticallyDropped > 0 {
+			s.stats.MalformedRecordsDropped.Add(uint64(semanticallyDropped))
+			slog.Warn("cluster sync: dropping semantically invalid DHCP v6 lease records — keeping the rest",
+				"dropped", semanticallyDropped, "kept", len(leases), "incarnation", incarnation, "seq", seq)
+		}
 		leases, dropped := filterDHCPLeasesByIdentity(6, leases)
 		if dropped > 0 {
 			s.stats.DHCPLeasesDroppedNoIdentity.Add(uint64(dropped))

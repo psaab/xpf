@@ -170,6 +170,108 @@ func clampPreferredRemaining(pref, remaining int) int {
 	return pref
 }
 
+// maxSyncLeaseLifetime caps a synced lease's Remaining/ValidLife (#10893). The
+// wire carries lifetimes as uint32 seconds, so a buggy or compromised
+// authenticated peer (or a legacy peer with no auth at all) can pin an address
+// for ~136 years with one full-set push. Five years is ~1800x the rendered
+// 1-day default and past any sane operator lease-time, while periodic
+// full-set pushes refresh legitimately long leases long before the cap
+// matters; the clamp direction is fail-safe (a shorter seeded lifetime only
+// costs the client a renewal). It is also int32-safe for downstream consumers.
+const maxSyncLeaseLifetime = 5 * 365 * 24 * 60 * 60 // 5 years, in seconds
+
+// SanitizeSyncLeaseForFamily enforces the semantic contract a SyncLease must
+// meet before it is trusted (#10893): the row's family matches the outer
+// message family, the address parses as a servable unicast address of that
+// family, an IA_PD row carries an in-range delegated prefix length, and
+// lifetimes are clamped to [0, maxSyncLeaseLifetime] with the #5073
+// preferred<=valid invariant preserved. It returns the sanitized row and
+// whether the row is keepable; a false row must be dropped, never seeded.
+//
+// All three sinks call it — the cluster receive filter (framing-then-semantics,
+// so one bad row cannot poison the held set or any consumer), the control-
+// socket seed, and the memfile pre-seed — so the decode/seed boundary cannot
+// drift. Lifetimes clamp rather than drop: an expired row (Remaining<=0) still
+// reaches the #4871 guards, which own the drop-vs-revive disposition.
+func SanitizeSyncLeaseForFamily(family int, l SyncLease) (SyncLease, bool) {
+	if l.Family != family {
+		return l, false
+	}
+	if !validSyncLeaseAddressForFamily(family, l.Address) {
+		return l, false
+	}
+	if !validSyncLeasePrefixLen(l) {
+		return l, false
+	}
+	l.ValidLife = clampSyncLeaseLifetime(l.ValidLife)
+	l.Remaining = clampSyncLeaseLifetime(l.Remaining)
+	if l.ValidLife > 0 && l.Remaining > l.ValidLife {
+		l.Remaining = l.ValidLife
+	}
+	l.PreferredRemaining = clampPreferredRemaining(clampSyncLeaseLifetime(l.PreferredRemaining), l.Remaining)
+	return l, true
+}
+
+// validSyncLeaseAddressForFamily reports whether address parses as an IP of the
+// given family in that family's textual form and is a plausible served
+// address: global-scope unicast, never unspecified/loopback/multicast/
+// link-local/broadcast. DHCP never assigns those, so a peer row carrying one
+// is corrupt or hostile.
+func validSyncLeaseAddressForFamily(family int, address string) bool {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return false
+	}
+	switch family {
+	case 4:
+		// Dotted-quad form only: a v6 rendering (including v4-mapped) is not
+		// a v4 lease Kea could install. 0/8 and 240/4 are reserved, not
+		// assignable unicast lease space.
+		v4 := ip.To4()
+		if v4 == nil || strings.Contains(address, ":") || v4[0] == 0 || v4[0] >= 240 {
+			return false
+		}
+	case 6:
+		// Colon form only, and never a v4 address in disguise.
+		if ip.To4() != nil || !strings.Contains(address, ":") {
+			return false
+		}
+	default:
+		return false
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	return true
+}
+
+// validSyncLeasePrefixLen bounds the delegated prefix of a v6 IA_PD row to the
+// protocol range 1..128 (#10893): a PrefixLen of 0 (or beyond 128) delegates
+// nothing (or is unrepresentable) and must not seed. Non-PD rows carry no
+// prefix — both seed paths force /128 or ignore the field — so any value is
+// accepted rather than dropping a lease over an ignored column. v4 rows carry
+// no prefix at all.
+func validSyncLeasePrefixLen(l SyncLease) bool {
+	if l.Family != 6 || l.LeaseType != "IA_PD" {
+		return true
+	}
+	return l.PrefixLen >= 1 && l.PrefixLen <= 128
+}
+
+// clampSyncLeaseLifetime bounds one lifetime to the seedable range (#10893).
+// Negatives floor to 0 (the #4871 guards drop the row downstream); over-long
+// values clamp to maxSyncLeaseLifetime instead of pinning the address.
+func clampSyncLeaseLifetime(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > maxSyncLeaseLifetime {
+		return maxSyncLeaseLifetime
+	}
+	return v
+}
+
 // IdentityKey returns a stable per-lease identity used for dedup/diff on the
 // sender (on-grant change detection) and as the seed idempotency key. It mirrors
 // the DDNS identity functions but is keyed on the address + identity so two
@@ -587,9 +689,15 @@ func (m *Manager) seedSyncLeases(ctx context.Context, family int, leases []SyncL
 	var seeded int
 	var errs []string
 	for _, l := range leases {
-		if l.Family != family {
+		// #10893: reject rows no honest peer serves (wrong family, unparsable
+		// or non-unicast address, IA_PD prefix out of range) and clamp
+		// lifetimes before the row reaches Kea's lease DB. Mirrors the
+		// memfile pre-seed guard and the cluster receive filter.
+		sanitized, ok := SanitizeSyncLeaseForFamily(family, l)
+		if !ok {
 			continue
 		}
+		l = sanitized
 		if l.Remaining <= 0 {
 			// #4871: an aged-out lease must be DROPPED, never re-anchored to
 			// now_local+Remaining at seed (which would resurrect it past its
@@ -1146,9 +1254,15 @@ func (m *Manager) writeMemfile4(path string, leases []SyncLease, now time.Time) 
 	b.WriteString(keaMemfileHeader4)
 	b.WriteByte('\n')
 	for _, l := range leases {
-		if l.Family != 4 {
+		// #10893: reject rows no honest peer serves (wrong family, unparsable
+		// or non-unicast address, IA_PD prefix out of range) and clamp
+		// lifetimes before the row reaches Kea's lease DB. Mirrors the
+		// socket-seed guard and the cluster receive filter.
+		sanitized, ok := SanitizeSyncLeaseForFamily(4, l)
+		if !ok {
 			continue
 		}
+		l = sanitized
 		if l.Remaining <= 0 {
 			continue // #4871: drop an aged-out lease rather than reviving it
 		}
@@ -1170,9 +1284,15 @@ func (m *Manager) writeMemfile6(path string, leases []SyncLease, now time.Time) 
 	b.WriteString(keaMemfileHeader6)
 	b.WriteByte('\n')
 	for _, l := range leases {
-		if l.Family != 6 {
+		// #10893: reject rows no honest peer serves (wrong family, unparsable
+		// or non-unicast address, IA_PD prefix out of range) and clamp
+		// lifetimes before the row reaches Kea's lease DB. Mirrors the
+		// socket-seed guard and the cluster receive filter.
+		sanitized, ok := SanitizeSyncLeaseForFamily(6, l)
+		if !ok {
 			continue
 		}
+		l = sanitized
 		if l.Remaining <= 0 {
 			continue // #4871: drop an aged-out lease rather than reviving it
 		}
