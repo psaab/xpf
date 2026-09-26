@@ -18,27 +18,8 @@ import (
 // inject a transient failure and assert it is surfaced (#3772 M9).
 var ruleListFn = netlink.RuleList
 
-// buildRouteSnapshots derives the helper FIB from config statics,
-// connected prefixes, and ip-rule leak rules, then applies the
-// ip-monitoring route overlay (#1827 PR-1b): each overlay entry
-// REPLACES the entire (table, family, prefix) entry set — never merges
-// next-hops — so an ECMP half-override is impossible by construction.
-//
-// It returns an error when the kernel ip-rule enumeration fails (#3772
-// M9): the synthetic rib-group / next-table leak routes are derived from
-// the live ip-rule table, so a transient RuleList failure must fail the
-// whole snapshot build closed (the apply path then retains the prior
-// dataplane state) rather than silently emitting a PARTIAL snapshot that
-// drops every route-leak route for that family while the kernel/FRR leak
-// path stays up — a divergence with no signal. Mirrors #3731's
-// surface-don't-swallow contract on the RuleAdd (write) side.
-// The second return value reports whether the #8355 learned-route cap DECLINED
-// the import (#9054). It is not a diagnostic: the helper's NoRoute adjudication
-// (#7480) decides whether to drop or delegate a frame whose destination is not
-// in its FIB, and that decision is only sound while the FIB is a near-complete
-// mirror of the kernel's. When the cap declines the import wholesale, NoRoute
-// stops meaning "there is no route" and starts meaning "we did not tell you" —
-// so the caller must put the fact on the wire.
+// routeSnapshotDedupeKey returns the canonical identity used to suppress
+// duplicate route snapshots during route collection.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%s|%t|%d|%d",
 		snap.Table, snap.Family, snap.Destination,
@@ -138,6 +119,24 @@ func configNextTableRulePriorities(cfg *config.Config, exclusions map[*config.St
 	return out
 }
 
+// buildRouteSnapshots derives the helper FIB from config statics,
+// connected prefixes, and ip-rule leak rules, then applies the
+// ip-monitoring route overlay (#1827 PR-1b): each overlay entry
+// REPLACES the entire (table, family, prefix) entry set — never merges
+// next-hops — so an ECMP half-override is impossible by construction.
+//
+// It returns an error when the kernel ip-rule enumeration fails (#3772
+// M9): the synthetic rib-group / next-table leak routes are derived from
+// the live ip-rule table, so a transient RuleList failure must fail the
+// whole snapshot build closed (the apply path then retains the prior
+// dataplane state) rather than silently emitting a PARTIAL snapshot that
+// drops every route-leak route for that family while the kernel/FRR leak
+// path stays up — a divergence with no signal. Mirrors #3731's
+// surface-don't-swallow contract on the RuleAdd (write) side.
+// The second return value reports whether #8355's learned-route budget shed
+// one or more complete (table, protocol) groups. It is distinct from "nothing
+// was imported": the helper may deliberately omit an over-budget group while
+// retaining unrelated protocols' routes.
 func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, overlay []config.RouteOverlayEntry) ([]RouteSnapshot, bool, error) {
 	if cfg == nil {
 		return nil, false, nil
@@ -1123,11 +1122,10 @@ const learnedRouteMainTableID = 254
 // reasoning as the ip-rule enumeration above — a snapshot silently missing
 // a subset of learned destinations is a FIB that disagrees with the kernel
 // in exactly the way this issue exists to stop.
-// The bool reports whether the #8355 cap DECLINED the import. It is distinct
-// from "nothing was imported": an empty kernel table and a refused 100k-route
-// table both add zero routes, and only the second one leaves the helper FIB
-// deliberately incomplete. #9054 is what happens when the two are conflated
-// downstream.
+// The bool reports whether the #8355 cap shed any complete (table, protocol)
+// group. It is distinct from "nothing was imported": an empty kernel table and
+// a budget-limited table both may add zero routes, but only the latter leaves
+// the helper FIB deliberately incomplete.
 func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addSnapshot func(RouteSnapshot)) (bool, error) {
 	if learnedRouteImportFn == nil {
 		return false, nil
@@ -1150,10 +1148,11 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 	if len(learned) == 0 {
 		return false, nil
 	}
-	// #8355: refuse a table larger than one publish can carry, rather than
-	// importing a prefix of it. See learned_route_cap_8355.go for why this
-	// degrades to NO import instead of a bounded subset.
-	if learnedRouteCapExceeded(len(learned)) {
+	// #10824: shed complete (table, protocol) groups rather than declining the
+	// entire learned-route import. The cap-hit counters identify the affected
+	// protocol so one flooded BGP peer cannot evict unrelated learned routes.
+	learned, capped := capLearnedRouteGroups(learned)
+	if capped && len(learned) == 0 {
 		return true, nil
 	}
 
@@ -1228,7 +1227,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			Preference:  routing.LearnedRouteImportPreference,
 		})
 	}
-	return false, nil
+	return capped, nil
 }
 
 // learnedRouteGapKey is the (table, family, destination) identity the

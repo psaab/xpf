@@ -1,9 +1,17 @@
 package api
 
 import (
+	"sort"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
+)
+
+var learnedRouteCapGroupShedsTotalDesc = prometheus.NewDesc(
+	"xpf_learned_route_cap_group_sheds_total",
+	"Total learned-route cap group sheds, by kernel route protocol.",
+	[]string{"protocol"}, nil,
 )
 
 // #9019: export the two userspace-dataplane counters that record work the box
@@ -50,12 +58,15 @@ import (
 //     counted as policy denials and Permit results retaining ordinary
 //     delegation (#9522).
 //
+//   - learned_route_cap_group_sheds_total{protocol}: complete table/protocol
+//     route groups shed to stay within the publish budget (#10824). The fixed
+//     protocol set is emitted at zero; unknown observed protocols are included.
+//
 // ALWAYS EMITTED, INCLUDING AT ZERO, per the #3464 convention and for the
 // reason #8312 and #9042 both give: a counter that appears only once it fires
 // cannot be alerted on, and cannot distinguish "never skipped" from "not
-// scraped". Zero is the normal state for both, which makes it the reading an
-// operator most needs to be able to trust -- any departure from it IS the
-// event.
+// scraped". Zero is the normal state, which makes every reading one an
+// operator can trust; any departure from zero IS the event.
 //
 // EMITTED BEFORE THE DATAPLANE GATE, like the admission-refusal and
 // authz-denial counters above them, and here the reason is sharper than
@@ -69,6 +80,7 @@ func (c *xpfCollector) describeDataplaneSilentSkips(ch chan<- *prometheus.Desc) 
 	ch <- c.napiProbeTargetSkipsTotal
 	ch <- c.bindingWedgeGiveupsTotal
 	ch <- c.learnedRouteCapHitsTotal
+	ch <- learnedRouteCapGroupShedsTotalDesc
 }
 
 func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
@@ -78,4 +90,14 @@ func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 		prometheus.CounterValue, float64(userspace.BindingWedgeGiveups()))
 	ch <- prometheus.MustNewConstMetric(c.learnedRouteCapHitsTotal,
 		prometheus.CounterValue, float64(userspace.LearnedRouteCapHits()))
+	protocolHits := userspace.LearnedRouteCapHitsByProtocol()
+	protocols := make([]string, 0, len(protocolHits))
+	for protocol := range protocolHits {
+		protocols = append(protocols, protocol)
+	}
+	sort.Strings(protocols)
+	for _, protocol := range protocols {
+		ch <- prometheus.MustNewConstMetric(learnedRouteCapGroupShedsTotalDesc,
+			prometheus.CounterValue, float64(protocolHits[protocol]), protocol)
+	}
 }
