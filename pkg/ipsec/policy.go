@@ -30,10 +30,11 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // written into the connections{} block). A VPN present in ipsecCfg.VPNs but
 // OMITTED from the render — a skip class: an unrenderable gateway reference
 // (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
-// (#9919 F-161), a `protocol ah` proposal with no ESP render path (#4298),
-// a section-breaking VPN name (#9495), an unresolved ipsec-policy chain
-// (#9919 F-090), an unusable ESP/PFS DH group (#9919 F-161), or a non-empty
-// bind-interface that resolves to no XFRM if_id (#10681) — is NOT in
+// (#9919 F-161), an unsupported IKE authentication method, a malformed PSK,
+// a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
+// VPN name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
+// ESP/PFS DH group (#9919 F-161), or a non-empty bind-interface that resolves
+// to no XFRM if_id (#10681) — is NOT in
 // the returned set even though renderConfig still returns success. Apply
 // diffs THIS rendered set (not the raw VPN map keys) so a previously-loaded
 // connection that dropped out of the render is treated as a removal and its
@@ -55,6 +56,11 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 	// the authoritative "loaded connection set" Apply diffs against
 	// prevConnNames (#5494).
 	rendered := make(map[string]bool)
+
+	// decodedPSKs caches validated values for the secrets block. A malformed
+	// key skips its VPN before emitting a connection, allowing Apply to unload
+	// it and tear down any stale SA.
+	decodedPSKs := make(map[string]string, len(ipsecCfg.VPNs))
 
 	// Connections
 	b.WriteString("connections {\n")
@@ -88,9 +94,9 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 		// by-construction backstop for any path that reaches render without
 		// passing local commit (HA peer-sync, direct IPsecConfig
 		// construction, a config persisted before the fix). One bad
-		// reference never zeroes a healthy tunnel. A non-chain resolve error
-		// (e.g. an unknown auth-method token from authMethodToSwan) is a
-		// different class and still aborts the whole render.
+		// reference never zeroes a healthy tunnel. Unsupported auth-methods
+		// carry errProposalUnresolved and are skipped per VPN, like unsafe
+		// proposal values.
 		authMethod, ikeProposals, ikeLifetime, aggressive, err := resolveIKESettings(ipsecCfg, gw)
 		if err != nil {
 			if errors.Is(err, errIKEChainUnresolved) {
@@ -117,7 +123,7 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			if errors.Is(err, errProposalUnresolved) {
 				skipped[name] = true
 				slog.Warn("skipping IPsec VPN: no safe IKE proposal set remains "+
-					"(unsafe algorithm or conflicting connection-level authentication/lifetime values)",
+					"(unsupported authentication or unsafe/conflicting proposal settings)",
 					"vpn", name, "detail", err.Error())
 				continue
 			}
@@ -223,6 +229,27 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 				continue
 			}
 			return "", nil, fmt.Errorf("vpn %s: %w", name, err)
+		}
+		// Normalize the effective PSK before emitting the connection. A bad
+		// Junos $9$ value must leave this VPN out of the rendered set, so Apply
+		// unloads it and tears down any stale SA instead of aborting before
+		// promoteConnNames.
+		secret := vpn.PSK.Reveal()
+		if secret == "" && gw != nil {
+			if ikePol, ok := ipsecCfg.IKEPolicies[gw.IKEPolicy]; ok && ikePol != nil {
+				secret = ikePol.PSK.Reveal()
+			}
+		}
+		if secret != "" {
+			decoded, err := normalizePSK(secret)
+			if err != nil {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: malformed pre-shared key "+
+					"(invalid Junos $9$ encoding) — replace it with a valid key",
+					"vpn", name, "detail", err.Error())
+				continue
+			}
+			decodedPSKs[name] = decoded
 		}
 
 		// This VPN passed every skip check, so it is emitted into the
@@ -453,41 +480,30 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			continue
 		}
 		vpn := ipsecCfg.VPNs[name]
-		// Resolve the remote endpoint + gateway once: it feeds both the
-		// IKE-policy-chain PSK lookup and the id selectors below. This VPN
-		// was not skipped, so resolveRemoteAddr returned ok=true and a
-		// usable remoteAddr ("", a concrete address, or "%any").
+		decoded, hasPSK := decodedPSKs[name]
+		if !hasPSK {
+			continue
+		}
+		// Resolve the remote endpoint + gateway once: they feed the id
+		// selectors below. This VPN survived every render skip check.
 		remoteAddr, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
-		secret := vpn.PSK.Reveal()
-		// Resolve PSK from IKE policy chain: VPN -> gateway -> IKE policy -> PSK
-		if secret == "" && gw != nil {
-			if ikePol, ok := ipsecCfg.IKEPolicies[gw.IKEPolicy]; ok {
-				secret = ikePol.PSK.Reveal()
-			}
+		fmt.Fprintf(&b, "  ike-%s {\n", sanitizeSwanctlValue(name))
+		// sanitizeSwanctlValue strips control chars (#1798); the
+		// quote/backslash escaper (#2126) makes a PSK containing a
+		// double-quote or backslash render as a balanced, swanctl-
+		// parseable quoted string instead of corrupting the block.
+		fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(decoded)))
+		// Scope this PSK to its peer with id selectors (#3952). A PSK
+		// secret with NO id matches ANY peer, so with two or more PSK
+		// VPNs strongSwan can bind the wrong secret to a peer and IKE
+		// authentication fails. Each id-<n> narrows the secret to a
+		// peer whose IKE identity matches — the configured remote-id,
+		// else the remote gateway address (plus the local-id when set).
+		for i, sel := range pskIDSelectors(remoteAddr, gw) {
+			fmt.Fprintf(&b, "    id-%d = \"%s\"\n", i+1,
+				escapeSwanctlQuoted(sanitizeSwanctlValue(sel)))
 		}
-		if secret != "" {
-			decoded, err := normalizePSK(secret)
-			if err != nil {
-				return "", nil, fmt.Errorf("vpn %s: %w", name, err)
-			}
-			fmt.Fprintf(&b, "  ike-%s {\n", sanitizeSwanctlValue(name))
-			// sanitizeSwanctlValue strips control chars (#1798); the
-			// quote/backslash escaper (#2126) makes a PSK containing a
-			// double-quote or backslash render as a balanced, swanctl-
-			// parseable quoted string instead of corrupting the block.
-			fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(decoded)))
-			// Scope this PSK to its peer with id selectors (#3952). A PSK
-			// secret with NO id matches ANY peer, so with two or more PSK
-			// VPNs strongSwan can bind the wrong secret to a peer and IKE
-			// authentication fails. Each id-<n> narrows the secret to a
-			// peer whose IKE identity matches — the configured remote-id,
-			// else the remote gateway address (plus the local-id when set).
-			for i, sel := range pskIDSelectors(remoteAddr, gw) {
-				fmt.Fprintf(&b, "    id-%d = \"%s\"\n", i+1,
-					escapeSwanctlQuoted(sanitizeSwanctlValue(sel)))
-			}
-			fmt.Fprintf(&b, "  }\n")
-		}
+		fmt.Fprintf(&b, "  }\n")
 	}
 	b.WriteString("}\n")
 
@@ -724,10 +740,11 @@ type SANameIndex map[string][]string
 // on its own, sharing every other section of ipsecCfg:
 //
 //   - the renderer SKIPS it (an unrenderable gateway, an unresolved
-//     ike-policy chain, an unusable DH group, an AH proposal, a
-//     section-breaking name, an unresolved ipsec-policy chain, an
-//     invalid bind-interface): it loads nothing and contributes no
-//     name, so it cannot make a loaded VPN's name look ambiguous;
+//     ike-policy chain, an unusable DH group, an unsupported auth method,
+//     a malformed PSK, an AH proposal, a section-breaking name, an
+//     unresolved ipsec-policy chain, or an invalid bind-interface): it
+//     loads nothing and contributes no name, so it cannot make a loaded VPN's
+//     name look ambiguous;
 //   - it renders: its connection name and every child the renderer emits for it
 //     (effectiveTrafficSelectors + sanitizeSwanctlValue, the render's own
 //     expansion) are indexed;
@@ -913,7 +930,7 @@ func authMethodToSwan(method string) (string, error) {
 	case "rsa-signatures", "ecdsa-signatures":
 		return "pubkey", nil
 	default:
-		return "", fmt.Errorf("unsupported IKE authentication-method %q", method)
+		return "", fmt.Errorf("%w: unsupported IKE authentication-method %q", errProposalUnresolved, method)
 	}
 }
 

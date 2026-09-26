@@ -44,24 +44,31 @@ func TestApplyHooksWrittenBeforeReloadOnlyOnFailure9511(t *testing.T) {
 	}
 }
 
-// Neither hook fires when the render fails: nothing reached the disk.
-func TestApplyHooksSilentOnRenderFailure9511(t *testing.T) {
+// An unsupported auth method skips only that VPN, so a healthy sibling is
+// still written and loaded and both hooks report the applied generation.
+func TestApplyHooksOnPerVPNAuthSkip9511(t *testing.T) {
 	m := NewWithConfigDir(t.TempDir())
 	m.swanctl = func(args ...string) ([]byte, error) { return nil, nil }
-	cfg := vpnCfg("vpn1")
+	cfg := vpnCfg("healthy", "bad")
 	cfg.IKEProposals = map[string]*config.IKEProposal{"prop-bad": {Name: "prop-bad", AuthMethod: "bogus"}}
 	cfg.IKEPolicies = map[string]*config.IKEPolicy{"pol-bad": {Proposals: []string{"prop-bad"}}}
 	cfg.Gateways = map[string]*config.IPsecGateway{"gw-bad": {Address: "172.16.9.9", IKEPolicy: "pol-bad"}}
-	for _, v := range cfg.VPNs {
-		v.Gateway = "gw-bad"
-	}
+	cfg.VPNs["bad"].Gateway = "gw-bad"
+
 	written, loaded := 0, 0
-	if err := m.ApplyWithHooks(cfg, ApplyHooks{Written: func() { written++ }, Loaded: func() { loaded++ }}); err == nil {
-		t.Fatal("FIXTURE: the render must fail on the bogus auth method")
+	if err := m.ApplyWithHooks(cfg, ApplyHooks{Written: func() { written++ }, Loaded: func() { loaded++ }}); err != nil {
+		t.Fatalf("unsupported auth on one VPN must not abort Apply: %v", err)
 	}
-	if written != 0 || loaded != 0 {
-		t.Errorf("a render failure wrote nothing; hooks must stay silent, got written=%d loaded=%d", written, loaded)
+	if written != 1 || loaded != 1 {
+		t.Fatalf("hooks for successful healthy generation = written:%d loaded:%d, want 1 each", written, loaded)
 	}
+	generated, err := os.ReadFile(m.configPath)
+	if err != nil {
+		t.Fatalf("reading applied swanctl config: %v", err)
+	}
+	doc := parseSwanctlDoc(t, string(generated))
+	doc.at(t, "connections").hasNoChild(t, "bad")
+	doc.at(t, "connections", "healthy")
 }
 
 // Neither hook fires when the write fails: the previous file is still on disk.

@@ -182,19 +182,37 @@ func TestExpectedLoadedConnsExcludesSkippedVPN9641(t *testing.T) {
 	}
 }
 
-// A HARD render error aborts the whole production render, so charon cannot have loaded
-// ANY part of that generation (Codex #9641 plan review P2). The candidate must be
-// disqualified as a whole. Excluding only the broken VPN would describe a generation
-// charon never ran.
-func TestExpectedLoadedConnsDisqualifiesACandidateWithARenderError9641(t *testing.T) {
+// An unsupported-auth VPN is a per-connection skip, so expectedLoadedConns
+// excludes it while retaining the healthy connections present in charon's
+// captured loaded set.
+func TestExpectedLoadedConnsExcludesUnsupportedAuthVPN9641(t *testing.T) {
 	cfg := proofConfig9641()
 	cfg.IKEProposals = map[string]*config.IKEProposal{"prop-bad": {Name: "prop-bad", AuthMethod: "bogus"}}
 	cfg.IKEPolicies = map[string]*config.IKEPolicy{"pol-bad": {Proposals: []string{"prop-bad"}}}
 	cfg.Gateways = map[string]*config.IPsecGateway{"gw-bad": {Address: "172.16.9.9", IKEPolicy: "pol-bad"}}
 	cfg.VPNs["broken"] = &config.IPsecVPN{Name: "broken", Gateway: "gw-bad"}
+
+	_, rendered, err := (&Manager{}).renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("unsupported auth on one VPN must not abort render: %v", err)
+	}
+	if rendered["broken"] || !rendered["proof-ms"] || !rendered["proof-plain"] {
+		t.Fatalf("rendered VPN set = %v, want only healthy proof VPNs", rendered)
+	}
 	got, err := expectedLoadedConns(cfg, nil)
-	if err == nil {
-		t.Fatalf("a render error must disqualify the whole candidate, got expected %s", describe9641(got))
+	if err != nil {
+		t.Fatalf("a per-VPN auth skip is not a hard render error: %v", err)
+	}
+	if _, ok := got["broken"]; ok {
+		t.Fatalf("skipped VPN must not be expected loaded, got %s", describe9641(got))
+	}
+	loaded, err := parseListConnsRaw(readFixture9641(t, "swanctl_list_conns_raw_9641.txt"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !loaded.Equal(got) {
+		t.Errorf("healthy siblings must remain expected: expected %s, charon %s",
+			describe9641(got), describe9641(loaded))
 	}
 }
 
