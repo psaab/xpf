@@ -62,6 +62,11 @@ const (
 // reinitiateIPsecSAs, so a slow Kea only delays the seed, never the takeover.
 const keaControlTimeout = 5 * time.Second
 
+// keaDHCPDisableMaxPeriod bounds a takeover that dies after disabling DHCP but
+// before the queued Kea restart. The normal restart happens immediately after
+// the memfile pre-seed; this is only the fail-open recovery.
+const keaDHCPDisableMaxPeriod = 300
+
 // maxKeaResponseBytes bounds a single Kea control-socket response (#9003).
 //
 // The exchange was DEADLINE-bounded and byte-UNBOUNDED: keaControlTimeout caps
@@ -885,89 +890,122 @@ func (m *Manager) PreSeedMemfile6(leases []SyncLease, now time.Time) error {
 // node's CURRENT local active leases and the held peer leases (#5040), instead
 // of overwriting it with the peer-only set.
 //
-// On a per-RG active-active takeover this node is ALREADY MASTER for one or
-// more RGs whose leases are live in the local Kea (and its persisted memfile).
-// The takeover then restarts Kea under the union config (already-mastered RG +
-// newly-taken RG). A peer-ONLY pre-seed (the pre-#5040 behavior) atomically
-// OVERWROTE the shared memfile, wiping this node's own still-mastered RG rows;
-// the restarted Kea then had no record of those in-use bindings and could
-// re-allocate their addresses to new clients (duplicate allocation). The
-// invariant: restarting Kea during one RG transition must preserve the lease
-// union for every RG that remains locally MASTER.
-//
-// The live socket is the authority for this pre-seed union. A persisted
-// memfile is still a valid fallback for ordinary lease-sync pushes, but on a
-// pure backup it is only the last lease set this node served and can contain
-// rows that the primary has since released (#9853). When the socket is down,
-// the fallback is parsed to retain the existing fail-closed behavior for
-// corrupt/untrusted files. If stillMastering is true, the fallback rows are
-// preserved because another RG is already MASTER while Kea is restarting for
-// this transition; only a pure-backup takeover may exclude fallback rows and
-// remove stale LFC generations. A genuinely MISSING memfile with Kea down is a
-// trusted empty (a cold node with nothing to preserve), so the union degenerates
-// to the peer set.
+// A live Kea server is disabled before its lease snapshot and remains disabled
+// until the takeover's queued restart. This makes the snapshot and atomic
+// replacement one quiesced operation: no grant can land between them or be
+// appended to the old memfile after replacement. The manager lock also keeps a
+// concurrent apply/restart from reopening Kea during that operation.
 func (m *Manager) PreSeedMemfileMerged4(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
-	local, live, err := m.getSyncLeasesWithSource(ctx, 4, now)
-	if err != nil {
-		return fmt.Errorf("pre-seed v4: local lease read failed, not overwriting memfile: %w", err)
-	}
-	if !live && stillMastering {
+	return m.withQuiescedPreSeed(ctx, 4, now, func(local []SyncLease, live bool) error {
+		if !live && stillMastering {
+			return m.writeMemfile4(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
+		}
+		if !live {
+			// The fallback was parsed only to distinguish a trusted empty file
+			// from a corrupt source. It is not current authority for a
+			// pure-backup takeover, so write the peer set and replace stale LFC
+			// generations.
+			return m.writeMemfile4ReplacingLFC(
+				m.leaseFile(4), mergeLeasesByIdentity(nil, peer, 4), now)
+		}
 		return m.writeMemfile4(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
-	}
-	if !live {
-		// The fallback was parsed only to distinguish a trusted empty file from
-		// a corrupt source. It is not current authority for a pure-backup
-		// takeover, so write the peer set and replace stale LFC generations.
-		return m.writeMemfile4ReplacingLFC(
-			m.leaseFile(4), mergeLeasesByIdentity(nil, peer, 4), now)
-	}
-	return m.writeMemfile4(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
+	})
 }
 
 // PreSeedMemfileMerged6 is the v6 counterpart of PreSeedMemfileMerged4 (#9853).
 func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
-	local, live, err := m.getSyncLeasesWithSource(ctx, 6, now)
-	if err != nil {
-		return fmt.Errorf("pre-seed v6: local lease read failed, not overwriting memfile: %w", err)
-	}
-	if !live && stillMastering {
+	return m.withQuiescedPreSeed(ctx, 6, now, func(local []SyncLease, live bool) error {
+		if !live && stillMastering {
+			return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
+		}
+		if !live {
+			return m.writeMemfile6ReplacingLFC(
+				m.leaseFile(6), mergeLeasesByIdentity(nil, peer, 6), now)
+		}
 		return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
-	}
-	if !live {
-		return m.writeMemfile6ReplacingLFC(
-			m.leaseFile(6), mergeLeasesByIdentity(nil, peer, 6), now)
-	}
-	return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
+	})
 }
 
 // PreSeedMemfileMerged4WithAuthority is the #10170 authority-aware v4
 // counterpart. It is additive so older callers retain the conservative
 // whole-union contract.
 func (m *Manager) PreSeedMemfileMerged4WithAuthority(ctx context.Context, peer LeaseSyncSnapshot, now time.Time, stillMastering bool, authority LeaseSyncAuthority) error {
-	local, live, err := m.getSyncLeasesWithSource(ctx, 4, now)
-	if err != nil {
-		return fmt.Errorf("pre-seed v4: local lease read failed, not overwriting memfile: %w", err)
-	}
-	if !live && !stillMastering {
-		return m.writeMemfile4ReplacingLFC(
-			m.leaseFile(4), mergeLeasesByAuthority(nil, peer, 4, authority, stillMastering), now)
-	}
-	return m.writeMemfile4(
-		m.leaseFile(4), mergeLeasesByAuthority(local, peer, 4, authority, stillMastering), now)
+	return m.withQuiescedPreSeed(ctx, 4, now, func(local []SyncLease, live bool) error {
+		if !live && !stillMastering {
+			return m.writeMemfile4ReplacingLFC(
+				m.leaseFile(4), mergeLeasesByAuthority(nil, peer, 4, authority, stillMastering), now)
+		}
+		return m.writeMemfile4(
+			m.leaseFile(4), mergeLeasesByAuthority(local, peer, 4, authority, stillMastering), now)
+	})
 }
 
 // PreSeedMemfileMerged6WithAuthority is the #10170 authority-aware v6 twin.
 func (m *Manager) PreSeedMemfileMerged6WithAuthority(ctx context.Context, peer LeaseSyncSnapshot, now time.Time, stillMastering bool, authority LeaseSyncAuthority) error {
-	local, live, err := m.getSyncLeasesWithSource(ctx, 6, now)
+	return m.withQuiescedPreSeed(ctx, 6, now, func(local []SyncLease, live bool) error {
+		if !live && !stillMastering {
+			return m.writeMemfile6ReplacingLFC(
+				m.leaseFile(6), mergeLeasesByAuthority(nil, peer, 6, authority, stillMastering), now)
+		}
+		return m.writeMemfile6(
+			m.leaseFile(6), mergeLeasesByAuthority(local, peer, 6, authority, stillMastering), now)
+	})
+}
+
+// withQuiescedPreSeed serializes takeover installation against this manager's
+// Apply calls and, when Kea is active, disables packet handling before reading
+// its live lease set. Successful quiescing remains in effect until ApplyAsync
+// restarts Kea on takeover; Kea's max-period is a fail-open recovery if that
+// restart never arrives. It invalidates the applied-config cache so an otherwise
+// unchanged configuration cannot suppress the required restart (#10896).
+func (m *Manager) withQuiescedPreSeed(ctx context.Context, family int, now time.Time, install func(local []SyncLease, live bool) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	socket := m.controlSocket(family)
+	resp, disableErr := keaControl(ctx, m.keaDial, socket, keaCommand{
+		Command: "dhcp-disable",
+		Arguments: map[string]int{
+			"max-period": keaDHCPDisableMaxPeriod,
+		},
+	})
+	quiesced := disableErr == nil && resp.Result == keaResultSuccess
+
+	// A config-identical ApplyAsync may otherwise skip its restart (#10896).
+	// The installed memfile requires a fresh Kea process, and a restart must
+	// also clear DHCP-disable when a later read/write step fails.
+	if quiesced {
+		if family == 6 {
+			m.appliedConfig6 = nil
+		} else {
+			m.appliedConfig4 = nil
+		}
+	}
+	if !quiesced {
+		if disableErr == nil {
+			disableErr = fmt.Errorf("dhcp-disable: result=%d text=%q", resp.Result, resp.Text)
+		}
+		unit := kea4Svc
+		if family == 6 {
+			unit = kea6Svc
+		}
+		active, err := m.unitActive(unit)
+		if err != nil {
+			return fmt.Errorf("pre-seed v%d: check Kea state after dhcp-disable failure: %w", family, err)
+		}
+		if active {
+			return fmt.Errorf("pre-seed v%d: cannot quiesce active Kea before memfile replacement: %w", family, disableErr)
+		}
+	}
+
+	local, live, err := m.getSyncLeasesWithSource(ctx, family, now)
 	if err != nil {
-		return fmt.Errorf("pre-seed v6: local lease read failed, not overwriting memfile: %w", err)
+		return fmt.Errorf("pre-seed v%d: local lease read failed, not overwriting memfile: %w", family, err)
 	}
-	if !live && !stillMastering {
-		return m.writeMemfile6ReplacingLFC(
-			m.leaseFile(6), mergeLeasesByAuthority(nil, peer, 6, authority, stillMastering), now)
+	if live != quiesced {
+		return fmt.Errorf("pre-seed v%d: live lease source and Kea quiesce state disagree; refusing memfile replacement", family)
 	}
-	return m.writeMemfile6(
-		m.leaseFile(6), mergeLeasesByAuthority(local, peer, 6, authority, stillMastering), now)
+	return install(local, live)
 }
 
 // mergeLeasesByIdentity returns the lease set the takeover pre-seed writes for

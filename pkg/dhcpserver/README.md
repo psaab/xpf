@@ -885,6 +885,14 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   takeover no longer strips the MAC from every IPv6 lease (#2386). DHCPv6 keys
   on DUID so the lease itself was never lost, but the empty column dropped
   hwaddr-based logging / reservation matching / operator visibility.
+- `PreSeedMemfileMerged{4,6}` — takeover's local+peer union. If Kea is active,
+  it issues `dhcp-disable` before reading the live lease set and keeps DHCP
+  disabled through the atomic memfile install. The pre-seed invalidates Kea's
+  cached loaded-config proof, so the queued takeover apply restarts Kea even if
+  the rendered configuration is unchanged (#10896). A 300-second `max-period`
+  restores service if that restart never arrives. If active Kea cannot be
+  quiesced, the pre-seed fails closed without replacing the memfile (#10895).
+
 - `WaitControlSocket{4,6}(ctx, within)` — bounded readiness wait before the
   post-start seed.
 
