@@ -1264,6 +1264,40 @@ func TestKeaSubnetIDStableAcrossFilteredSubsets(t *testing.T) {
 	)
 }
 
+// TestKeaSubnetIDStableAcrossSpellingChange is the #10892 regression guard.
+// Kea's memfile leases store the subnet ID, not the CIDR spelling. If the
+// operator respells an unchanged prefix with host bits, the regenerated Kea
+// subnet must retain the ID persisted with the existing lease.
+func TestKeaSubnetIDStableAcrossSpellingChange(t *testing.T) {
+	const oldSpelling = "10.0.1.0/24"
+	const newSpelling = "10.0.1.5/24"
+	render := func(subnet string) int {
+		t.Helper()
+		cfg := v4Config()
+		cfg.DHCPLocalServer.Groups["g0"].Pools[0].Subnet = subnet
+		m, _ := testManager(t, map[string]bool{}, "")
+		if err := m.generateKea4Config(cfg); err != nil {
+			t.Fatalf("generate Kea config for %s: %v", subnet, err)
+		}
+		return subnetIDMap(t, m.confPath4, "4")[subnet]
+	}
+
+	// A lease recorded under the old config carries this subnet_id in Kea's
+	// memfile. The subnet under the new spelling must still own that ID.
+	leaseSubnetID := render(oldSpelling)
+	if leaseSubnetID == 0 {
+		t.Fatalf("old spelling %s was not rendered", oldSpelling)
+	}
+	newSubnetID := render(newSpelling)
+	if newSubnetID == 0 {
+		t.Fatalf("new spelling %s was not rendered", newSpelling)
+	}
+	if newSubnetID != leaseSubnetID {
+		t.Fatalf("spelling change from %s to %s changed subnet_id from %d to %d; existing leases would be orphaned",
+			oldSpelling, newSpelling, leaseSubnetID, newSubnetID)
+	}
+}
+
 func mapsEqualSI(a, b map[string]int) bool {
 	if len(a) != len(b) {
 		return false
