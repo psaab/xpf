@@ -282,19 +282,33 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	return electNoChange, ""
 }
 
-// warnDuplicateNodeIDLocked emits a rate-limited (>=30s) error when the peer
-// advertises the local node's own node-id. Two chassis sharing a node-id is an
-// invalid cluster configuration: the HA protocol carries no per-node identity
-// other than the node-id, so election has no asymmetric discriminator to elect
-// a single primary — the condition cannot be resolved at runtime and both nodes
-// fail closed to SECONDARY. The only remedy is correcting /etc/xpf/node-id on
-// one chassis. Must be called with m.mu held.
-func (m *Manager) warnDuplicateNodeIDLocked() {
+// duplicateNodeIDWarningDueLocked is the shared >=30s rate limiter for both
+// duplicate-node-id warnings (the election tie-break and heartbeat join point).
+// A 5/s heartbeat stream must not flood the log however the condition is
+// observed. Reports whether the caller may emit. Must be called with m.mu held.
+func (m *Manager) duplicateNodeIDWarningDueLocked() bool {
 	now := time.Now()
 	if !m.lastDupNodeIDWarn.IsZero() && now.Sub(m.lastDupNodeIDWarn) < 30*time.Second {
-		return
+		return false
 	}
 	m.lastDupNodeIDWarn = now
+	return true
+}
+
+// warnDuplicateNodeIDLocked emits the ELECTION-path duplicate-node-id error: a
+// same-node-id peer state that reached electRG (the direct API / tests, or any
+// future path that does not go through the heartbeat join point). Here
+// fail-closed-to-SECONDARY is what electRG implements at every same-node-id tie
+// (#4549 F11), so the message names it. Must be called with m.mu held.
+//
+// The heartbeat join point (NoteDuplicateNodeIDHeartbeat) has its own message:
+// the frame there is discarded before election, so the outcome is different
+// and sharing this text lied to the operator (#10772 x2-F2). Keep the two
+// messages path-accurate; share only the limiter.
+func (m *Manager) warnDuplicateNodeIDLocked() {
+	if !m.duplicateNodeIDWarningDueLocked() {
+		return
+	}
 	slog.Error("cluster: duplicate node-id detected — the peer advertises the "+
 		"same node-id as this node; this is an INVALID cluster configuration "+
 		"(two chassis cannot share a node-id). Election has no way to resolve "+
@@ -311,13 +325,30 @@ func (m *Manager) warnDuplicateNodeIDLocked() {
 // never receives its own frame, so a same-cluster frame with our node-id is a
 // peer misconfigured with a duplicate node-id — an invalid cluster (#4549 F11).
 // The receiver still discards the frame (it cannot be told apart from a stray
-// loopback and a duplicate-node-id cluster is unresolvable at runtime), but the
-// rate-limited warning surfaces the misconfiguration for the operator. Takes
-// m.mu.
+// loopback and a duplicate-node-id cluster is unresolvable at runtime), so the
+// peer is treated as absent: lastSeen is untouched. After the startup
+// peer-absent grace, each enabled and eligible RG can promote independently via
+// single-node election; if both nodes are eligible, both claim PRIMARY with
+// duplicate VIPs on the segment. This warning names THAT outcome, not the
+// election tie-break's fail-closed-to-SECONDARY, which this path never reaches
+// (#10772 x2-F2). Takes m.mu.
 func (m *Manager) NoteDuplicateNodeIDHeartbeat() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.warnDuplicateNodeIDLocked()
+	if !m.duplicateNodeIDWarningDueLocked() {
+		return
+	}
+	slog.Error("cluster: duplicate node-id detected — received a heartbeat "+
+		"carrying this node's own node-id; this is an INVALID cluster "+
+		"configuration (two chassis cannot share a node-id). The frame is "+
+		"discarded and the peer is treated as absent, so each eligible RG can "+
+		"promote via single-node election once the startup peer-absent grace "+
+		"elapses; if both nodes are eligible, both claim PRIMARY with duplicate "+
+		"VIPs on the segment. Correct /etc/xpf/node-id on one node.",
+		"node_id", m.nodeID)
+	if m.history != nil {
+		m.history.Record(EventRG, -1, "duplicate node-id: invalid cluster configuration")
+	}
 }
 
 // runElection evaluates all RGs using current peer state and applies transitions.

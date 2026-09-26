@@ -568,7 +568,8 @@ identical `electRG` code and compute the identical result. There is no
 correct runtime resolution; the only remedy is correcting
 `/etc/xpf/node-id` on one chassis.
 
-Two defenses, both fail-safe rather than manufacturing a false winner:
+The receive and election paths have different outcomes; only the election
+tie-break fails closed:
 
 - **Join point (`heartbeatReceiver.recvLoop`, `heartbeat.go`).** On a
   unicast point-to-point control link a node never receives its own
@@ -578,10 +579,10 @@ Two defenses, both fail-safe rather than manufacturing a false winner:
   cluster is unresolvable), but calls `NoteDuplicateNodeIDHeartbeat` to
   emit a rate-limited (`>=30s`) `slog.Error` so the operator sees the
   misconfiguration instead of a silent split-brain. Because the frame is
-  discarded, `peerAlive`/`peerNodeID` never reflect the duplicate peer, so
-  in production both nodes run `electSingleNode` and would otherwise both
-  claim PRIMARY — the warning is the operator-facing signal that this is
-  happening.
+  discarded, `peerAlive`/`peerNodeID` never reflect the duplicate peer. After
+  the startup peer-absent grace, each node independently runs `electSingleNode`;
+  eligible RGs can claim PRIMARY on both nodes, creating duplicate VIPs. The
+  warning names that outcome, not fail-closed election behavior.
 
 - **Election tie-break (`electRG`, `election.go`).** If a same-node-id
   peer ever does reach election (the direct API / tests, or any future
