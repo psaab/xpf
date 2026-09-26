@@ -814,21 +814,22 @@ contract.
   set — pinning the interpretation of what the operator asked for is correct
   there, and it renders no config-derived label.
 
-  **Single-interface counters are re-resolved every tick (#10838).** The stream
-  re-reads the active config to resolve the requested display name to its current
-  kernel device (falling back to the opening config if the store briefly has no
-  active config). When that device changes, `ResetOnDeviceChange` drops
-  `prevSingle` and `baselineSingle`, and the frame carries a persistent note
-  naming both devices and saying the baseline reset. This avoids cross-device
-  rates/deltas and matches the CLI's reset/annotate contract.
+  **Single-interface RETH counters stay pinned to the open-time device (#10838).**
+  The kernel member and one-hop proxy decision are both settled at stream entry;
+  re-resolving a committed alias inside the loop could make the old serving node
+  read a newly remote RETH. Every RETH frame carries a persistent note naming the
+  kernel device resolved at open and warning that its counters may be stale after
+  failover.
 
-  An RG ownership change is tracked separately from a kernel-name change: an
-  already-open stream remains on its serving node and cannot transfer to the new
-  primary. The handler resets its baselines and annotates the frame that the
-  local device's counters may be stale. `TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838`
-  covers a config/member change; `TestMonitorInterfaceRGOwnershipChangeAnnotatesBoundNode10838`
-  flips ownership with the config and kernel device unchanged and checks the stale
-  note plus zero post-transition delta.
+  An RG ownership change is tracked separately: an already-open stream remains
+  on its serving node and cannot transfer to the new primary. The handler resets
+  its rate/delta baselines and annotates the local counters as potentially stale.
+  The CLI instead re-resolves its device per tick and resets baselines on a
+  kernel-name change. `TestMonitorInterfacePinsOpenDeviceAndAnnotates10838`
+  drives a real config/member change and checks the persistent open-time warning;
+  `TestMonitorInterfaceRGOwnershipChangeAnnotatesBoundNode10838` flips ownership
+  with config and kernel device unchanged and checks the stale note plus zero
+  post-transition delta.
 
   `isRethName` / `rethRG` still feed the serve-local vs proxy-to-peer dispatch,
   which is settled once before the loop. `monitor_cfg_refresh_9144_test.go` drives

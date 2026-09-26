@@ -63,15 +63,13 @@ func monitorResolveToKernel(cfg *config.Config, cfgName string) string {
 // requested alias set — pinning the interpretation of what the operator asked
 // for is correct there, and it renders no config-derived label.
 //
-// #10838: single-interface monitoring re-resolves the requested display name
-// to its current kernel device each tick. ResetOnDeviceChange drops the
-// per-device prev/baseline snapshots and the frame carries a persistent note
-// when the member changes. RG ownership is monitored separately: since an
-// already-open stream cannot migrate to the new primary, a local/peer ownership
-// transition resets its baselines and annotates the local counters as potentially
-// stale. The stream-entry uses below stay pinned:
-// isRethName / rethRG feed the serve-local vs proxy-to-peer dispatch, which is
-// settled before the loop and cannot switch the stream's peer mid-flight.
+// #10838: single-interface RETH monitoring keeps its kernel device pinned at
+// stream entry, together with the one-hop proxy decision, and carries a
+// persistent frame note naming that device and warning it may be stale after
+// failover. An RG ownership change is monitored separately: since an already-open
+// stream cannot migrate to the new primary, the handler resets its baselines and
+// annotates the local counters as potentially stale. The CLI re-resolves its
+// device per tick and uses ResetOnDeviceChange to clear per-device baselines.
 //
 // openCfg is the snapshot the stream opened with and is used ONLY when the
 // re-read returns nil (a store transiently without an active config): the stream

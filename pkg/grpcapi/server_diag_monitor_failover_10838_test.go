@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"regexp"
 	"strings"
@@ -32,11 +33,11 @@ func (failoverMonitorDP10838) Status() (dpuserspace.ProcessStatus, error) {
 	return dpuserspace.ProcessStatus{Enabled: true}, nil
 }
 
-// TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838 drives the real
-// handler across a committed RETH-member change. It proves the second frame
-// reads the new member, marks the old->new device transition, and restarts its
-// delta from zero rather than comparing counters from different devices.
-func TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838(t *testing.T) {
+// TestMonitorInterfacePinsOpenDeviceAndAnnotates10838 drives the real handler
+// across a committed RETH-member change. The stream must continue reading the
+// kernel device selected before the proxy decision, and every frame warns that
+// those pinned counters may be stale after failover.
+func TestMonitorInterfacePinsOpenDeviceAndAnnotates10838(t *testing.T) {
 	oldIface, err := net.InterfaceByName("lo")
 	if err != nil {
 		t.Skipf("loopback interface unavailable: %v", err)
@@ -69,10 +70,13 @@ func TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838(t *testing.T) {
 	}
 	s := &Server{
 		store: store,
-		dp: failoverMonitorDP10838{counters: map[int]uint64{
-			oldIface.Index: 1000,
-			newIface.Index: 9000,
-		}},
+		dp: failoverMonitorDP10838{
+			counters: map[int]uint64{
+				oldIface.Index: 1000,
+				newIface.Index: 50000,
+			},
+			step: 8000,
+		},
 	}
 	stream := newTwoTickMonitorStream9144(func(n int) {
 		if n == 1 {
@@ -95,17 +99,17 @@ func TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838(t *testing.T) {
 	if len(stream.frames) != 2 {
 		t.Fatalf("got %d frames, want 2", len(stream.frames))
 	}
-	if !strings.Contains(stream.frames[0], "Input  bytes:") {
-		t.Fatalf("first frame lacks input counters:\n%s", stream.frames[0])
-	}
-	for _, want := range []string{
-		"Interface: reth0",
-		"reth0 device changed lo -> " + newKernel,
-		"possible RG failover",
-		"baseline reset",
-	} {
-		if !strings.Contains(stream.frames[1], want) {
-			t.Errorf("second frame missing %q:\n%s", want, stream.frames[1])
+	for _, frame := range stream.frames {
+		for _, want := range []string{
+			"Interface: reth0",
+			"reth0 uses kernel device lo resolved at stream open",
+			"stays pinned to its serving node",
+			"cannot follow RG failover",
+			"counters may be stale",
+		} {
+			if !strings.Contains(frame, want) {
+				t.Errorf("frame missing pinned-device warning %q:\n%s", want, frame)
+			}
 		}
 	}
 	var inputLine string
@@ -115,8 +119,10 @@ func TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838(t *testing.T) {
 			break
 		}
 	}
-	if inputLine == "" || !strings.Contains(inputLine, "[0]") {
-		t.Fatalf("new member's first delta was not reset to zero; input line %q\n%s", inputLine, stream.frames[1])
+	var gotBytes uint64
+	if _, err := fmt.Sscanf(inputLine, "  Input  bytes: %d", &gotBytes); err != nil || gotBytes != 9000 || !strings.Contains(inputLine, "[8000]") {
+		t.Fatalf("second frame did not keep reading the opening device and its same-device delta: bytes=%d line=%q err=%v\n%s",
+			gotBytes, inputLine, err, stream.frames[1])
 	}
 }
 

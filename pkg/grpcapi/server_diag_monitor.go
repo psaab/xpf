@@ -639,6 +639,11 @@ func monitorRGOwnershipChangeNote(displayName, kernelName string, rg int, oldOwn
 		displayName, rg, oldOwner, newOwner, kernelName)
 }
 
+func monitorPinnedRethDeviceNote(displayName, kernelName string) string {
+	return fmt.Sprintf("Note: %s uses kernel device %s resolved at stream open; this gRPC stream stays pinned to its serving node and cannot follow RG failover, so counters may be stale",
+		displayName, kernelName)
+}
+
 // monitorProxyAction is the outcome of the MonitorInterface single-interface
 // proxy decision.
 type monitorProxyAction int
@@ -787,21 +792,10 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		// monitorServeLocal: fall through and read local counters below.
 	}
 
-	// #10838: per-tick re-resolution for single-interface mode. #9144 pinned
-	// singleKernelName at open because re-resolving would silently swap the
-	// device under baselineSingle/prevSingle and render garbage rates. That
-	// pin is now safe to lift: the loop detects a kernel-name change, drops
-	// prev/baseline, and annotates the frame — the same reset/annotate
-	// contract the CLI applies. A nil re-read degrades to the opening
-	// snapshot (as monitorSummaryInterfaces does) so a config blip cannot
-	// forge a device change.
-	resolveSingleKernel := func() string {
-		cfgNow := s.store.ActiveConfig()
-		if cfgNow == nil {
-			cfgNow = cfg
-		}
-		return monitoriface.ResolvePhysicalParent(monitorResolveToKernel(cfgNow, singleDisplayName))
-	}
+	// #10838: keep single-interface RETH counters pinned to the kernel device
+	// selected before stream-entry proxy dispatch. Re-resolving after that
+	// decision could read a newly remote RETH locally. The stream note names
+	// the pinned device and warns that its counters may be stale after failover.
 
 	// Admission bound (#9891): fail-fast before the ticker, the rendering
 	// state, and any peer dial, so a refused subscriber costs no goroutine,
@@ -844,6 +838,9 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	var prevSingle *monitoriface.Snapshot
 	var baselineSingle *monitoriface.Snapshot
 	singleDeviceNote := ""
+	if isSingle && isRethName(singleDisplayName) && singleRG > 0 {
+		singleDeviceNote = monitorPinnedRethDeviceNote(singleDisplayName, singleKernelName)
+	}
 	singlePrimaryOwner := monitorRGPrimaryOwner(singleCluster, singleRG)
 	prevAll := make(map[string]*monitoriface.Snapshot)
 
@@ -865,15 +862,6 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	for {
 		var buf strings.Builder
 		if isSingle {
-			kn := resolveSingleKernel()
-			// #10838: the display name can re-resolve to a different kernel
-			// device mid-stream (RG failover, member change, config commit).
-			// Deltas against the old device's prev/baseline would be
-			// cross-device garbage (clamped-0 or spikes), so drop them and
-			// annotate — the same reset/annotate contract the CLI applies.
-			if note := monitoriface.ResetOnDeviceChange(singleDisplayName, &singleKernelName, kn, &prevSingle, &baselineSingle); note != "" {
-				singleDeviceNote = note
-			}
 			if owner := monitorRGPrimaryOwner(s.currentMonitorClusterState(), singleRG); owner != "" && owner != singlePrimaryOwner {
 				ownerNote := monitorRGOwnershipChangeNote(singleDisplayName, singleKernelName, singleRG, singlePrimaryOwner, owner)
 				if singleDeviceNote == "" {
