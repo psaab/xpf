@@ -807,25 +807,33 @@ contract.
   display-name mapping from `cfg`, and an interceptor cannot re-derive closures
   inside a handler body), and there is no uniform enforcement action — cancelling
   an operator's `monitor interface` because someone committed is plainly wrong. The
-  "omits the next one" concern is answered by SCOPE instead: `MonitorInterface` is
-  the only stream that renders live data under a config-derived label pinned at
-  open. `MonitorPacketDrop` also reads the config at open, but only to validate the
-  request's zone/interface filters and resolve the requested alias set — pinning
-  the interpretation of what the operator asked for is correct there, and it
-  renders no config-derived label.
+  "omits the next one" concern is answered by SCOPE instead: `MonitorInterface`
+  keeps the requested display alias, but resolves its backing kernel device on
+  each tick. `MonitorPacketDrop` also reads the config at open, but only to
+  validate the request's zone/interface filters and resolve the requested alias
+  set — pinning the interpretation of what the operator asked for is correct
+  there, and it renders no config-derived label.
 
-  **Deliberately NOT refreshed**, so the fix does not half-land: `singleKernelName`
-  (single-interface mode) stays resolved at open, because the rate columns are
-  deltas against baselines held for a SPECIFIC kernel device and re-resolving
-  mid-stream would swap the device under those baselines and render garbage rates
-  — replacing a wrong label with wrong numbers; and `isRethName` / `rethRG`, which
-  feed the serve-local vs proxy-to-peer dispatch settled once before the loop.
-  Guards: `monitor_cfg_refresh_9144_test.go`, including a cell that drives the real
-  handler across a real mid-stream commit and asserts the RENDERED FRAMES change
-  (the direct-call cells all stay green if the loop stops calling the helper), and
-  a control asserting the fixture's alias actually reaches the display-name
-  mapping — without it the whole file would pass on a config the summary path never
-  consults.
+  **Single-interface RETH counters stay pinned to the open-time device (#10838).**
+  The kernel member and one-hop proxy decision are both settled at stream entry;
+  re-resolving a committed alias inside the loop could make the old serving node
+  read a newly remote RETH. Every RETH frame carries a persistent note naming the
+  kernel device resolved at open and warning that its counters may be stale after
+  failover.
+
+  An RG ownership change is tracked separately: an already-open stream remains
+  on its serving node and cannot transfer to the new primary. The handler resets
+  its rate/delta baselines and annotates the local counters as potentially stale.
+  The CLI instead re-resolves its device per tick and resets baselines on a
+  kernel-name change. `TestMonitorInterfacePinsOpenDeviceAndAnnotates10838`
+  drives a real config/member change and checks the persistent open-time warning;
+  `TestMonitorInterfaceRGOwnershipChangeAnnotatesBoundNode10838` flips ownership
+  with config and kernel device unchanged and checks the stale note plus zero
+  post-transition delta.
+
+  `isRethName` / `rethRG` still feed the serve-local vs proxy-to-peer dispatch,
+  which is settled once before the loop. `monitor_cfg_refresh_9144_test.go` drives
+  the summary handler across a real config commit.
 - **MonitorInterface peer proxy — one-hop bound (#5497).** For a RETH (or
   a peer-owned physical member) `MonitorInterface` may forward the stream
   to the cluster peer (`proxyMonitorInterface` → `dialPeer`). Two invariants

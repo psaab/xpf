@@ -57,24 +57,19 @@ func monitorResolveToKernel(cfg *config.Config, cfgName string) string {
 // uniform enforcement action — cancelling an operator's `monitor interface`
 // because someone committed is plainly wrong. So the fix belongs in the handler,
 // and the "silently omits the next one" concern is answered by scope instead:
-// MonitorInterface is the only stream that renders LIVE data under a
-// config-derived label pinned at open. MonitorPacketDrop also reads the config
-// at open, but only to VALIDATE the request's zone/interface filters and resolve
-// the requested alias set — pinning the interpretation of what the operator
-// asked for is correct there, and it renders no config-derived label.
+// MonitorInterface is the only stream that renders live data under a
+// config-derived alias. MonitorPacketDrop also reads the config at open, but
+// only to VALIDATE the request's zone/interface filters and resolve the
+// requested alias set — pinning the interpretation of what the operator asked
+// for is correct there, and it renders no config-derived label.
 //
-// WHAT IS DELIBERATELY *NOT* REFRESHED. The stream-ENTRY uses of the open-time
-// cfg stay pinned, so this fix does not half-land:
-//
-//   - singleKernelName (single-interface mode). The rate columns are deltas
-//     against baselineSingle/prevSingle, which are counters of a SPECIFIC kernel
-//     device. Re-resolving mid-stream would silently swap the device under those
-//     baselines and render garbage rates — replacing a wrong label with wrong
-//     numbers, which is strictly worse. Pinned, and pinned by a cell.
-//   - isRethName / rethRG, which feed the serve-local vs proxy-to-peer dispatch.
-//     That decision is made once before the loop and the stream has no mechanism
-//     to start proxying mid-flight; re-evaluating it would change a value nothing
-//     reads.
+// #10838: single-interface RETH monitoring keeps its kernel device pinned at
+// stream entry, together with the one-hop proxy decision, and carries a
+// persistent frame note naming that device and warning it may be stale after
+// failover. An RG ownership change is monitored separately: since an already-open
+// stream cannot migrate to the new primary, the handler resets its baselines and
+// annotates the local counters as potentially stale. The CLI re-resolves its
+// device per tick and uses ResetOnDeviceChange to clear per-device baselines.
 //
 // openCfg is the snapshot the stream opened with and is used ONLY when the
 // re-read returns nil (a store transiently without an active config): the stream

@@ -224,15 +224,19 @@ type Server struct {
 	// key is stored on the first CHECK, not only on a warning, so the #9340
 	// per-alternative analysis runs once per class and pattern, never per
 	// request.
-	unenforceableDenyWarned   sync.Map
-	store                     *configstore.Store
-	dp                        grpcRuntime
-	eventBuf                  *logging.EventBuffer
-	gc                        *conntrack.GC
-	routing                   *routing.Manager
-	frr                       *frr.Manager
-	ipsec                     *ipsec.Manager
-	cluster                   *cluster.Manager
+	unenforceableDenyWarned sync.Map
+	store                   *configstore.Store
+	dp                      grpcRuntime
+	eventBuf                *logging.EventBuffer
+	gc                      *conntrack.GC
+	routing                 *routing.Manager
+	frr                     *frr.Manager
+	ipsec                   *ipsec.Manager
+	cluster                 *cluster.Manager
+	// monitorClusterStateFn exposes the live ownership view to the interface
+	// monitor; nil uses cluster directly. Tests can advance RG ownership while
+	// a stream is open without a real cluster manager.
+	monitorClusterStateFn     func() monitorClusterState
 	dhcp                      *dhcp.Manager
 	dhcpServer                DHCPServerStatus
 	rpmResultsFn              func() []*rpm.ProbeResult

@@ -14,7 +14,8 @@ packets, bytes, delta, rate.
   Abstracts monitor-interface counter reads so callers adapt broader
   dataplanes at their package boundary and tests can inject a fake.
 - `ReadSnapshot(counterReader CounterReader, statusReader StatusReader, kernelName string) (Snapshot, error)` — `monitor.go`.
-- `RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *Snapshot, startTime time.Time)` — `monitor.go`.
+- `ResetOnDeviceChange(displayName string, trackedKernel *string, newKernel string, prev, baseline **Snapshot) string` — `monitor.go`. Resets single-interface rate/delta baselines and returns a persistent annotation when the kernel device changes.
+- `RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *Snapshot, startTime time.Time, deviceNote string)` — `monitor.go`.
 - `RenderTrafficSummary(w io.Writer, hostname string, names []string, kernelNames map[string]string, snaps, prevSnaps map[string]*Snapshot, mode SummaryMode, startTime time.Time)` — `monitor.go`.
 
 ## Callers

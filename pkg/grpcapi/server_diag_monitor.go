@@ -607,6 +607,43 @@ type monitorClusterState interface {
 	IsPeerPrimary(rg int) bool
 }
 
+func (s *Server) currentMonitorClusterState() monitorClusterState {
+	if s.monitorClusterStateFn != nil {
+		return s.monitorClusterStateFn()
+	}
+	if s.cluster != nil {
+		return s.cluster
+	}
+	return nil
+}
+
+func monitorRGPrimaryOwner(cl monitorClusterState, rg int) string {
+	if cl == nil || rg <= 0 {
+		return ""
+	}
+	local, peer := cl.IsLocalPrimary(rg), cl.IsPeerPrimary(rg)
+	switch {
+	case local && peer:
+		return "both"
+	case local:
+		return "local"
+	case peer:
+		return "peer"
+	default:
+		return "neither"
+	}
+}
+
+func monitorRGOwnershipChangeNote(displayName, kernelName string, rg int, oldOwner, newOwner string) string {
+	return fmt.Sprintf("Note: %s RG%d primary changed %s -> %s (possible failover); this stream remains bound to this node's device %s and does not move to the new peer, so counters may be stale — baseline reset",
+		displayName, rg, oldOwner, newOwner, kernelName)
+}
+
+func monitorPinnedRethDeviceNote(displayName, kernelName string) string {
+	return fmt.Sprintf("Note: %s uses kernel device %s resolved at stream open; this gRPC stream stays pinned to its serving node and cannot follow RG failover, so counters may be stale",
+		displayName, kernelName)
+}
+
 // monitorProxyAction is the outcome of the MonitorInterface single-interface
 // proxy decision.
 type monitorProxyAction int
@@ -668,10 +705,13 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	// e.g. "ge-0/0/0" → "ge-0-0-0", "reth0" → physical member's kernel name.
 	//
 	// This closure captures the OPEN-time cfg deliberately. It feeds the
-	// stream-ENTRY decisions below (single-interface resolution, the RETH
-	// proxy-to-peer dispatch), which are settled once and must not move
-	// mid-stream — see monitorSummaryInterfaces for the per-tick path and
-	// the reasoning for the split.
+	// stream-ENTRY decisions below (single-interface resolution for the
+	// admission-time NotFound check, the RETH proxy-to-peer dispatch), which
+	// are settled once and must not move mid-stream — see
+	// monitorSummaryInterfaces for the per-tick path and the reasoning for
+	// the split. Single-interface COUNTERS re-resolve per tick via
+	// resolveSingleKernel below (#10838), with a baseline reset whenever
+	// the device moves.
 	resolveToKernel := func(cfgName string) string {
 		return monitorResolveToKernel(cfg, cfgName)
 	}
@@ -718,10 +758,14 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 
 	isSingle := req.InterfaceName != ""
 	var singleDisplayName, singleKernelName string
+	var singleCluster monitorClusterState
+	singleRG := -1
 	proxyToPeer := false
 	if isSingle {
 		singleDisplayName = req.InterfaceName
 		singleKernelName = monitoriface.ResolvePhysicalParent(resolveToKernel(req.InterfaceName))
+		singleRG = rethRG(req.InterfaceName)
+		singleCluster = s.currentMonitorClusterState()
 
 		// Decide whether to serve locally, proxy one hop to the peer, or report
 		// not-found. A request already forwarded from the peer (no-peer marker)
@@ -732,17 +776,13 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		// no subscriber slot; the proxy decision is recorded and acted on only
 		// once a slot is held, so a refused subscriber dials no peer.
 		_, ifErr := net.InterfaceByName(singleKernelName)
-		var cl monitorClusterState
-		if s.cluster != nil {
-			cl = s.cluster
-		}
 		switch decideMonitorProxy(
 			monitorRequestForwardedFromPeer(stream.Context()),
 			ifErr == nil,
 			isPeerInterface(req.InterfaceName),
 			isRethName(req.InterfaceName),
-			rethRG(req.InterfaceName),
-			cl,
+			singleRG,
+			singleCluster,
 		) {
 		case monitorProxyToPeer:
 			proxyToPeer = true
@@ -751,6 +791,11 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		}
 		// monitorServeLocal: fall through and read local counters below.
 	}
+
+	// #10838: keep single-interface RETH counters pinned to the kernel device
+	// selected before stream-entry proxy dispatch. Re-resolving after that
+	// decision could read a newly remote RETH locally. The stream note names
+	// the pinned device and warns that its counters may be stale after failover.
 
 	// Admission bound (#9891): fail-fast before the ticker, the rendering
 	// state, and any peer dial, so a refused subscriber costs no goroutine,
@@ -792,6 +837,11 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	// Previous snapshots for rate calculation.
 	var prevSingle *monitoriface.Snapshot
 	var baselineSingle *monitoriface.Snapshot
+	singleDeviceNote := ""
+	if isSingle && isRethName(singleDisplayName) && singleRG > 0 {
+		singleDeviceNote = monitorPinnedRethDeviceNote(singleDisplayName, singleKernelName)
+	}
+	singlePrimaryOwner := monitorRGPrimaryOwner(singleCluster, singleRG)
 	prevAll := make(map[string]*monitoriface.Snapshot)
 
 	// statusReader is the shared, coalescing Status() reader (#5707). Summary
@@ -812,14 +862,31 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	for {
 		var buf strings.Builder
 		if isSingle {
+			if owner := monitorRGPrimaryOwner(s.currentMonitorClusterState(), singleRG); owner != "" && owner != singlePrimaryOwner {
+				ownerNote := monitorRGOwnershipChangeNote(singleDisplayName, singleKernelName, singleRG, singlePrimaryOwner, owner)
+				if singleDeviceNote == "" {
+					singleDeviceNote = ownerNote
+				} else {
+					singleDeviceNote += "; " + strings.TrimPrefix(ownerNote, "Note: ")
+				}
+				singlePrimaryOwner = owner
+				// The handler stays on this node; it cannot transfer an
+				// already-open stream to the new primary. Drop the old owner
+				// epoch's rates/deltas and label the frame as potentially stale.
+				prevSingle = nil
+				baselineSingle = nil
+			}
 			snap := readSnap(singleKernelName)
 			if snap == nil {
 				fmt.Fprintf(&buf, "interface %s: not available\n", singleDisplayName)
+				if singleDeviceNote != "" {
+					fmt.Fprintf(&buf, "  %s\n", singleDeviceNote)
+				}
 			} else {
 				if baselineSingle == nil {
 					baselineSingle = snap
 				}
-				monitoriface.RenderSingleInterface(&buf, hostname, singleDisplayName, singleKernelName, snap, prevSingle, baselineSingle, startTime)
+				monitoriface.RenderSingleInterface(&buf, hostname, singleDisplayName, singleKernelName, snap, prevSingle, baselineSingle, startTime, singleDeviceNote)
 				snapCopy := *snap
 				prevSingle = &snapCopy
 			}
