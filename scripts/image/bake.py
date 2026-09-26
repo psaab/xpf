@@ -97,10 +97,14 @@ RUNTIME_PACKAGES = [
     "perl-base",
 ]
 
+# #10765 F7: NO forwarding knobs here. net.ipv4.ip_forward and
+# net.ipv6.conf.all.forwarding belong to the #9725 daemon transit gate
+# (pkg/daemon/daemon_transit_gate.go), its sole writer; a sysctl.d drop-in
+# setting them re-opens routed transit on every boot, including on boxes
+# where xpfd never runs. The AF_XDP fast path needs no ip_forward
+# (docs/image-validation.md: 4.29/3.02 Gbit/s with both knobs at 0).
 SYSCTL_CONF = (
     "net.core.bpf_jit_enable=1\n"
-    "net.ipv4.ip_forward=1\n"
-    "net.ipv6.conf.all.forwarding=1\n"
     "net.ipv6.conf.all.accept_ra=0\n"
     "net.ipv6.conf.default.accept_ra=0\n"
 )
