@@ -57,24 +57,18 @@ func monitorResolveToKernel(cfg *config.Config, cfgName string) string {
 // uniform enforcement action — cancelling an operator's `monitor interface`
 // because someone committed is plainly wrong. So the fix belongs in the handler,
 // and the "silently omits the next one" concern is answered by scope instead:
-// MonitorInterface is the only stream that renders LIVE data under a
-// config-derived label pinned at open. MonitorPacketDrop also reads the config
-// at open, but only to VALIDATE the request's zone/interface filters and resolve
-// the requested alias set — pinning the interpretation of what the operator
-// asked for is correct there, and it renders no config-derived label.
+// MonitorInterface is the only stream that renders live data under a
+// config-derived alias. MonitorPacketDrop also reads the config at open, but
+// only to VALIDATE the request's zone/interface filters and resolve the
+// requested alias set — pinning the interpretation of what the operator asked
+// for is correct there, and it renders no config-derived label.
 //
-// WHAT IS DELIBERATELY *NOT* REFRESHED. The stream-ENTRY uses of the open-time
-// cfg stay pinned, so this fix does not half-land:
-//
-//   - singleKernelName (single-interface mode). The rate columns are deltas
-//     against baselineSingle/prevSingle, which are counters of a SPECIFIC kernel
-//     device. Re-resolving mid-stream would silently swap the device under those
-//     baselines and render garbage rates — replacing a wrong label with wrong
-//     numbers, which is strictly worse. Pinned, and pinned by a cell.
-//   - isRethName / rethRG, which feed the serve-local vs proxy-to-peer dispatch.
-//     That decision is made once before the loop and the stream has no mechanism
-//     to start proxying mid-flight; re-evaluating it would change a value nothing
-//     reads.
+// #10838: single-interface monitoring also re-resolves the requested display
+// name to its current kernel device on each tick. ResetOnDeviceChange drops the
+// per-device prev/baseline snapshots and the rendered frame carries a persistent
+// note when the member changes. The stream-entry uses below stay pinned:
+// isRethName / rethRG feed the serve-local vs proxy-to-peer dispatch, which is
+// settled before the loop and cannot switch the stream's peer mid-flight.
 //
 // openCfg is the snapshot the stream opened with and is used ONLY when the
 // re-read returns nil (a store transiently without an active config): the stream

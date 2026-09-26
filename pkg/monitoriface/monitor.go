@@ -241,6 +241,36 @@ func ResolvePhysicalParent(name string) string {
 	return name
 }
 
+// FormatDeviceChangeNote renders the shared device-change annotation for
+// single-interface monitoring (#10838), or "" when the device did not move.
+//
+// A display name such as reth0 can re-resolve to a different kernel device
+// mid-stream (RG failover, member change, config commit). Both transports
+// call this on every tick: a non-empty return means the prev/baseline held
+// for the old device must be dropped and the note rendered. One helper for
+// both transports so the reset/annotate contract cannot drift.
+func FormatDeviceChangeNote(displayName, oldKernel, newKernel string) string {
+	if oldKernel == newKernel {
+		return ""
+	}
+	return fmt.Sprintf("Note: %s device changed %s -> %s (possible RG failover) — baseline reset; rates and deltas restart from the new device",
+		displayName, oldKernel, newKernel)
+}
+
+// ResetOnDeviceChange drops rate and delta baselines when a display name
+// resolves to a different kernel device. The non-empty note is intended to
+// remain visible for the rest of the monitor session.
+func ResetOnDeviceChange(displayName string, trackedKernel *string, newKernel string, prev, baseline **Snapshot) string {
+	if *trackedKernel == newKernel {
+		return ""
+	}
+	note := FormatDeviceChangeNote(displayName, *trackedKernel, newKernel)
+	*trackedKernel = newKernel
+	*prev = nil
+	*baseline = nil
+	return note
+}
+
 func ListTrafficInterfaces() ([]string, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
@@ -641,7 +671,7 @@ func ReadLinkSpeed(name string) string {
 	return formatLinkSpeed(mbps)
 }
 
-func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *Snapshot, startTime time.Time) {
+func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *Snapshot, startTime time.Time, deviceNote string) {
 	seconds := int(time.Since(startTime).Seconds())
 	now := time.Now().Format("15:04:05")
 	linkState := ReadLinkState(kernelName)
@@ -650,6 +680,9 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 	fmt.Fprintf(w, "%-40s Seconds: %-10d Time: %s\n", hostname, seconds, now)
 	fmt.Fprintf(w, "Interface: %s, Enabled, Link is %s\n", displayName, linkState)
 	fmt.Fprintf(w, "Encapsulation: Ethernet, Speed: %s\n", speed)
+	if deviceNote != "" {
+		fmt.Fprintf(w, "  %s\n", deviceNote)
+	}
 
 	var rxBps, txBps, rxPps, txPps uint64
 	var userspaceRateDropped bool

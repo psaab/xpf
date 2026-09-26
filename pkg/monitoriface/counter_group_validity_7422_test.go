@@ -81,6 +81,6 @@ func TestCounterGroupValidityIsPerGroup7422(t *testing.T) {
 func render7422(t *testing.T, snap *Snapshot) string {
 	t.Helper()
 	var buf bytes.Buffer
-	RenderSingleInterface(&buf, "host", "ge-0/0/0", "ge-0-0-0", snap, nil, nil, time.Now())
+	RenderSingleInterface(&buf, "host", "ge-0/0/0", "ge-0-0-0", snap, nil, nil, time.Now(), "")
 	return buf.String()
 }

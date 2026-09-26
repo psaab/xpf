@@ -142,7 +142,7 @@ func aggregateUserspaceIfaceSnapshot(kernelName string, status dpuserspace.Proce
 }
 
 func renderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *ifaceSnapshot, startTime time.Time) {
-	monitoriface.RenderSingleInterface(w, hostname, displayName, kernelName, snap, prev, baseline, startTime)
+	monitoriface.RenderSingleInterface(w, hostname, displayName, kernelName, snap, prev, baseline, startTime, "")
 }
 
 // handleMonitorInterface dispatches monitor interface sub-commands.
@@ -269,11 +269,21 @@ func (c *CLI) monitorInterfaceSingle(ifaceName string) error {
 	startTime := time.Now()
 	var prev *monitoriface.Snapshot
 	var baseline *monitoriface.Snapshot
+	trackedKernel := kernelName
+	deviceNote := ""
 	frozen := false
 	allIfaces := c.sortedMonitorInterfaces()
 
 	renderNow := func() {
 		kn := monitoriface.ResolvePhysicalParent(c.resolveToKernel(displayName))
+		// #10838: the display name can re-resolve to a different kernel device
+		// mid-stream (RG failover, member change, config commit). Deltas against
+		// the old device's prev/baseline would be cross-device garbage
+		// (clamped-0 or spikes), so drop them and say so — the same
+		// reset/annotate contract the gRPC stream applies.
+		if note := monitoriface.ResetOnDeviceChange(displayName, &trackedKernel, kn, &prev, &baseline); note != "" {
+			deviceNote = note
+		}
 		snap, err := c.readMonitorSnapshot(kn)
 		if err != nil {
 			return
@@ -283,7 +293,7 @@ func (c *CLI) monitorInterfaceSingle(ifaceName string) error {
 			baseline = &snapCopy
 		}
 		fmt.Print(clearAndHome)
-		monitoriface.RenderSingleInterface(os.Stdout, c.hostname, displayName, kn, &snap, prev, baseline, startTime)
+		monitoriface.RenderSingleInterface(os.Stdout, c.hostname, displayName, kn, &snap, prev, baseline, startTime, deviceNote)
 		snapCopy := snap
 		prev = &snapCopy
 	}
@@ -319,6 +329,8 @@ func (c *CLI) monitorInterfaceSingle(ifaceName string) error {
 					displayName = allIfaces[idx]
 					prev = nil
 					baseline = nil
+					deviceNote = ""
+					trackedKernel = monitoriface.ResolvePhysicalParent(c.resolveToKernel(displayName))
 					startTime = time.Now()
 					renderNow()
 				}

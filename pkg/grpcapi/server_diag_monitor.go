@@ -668,10 +668,13 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	// e.g. "ge-0/0/0" → "ge-0-0-0", "reth0" → physical member's kernel name.
 	//
 	// This closure captures the OPEN-time cfg deliberately. It feeds the
-	// stream-ENTRY decisions below (single-interface resolution, the RETH
-	// proxy-to-peer dispatch), which are settled once and must not move
-	// mid-stream — see monitorSummaryInterfaces for the per-tick path and
-	// the reasoning for the split.
+	// stream-ENTRY decisions below (single-interface resolution for the
+	// admission-time NotFound check, the RETH proxy-to-peer dispatch), which
+	// are settled once and must not move mid-stream — see
+	// monitorSummaryInterfaces for the per-tick path and the reasoning for
+	// the split. Single-interface COUNTERS re-resolve per tick via
+	// resolveSingleKernel below (#10838), with a baseline reset whenever
+	// the device moves.
 	resolveToKernel := func(cfgName string) string {
 		return monitorResolveToKernel(cfg, cfgName)
 	}
@@ -752,6 +755,22 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		// monitorServeLocal: fall through and read local counters below.
 	}
 
+	// #10838: per-tick re-resolution for single-interface mode. #9144 pinned
+	// singleKernelName at open because re-resolving would silently swap the
+	// device under baselineSingle/prevSingle and render garbage rates. That
+	// pin is now safe to lift: the loop detects a kernel-name change, drops
+	// prev/baseline, and annotates the frame — the same reset/annotate
+	// contract the CLI applies. A nil re-read degrades to the opening
+	// snapshot (as monitorSummaryInterfaces does) so a config blip cannot
+	// forge a device change.
+	resolveSingleKernel := func() string {
+		cfgNow := s.store.ActiveConfig()
+		if cfgNow == nil {
+			cfgNow = cfg
+		}
+		return monitoriface.ResolvePhysicalParent(monitorResolveToKernel(cfgNow, singleDisplayName))
+	}
+
 	// Admission bound (#9891): fail-fast before the ticker, the rendering
 	// state, and any peer dial, so a refused subscriber costs no goroutine,
 	// no ticker, and no connection. Held across the proxy forwarding loop as
@@ -792,6 +811,7 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	// Previous snapshots for rate calculation.
 	var prevSingle *monitoriface.Snapshot
 	var baselineSingle *monitoriface.Snapshot
+	singleDeviceNote := ""
 	prevAll := make(map[string]*monitoriface.Snapshot)
 
 	// statusReader is the shared, coalescing Status() reader (#5707). Summary
@@ -812,14 +832,26 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	for {
 		var buf strings.Builder
 		if isSingle {
+			kn := resolveSingleKernel()
+			// #10838: the display name can re-resolve to a different kernel
+			// device mid-stream (RG failover, member change, config commit).
+			// Deltas against the old device's prev/baseline would be
+			// cross-device garbage (clamped-0 or spikes), so drop them and
+			// annotate — the same reset/annotate contract the CLI applies.
+			if note := monitoriface.ResetOnDeviceChange(singleDisplayName, &singleKernelName, kn, &prevSingle, &baselineSingle); note != "" {
+				singleDeviceNote = note
+			}
 			snap := readSnap(singleKernelName)
 			if snap == nil {
 				fmt.Fprintf(&buf, "interface %s: not available\n", singleDisplayName)
+				if singleDeviceNote != "" {
+					fmt.Fprintf(&buf, "  %s\n", singleDeviceNote)
+				}
 			} else {
 				if baselineSingle == nil {
 					baselineSingle = snap
 				}
-				monitoriface.RenderSingleInterface(&buf, hostname, singleDisplayName, singleKernelName, snap, prevSingle, baselineSingle, startTime)
+				monitoriface.RenderSingleInterface(&buf, hostname, singleDisplayName, singleKernelName, snap, prevSingle, baselineSingle, startTime, singleDeviceNote)
 				snapCopy := *snap
 				prevSingle = &snapCopy
 			}
