@@ -29,6 +29,12 @@ func RenderAlarms(w io.Writer, alarms []ActiveAlarm, startCount int, detail bool
 			if !a.FirstSeen.IsZero() {
 				fmt.Fprintf(w, "  First seen: %s\n", a.FirstSeen.Format("2006-01-02 15:04:05"))
 			}
+			if !a.LastSample.IsZero() {
+				fmt.Fprintf(w, "  Last sample: %s\n", a.LastSample.Format("2006-01-02 15:04:05"))
+			}
+			if a.Stale {
+				fmt.Fprintf(w, "  Status: STALE (no fresh coherent helper sample)\n")
+			}
 			fmt.Fprintf(w, "\n")
 		}
 	}
@@ -59,6 +65,12 @@ func RenderExhaustionAlarms(w io.Writer, alarms []ActiveExhaustionAlarm, startCo
 				count, a.PoolName, a.Events)
 			if !a.FirstSeen.IsZero() {
 				fmt.Fprintf(w, "  First seen: %s\n", a.FirstSeen.Format("2006-01-02 15:04:05"))
+			}
+			if !a.LastSample.IsZero() {
+				fmt.Fprintf(w, "  Last sample: %s\n", a.LastSample.Format("2006-01-02 15:04:05"))
+			}
+			if a.Stale {
+				fmt.Fprintf(w, "  Status: STALE (no fresh coherent helper sample)\n")
 			}
 			fmt.Fprintf(w, "\n")
 		}

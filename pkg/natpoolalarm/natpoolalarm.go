@@ -126,6 +126,11 @@ type ActiveAlarm struct {
 	CurrentPct     uint64
 	RaiseThreshold int
 	FirstSeen      time.Time
+	// LastSample is the last fresh coherent sample for this pool (#10902).
+	LastSample time.Time
+	// Stale reports the monitor is HOLDing on unavailable/incoherent helper
+	// data, so CurrentPct may be unfresh (#10902).
+	Stale bool
 }
 
 // ActiveExhaustionAlarm is a thread-safe snapshot of one active NAT pool
@@ -137,13 +142,19 @@ type ActiveExhaustionAlarm struct {
 	PoolName  string
 	Events    uint64
 	FirstSeen time.Time
+	// LastSample is the last fresh coherent sample for this pool (#10902).
+	LastSample time.Time
+	// Stale reports the monitor is HOLDing on unavailable/incoherent helper
+	// data, so Events may be unfresh (#10902).
+	Stale bool
 }
 
 // alarmState is the per-pool internal record while raised.
 type alarmState struct {
-	pct       uint64
-	raiseThr  int
-	firstSeen time.Time
+	pct        uint64
+	raiseThr   int
+	firstSeen  time.Time
+	lastSample time.Time
 }
 
 // exhBaseline is the per-pool exhaustion continuity record (#9902 F-026):
@@ -160,6 +171,7 @@ type exhBaseline struct {
 type exhAlarmState struct {
 	lastEvents uint64
 	firstSeen  time.Time
+	lastSample time.Time
 }
 
 // Monitor evaluates NAT pool utilization on a slow tick and maintains the
@@ -188,7 +200,11 @@ type Monitor struct {
 	lastSeq          uint64
 	exhBaseline      map[string]*exhBaseline
 	activeExhaustion map[string]*exhAlarmState
-	started          bool // run() launched (guards Stop against an unstarted monitor)
+	// stale marks held alarms as showing unfresh data (#10902): set on every
+	// !Available/!HelperCoherent HOLD-all tick, cleared on every coherent
+	// tick. Snapshots copy it so `show` can render STALE.
+	stale   bool
+	started bool // run() launched (guards Stop against an unstarted monitor)
 
 	stopOnce sync.Once // guards close(stop) against concurrent Stop callers
 	stop     chan struct{}
@@ -287,15 +303,20 @@ func (m *Monitor) evaluate() {
 	view := m.sample()
 
 	// dp nil / helper down → HOLD all alarms (no clear): no data is not a
-	// decision to clear.
+	// decision to clear. The held alarms are marked STALE so `show` does not
+	// present unfresh data as current (#10902).
 	if !view.Available {
+		m.setStale(true)
 		return
 	}
 	// Mid-apply (status gen != applied gen) → counters/config transiently
-	// mismatched → HOLD all this tick.
+	// mismatched → HOLD all this tick, likewise STALE (#10902).
 	if !view.HelperCoherent {
+		m.setStale(true)
 		return
 	}
+	// Coherent fresh data: held alarms are current again.
+	m.setStale(false)
 
 	cfg := view.Config
 	// Fail-closed nil config: clear every active alarm and return.
@@ -539,10 +560,12 @@ func (m *Monitor) raise(poolName string, pct uint64, raiseThr int) {
 		// Already raised — should not happen (caller gates on !raised), but
 		// keep idempotent: refresh pct, no duplicate syslog.
 		m.active[poolName].pct = pct
+		m.active[poolName].lastSample = m.nowFn()
 		m.mu.Unlock()
 		return
 	}
-	m.active[poolName] = &alarmState{pct: pct, raiseThr: raiseThr, firstSeen: m.nowFn()}
+	now := m.nowFn()
+	m.active[poolName] = &alarmState{pct: pct, raiseThr: raiseThr, firstSeen: now, lastSample: now}
 	m.mu.Unlock()
 
 	m.emitLine(severityRaise, fmt.Sprintf(
@@ -600,6 +623,7 @@ func (m *Monitor) updatePct(poolName string, pct uint64) {
 	defer m.mu.Unlock()
 	if st, ok := m.active[poolName]; ok {
 		st.pct = pct
+		st.lastSample = m.nowFn()
 	}
 }
 
@@ -618,6 +642,15 @@ func (m *Monitor) setLastExhaustionSeq(seq uint64) {
 	m.lastSeq = seq
 }
 
+// setStale records whether held alarms are showing unfresh helper data
+// (#10902). Called on every tick: true on HOLD-all, false once a coherent
+// sample lands.
+func (m *Monitor) setStale(stale bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stale = stale
+}
+
 // evalExhaustion runs one pool's exhaustion state machine for a fresh tick
 // (#9902 F-026). The baseline key is (procGen, allocatorID): a change in
 // EITHER means the counter instance was replaced (helper restart or
@@ -625,16 +658,19 @@ func (m *Monitor) setLastExhaustionSeq(seq uint64) {
 // so the tick rebases SILENTLY — no evaluation, no clear, streak reset. On
 // an UNCHANGED key the counters are the same instance's monotonic atomics,
 // so the delta is genuine: >0 raises (or silently refreshes the displayed
-// events), ==0 advances the 3-clean-tick clear hysteresis. cur<prev on an
-// unchanged key is unreachable in production (same-instance counters only
-// grow) but specified anyway: defensive rebase.
+// events), ==0 advances the 3-clean-tick clear hysteresis. For a nonzero
+// allocator id, cur<prev is unreachable in production because one allocator's
+// counter only grows. A legacy id-0 allocator can be rebuilt without identity
+// metadata, so a decrease is a reset signal and defensive rebase.
 //
-// AllocatorID 0 (a helper older than the field) ALWAYS rebases, even
-// against a 0 baseline: a legacy same-process rebuild is invisible (0→0),
-// and a fast re-exhaustion past the old count before the next coherent
-// tick would otherwise evaluate as a phantom delta and FALSE-raise. The
-// tradeoff is explicit: legacy helpers never raise exhaustion (fail-silent
-// for the skewed-upgrade window) rather than risk false alarms.
+// AllocatorID 0 (a helper older than the field) evaluates like any other id
+// (#10902): 0→0 on an unchanged procGen is the same-process legacy allocator,
+// so a positive delta raises. A same-process rebuild resets the counter, and
+// cur<prev on the unchanged key still defensive-rebases below — only a
+// rebuild followed by re-exhaustion past the old count raises, which is a
+// true positive (exhaustion did recur) with an approximate magnitude, not a
+// phantom. The previous fail-silent tradeoff left flow-only legacy pools (no
+// measurable utilization leg, never-raising exhaustion) completely blind.
 //
 // Lost deltas on rebase are inherent to the 1 Hz poll: events between the
 // last tick and a rebuild are unobservable — a rebase neither counts nor
@@ -651,14 +687,22 @@ func (m *Monitor) evalExhaustion(poolName string, procGen, allocatorID, cur uint
 	case !seen:
 		// First sighting: silent baseline, no evaluation this tick.
 		m.exhBaseline[poolName] = &exhBaseline{procGen: procGen, allocatorID: allocatorID, count: cur}
-	case allocatorID == 0 || procGen != b.procGen || allocatorID != b.allocatorID:
-		// Identity change (or legacy-0): silent rebase. The new count is
-		// stored, the streak resets, and an active alarm is NEITHER
-		// cleared (no false credit) NOR refreshed.
+	case procGen != b.procGen || allocatorID != b.allocatorID:
+		// Identity change: silent rebase. The new count is stored, the
+		// streak resets, and an active alarm is NEITHER cleared (no false
+		// credit) NOR refreshed — but its lastSample advances (fresh
+		// observation, incomparable count).
 		b.procGen, b.allocatorID, b.count, b.streak = procGen, allocatorID, cur, 0
+		if st, raised := m.activeExhaustion[poolName]; raised {
+			st.lastSample = m.nowFn()
+		}
 	case cur < b.count:
-		// Same-key decrease: defensive rebase (unreachable in production).
+		// Counter reset: expected for legacy id-0 allocators; otherwise
+		// defensive. Rebase without crediting a clear or exhaustion delta.
 		b.count, b.streak = cur, 0
+		if st, raised := m.activeExhaustion[poolName]; raised {
+			st.lastSample = m.nowFn()
+		}
 	default:
 		delta := cur - b.count
 		b.count = cur
@@ -666,11 +710,14 @@ func (m *Monitor) evalExhaustion(poolName string, procGen, allocatorID, cur uint
 			b.streak = 0
 			if st, raised := m.activeExhaustion[poolName]; raised {
 				st.lastEvents = delta
+				st.lastSample = m.nowFn()
 			} else {
-				m.activeExhaustion[poolName] = &exhAlarmState{lastEvents: delta, firstSeen: m.nowFn()}
+				now := m.nowFn()
+				m.activeExhaustion[poolName] = &exhAlarmState{lastEvents: delta, firstSeen: now, lastSample: now}
 				sev, msg, emit = severityRaise, sprintfExhaustionRaised(poolName, delta), true
 			}
-		} else if _, raised := m.activeExhaustion[poolName]; raised {
+		} else if st, raised := m.activeExhaustion[poolName]; raised {
+			st.lastSample = m.nowFn()
 			b.streak++
 			if b.streak >= 3 {
 				delete(m.activeExhaustion, poolName)
@@ -762,6 +809,8 @@ func (m *Monitor) ActiveAlarms() []ActiveAlarm {
 			CurrentPct:     st.pct,
 			RaiseThreshold: st.raiseThr,
 			FirstSeen:      st.firstSeen,
+			LastSample:     st.lastSample,
+			Stale:          m.stale,
 		})
 	}
 	m.mu.Unlock()
@@ -780,9 +829,11 @@ func (m *Monitor) ActiveExhaustionAlarms() []ActiveExhaustionAlarm {
 	out := make([]ActiveExhaustionAlarm, 0, len(m.activeExhaustion))
 	for name, st := range m.activeExhaustion {
 		out = append(out, ActiveExhaustionAlarm{
-			PoolName:  name,
-			Events:    st.lastEvents,
-			FirstSeen: st.firstSeen,
+			PoolName:   name,
+			Events:     st.lastEvents,
+			FirstSeen:  st.firstSeen,
+			LastSample: st.lastSample,
+			Stale:      m.stale,
 		})
 	}
 	m.mu.Unlock()

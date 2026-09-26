@@ -56,9 +56,11 @@ provable fixed point between two wrong sources:
 
 When the view is `!Available` (helper down) or `!HelperCoherent` (mid-apply,
 status gen != applied gen), the monitor HOLDs ALL alarms — no clear — because no
-data is not a decision to clear. Config-derived clears (rule un-reference, pool
-removal, feature-disabled, nil-config — plus a convert to a class whose legs
-are unmeasurable) DO fire once a coherent applied config is available.
+data is not a decision to clear. Held alarm detail includes the last coherent
+sample time and a `STALE (no fresh coherent helper sample)` status until
+coherent data returns. Config-derived clears (rule un-reference, pool removal,
+feature-disabled, nil-config — plus a convert to a class whose legs are
+unmeasurable) DO fire once a coherent applied config is available.
 
 ## Constraints honoured
 
@@ -67,11 +69,10 @@ are unmeasurable) DO fire once a coherent applied config is available.
   rule).
 - **No per-tick logging** — the syslog emit is gated entirely behind a raise/
   clear transition.
-- The utilization half reuses the existing 1 Hz `SourceNATPoolStatus`
-  counters and `last_snapshot_generation` with no Rust change (#2079); the
-  exhaustion half adds one additive `allocator_id` u64 to the pool row
-  (#9902 F-026), defaulted on both planes so mixed-version pairs degrade to
-  the documented legacy-0 residual instead of failing a decode.
+- The utilization half reuses the existing 1 Hz `SourceNATPoolStatus` counters
+  and `last_snapshot_generation` with no Rust change (#2079).
+- The exhaustion half adds one additive `allocator_id` u64 to the pool row
+  (#9902 F-026), defaulted on both planes so mixed-version pairs still decode.
 
 ## Dedup / deterministic / persistent / address-only
 
@@ -119,12 +120,13 @@ entirely. Watches every rule-referenced pool class (PAT, deterministic,
 address-only); still gated on the same stanza (feature-disabled / nil-config
 clears and retires baselines).
 
-Two stated residuals. (1) Legacy `allocator_id` 0 ALWAYS rebases — a legacy
-same-process rebuild is invisible (0→0), and evaluating the delta would
-false-raise on a fast re-exhaustion past the old count — so legacy helpers
-fail silent (never raise) for the skewed-upgrade window. (2) Rebase loses the
-inter-tick delta: events between the last tick and a rebuild are unobservable
-at the 1 Hz poll cadence, and a rebase neither counts nor clears them.
+For legacy `allocator_id` 0, positive counter deltas within one helper
+incarnation raise exhaustion alarms, so flow-only legacy pools are not blind.
+A counter reset observed below the previous value silently rebases; if an
+unobserved same-process rebuild has already re-exhausted past the prior value
+by the next poll, its positive delta is indistinguishable from continuous use
+and can overstate the displayed event delta. Rebase also loses events between
+the last tick and a rebuild, which are unobservable at the 1 Hz poll cadence.
 
 ## Commit-time validation
 
@@ -149,7 +151,8 @@ raise=0/clear=0 is an always-firing alarm). See `docs/config-schema.md` #2079.
   same-seq HOLD, absent HOLD, removal retire + re-add silence,
   baseline-only prune, deterministic + address-only watched, det-convert
   1-clear, class-change continuity, disable/nil-config clear,
-  unavailable/incoherent HOLD, severity/shape.
+  unavailable/incoherent HOLD, legacy-id-0 positive-delta raise,
+  helper-loss stale state and show output, severity/shape.
 - `natpoolalarm_tracked_flows_9896_test.go` — at-cap fixture raises, dual-leg
   crossing emits one line, `MaxTrackedFlows==0` falls back to ports-only,
   flow-leg clear + hysteresis-band hold, address-only flow-leg cells,
