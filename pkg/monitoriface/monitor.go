@@ -153,20 +153,40 @@ func deltaU64Rebase(curr uint64, baseline *uint64) (uint64, bool) {
 	return delta, reset
 }
 
-// Rebaseline only the kernel counters that actually decreased. A reset in the
-// userspace component must not erase the kernel baseline.
-func rebaselineInterfaceTrafficCounters(curr, baseline *Snapshot) {
-	if curr.RxPkts < baseline.RxPkts {
-		baseline.RxPkts = curr.RxPkts
+// Rebaseline the kernel traffic counters whose series restarted, and mark
+// their baseline deltas unmeasurable. A reset inside the prev→snap window
+// poisons the baseline delta even when snap still exceeds the baseline value
+// (baseline=5, prev=100, snap=10 must render n/a, not 5): the growth the
+// baseline predates is unknowable once the series restarts (#10839
+// follow-up). Flagged counters rebaseline to the current sample so the NEXT
+// window measures honestly from the new series.
+//
+// Kernel counters ONLY. A reset in the userspace component must not erase the
+// kernel baseline, and vice versa: the userspace detail rows own their
+// baseline via deltaU64Rebase and must still see the pre-reset values when
+// they run later in this render. baseline.Userspace is never touched here.
+func rebaselineInterfaceTrafficCounters(snap, prev, baseline *Snapshot, deltas *trafficDeltas) {
+	if snap == nil || baseline == nil || deltas == nil {
+		return
 	}
-	if curr.TxPkts < baseline.TxPkts {
-		baseline.TxPkts = curr.TxPkts
+	// Per-counter kernel fields; the matching prev field selects the
+	// window-poison arm. No closures over struct fields: four explicit
+	// blocks beat a reflection-free accessor table nobody can grep.
+	if prev != nil && snap.RxPkts < prev.RxPkts || snap.RxPkts < baseline.RxPkts {
+		deltas.rxPktsReset = true
+		baseline.RxPkts = snap.RxPkts
 	}
-	if curr.RxBytes < baseline.RxBytes {
-		baseline.RxBytes = curr.RxBytes
+	if prev != nil && snap.TxPkts < prev.TxPkts || snap.TxPkts < baseline.TxPkts {
+		deltas.txPktsReset = true
+		baseline.TxPkts = snap.TxPkts
 	}
-	if curr.TxBytes < baseline.TxBytes {
-		baseline.TxBytes = curr.TxBytes
+	if prev != nil && snap.RxBytes < prev.RxBytes || snap.RxBytes < baseline.RxBytes {
+		deltas.rxBytesReset = true
+		baseline.RxBytes = snap.RxBytes
+	}
+	if prev != nil && snap.TxBytes < prev.TxBytes || snap.TxBytes < baseline.TxBytes {
+		deltas.txBytesReset = true
+		baseline.TxBytes = snap.TxBytes
 	}
 }
 
@@ -802,7 +822,7 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 	if baseline != nil {
 		baselineDeltas = snapshotTrafficDeltas(snap, baseline)
 		if snap.DataplaneCountersNote == "" {
-			rebaselineInterfaceTrafficCounters(snap, baseline)
+			rebaselineInterfaceTrafficCounters(snap, prev, baseline, &baselineDeltas)
 		}
 	}
 	currCounters := displayTrafficCounters(snap)
