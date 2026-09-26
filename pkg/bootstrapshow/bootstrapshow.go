@@ -39,8 +39,8 @@ const (
 	// StatusNoConfig: no text config file present (factory / fresh boot).
 	// Expected — NOT a failure.
 	StatusNoConfig = "no-config"
-	// StatusFailed: a text config file was present but could not be
-	// read/parsed/committed, or was rejected by the device-map preflight.
+	// StatusFailed: a text-config import failed (read/parse/commit/device-map
+	// preflight), or the day-0 loader rejected a medium before installing it.
 	StatusFailed = "import-failed"
 )
 
@@ -67,7 +67,7 @@ func explain(status string) string {
 	case StatusNoConfig:
 		return "no configuration file was present (factory boot) — expected, not a failure"
 	case StatusFailed:
-		return "a configuration file was present but could NOT be applied — see Error below"
+		return "a configuration could NOT be applied — see Error below"
 	case "":
 		return "the daemon has not yet reached the boot-time import decision"
 	default:

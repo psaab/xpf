@@ -80,46 +80,36 @@ func TestAbsentActiveHistoryForcesBootstrapNotClaimAll_10297(t *testing.T) {
 	if got := computeBootClass(false, true, false, true); got != bootClassBootstrap {
 		t.Fatalf("absent active with history classified %v; want bootClassBootstrap", got)
 	}
-	if shouldBootstrapFromFile(false, true) {
+	if shouldBootstrapFromFile(false, true, true) {
 		t.Fatal("absent active with history must not import stale xpf.conf")
 	}
 }
 
 // TestShouldBootstrapFromFile pins the daemon's import gate (the Run branch at
-// daemon_run.go that imports the text xpf.conf after Load). It exists because
-// the helper-level computeBootClass test cannot catch a regression in the
-// SEPARATE Run-level decision to skip bootstrapFromFile on compile failure
-// (Codex #1991 r2): removing the `!configCompileFailed` guard would still pass
-// every computeBootClass case yet would silently import a different config over
-// a broken committed DB. The (no-active, compile-failed) cell below is the one
-// that flips false→true if the guard is dropped, failing this test.
+// daemon_run.go that imports text xpf.conf after Load). A first-commit rollback
+// leaves a compiled empty config with EverCommitted=false; this is still an
+// unconfigured box and must retry the file import. A compiled active config
+// with EverCommitted=true remains protected, and fail-closed loads never import.
 func TestShouldBootstrapFromFile(t *testing.T) {
 	tests := []struct {
 		name          string
 		hasActive     bool
-		compileFailed bool
+		everCommitted bool
+		failClosed    bool
 		want          bool
 	}{
-		// No active config and no compile failure: fresh / never-committed
-		// boot imports the text xpf.conf (the long-standing behavior).
-		{"no-active-no-compile-failure", false, false, true},
-		// A valid active config is loaded: never import over it.
-		{"active-loaded", true, false, false},
-		// #1960 the load-bearing cell: no active config (compiled stayed nil)
-		// but the committed DB failed to compile. The import MUST be skipped —
-		// importing xpf.conf here swaps in a different config and then takes
-		// over interfaces, defeating the fail-closed intent. Dropping the
-		// `!configCompileFailed` guard flips this to true and fails the test.
-		{"no-active-compile-failed", false, true, false},
-		// Defensive: even if a compiled config were somehow present, a
-		// compile-failed load never imports.
-		{"active-and-compile-failed", true, true, false},
+		{"fresh-store", false, false, false, true},
+		{"first-commit-rollback-compiled-empty", true, false, false, true},
+		{"committed-active-config", true, true, false, false},
+		{"no-active-existing-behavior", false, true, false, true},
+		{"no-active-fail-closed", false, true, true, false},
+		{"active-fail-closed", true, false, true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldBootstrapFromFile(tt.hasActive, tt.compileFailed); got != tt.want {
-				t.Fatalf("shouldBootstrapFromFile(hasActive=%v, compileFailed=%v) = %v; want %v",
-					tt.hasActive, tt.compileFailed, got, tt.want)
+			if got := shouldBootstrapFromFile(tt.hasActive, tt.everCommitted, tt.failClosed); got != tt.want {
+				t.Fatalf("shouldBootstrapFromFile(active=%v, everCommitted=%v, failClosed=%v) = %v; want %v",
+					tt.hasActive, tt.everCommitted, tt.failClosed, got, tt.want)
 			}
 		})
 	}

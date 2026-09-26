@@ -362,21 +362,27 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 
 	// #10297: an absent active.json with surviving rollback markers is
 	// another fail-closed case; importing xpf.conf would clobber history.
+	// EverCommitted is authoritative here: Item 1b's committed=0 active.json
+	// compiles to a non-nil empty config but still needs day-0 import/retry.
 	if shouldBootstrapFromFile(d.store.ActiveConfig() != nil,
-		configCompileFailed || absentActiveWithHistory) {
+		d.store.EverCommitted(), configCompileFailed || absentActiveWithHistory) {
 		if err := d.bootstrapFromFile(); err != nil {
 			// #4186 (H-17): a missing text config file is the EXPECTED
-			// factory/fresh-boot state, not a failure — log it at Info, not
-			// Warn, so operators triaging a real day-0 failure aren't taught
-			// to ignore a benign line. Keep Warn for a REAL failure (file
-			// present but unreadable/unparseable/uncommittable, incl. the
-			// #4183 device-map strand rejection).
+			// factory/fresh-boot state unless the loader left its commit-check
+			// REJECT signal. That signal distinguishes a rejected medium from
+			// an absent medium even though neither installs xpf.conf.
 			// #4184 (H-11): record the outcome so a failed import is visible
 			// on /health + an event, not just here in journald.
 			if errors.Is(err, os.ErrNotExist) {
-				slog.Info("no text config present to bootstrap from (factory/fresh boot)",
-					"file", d.opts.ConfigFile)
-				d.recordBootstrapImport(bootstrapImportNoConfig, "")
+				if detail := day0RejectMarkerDetail(d.opts.ConfigFile); detail != "" {
+					slog.Warn("day-0 config rejected by commit-check; loader left no config file",
+						"file", d.opts.ConfigFile, "err", detail)
+					d.recordBootstrapImport(bootstrapImportFailed, detail)
+				} else {
+					slog.Info("no text config present to bootstrap from (factory/fresh boot)",
+						"file", d.opts.ConfigFile)
+					d.recordBootstrapImport(bootstrapImportNoConfig, "")
+				}
 			} else {
 				slog.Warn("failed to bootstrap config from file", "err", err)
 				d.recordBootstrapImport(bootstrapImportFailed, err.Error())
