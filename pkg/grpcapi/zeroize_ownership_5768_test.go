@@ -48,16 +48,16 @@ func TestZeroizeConfigDirScopedToOwnedArtifacts5768(t *testing.T) {
 	}
 	// xpf-owned config-state artifacts (must be erased — no secret retention).
 	owned := []string{
-		filepath.Join(dir, configBase),                        // the live config file
-		filepath.Join(dir, configstore.RescueConfigBase),      // rescue.conf
-		filepath.Join(dir, configstore.Day0ConfigAppliedBase), // day-0 loader stamp (#10740)
-		filepath.Join(dir, configBase+".1"),                   // <base>.<N> text rollback slot
-		filepath.Join(dir, ".config.journal"),                 // audit journal
-		filepath.Join(dir, ".config.journal.1"),               // rotated journal segment
-		filepath.Join(dir, ".xpf.conf.tmp-abc123"),            // fsatomic crash temp
-		filepath.Join(dir, ".configdb", "master.key"),         // AES-GCM key
-		filepath.Join(dir, ".configdb", "active.json"),        // SSOT
-		filepath.Join(dir, "tls", "key.pem"),                  // self-signed REST key
+		filepath.Join(dir, configBase),                   // the live config file
+		filepath.Join(dir, configstore.RescueConfigBase), // rescue.conf
+		filepath.Join(dir, ".day0-config-applied"),       // literal loader stamp (#10740)
+		filepath.Join(dir, configBase+".1"),              // <base>.<N> text rollback slot
+		filepath.Join(dir, ".config.journal"),            // audit journal
+		filepath.Join(dir, ".config.journal.1"),          // rotated journal segment
+		filepath.Join(dir, ".xpf.conf.tmp-abc123"),       // fsatomic crash temp
+		filepath.Join(dir, ".configdb", "master.key"),    // AES-GCM key
+		filepath.Join(dir, ".configdb", "active.json"),   // SSOT
+		filepath.Join(dir, "tls", "key.pem"),             // self-signed REST key
 	}
 	for _, p := range owned {
 		if err := os.WriteFile(p, secret, 0o600); err != nil {

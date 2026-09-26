@@ -42,7 +42,7 @@ func TestFactoryResetConfigDirScopedToOwnedArtifacts5768(t *testing.T) {
 	owned := []string{
 		filepath.Join(dir, configBase),                 // the live config file
 		filepath.Join(dir, RescueConfigBase),           // rescue.conf
-		filepath.Join(dir, Day0ConfigAppliedBase),      // day-0 loader stamp (#10740)
+		filepath.Join(dir, ".day0-config-applied"),     // literal loader stamp (#10740)
 		filepath.Join(dir, configBase+".1"),            // <base>.<N> text rollback slot
 		filepath.Join(dir, ".config.journal"),          // audit journal
 		filepath.Join(dir, ".config.journal.1"),        // rotated journal segment
