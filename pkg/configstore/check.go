@@ -34,9 +34,9 @@ func CheckText(content string, nodeID int) (*config.Config, error) {
 	if err := checkConfigSize(content); err != nil {
 		return nil, err
 	}
-	tree, errs := config.NewParser(content).Parse()
-	if len(errs) > 0 {
-		return nil, fmt.Errorf("parse error: %v", errs[0])
+	tree, err := parseOverrideContent(content)
+	if err != nil {
+		return nil, err
 	}
 	compiled, err := compileTreeStrict(tree, nodeID)
 	if err != nil {
