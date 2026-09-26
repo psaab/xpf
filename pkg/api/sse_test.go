@@ -4,14 +4,61 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/logging"
 )
+
+type overrunSSEWriter struct {
+	header       http.Header
+	mu           sync.Mutex
+	body         strings.Builder
+	flushes      int
+	headersSent  chan struct{}
+	blockedFlush chan struct{}
+	releaseFlush chan struct{}
+}
+
+func newOverrunSSEWriter() *overrunSSEWriter {
+	return &overrunSSEWriter{
+		header:       make(http.Header),
+		headersSent:  make(chan struct{}),
+		blockedFlush: make(chan struct{}),
+		releaseFlush: make(chan struct{}),
+	}
+}
+
+func (w *overrunSSEWriter) Header() http.Header { return w.header }
+func (w *overrunSSEWriter) WriteHeader(int)     {}
+func (w *overrunSSEWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.Write(p)
+}
+func (w *overrunSSEWriter) Flush() {
+	w.mu.Lock()
+	w.flushes++
+	n := w.flushes
+	w.mu.Unlock()
+	switch n {
+	case 1:
+		close(w.headersSent)
+	case 2:
+		close(w.blockedFlush)
+		<-w.releaseFlush
+	}
+}
+func (w *overrunSSEWriter) bodyString() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.String()
+}
 
 func TestSetSSEHeaders(t *testing.T) {
 	w := httptest.NewRecorder()
@@ -112,6 +159,75 @@ func TestEventStreamHandler(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+func TestSSEStreamsReportSubscriberOverruns_10834(t *testing.T) {
+	tests := []struct {
+		name   string
+		serve  func(*Server, http.ResponseWriter, *http.Request)
+		target string
+	}{
+		{"events", (*Server).eventStreamHandler, "/api/v1/events/stream"},
+		{"logs", (*Server).logStreamHandler, "/api/v1/logs/stream"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := logging.NewEventBuffer(512)
+			s := &Server{eventBuf: buf}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil).WithContext(ctx)
+			w := newOverrunSSEWriter()
+			done := make(chan struct{})
+			go func() {
+				tc.serve(s, w, req)
+				close(done)
+			}()
+
+			select {
+			case <-w.headersSent:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SSE handler did not establish its response")
+			}
+			buf.Add(logging.EventRecord{Time: time.Now(), Type: "POLICY_DENY", Action: "deny"})
+			select {
+			case <-w.blockedFlush:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SSE handler did not block on the first event flush")
+			}
+
+			const storm = 300
+			for range storm {
+				buf.Add(logging.EventRecord{Time: time.Now(), Type: "POLICY_DENY", Action: "deny"})
+			}
+			dropped := buf.DroppedTotal()
+			if dropped == 0 {
+				t.Fatal("bounded event storm did not overrun the blocked subscriber")
+			}
+			close(w.releaseFlush)
+
+			deadline := time.Now().Add(2 * time.Second)
+			for !strings.Contains(w.bodyString(), "event: overrun") && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SSE handler did not exit after cancellation")
+			}
+
+			body := w.bodyString()
+			if !strings.Contains(body, "event: overrun") {
+				t.Fatalf("stream omitted the overrun event: %q", body)
+			}
+			if marker := logging.OverrunLine(dropped); !strings.Contains(body, marker) {
+				t.Errorf("stream gap marker does not report %d dropped records: %q", dropped, body)
+			}
+			if count := fmt.Sprintf(`"dropped":%d`, dropped); !strings.Contains(body, count) {
+				t.Errorf("stream gap payload lacks cumulative dropped count %s: %q", count, body)
+			}
+		})
 	}
 }
 

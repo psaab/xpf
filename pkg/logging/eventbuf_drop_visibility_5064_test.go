@@ -46,8 +46,15 @@ func TestEventBufferDropVisibility(t *testing.T) {
 	// Drain the two buffered records. They are the FIRST two published
 	// (BufSeq 1 and 2), strictly increasing, and NOT overrun-flagged (no drop
 	// preceded them).
+	var tracker EventGapTracker
+	var gapLines []string
 	r1 := <-sub.C
 	r2 := <-sub.C
+	for _, rec := range []EventRecord{r1, r2} {
+		if lost, gap := tracker.Observe(sub, rec); gap {
+			gapLines = append(gapLines, OverrunLine(lost))
+		}
+	}
 	if r1.BufSeq != 1 || r2.BufSeq != 2 {
 		t.Fatalf("delivered BufSeq = %d,%d want 1,2 (buffer publish sequence not attached)", r1.BufSeq, r2.BufSeq)
 	}
@@ -68,6 +75,9 @@ func TestEventBufferDropVisibility(t *testing.T) {
 	if !r6.Overrun {
 		t.Fatalf("first record after a drop must carry Overrun=true (in-band loss signal)")
 	}
+	if lost, gap := tracker.Observe(sub, r6); gap {
+		gapLines = append(gapLines, OverrunLine(lost))
+	}
 	if gap := r6.BufSeq - r2.BufSeq - 1; gap != wantDropped {
 		t.Fatalf("BufSeq gap = %d, want %d shed records between the two deliveries", gap, wantDropped)
 	}
@@ -81,6 +91,15 @@ func TestEventBufferDropVisibility(t *testing.T) {
 	}
 	if r7.BufSeq != total+2 {
 		t.Fatalf("post-recovery record BufSeq = %d, want %d", r7.BufSeq, total+2)
+	}
+	if lost, gap := tracker.Observe(sub, r7); gap {
+		gapLines = append(gapLines, OverrunLine(lost))
+	}
+	if len(gapLines) != 1 || gapLines[0] != OverrunLine(wantDropped) {
+		t.Fatalf("operator gap lines = %v, want exactly %q", gapLines, OverrunLine(wantDropped))
+	}
+	if got, want := uint64(4)+sub.Dropped(), uint64(total+2); got != want {
+		t.Fatalf("published accounting: received + dropped = %d, want %d", got, want)
 	}
 
 	// Counters are monotonic: no further drops occurred during recovery.

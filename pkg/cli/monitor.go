@@ -276,6 +276,7 @@ type monitorFlowState struct {
 	active   bool
 	cancel   context.CancelFunc // cancel the active monitor goroutine
 	sub      *logging.Subscription
+	dropped  uint64 // total event-buffer records lost by the current/last trace
 	// lastErr records the reason the writer goroutine last stopped on its
 	// own (disk-full / permission / rotation failure). It is surfaced by
 	// showMonitorSecurityFlow so the operator sees WHY tracing stopped
@@ -661,6 +662,7 @@ func (c *CLI) handleMonitorSecurityFlowStart() error {
 	}
 
 	c.monitorFlow.active = true
+	c.monitorFlow.dropped = 0
 	// Clear any error recorded by a previous writer-goroutine stop so a
 	// fresh start does not surface a stale failure reason (#4883-B).
 	c.monitorFlow.lastErr = nil
@@ -705,12 +707,52 @@ func (c *CLI) handleMonitorSecurityFlowStart() error {
 	writer := newTraceWriter(traceName, logFile, maxSize, maxFiles)
 	go func() {
 		defer writer.close()
-		defer sub.Close()
+		var gaps logging.EventGapTracker
+		writerFailed := false
+		recordWriterError := func(err error) {
+			writerFailed = true
+			// Rotation or write failed; stop tracing rather than grow the
+			// active file without bound. Clear the monitor state under the
+			// lock so show stops reporting Active and a fresh start is accepted.
+			// Guard on the subscription identity so a concurrent stop/start is
+			// not clobbered (#4883-B).
+			c.monitorFlow.mu.Lock()
+			if c.monitorFlow.sub == sub {
+				c.monitorFlow.active = false
+				c.monitorFlow.cancel = nil
+				c.monitorFlow.sub = nil
+				c.monitorFlow.lastErr = err
+			}
+			c.monitorFlow.mu.Unlock()
+		}
+		defer func() {
+			// Unsubscribe before taking the final count so no producer can add
+			// another drop between the snapshot and close.
+			sub.Close()
+			if lost := gaps.Finish(sub); lost > 0 && !writerFailed {
+				if err := writer.writeLine(logging.OverrunLine(lost)); err != nil {
+					recordWriterError(err)
+				}
+			}
+			c.monitorFlow.mu.Lock()
+			if c.monitorFlow.sub == sub || c.monitorFlow.sub == nil {
+				c.monitorFlow.dropped = sub.Dropped()
+			}
+			c.monitorFlow.mu.Unlock()
+		}()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case rec := <-sub.C:
+				// Record loss before any filters: dropped records may belong to
+				// another event type or not match this trace's criteria.
+				if lost, gap := gaps.Observe(sub, rec); gap {
+					if err := writer.writeLine(logging.OverrunLine(lost)); err != nil {
+						recordWriterError(err)
+						return
+					}
+				}
 				// Check if any filter matches.
 				matched := false
 				for _, f := range filters {
@@ -727,22 +769,7 @@ func (c *CLI) handleMonitorSecurityFlowStart() error {
 					continue
 				}
 				if err := writer.writeLine(line); err != nil {
-					// Rotation or write failed; stop tracing rather than grow
-					// the active file without bound. Clear the monitor state
-					// under the lock so `show ... flow` stops reporting Active
-					// and a fresh `start` is accepted — otherwise the monitor
-					// stays wedged Active (audit telemetry silently stopped
-					// while health reads green) until an operator issues
-					// `stop` (#4883-B). Guard on the subscription identity so
-					// a concurrent stop/start is not clobbered.
-					c.monitorFlow.mu.Lock()
-					if c.monitorFlow.sub == sub {
-						c.monitorFlow.active = false
-						c.monitorFlow.cancel = nil
-						c.monitorFlow.sub = nil
-						c.monitorFlow.lastErr = err
-					}
-					c.monitorFlow.mu.Unlock()
+					recordWriterError(err)
 					return
 				}
 			}
@@ -764,6 +791,9 @@ func (c *CLI) handleMonitorSecurityFlowStop() error {
 	if c.monitorFlow.cancel != nil {
 		c.monitorFlow.cancel()
 		c.monitorFlow.cancel = nil
+	}
+	if c.monitorFlow.sub != nil {
+		c.monitorFlow.dropped = c.monitorFlow.sub.Dropped()
 	}
 	c.monitorFlow.sub = nil
 	c.monitorFlow.active = false
@@ -800,6 +830,11 @@ func (c *CLI) showMonitorSecurityFlow() error {
 		fmt.Printf("  Monitor security flow match: %s\n", c.monitorFlow.match)
 	}
 	fmt.Printf("  Monitor security flow filters: %d\n", len(c.monitorFlow.filters))
+	dropped := c.monitorFlow.dropped
+	if c.monitorFlow.sub != nil {
+		dropped = c.monitorFlow.sub.Dropped()
+	}
+	fmt.Printf("  Monitor security flow records dropped: %d\n", dropped)
 
 	// Sort filter names for deterministic output.
 	names := make([]string, 0, len(c.monitorFlow.filters))
@@ -976,7 +1011,16 @@ func (c *CLI) handleMonitorSecurityPacketDrop(args []string) error {
 
 	// Subscribe to event buffer.
 	sub := c.eventBuf.Subscribe(256)
-	defer sub.Close()
+	var gaps logging.EventGapTracker
+	defer func() {
+		sub.Close()
+		if lost := gaps.Finish(sub); lost > 0 {
+			fmt.Println(logging.OverrunLine(lost))
+		}
+		if dropped := sub.Dropped(); dropped > 0 {
+			fmt.Printf("dropped=%d\n", dropped)
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -996,6 +1040,9 @@ func (c *CLI) handleMonitorSecurityPacketDrop(args []string) error {
 			fmt.Println() // newline after ^C
 			return nil
 		case rec := <-sub.C:
+			if lost, gap := gaps.Observe(sub, rec); gap {
+				fmt.Println(logging.OverrunLine(lost))
+			}
 			// Only show drops (POLICY_DENY and SCREEN_DROP).
 			if rec.Type != "POLICY_DENY" && rec.Type != "SCREEN_DROP" {
 				continue

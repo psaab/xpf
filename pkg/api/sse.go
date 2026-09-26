@@ -337,12 +337,25 @@ func (s *Server) eventStreamHandler(w http.ResponseWriter, r *http.Request) {
 	// #7632: bound a subscriber that stays connected and stops reading.
 	stream := newSSEStream(w, sseWriteDeadline)
 	var seq uint64
+	var gaps logging.EventGapTracker
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case rec := <-sub.C:
+			if lost, gap := gaps.Observe(sub, rec); gap {
+				seq++
+				data, err := json.Marshal(eventOverrunEntry{
+					Message: logging.OverrunLine(lost),
+					Dropped: sub.Dropped(),
+				})
+				if err == nil {
+					if err := stream.writeEvent(fmt.Sprintf("%d", seq), "overrun", string(data)); err != nil {
+						return
+					}
+				}
+			}
 			if categoryFilter != 0 && !matchCategory(rec.Type, categoryFilter) {
 				continue
 			}
@@ -397,12 +410,25 @@ func (s *Server) logStreamHandler(w http.ResponseWriter, r *http.Request) {
 	// #7632: same bound as the event stream.
 	stream := newSSEStream(w, sseWriteDeadline)
 	var seq uint64
+	var gaps logging.EventGapTracker
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case rec := <-sub.C:
+			if lost, gap := gaps.Observe(sub, rec); gap {
+				seq++
+				data, err := json.Marshal(eventOverrunEntry{
+					Message: logging.OverrunLine(lost),
+					Dropped: sub.Dropped(),
+				})
+				if err == nil {
+					if err := stream.writeEvent(fmt.Sprintf("%d", seq), "overrun", string(data)); err != nil {
+						return
+					}
+				}
+			}
 			severity := eventRecordSeverity(rec)
 			if severityFilter != 0 && severity > severityFilter {
 				continue
@@ -426,6 +452,11 @@ func (s *Server) logStreamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+type eventOverrunEntry struct {
+	Message string `json:"message"`
+	Dropped uint64 `json:"dropped"`
 }
 
 // LogStreamEntry is a log message sent via SSE.

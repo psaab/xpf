@@ -1,10 +1,15 @@
 package cli
 
 import (
+	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // #3378: the flow-trace file was opened by raw "/var/log/"+name concatenation,
@@ -296,5 +301,105 @@ func TestPacketDrop_RejectsMissingOptionValue(t *testing.T) {
 	c := &CLI{}
 	if reachedEventLoop(t, c, []string{"count"}) {
 		t.Fatal("value-less packet-drop option was not rejected (parser fell through to the event loop)")
+	}
+}
+func TestMonitorPacketDropReportsSubscriberOverrun_10834(t *testing.T) {
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = w
+
+	eb := logging.NewEventBuffer(512)
+	c := &CLI{eventBuf: eb}
+	done := make(chan error, 1)
+	go func() {
+		done <- c.handleMonitorSecurityPacketDrop(nil)
+	}()
+
+	var cancelCmd func()
+	defer func() {
+		if cancelCmd != nil {
+			cancelCmd()
+		}
+		_ = r.Close()
+		_ = w.Close()
+		os.Stdout = oldStdout
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for cancelCmd == nil && time.Now().Before(deadline) {
+		c.cmdMu.Lock()
+		cancelCmd = c.cmdCancel
+		c.cmdMu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	if cancelCmd == nil {
+		t.Fatal("packet-drop command did not subscribe")
+	}
+
+	const storm = 10000
+	for range storm {
+		eb.Add(logging.EventRecord{
+			Time: time.Now(), Type: "POLICY_DENY", SrcAddr: "10.0.1.1:1000",
+			DstAddr: "10.0.2.1:80", Protocol: "TCP", Action: "deny",
+		})
+	}
+	dropped := eb.DroppedTotal()
+	if dropped == 0 {
+		t.Fatal("bounded event storm did not overrun the packet-drop subscriber")
+	}
+
+	lines := make(chan string, 20000)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer close(lines)
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+	}()
+
+	var reported uint64
+	recordMarker := func(line string) {
+		var lost uint64
+		if n, err := fmt.Sscanf(line, "** %d records lost (overrun) **", &lost); n == 1 && err == nil {
+			reported += lost
+		}
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for reported < dropped && time.Now().Before(deadline) {
+		select {
+		case line := <-lines:
+			recordMarker(line)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancelCmd()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("packet-drop command returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("packet-drop command did not stop after cancellation")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close captured stdout: %v", err)
+	}
+	os.Stdout = oldStdout
+	sawFinalCount := false
+	for line := range lines {
+		recordMarker(line)
+		if line == fmt.Sprintf("dropped=%d", dropped) {
+			sawFinalCount = true
+		}
+	}
+	if reported != dropped {
+		t.Fatalf("packet-drop gap markers report %d lost records, want %d", reported, dropped)
+	}
+	if !sawFinalCount {
+		t.Errorf("packet-drop output omitted final dropped=%d count", dropped)
 	}
 }
