@@ -1746,6 +1746,12 @@ not reported. `Manager.ReadNATRuleCounter` is a map read with no error path, so
 an unarmed read returns `(zero, nil)` and is indistinguishable from a measured
 zero; the REST sibling already refuses rather than printing one (#5046).
 
+When the dataplane is armed but the apply result has not assigned a counter ID
+to a rule, its hit count renders `unknown (no counter assigned)`. If reading
+an assigned counter fails, the detail view emits a warning with the read error
+instead of silently omitting the measurement.
+
+
 ---
 
 ## Security: NAT Destination Rule All

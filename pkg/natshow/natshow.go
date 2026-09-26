@@ -228,6 +228,20 @@ func noteNotInstalledStatic(w io.Writer, reason string) {
 // about the same condition.
 const natCounterUnarmed = "n/a (dataplane not armed)"
 
+// natCounterNoID distinguishes a rule with no assigned translation counter
+// from a measured zero. In the short window between rule apply and counter-ID
+// publication, absence of the ID means the hit count is unknown.
+const natCounterNoID = "unknown (no counter assigned)"
+
+// noteNATCounterReadError surfaces failures reading an assigned NAT counter.
+// Like noteSessionScanError, the warning keeps an unavailable measurement from
+// looking like a rule that saw no traffic.
+func noteNATCounterReadError(w io.Writer, err error) {
+	if err != nil {
+		fmt.Fprintf(w, "Warning: translation hits could not be read: %v\n", err)
+	}
+}
+
 type Reader interface {
 	IsLoaded() bool
 	IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error

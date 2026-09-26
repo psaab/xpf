@@ -195,10 +195,14 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := dp.ReadNATRuleCounter(uint32(cid))
-					if err == nil {
+					if err != nil {
+						noteNATCounterReadError(w, err)
+					} else {
 						fmt.Fprintf(w, "    Translation hits:        %d packets  %d bytes\n",
 							cnt.Packets, cnt.Bytes)
 					}
+				} else {
+					fmt.Fprintf(w, "    Translation hits:        %s\n", natCounterNoID)
 				}
 			} else if dp != nil && excludedReason == "" {
 				fmt.Fprintf(w, "    Translation hits:        %s\n", natCounterUnarmed)
