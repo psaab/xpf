@@ -607,6 +607,38 @@ type monitorClusterState interface {
 	IsPeerPrimary(rg int) bool
 }
 
+func (s *Server) currentMonitorClusterState() monitorClusterState {
+	if s.monitorClusterStateFn != nil {
+		return s.monitorClusterStateFn()
+	}
+	if s.cluster != nil {
+		return s.cluster
+	}
+	return nil
+}
+
+func monitorRGPrimaryOwner(cl monitorClusterState, rg int) string {
+	if cl == nil || rg <= 0 {
+		return ""
+	}
+	local, peer := cl.IsLocalPrimary(rg), cl.IsPeerPrimary(rg)
+	switch {
+	case local && peer:
+		return "both"
+	case local:
+		return "local"
+	case peer:
+		return "peer"
+	default:
+		return "neither"
+	}
+}
+
+func monitorRGOwnershipChangeNote(displayName, kernelName string, rg int, oldOwner, newOwner string) string {
+	return fmt.Sprintf("Note: %s RG%d primary changed %s -> %s (possible failover); this stream remains bound to this node's device %s and does not move to the new peer, so counters may be stale — baseline reset",
+		displayName, rg, oldOwner, newOwner, kernelName)
+}
+
 // monitorProxyAction is the outcome of the MonitorInterface single-interface
 // proxy decision.
 type monitorProxyAction int
@@ -721,10 +753,14 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 
 	isSingle := req.InterfaceName != ""
 	var singleDisplayName, singleKernelName string
+	var singleCluster monitorClusterState
+	singleRG := -1
 	proxyToPeer := false
 	if isSingle {
 		singleDisplayName = req.InterfaceName
 		singleKernelName = monitoriface.ResolvePhysicalParent(resolveToKernel(req.InterfaceName))
+		singleRG = rethRG(req.InterfaceName)
+		singleCluster = s.currentMonitorClusterState()
 
 		// Decide whether to serve locally, proxy one hop to the peer, or report
 		// not-found. A request already forwarded from the peer (no-peer marker)
@@ -735,17 +771,13 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		// no subscriber slot; the proxy decision is recorded and acted on only
 		// once a slot is held, so a refused subscriber dials no peer.
 		_, ifErr := net.InterfaceByName(singleKernelName)
-		var cl monitorClusterState
-		if s.cluster != nil {
-			cl = s.cluster
-		}
 		switch decideMonitorProxy(
 			monitorRequestForwardedFromPeer(stream.Context()),
 			ifErr == nil,
 			isPeerInterface(req.InterfaceName),
 			isRethName(req.InterfaceName),
-			rethRG(req.InterfaceName),
-			cl,
+			singleRG,
+			singleCluster,
 		) {
 		case monitorProxyToPeer:
 			proxyToPeer = true
@@ -812,6 +844,7 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	var prevSingle *monitoriface.Snapshot
 	var baselineSingle *monitoriface.Snapshot
 	singleDeviceNote := ""
+	singlePrimaryOwner := monitorRGPrimaryOwner(singleCluster, singleRG)
 	prevAll := make(map[string]*monitoriface.Snapshot)
 
 	// statusReader is the shared, coalescing Status() reader (#5707). Summary
@@ -840,6 +873,20 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 			// annotate — the same reset/annotate contract the CLI applies.
 			if note := monitoriface.ResetOnDeviceChange(singleDisplayName, &singleKernelName, kn, &prevSingle, &baselineSingle); note != "" {
 				singleDeviceNote = note
+			}
+			if owner := monitorRGPrimaryOwner(s.currentMonitorClusterState(), singleRG); owner != "" && owner != singlePrimaryOwner {
+				ownerNote := monitorRGOwnershipChangeNote(singleDisplayName, singleKernelName, singleRG, singlePrimaryOwner, owner)
+				if singleDeviceNote == "" {
+					singleDeviceNote = ownerNote
+				} else {
+					singleDeviceNote += "; " + strings.TrimPrefix(ownerNote, "Note: ")
+				}
+				singlePrimaryOwner = owner
+				// The handler stays on this node; it cannot transfer an
+				// already-open stream to the new primary. Drop the old owner
+				// epoch's rates/deltas and label the frame as potentially stale.
+				prevSingle = nil
+				baselineSingle = nil
 			}
 			snap := readSnap(singleKernelName)
 			if snap == nil {

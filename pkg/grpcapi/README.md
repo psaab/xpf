@@ -817,17 +817,22 @@ contract.
   **Single-interface counters are re-resolved every tick (#10838).** The stream
   re-reads the active config to resolve the requested display name to its current
   kernel device (falling back to the opening config if the store briefly has no
-  active config). When the device changes, `ResetOnDeviceChange` drops
+  active config). When that device changes, `ResetOnDeviceChange` drops
   `prevSingle` and `baselineSingle`, and the frame carries a persistent note
   naming both devices and saying the baseline reset. This avoids cross-device
   rates/deltas and matches the CLI's reset/annotate contract.
 
+  An RG ownership change is tracked separately from a kernel-name change: an
+  already-open stream remains on its serving node and cannot transfer to the new
+  primary. The handler resets its baselines and annotates the frame that the
+  local device's counters may be stale. `TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838`
+  covers a config/member change; `TestMonitorInterfaceRGOwnershipChangeAnnotatesBoundNode10838`
+  flips ownership with the config and kernel device unchanged and checks the stale
+  note plus zero post-transition delta.
+
   `isRethName` / `rethRG` still feed the serve-local vs proxy-to-peer dispatch,
-  which is settled once before the loop. Guards: `monitor_cfg_refresh_9144_test.go`
-  drives the summary handler across a real config commit;
-  `TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838` drives
-  single-interface mode across a real member change and checks the rendered
-  note and zero post-reset delta.
+  which is settled once before the loop. `monitor_cfg_refresh_9144_test.go` drives
+  the summary handler across a real config commit.
 - **MonitorInterface peer proxy — one-hop bound (#5497).** For a RETH (or
   a peer-owned physical member) `MonitorInterface` may forward the stream
   to the cluster peer (`proxyMonitorInterface` → `dialPeer`). Two invariants

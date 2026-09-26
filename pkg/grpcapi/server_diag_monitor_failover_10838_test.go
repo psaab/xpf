@@ -19,11 +19,14 @@ var monitorKernelNamePattern10838 = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$
 type failoverMonitorDP10838 struct {
 	dataplane.DataPlane
 	counters map[int]uint64
+	step     uint64
 }
 
 func (failoverMonitorDP10838) IsLoaded() bool { return true }
 func (d failoverMonitorDP10838) ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error) {
-	return dataplane.InterfaceCounterValue{RxPackets: d.counters[ifindex] / 100, RxBytes: d.counters[ifindex]}, nil
+	rxBytes := d.counters[ifindex]
+	d.counters[ifindex] += d.step
+	return dataplane.InterfaceCounterValue{RxPackets: rxBytes / 100, RxBytes: rxBytes}, nil
 }
 func (failoverMonitorDP10838) Status() (dpuserspace.ProcessStatus, error) {
 	return dpuserspace.ProcessStatus{Enabled: true}, nil
@@ -114,6 +117,74 @@ func TestMonitorInterfaceSingleDeviceChangeResetsBaseline10838(t *testing.T) {
 	}
 	if inputLine == "" || !strings.Contains(inputLine, "[0]") {
 		t.Fatalf("new member's first delta was not reset to zero; input line %q\n%s", inputLine, stream.frames[1])
+	}
+}
+
+// TestMonitorInterfaceRGOwnershipChangeAnnotatesBoundNode10838 exercises the
+// actual HA failover shape: the config and local kernel member stay unchanged,
+// but RG ownership moves to the peer while the gRPC stream is already serving
+// locally. The stream cannot transfer to the new primary, so it must say that
+// its local counters may be stale and reset its baseline at the ownership epoch.
+func TestMonitorInterfaceRGOwnershipChangeAnnotatesBoundNode10838(t *testing.T) {
+	localIface, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	store := monitorStore9144(t, monitorCfgRethA9144)
+	cluster := &fakeMonitorCluster{
+		localPrimary: map[int]bool{1: true},
+		peerPrimary:  map[int]bool{},
+	}
+	s := &Server{
+		store: store,
+		dp: failoverMonitorDP10838{
+			counters: map[int]uint64{localIface.Index: 1000},
+			step:     8000,
+		},
+		monitorClusterStateFn: func() monitorClusterState { return cluster },
+	}
+	stream := newTwoTickMonitorStream9144(func(n int) {
+		if n == 1 {
+			cluster.localPrimary[1] = false
+			cluster.peerPrimary[1] = true
+		}
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- s.MonitorInterface(&pb.MonitorInterfaceRequest{InterfaceName: "reth0"}, stream)
+	}()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("MonitorInterface: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		stream.cancel()
+		t.Fatal("MonitorInterface did not emit two frames")
+	}
+	if len(stream.frames) != 2 {
+		t.Fatalf("got %d frames, want 2", len(stream.frames))
+	}
+	for _, want := range []string{
+		"RG1 primary changed local -> peer",
+		"this stream remains bound to this node's device lo",
+		"does not move to the new peer",
+		"counters may be stale",
+		"baseline reset",
+	} {
+		if !strings.Contains(stream.frames[1], want) {
+			t.Errorf("second frame missing %q:\n%s", want, stream.frames[1])
+		}
+	}
+	var inputLine string
+	for _, line := range strings.Split(stream.frames[1], "\n") {
+		if strings.Contains(line, "Input  bytes:") {
+			inputLine = line
+			break
+		}
+	}
+	if inputLine == "" || !strings.Contains(inputLine, "[0]") {
+		t.Fatalf("first delta after owner change was not reset; input line %q\n%s", inputLine, stream.frames[1])
 	}
 }
 
