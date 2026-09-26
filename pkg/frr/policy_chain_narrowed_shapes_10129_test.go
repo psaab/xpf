@@ -207,52 +207,128 @@ func TestNarrowedSuffixSafePopulatedComposedAttachesDenyAlias10129(t *testing.T)
 	}
 }
 
-// Ghost-first/middle narrowed chains still install their survivors today
-// (warn-only): nothing is deleted by the RENDER. Combined with
-// TestDenyBeforeASurvivingMemberDeletesTheRestOfTheChain8363 (a deny AT a
-// non-final ghost position deletes), this is why a future deny must discriminate
-// on GhostsAreSuffix — and why these sites must keep today's behavior.
-func TestNarrowedGhostFirstMiddleSurvivorsNotDeleted10129(t *testing.T) {
-	po := policyOptions10129()
-	fc := &FullConfig{
-		PolicyOptions: po,
-		BGP: &config.BGPConfig{
-			LocalAS: 65001, RouterID: "1.1.1.1",
-			Neighbors: []*config.BGPNeighbor{
-				{Address: "10.0.2.3", PeerAS: 65002, FamilyInet: true, Import: []string{"GHOST", "ACCEPTER"}},
-				{Address: "10.0.2.4", PeerAS: 65002, FamilyInet: true, Import: []string{"ACCEPTER", "GHOST", "B"}},
-			},
-		},
+// Non-suffix narrowed chains use a private alias with a trailing deny. The
+// alias keeps every surviving member in order; it does not synthesize a chain
+// member at the ghost position (the #8363 insertion hazard). Cover ghost-first
+// and ghost-middle in both BGP directions and AFIs, asserting the attached map
+// really terminates with deny rather than merely checking the alias helper.
+func TestNarrowedGhostFirstMiddleAliasesDenyAcrossBGPContexts10821(t *testing.T) {
+	positions := []struct {
+		name string
+		auth []string
+		kept []string
+	}{
+		{name: "ghost-first", auth: []string{"GHOST", "ACCEPTER"}, kept: []string{"ACCEPTER"}},
+		{name: "ghost-middle", auth: []string{"ACCEPTER", "GHOST", "B"}, kept: []string{"ACCEPTER", "B"}},
 	}
-	sites := narrowedChainSites(fc.BGP, po)
-	if len(sites) != 2 {
-		t.Fatalf("want two narrowed sites, got %+v", sites)
-	}
-	for _, s := range sites {
-		if s.GhostsAreSuffix {
-			t.Fatalf("ghost-first/middle must NOT classify suffix, got %+v", s)
+	for _, position := range positions {
+		for _, direction := range []string{"import", "export"} {
+			for _, family := range []string{"v4", "v6"} {
+				name := position.name + "/" + direction + "/" + family
+				t.Run(name, func(t *testing.T) {
+					address := "10.0.2.3"
+					neighbor := &config.BGPNeighbor{
+						Address: address, PeerAS: 65002,
+						FamilyInet: family == "v4", FamilyInet6: family == "v6",
+					}
+					if family == "v6" {
+						address = "2001:db8::3"
+						neighbor.Address = address
+					}
+					if direction == "import" {
+						neighbor.Import = position.auth
+					} else {
+						neighbor.Export = position.auth
+					}
+					po := policyOptions10129()
+					fc := &FullConfig{
+						PolicyOptions: po,
+						BGP: &config.BGPConfig{
+							LocalAS: 65001, RouterID: "1.1.1.1",
+							Neighbors: []*config.BGPNeighbor{neighbor},
+						},
+					}
+					sites := narrowedChainSites(fc.BGP, po)
+					if len(sites) != 1 || sites[0].GhostsAreSuffix {
+						t.Fatalf("want exactly one non-suffix narrowed site, got %+v", sites)
+					}
+					m := New()
+					section := m.buildManagedSection(fc)
+					alias := narrowedAliasName10129(position.kept)
+					action := "in"
+					if direction == "export" {
+						action = "out"
+					}
+					attachment := fmt.Sprintf("neighbor %s route-map %s %s\n", address, alias, action)
+					if !strings.Contains(section, attachment) {
+						t.Fatalf("non-suffix %s chain must attach deny alias %q:\n%s", direction, alias, section)
+					}
+					headers := routeMapHeaders6807(section, alias)
+					denySeq := (len(position.kept) + 1) * 10
+					if len(headers) != len(position.kept)+1 ||
+						!strings.HasSuffix(headers[len(headers)-1], fmt.Sprintf(" deny %d", denySeq)) {
+						t.Fatalf("attached alias trailing action must be deny-%d, got %v:\n%s", denySeq, headers, section)
+					}
+					if body := routeMapSeqBody10129(t, section, alias, denySeq); strings.Contains(body, "match ") {
+						t.Fatalf("trailing deny-%d must be unconditional:\n%s", denySeq, section)
+					}
+					for i, policy := range position.kept {
+						prefixList := "PL"
+						if policy == "B" {
+							prefixList = "PL2"
+						}
+						seq := (i + 1) * 10
+						want := fmt.Sprintf("route-map %s permit %d\n match ip address prefix-list %s\n", alias, seq, prefixList)
+						if !strings.Contains(section, want) {
+							t.Errorf("alias lost or reordered surviving policy %s:\n%s", policy, section)
+						}
+					}
+					if got := m.NarrowedPolicyChainsSuffixShape(); len(got) != 0 {
+						t.Fatalf("non-suffix sites must remain outside the suffix-shape gauge, got %v", got)
+					}
+				})
+			}
 		}
 	}
-	m := New()
-	section := m.buildManagedSection(fc)
-	// Ghost-first keeps single ACCEPTER standalone; ghost-middle keeps composed.
-	if !strings.Contains(section, "neighbor 10.0.2.3 route-map ACCEPTER in\n") {
-		t.Fatalf("ghost-first must still attach surviving ACCEPTER:\n%s", section)
+}
+
+func TestNarrowedNonSuffixTerminatingGhostsRequirePositionProof10821(t *testing.T) {
+	cases := []struct {
+		name string
+		auth []string
+		kept []string
+		safe bool
+	}{
+		{name: "ghost-after-match-all", auth: []string{"MATCHALL", "GHOST", "B"}, kept: []string{"MATCHALL", "B"}, safe: true},
+		{name: "ghost-before-match-all", auth: []string{"GHOST", "MATCHALL"}, kept: []string{"MATCHALL"}, safe: false},
 	}
-	const composed = "ACCEPTER-B-xpf-chain"
-	if !strings.Contains(section, "neighbor 10.0.2.4 route-map "+composed+" in\n") {
-		t.Fatalf("ghost-middle must still attach surviving composed %s:\n%s", composed, section)
-	}
-	if !strings.Contains(section, "route-map "+composed+" permit 10\n match ip address prefix-list PL\n") ||
-		!strings.Contains(section, "route-map "+composed+" permit 20\n match ip address prefix-list PL2") {
-		t.Fatalf("ghost-middle survivors must both render (not deleted):\n%s", section)
-	}
-	// Gauges discriminate: both reported narrowed, neither deny-safe.
-	if got := m.NarrowedPolicyChains(); len(got) != 2 {
-		t.Fatalf("want 2 narrowed descriptors, got %v", got)
-	}
-	if got := m.NarrowedPolicyChainsSuffixShape(); len(got) != 0 {
-		t.Fatalf("ghost-first/middle must contribute zero deny-safe descriptors, got %v", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			po := policyOptions10129()
+			fc := &FullConfig{
+				PolicyOptions: po,
+				BGP: &config.BGPConfig{
+					LocalAS: 65001, RouterID: "1.1.1.1",
+					Neighbors: []*config.BGPNeighbor{{
+						Address: "10.0.2.5", PeerAS: 65002, FamilyInet: true, Import: tc.auth,
+					}},
+				},
+			}
+			sites := narrowedChainSites(fc.BGP, po)
+			if len(sites) != 1 || sites[0].GhostsAreSuffix {
+				t.Fatalf("want one non-suffix site, got %+v", sites)
+			}
+			if got := narrowedGhostsAfterTerminator10821(sites[0], po); got != tc.safe {
+				t.Fatalf("ghost-after-terminator proof=%v, want %v; site=%+v", got, tc.safe, sites[0])
+			}
+			err := narrowedAliasCollision10129(fc)
+			if tc.safe && err != nil {
+				t.Fatalf("a ghost after match-all must remain on the shared terminating map: %v", err)
+			}
+			if !tc.safe && err == nil {
+				t.Fatal("reachable ghost before match-all must fail closed instead of retaining BGP permit fall-off")
+			}
+		})
 	}
 }
 

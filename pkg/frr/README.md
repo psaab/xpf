@@ -624,48 +624,53 @@ route to the peer, a worse outage than the bug. On **import** there is no
 redistribute construct, so the same token is just a name that resolves to
 nothing and must deny. The exclusion is therefore export-only.
 
-**Narrowed → unchanged, but no longer silent (#8363).** A chain that keeps some
-members still renders the surviving subset, byte-identically. The measurement
-that gated this (`policy_chain_narrowed_eval_8363_test.go`) refuted the stated
-objection and found a different one:
+**Narrowed chains close their permit fall-off without deleting survivors
+(#8363/#10129/#10821).** Filtering an undefined policy member out of a BGP chain
+can leave the surviving subset to fall off into Junos BGP default-permit. The
+rendered filter then accepts or advertises routes the missing member was meant
+to reject.
 
-- An **accepting member terminates** evaluation — xpf emits `on-match next` only
-  for non-terminating terms, so a `then accept` term is a bare `permit` and FRR
-  stops there. A route the surviving member accepts never reaches a later deny.
-  The feared "works-but-narrowed goes deny-all" does not happen that way.
-- **Position does.** A synthesized deny is a chain member with a terminating
-  *default* action, and `renderComposedRouteMap` breaks on the first such member,
-  so every later member is never emitted. `[GHOST, REAL]` renders as a lone
-  `deny 10` — deny-all, invisible in the output because nothing is left to look
-  wrong.
+- xpf does not insert a synthetic deny member at a non-suffix ghost position.
+  A chain member with a terminating policy default makes
+  `renderComposedRouteMap` stop there, deleting every later survivor; a
+  `[GHOST, REAL]` chain could therefore become deny-all.
+- Instead, a private route-map alias re-renders all retained members in order
+  and appends an unconditional trailing deny. This preserves legitimate
+  survivors while denying routes that otherwise fall off. Suffix fall-through
+  and empty survivors use this behavior since #10129; #10821 extends it to
+  non-suffix ghost-first/middle fall-through and empty survivors. Shared
+  standalone/composed maps remain unchanged for intact attachments.
+- A trailing deny is unreachable when the retained chain already terminates
+  for every route. A non-suffix attachment remains on its shared map only when
+  every ghost is provably after a match-all term or terminating policy default;
+  otherwise the apply fails closed rather than retaining a reachable
+  permit-default fall-off. Terminating-default/match-all suffix survivors stay
+  shared because the ghosts are already after their terminator.
 
-So a synthesized deny is safe **iff the undefined members form a suffix** of the
-authored chain. Ghost-last is safe; ghost-first or ghost-middle is a routing
-outage. Rather than take that behaviour change on a working config, the narrowing
-is made **visible** — and operationally, not at commit time, because the affected
-population never commits: strict rejects an undefined reference in both
-directions, so these configs arrive via `Store.Load` / `SyncApply` on a reboot,
-peer sync or rollback. A commit-time warning would reach nobody in it.
+Rollout follows #10129 Phase 2's immediate-deny decision. Strict commit rejects
+undefined references, so affected configurations arrive through tolerant load,
+HA peer-sync, or rollback; render-time alias collision checks fail those paths
+closed if an alias could merge with another route-map. `warnNarrowedChains`
+still logs the authored, retained, and discarded members and reports the
+narrowed shapes.
 
-`warnNarrowedChains` logs each site with what was authored, what is applied, and
-what was discarded, and two gauges carry it:
 
 | gauge | meaning |
 |---|---|
 | `xpf_frr_policy_chains_narrowed` | attachments filtered by less than authored. Alert on > 0. |
-| `xpf_frr_policy_chains_narrowed_deny_safe` | the subset whose ghosts form a suffix — where a deny *would* be safe |
+| `xpf_frr_policy_chains_narrowed_deny_safe` | suffix-shaped subset only; non-suffix fall-through/empty chains are also closed by trailing aliases (#10821). |
 
-They are deliberately **separate** from `xpf_frr_route_maps_quarantined`, whose
-documented meaning is that every route on those neighbors is being *withdrawn*.
-A narrowed chain withdraws nothing, so folding it in would fire that alert for
-non-withdrawals. Both sets are rebuilt per render, so a config that stops
-narrowing stops reporting. The `deny_safe` split exists so the decision on
-whether to ever synthesize a deny here is sized on how often the safe shape
-actually occurs, rather than on argument — which is what this measurement just
-had to overturn. Before this it was completely silent —
-the rendered section is self-consistent, the session works, and `show route-map`
-displays a real well-formed policy that is simply not the one the operator
-wrote.
+They remain deliberately **separate** from `xpf_frr_route_maps_quarantined`,
+whose documented meaning is that every route on those neighbors is being
+*withdrawn*. A narrowed chain withdraws nothing, so folding it in would fire
+that alert for non-withdrawals. Both sets are rebuilt per render, so a config
+that stops narrowing stops reporting.
+
+The suffix-shape gauge remains a position census, not the complete alias
+population. It remains useful for the separate member-insertion hazard, not as
+a production switch or migration gate. Before narrowing was measured, the
+rendered section was self-consistent and the session worked, but `show route-map`
+displayed a well-formed policy that was simply not the one the operator wrote.
 
 **Reachability.** Strict commit rejects an undefined policy reference in either
 direction (`config.TestBGPNeighborImportTypoRejected`), so no commit-time

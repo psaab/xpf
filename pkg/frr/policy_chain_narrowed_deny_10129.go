@@ -102,19 +102,67 @@ func narrowedSurvivorShape10129(kept []string, po *config.PolicyOptionsConfig) s
 	return "fall-through"
 }
 
-// narrowedAliasEligible10129 identifies the subset whose missing authored
-// members can be closed without changing the surviving chain semantics.
-// Non-suffix chains remain on the existing surviving map because inserting a
-// terminating member at a ghost position would delete later survivors.
-// Terminating-default and match-all-final-term survivors remain on the shared
-// map because their explicit termination makes a trailing deny unreachable.
-// Fall-through and empty survivors receive a private deny alias.
+// narrowedAliasEligible10129 identifies the suffix-safe subset whose missing
+// authored members can be closed without changing the surviving chain
+// semantics. Terminating-default and match-all-final-term survivors remain on
+// the shared map because their explicit termination makes a trailing deny
+// unreachable. Fall-through and empty survivors receive a private deny alias.
 func narrowedAliasEligible10129(site narrowedChainSite, po *config.PolicyOptionsConfig) bool {
 	if len(site.Kept) == 0 || !site.GhostsAreSuffix {
 		return false
 	}
 	shape := narrowedSurvivorShape10129(site.Kept, po)
 	return shape == "fall-through" || shape == "empty"
+}
+
+// narrowedAliasEligible10821 extends #10129's suffix-safe alias to non-suffix
+// fall-through and empty survivors. The private alias appends a trailing deny
+// after the retained chain, preserving all survivors in their original order;
+// it does not insert a terminating chain member at the ghost position.
+func narrowedAliasEligible10821(site narrowedChainSite, po *config.PolicyOptionsConfig) bool {
+	if narrowedAliasEligible10129(site, po) {
+		return true
+	}
+	if len(site.Kept) == 0 {
+		return false
+	}
+	shape := narrowedSurvivorShape10129(site.Kept, po)
+	return shape == "fall-through" || shape == "empty"
+}
+
+// narrowedGhostsAfterTerminator10821 reports whether every ghost is after a
+// kept prefix that provably terminates for every route. In that case the ghost
+// is unreachable and the existing shared map is safe. A missing/unknown
+// direction or any reachable ghost is not proof and must fail closed.
+func narrowedGhostsAfterTerminator10821(site narrowedChainSite, po *config.PolicyOptionsConfig) bool {
+	if po == nil {
+		return false
+	}
+	export := strings.HasSuffix(site.Where, " export")
+	if !export && !strings.HasSuffix(site.Where, " import") {
+		return false
+	}
+	var prefix []string
+	sawGhost := false
+	for _, name := range site.Authored {
+		if name == "" {
+			continue
+		}
+		if isDefinedPolicyStatement(name, po) {
+			prefix = append(prefix, name)
+			continue
+		}
+		if export && (knownRedistProtocol(name) ||
+			knownRedistProtocol(junosProtocolToFRR7625(name))) {
+			continue
+		}
+		sawGhost = true
+		shape := narrowedSurvivorShape10129(prefix, po)
+		if shape != "terminating-default" && shape != "match-all" {
+			return false
+		}
+	}
+	return sawGhost
 }
 
 // renderNarrowedChainAlias10129 renders a deny-terminated attached-map alias
@@ -166,7 +214,11 @@ func narrowedAliasCollision10129(fc *FullConfig) error {
 	}
 	sort.Strings(operatorNames)
 	for _, site := range sites {
-		if !narrowedAliasEligible10129(site, fc.PolicyOptions) {
+		if !narrowedAliasEligible10821(site, fc.PolicyOptions) {
+			if !site.GhostsAreSuffix &&
+				!narrowedGhostsAfterTerminator10821(site, fc.PolicyOptions) {
+				return fmt.Errorf("non-suffix narrowed BGP chain at %q has a reachable ghost with no safe trailing-deny rendering; refusing the fail-open surviving attachment", site.Where)
+			}
 			continue
 		}
 		alias := narrowedAliasName10129(site.Kept)
@@ -212,7 +264,7 @@ func narrowedAliasNames10129(fc *FullConfig) []string {
 	var out []string
 	add := func(bgp *config.BGPConfig) {
 		for _, site := range narrowedChainSites(bgp, fc.PolicyOptions) {
-			if !narrowedAliasEligible10129(site, fc.PolicyOptions) {
+			if !narrowedAliasEligible10821(site, fc.PolicyOptions) {
 				continue
 			}
 			name := narrowedAliasName10129(site.Kept)
@@ -240,7 +292,7 @@ func narrowedAliasChains10129(fc *FullConfig) map[string][]string {
 	}
 	add := func(bgp *config.BGPConfig) {
 		for _, site := range narrowedChainSites(bgp, fc.PolicyOptions) {
-			if narrowedAliasEligible10129(site, fc.PolicyOptions) {
+			if narrowedAliasEligible10821(site, fc.PolicyOptions) {
 				out[narrowedAliasName10129(site.Kept)] = append([]string(nil), site.Kept...)
 			}
 		}
@@ -253,8 +305,10 @@ func narrowedAliasChains10129(fc *FullConfig) map[string][]string {
 }
 
 // narrowedAliasRef10129 swaps one eligible attachment to its prepared alias.
-// Non-eligible narrowed shapes retain the existing reference so ghost-first
-// and ghost-middle survivors are not deleted by an inserted terminator.
+// The #10821 extension attaches non-suffix fall-through/empty chains using a
+// trailing deny, preserving the surviving order. A non-suffix chain that
+// cannot reach that deny safely is rejected by the collision/apply guard
+// unless every ghost follows a terminating survivor.
 func (m *Manager) narrowedAliasRef10129(n *config.BGPNeighbor, bgp *config.BGPConfig, global []string, po *config.PolicyOptionsConfig, export bool) string {
 	if n == nil || bgp == nil || po == nil {
 		return ""
@@ -275,7 +329,7 @@ func (m *Manager) narrowedAliasRef10129(n *config.BGPNeighbor, bgp *config.BGPCo
 	suffix := "neighbor " + n.Address + whereSuffix
 	for _, site := range narrowedChainSites(bgp, po) {
 		if site.Where == suffix && equalStringSlice(site.Authored, authored) &&
-			equalStringSlice(site.Kept, kept) && narrowedAliasEligible10129(site, po) {
+			equalStringSlice(site.Kept, kept) && narrowedAliasEligible10821(site, po) {
 			return narrowedAliasName10129(site.Kept)
 		}
 	}
