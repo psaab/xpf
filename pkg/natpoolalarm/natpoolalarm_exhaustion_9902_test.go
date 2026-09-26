@@ -706,24 +706,102 @@ func TestExhaustionRenderShowsLastNonzeroDelta9902(t *testing.T) {
 	}
 }
 
-// Legacy helpers (allocator_id 0) ALWAYS rebase: a same-process rebuild is
-// invisible (0→0), so any delta on id 0 is unprovable — evaluating it would
-// false-raise on a fast re-exhaustion past the old count. Fail-silent, never
-// raise.
-func TestExhaustionLegacyZeroNeverRaises9902(t *testing.T) {
+// Legacy helpers (allocator_id 0) still report useful cumulative deltas while
+// the helper process remains the same. Those pools must not be blind to
+// exhaustion merely because the helper predates allocator identity metadata.
+func TestExhaustionLegacyZeroRaisesOnPositiveDelta9902(t *testing.T) {
 	m, rec, vb := newMon()
-	cfg := cfgWith(80, 70, false)
+	cfg := cfgWith(80, 70, true) // flow-only legacy pool; utilization cannot cover it
 	setExhView9902(vb, cfg, 1, 1, exhPool9902("p1", 5, 0))
-	m.evaluate() // baseline at 0
+	m.evaluate() // baseline
 	setExhView9902(vb, cfg, 2, 1, exhPool9902("p1", 50, 0))
-	m.evaluate() // +45 on id 0: rebase, NOT a raise
+	m.evaluate() // +45 → raise
+	if got := activeExhaustion9902(t, m); len(got) != 1 || got[0].Events != 45 {
+		t.Fatalf("id-0 positive delta must raise with events=45, got %+v", got)
+	}
+	if got := countMatch(rec.snapshot(), exhaustedRaisedTag); got != 1 {
+		t.Fatalf("id-0 positive delta must emit one raise, got %d", got)
+	}
+	rec.reset()
 	setExhView9902(vb, cfg, 3, 1, exhPool9902("p1", 99, 0))
-	m.evaluate() // +49 more: still silent
-	if got := activeExhaustion9902(t, m); len(got) != 0 {
-		t.Fatalf("id-0 deltas must never raise, got %+v", got)
+	m.evaluate() // +49 refreshes the active alarm without another transition
+	if got := activeExhaustion9902(t, m); len(got) != 1 || got[0].Events != 49 {
+		t.Fatalf("id-0 positive delta must refresh events=49, got %+v", got)
 	}
 	if len(rec.snapshot()) != 0 {
-		t.Fatalf("id-0 ticks must emit nothing, got %v", rec.snapshot())
+		t.Fatalf("active id-0 alarm refresh must not emit, got %v", rec.snapshot())
+	}
+}
+
+func TestActiveAlarmsShowStaleAfterHelperLoss10902(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, false)
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	m.nowFn = func() time.Time { return now }
+
+	s := exhPool9902("p1", 5, 0)
+	s.UsedPorts = 95
+	setExhView9902(vb, cfg, 1, 1, s)
+	m.evaluate() // utilization raised; exhaustion baseline established
+
+	now = now.Add(time.Second)
+	s.ExhaustionTotal = 8
+	setExhView9902(vb, cfg, 2, 1, s)
+	m.evaluate() // exhaustion raised; both last-sample times advance
+
+	if got := m.ActiveAlarms(); len(got) != 1 || !got[0].LastSample.Equal(now) || got[0].Stale {
+		t.Fatalf("utilization alarm should have a fresh sample before helper loss, got %+v", got)
+	}
+	if got := m.ActiveExhaustionAlarms(); len(got) != 1 || !got[0].LastSample.Equal(now) || got[0].Stale {
+		t.Fatalf("exhaustion alarm should have a fresh sample before helper loss, got %+v", got)
+	}
+
+	rec.reset()
+	vb.set(View{Available: false})
+	m.evaluate()
+	util := m.ActiveAlarms()
+	exhaustion := m.ActiveExhaustionAlarms()
+	if len(util) != 1 || !util[0].Stale || !util[0].LastSample.Equal(now) {
+		t.Fatalf("helper loss must retain utilization alarm as stale with last sample, got %+v", util)
+	}
+	if len(exhaustion) != 1 || !exhaustion[0].Stale || !exhaustion[0].LastSample.Equal(now) {
+		t.Fatalf("helper loss must retain exhaustion alarm as stale with last sample, got %+v", exhaustion)
+	}
+	var utilOut, exhaustionOut strings.Builder
+	RenderAlarms(&utilOut, util, 0, true)
+	RenderExhaustionAlarms(&exhaustionOut, exhaustion, 0, true)
+	for name, out := range map[string]string{
+		"utilization": utilOut.String(),
+		"exhaustion":  exhaustionOut.String(),
+	} {
+		if !strings.Contains(out, "Last sample: 2026-09-26 12:00:01") ||
+			!strings.Contains(out, "Status: STALE (no fresh coherent helper sample)") {
+			t.Fatalf("%s detail must show last sample and stale status, got:\n%s", name, out)
+		}
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("helper loss must HOLD without emitting, got %v", got)
+	}
+	now = now.Add(time.Second)
+	setExhView9902(vb, cfg, 3, 1, s)
+	m.evaluate()
+	if got := m.ActiveAlarms(); len(got) != 1 || got[0].Stale {
+		t.Fatalf("coherent helper recovery must clear utilization stale status, got %+v", got)
+	}
+	if got := m.ActiveExhaustionAlarms(); len(got) != 1 || got[0].Stale {
+		t.Fatalf("coherent helper recovery must clear exhaustion stale status, got %+v", got)
+	}
+	incoherent := coherentView(cfg, s)
+	incoherent.StatusSequence = 4
+	incoherent.ProcGen = 1
+	incoherent.HelperCoherent = false
+	vb.set(incoherent)
+	m.evaluate()
+	if got := m.ActiveAlarms(); len(got) != 1 || !got[0].Stale || !got[0].LastSample.Equal(now) {
+		t.Fatalf("incoherent helper sample must mark utilization stale, got %+v", got)
+	}
+	if got := m.ActiveExhaustionAlarms(); len(got) != 1 || !got[0].Stale || !got[0].LastSample.Equal(now) {
+		t.Fatalf("incoherent helper sample must mark exhaustion stale, got %+v", got)
 	}
 }
 
