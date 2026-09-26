@@ -90,6 +90,22 @@ every `system login user` is provisioned with a real shell account
 receive the highest class in the system. The `!found` branch also promoted any
 OS account that merely existed on the box but was absent from `system login`.
 
+### SSH login shells follow the class (#10833)
+
+The OS account shell is now part of the class boundary, not a general-purpose
+escape around CLI/API RBAC. `super-user` accounts keep `/bin/bash` as the
+documented full-OS-access exception. Every other known built-in or custom class
+(including `operator`, `read-only`, and `config-viewer`) gets the xpf CLI as its
+login shell; SSH therefore starts in the RBAC-enforced CLI, with no bash
+available. The empty `unauthorized` class and unknown classes get
+`/usr/sbin/nologin`.
+
+The daemon also updates existing local accounts on apply, so accounts created
+before this policy and class downgrades do not retain `/bin/bash`. Packaged
+installs use `/usr/local/sbin/cli`; `make install` uses `/usr/local/bin/cli`.
+If neither executable is installed, shell selection fails closed to the
+packaged CLI path (sshd cannot launch it); it never falls back to bash.
+
 The decision, in order:
 
 | Caller | Class |
