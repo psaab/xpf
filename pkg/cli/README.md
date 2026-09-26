@@ -199,7 +199,8 @@ presenter's rendered output is byte-identical:
      200x table and was rejected by the allocation-ratio cell, which is why
      that cell measures a ratio between two real runs rather than asserting
      the design.
-  2. **The output is unchanged**, including the `(of N total)` figure, which
+  2. **Standalone output is unchanged.** In cluster mode, the header identifies
+     the local node and marks the result as local-only. The `(of N total)` figure
      still counts every session the filter admitted rather than the rows kept.
      A bound that redefined that number would change what the operator reads.
 

@@ -880,7 +880,12 @@ func (c *CLI) showTopTalkers(f sessionFilter) error {
 		limit = len(entries)
 	}
 
-	fmt.Printf("Top %d sessions by %s (of %d total):\n", limit, f.sortBy, collector.total)
+	if c.cluster != nil {
+		fmt.Printf("Top %d sessions by %s on node%d (local only; of %d total):\n",
+			limit, f.sortBy, c.cluster.NodeID(), collector.total)
+	} else {
+		fmt.Printf("Top %d sessions by %s (of %d total):\n", limit, f.sortBy, collector.total)
+	}
 	fmt.Printf("%-5s %-22s %-22s %-5s %-20s %12s %12s %5s %s\n",
 		"#", "Source", "Destination", "Proto", "Zone", "Bytes(f/r)", "Pkts(f/r)", "Age", "App")
 	for i := 0; i < limit; i++ {
