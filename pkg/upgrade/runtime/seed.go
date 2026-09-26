@@ -280,7 +280,7 @@ func regularFileSHA256(path string) ([sha256.Size]byte, error) {
 		return [sha256.Size]byte{}, err
 	}
 	var sum [sha256.Size]byte
-	copy(sum[:], h.Sum(nil))
+	h.Sum(sum[:0])
 	return sum, nil
 }
 
