@@ -512,7 +512,7 @@ func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
 			p.fragTimes[fragKey] = time.Now()
 		}
 		before := p.fragPool.Stats().DuplicateDrops
-		complete, err := p.fragPool.Insert(fragKey, *frame.Fragment)
+		complete, err := p.fragPool.insertAt(fragKey, *frame.Fragment, p.fragTimes[fragKey])
 		after := p.fragPool.Stats().DuplicateDrops
 		duplicate := after > before
 		var drops []CaptureFrame
@@ -917,6 +917,9 @@ func (p *CapturePipeline) expireFragments(now time.Time) int {
 	cutoff := now.Add(-p.fragmentDeadline)
 	var expired []CaptureFrame
 	p.mu.Lock()
+	if p.fragPool != nil {
+		p.fragPool.Expire(cutoff)
+	}
 	for key, started := range p.fragTimes {
 		if started.Before(cutoff) {
 			expired = append(expired, p.fragHolds[key]...)
@@ -926,9 +929,6 @@ func (p *CapturePipeline) expireFragments(now time.Time) int {
 	}
 	p.stats.FragmentDrops += uint64(len(expired))
 	p.mu.Unlock()
-	if p.fragPool != nil {
-		p.fragPool.Expire(cutoff)
-	}
 	for _, frame := range expired {
 		if frame.phase == PipelineShadow {
 			p.mu.Lock()
