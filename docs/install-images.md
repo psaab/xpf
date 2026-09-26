@@ -674,11 +674,12 @@ on a minimal host and only goes RED on a genuine regression. It covers:
   `shellcheck` cannot see that a logic change wipes a customer box's
   PXE/recovery entries or undoes a promoted kernel slot. The real script
   runs under a real `/bin/sh` with a mock `efibootmgr` modelling NVRAM as
-  state files, so the four classes a reviewer caught during #1930 are
-  regression fixtures: wrong-loader-path deletion, duplicate dedup,
-  promoted-slot BootOrder preservation, and the empty-BootOrder no-write
-  guard (a reseed built from an unreadable BootOrder would emit
-  `--bootorder <A>,<B>` and wipe everything else). `[ -b "$ESP_DISK" ]` is
+  state files, so regression fixtures cover the classes a reviewer caught
+  during #1930 and the non-xpf-front reseed regression: wrong-loader-path
+  deletion, duplicate dedup, promoted-slot and operator-selected non-xpf
+  BootOrder preservation, and the empty-BootOrder no-write guard (a reseed
+  built from an unreadable BootOrder would emit `--bootorder <A>,<B>` and wipe
+  everything else). `[ -b "$ESP_DISK" ]` is
   not relaxed by a test hook — the mock names a partition of a real host
   block device — and only two path roots are overridable
   (`XPF_UEFI_SLOTS_EFIVARS`, `XPF_UEFI_SLOTS_ESP`), the same pattern

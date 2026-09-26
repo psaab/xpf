@@ -321,6 +321,37 @@ class BootOrderTests(_SlotsBase):
         self.assertEqual(self.order()[0], "0008",
                          "the promoted slot lost the BootOrder front")
 
+    def test_non_xpf_front_preserves_promoted_order(self):
+        # An operator may place ubuntu/PXE ahead of the promoted slot. A
+        # subsequent boot must preserve that explicit BootOrder rather than
+        # treating any non-xpf front as a fresh box and seeding A first.
+        self.seed(["0007|xpf-A|\\EFI\\xpf-A\\shimx64.efi",
+                   "0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU, PXE],
+                  "0000,0008,0007,0001")
+        self.run_slots()
+        self.assertEqual(
+            self.order(), ["0000", "0008", "0007", "0001"],
+            "the registrar overrode the operator's non-xpf BootOrder front")
+        self.assertEqual(
+            [c for c in self.calls() if "--bootorder" in c], [],
+            "the registrar rewrote an existing BootOrder")
+
+        self.run_slots()
+        self.assertEqual(
+            self.order(), ["0000", "0008", "0007", "0001"],
+            "the next boot changed the operator's explicit BootOrder")
+
+    def test_non_xpf_front_survives_missing_slot_registration(self):
+        self.seed(["0008|xpf-B|\\EFI\\xpf-B\\shimx64.efi", UBUNTU, PXE],
+                  "0000,0008,0001")
+        self.run_slots()
+        a_ids = self.ids_for("xpf-A")
+        self.assertEqual(len(a_ids), 1)
+        self.assertEqual(
+            self.order(), ["0000", a_ids[0], "0008", "0001"],
+            "registering a missing slot displaced the operator's default or "
+            "reordered existing entries")
+
     def test_promoted_b_is_preserved_even_when_slot_a_must_be_recreated(self):
         # B promoted, A's entry lost (a firmware reset that took one entry).
         # The self-heal recreates A — and --create PREPENDS — so the promoted
