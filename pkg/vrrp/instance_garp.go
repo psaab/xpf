@@ -40,14 +40,22 @@ func garpDampened(lastNanos, nowNanos int64) bool {
 //     suppresses a genuine duplicate for the same transition, never the
 //     intended forced send.
 //   - Time dampener: skip if the previous burst was < minGARPInterval ago
-//     (garpDampened). This applies to the NORMAL (force == false) path only,
-//     to rate-limit routine/periodic GARP during rapid VRRP flaps. A forced
-//     send BYPASSES the dampener: ReconcileVIPs runs after programRethMAC
-//     changed the RETH virtual MAC, so peers hold a stale ARP entry and the
-//     post-MAC-change GARP is critical even if a routine GARP happened to be
-//     emitted within the last 500ms — otherwise traffic blackholes until the
-//     stale ARP ages out (#2081).
+//     (garpDampened). This applies to the NORMAL (force == false) path only
+//     while the node remains in the same ownership tenure. If it relinquished
+//     mastership since that burst, a peer may have changed neighbor bindings,
+//     so a rapid failback must announce again. A forced send BYPASSES the
+//     dampener: ReconcileVIPs runs after programRethMAC changed the RETH
+//     virtual MAC, so peers hold a stale ARP entry and the post-MAC-change
+//     GARP is critical even if a routine GARP happened within 500ms (#2081).
+//
+// The two-argument seam is used by focused tests; sendGARP passes its captured
+// owner generation to the internal decision so a concurrent transition cannot
+// make a prior-tenure GARP look like a burst from the new tenure.
 func (vi *vrrpInstance) garpSendAllowed(force bool, nowNanos int64) bool {
+	return vi.garpSendAllowedForOwner(force, nowNanos, vi.ownerGen.Load())
+}
+
+func (vi *vrrpInstance) garpSendAllowedForOwner(force bool, nowNanos int64, ownerGen uint64) bool {
 	epoch := vi.garpEpoch.Load()
 	if vi.lastGARPEpoch.Load() == epoch && epoch > 0 {
 		slog.Debug("vrrp: GARP already sent for this epoch",
@@ -57,13 +65,11 @@ func (vi *vrrpInstance) garpSendAllowed(force bool, nowNanos int64) bool {
 	if force {
 		// Forced sends (post-MAC-change reconcile via ReconcileVIPs) bypass
 		// the time dampener — the dampener exists only to rate-limit routine
-		// GARP and must never suppress a MAC-change correction (#2081). Note
-		// the becomeMaster path (including manual takeover via ForceRGMaster)
-		// is intentionally NOT forced: it does not change the MAC, so it stays
-		// subject to the dampener.
+		// GARP and must never suppress a MAC-change correction (#2081).
 		return true
 	}
-	if last := vi.lastGARPTime.Load(); garpDampened(last, nowNanos) {
+	if last := vi.lastGARPTime.Load(); garpDampened(last, nowNanos) &&
+		vi.lastGARPOwnerGen.Load() == ownerGen {
 		slog.Debug("vrrp: GARP dampened (too soon)",
 			"key", vi.key(), "elapsed", time.Duration(nowNanos-last))
 		return false
@@ -143,12 +149,15 @@ func GatewayProbeTarget(ipNet *net.IPNet) (net.IP, bool) {
 // standard ARP Request with the VIP as the source address.
 //
 // force bypasses the 500ms time dampener (but not the per-epoch dedup) so a
-// post-MAC-change reconcile GARP is always emitted; see garpSendAllowed.
+// post-MAC-change reconcile GARP is always emitted. A normal send also bypasses
+// dampening when it follows a completed MASTER tenure that has since ended;
+// neighbors may have learned the peer's MAC while this node was BACKUP.
 //
 // This method may be called in a goroutine from becomeMaster().
 func (vi *vrrpInstance) sendGARP(force bool) {
 	epoch := vi.garpEpoch.Load()
-	if !vi.garpSendAllowed(force, time.Now().UnixNano()) {
+	ownerGen := vi.ownerGen.Load()
+	if !vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen) {
 		return
 	}
 	// #8597 (muse-004 K20): under vi.mu — updateConfig writes this field on the
@@ -218,6 +227,7 @@ func (vi *vrrpInstance) sendGARP(force bool) {
 			}
 		}
 	}
+	vi.lastGARPOwnerGen.Store(ownerGen)
 	vi.lastGARPEpoch.Store(epoch)
 	vi.lastGARPTime.Store(time.Now().UnixNano())
 }

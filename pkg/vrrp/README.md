@@ -357,12 +357,15 @@ the baseline with an ordinary advert.
 - GARP suppression gates: `sendGARP(force)` has two gates — a per-epoch
   dedup (`garpEpoch`/`lastGARPEpoch`, one burst per transition) and a
   500 ms time dampener (`lastGARPTime`/`garpDampened`, storm control for
-  rapid flaps). `force=true` bypasses ONLY the dampener (the epoch dedup
-  still applies). `becomeMaster` and the periodic path pass `force=false`;
-  `ReconcileVIPs` passes `force=true` because the RETH MAC just changed and
-  the correction GARP must not be swallowed by a routine burst that fired in
-  the prior 500 ms (#2081). The decision lives in the network-free helper
-  `garpSendAllowed`, which is unit-tested directly.
+  routine sends within the same ownership tenure). After mastership is
+  relinquished, a normal failback GARP bypasses the dampener because peers may
+  have learned the intervening master's MAC; `lastGARPOwnerGen` distinguishes
+  that case from a rapid flap within one tenure. `force=true` also bypasses the
+  dampener (the epoch dedup still applies). `becomeMaster` and the periodic
+  path pass `force=false`; `ReconcileVIPs` passes `force=true` because the RETH
+  MAC just changed and the correction GARP must not be swallowed by a routine
+  burst that fired in the prior 500 ms (#2081). The decision lives in the
+  network-free helper `garpSendAllowed`, which is unit-tested directly.
 - Supplementary gateway ARP probe: after each IPv4 GARP burst, `sendGARP`
   also sends a directed ARP Request — VIP as the ARP sender (#2152) — to the
   subnet's first usable host (network address + 1, the most common gateway),

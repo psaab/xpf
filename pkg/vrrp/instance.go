@@ -261,11 +261,12 @@ type vrrpInstance struct {
 	lastUnknownMasterWarn atomic.Int64
 
 	// GARP suppression for strict-vip-ownership mode.
-	suppressGARP    atomic.Bool   // when true, becomeMaster() skips GARP/NA
-	garpEpoch       atomic.Uint64 // incremented on each becomeMaster()/ReconcileVIPs transition
-	lastGARPEpoch   atomic.Uint64 // epoch of last completed sendGARP()
-	lastGARPTime    atomic.Int64  // Unix nanos of last GARP send (dampens routine GARP only; forced sends bypass — see garpSendAllowed)
-	garpClampWarned atomic.Bool   // #5695: guards a once-per-instance warn when a configured GARPCount is clamped (never per-send)
+	suppressGARP     atomic.Bool   // when true, becomeMaster() skips GARP/NA
+	garpEpoch        atomic.Uint64 // incremented on each becomeMaster()/ReconcileVIPs transition
+	lastGARPEpoch    atomic.Uint64 // epoch of last completed sendGARP()
+	lastGARPTime     atomic.Int64  // Unix nanos of last GARP send
+	lastGARPOwnerGen atomic.Uint64 // owner generation in which the last GARP completed
+	garpClampWarned  atomic.Bool   // #5695: guards a once-per-instance warn when a configured GARPCount is clamped (never per-send)
 
 	// ownerGen is the identity of the current Master/Backup ownership tenure
 	// (#5082). setState bumps it whenever the state actually changes, so every
