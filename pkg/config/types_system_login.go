@@ -85,23 +85,16 @@ type LoginConfig struct {
 // hard-rejected at the `user ... class` enum) and maps the whole-box Junos
 // permission tokens onto the nearest coarse bucket.
 //
-// The four regex sub-statements are NOT symmetric (#5831):
+// The four regex sub-statements have different Junos semantics (#5831, #7172):
 //
-//   - allow-commands / allow-configuration are ADDITIVE in Junos — they grant
-//     access BEYOND the permission bits. Ignoring an additive grant can only
-//     ever hand the class LESS than the operator wrote, so they stay
-//     recognized-but-not-enforced with an advisory (fail-closed).
+//   - allow-commands / allow-configuration are ADDITIVE — they grant access
+//     beyond the permission bits, so xpf enforces them as allowlists rather
+//     than folding them into the coarse permission mapping.
 //   - idle-timeout is retained for legacy loads but rejected on strict commits
 //     because no runtime surface applies its session deadline (#10828).
 //   - deny-commands / deny-configuration are RESTRICTIVE — they subtract from
-//     the permission bits. Ignoring them hands the class MORE than the
-//     operator wrote, so they are hard-rejected at commit
-//     (validateLoginClassDenyStrict) and, on the tolerant load / peer-sync
-//     path, fold the class down to the REPAIR FLOOR — {view, configure}
-//     intersected with what the class already held
-//     (foldLoginClassDenyToRepairableFloor). Not to view-only: the configured
-//     class can be bound to the console login, and a class that cannot enter
-//     `configure` cannot delete the statement that is blocking every commit.
+//     the permission bits, so xpf enforces them as denials. DenyLeavesPresent
+//     preserves explicit empty regex leaves for that enforcement.
 type LoginClass struct {
 	Name              string
 	Permissions       []string               // raw Junos permission tokens as written
@@ -110,10 +103,10 @@ type LoginClass struct {
 	// IdleTimeoutSet records explicit leaf presence (including value 0) so
 	// strict commit validation can reject the unsupported setting (#10828).
 	IdleTimeoutSet     bool   `json:"-" yaml:"-"`
-	AllowCommands      string // regex; additive, recognized, not enforced
-	DenyCommands       string // regex; restrictive — see DenyLeavesPresent
-	AllowConfiguration string // regex; additive, recognized, not enforced
-	DenyConfiguration  string // regex; restrictive — see DenyLeavesPresent
+	AllowCommands      string // additive regex; enforced as an allowlist (#7172)
+	DenyCommands       string // restrictive regex; enforced; see DenyLeavesPresent
+	AllowConfiguration string // additive regex; enforced as an allowlist (#7172)
+	DenyConfiguration  string // restrictive regex; enforced; see DenyLeavesPresent
 
 	// DenyLeavesPresent records which RESTRICTIVE regex leaves the operator
 	// actually WROTE, in config order, independent of their value (#5831).

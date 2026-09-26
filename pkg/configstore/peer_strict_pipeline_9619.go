@@ -33,6 +33,7 @@ import (
 //     peer's apply-groups expansion (both #9619 witnesses fail here);
 //   - config.CompileConfigForNode: every compiler-side strict gate;
 //   - crossCheckRAIntervals: the #4525 min/max ratio on the peer's view.
+//   - crossCheckLoginIdleTimeout10828: unsupported login-class deadlines.
 //
 // crossCheckNodeID is the one step NOT run for the peer. It compares the
 // compiled `chassis cluster node` leaf with the node-id file of the host doing
@@ -64,6 +65,9 @@ func validatePeerStrictPipeline(peerTree *config.ConfigTree, nodeID int) error {
 		return peerStrictError(peerID, err)
 	}
 	if err := crossCheckRAIntervals(peerCompiled); err != nil {
+		return peerStrictError(peerID, err)
+	}
+	if err := crossCheckLoginIdleTimeout10828(peerCompiled); err != nil {
 		return peerStrictError(peerID, err)
 	}
 	return nil

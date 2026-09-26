@@ -307,6 +307,43 @@ func TestCommitCheck_RejectsLoginClassIdleTimeout10828(t *testing.T) {
 	}
 }
 
+func TestPeerCommitCheckRejectsLoginClassIdleTimeout10828(t *testing.T) {
+	text := `groups {
+    node0 {
+        chassis { cluster { node 0; } }
+    }
+    node1 {
+        chassis { cluster { node 1; } }
+        system {
+            login {
+                class ops {
+                    permissions view;
+                    idle-timeout 1;
+                }
+            }
+        }
+    }
+}
+chassis {
+    cluster {
+        cluster-id 1;
+        reth-count 2;
+        authentication-key "peer-idletimeout-10828-long-enough";
+    }
+}
+apply-groups "${node}";
+`
+	_, err := CheckText(text, 0)
+	if err == nil {
+		t.Fatal("CheckText accepted a shared config with idle-timeout in the peer's effective view")
+	}
+	for _, want := range []string{"peer node1", "idle-timeout is not enforced by xpf"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("CheckText error = %v, want %q", err, want)
+		}
+	}
+}
+
 func TestLoad_ToleratesLegacyLoginClassIdleTimeout10828(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config")
 	writeStoredConfig(t, cfgPath, "set system login class ops idle-timeout 0")
