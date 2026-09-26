@@ -26,8 +26,10 @@ import (
 //
 // FAIL-ON-REVERT: dropping the appliance branch from chooseBootstrapLifeline
 // reds TestChooseBootstrapLifeline/appliance_factory_boot_no_route AND the
-// wiring test below (no .network is written). Dropping the everCommitted half
-// of the gate reds TestIsApplianceFactoryBoot/marker_but_already_committed.
+// wiring test below. Dropping the everCommitted half of the pure gate reds
+// TestIsApplianceFactoryBoot/marker_but_already_committed; dropping only the
+// production binding (M13, #10749) reds the committed-appliance wiring row,
+// which writes a .network.
 
 func TestIsApplianceFactoryBoot(t *testing.T) {
 	tests := []struct {
@@ -159,20 +161,23 @@ func TestChooseBootstrapLifeline(t *testing.T) {
 
 // TestSetupBootstrapLifelineAppliance binds the WIRING, not just the pure
 // cores: it drives the real setupBootstrapLifeline with the world-readers
-// faked (no default route, one enumerated NIC already named fxp0 so no rename
-// is attempted) and asserts the observable outcome the image gate checks —
-// the bootstrap fxp0 DHCP .network exists. A revert of the production call
-// site (however the pure helpers behave) leaves the directory empty.
+// faked (no default route and one enumerated NIC named enp5s0) and asserts the
+// observable outcomes the image gate checks. The committed-appliance row also
+// proves that production reads EverCommitted: dropping that argument writes
+// fxp0's .network and renames the NIC on a fail-closed boot.
 func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 	tests := []struct {
-		name        string
-		writeMarker bool
-		wantNetwork bool
+		name         string
+		writeMarker  bool
+		commitConfig bool
+		wantNetwork  bool
+		wantRename   bool
 	}{
 		{
 			name:        "appliance factory boot writes the bootstrap fxp0 .network",
 			writeMarker: true,
 			wantNetwork: true,
+			wantRename:  true,
 		},
 		{
 			// The #1922 guard, intact: no marker means no NIC is claimed even
@@ -180,6 +185,13 @@ func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 			name:        "foreign host with no marker claims nothing",
 			writeMarker: false,
 			wantNetwork: false,
+		},
+		{
+			// A committed appliance may still boot fail-closed, but it is
+			// not a factory boot and must not claim its first NIC.
+			name:         "committed appliance in bootstrap claims nothing (#10749)",
+			writeMarker:  true,
+			commitConfig: true,
 		},
 	}
 	for _, tt := range tests {
@@ -212,10 +224,10 @@ func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 
 			// No default route — the #7114 precondition.
 			detectLifelineInterfaceFn = func() (string, bool, error) { return "", false, nil }
-			// One NIC, already wearing the target name so the rename is a
-			// no-op and the test needs no netlink.
+			// One NIC whose current name differs from fxp0. The factory
+			// row exercises the rename seam; the other rows must not call it.
 			enumeratePCINICsFn = func() ([]pciNIC, error) {
-				return []pciNIC{{sortKey: 0, busAddr: "0000:05:00.0", name: defaultMgmtInterface}}, nil
+				return []pciNIC{{sortKey: 0, busAddr: "0000:05:00.0", name: "enp5s0"}}, nil
 			}
 			renamed := false
 			renameInterfaceFn = func(_, _ string) error { renamed = true; return nil }
@@ -228,10 +240,23 @@ func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 				}
 			}
 
-			d := &Daemon{store: newConfigStore(t, filepath.Join(dir, "xpf.conf"))}
-			if d.store.EverCommitted() {
-				t.Fatal("precondition: a fresh store must report EverCommitted()==false")
+			store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))
+			if tt.commitConfig {
+				if err := store.EnterConfigure(); err != nil {
+					t.Fatalf("EnterConfigure: %v", err)
+				}
+				if err := store.LoadOverride("system { host-name ever-committed; }"); err != nil {
+					t.Fatalf("LoadOverride: %v", err)
+				}
+				if _, err := store.Commit(); err != nil {
+					t.Fatalf("Commit: %v", err)
+				}
+				store.ExitConfigure()
 			}
+			if got := store.EverCommitted(); got != tt.commitConfig {
+				t.Fatalf("EverCommitted() = %v, want %v", got, tt.commitConfig)
+			}
+			d := &Daemon{store: store}
 			d.setupBootstrapLifeline()
 
 			netPath := filepath.Join(linkDir, linkPrefix+"fxp0.network")
@@ -240,8 +265,11 @@ func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 			case tt.wantNetwork && err != nil:
 				t.Fatalf("expected the bootstrap fxp0 .network at %s: %v", netPath, err)
 			case !tt.wantNetwork && err == nil:
-				t.Fatalf("no NIC may be claimed without the marker, but %s was written:\n%s",
-					netPath, data)
+				t.Fatalf("no NIC may be claimed in %q, but %s was written:\n%s",
+					tt.name, netPath, data)
+			}
+			if renamed != tt.wantRename {
+				t.Fatalf("renameInterface called = %v, want %v", renamed, tt.wantRename)
 			}
 			if !tt.wantNetwork {
 				if reloaded {
@@ -251,9 +279,6 @@ func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 			}
 			if got := string(data); !strings.Contains(got, "DHCP=yes") || !strings.Contains(got, "Name=fxp0") {
 				t.Fatalf("bootstrap .network is not an fxp0 DHCP config:\n%s", got)
-			}
-			if renamed {
-				t.Fatal("the enumerated NIC already wears the fxp0 name; no rename expected")
 			}
 			if !reloaded {
 				t.Fatal("networkd was never reloaded, so the new .network never takes effect")
