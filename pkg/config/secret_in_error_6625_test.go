@@ -225,3 +225,55 @@ func TestDualUseCommunityRedactedOnlyUnderSNMP6625(t *testing.T) {
 			"character, and redacting it destroys that diagnostic; got: %s", bgpErr.Error())
 	}
 }
+
+func TestSchemaErrorsRedactCredentialPathElements10771(t *testing.T) {
+	tests := []struct {
+		name        string
+		set         string
+		secret      string
+		want        string
+		wantVisible string
+	}{
+		{
+			name:        "SNMP community identity",
+			set:         "set snmp community LEAK-SNMP-COMMUNITY-10771 authorization read-wrote",
+			secret:      "LEAK-SNMP-COMMUNITY-10771",
+			want:        "<redacted>",
+			wantVisible: `invalid value "read-wrote"`,
+		},
+		{
+			name:        "IKE PSK swallowed as missing qualifier",
+			set:         "set security ike policy ike-pol pre-shared-key LEAK-PSK-10771",
+			secret:      "LEAK-PSK-10771",
+			want:        "<redacted>",
+			wantVisible: "pre-shared-key",
+		},
+		{
+			name:        "BGP community remains an identifier",
+			set:         "set policy-options community LEAK-BGP-COMMUNITY-10771 members",
+			secret:      "LEAK-BGP-COMMUNITY-10771",
+			wantVisible: "LEAK-BGP-COMMUNITY-10771",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := SchemaValidate(buildTree(t, []string{tc.set}), nil)
+			if err == nil {
+				t.Fatal("malformed secret-path config passed schema validation")
+			}
+			got := err.Error()
+			if strings.Contains(got, tc.secret) && tc.want != "" {
+				t.Fatalf("schema diagnostic leaked credential %q: %s", tc.secret, got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("schema diagnostic lacks redaction marker %q: %s", tc.want, got)
+			}
+			if !strings.Contains(got, tc.wantVisible) {
+				t.Fatalf("schema diagnostic lost actionable detail %q: %s", tc.wantVisible, got)
+			}
+			if tc.want == "" && strings.Contains(got, "<redacted>") {
+				t.Fatalf("non-secret BGP community name was over-redacted: %s", got)
+			}
+		})
+	}
+}

@@ -55,7 +55,8 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
 - `xpfd verify-dataplane` — verifies the embedded userspace shim without
   touching production dataplane state.
 - `xpfd check-config <config-file>` — runs strict config validation and the
-  device-map management-stranding preflight.
+  device-map management-stranding preflight, then prints any non-fatal compile
+  advisories as `warning:` lines while retaining a successful exit status.
 - `xpfd export-config <output-file>` — writes the CURRENT active config DB as
   hierarchical day-0 text to a 0600 file for image-replace upgrades. Refuses
   stdout, a missing/empty active config DB, or an invalid output path.

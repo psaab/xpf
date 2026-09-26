@@ -26,9 +26,11 @@ the staged copy 0644.
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -97,6 +99,38 @@ class MakeConfigDriveModeTests(unittest.TestCase):
         self.assertEqual(
             staged[0] & 0o077, 0,
             f"staged xpf.conf must be owner-only, got {oct(staged[0])} (#4905-C)")
+
+    def test_check_config_warnings_are_printed(self):
+        warning = "replace the published cluster PSK"
+
+        def fake_run(argv, **_kwargs):
+            if argv[1] == "check-config":
+                return mock.Mock(
+                    returncode=0,
+                    stdout=f"PASS day0.conf\nwarning: {warning}\n",
+                    stderr="",
+                )
+            out = argv[argv.index("-o") + 1]
+            with open(out, "wb") as f:
+                f.write(b"\x00" * 2048)
+            return mock.Mock(returncode=0)
+
+        with tempfile.TemporaryDirectory() as td:
+            conf = os.path.join(td, "day0.conf")
+            with open(conf, "w") as f:
+                f.write("system { host-name day0; }\n")
+            output = io.StringIO()
+            with redirect_stdout(output), \
+                 mock.patch.object(mcd, "find_xpfd",
+                                   return_value="/usr/local/sbin/xpfd"), \
+                 mock.patch.object(mcd, "_iso_tool",
+                                   return_value="xorriso"), \
+                 mock.patch.object(mcd.subprocess, "run",
+                                   side_effect=fake_run):
+                mcd.build_config_drive(
+                    conf, os.path.join(td, "day0-config.iso"),
+                    node_id=0, validate=True)
+        self.assertIn(f"WARNING: {warning}", output.getvalue())
 
 
 if __name__ == "__main__":

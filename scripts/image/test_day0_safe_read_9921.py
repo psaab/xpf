@@ -290,6 +290,21 @@ class TryDeviceTests(unittest.TestCase):
         self.assertFalse(marker.exists(),
                          "a successful install after another medium's REJECT must clear its signal")
 
+
+    def test_successful_validation_warning_reaches_boot_log(self):
+        warning = "replace the published cluster PSK"
+        self.xpfd.write_text(
+            '#!/bin/sh\n'
+            'echo "PASS day0.conf"\n'
+            f'echo "warning: {warning}"\n'
+            'exit 0\n')
+        self._medium("/dev/fake0",
+                     {"xpf.conf": CONF.format(name="day0-ok").encode()})
+        rc, out, _dt = self._try_device()
+        self.assertEqual(rc, 0, out[-600:])
+        self.assertIn(f"WARNING: {warning}", out)
+        self.assertEqual(self._installed(), CONF.format(name="day0-ok").encode())
+
     def test_commit_check_reject_leaves_daemon_signal(self):
         self.xpfd.write_text(
             '#!/bin/sh\necho "FAIL bad stanza"\nexit 2\n')

@@ -394,7 +394,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// can fix it, tolerant where refusing would brick the node.
 		if closed {
 			return fmt.Errorf("%s: unknown configuration keyword %q under closed-world subtree",
-				strings.Join(path, " "), keyword)
+				strings.Join(redactSecretPath(path), " "), keyword)
 		}
 		// Open-world — the default for a subtree that has NOT opted in, which
 		// is most of them and emphatically not all. Unknown keywords are not
@@ -432,7 +432,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	if childSchema.nodeValidator != nil && exactMatch {
 		if err := childSchema.nodeValidator(node, parent); err != nil {
 			leafPath := append(append([]string(nil), path...), keyword)
-			return fmt.Errorf("%s: %v", strings.Join(leafPath, " "), err)
+			return fmt.Errorf("%s: %v", strings.Join(redactSecretPath(leafPath), " "), err)
 		}
 	}
 	// exactMatch is computed here rather than at its original site further
@@ -562,7 +562,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	if childSchema.midKeyword != "" && len(node.Keys) > childSchema.midKeywordAt &&
 		node.Keys[childSchema.midKeywordAt] != childSchema.midKeyword {
 		return fmt.Errorf("%s: unexpected keyword %q — expected %q (`%s <a> %s <b>` names a zone pair, and the middle keyword is fixed)",
-			strings.Join(newPath, " "), node.Keys[childSchema.midKeywordAt],
+			strings.Join(redactSecretPath(newPath), " "), node.Keys[childSchema.midKeywordAt],
 			childSchema.midKeyword, node.Keys[0], childSchema.midKeyword)
 	}
 
@@ -646,7 +646,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 				"`%s` statement is then silently dropped from the compiled config "+
 				"while `show configuration` still displays it. Add the missing `;` "+
 				"(#8437)",
-				strings.Join(append(append([]string(nil), path...), keyword), " "),
+				strings.Join(redactSecretPath(append(append([]string(nil), path...), keyword)), " "),
 				tok, keyword, keyword, tok)
 		}
 	}
@@ -779,7 +779,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 			return fmt.Errorf("%s: `%s` declares a value and none was given — the compiler "+
 				"drops a valueless statement, so this commits clean and the configuration "+
 				"silently does not carry it",
-				strings.Join(newPath, " "), keyword)
+				strings.Join(redactSecretPath(newPath), " "), keyword)
 		}
 	}
 	if missingArgs > 0 && !childSchema.compoundKey {
@@ -854,7 +854,7 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 		for i, tok := range node.Keys[:consume] {
 			if baseArgIdx+i == containerSchema.midKeywordAt-1 && tok != containerSchema.midKeyword {
 				return fmt.Errorf("%s: unexpected keyword %q — expected %q (the middle keyword of this stanza is fixed)",
-					strings.Join(path, " "), tok, containerSchema.midKeyword)
+					strings.Join(redactSecretPath(path), " "), tok, containerSchema.midKeyword)
 			}
 		}
 	}
@@ -985,18 +985,18 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 		return fmt.Errorf("%s: `%s` declares a value and none was given (this leaf takes %d value token(s)); "+
 			"the compiler drops a valueless statement, so this commits clean and the "+
 			"configuration silently does not carry it",
-			strings.Join(leafPath, " "), leafName, leafSchema.args)
+			strings.Join(redactSecretPath(leafPath), " "), leafName, leafSchema.args)
 	}
 	if len(node.Keys) > allowed {
 		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)",
-			strings.Join(leafPath, " "), node.Keys[allowed], leafSchema.args)
+			strings.Join(redactSecretPath(leafPath), " "), node.Keys[allowed], leafSchema.args)
 	}
 	for _, c := range node.Children {
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
 		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s) and no sub-statement; the extra token would be silently dropped)",
-			strings.Join(leafPath, " "), c.Keys[0], leafSchema.args)
+			strings.Join(redactSecretPath(leafPath), " "), c.Keys[0], leafSchema.args)
 	}
 	return nil
 }
@@ -1259,7 +1259,7 @@ func validateTailLeaf(node *Node, leafSchema *schemaNode, parentPath []string, s
 	}
 	if err := leafSchema.tailValidator(tokens, siblingTails); err != nil {
 		return &typedLeafSchemaError{
-			msg: fmt.Sprintf("%s: %v", strings.Join(path, " "), err),
+			msg: fmt.Sprintf("%s: %v", strings.Join(redactSecretPath(path), " "), err),
 		}
 	}
 	return nil
@@ -1343,7 +1343,7 @@ func IsTypedLeafSchemaError(err error) bool {
 // transmit-rate: missing value". path already includes the leaf keyword.
 func typedLeafErrorf(path []string, format string, args ...interface{}) error {
 	return &typedLeafSchemaError{
-		msg: fmt.Sprintf("%s: %s", strings.Join(path, " "), fmt.Sprintf(format, args...)),
+		msg: fmt.Sprintf("%s: %s", strings.Join(redactSecretPath(path), " "), fmt.Sprintf(format, args...)),
 	}
 }
 
@@ -1374,7 +1374,7 @@ func typedLeafErrorf(path []string, format string, args ...interface{}) error {
 // containment test can over-redact for a very short token; that is the safe
 // direction and it is preferred to reasoning about which validators echo.
 func typedLeafInvalidErrorf(path []string, tok string, err error) error {
-	joined := strings.Join(path, " ")
+	joined := strings.Join(redactSecretPath(path), " ")
 	if len(path) > 0 && isSecretLeaf(joined, path[len(path)-1:]) {
 		// Redact the value INSIDE the reason rather than discarding the
 		// reason. The validators echo it themselves — ValidateCryptHash says

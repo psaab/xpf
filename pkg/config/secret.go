@@ -436,3 +436,21 @@ func redactSecretKeys(prefix string, keys []string) []string {
 	}
 	return out
 }
+
+// redactSecretPath masks credential operands in a schema-walker path before
+// it is included in a diagnostic. It shares the path classification used by
+// AST rendering so identity-bearing credentials (such as SNMP community names)
+// and value-bearing credentials cannot diverge across output surfaces.
+func redactSecretPath(path []string) []string {
+	indices := secretIndices(path)
+	if len(indices) == 0 {
+		return path
+	}
+	redacted := append([]string(nil), path...)
+	for _, index := range indices {
+		if index >= 0 && index < len(redacted) {
+			redacted[index] = SecretRedacted
+		}
+	}
+	return redacted
+}

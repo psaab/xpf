@@ -89,6 +89,9 @@ def build_config_drive(config, out=None, node_id=None, validate=True):
             if r.returncode != 0:
                 die("config REJECTED by commit-check — fix it or pass "
                     f"--no-validate:\n{r.stdout}{r.stderr}")
+            for line in r.stdout.splitlines():
+                if line.startswith("warning:"):
+                    print(f"WARNING: {line.partition(':')[2].strip()}")
         else:
             print("WARNING: no xpfd binary — skipping build-host validation "
                   "(the appliance still validates at first boot).", file=sys.stderr)
