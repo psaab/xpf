@@ -3,6 +3,8 @@ package cliterm
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -71,5 +73,62 @@ func TestOtherReadErrorsAlsoAbort(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tty vanished") {
 		t.Errorf("error %q loses the underlying cause", err)
+	}
+}
+
+func TestReadlineHistoryDoesNotPersistSubmittedPSK_10743(t *testing.T) {
+	const secretCommand = "set security ike policy pol1 pre-shared-key ascii-text LEAK-READLINE-PSK"
+
+	input, inputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = input.Close()
+		_ = inputWriter.Close()
+	})
+	if _, err := io.WriteString(inputWriter, secretCommand+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := inputWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	historyFile := filepath.Join(t.TempDir(), "history")
+	cfg := DisableReadlineHistoryAutoSave(&readline.Config{
+		HistoryFile:        historyFile,
+		HistoryLimit:       10000,
+		Stdin:              input,
+		Stdout:             io.Discard,
+		Stderr:             io.Discard,
+		FuncMakeRaw:        func() error { return nil },
+		FuncExitRaw:        func() error { return nil },
+		FuncGetWidth:       func() int { return 80 },
+		FuncOnWidthChanged: func(func()) {},
+	})
+
+	rl, err := readline.NewEx(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rl.Close()
+
+	got, err := rl.Readline()
+	if err != nil {
+		t.Fatalf("read submitted CLI line: %v", err)
+	}
+	if got != secretCommand {
+		t.Fatalf("readline returned %q, want %q", got, secretCommand)
+	}
+	if err := rl.Close(); err != nil {
+		t.Fatalf("close readline: %v", err)
+	}
+
+	history, err := os.ReadFile(historyFile)
+	if err != nil {
+		t.Fatalf("read history file: %v", err)
+	}
+	if strings.Contains(string(history), "LEAK-READLINE-PSK") {
+		t.Fatalf("readline persisted a submitted PSK in the history file: %q", history)
 	}
 }
