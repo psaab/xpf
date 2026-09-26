@@ -171,6 +171,36 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		return electNoChange, ""
 	}
 
+	// A completed operator transfer pins both ownership roles until the
+	// committed target yields or the operator resets the old owner. Keep the
+	// new owner primary against ordinary preempt; keep the old owner secondary
+	// while the peer claims primary, and through its local transfer grace when
+	// the peer heartbeat may still be stale. Weight-zero and explicit
+	// transfer-out decisions have already taken precedence above.
+	if rg.transferCommitRolePinned {
+		switch rg.transferCommitRole {
+		case StatePrimary:
+			if peerGroup.State == StatePrimary {
+				// The peer has explicitly reclaimed primary. Return to normal
+				// election so the requester can yield.
+				rg.transferCommitRolePinned = false
+			} else {
+				if rg.State != StatePrimary {
+					return electLocalPrimary, "Committed transfer keeps primary"
+				}
+				return electNoChange, ""
+			}
+		case StateSecondary:
+			if peerGroup.State == StatePrimary || time.Now().Before(m.localTransferOutHoldUntil[rg.GroupID]) {
+				if rg.State != StateSecondary {
+					return electLocalSecondary, "Committed transfer keeps secondary"
+				}
+				return electNoChange, ""
+			}
+			rg.transferCommitRolePinned = false
+		}
+	}
+
 	// Preempt enabled: higher effective priority wins.
 	// This takes priority over split-brain detection since preempt explicitly
 	// requests priority-based election.

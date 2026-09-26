@@ -203,6 +203,7 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	// returns; a local operator failover leaves it cleared so its deliberate
 	// hold is never auto-restored (#5079).
 	m.clearRemoteTransferOutLeaseLocked(rgID)
+	rg.transferCommitRolePinned = false
 	rg.ManualFailover = true
 	rg.ManualFailoverAt = time.Now()
 	rg.State = StateSecondaryHold
@@ -340,6 +341,7 @@ func (m *Manager) ForceSecondary() error {
 		// transfer-out lease so it is never auto-restored (#5079).
 		oldState := rg.State
 		m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
+		rg.transferCommitRolePinned = false
 		rg.Weight = 0
 		rg.ManualFailover = true
 		rg.ManualFailoverAt = time.Now()
@@ -376,6 +378,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 		slog.Info("cluster: kernel-upgrade hold cleared by failover reset (rejoin)", "rg", rgID)
 	}
 	rg.ManualFailover = false
+	rg.transferCommitRolePinned = false
 	rg.ManualFailoverAt = time.Time{}
 	// Drop any armed remote transfer-out lease for this RG, mirroring the
 	// ManualFailover / ForceSecondary(ISSU) / ManualFailoverBatch reset paths.
@@ -621,6 +624,10 @@ func (m *Manager) notePeerTransferCommitted(rgID int) {
 	defer m.mu.Unlock()
 
 	m.clearPeerTransferOutOverrideLocked(rgID)
+	if rg := m.groups[rgID]; rg != nil {
+		rg.transferCommitRolePinned = true
+		rg.transferCommitRole = StatePrimary
+	}
 	m.peerTransferCommitGraceUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 	peerGroup, ok := m.peerGroups[rgID]
 	if !ok {
@@ -739,14 +746,13 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 	if rg.State == StatePrimary {
 		return fmt.Errorf("%w: redundancy group %d still primary locally", ErrRemoteFailoverRejected, rgID)
 	}
-	if rg.State == StateSecondary && !rg.ManualFailover {
-		return nil
-	}
 
 	oldState := rg.State
 	rg.ManualFailover = false
 	rg.ManualFailoverAt = time.Time{}
 	rg.State = StateSecondary
+	rg.transferCommitRolePinned = true
+	rg.transferCommitRole = StateSecondary
 	// A completed transfer-out invalidates any stale inbound-transfer view
 	// from the previous owner direction. If we keep forcing the peer into
 	// secondary-hold here, the next heartbeat can immediately re-elect the
@@ -990,6 +996,7 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 		// Fresh batch failover supersedes any prior remote transfer-out lease;
 		// the remote path re-arms after this returns (#5079).
 		m.clearRemoteTransferOutLeaseLocked(rgID)
+		rg.transferCommitRolePinned = false
 		res.Applied = append(res.Applied, rgID)
 		rg.ManualFailover = true
 		rg.ManualFailoverAt = now
@@ -1211,6 +1218,10 @@ func (m *Manager) notePeerTransferCommittedBatch(rgIDs []int) {
 
 	for _, rgID := range rgIDs {
 		m.clearPeerTransferOutOverrideLocked(rgID)
+		if rg := m.groups[rgID]; rg != nil {
+			rg.transferCommitRolePinned = true
+			rg.transferCommitRole = StatePrimary
+		}
 		m.peerTransferCommitGraceUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 		peerGroup, ok := m.peerGroups[rgID]
 		if !ok {
@@ -1247,13 +1258,12 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 
 	for _, rgID := range ids {
 		rg := m.groups[rgID]
-		if rg.State == StateSecondary && !rg.ManualFailover {
-			continue
-		}
 		oldState := rg.State
 		rg.ManualFailover = false
 		rg.ManualFailoverAt = time.Time{}
 		rg.State = StateSecondary
+		rg.transferCommitRolePinned = true
+		rg.transferCommitRole = StateSecondary
 		// Clear stale inbound-transfer markers from the previous direction
 		// before we park this node as the old owner. Otherwise the next peer
 		// heartbeat can still force the peer into secondary-hold and snap the
