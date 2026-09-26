@@ -53,10 +53,10 @@ func (d *Daemon) initManagers(failClosed bool) error {
 			slog.Warn("failed to create routing manager", "err", err)
 		} else {
 			d.routing = rm
-			// #1827: flush the reserved probe-pin band (ip rules 50-99 +
-			// tables 7000-7049) before anything else runs, so a crashed
-			// daemon never leaks stale probe pins across restarts.
-			if err := d.routing.ClearProbePins(); err != nil {
+			// #10765: probe-pin tables and priorities are shared with host
+			// policy routing until xpf owns the host. Sweep only while the
+			// host-routing ownership gate is active.
+			if err := d.clearStaleProbePinsAtStartup(); err != nil {
 				slog.Warn("failed to clear stale probe pins", "err", err)
 			}
 		}
@@ -270,6 +270,16 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		}
 	}
 	return nil
+}
+
+// clearStaleProbePinsAtStartup removes stale probe pins only when xpf owns
+// the host's routing posture. An uncommitted package install on a foreign
+// host must preserve unrelated rules and routes in the same numeric bands.
+func (d *Daemon) clearStaleProbePinsAtStartup() error {
+	if !d.shouldManageTransitGate() {
+		return nil
+	}
+	return d.routing.ClearProbePins()
 }
 
 // loadAndBootstrapConfig loads the persisted configuration (DB, falling back to

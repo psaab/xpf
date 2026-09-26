@@ -353,8 +353,8 @@ delegate to the owning domain. Exported types:
   #1827). Constants live in `pkg/config` (`ProbeRulePriorityBase`,
   `ProbeTableBase` 7000-7049, `ProbeFwmarkBase` 0x1000) because
   `pkg/config` commit validation, this package, and `pkg/rpm` all
-  consume them. Cleared on daemon startup (`ClearProbePins`) so a
-  crashed daemon never leaks pins.
+  consume them. `ClearProbePins` sweeps the range at startup only when xpf owns
+  host routing posture; uncommitted foreign-host installs preserve it.
 - `100–199`: next-table inter-VRF leaking (static routes with
   `next-table` directive). `nextTableRulePriority` in `rules.go`.
   **The window is drawn down IPv4-FIRST, and that is enforced HERE

@@ -13,10 +13,11 @@
 // part of the dataplane snapshot.
 //
 // Per-test tables make "same target via two uplinks" (the normal
-// dual-WAN probe pattern) first-class. Startup runs a clear() pass over
-// the band and flushes the probe tables so a crashed daemon never leaks
-// stale pins (AGY r2-3). Pin state follows the prober lifecycle, not
-// config lifecycle.
+// dual-WAN probe pattern) first-class. Startup sweeps the band only on
+// hosts xpf owns, so a crashed daemon never leaks stale pins there while
+// uncommitted foreign-host boots preserve rules and routes in the shared
+// bands (AGY r2-3). Pin state follows the prober lifecycle, not config
+// lifecycle.
 package routing
 
 import (
@@ -253,8 +254,9 @@ func (p *probePinManager) Apply(pins []ProbePin) map[string]error {
 }
 
 // clear removes all ip rules in the probe-pin priority band and flushes
-// every route in the reserved probe tables (both families). Run at
-// daemon startup as well so a crashed daemon never leaks stale pins.
+// every route in the reserved probe tables (both families). The daemon's
+// startup caller runs this only when xpf owns host routing posture; Apply
+// also uses it before reprogramming configured pins.
 //
 // A RuleList/RouteListFiltered dump failure is aggregated and returned
 // (errors.Join, mirroring the pattern in rules.go) rather than silently
