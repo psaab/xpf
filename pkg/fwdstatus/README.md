@@ -106,18 +106,28 @@ root `pkg/dataplane` package, `pkg/cli`, or `pkg/grpcapi`.
   cache so it adds **zero** control-socket traffic. A second periodic
   `Status()` here would double the status rate (2/s) on the socket
   shared with session installs and starve them during bulk sync
-  (CLAUDE.md "Control socket contention"). On a cache miss (helper not
-  yet polled) the worker counters hold at their previous values,
-  preserving series monotonicity. `Build()` (on-demand `show chassis
-  forwarding`) still calls `Status()` directly — that is a rare CLI
-  diagnostic, not a periodic poller, so it is not a rate violation.
+- On a cache miss (helper not yet polled), worker counters hold at
+  their previous values and the sample is marked held; every worker
+  window spanning that miss renders invalid rather than treating the
+  interval as zero CPU. `Build()` (on-demand `show chassis forwarding`)
+  still calls `Status()` directly — that is a rare CLI diagnostic, not
+  a periodic poller, so it is not a rate violation.
 - The eBPF mode renders the worker-thread row as `N/A — eBPF path
   has no worker threads`. Don't add code that fakes a worker entry
   there; the N/A is informative.
 - Daemon CPU is per-core percent (can exceed 100 on a multi-core
-  daemon); worker CPU is computed as `Σ(thread_cpu_ns) / Σ(wall_ns)`,
-  i.e. a per-worker average effectively bounded around 100%, not a
-  multi-core sum.
+  daemon); it converts `/proc` ticks with runtime `getconf CLK_TCK`
+  when available and labels CPU and uptime approximate if the Linux
+  ABI fallback is needed. Heap RSS uses the runtime page size rather
+  than assuming 4 KiB.
+- CPU windows require enough history and a fresh sampler sample. A
+  newest sample older than two intervals invalidates the windows and
+  renders an explicit stale-sample note; worker windows intersecting a
+  held telemetry sample are invalid.
+- Worker CPU is computed as `Σ(thread_cpu_ns) / Σ(wall_ns)`, i.e. a
+  per-worker average effectively bounded around 100%, not a multi-core
+  sum. Busy-poll mode can report near-100% while idle; it is not a
+  throughput signal.
 - Windows shorter than the daemon uptime render as `-` to avoid lying
   about a 5 m average that hasn't elapsed yet.
 - **Online requires positive, in-window heartbeat evidence (#4875).**
