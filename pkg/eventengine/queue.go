@@ -32,67 +32,47 @@ import (
 // duplicates and starve an unrelated policy's remediation into a queue-full drop.
 const actionQueueDepth = 64
 
-// enqueue adds an action to the bounded worker queue with dedup-by-policy: a
-// newer trigger of the same policy supersedes an older queued one (there is no
-// value in applying a stale remediation twice), which also bounds the queue to
-// one pending action per policy. If the queue is full of OTHER policies'
-// actions, the new action is dropped (counted) rather than blocking the caller
-// goroutine (#2157 bounded queue).
+// enqueue adds an action with dedup-by-policy. A critical security/firewall
+// mutation enters ahead of ordinary queued work; FIFO remains stable within
+// both classes. When the queue is full, a critical action displaces the newest
+// ordinary action so it can still enter the bounded queue.
 //
-// #5853: the dedup runs on EVERY enqueue via supersede, not only when the
-// channel is full. The pre-#5853 fast path did an UNCONDITIONAL send first and
-// only deduped in the full/`default` branch, so while the worker was blocked
-// behind the config lock a burst from ONE policy filled all 64 slots with
-// redundant duplicates (later discarded by cooldown/staleness) and the next
-// remediation for an UNRELATED policy was dropped queue-full. Draining and
-// replacing the same-policy entry up front keeps at most one pending action per
-// policy, so a same-policy burst occupies a single slot and leaves the rest free
-// for other policies. supersede is non-blocking (select-with-default drain +
-// refill), so this never blocks the caller even mid-shutdown (e.actions is never
-// closed); a genuine full-of-other-policies queue still drops the new action
-// (counted) via supersede returning false.
+// A displaced action is a real capacity loss, not a supersede. Its edge latch is
+// released after enqueueMu is dropped so that the policy can retry on a fresh
+// event (#6810). The new critical action remains admitted.
 //
 // The whole body runs under enqueueMu (#5062) so concurrent producers cannot
-// interleave: supersede's drain+refill must be atomic w.r.t. other producers,
-// otherwise a second producer could take a slot supersede freed while draining
-// and force supersede to drop an already-accepted survivor. See the enqueueMu
-// field comment for the lock-ordering rationale.
-// enqueue returns whether the action was ADMITTED — i.e. whether an equivalent
-// action for this policy is now queued for the worker. It returns false only
-// when nothing will run: a genuine capacity drop, or a shutdown fast-exit.
+// interleave supersede's drain-and-refill.
 //
-// #6810: the verdict exists because the caller has already armed the edge latch
-// for this crossing by the time it gets here. Before this, enqueue returned
-// nothing, so a dropped action was indistinguishable from an admitted one at
-// the call site and the latch stayed armed over a remediation that never ran.
-// A superseded placement still counts as admitted: the newer equivalent action
-// IS queued, which is exactly what the latch is asserting.
+// enqueue reports whether the action now has a queued equivalent. The caller
+// rolls back the current action's latch when admission fails; enqueue handles
+// the latch for any displaced ordinary action after releasing enqueueMu.
 func (e *Engine) enqueue(a plannedAction) bool {
 	e.enqueueMu.Lock()
-	defer e.enqueueMu.Unlock()
-	// Fast exit during shutdown: don't churn the queue for an action the worker
-	// will never apply. supersede would otherwise still succeed (the channel is
-	// unbounded-in-shutdown only in that it is never closed), but there is no
-	// consumer left to drain it.
 	select {
 	case <-e.stopCh:
+		e.enqueueMu.Unlock()
 		return false
 	default:
 	}
-	if e.supersede(a) {
+	admitted, evicted, hasEvicted := e.supersede(a)
+	e.enqueueMu.Unlock()
+	if hasEvicted {
+		e.releaseEdgeLatch(evicted.policyName, evicted.event, evicted.semRev)
+		slog.Warn("event-options: critical remediation displaced queued action",
+			"policy", evicted.policyName, "critical-policy", a.policyName)
+	}
+	if admitted {
 		return true
 	}
-	// supersede could not place `a`: the queue is full of OTHER policies'
-	// actions and there was no same-policy entry to evict. This is the only
-	// genuine capacity drop (an unrelated policy really did fill the queue).
 	e.counters.droppedQueueFull.Add(1)
 	slog.Warn("event-options: action queue full, dropping remediation",
 		"policy", a.policyName)
 	return false
 }
 
-// releaseEdgeLatch clears the #3756 edge latch that evaluateEvent armed for one
-// crossing, when the action that crossing authorized was never admitted (#6810).
+// releaseEdgeLatch clears the edge latch for a queue-capacity loss. The action
+// may have been rejected immediately or displaced by critical queued work.
 //
 // evaluateEvent arms the latch under e.mu and returns; HandleEvent classifies
 // and enqueues afterwards, outside that lock. If the queue is full of OTHER
@@ -135,37 +115,35 @@ func (e *Engine) releaseEdgeLatch(name, eventName, authRev string) {
 	}
 }
 
-// supersede non-blockingly rebuilds the queue, replacing any existing
-// same-policy action with a, and returns true if a was placed. It is the SOLE
-// enqueue path (#5853): every enqueue drains the buffered queue, drops any
-// existing same-policy entry (benign dedup, counted as superseded), re-enqueues
-// the surviving OTHER-policy actions in FIFO order, and places a at the tail. It
-// returns false only when the queue is full of OTHER policies and a could not be
-// placed (a genuine capacity drop the caller counts as droppedQueueFull).
+// criticalAction reports whether any operation mutates security/firewall
+// configuration. Classification is done once in classifyPlan, before enqueue.
+func criticalAction(a plannedAction) bool {
+	for _, op := range a.ops {
+		if op.critical {
+			return true
+		}
+	}
+	return false
+}
+
+// supersede rebuilds the bounded queue, replacing an existing same-policy
+// action and keeping critical actions before ordinary actions. It returns
+// whether the new action was placed and (if so) any ordinary action displaced
+// to make room for a critical one. It is the SOLE enqueue path (#5853).
 //
-// CALLER MUST HOLD enqueueMu (#5062). That is what makes the drain->re-enqueue
-// atomic w.r.t. other producers: while this runs, no other enqueue/supersede can
-// take a slot the drain just freed, so every surviving other-policy action is
-// re-enqueued exactly once in FIFO order (a survivor can never be dropped). The
-// only concurrent actor is the consumer (actionWorker), which just REMOVES
-// items, so the drain sees at most the buffered entries and the loop is bounded
-// with no need to guard against a producer refilling underneath it.
-func (e *Engine) supersede(a plannedAction) bool {
+// CALLER MUST HOLD enqueueMu (#5062). No other producer can refill a slot
+// during drain->refill; the only concurrent actor is the consumer, which only
+// removes entries. A full queue may therefore reject a normal action, or reject
+// a critical action only when every queued action is already critical.
+func (e *Engine) supersede(a plannedAction) (bool, plannedAction, bool) {
 	drained := make([]plannedAction, 0, actionQueueDepth)
-	replaced := false
-	// Drain whatever is currently buffered.
+	var evicted plannedAction
+	hasEvicted := false
 	for {
 		select {
 		case old := <-e.actions:
 			e.counters.queueDepth.Add(-1)
 			if old.policyName == a.policyName {
-				// Drop the stale same-policy action; it is superseded by the
-				// newer trigger a. This is a benign dedup — the newer equivalent
-				// action still runs — NOT a capacity loss, so count it as
-				// superseded rather than droppedQueueFull (#5853). Inflating the
-				// alert-worthy queue_full metric on every same-policy burst
-				// (which the early dedup makes routine) would mask real capacity
-				// drops.
 				e.counters.superseded.Add(1)
 				continue
 			}
@@ -175,23 +153,39 @@ func (e *Engine) supersede(a plannedAction) bool {
 		}
 	}
 refill:
-	// Test-only seam (#5062): the drain->re-enqueue boundary. In production this
-	// is nil. A concurrency test sets it to drive a second producer into the
-	// freed slots here and prove enqueueMu serializes it (the survivors are
-	// preserved regardless of what the injected producer does).
 	if e.afterDrainFn != nil {
 		e.afterDrainFn()
 	}
-	// Re-enqueue the surviving other-policy actions in their original FIFO
-	// order, then place the new (superseding) action at the TAIL (#2869).
-	// Prepending `a` would jump it ahead of every already-queued action of
-	// OTHER policies, converting the documented FIFO queue into LIFO for the
-	// newest arrival and starving older queued remediations under sustained
-	// event frequency. Supersede must only drop/replace the stale SAME-policy
-	// entry (done in the drain loop above); it must not reorder unrelated
-	// policies relative to the order their events were observed.
-	all := append(drained, a)
-	for _, item := range all {
+	priority := criticalAction(a)
+	if len(drained) == actionQueueDepth && priority {
+		for i := len(drained) - 1; i >= 0; i-- {
+			if criticalAction(drained[i]) {
+				continue
+			}
+			evicted = drained[i]
+			hasEvicted = true
+			copy(drained[i:], drained[i+1:])
+			drained = drained[:len(drained)-1]
+			e.counters.droppedQueueFull.Add(1)
+			break
+		}
+	}
+	placed := len(drained) < actionQueueDepth
+	if placed {
+		if priority {
+			i := 0
+			for i < len(drained) && criticalAction(drained[i]) {
+				i++
+			}
+			drained = append(drained, plannedAction{})
+			copy(drained[i+1:], drained[i:])
+			drained[i] = a
+		} else {
+			drained = append(drained, a)
+		}
+	}
+	replaced := false
+	for _, item := range drained {
 		select {
 		case e.actions <- item:
 			e.counters.queueDepth.Add(1)
@@ -199,17 +193,10 @@ refill:
 				replaced = true
 			}
 		default:
-			// Still no room (lost the race to another producer, or the queue
-			// is full of unrelated policies and there was no stale same-policy
-			// entry to evict). Count the loss for any SURVIVOR we could not
-			// re-place — but NOT for the new action `a` itself: supersede
-			// returns false in that case and enqueue owns `a`'s single
-			// queue_full count + warn. Counting it here too would
-			// double-increment xpf_event_actions_dropped_total (#2869).
 			if item.policyName != a.policyName {
 				e.counters.droppedQueueFull.Add(1)
 			}
 		}
 	}
-	return replaced
+	return replaced, evicted, hasEvicted
 }

@@ -99,9 +99,9 @@ A `change-configuration` action's `then` commands are applied as an
 all-or-nothing transaction:
 
 1. **Pre-classify** the `then` commands into a typed plan BEFORE touching the
-   candidate. An unparseable `set`/`delete` or an unknown command type rejects
-   the WHOLE batch immediately (no lock taken, no queue slot) and bumps
-   `xpf_event_actions_rejected_total`.
+   candidate. An unparseable `set`/`delete`, an unknown command type, or more
+   than eight `ThenCommands` rejects the WHOLE batch immediately (no lock taken,
+   no queue slot) and bumps `xpf_event_actions_rejected_total`.
 2. **Apply to the candidate** (`EnterConfigure` clones the active config — the
    candidate IS the rollback). Any op error discards the candidate
    (`ExitConfigure`) and rejects the batch. **No partial apply ever commits.**
@@ -113,6 +113,15 @@ all-or-nothing transaction:
 A `delete` of a missing path is a **tolerated exception** (logged at Debug):
 Junos `change-configuration` semantics, and a missing delete target is not a
 half-applied batch.
+
+## Clone-cost bound (#10877)
+
+Each candidate set/delete clones the full tree to stamp event planting-class
+provenance. `classifyPlan` therefore rejects more than eight `ThenCommands`
+before queue admission, bounding this per-operation clone multiplier while
+retaining small multi-command remediations. `BenchmarkRemediationBatchCloneCost`
+measures clone-only batch cost across tree sizes and command counts; run it with
+`go test ./pkg/eventengine -run='^$' -bench='^BenchmarkRemediationBatchCloneCost$'`.
 
 **Audit description (#3754/#10874):** the remediation commit carries a
 deterministic description — `event-options policy <name>:
@@ -323,17 +332,20 @@ cannot occur.
   overflow in its refill loop — it only counts a SURVIVOR it could not re-place).
   Loss is always counted, never silent, and never double-counted (#2869), and the
   benign dedup no longer inflates the alert-worthy `queue_full` metric.
-- **FIFO ordering across policies (#2869):** the queue is FIFO. Each enqueue's
-  `supersede()` drains/refills the queue to drop any stale same-policy entry, then
-  re-enqueues the surviving OTHER-policy actions in their original order and
-  places the new (superseding) action at the **TAIL** — never the head.
-  Prepending the new action would let the newest event jump ahead of every older
-  queued remediation (LIFO), starving older policies under sustained event
-  frequency and reordering remediation against the order events were observed.
-  Supersede therefore only ever drops/replaces the stale same-policy entry; it
-  does not reorder unrelated policies. Locked by
-  `TestSupersede_PreservesFIFOPlacesNewAtTail` (fail-on-revert: a prepend lands
-  the new action at index 0 and the test goes RED).
+- **Critical security/firewall lane (#10877):** actions whose parsed target is
+  under the top-level `security` or `firewall` tree are queued ahead of ordinary
+  actions, with FIFO preserved within each class. A critical action arriving at
+  a full queue displaces the newest ordinary action; that real loss increments
+  `queue_full` and releases the displaced policy's edge latch so it can retry
+  on a fresh event. A full queue of critical actions can still reject another
+  critical action. The queue remains capped at 64 and does not preempt the
+  currently executing action.
+- **FIFO within priority classes (#2869/#10877):** each enqueue's `supersede()`
+  drains/refills the queue to drop any stale same-policy entry, then preserves
+  the surviving actions' order within their class. Ordinary actions remain
+  FIFO; critical security/firewall actions pass ordinary queued work by design.
+  New actions join the tail of their own class. This prevents LIFO starvation
+  while bounding a critical action's wait behind ordinary policies.
 - **Producer serialization — no capacity theft (#5062):** `HandleEvent`
   evaluates under `e.mu` but RELEASES it before `enqueue`, so many RPM-probe
   goroutines run `enqueue` concurrently. `supersede()` DRAINS the accepted
