@@ -206,6 +206,15 @@ pub(crate) struct ShardedNeighborMap {
     /// #10704: cumulative count of unsolicited ARP/neighbor updates refused
     /// because they tried to replace a live differing MAC.
     arp_overwrite_refusals: AtomicU64,
+    /// #10854: cumulative count of pre-policy RX source-learns refused
+    /// because they tried to overwrite a live entry's differing MAC.
+    /// Source learning runs on RX before screen/policy admission, so the
+    /// pre-policy arm is create-only; an admitted packet re-learns through
+    /// the post-admission legs (slow-path forward choke + flow-cache-hit
+    /// forward), which is what keeps a refusal from wedging a genuine MAC
+    /// move. Relaxed — observability only, off the fast path except on a
+    /// refusal.
+    rx_learn_overwrite_refusals: AtomicU64,
 }
 
 /// Shard index for a key. The Knuth multiplier `0x9E3779B97F4A7C15`
@@ -293,7 +302,23 @@ impl ShardedNeighborMap {
             learn_cap_drops: AtomicU64::new(0),
             insert_generation: AtomicU64::new(0),
             arp_overwrite_refusals: AtomicU64::new(0),
+            rx_learn_overwrite_refusals: AtomicU64::new(0),
         }
+    }
+    /// #10854: refused pre-policy transit learns that would overwrite a
+    /// neighbor with a different MAC.
+    #[cfg(test)]
+    pub(crate) fn rx_learn_overwrite_refusals(&self) -> u64 {
+        self.rx_learn_overwrite_refusals
+            .load(Ordering::Relaxed)
+    }
+    /// #10854: account one pre-policy source learn refused because it would
+    /// replace an existing neighbor's MAC. Kept distinct from capacity
+    /// refusals so existing learn-cap telemetry retains its meaning.
+    #[inline]
+    pub(crate) fn note_rx_learn_overwrite_refusal(&self) {
+        self.rx_learn_overwrite_refusals
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// #5673: cumulative data-path learns refused by the aggregate
@@ -820,6 +845,43 @@ impl ShardedNeighborMap {
         // #9071: see bulk_replace_neighbors. Same omission, same consequence,
         // and the same "only when something changed" condition.
         self.bump_insert_generation_9071(installed);
+    }
+    /// #10854: create-only variant for RX source-learns, which run before
+    /// screen and policy admission. Creates missing keys and refreshes the
+    /// same MAC, but atomically refuses a differing live MAC so an unadmitted
+    /// packet cannot poison a neighbor used by another flow. The admitted
+    /// forward path uses `learn_pair_if_changed` to allow genuine MAC moves.
+    ///
+    /// Like `learn_pair_if_changed`, installs a VLAN physical/logical pair
+    /// atomically and enforces the per-shard cap. Same-MAC callers are
+    /// expected to elide this all-shard lock with their single-shard precheck.
+    pub(crate) fn learn_pair_if_absent_or_same(
+        &self,
+        keys: &[(i32, IpAddr)],
+        val: NeighborEntry,
+    ) -> bool {
+        let installed = self.with_all_shards(|bulk| {
+            if keys.iter().any(|key| {
+                bulk.get(key).is_some_and(|prior| prior.mac != val.mac)
+            }) {
+                self.rx_learn_overwrite_refusals
+                    .fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            let blocked = keys.iter().any(|key| {
+                bulk.get(key).is_none() && bulk.len_for(key) >= MAX_DYNAMIC_NEIGHBORS_PER_SHARD
+            });
+            if blocked {
+                self.learn_cap_drops.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            for key in keys {
+                bulk.insert(*key, val);
+            }
+            !keys.is_empty()
+        });
+        self.bump_insert_generation_9071(installed);
+        installed
     }
 
     /// #9071: advance the insert generation.

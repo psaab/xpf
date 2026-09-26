@@ -66,12 +66,16 @@ the userspace dataplane admission boundary is in
   per-shard cap (`MAX_DYNAMIC_NEIGHBORS_PER_SHARD`, aggregate
   `MAX_DYNAMIC_NEIGHBORS`, `afxdp/sharded_neighbor.rs`): a NEW data-path learn
   whose target shard is full is refused (the packet still forwards — a
-  learn-path guard, not a packet filter), while an UPDATE to an already-learned
-  neighbor (a real MAC failover) and the authoritative control-plane /
-  on-demand-resolver installs are never capped. The RX-learn caller
-  short-circuits the bulk lock once its pre-check sees every candidate key
-  new-and-at-cap, so a steady flood no longer serializes the shards. Refusals
-  are surfaced as `xpf_userspace_dynamic_neighbor_learn_cap_drops_total`;
+  learn-path guard, not a packet filter). The pre-policy source-learn is
+  create-only: a differing live MAC is preserved and the refusal is counted
+  separately, so a policy-denied spoof cannot poison a live neighbor. Once a
+  packet passes screen, policy, and output-filter admission, its live source
+  MAC may update an existing entry; this preserves convergence for a genuine
+  permitted host move. Authoritative control-plane / on-demand-resolver
+  installs retain their existing update semantics.
+  The RX-learn caller short-circuits the bulk lock once its pre-check sees every
+  candidate key new-and-at-cap, so a steady flood no longer serializes the shards. Capacity
+  refusals are surfaced as `xpf_userspace_dynamic_neighbor_learn_cap_drops_total`;
   NDP Neighbor Advertisement learn refusals are separately surfaced as
   `xpf_userspace_ndp_na_frag_refused_total` (RFC 6980 Fragment header) and
   `xpf_userspace_ndp_na_bad_source_refused_total` (invalid on-link-unicast

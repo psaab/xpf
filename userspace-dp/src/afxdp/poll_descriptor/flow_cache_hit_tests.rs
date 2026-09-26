@@ -1127,6 +1127,7 @@ fn run_stage_seeded(
     let mut owned_packet_frame: Option<Vec<u8>> = None;
     let mut mirror_sample_counter = initial_sample_counter;
 
+    let mut last_learned_neighbor = None;
     // #6304: measure only THIS call. The fixture's own setup pushes (the AtCap
     // precondition, the interleaving-producer probes) go through the same
     // admission primitive, so the reset has to sit immediately before the call
@@ -1156,6 +1157,7 @@ fn run_stage_seeded(
         seed.now_ns,
         1,
         &fixture.worker_ctx(),
+        &mut last_learned_neighbor,
         &mut telemetry,
     );
     let admission_attempts = crate::afxdp::binding_state::pending_tx_admission_attempts();
@@ -3635,4 +3637,49 @@ fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
     assert_eq!(run.dbg_forward, 0);
     assert_eq!(run.dbg_tx, 0);
     assert_eq!(run.sessions.len(), 1, "the gate must preserve the live session");
+}
+
+/// #10854: the admitted cache-hit learn must retain the original RX source MAC
+/// even though the same-binding fast path rewrites the Ethernet source to the
+/// router's egress MAC in place.
+#[test]
+fn admitted_cache_hit_learns_original_rx_source_mac_after_in_place_rewrite() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let packet_mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let mut frame = tcp_v4_ack_frame();
+    frame[6..12].copy_from_slice(&packet_mac);
+    let egress_mac = cached_entry().descriptor.src_mac;
+    let run = run_stage(&fixture, &frame, 0);
+
+    assert_eq!(
+        run.flow_cache_tallies,
+        (1, 0, 0),
+        "must be a real cache hit"
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    let tx_frame = run
+        .tx_frame
+        .expect("same-binding hit must stage an in-place TX frame");
+    assert_eq!(
+        &tx_frame[6..12],
+        &egress_mac,
+        "the egress rewrite must change the live UMEM source MAC",
+    );
+    let key = test_key().src_ip;
+    assert_eq!(
+        fixture
+            .dynamic_neighbors
+            .get(&(PHYS_INGRESS_IFINDEX, key))
+            .map(|entry| entry.mac),
+        Some(packet_mac),
+        "the neighbor map must learn the original source MAC, not the rewritten router MAC",
+    );
+    assert_eq!(
+        fixture
+            .dynamic_neighbors
+            .get(&(LOGICAL_INGRESS_IFINDEX, key))
+            .map(|entry| entry.mac),
+        Some(packet_mac),
+        "the logical VLAN neighbor key must learn the original source MAC too",
+    );
 }

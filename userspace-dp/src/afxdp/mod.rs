@@ -1688,8 +1688,9 @@ mod neigh_schedule;
 mod neighbor_dispatch;
 use neighbor_dispatch::{
     PendingNeighAdmission, build_missing_neighbor_session_metadata,
-    learn_dynamic_neighbor_from_packet, pending_neigh_admission, pending_neigh_flow_key,
-    record_pending_neigh_admission_drop, retry_pending_neigh,
+    learn_dynamic_neighbor_after_admission, learn_dynamic_neighbor_from_packet,
+    pending_neigh_admission, pending_neigh_flow_key, record_pending_neigh_admission_drop,
+    retry_pending_neigh,
 };
 // `learn_dynamic_neighbor` / `pair_write_needed` are only referenced
 // by tests in afxdp/forwarding/tests.rs and afxdp/tests.rs; gate the

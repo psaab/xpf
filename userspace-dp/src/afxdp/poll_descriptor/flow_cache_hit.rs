@@ -98,6 +98,7 @@ pub(super) fn stage_flow_cache_hit(
     now_ns: u64,
     now_secs: u64,
     worker_ctx: &WorkerContext,
+    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
     telemetry: &mut TelemetryContext,
 ) -> FlowCacheOutcome {
     // Re-derive packet_frame locally (matches L477 of the caller's
@@ -105,6 +106,16 @@ pub(super) fn stage_flow_cache_hit(
     // this helper; NLL releases it before the take() at the
     // fallback-forward branch.
     let packet_frame: &[u8] = owned_packet_frame.as_deref().unwrap_or(raw_frame);
+    // The helper may move an owned decapsulated frame into a queued request.
+    // Only native live frames are eligible for source-neighbor learning.
+    let learn_from_live_frame = owned_packet_frame.is_none();
+    let live_source_mac: Option<[u8; 6]> = if learn_from_live_frame {
+        packet_frame
+            .get(6..12)
+            .and_then(|bytes| bytes.try_into().ok())
+    } else {
+        None
+    };
     // #10670: the cache key omits the validated fabric arrival zone. Check
     // the live session before lookup_counted can account a foreign packet as
     // a cache hit or touch the owner's entry. Preserve same-zone hits; foreign
@@ -669,6 +680,20 @@ pub(super) fn stage_flow_cache_hit(
                     recycle_now = false;
                 }
             }
+        }
+        if !recycle_now && let Some(src_mac) = live_source_mac {
+            // The request was built only after the cached flow's admission and
+            // output-filter checks passed. Learn the original Ethernet source
+            // captured before an in-place rewrite; the pre-policy RX learn above
+            // is create-only.
+            learn_dynamic_neighbor_after_admission(
+                meta,
+                flow.src_ip,
+                src_mac,
+                last_learned_neighbor,
+                worker_ctx.forwarding,
+                worker_ctx.dynamic_neighbors,
+            );
         }
         if recycle_now {
             scratch.scratch_recycle.push(desc.addr);
