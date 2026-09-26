@@ -259,9 +259,9 @@ func (d *Daemon) collectDHCPRoutes() []frr.DHCPRoute {
 }
 
 // dhcpConnectedPrefixesByVRF inventories the active config's interface
-// addresses as connected prefixes, keyed by routing context (#10762). VRF
-// ownership uses dhcpLeaseRoutingInstances and lease interface keys so it
-// follows the same name conversion as collectDHCPRoutes (#9135).
+// addresses as connected prefixes, keyed by routing context (#10762). Static
+// unit ownership is resolved structurally from routing-instance references;
+// DHCPLeaseIfName cannot distinguish two untagged logical units on one device.
 //
 // Management-VRF-bound interfaces are excluded: their addresses are connected
 // in table 999, not in any FRR routing context.
@@ -270,12 +270,42 @@ func dhcpConnectedPrefixesByVRF(cfg *config.Config, mgmtSet map[string]bool) map
 	if cfg == nil {
 		return out
 	}
-	vrfByLeaseKey := dhcpLeaseRoutingInstances(cfg)
+	type interfaceUnit struct {
+		name string
+		num  int
+	}
+	unitVRF := map[interfaceUnit]string{}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" {
+			continue
+		}
+		for _, member := range ri.Interfaces {
+			claim := resolveMemberDeclaredBase(cfg, member)
+			if !claim.ok {
+				continue
+			}
+			ifc := cfg.Interfaces.Interfaces[claim.base]
+			if ifc == nil {
+				continue
+			}
+			if claim.hasUnit {
+				if claim.unit >= 0 && ifc.Units[claim.unit] != nil {
+					unitVRF[interfaceUnit{name: claim.base, num: claim.unit}] = ri.Name
+				}
+				continue
+			}
+			for num, unit := range ifc.Units {
+				if unit != nil {
+					unitVRF[interfaceUnit{name: claim.base, num: num}] = ri.Name
+				}
+			}
+		}
+	}
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil {
 			continue
 		}
-		for _, unit := range ifc.Units {
+		for num, unit := range ifc.Units {
 			if unit == nil || len(unit.Addresses) == 0 {
 				continue
 			}
@@ -283,7 +313,7 @@ func dhcpConnectedPrefixesByVRF(cfg *config.Config, mgmtSet map[string]bool) map
 			if mgmtSet[key] {
 				continue
 			}
-			vrf := vrfByLeaseKey[key]
+			vrf := unitVRF[interfaceUnit{name: name, num: num}]
 			for _, raw := range unit.Addresses {
 				prefix, err := netip.ParsePrefix(raw)
 				if err == nil {

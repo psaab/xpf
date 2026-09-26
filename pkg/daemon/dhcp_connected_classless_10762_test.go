@@ -67,3 +67,43 @@ func TestCollectDHCPRoutesSuppressesClasslessRoutesInsideConnectedSubnets10762(t
 	}
 	t.Fatal("explicit classless trust override did not restore the connected-overlap route")
 }
+
+// A DHCP lease key on an untagged device does not include the logical unit
+// number. Do not use it to assign static connected prefixes to an instance:
+// a unit-1 member must not move unit 0's connected subnet out of the default
+// table.
+func TestConnectedPrefixRoutingContextUsesLogicalUnitOwnership10762(t *testing.T) {
+	t.Setenv(dhcpClasslessTrustOverrideEnv, "")
+	store := testStoreWithSetConfig(t, []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.2.1/24",
+		"set interfaces ge-0/0/1 unit 0 family inet dhcp",
+		"set routing-instances tenant instance-type virtual-router",
+		"set routing-instances tenant interface ge-0/0/0.1",
+	})
+	mgr := dhcp.NewManagerForTesting(nil)
+	mgr.SeedLeaseForTesting("ge-0-0-1", dhcp.AFInet, &dhcp.Lease{
+		Interface: "ge-0-0-1",
+		Family:    dhcp.AFInet,
+		Address:   netip.MustParsePrefix("198.51.100.10/24"),
+		Gateway:   netip.MustParseAddr("198.51.100.1"),
+		ClasslessRoutes: []dhcp.LeaseRoute{
+			{Destination: netip.MustParsePrefix("10.0.1.0/25"), Gateway: netip.MustParseAddr("198.51.100.1")},
+			{Destination: netip.MustParsePrefix("10.0.2.0/25"), Gateway: netip.MustParseAddr("198.51.100.1")},
+		},
+	})
+	routes := (&Daemon{store: store, dhcp: mgr}).collectDHCPRoutes()
+	got := make(map[string]int, len(routes))
+	for _, route := range routes {
+		got[route.Destination]++
+	}
+	if got["10.0.1.0/25"] != 0 {
+		t.Errorf("unit-0 connected prefix was misattributed to unit-1's VRF: %+v", routes)
+	}
+	if got["10.0.2.0/25"] != 1 {
+		t.Errorf("unit-1 connected prefix in another VRF suppressed a default-context route: %+v", routes)
+	}
+	if got[""] != 1 {
+		t.Errorf("DHCP default route was lost: %+v", routes)
+	}
+}
