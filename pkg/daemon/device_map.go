@@ -733,6 +733,18 @@ func (d *Daemon) deviceMapCommitPreflight(candidate, rollbackTarget *config.Conf
 // skip the check. This keeps the on-target genuine-strand rejection (mapped
 // NICs present but management lost) and the on-target card-swap refusal intact.
 func CheckDeviceMapStrandsManagement(cfg *config.Config) (reason string, offTarget bool, err error) {
+	return checkDeviceMapStrandsManagement(cfg, true)
+}
+
+// CheckDeviceMapStrandsManagementOnTarget checks a day-0 config against the
+// hardware it will be imported on. Unlike build/deploy-host check-config,
+// every-unbound identities are not evidence of an off-target invocation here:
+// the import preflight must assess the actual present NICs and fail closed.
+func CheckDeviceMapStrandsManagementOnTarget(cfg *config.Config) (reason string, offTarget bool, err error) {
+	return checkDeviceMapStrandsManagement(cfg, false)
+}
+
+func checkDeviceMapStrandsManagement(cfg *config.Config, allowOffTarget bool) (reason string, offTarget bool, err error) {
 	if cfg == nil || !cfg.Chassis.DeviceMap.Active() {
 		return "", false, nil
 	}
@@ -740,7 +752,7 @@ func CheckDeviceMapStrandsManagement(cfg *config.Config) (reason string, offTarg
 	if err != nil {
 		return "", false, err
 	}
-	if !anyMappedIdentityPresent(cfg, nics) {
+	if allowOffTarget && !anyMappedIdentityPresent(cfg, nics) {
 		return "", true, nil
 	}
 	lifelineName, _ := resolveLifelineCurrentName()

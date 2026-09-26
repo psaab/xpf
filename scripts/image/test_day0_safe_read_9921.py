@@ -386,6 +386,7 @@ class TryDeviceTests(unittest.TestCase):
         self.assertEqual(rc, 0, out[-600:])
         self.assertEqual((self.xpf_dir / "node-id").read_text(), "1\n")
         self.assertIn("-node-id 1", self.args_file.read_text())
+        self.assertIn("-on-target", self.args_file.read_text())
 
     def test_ignores_bad_node_id_for_standalone_config(self):
         self._medium("/dev/fake0", {

@@ -350,11 +350,13 @@ func main() {
 		fs := flag.NewFlagSet("check-config", flag.ContinueOnError)
 		nodeID := fs.Int("node-id", -1,
 			"cluster node ID; required for HA configs, 0 or 1 (-1 = standalone)")
+		onTarget := fs.Bool("on-target", false,
+			"run device-map preflight against target hardware and fail closed")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			os.Exit(1)
 		}
 		if fs.NArg() != 1 {
-			fmt.Fprintf(os.Stderr, "usage: xpfd check-config [-node-id 0|1] <config-file>\n")
+			fmt.Fprintf(os.Stderr, "usage: xpfd check-config [-node-id 0|1] [-on-target] <config-file>\n")
 			os.Exit(1)
 		}
 		if *nodeID < -1 || *nodeID > 1 {
@@ -377,17 +379,23 @@ func main() {
 
 		// #4183: the strict parse+schema+compile gate above does NOT catch a
 		// device-map that would strand management on next boot — the same
-		// preflight an interactive commit runs. When check-config runs ON THE
-		// TARGET HARDWARE (the mapped NICs are present) this hard-FAILs,
-		// converting a first-boot console-only lockout into a day-0 rejection
-		// while it can still be fixed. When run OFF-target (the config-drive is
-		// built/deployed off-box — #4191 review), none of the mapped identities
-		// resolve, so the check is SKIPPED with a warning rather than
-		// false-rejecting a valid map; the on-target first-boot preflight is the
-		// real gate there.
-		if reason, offTarget, derr := daemon.CheckDeviceMapStrandsManagement(compiled); derr != nil {
-			// NIC enumeration failed (transient/environmental). Warn but do
-			// not fail the check — the runtime lifeline is the backstop.
+		// preflight an interactive commit runs. Build/deploy hosts use the
+		// default mode: when none of the mapped identities are present, the
+		// hardware is off-target and the map check is skipped rather than
+		// false-rejecting a valid config-drive. The day-0 loader runs on the
+		// target and passes -on-target, so an all-unbound map is checked against
+		// the target's NIC inventory instead of being mistaken for off-target.
+		// On-target NIC enumeration errors also fail closed, matching import's
+		// device-map preflight.
+		checkStrands := daemon.CheckDeviceMapStrandsManagement
+		if *onTarget {
+			checkStrands = daemon.CheckDeviceMapStrandsManagementOnTarget
+		}
+		if reason, offTarget, derr := checkStrands(compiled); derr != nil {
+			if *onTarget {
+				fmt.Printf("FAIL %s\ndevice-map strand preflight could not read the target NIC inventory: %v\n", path, derr)
+				os.Exit(2)
+			}
 			fmt.Fprintf(os.Stderr, "check-config: device-map strand preflight skipped: %v\n", derr)
 		} else if offTarget {
 			fmt.Fprintf(os.Stderr, "check-config: device-map strand check skipped: none of the "+
