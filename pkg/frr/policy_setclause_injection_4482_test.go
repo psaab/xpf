@@ -54,6 +54,15 @@ func TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482(t *testing.T
 			"pl-evil":  {Name: "pl-evil", Prefixes: []string{"10.0.0.0/8\n router bgp 65000"}},
 			"pl-evil6": {Name: "pl-evil6", Prefixes: []string{"2001:db8::/32\n router bgp 65000"}},
 		},
+		Communities: map[string]*config.CommunityDef{
+			// A `match community` name must now resolve to an emitted list
+			// under #10822; define this one so the test exercises name
+			// sanitation rather than the dangling-reference guard.
+			"cm1\n neighbor 7.7.7.7 remote-as 65000": {
+				Name:    "cm1\n neighbor 7.7.7.7 remote-as 65000",
+				Members: []string{"65000:100"},
+			},
+		},
 		ASPaths: map[string]*config.ASPathDef{
 			// The t3 `match as-path` name slot must resolve: since #9881
 			// the renderer never emits a dangling match (a reject term
