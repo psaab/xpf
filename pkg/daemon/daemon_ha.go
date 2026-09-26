@@ -17,6 +17,7 @@ import (
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/ra"
 	"github.com/psaab/xpf/pkg/vrrp"
 )
 
@@ -1439,10 +1440,11 @@ func (d *Daemon) reconcileRGState() {
 			}
 		}
 
-		// Cold-boot goodbyes clear a prior node's distinct router identity.
-		// The stable RETH source is shared by both peers, so an inactive node
-		// must not withdraw the identity the active peer continues to advertise.
-		// Keep the one-shot for any explicitly configured per-node source.
+		// startupGoodbyeRA tracks whether cold-backup cleanup is complete for each
+		// inactive RG. Distinct router identities must successfully receive a
+		// goodbye; the shared stable RETH identity is intentionally suppressed so a
+		// cold backup cannot withdraw the peer's live router. A send failure leaves
+		// the bit unset so the reconcile ticker retries (#5093).
 		if !tr.Active && d.ra != nil && d.startupGoodbyeNeeded(rgID) {
 			cfg := d.store.ActiveConfig()
 			if cfg != nil {
@@ -1458,7 +1460,6 @@ func (d *Daemon) reconcileRGState() {
 						rgRA = append(rgRA, ra)
 					}
 				}
-				rgRA = startupGoodbyeConfigs(cfg, rgID, rgRA)
 				if len(rgRA) > 0 && d.startupGoodbyeBegin(rgID) {
 					// Emit off the reconcile goroutine (bind retry can take ~2s);
 					// the sticky bit is set only after the goodbye lands so a
@@ -1518,25 +1519,30 @@ func (d *Daemon) startupGoodbyeBegin(rgID int) bool {
 }
 
 // runStartupGoodbye emits the cold-boot one-shot goodbye for an inactive RG and
-// marks the RG done ONLY when every interface's lifetime-0 RA was written (or
-// intentionally skipped because another owner already holds it). On any
-// per-interface write/bind failure it leaves the sticky bit unset so the next
-// reconcile pass (2s ticker) retries — the old code set the bit before launching
-// the async withdraw, so a bind/write failure was never retried and the stale
-// IPv6 default-router identity lingered on hosts until Router Lifetime expiry
-// (#5093). Runs in its own goroutine; the in-flight slot serializes retries.
+// marks the RG done ONLY when every distinct-identity interface's lifetime-0 RA
+// was written (or intentionally skipped because another owner holds it). A
+// cluster's shared stable RETH identity is filtered: a goodbye from this cold
+// backup would also withdraw the peer's router. If both members are BACKUP, a
+// stale route may remain until Router Lifetime expiry; a future master's RA
+// refresh repairs it. On write/bind failure the sticky bit stays unset so the
+// next reconcile retries (#5093). Runs in its own goroutine; the in-flight slot
+// serializes retries.
 func (d *Daemon) runStartupGoodbye(rgID int, rgRA []*config.RAInterfaceConfig) {
-	withdraw := d.startupGoodbyeWithdrawFn
-	if withdraw == nil {
-		withdraw = d.ra.WithdrawOnce
-	}
-	results := withdraw(rgRA)
-	done := true
-	for _, r := range results {
-		if r.Err != nil {
-			done = false
-			slog.Warn("ra: startup goodbye failed; will retry on next reconcile",
-				"rg", rgID, "interface", r.Interface, "err", r.Err)
+	requested := len(rgRA)
+	rgRA = startupGoodbyeConfigs(rgRA)
+	done := len(rgRA) == 0
+	if !done {
+		withdraw := d.startupGoodbyeWithdrawFn
+		if withdraw == nil {
+			withdraw = d.ra.WithdrawOnce
+		}
+		done = true
+		for _, r := range withdraw(rgRA) {
+			if r.Err != nil {
+				done = false
+				slog.Warn("ra: startup goodbye failed; will retry on next reconcile",
+					"rg", rgID, "interface", r.Interface, "err", r.Err)
+			}
 		}
 	}
 
@@ -1550,26 +1556,25 @@ func (d *Daemon) runStartupGoodbye(rgID int, rgRA []*config.RAInterfaceConfig) {
 	}
 	d.startupGoodbyeMu.Unlock()
 
-	if done {
+	if done && requested > 0 && len(rgRA) == 0 {
+		slog.Info("ra: startup goodbye skipped for shared router identity", "rg", rgID)
+	} else if done {
 		slog.Info("ra: startup goodbye complete", "rg", rgID)
 	}
 }
 
-// startupGoodbyeConfigs removes interfaces using the stable shared RETH router
-// identity: a cold-boot secondary must not withdraw a router its peer serves.
-func startupGoodbyeConfigs(cfg *config.Config, rgID int, rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
-	if cfg == nil || cfg.Chassis.Cluster == nil {
+func startupGoodbyeConfigs(rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
+	if len(rgRA) == 0 {
 		return rgRA
 	}
-	sharedSource := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID).String()
-	kept := rgRA[:0]
-	for _, raCfg := range rgRA {
-		if raCfg == nil || raCfg.SourceLinkLocal == sharedSource {
+	filtered := make([]*config.RAInterfaceConfig, 0, len(rgRA))
+	for _, cfgRA := range rgRA {
+		if cfgRA == nil || isSharedStableRASource(cfgRA.SourceLinkLocal) {
 			continue
 		}
-		kept = append(kept, raCfg)
+		filtered = append(filtered, cfgRA)
 	}
-	return kept
+	return filtered
 }
 
 // rethInterfacesForRG returns the Linux interface names of RETH interfaces
@@ -1581,14 +1586,15 @@ func rethInterfacesForRG(cfg *config.Config, rgID int) []string {
 // rethInterfacesMatchingRG returns the Linux interface names of every RETH
 // interface whose redundancy group satisfies want.
 //
-// It is the SINGLE source for both RG-derived interface sets the cluster DHCP
-// filter needs — "which interfaces does THIS node currently master" and "which
-// interfaces are redundancy-group-scoped AT ALL" (#6520). Deriving the two from
-// one walker is not a style preference: a divergence between them is ALWAYS a
-// bug, because the filter's keep rule is exactly "RG-scoped implies mastered".
-// If one set resolved a RETH member differently from the other, a node-local
-// interface would be misread as an unmastered RG member (service dropped) or an
-// RG member as node-local (both nodes serve DHCP on one redundant segment).
+// It is the SINGLE source for RG-derived interface sets consumed by cluster
+// DHCP filtering and RA reconciliation. The DHCP filter requires two sets —
+// "which interfaces does THIS node currently master" and "which interfaces
+// are redundancy-group-scoped AT ALL" (#6520). Deriving them from one walker
+// is not a style preference: divergence between them is ALWAYS a bug, because
+// the filter's keep rule is exactly "RG-scoped implies mastered". If one set
+// resolved a RETH member differently from the other, a node-local interface
+// would be misread as an unmastered RG member (service dropped) or an RG member
+// as node-local (both nodes serve DHCP on one redundant segment).
 func rethInterfacesMatchingRG(cfg *config.Config, want func(rgID int) bool) []string {
 	var names []string
 	rgOwners := cfg.RethRGOwners() // #6781
@@ -1872,9 +1878,10 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 
 type raScopedClearer interface {
 	ClearInterfacesWithoutGoodbye([]string) error
+	Status() []ra.SenderInfo
 }
 
-func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Config, rgID int, allRA []*config.RAInterfaceConfig) error {
+func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Config, rgID int) error {
 	if clearer == nil || cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
@@ -1886,11 +1893,12 @@ func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Confi
 	for _, name := range rgIfaces {
 		rgIfaceSet[name] = true
 	}
-	sharedSource := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID).String()
 	var names []string
-	for _, raCfg := range allRA {
-		if raCfg != nil && rgIfaceSet[raCfg.Interface] && raCfg.SourceLinkLocal == sharedSource {
-			names = append(names, raCfg.Interface)
+	for _, sender := range clearer.Status() {
+		if sender.State == "active" &&
+			rgIfaceSet[sender.Interface] &&
+			isSharedStableRASource(sender.SrcAddr) {
+			names = append(names, sender.Interface)
 		}
 	}
 	if len(names) == 0 {
@@ -1940,7 +1948,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 		// started before this ownership transition. Later reconciles observe the
 		// already-inactive RG and cannot re-arm its sender.
 		d.raReconcileMu.Lock()
-		err := clearRethRASendersWithoutGoodbye(d.ra, cfg, rgID, d.buildRAConfigs(cfg))
+		err := clearRethRASendersWithoutGoodbye(d.ra, cfg, rgID)
 		d.raReconcileMu.Unlock()
 		if err != nil {
 			slog.Warn("ra: failed to clear demoted RG senders without goodbye",
@@ -2242,19 +2250,13 @@ func (d *Daemon) applyRethServices() {
 	}
 }
 
-// clearRethServices sends goodbye RAs (lifetime=0) and stops Kea DHCP
-// server. Called on VRRP BACKUP transition to prevent the secondary from
-// advertising RAs or serving DHCP leases. The goodbye RA tells hosts to
-// immediately remove this router as a default gateway.
+// clearRethServices is the legacy all-RG BACKUP hook. RA state remains
+// centralized in ownership reconciliation, which silently stops shared
+// identities and preserves senders for groups that remain active. DHCP is
+// cleared here as before.
 // Deprecated: use clearRethServicesForRG for per-RG management.
 func (d *Daemon) clearRethServices() {
-	if d.ra != nil {
-		if err := d.ra.Withdraw(); err != nil {
-			slog.Warn("vrrp: failed to withdraw RA on BACKUP", "err", err)
-		} else {
-			slog.Info("vrrp: RA withdrawn (BACKUP, goodbye RA sent)")
-		}
-	}
+	d.reconcileClusterRAServices("legacy-vrrp-backup")
 	if d.dhcpServer != nil {
 		// ApplyAsync(nil) == authoritative clear (#1835 F2): see
 		// clearRethServicesForRG.

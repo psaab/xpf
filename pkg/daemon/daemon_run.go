@@ -1054,7 +1054,7 @@ func (d *Daemon) runStartupWithEventBuffer(ctx context.Context, phases []startup
 
 // startReconcileRGStateLoop launches the RG-state reconcile safety-net loop and
 // registers it on the run WaitGroup so runShutdownSequence's wg.Wait() JOINS it
-// BEFORE the HA ownership-relinquish steps (rg_active clear, RA withdraw,
+// BEFORE HA ownership cleanup (rg_active clear, shared-identity RA sender stop,
 // direct-mode VIP removal, VRRP Stop). #5681 / M23: as a bare goroutine the loop
 // was never joined — stop() cancelled its ctx, but a tick already past the
 // ctx.Done() select (or blocked mid-pass on a control-socket update) could

@@ -1392,16 +1392,13 @@ type Daemon struct {
 	// be mid-publish while stop tore the epoch down.
 	clusterCommsWG sync.WaitGroup
 
-	// startupGoodbyeRA tracks whether the one-shot goodbye RA has been
-	// sent for each inactive RG on startup. Prevents stale RA routes
-	// from a previous primary run keeping hosts dual-pathing traffic.
-	// It is set only AFTER the goodbye provably went out (#5093): a
-	// bind/write failure leaves it unset so the reconcile ticker retries.
-	// startupGoodbyeMu guards it plus startupGoodbyeInflight, which are now
-	// written from the async WithdrawOnce goroutine as well as the reconcile
-	// loop. startupGoodbyeInflight marks RGs whose goodbye goroutine is still
-	// running so a later reconcile tick does not launch a duplicate (which
-	// would self-skip on the held tombstone and falsely record success).
+	// startupGoodbyeRA tracks whether cold-backup cleanup is complete for each
+	// inactive RG. Distinct router identities must successfully receive a
+	// goodbye; the shared stable RETH identity is intentionally suppressed so a
+	// cold backup cannot withdraw the peer's live router. A send failure leaves
+	// the bit unset so the reconcile ticker retries (#5093).
+	// startupGoodbyeMu guards it plus startupGoodbyeInflight, which are written
+	// from the async goodbye goroutine as well as the reconcile loop.
 	startupGoodbyeMu       sync.Mutex
 	startupGoodbyeRA       map[int]bool
 	startupGoodbyeInflight map[int]bool
@@ -1412,7 +1409,7 @@ type Daemon struct {
 
 	// Cluster RA convergence (#5861). In cluster mode RA senders run ONLY on
 	// the RG that is the current active owner; the desired RA set is the union
-	// of buildRAConfigs filtered to the currently-active RGs. reconcileClusterRA
+	// of buildRAConfigs filtered to the currently-active RGs. reconcileClusterRAServices
 	// funnels EVERY cluster RA transition — a day-2 config commit, a VRRP
 	// MASTER/BACKUP transition, and a periodic dropped-event safety pass —
 	// through one owner-gated + serialized applier so a config edit on a
@@ -1422,7 +1419,7 @@ type Daemon struct {
 	// raReconcileMu serializes the ownership snapshot and the ra.Apply so a
 	// config apply cannot race a demotion and re-arm/transmit RA on a node that
 	// just became inactive (the demotion-race guard): the VRRP demote path
-	// updates rg-state BEFORE taking this lock to withdraw, so under the lock
+	// updates rg-state BEFORE taking this lock to converge RA sender state, so
 	// the snapshot always reflects the true current owner at apply time.
 	//
 	// lastRAReconcileHash is the digest of the last successfully applied desired
@@ -1435,6 +1432,14 @@ type Daemon struct {
 	raReconcileMu       sync.Mutex
 	lastRAReconcileHash string
 	raApplyFn           func([]*config.RAInterfaceConfig) error
+	// raStatusFn supplies live sender source addresses so ownership changes can
+	// silently stop a sender even after its RA config was removed. Nil means
+	// use d.ra.Status.
+	raStatusFn func() []ra.SenderInfo
+	// raClearInterfacesFn is the per-interface silent-stop entry point used
+	// when a shared cluster router identity becomes inactive. Nil means use
+	// d.ra.ClearInterfacesWithoutGoodbye.
+	raClearInterfacesFn func([]string) error
 
 	// raHasDeadSendersFn overrides the dead-sender probe (#6793). Nil means use
 	// d.ra.HasDeadSenders. It exists because the reassert loop's contract —

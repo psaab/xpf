@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"sort"
 	"time"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/ra"
 )
 
 // reconcileClusterRAServices converges the cluster RA senders to the union of
@@ -29,14 +32,13 @@ import (
 // Owner gating + demotion-race guard: the desired set is built from
 // snapshotRethMasterState() — an RG's interfaces are included ONLY while this
 // node is its active owner. The ownership snapshot and the ra.Apply run under
-// raReconcileMu, and the VRRP demote path updates rg-state (SetVRRP/Reconcile)
-// BEFORE it calls this function, so a config apply that races a demotion either
-// snapshots the RG as already-inactive (its senders are withdrawn / never
-// armed) or snapshots it active — in which case the node genuinely was the
-// owner at apply time and the demote's own reconcile pass, serialized behind
-// this one on raReconcileMu, withdraws immediately after. An inactive owner
-// never transmits; a removal emits the lifetime-0 goodbye only from the current
-// owner (ra.Apply's graceful-withdraw path).
+// raReconcileMu. Inactive interfaces using the shared stable RETH source are
+// silently stopped before Apply, because their router identity may already be
+// live on the peer; unique-source withdrawals keep the graceful goodbye. The
+// VRRP demote path updates rg-state before it calls this function, so a config
+// apply racing demotion either snapshots the RG inactive and silently stops it,
+// or snapshots it active and the serialized demote pass stops it immediately
+// afterward.
 //
 // Idempotence: a stable digest of the desired set (lastRAReconcileHash) gates
 // the actual ra.Apply, so the periodic safety pass is free when nothing moved.
@@ -63,7 +65,12 @@ func (d *Daemon) reconcileClusterRAServices(reason string) {
 		apply = d.ra.Apply
 	}
 
-	desired := d.desiredClusterRA(cfg)
+	desired, silentStop := d.clusterRAConfigSets(cfg)
+	if err := d.clearInactiveSharedRASenders(silentStop); err != nil {
+		slog.Warn("ra: shared-identity silent stop failed; will retry",
+			"reason", reason, "err", err)
+		return
+	}
 	newHash := raDesiredHash(desired)
 	// #6793: a DEAD sender (its asynchronous conn open failed, so it will never
 	// emit an RA) does not move the desired-set digest, so the idempotence gate
@@ -211,43 +218,86 @@ func (d *Daemon) reassertDeadRASendersOnce(ctx context.Context) {
 // (snapshotRethMasterState and rethInterfacesForRG both iterate maps). Callers
 // must hold raReconcileMu.
 func (d *Daemon) desiredClusterRA(cfg *config.Config) []*config.RAInterfaceConfig {
+	desired, _ := d.clusterRAConfigSets(cfg)
+	return desired
+}
+
+// clusterRAConfigSets derives the active desired set and the inactive shared-
+// identity interfaces that must be stopped silently. A stable RETH link-local is
+// the cluster's router identity, not a node's: sending a demotion goodbye would
+// also withdraw the peer's live default route. If both nodes are BACKUP, the
+// stale route may persist until Router Lifetime expiry; a later MASTER's RA
+// refresh repairs it.
+func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceConfig, []string) {
+	masters := d.snapshotRethMasterState()
 	ownedIfaces := make(map[string]bool)
-	for rgID, active := range d.snapshotRethMasterState() {
-		if !active {
-			continue
-		}
-		for _, n := range rethInterfacesForRG(cfg, rgID) {
-			ownedIfaces[n] = true
-		}
+	inactiveIfaces := make(map[string]bool)
+	for _, name := range rethInterfacesMatchingRG(cfg, func(rgID int) bool { return masters[rgID] }) {
+		ownedIfaces[name] = true
 	}
-	if len(ownedIfaces) == 0 {
-		return nil
+	for _, name := range rethInterfacesMatchingRG(cfg, func(rgID int) bool { return !masters[rgID] }) {
+		inactiveIfaces[name] = true
+	}
+	if len(ownedIfaces) == 0 && len(inactiveIfaces) == 0 {
+		return nil, nil
 	}
 
 	var desired []*config.RAInterfaceConfig
-	for _, ra := range d.buildRAConfigs(cfg) {
-		if ownedIfaces[ra.Interface] {
-			desired = append(desired, ra)
+	for _, cfgRA := range d.buildRAConfigs(cfg) {
+		if ownedIfaces[cfgRA.Interface] {
+			desired = append(desired, cfgRA)
+		}
+	}
+
+	// Use the live sender source rather than current RA config: a config
+	// removal racing demotion leaves the old sender active until this reconcile
+	// applies. This also keeps periodic safety reconciles on the same silent-stop
+	// path as the VRRP demotion edge.
+	var silentStop []string
+	for _, sender := range d.raSenderStatuses() {
+		if sender.State == "active" &&
+			inactiveIfaces[sender.Interface] &&
+			!ownedIfaces[sender.Interface] &&
+			isSharedStableRASource(sender.SrcAddr) {
+			silentStop = append(silentStop, sender.Interface)
 		}
 	}
 	sort.Slice(desired, func(i, j int) bool {
 		return desired[i].Interface < desired[j].Interface
 	})
-	// Sort the prefixes WITHIN each interface too. buildRAConfigs appends
-	// DHCPv6-PD-delegated prefixes in DelegatedPrefixesForRA's map-iteration
-	// order (m.delegatedPDs is a map), so when 2+ delegated PDs target the same
-	// RA interface their prefixes land on one config's slice in nondeterministic
-	// order. raDesiredHash marshals order-sensitively and ra.configEqual compares
-	// prefixes index-by-index, so an unsorted order would flap the digest and make
-	// the every-2s periodic reconcile spuriously re-apply RA (a sub-second RA gap
-	// + a per-poll-tick apply log). Sorting here gives a stable, total order.
-	// This is safe to do in place: buildRAConfigs returns freshly-owned configs
-	// (static entries are deep-cloned by cloneRAInterfaceConfig, PD-only entries
-	// are newly allocated), so no Prefixes slice is aliased to the active config.
-	for _, ra := range desired {
-		sortRAPrefixes(ra.Prefixes)
+	for _, cfgRA := range desired {
+		sortRAPrefixes(cfgRA.Prefixes)
 	}
-	return desired
+	sort.Strings(silentStop)
+	return desired, silentStop
+}
+
+func (d *Daemon) clearInactiveSharedRASenders(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	clear := d.raClearInterfacesFn
+	if clear == nil {
+		if d.ra == nil {
+			return nil
+		}
+		clear = d.ra.ClearInterfacesWithoutGoodbye
+	}
+	return clear(names)
+}
+
+func (d *Daemon) raSenderStatuses() []ra.SenderInfo {
+	if d.raStatusFn != nil {
+		return d.raStatusFn()
+	}
+	if d.ra == nil {
+		return nil
+	}
+	return d.ra.Status()
+}
+
+func isSharedStableRASource(source string) bool {
+	return cluster.IsStableRethLinkLocal(net.ParseIP(source))
 }
 
 // sortRAPrefixes orders an RA interface's advertised prefixes by a stable, total

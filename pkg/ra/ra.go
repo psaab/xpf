@@ -130,6 +130,12 @@ type Manager struct {
 	// is dropped outright when a sender is (re)started on the interface — the
 	// router is BACK, so there is nothing left to withdraw.
 	goodbyeOwed map[string]*goodbyeDebt
+
+	// goodbyeSuppressed records interfaces whose last stop intentionally did
+	// not emit a goodbye. It prevents a concurrent failed graceful drain from
+	// recreating retry debt after ClearInterfacesWithoutGoodbye suppresses it.
+	// A later Apply that desires the interface clears this marker.
+	goodbyeSuppressed map[string]bool
 }
 
 // goodbyeDebt is one interface's outstanding final-goodbye retry debt (#6777).
@@ -212,10 +218,11 @@ func (m *Manager) DeadSenderInterfaces() []string {
 // New creates a new RA manager.
 func New() *Manager {
 	return &Manager{
-		senders:     make(map[string]*sender),
-		draining:    make(map[string]*drainEntry),
-		ifaceEpoch:  make(map[string]uint64),
-		goodbyeOwed: make(map[string]*goodbyeDebt),
+		senders:           make(map[string]*sender),
+		draining:          make(map[string]*drainEntry),
+		ifaceEpoch:        make(map[string]uint64),
+		goodbyeOwed:       make(map[string]*goodbyeDebt),
+		goodbyeSuppressed: make(map[string]bool),
 	}
 }
 
@@ -241,6 +248,10 @@ func (m *Manager) bumpIfaceEpoch(name string) { m.ifaceEpoch[name]++ }
 // interface converges on maxGoodbyeRetries rather than restarting its budget
 // every pass.
 func (m *Manager) recordGoodbyeDebtLocked(name string, cfg *config.RAInterfaceConfig, err error) {
+	if m.goodbyeSuppressed[name] {
+		delete(m.goodbyeOwed, name)
+		return
+	}
 	if cfg == nil {
 		return
 	}
@@ -292,6 +303,10 @@ func (m *Manager) retryOwedGoodbyes(desired map[string]*config.RAInterfaceConfig
 	var todo []*config.RAInterfaceConfig
 	var held []string
 	for name, d := range m.goodbyeOwed {
+		if m.goodbyeSuppressed[name] {
+			delete(m.goodbyeOwed, name)
+			continue
+		}
 		if _, back := desired[name]; back {
 			slog.Info("ra: dropping final-goodbye retry debt; interface is advertised again",
 				"interface", name)
@@ -664,6 +679,7 @@ func (m *Manager) Apply(configs []*config.RAInterfaceConfig) error {
 	desired := make(map[string]*config.RAInterfaceConfig, len(configs))
 	for _, cfg := range configs {
 		desired[cfg.Interface] = cfg
+		delete(m.goodbyeSuppressed, cfg.Interface)
 	}
 
 	// A pending stop. tomb=true means a tombstone was installed for the
@@ -982,8 +998,10 @@ func (m *Manager) WithdrawInterfaces(names []string) {
 }
 
 // ClearInterfacesWithoutGoodbye stops only the named senders without emitting
-// lifetime-0 RAs. HA ownership moves use this when the router identity remains
-// present on the peer; other interfaces and their senders are untouched.
+// lifetime-0 RAs. It cancels pending replacements and discards current or late
+// retry debt; a goodbye already requested by another operation cannot be
+// recalled. HA ownership moves use it when the identity remains present on the
+// peer; other interfaces and their senders are untouched.
 func (m *Manager) ClearInterfacesWithoutGoodbye(names []string) error {
 	if len(names) == 0 {
 		return nil
@@ -998,18 +1016,20 @@ func (m *Manager) ClearInterfacesWithoutGoodbye(names []string) error {
 		}
 		seen[name] = struct{}{}
 		m.bumpIfaceEpoch(name)
+		m.goodbyeSuppressed[name] = true
+		delete(m.goodbyeOwed, name)
 		if s, ok := m.senders[name]; ok {
 			delete(m.senders, name)
 			m.draining[name] = &drainEntry{sender: s, cfg: s.cfg}
 			s.signalStop(modeHard)
 			owned = append(owned, ownedDrain{name: name, s: s})
-			delete(m.goodbyeOwed, name)
 			continue
 		}
-		if _, draining := m.draining[name]; !draining {
-			// A prior graceful attempt is no longer relevant after ownership
-			// moved to a peer advertising the same router identity.
-			delete(m.goodbyeOwed, name)
+		if e := m.draining[name]; e != nil {
+			// Preserve the draining operation's monotonic goodbye decision.
+			if e.sender != nil {
+				e.sender.signalStop(modeHard)
+			}
 		}
 	}
 	epoch := m.epoch
@@ -1028,6 +1048,7 @@ func (m *Manager) ClearInterfacesWithoutGoodbye(names []string) error {
 	}
 	return errors.Join(errs...)
 }
+
 
 // claimGracefulLocked records the graceful withdrawal intent for each named
 // interface UNDER m.mu, and returns only the interfaces THIS Withdraw owns the

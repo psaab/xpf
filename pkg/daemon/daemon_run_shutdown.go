@@ -27,13 +27,12 @@ const applyCloseoutDrainTimeout = 5 * time.Second
 // interface at compile time in daemon_control_shutdown_8526_test.go.
 type controlShutdownBounder interface{ BeginControlShutdown() }
 
-// runShutdownSequence performs the ordered post-run teardown: abort in-flight
-// apply, stop the signal context, wait background goroutines, then tear down
-// SNMP/flowexport/feeds/RPM/archive/event-engine/ipmon/natpool-alarm/FRR/LLDP,
-// clear HA rg_active (non-hitless), withdraw RA, stop VRRP/cluster/session-sync,
-// close/teardown the dataplane, and restore step0 tunables. The ordering is
-// load-bearing (see the per-step comments). Extracted verbatim from Run() so
-// the 1690-LOC lifecycle stays reviewable (#4662 Increment 1). Returns runErr
+// runShutdownSequence performs ordered post-run teardown: abort in-flight apply,
+// stop the signal context, wait background goroutines, tear down services, stop
+// RA senders (silently in cluster mode, graceful goodbye in standalone mode),
+// stop VRRP/cluster/session-sync, close the dataplane, and restore step0 tunables.
+// The ordering is load-bearing (see the per-step comments). Extracted from Run()
+// so the 1690-LOC lifecycle stays reviewable (#4662 Increment 1). Returns runErr
 // unchanged.
 func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr error) error {
 	// #8621: stop answering ARP for source-NAT pool addresses FIRST. A node on
@@ -387,10 +386,16 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 		d.lldpMgr.Stop()
 	}
 
-	// Withdraw RA senders (sends goodbye RAs with lifetime=0) before VRRP
-	// stop so hosts immediately stop using this node as a default router.
+	// Stop cluster senders silently because the peer may already be advertising
+	// the same shared RETH router identity; a lifetime-zero RA would also
+	// withdraw that peer's route. Standalone mode has no peer and keeps the
+	// graceful goodbye.
 	if d.ra != nil {
-		if err := d.ra.Withdraw(); err != nil {
+		if haMode {
+			if err := d.ra.Clear(); err != nil {
+				slog.Warn("shutdown: failed to silently stop RA senders", "err", err)
+			}
+		} else if err := d.ra.Withdraw(); err != nil {
 			slog.Warn("shutdown: failed to withdraw RA senders", "err", err)
 		}
 	}

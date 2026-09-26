@@ -14,6 +14,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dhcp"
+	"github.com/psaab/xpf/pkg/ra"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -358,13 +359,16 @@ func TestClusterRAMultiPDPrefixOrderStableNoFlap(t *testing.T) {
 }
 
 type sharedLLClearSpy10779 struct {
-	calls [][]string
+	calls    [][]string
+	statuses []ra.SenderInfo
 }
 
 func (s *sharedLLClearSpy10779) ClearInterfacesWithoutGoodbye(names []string) error {
 	s.calls = append(s.calls, append([]string(nil), names...))
 	return nil
 }
+
+func (s *sharedLLClearSpy10779) Status() []ra.SenderInfo { return s.statuses }
 
 func TestStartupGoodbyeSkipsSharedStableRethIdentity10779(t *testing.T) {
 	store := raClusterStore(t, "2001:db8:1077:9::/64")
@@ -383,7 +387,7 @@ func TestStartupGoodbyeSkipsSharedStableRethIdentity10779(t *testing.T) {
 	perNode := *raConfigs[0]
 	perNode.Interface = "ge-7-0-0.50"
 	perNode.SourceLinkLocal = "fe80::face"
-	got := startupGoodbyeConfigs(cfg, 1, []*config.RAInterfaceConfig{raConfigs[0], &perNode})
+	got := startupGoodbyeConfigs([]*config.RAInterfaceConfig{raConfigs[0], &perNode})
 	if len(got) != 1 || got[0] != &perNode {
 		t.Fatalf("startup goodbye targets = %v, want only per-node source %q",
 			got, perNode.SourceLinkLocal)
@@ -398,10 +402,13 @@ func TestDemotionStopsOnlySharedSourceRAWithoutGoodbye10779(t *testing.T) {
 	perNode := *raConfigs[0]
 	perNode.Interface = "ge-7-0-0.50"
 	perNode.SourceLinkLocal = "fe80::face"
-	allRA := append(raConfigs, &perNode)
-
-	clearer := &sharedLLClearSpy10779{}
-	if err := clearRethRASendersWithoutGoodbye(clearer, cfg, 1, allRA); err != nil {
+	clearer := &sharedLLClearSpy10779{
+		statuses: []ra.SenderInfo{
+			{Interface: raConfigs[0].Interface, SrcAddr: raConfigs[0].SourceLinkLocal, State: "active"},
+			{Interface: perNode.Interface, SrcAddr: perNode.SourceLinkLocal, State: "active"},
+		},
+	}
+	if err := clearRethRASendersWithoutGoodbye(clearer, cfg, 1); err != nil {
 		t.Fatalf("clear demoted RG senders: %v", err)
 	}
 	if len(clearer.calls) != 1 {
@@ -410,5 +417,112 @@ func TestDemotionStopsOnlySharedSourceRAWithoutGoodbye10779(t *testing.T) {
 	if !reflect.DeepEqual(clearer.calls[0], []string{raConfigs[0].Interface}) {
 		t.Fatalf("cleared interfaces = %v, want only shared source %s",
 			clearer.calls[0], raConfigs[0].Interface)
+	}
+}
+func TestClusterRADemotionSilentlyClearsSharedIdentity10789(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1::/64")
+	spy := &raApplySpy{}
+	var events []string
+	var cleared [][]string
+	d := &Daemon{
+		store:                 store,
+		rgStates:              make(map[int]*rgStateMachine),
+		raStatusFn: func() []ra.SenderInfo {
+			return []ra.SenderInfo{{
+				Interface: "ge-0-0-0.50",
+				SrcAddr:   cluster.StableRethLinkLocal(1, 1).String(),
+				State:     "active",
+			}}
+		},
+		raApplyFn:             func(desired []*config.RAInterfaceConfig) error {
+			events = append(events, "apply")
+			return spy.apply(desired)
+		},
+		raClearInterfacesFn: func(names []string) error {
+			events = append(events, "clear")
+			cleared = append(cleared, append([]string(nil), names...))
+			return nil
+		},
+	}
+	d.getOrCreateRGState(1).SetVRRP("reth0", true)
+	d.reconcileClusterRAServices("master")
+	if len(cleared) != 0 {
+		t.Fatalf("active shared identity was silently cleared: %v", cleared)
+	}
+	if len(spy.last()) != 1 {
+		t.Fatalf("active owner did not retain its RA sender: %+v", spy.last())
+	}
+	// On demotion, stopping the local sender must not withdraw the shared
+	// default-router identity that the peer may already be advertising.
+	events = nil
+	d.getOrCreateRGState(1).SetVRRP("reth0", false)
+	d.clearRethServicesForRG(1)
+	if len(cleared) != 1 || !reflect.DeepEqual(cleared[0], []string{"ge-0-0-0.50"}) {
+		t.Fatalf("demotion silent-stop names=%v, want [[ge-0-0-0.50]]", cleared)
+	}
+	if !reflect.DeepEqual(events, []string{"clear", "apply"}) {
+		t.Fatalf("demotion RA reconciliation calls=%v, want [clear apply]", events)
+	}
+	if got := spy.lastPrefixes(); len(got) != 0 {
+		t.Fatalf("demoted node remains in desired RA set: %v", got)
+	}
+}
+
+func TestClusterRADemotionConfigRemovalUsesLiveSharedSource10789(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1::/64")
+	sharedSource := cluster.StableRethLinkLocal(1, 1).String()
+	var events []string
+	var cleared [][]string
+	spy := &raApplySpy{}
+	d := &Daemon{
+		store:    store,
+		rgStates: make(map[int]*rgStateMachine),
+		raStatusFn: func() []ra.SenderInfo {
+			return []ra.SenderInfo{{
+				Interface: "ge-0-0-0.50",
+				SrcAddr:   sharedSource,
+				State:     "active",
+			}}
+		},
+		raApplyFn: func(desired []*config.RAInterfaceConfig) error {
+			events = append(events, "apply")
+			return spy.apply(desired)
+		},
+		raClearInterfacesFn: func(names []string) error {
+			events = append(events, "clear")
+			cleared = append(cleared, append([]string(nil), names...))
+			return nil
+		},
+	}
+	d.getOrCreateRGState(1).SetVRRP("reth0", true)
+	d.reconcileClusterRAServices("before-config-removal")
+	if len(spy.last()) != 1 || len(cleared) != 0 {
+		t.Fatalf("test precondition: active owner had applied=%d clear=%v", len(spy.last()), cleared)
+	}
+	events = nil
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSet("delete protocols router-advertisement"); err != nil {
+		t.Fatalf("remove RA config: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("commit RA removal: %v", err)
+	}
+	store.ExitConfigure()
+	if got := len(store.ActiveConfig().Protocols.RouterAdvertisement); got != 0 {
+		t.Fatalf("test precondition: retained %d RA configs after deletion", got)
+	}
+
+	d.getOrCreateRGState(1).SetVRRP("reth0", false)
+	d.clearRethServicesForRG(1)
+	if !reflect.DeepEqual(events, []string{"clear", "apply"}) {
+		t.Fatalf("demotion after config removal calls=%v, want [clear apply]", events)
+	}
+	if !reflect.DeepEqual(cleared, [][]string{{"ge-0-0-0.50"}}) {
+		t.Fatalf("demotion after config removal cleared=%v, want shared sender", cleared)
+	}
+	if len(spy.lastPrefixes()) != 0 {
+		t.Fatalf("demoted sender remains desired after config removal: %v", spy.lastPrefixes())
 	}
 }

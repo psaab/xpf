@@ -1593,11 +1593,15 @@ this node is its active owner. The ownership snapshot and the `ra.Apply`
 run under `raReconcileMu`, and the VRRP demote path updates rg-state
 (`SetVRRP`/`Reconcile`) BEFORE it drives the RA reconcile. So a config apply
 that races a demotion either snapshots the RG as already-inactive (its
-senders are withdrawn / never armed) or snapshots it active — in which case
-the node genuinely was the owner at apply time and the demote's own reconcile
-pass, serialized behind this one on `raReconcileMu`, withdraws immediately
-after. An inactive owner never transmits; a removal emits the lifetime-0
-goodbye only from the current owner (`ra.Apply`'s graceful-withdraw path).
+senders are silently stopped when they use the shared router identity, or
+never armed) or snapshots it active — in which case the node genuinely was
+the owner at apply time and the demote's own reconcile pass, serialized behind
+this one on `raReconcileMu`, stops the shared identity silently immediately
+after. Unique-source senders still emit a goodbye on removal. Stable RETH
+link-local addresses are cluster-wide router identities: a lifetime-zero RA
+would also withdraw the active peer's route. If both nodes are BACKUP, a stale
+host route may remain until Router Lifetime expiry; a later MASTER's RA refresh
+repairs it.
 
 **Idempotence.** A stable digest of the desired set (`lastRAReconcileHash`,
 updated only on a successful apply) gates the actual `ra.Apply`, so the
@@ -2550,9 +2554,9 @@ never lock an operator out of a remote box it manages.
     through `startReconcileRGStateLoop(ctx, &wg)`, which does the
     `wg.Add(1)`/`defer wg.Done()` wrap exactly like the sibling DDNS/proxy-ARP/
     Surface-A reconcile loops. This is load-bearing: `wg.Wait()` runs BEFORE the
-    HA ownership-relinquish steps (the `rg_active` clear, RA withdraw, direct-
-    mode VIP removal, VRRP `Stop`), so a reconcile pass that was in flight (or a
-    tick that just passed the `ctx.Done()` select) COMPLETES and the loop EXITS
+    HA ownership-relinquish steps (the `rg_active` clear, shared-identity RA
+    sender stop, direct-mode VIP removal, VRRP `Stop`), so a reconcile pass that
+    was in flight (or a tick that just passed the `ctx.Done()` select) COMPLETES
     before ownership cleanup begins. As a bare `go` goroutine it was unjoined:
     `stop()` cancelled its ctx but a late pass could re-enable forwarding /
     re-add VIPs AFTER `wg.Wait()` returned — during ownership cleanup — and
