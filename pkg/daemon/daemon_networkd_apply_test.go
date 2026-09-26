@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,5 +128,73 @@ func TestApplyConfigLocked_NetworkdWriteErrorFailsCommit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "networkd") {
 		t.Fatalf("applyConfigLocked error should mention the networkd failure: %v", err)
+	}
+}
+
+type partialApplyFailureDP10759 struct {
+	*runtimeOnlyApplyTestDP
+	result *dataplane.ApplyResult
+	err    error
+}
+
+func (d *partialApplyFailureDP10759) ApplyConfig(context.Context, *config.Config) (*dataplane.ApplyResult, error) {
+	d.applyCalls++
+	return d.result.Clone(), d.err
+}
+
+// TestApplyConfigLockedAppliesNetworkdModelsAfterDataplaneFailure10759 binds
+// the daemon side of the partial-result contract: even though helper
+// publication fails, networkd must configure the imported management interface
+// from the models already produced by this apply. The overall apply still
+// fails closed, and the bootstrap-import status continues to describe the
+// successful import rather than dataplane convergence.
+//
+// RED-on-revert: restoring userspace.Manager.ApplyConfig's nil-on-error return
+// makes TestApplyConfigPreservesPartialResultOnLateFailure10759 fail and
+// prevents the real dataplane path from supplying the result exercised here.
+func TestApplyConfigLockedAppliesNetworkdModelsAfterDataplaneFailure10759(t *testing.T) {
+	networkDir := t.TempDir()
+	installFakeNetworkctl(t)
+	injected := errors.New("apply_snapshot: helper unavailable")
+	dp := &partialApplyFailureDP10759{
+		runtimeOnlyApplyTestDP: &runtimeOnlyApplyTestDP{},
+		result: &dataplane.ApplyResult{
+			ManagedInterfaces: []networkd.InterfaceConfig{{
+				Name:      "fxp0",
+				Addresses: []string{"192.0.2.2/24"},
+			}},
+		},
+		err: injected,
+	}
+	d := &Daemon{
+		networkd: networkd.NewInDir(networkDir),
+		store:    newConfigStore(t, filepath.Join(t.TempDir(), "config.db")),
+		vrrpMgr:  vrrp.NewManager(),
+		opts:     Options{NoDataplane: true},
+	}
+	d.setDataplane(dp)
+	d.recordBootstrapImport(bootstrapImportOK, "")
+
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"fxp0": {Name: "fxp0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
+	err := d.applyConfigLocked(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), injected.Error()) {
+		t.Fatalf("applyConfigLocked error = %v, want the dataplane failure", err)
+	}
+	if dp.applyCalls != 1 {
+		t.Fatalf("dataplane ApplyConfig calls = %d, want 1", dp.applyCalls)
+	}
+	path := filepath.Join(networkDir, "10-xpf-fxp0.network")
+	body, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("networkd did not write the imported static-management interface after dataplane failure: %v", readErr)
+	}
+	if !strings.Contains(string(body), "192.0.2.2/24") {
+		t.Fatalf("networkd file %s does not contain the imported static address: %s", filepath.Base(path), body)
+	}
+	if got := d.BootstrapImportSnapshot(); got.Status != bootstrapImportOK || got.Failed {
+		t.Fatalf("bootstrap-import snapshot after apply failure = %+v, want status=ok (import succeeded independently)", got)
 	}
 }
