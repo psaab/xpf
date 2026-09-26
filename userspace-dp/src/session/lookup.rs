@@ -1149,7 +1149,8 @@ impl SessionTable {
     /// every index mutation pairs with the metadata write: install,
     /// update/refresh reindex, remove; demote touches neither), forward,
     /// locally-held, non-seed, non-worker-replica, non-TUN-origin,
-    /// disposition in {ForwardCandidate, FabricRedirect}.
+    /// disposition in {ForwardCandidate, FabricRedirect, NoRoute,
+    /// MissingNeighbor}.
     /// Unlike the refresh/sweep precedents, resumption is EXACT for the
     /// stated set, not deliberately approximate: a slot reused below the
     /// cursor holds a new incarnation with a higher epoch, so the epoch
@@ -1192,7 +1193,10 @@ impl SessionTable {
                 }
                 if !matches!(
                     entry.decision.resolution.disposition,
-                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+                    ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::FabricRedirect
+                        | ForwardingDisposition::NoRoute
+                        | ForwardingDisposition::MissingNeighbor
                 ) {
                     continue;
                 }
@@ -1202,5 +1206,128 @@ impl SessionTable {
             }
         }
         if end >= cap { Complete } else { ResumeAt(end) }
+    }
+}
+
+#[cfg(test)]
+mod export_unresolved_sessions_10790_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn key(src_port: u16) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            src_port,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        }
+    }
+
+    fn metadata() -> SessionMetadata {
+        SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        }
+    }
+
+    fn decision(disposition: ForwardingDisposition, egress_ifindex: i32) -> SessionDecision {
+        let forwardable = egress_ifindex > 0;
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition,
+                local_ifindex: 0,
+                egress_ifindex,
+                tx_ifindex: egress_ifindex,
+                tunnel_endpoint_id: 0,
+                next_hop: forwardable.then_some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+                neighbor_mac: (disposition == ForwardingDisposition::ForwardCandidate)
+                    .then_some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
+    }
+
+    #[test]
+    fn owner_export_retains_imported_noroute_and_missing_neighbor_sessions_10790() {
+        let mut sessions = SessionTable::new();
+        let key_forward = key(41001);
+        let key_no_route = key(41002);
+        let key_missing_neighbor = key(41003);
+        let key_policy_denied = key(41004);
+        for (key, resolution) in [
+            (
+                key_forward.clone(),
+                decision(ForwardingDisposition::ForwardCandidate, 12),
+            ),
+            (
+                key_no_route.clone(),
+                decision(ForwardingDisposition::NoRoute, 0),
+            ),
+            (
+                key_missing_neighbor.clone(),
+                decision(ForwardingDisposition::MissingNeighbor, 12),
+            ),
+            (
+                key_policy_denied.clone(),
+                decision(ForwardingDisposition::PolicyDenied, 0),
+            ),
+        ] {
+            assert!(sessions.install_with_protocol_with_origin(
+                key,
+                resolution,
+                metadata(),
+                SessionOrigin::SyncImport,
+                1_000,
+                PROTO_TCP,
+                0,
+            ));
+        }
+
+        let mut exported = Vec::new();
+        assert_eq!(
+            sessions.iter_export_budgeted(0, 16, u64::MAX, &[1], |key, _, _, _| {
+                exported.push(key.clone());
+                true
+            },),
+            ExportWalkOutcome::Complete
+        );
+        assert!(
+            exported.contains(&key_forward),
+            "forwardable imports remain exported"
+        );
+        assert!(
+            exported.contains(&key_no_route),
+            "NoRoute import is authoritative shared state and must survive BulkEnd"
+        );
+        assert!(
+            exported.contains(&key_missing_neighbor),
+            "MissingNeighbor import must be re-exported while neighbor resolution is pending"
+        );
+        assert!(
+            !exported.contains(&key_policy_denied),
+            "terminal policy denials are not authoritative forwarding sessions"
+        );
     }
 }

@@ -196,6 +196,15 @@ impl SyncedImportOutcome {
     }
 }
 
+fn strict_mirror_publish_failed(result: crate::afxdp::bpf_map::ConntrackPublishResult) -> bool {
+    matches!(
+        result,
+        crate::afxdp::bpf_map::ConntrackPublishResult::KernelError
+            | crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy
+            | crate::afxdp::bpf_map::ConntrackPublishResult::NoMap
+    )
+}
+
 // #7209: this whole block moved from `impl Coordinator` to the SESSION DOMAIN
 // handle. Nothing in it needed the coordinator — the reference set is exactly
 // `sessions`, `forwarding`, `bpf_maps`, `workers`, `ha.rg_runtime` and
@@ -385,6 +394,87 @@ impl crate::afxdp::ha::SessionDomain {
         true
     }
 
+    fn rollback_rejected_mirror_import(
+        &self,
+        forwarding: &ForwardingState,
+        entry: &SyncedSessionEntry,
+        previous_entry: Option<&SyncedSessionEntry>,
+        translation_reserved: bool,
+    ) {
+        if !translation_reserved {
+            return;
+        }
+        let now_ns = monotonic_nanos();
+        crate::nat::release_synced_source_nat_allocation_untracked(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            &entry.key,
+            entry.decision.nat,
+            entry.metadata.is_reverse,
+            now_ns,
+        );
+        // A same-key replacement can have retired its previous allocator
+        // tuple while reserving the import. Restore that reservation when the
+        // mirror refuses, so the unaccepted replacement does not displace the
+        // still-authoritative entry.
+        if let Some(previous) = previous_entry
+            && !previous.metadata.is_reverse
+        {
+            let zones = crate::afxdp::session_glue::synced_source_nat_zone_pair(
+                forwarding,
+                &previous.metadata,
+            );
+            let _ = crate::nat::reserve_synced_source_nat_allocation_untracked(
+                &forwarding.iface_nat_allocators,
+                &forwarding.source_nat_rules,
+                &previous.key,
+                previous.decision.nat,
+                false,
+                zones,
+                now_ns,
+            );
+            let _ = crate::nat64::reserve_synced_nat64_allocation(
+                &forwarding.nat64,
+                &previous.key,
+                previous.decision.nat,
+                false,
+                now_ns,
+            );
+        }
+    }
+
+    fn restore_rejected_forward_mirror(
+        &self,
+        forwarding: &ForwardingState,
+        entry: &SyncedSessionEntry,
+        previous_entry: Option<&SyncedSessionEntry>,
+    ) {
+        let mut target_bare = entry.key.clone();
+        target_bare.routing_domain = 0;
+        target_bare.discriminator = Default::default();
+        let survivor = previous_entry.cloned().or_else(|| {
+            lock_shared_recover(&self.sessions.synced)
+                .values()
+                .find(|candidate| {
+                    candidate.key != entry.key && {
+                        let mut candidate_bare = candidate.key.clone();
+                        candidate_bare.routing_domain = 0;
+                        candidate_bare.discriminator = Default::default();
+                        candidate_bare == target_bare
+                    }
+                })
+                .cloned()
+        });
+        if let Some(survivor) = survivor {
+            let _ = self.publish_mirror_only(forwarding, &survivor);
+            return;
+        }
+        let maps = self.bpf_maps.load();
+        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+        crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(v4_fd, v6_fd, &entry.key);
+    }
+
     /// Publish one synced session row to the kernel session map, or record that
     /// there was no map to publish into (#7209).
     ///
@@ -459,7 +549,6 @@ impl crate::afxdp::ha::SessionDomain {
             entry.origin,
         )
     }
-
 
     /// Hard cap on one clear snapshot (P4): take(cap+1) bounds the
     /// transient key Vec even against a hostile table (262144 × ~72B ≈
@@ -803,16 +892,51 @@ impl crate::afxdp::ha::SessionDomain {
         {
             return SyncedImportOutcome::Applied;
         }
-        if entry.origin.is_peer_synced()
+        let translation_reserved = entry.origin.is_peer_synced()
             && !entry.metadata.is_reverse
-            && !worker_records.is_empty()
-            && !self.reserve_synced_translation(&entry)
-        {
+            && !worker_records.is_empty();
+        if translation_reserved && !self.reserve_synced_translation(&entry) {
             self.sessions
                 .import_reserve_refused
                 .fetch_add(1, Ordering::Relaxed);
             return SyncedImportOutcome::RejectedReserve;
         }
+        // Strict mirror imports commit the conntrack mirror before publishing
+        // shared authority or steering rows. A refusal can then roll back the
+        // coordinator's untracked NAT reservation without leaving an import
+        // that was reported as rejected visible to workers or lookups.
+        if strict_mirror {
+            let forward_mirror = self.publish_mirror_only(forwarding, &entry);
+            if strict_mirror_publish_failed(forward_mirror) {
+                self.rollback_rejected_mirror_import(
+                    forwarding,
+                    &entry,
+                    previous_entry.as_ref(),
+                    translation_reserved,
+                );
+                return SyncedImportOutcome::RejectedMirrorPublish;
+            }
+            if let Some(reverse) = reverse_entry.as_ref() {
+                let reverse_mirror = self.publish_mirror_only(forwarding, reverse);
+                if strict_mirror_publish_failed(reverse_mirror) {
+                    if forward_mirror == crate::afxdp::bpf_map::ConntrackPublishResult::Written {
+                        self.restore_rejected_forward_mirror(
+                            forwarding,
+                            &entry,
+                            previous_entry.as_ref(),
+                        );
+                    }
+                    self.rollback_rejected_mirror_import(
+                        forwarding,
+                        &entry,
+                        previous_entry.as_ref(),
+                        translation_reserved,
+                    );
+                    return SyncedImportOutcome::RejectedMirrorPublish;
+                }
+            }
+        }
+
         // #9752 round 4 item 2: unknown-never-default AT the authoritative
         // shared install. A (0,0) import over a stamped stored entry of the
         // SAME (or unknown) incarnation is an old sender's resend — preserve
@@ -923,16 +1047,8 @@ impl crate::afxdp::ha::SessionDomain {
                 entry.metadata.is_reverse,
             );
         }
-        let mirror_result = self.publish_mirror_only(forwarding, &entry);
-        if strict_mirror
-            && matches!(
-                mirror_result,
-                crate::afxdp::bpf_map::ConntrackPublishResult::KernelError
-                    | crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy
-                    | crate::afxdp::bpf_map::ConntrackPublishResult::NoMap
-            )
-        {
-            return SyncedImportOutcome::RejectedMirrorPublish;
+        if !strict_mirror {
+            self.publish_mirror_only(forwarding, &entry);
         }
         refresh_reverse_prewarm_owner_rg_indexes(
             &self.sessions.owner_rg_indexes.reverse_prewarm_sessions,
@@ -962,16 +1078,8 @@ impl crate::afxdp::ha::SessionDomain {
                     true,
                 );
             }
-            let mirror_result = self.publish_mirror_only(forwarding, reverse);
-            if strict_mirror
-                && matches!(
-                    mirror_result,
-                    crate::afxdp::bpf_map::ConntrackPublishResult::KernelError
-                        | crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy
-                        | crate::afxdp::bpf_map::ConntrackPublishResult::NoMap
-                )
-            {
-                return SyncedImportOutcome::RejectedMirrorPublish;
+            if !strict_mirror {
+                self.publish_mirror_only(forwarding, reverse);
             }
         }
         // #6242: fan out to each worker's command queue via its runtime record.
@@ -1804,5 +1912,142 @@ impl crate::afxdp::ha::SessionDomain {
             session_id: 0,
             tcp_close_class: 0,
         });
+    }
+}
+
+#[cfg(test)]
+mod rejected_mirror_reservation_10790_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    fn worker_handle(commands: Arc<Mutex<VecDeque<WorkerCommand>>>) -> WorkerHandle {
+        WorkerHandle {
+            stop: Arc::new(AtomicBool::new(false)),
+            heartbeat: Arc::new(AtomicU64::new(0)),
+            commands,
+            session_export_ack: Arc::new(AtomicU64::new(0)),
+            cos_status: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            runtime_atomics: Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
+            cold_path_atomics: Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new()),
+        }
+    }
+
+    #[test]
+    fn mirror_refusal_rolls_back_nat_reservation_and_unpublished_authority_10790() {
+        let mut coordinator = Coordinator::new();
+        let mut forwarding = ForwardingState::default();
+        forwarding.source_nat_rules =
+            crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+                name: "pool-snat".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_name: "p".to_string(),
+                pool_addresses: vec!["203.0.113.1/32".to_string()],
+                port_low: 1024,
+                port_high: 65535,
+                ..crate::SourceNATRuleSnapshot::default()
+            }]);
+        coordinator.set_forwarding_for_test(forwarding);
+
+        let commands = Arc::new(Mutex::new(VecDeque::new()));
+        coordinator.workers.register(
+            0,
+            WorkerRuntimeRecord::for_test(worker_handle(commands.clone())),
+            None,
+        );
+
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            src_port: 41_090,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let pool_port = 23_090;
+        let entry = SyncedSessionEntry {
+            key: key.clone(),
+            decision: SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                },
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+                    rewrite_src_port: Some(pool_port),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: SessionMetadata {
+                ingress_zone: 1,
+                egress_zone: 2,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                owner_rg_id: 1,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+            },
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        };
+        let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        assert!(
+            !allocator.debug_is_port_occupied(0, pool_port),
+            "fixture port must start unreserved"
+        );
+
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(entry),
+            SyncedImportOutcome::RejectedMirrorPublish,
+            "the absent conntrack map must exercise the strict mirror refusal"
+        );
+        assert!(
+            !allocator.debug_is_port_occupied(0, pool_port),
+            "a refused NAT import must not strand its pool port"
+        );
+        assert!(
+            lock_shared_recover(&coordinator.session_domain.sessions.synced).is_empty(),
+            "strict refusal must leave no shared session authority"
+        );
+        assert!(
+            lock_shared_recover(&coordinator.session_domain.sessions.nat).is_empty(),
+            "strict refusal must leave no reverse-NAT shared row"
+        );
+        assert!(
+            lock_shared_recover(&coordinator.session_domain.sessions.forward_wire).is_empty(),
+            "strict refusal must leave no forward-wire shared row"
+        );
+        assert!(
+            worker_queue::lock_recover(&commands).is_empty(),
+            "a refused import must not fan out to registered workers"
+        );
     }
 }

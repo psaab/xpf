@@ -162,22 +162,16 @@ func (vi *vrrpInstance) rearmForRetry(masterDownTimer *time.Timer) {
 	masterDownTimer.Reset(vi.masterDownInterval())
 }
 
-// becomeBackup transitions to Backup state: remove VIPs, reset timers.
-//
-// Verified BACKUP ownership (#5482): the BACKUP-side symmetry of the #5082
-// fail-closed MASTER path. We ARE stepping down (a superior/equal master is
-// taking over), so publishing BACKUP is the honest role — refusing to emit would
-// risk split-brain. But the pre-#5482 code called the VOID removeVIPs and emitted
-// BACKUP unconditionally, so a swallowed netlink removal failure left this
-// now-BACKUP node still answering ARP for the VIP (duplicate-address hazard vs
-// the new master). surfaceStaleVIP records the divergence loudly and schedules an
-// async reconcile so the stale VIP clears without a silent hazard, while
-// emitEvent still publishes the true BACKUP state.
-func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) {
+// becomeBackup transitions to Backup state after removing the VIPs. Holding
+// vipMu across removal and publication prevents ReconcileVIP from re-adding a
+// VIP in the gap between those operations.
+func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) error {
 	slog.Info("vrrp: transitioning to BACKUP",
 		"key", vi.key())
+	vi.vipMu.Lock()
+	removeErr := vi.removeVIPsLocked(nil)
 	vi.setState(StateBackup)
-	removeErr := vi.removeVIPs()
+	vi.vipMu.Unlock()
 	vi.surfaceStaleVIP(removeErr, "becomeBackup")
 	advertTimer.Stop()
 	masterDownTimer.Reset(vi.masterDownInterval())
@@ -189,11 +183,8 @@ func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) {
 	vi.skipNextPreemptHold = false
 	vi.mu.Unlock()
 	vi.emitEvent()
-	// #6177 item 1: the VIPs are now physically off the interface (or
-	// removeErr says why they are not). Report to every resign barrier armed
-	// on this instance so a fenced remote failover releases its applied-ack on
-	// VIP REMOVAL, not merely on "resignation signalled + priority 0". This is
-	// the last statement in the function on purpose: a waiter that observes the
-	// completion must not be able to observe it before the removal ran.
+	// #6177 item 1: a waiter observes the completed VIP removal, not merely
+	// "resignation signalled + priority 0".
 	vi.notifyResigned(removeErr)
+	return removeErr
 }

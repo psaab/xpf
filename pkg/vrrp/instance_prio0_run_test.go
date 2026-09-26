@@ -1,9 +1,13 @@
 package vrrp
 
 import (
+	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/vishvananda/netlink"
 )
 
 // TestRun_PriorityZeroResignPromotesPeerImmediately drives the real run loops
@@ -40,6 +44,23 @@ func TestRun_PriorityZeroResignPromotesPeerImmediately(t *testing.T) {
 				vi.suppressGARP.Store(true)
 				installFakeVIPNetlink(vi)
 			}
+
+			var masterVIPRemovals atomic.Int32
+			var removalObservedWhileMaster atomic.Bool
+			var priorityZeroFollowedRemoval atomic.Bool
+			master.addrDelFn = func(_ netlink.Link, _ *netlink.Addr) error {
+				if master.getState() == StateMaster {
+					attempt := masterVIPRemovals.Add(1)
+					removalObservedWhileMaster.Store(true)
+					if path == "shutdown" && attempt == 1 {
+						return errors.New("injected transient shutdown AddrDel failure")
+					}
+				}
+				return nil
+			}
+			// The stop path waits briefly between bounded removal retries. Keep
+			// this proof deterministic without changing the production default.
+			master.vipReconcileBackoff = time.Millisecond
 			manager.mu.Lock()
 			manager.instances = map[instanceKey]*vrrpInstance{
 				{iface: "reth10786", groupID: 101}: master,
@@ -57,6 +78,14 @@ func TestRun_PriorityZeroResignPromotesPeerImmediately(t *testing.T) {
 						resignAdvertCount++
 						if resignAdvertCount == 1 {
 							firstResignAdvert <- time.Now()
+						}
+						requiredRemovals := int32(1)
+						if path == "shutdown" {
+							requiredRemovals = 2
+						}
+						if removalObservedWhileMaster.Load() &&
+							masterVIPRemovals.Load() >= requiredRemovals {
+							priorityZeroFollowedRemoval.Store(true)
 						}
 					} else {
 						select {
@@ -124,6 +153,12 @@ func TestRun_PriorityZeroResignPromotesPeerImmediately(t *testing.T) {
 				}
 			case <-time.After(time.Until(deadline)):
 				t.Fatalf("peer stayed %s for 50ms after priority-0 resignation", backup.getState())
+			}
+			if !removalObservedWhileMaster.Load() {
+				t.Fatal("MASTER resignation did not attempt VIP removal while still MASTER")
+			}
+			if !priorityZeroFollowedRemoval.Load() {
+				t.Fatal("priority-zero advertisement preceded successful VIP removal")
 			}
 
 			if barrier != nil {
