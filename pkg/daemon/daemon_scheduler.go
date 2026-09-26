@@ -48,14 +48,14 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 		return nil
 	}
 
-	sched, activeState := scheduler.NewPrimed(cfg.Schedulers, func(ctx context.Context, activeState map[string]bool) error {
+	sched, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(ctx context.Context, activeState map[string]bool) error {
 		// #8660: the SCHEDULER'S ctx, handed to us by the tick. Not
 		// `d.daemonCtx`, which is the raw production-uncancelled parent — a
 		// tick parked on the semaphore with that one is released by nothing,
 		// so `stopPolicySchedulerLoop`'s `schedulerWg.Wait()` blocked behind a
 		// wedged apply and shutdown never reached HA relinquish.
 		return d.publishPolicyScheduleState(ctx, epoch, activeState)
-	}, now)
+	}, now, policySchedulerLocation(cfg, now))
 	sched.CarryRecoveryStateFrom(previous, now)
 	activeState = sched.ActiveState()
 	d.scheduler.Store(sched)
@@ -72,8 +72,25 @@ func (d *Daemon) policySchedulerActiveStateForApplyLocked(cfg *config.Config, no
 	if sched := d.scheduler.Load(); sched != nil && hash == d.policySchedulerConfigHash {
 		return sched.ActiveState()
 	}
-	_, activeState := scheduler.NewPrimed(cfg.Schedulers, func(context.Context, map[string]bool) error { return nil }, now)
+	_, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(context.Context, map[string]bool) error { return nil }, now, policySchedulerLocation(cfg, now))
 	return activeState
+}
+
+// policySchedulerLocation returns the committed system zone for scheduler
+// evaluation. Empty configuration preserves the host-local behavior; an
+// unavailable configured zone returns nil so the scheduler fails closed rather
+// than inheriting a potentially stale process-local zone.
+func policySchedulerLocation(cfg *config.Config, now time.Time) *time.Location {
+	if cfg == nil || cfg.System.TimeZone == "" {
+		return now.Location()
+	}
+	loc, err := time.LoadLocation(cfg.System.TimeZone)
+	if err != nil {
+		slog.Warn("scheduler: configured system time zone unavailable; scheduled policies will stay inactive",
+			"timezone", cfg.System.TimeZone, "err", err)
+		return nil
+	}
+	return loc
 }
 
 func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
@@ -81,6 +98,10 @@ func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
 		return [32]byte{}, false
 	}
 	h := sha256.New()
+	// #10949: a configured timezone is scheduler input even when scheduler
+	// windows themselves are unchanged. Hash it so a commit replaces the
+	// scheduler generation and publishes state in the new location.
+	writePolicySchedulerHashString(h, cfg.System.TimeZone)
 	names := make([]string, 0, len(cfg.Schedulers))
 	for name := range cfg.Schedulers {
 		names = append(names, name)

@@ -64,6 +64,42 @@ func TestReconcilePolicySchedulerLockedKeepsByteIdenticalScheduler(t *testing.T)
 	}
 }
 
+func TestCommittedTimeZoneReplacesSchedulerAndAgreesAcrossPeers10949(t *testing.T) {
+	now := time.Date(2026, 2, 12, 12, 30, 0, 0, time.UTC) // 04:30 in Los Angeles
+	makeConfig := func(zone string) *config.Config {
+		return &config.Config{
+			System: config.SystemConfig{TimeZone: zone},
+			Schedulers: map[string]*config.SchedulerConfig{
+				"workhours": {Name: "workhours", StartTime: "04:00:00", StopTime: "05:00:00"},
+			},
+		}
+	}
+
+	zoneA := makeConfig("UTC")
+	zoneB := makeConfig("America/Los_Angeles")
+	d := &Daemon{}
+	if state := d.reconcilePolicySchedulerLockedAt(zoneA, now); state["workhours"] {
+		t.Fatal("the scheduler must be inactive at 12:30 UTC under zone A (UTC)")
+	}
+	old := d.scheduler.Load()
+	stateB := d.reconcilePolicySchedulerLockedAt(zoneB, now)
+	if d.scheduler.Load() == old {
+		t.Fatal("a committed system time-zone change must replace the scheduler generation")
+	}
+	if !stateB["workhours"] {
+		t.Fatal("the new generation did not use zone B: 12:30 UTC is 04:30 in Los Angeles")
+	}
+
+	// A peer starting directly from the same committed configuration must
+	// derive the same state rather than inherit its own process's TZ history.
+	peer := &Daemon{}
+	peerState := peer.reconcilePolicySchedulerLockedAt(zoneB, now)
+	if !peerState["workhours"] || peerState["workhours"] != stateB["workhours"] {
+		t.Fatalf("peer state=%v, zone-change state=%v; peers must agree for committed zone B",
+			peerState, stateB)
+	}
+}
+
 func TestReconcilePolicySchedulerCarriesFailedRecoveryState(t *testing.T) {
 	now := time.Date(2026, 2, 12, 12, 0, 0, 0, time.UTC)
 	oldCfg := &config.Config{

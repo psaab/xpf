@@ -16,6 +16,9 @@ during specific windows.
 - `NewPrimed(..., now)` — constructor for daemon apply paths that need the
   initial active-state map without firing the callback while an external
   apply semaphore is already held.
+- `NewPrimedInLocation(..., loc)` — `scheduler.go`. Apply paths with a
+  committed system time zone use this constructor so the scheduler does not
+  depend on Go's process-cached `time.Local`.
 - `Run(ctx context.Context)` — `scheduler.go`.
 - `IsActive(name string) bool` — `scheduler.go`.
 - `ActiveState() map[string]bool` — `scheduler.go`. Snapshot of every
@@ -55,20 +58,25 @@ grouped by the `schedulers` entry in `setSchema`
 `start-date`/`stop-date` value slots are typed so a malformed window is
 rejected at commit (`ValidateTimeOfDay` / `ValidateDate`).
 
-**Time zone — system local (#3988).** Scheduler dates and times are Junos
-local wall-clock. `withinDateRange` parses `StartDate`/`StopDate` with
+**Time zone — committed system local (#3988, #10949).** Scheduler dates and
+times are Junos local wall-clock. The daemon resolves a configured
+`system time-zone` with `time.LoadLocation` and includes that value in the
+scheduler generation hash, so a committed zone change rebuilds and publishes
+the scheduler state in the new zone during apply. Each subsequent tick
+converts its instant into the generation's cached location before evaluating
+date and time windows; peers with the same committed zone therefore agree
+regardless of restart history. If no zone is configured, the caller's time
+location is retained. If a configured zone cannot be loaded, scheduled
+policies fail closed.
+
+`withinDateRange` parses `StartDate`/`StopDate` with
 `time.ParseInLocation("2006-01-02", …, now.Location())`, so the calendar
-boundary lands on **local midnight**; every production caller supplies `now`
-from `time.Now()` or the evaluation ticker, both of which carry `time.Local`.
-Parsing the date with `time.Parse` (its UTC default) put the boundary on UTC
-midnight and shifted the whole range by the local UTC offset — a
-`start-date 2026-07-01` range under UTC-7 went active at 17:00 local on
-2026-06-30, ~7 h early. The daily `start-time`/`stop-time` window is already
-local-safe and unchanged: it never forms an instant, comparing only wall-clock
-H/M/S components (`parseTimeOfDay` vs `timeOfDay`, both in `now`'s zone). A
-UTC-offset-0 host is unaffected (local == UTC). Deriving the zone from `now`
-rather than reading `time.Local` directly keeps the boundary consistent with
-the same clock the window is compared against and needs no global test seam.
+boundary lands on local midnight. Parsing the date with `time.Parse` (its UTC
+default) put the boundary on UTC midnight and shifted the whole range by the
+local UTC offset — a `start-date 2026-07-01` range under UTC-7 went active at
+17:00 local on 2026-06-30, ~7 h early. Daily `start-time`/`stop-time` windows
+compare only wall-clock H/M/S components (`parseTimeOfDay` vs `timeOfDay`),
+using the same converted local instant.
 
 **Fail-closed invariant (#3849 — security).** `isWithinWindow` treats an
 ABSENT window as **inactive**, never always-on. A scheduler that resolves
