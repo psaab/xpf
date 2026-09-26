@@ -19,6 +19,12 @@ func (d *Daemon) bootstrapFromFile() error {
 	if err != nil {
 		return fmt.Errorf("read config file: %w", err)
 	}
+	// A zero-length file is not a meaningful configuration. In particular,
+	// do not let a torn day-0 install commit an empty tree and mark the store
+	// as ever committed.
+	if len(data) == 0 {
+		return fmt.Errorf("config file %q is empty", d.opts.ConfigFile)
+	}
 
 	// Import into the store: enter config mode, load, commit.
 	// Commit() handles compilation (including ${node} variable expansion

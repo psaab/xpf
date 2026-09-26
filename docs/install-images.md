@@ -364,10 +364,12 @@ Day-0 loader specifics (`scripts/image/xpf-day0-config`, oneshot unit
   its labeled position. Mounted `ro,nosuid,nodev,noexec`; only the two
   fixed filenames at the volume root are considered; 4 MiB size cap;
   validation under timeout. Nothing on the medium is executed.
-- On PASS the config is installed as `/etc/xpf/xpf.conf` (mode 0600 —
-  it may carry credential material) and xpfd's normal
-  bootstrap-from-file import commits it at startup. No second config
-  ingestion mechanism exists.
+- On PASS the validated config is installed as `/etc/xpf/xpf.conf` (mode
+  0600 — it may carry credential material) via a same-directory temporary
+  file, fsync, atomic rename, and directory fsync. xpfd's normal
+  bootstrap-from-file import commits it at startup, but refuses a zero-length
+  config instead of committing an empty tree. No second config ingestion
+  mechanism exists.
 - Failures never block the boot: the unit is ordering-only (no
   `Requires=`), the script always exits 0, and `TimeoutStartSec`
   backstops a hung mount. Fallback is always the factory bootstrap.

@@ -108,6 +108,32 @@ while ($n < $cap) {
 }
 ' -- "$1" "$2"
 }
+# install_config_durable <validated-file> atomically replaces xpf.conf with
+# the already-validated bytes and persists both the file and directory entry.
+install_config_durable() {
+	local source="$1" target="$XPF_DIR/xpf.conf" staged
+	staged=$(mktemp "$XPF_DIR/.xpf.conf.XXXXXX") || return 1
+	if ! install -o root -g root -m 0600 "$source" "$staged"; then
+		rm -f "$staged"
+		return 1
+	fi
+	if ! perl -MIO::Handle -MFcntl=O_RDONLY -e '
+use strict;
+use warnings;
+my ($staged, $target, $dir) = @ARGV;
+open my $file, "<", $staged or die "open $staged: $!";
+$file->sync or die "fsync $staged: $!";
+close $file or die "close $staged: $!";
+rename($staged, $target) or die "rename $staged to $target: $!";
+sysopen(my $directory, $dir, O_RDONLY) or die "open directory $dir: $!";
+$directory->sync or die "fsync directory $dir: $!";
+close $directory or die "close directory $dir: $!";
+' "$staged" "$target" "$XPF_DIR"; then
+		rm -f "$staged"
+		return 1
+	fi
+	return 0
+}
 
 cleanup() {
 	umount "$MNT" 2>/dev/null || true
@@ -246,11 +272,10 @@ try_device() {
 
 	mkdir -p "$XPF_DIR"
 	chmod 0750 "$XPF_DIR" 2>/dev/null || true
-	# 0600: a day-0 config may carry credential material
-	# (root-authentication encrypted-password, IKE PSKs). Install the
-	# validated COPY, never re-read the medium.
-	if ! install -o root -g root -m 0600 "$tmpconf" "$XPF_DIR/xpf.conf"; then
-		warn "failed to install $XPF_DIR/xpf.conf"
+	# The config may carry credentials; install only the validated copy with
+	# mode 0600. A same-directory temp + rename prevents torn readers.
+	if ! install_config_durable "$tmpconf"; then
+		warn "failed to install $XPF_DIR/xpf.conf durably"
 		rm -f "$tmpconf"
 		umount "$MNT"
 		return 1
