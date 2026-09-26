@@ -343,6 +343,8 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 		// do not rekey together; emitting `rand_time = 0s` removed that
 		// jitter with no recorded rationale. Junos has no rand_time knob,
 		// so omission (strongSwan's default) is the faithful render.
+		// Keep direct or pre-fix configs bounded like compiled proposals.
+		ikeLifetime = clampIPsecLifetimeSeconds(ikeLifetime)
 		if ikeLifetime > 0 {
 			fmt.Fprintf(&b, "    rekey_time = %ds\n", ikeLifetime)
 		}
@@ -405,7 +407,7 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			// #9919 F-163: no rand_time beside the child rekey_time either
 			// (same de-jitter as the IKE connection above).
 			if espLifetime > 0 {
-				fmt.Fprintf(&b, "        rekey_time = %ds\n", espLifetime)
+				fmt.Fprintf(&b, "        rekey_time = %ds\n", clampIPsecLifetimeSeconds(espLifetime))
 			}
 			// Junos df-bit → strongSwan copy_df (outer IP-header DF handling;
 			// the DF bit lives in the outer encapsulating IP header, not ESP).
@@ -687,6 +689,7 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 	}
 	return children
 }
+
 // ChildSelector is an exported view of the renderer's resolved selector pair.
 // Its fields are the exact values rendered as swanctl local_ts/remote_ts.
 type ChildSelector = childSelector

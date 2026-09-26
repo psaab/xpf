@@ -543,30 +543,20 @@ func validateIPsecEndpointsStrict(cfg *Config) error {
 
 // validateIPsecProposalLifetimesStrict rejects a `lifetime-seconds` on an
 // IKE (Phase-1) or IPsec (Phase-2) proposal that was PRESENT in the input
-// but was not a usable positive integer -- a negative, a zero, or a
-// non-numeric token.
+// but was not a positive integer in the Junos-supported range 1..86400.
 //
-// #9008: both leaves carry validator: ValidateIntegerMin(1) in setSchema,
-// but SchemaValidate is invoked ONLY from compileTreeStrict. So the bound
-// is enforced on the `Store.Commit -> compileTree -> compileTreeStrict`
-// channel and NOWHERE ELSE: compileTreeLenient -- which backs Store.Load
-// (daemon boot, reading back the on-disk active config) and the HA
-// SyncApply path -- downgrades schema findings to slog.Warn, and the
-// compiler then dropped the offending token without a trace. A negative
-// was worse than dropped: strconv.Atoi parses "-5" cleanly, so it was
-// STORED as LifetimeSeconds and carried into the swanctl renderer.
+// #9008 and #10882: both leaves are bounded by the schema to 1..86400, but
+// SchemaValidate runs only from compileTreeStrict. So the bound is enforced on
+// the `Store.Commit -> compileTree -> compileTreeStrict` channel and NOWHERE
+// ELSE: compileTreeLenient, which backs Store.Load and HA SyncApply, downgrades
+// schema findings to warnings. The compiler records the offending value in
+// LifetimeSecondsInvalidSpec, and caps an over-limit value at 86400 so a
+// tolerant load cannot carry an effectively immortal SA into swanctl.
 //
-// The compiler now records the raw token (LifetimeSecondsInvalidSpec)
-// because the compiled int cannot express either case: a non-numeric
-// leaves 0, which is indistinguishable from "not configured", and a
-// negative is a value the renderer cannot tell from an intended one.
-//
-// Wired through opts.lenientIPsecProposalLifetime, so the tolerant path
-// WARNS where the strict path rejects. That asymmetry is deliberate and
-// is the #1960 doctrine: Store.Load must not gain a new REJECTION -- a
-// config an older binary accepted must still load, or a daemon restart
-// after a downgrade strands the box on an unreadable active config. It
-// may, and now does, gain a new WARNING.
+// The compiler records the raw token in LifetimeSecondsInvalidSpec because a
+// compiled int cannot express non-numeric, non-positive, or over-limit input:
+// non-numeric values leave 0, negative values could otherwise be rendered, and
+// over-limit values must be capped while remaining diagnosable.
 func validateIPsecProposalLifetimesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -590,8 +580,8 @@ func validateIPsecProposalLifetimesStrict(cfg *Config) error {
 	// Map iteration order is randomised; sort so the message (and any test
 	// asserting on it) is stable when more than one proposal is bad.
 	sort.Strings(bad)
-	return fmt.Errorf("%s: lifetime-seconds must be a positive integer (at least 1)",
-		strings.Join(bad, "; "))
+	return fmt.Errorf("%s: lifetime-seconds must be an integer in [1..%d]",
+		strings.Join(bad, "; "), MaxIPsecLifetimeSeconds)
 }
 
 // validateIPsecDHGroupsStrict rejects a `dh-group` (IKE Phase-1 proposal,

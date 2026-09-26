@@ -421,10 +421,14 @@ func deriveDPD(gw *config.IPsecGateway, vpn *config.IPsecVPN) dpdSettings {
 	delay := gw.DPDInterval
 	if delay <= 0 {
 		delay = 10
+	} else if delay > config.MaxIPsecDPDIntervalSeconds {
+		delay = config.MaxIPsecDPDIntervalSeconds
 	}
 	threshold := gw.DPDThreshold
 	if threshold <= 0 {
 		threshold = 5
+	} else if threshold > config.MaxIPsecDPDThreshold {
+		threshold = config.MaxIPsecDPDThreshold
 	}
 
 	action := ""
@@ -463,6 +467,13 @@ func deriveDPD(gw *config.IPsecGateway, vpn *config.IPsecVPN) dpdSettings {
 		Timeout: delay * threshold,
 		Action:  action,
 	}
+}
+
+func clampIPsecLifetimeSeconds(seconds int) int {
+	if seconds > config.MaxIPsecLifetimeSeconds {
+		return config.MaxIPsecLifetimeSeconds
+	}
+	return seconds
 }
 
 // hasIKEChain checks if the IKE policy -> IKE proposal chain is available.

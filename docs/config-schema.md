@@ -10326,23 +10326,18 @@ reserved for whole-dataplane selection where a rewrite shim
     crypto leaves — `authentication-method` (IKE only, enum
     `pre-shared-keys|rsa-signatures|ecdsa-signatures`, matching
     `authMethodToSwan`), `dh-group`, and `lifetime-seconds`
-    (`ValidateIntegerMin(1)` — 0/garbage previously silently compiled to
-    0). **The schema bound alone did not cover every channel (#9008):**
-    `SchemaValidate` is invoked ONLY from `compileTreeStrict`, so the floor
-    was enforced on the `Store.Commit -> compileTree -> compileTreeStrict`
-    path and nowhere else. `compileTreeLenient` — which backs `Store.Load`
-    (daemon boot, reading the persisted active config) and the HA
-    `SyncApply` path — downgrades schema findings to `slog.Warn`, and the
-    compiler then dropped the offending token with no diagnostic at all. A
-    NEGATIVE was worse than dropped: `strconv.Atoi("-5")` succeeds, so it
-    was STORED as `LifetimeSeconds` and carried into the swanctl renderer.
-    Both compiler loops now RECORD the raw token
-    (`LifetimeSecondsInvalidSpec`, which the compiled int cannot express —
-    a non-numeric leaves 0, indistinguishable from "not configured") and
-    `validateIPsecProposalLifetimesStrict` rejects on commit / warns on the
-    tolerant path via `lenientIPsecProposalLifetime`, per the #1960
-    fail-closed-on-load doctrine: `Store.Load` may gain a new WARNING but
-    never a new REJECTION. Both `dh-group` leaves use `ValueDHGroup` + `ValidateDHGroup` and
+    (`ValidateInteger(1, 86400)`; Junos caps IKE and ESP SA lifetimes at
+    86400 seconds). #9008 already records malformed and below-minimum values
+    for diagnostics; #10882 adds the upper bound to both schema validators and
+    the compiler gate. `SchemaValidate` runs only from `compileTreeStrict`,
+    while `compileTreeLenient` backs `Store.Load` and HA `SyncApply` and
+    downgrades schema findings to warnings. Both compiler loops record the raw
+    over-limit token in `LifetimeSecondsInvalidSpec` and cap the compiled
+    lifetime at 86400, so tolerant loads do not carry effectively immortal
+    SAs into swanctl. `validateIPsecProposalLifetimesStrict` rejects the
+    invalid value at strict commit and warns on tolerant paths; the renderer
+    independently caps direct or pre-fix configs before emitting `rekey_time`.
+    Both `dh-group` leaves use `ValueDHGroup` + `ValidateDHGroup` and
     accept the bare-integer (`14`) and the Junos `group<N>` (`group14`)
     spellings identically (#2639):
     - IKE `dh-group` — the IKE compiler loop (`compiler_ipsec.go`
