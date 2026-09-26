@@ -443,6 +443,7 @@ func runDay0Loader(t *testing.T, loaderDir string) string {
 	script := `export XPF_DAY0_SOURCE_ONLY=1
 source "$1" || exit 99
 XPF_DIR="$2"
+REJECT_MARKER="$XPF_DIR/.day0-config-rejected"
 MNT="$XPF_DIR/mnt"
 STAMP="$XPF_DIR/.day0-config-applied"
 XPFD=/bin/true
