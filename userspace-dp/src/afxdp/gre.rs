@@ -255,9 +255,9 @@ pub(in crate::afxdp) fn gre_checksum_counter_test_lock() -> std::sync::MutexGuar
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// #6842: native-GRE frames REFUSED for decap because the GRE version
-/// field was non-zero while the outer tuple named a configured GRE
-/// tunnel endpoint.
+/// #6842: `unsupported_version_refusals` counts native-GRE frames REFUSED for
+/// decap because the GRE version field was non-zero while the outer tuple named
+/// a configured GRE tunnel endpoint.
 ///
 /// GRE version is a *decap discriminator*, not a cosmetic field. RFC
 /// 2784/2890 GRE is version 0. RFC 2637 (PPTP) "enhanced GRE" is
@@ -286,6 +286,11 @@ pub(in crate::afxdp) fn gre_checksum_counter_test_lock() -> std::sync::MutexGuar
 /// nonzero value means a peer is offering PPTP/enhanced GRE to a
 /// configured GRE tunnel endpoint; xpf has no PPTP ALG (see #6842) so
 /// that traffic is not terminated here.
+
+/// #10865: `pt_nibble_mismatch_refusals` separately counts configured GRE
+/// endpoint refusals when the GRE Protocol Type disagrees with the inner IP
+/// version nibble for the endpoint's matching outer tuple, key, and domain.
+///
 /// #8291: the cumulative store, reached through `ForwardingState` rather than a
 /// process-global `static`.
 ///
@@ -314,10 +319,12 @@ pub(in crate::afxdp) fn gre_checksum_counter_test_lock() -> std::sync::MutexGuar
 #[derive(Clone, Debug, Default)]
 pub(in crate::afxdp) struct GreDecapCounters {
     unsupported_version_refusals: std::sync::Arc<AtomicU64>,
+    /// #10865: PT/nibble mismatch refusals offered to a configured GRE endpoint.
+    pt_nibble_mismatch_refusals: std::sync::Arc<AtomicU64>,
 }
 
 impl GreDecapCounters {
-    /// Account one version refusal. The only mutator.
+    /// Account one version refusal. The only mutator for this counter.
     pub(in crate::afxdp) fn note_unsupported_version_refusal(&self) {
         self.unsupported_version_refusals
             .fetch_add(1, Ordering::Relaxed);
@@ -325,6 +332,16 @@ impl GreDecapCounters {
 
     pub(in crate::afxdp) fn unsupported_version_refusals(&self) -> u64 {
         self.unsupported_version_refusals.load(Ordering::Relaxed)
+    }
+
+    /// Account one PT/nibble mismatch refusal. The only mutator for this counter.
+    pub(in crate::afxdp) fn note_pt_nibble_mismatch_refusal(&self) {
+        self.pt_nibble_mismatch_refusals
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::afxdp) fn pt_nibble_mismatch_refusals(&self) -> u64 {
+        self.pt_nibble_mismatch_refusals.load(Ordering::Relaxed)
     }
 }
 
@@ -373,6 +390,54 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
         return;
     }
     forwarding.gre_decap_counters.note_unsupported_version_refusal();
+}
+
+/// Cold-path bookkeeping for the PT/nibble refusal above.
+///
+/// Only reached when the GRE Protocol Type disagrees with the inner version
+/// nibble. Count only a frame offered to a configured GRE endpoint with the
+/// matching key and transport domain; ordinary transit GRE is not counted.
+#[cold]
+#[inline(never)]
+fn note_gre_pt_nibble_mismatch(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+    key: u32,
+    key_present: bool,
+    inner_packet: &[u8],
+    inner_family: u8,
+) {
+    let expected_nibble = match inner_family as i32 {
+        libc::AF_INET => 4,
+        libc::AF_INET6 => 6,
+        _ => return,
+    };
+    // An empty inner has no nibble to disagree with; it is still refused,
+    // but is not a PT/nibble mismatch and must not inflate this counter.
+    if !matches!(inner_packet.first(), Some(b) if b >> 4 != expected_nibble) {
+        return;
+    }
+    let Some((outer_src, outer_dst)) = parse_outer_addresses(frame, meta) else {
+        return;
+    };
+    let ingress_routing_instance = gre_ingress_routing_instance(forwarding, meta);
+    if match_tunnel_endpoint(
+        forwarding,
+        meta.addr_family as i32,
+        outer_src,
+        outer_dst,
+        key,
+        key_present,
+        ingress_routing_instance,
+    )
+    .is_none()
+    {
+        return;
+    }
+    forwarding
+        .gre_decap_counters
+        .note_pt_nibble_mismatch_refusal();
 }
 
 /// Read the inner IP packet's DSCP+ECN byte for outer-header
@@ -998,6 +1063,15 @@ pub(super) fn try_native_gre_decap_from_frame(
     // mismatch would be adjudicated as one family and delivered as another.
     // Fail closed before any of it.
     if !gre_inner_nibble_matches(inner_packet, inner_family) {
+        note_gre_pt_nibble_mismatch(
+            frame,
+            meta,
+            forwarding,
+            key,
+            key_present,
+            inner_packet,
+            inner_family,
+        );
         return None;
     }
 

@@ -588,6 +588,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_gre_encap_df_oversize_drops_total",                  // #2331 GRE encap DF-set oversized-outer drops
 		"xpf_userspace_gre_decap_checksum_invalid_drops_total",             // #2782 GRE decap checksum-present invalid drops
 		"xpf_userspace_gre_decap_unsupported_version_refusals_total",       // #6842 GRE decap refused: non-zero GRE version (PPTP) at a configured endpoint
+		"xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total",        // #10865 GRE decap refused: configured endpoint PT/nibble mismatch
 		// #10695 (#9506): IPsec-inner Rust status counter census.
 		"xpf_userspace_zone_gate_unzoned_total",
 		"xpf_userspace_zone_gate_ambiguous_total",

@@ -354,6 +354,66 @@ fn the_refusal_total_survives_a_config_apply_8291() {
     );
 }
 
+/// #10865: PT/nibble mismatch refusals survive config rebuilds and reach the
+/// coordinator's operator-visible status surface.
+#[test]
+fn pt_nibble_mismatch_refusal_total_survives_apply_and_reaches_status_10865() {
+    use crate::afxdp::forwarding_build::build_forwarding_state_with_policy_counters_and_previous;
+    use crate::policy::PolicyCounterStore;
+
+    let snapshot = gre_to_self_snapshot();
+    let policy = PolicyCounterStore::default();
+    let nat = crate::nat::NatCounterStore::default();
+    let first =
+        build_forwarding_state_with_policy_counters_and_previous(&snapshot, &policy, &nat, None)
+            .expect("first apply builds");
+
+    // Same endpoint/key as the version tests, but a valid v4 header whose
+    // version nibble disagrees with the GRE Protocol Type's IPv4 claim.
+    let mut inner = build_gre_inner_icmp_packet_v4();
+    inner[0] = 0x65;
+    inner[10] = 0;
+    inner[11] = 0;
+    let ip_sum = checksum16(&inner[0..20]);
+    inner[10] = (ip_sum >> 8) as u8;
+    inner[11] = ip_sum as u8;
+    let frame = build_gre_versioned_outer_frame_v4(0, GRE_FLAG_KEY, 0, 0, TUNNEL_PEER, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    assert!(try_native_gre_decap_from_frame(&frame, meta, &first).is_none());
+    assert_eq!(
+        first.gre_decap_counters.pt_nibble_mismatch_refusals(),
+        1,
+        "precondition: the packet path must count the mismatch refusal"
+    );
+
+    let second = build_forwarding_state_with_policy_counters_and_previous(
+        &snapshot,
+        &policy,
+        &nat,
+        Some(&first),
+    )
+    .expect("second apply builds");
+    assert_eq!(
+        second.gre_decap_counters.pt_nibble_mismatch_refusals(),
+        1,
+        "the cumulative mismatch-refusal total survives config apply"
+    );
+
+    let mut coordinator = crate::afxdp::Coordinator::new();
+    coordinator.set_forwarding_for_test(second);
+    assert_eq!(
+        coordinator.gre_decap_pt_nibble_mismatch_refusals_total(),
+        1,
+        "the status surface reports the carried PT/nibble refusal total"
+    );
+    assert!(try_native_gre_decap_from_frame(&frame, meta, &coordinator.forwarding).is_none());
+    assert_eq!(
+        coordinator.gre_decap_pt_nibble_mismatch_refusals_total(),
+        2,
+        "the coordinator status remains attached to the live cumulative counter"
+    );
+}
+
 /// #8291: the operator-visible surface still reports the number it reported
 /// before the counter moved off the `static`.
 ///

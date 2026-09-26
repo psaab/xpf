@@ -486,6 +486,7 @@ pub(crate) fn run() -> Result<(), String> {
             gre_encap_df_oversize_drops_total: 0,
             gre_decap_checksum_invalid_drops_total: 0,
             gre_decap_unsupported_version_refusals_total: 0,
+            gre_decap_pt_nibble_mismatch_refusals_total: 0,
             time_exceeded_rate_limited_total: 0,
             packet_too_big_rate_limited_total: 0,
             reject_rate_limited_total: 0,

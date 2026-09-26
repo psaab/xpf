@@ -1350,6 +1350,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceGreDecapPtNibbleMismatchRefusals: prometheus.NewDesc(
+			"xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total",
+			"gre decap PT/nibble mismatch refusals",
+			nil,
+			nil,
+		),
 		userspaceTimeExceededRateLimited: prometheus.NewDesc(
 			"xpf_userspace_time_exceeded_rate_limited_total",
 			"time-exceeded generated-error rate-limit drops",
@@ -1523,6 +1529,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #6842: GRE-decap unsupported-version (RFC 2637 / PPTP) refusal
 		// counter emitted unconditionally.
 		GreDecapUnsupportedVersionRefusalsTotal: 9,
+		// #10865: GRE-decap PT/nibble mismatch refusal counter emitted
+		// unconditionally with a distinct value.
+		GreDecapPtNibbleMismatchRefusalsTotal: 10,
 		// #2472: per-reason generated-error rate-limit drop counters emitted
 		// unconditionally.
 		TimeExceededRateLimitedTotal: 11,
@@ -1665,13 +1674,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// +12 for #10695's zone-gate and IPsec-inner parse/ECN/queue/slab/orphan
 	// counters, plus #10720's incomplete-synced-key refusal counter = 88; no
 	// cause may be folded into another series.
-	// +1 for #10729 X2-F6's AH-flowless total = 89 (asserted below).
+	// +1 for #10729 X2-F6's AH-flowless total = 89; +1 for #10865 GRE
+	// PT/nibble mismatch refusals = 90 (asserted below).
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 89 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 89 metrics, got %d", len(got))
+	if len(got) != 90 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 90 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1819,6 +1829,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// checksum-invalid counter's 8, so a collector wired to the wrong
 	// status field is caught here rather than agreeing by coincidence.
 	assertCounterClose(t, got, c.userspaceGreDecapUnsupportedVersionRefusals, nil, 9)
+	// #10865: PT/nibble mismatch refusal counter emitted unconditionally
+	// with its own value, distinct from the neighboring GRE counters.
+	assertCounterClose(t, got, c.userspaceGreDecapPtNibbleMismatchRefusals, nil, 10)
 	// #2472: per-reason generated-error rate-limit drop counters emitted
 	// unconditionally.
 	assertCounterClose(t, got, c.userspaceTimeExceededRateLimited, nil, 11)

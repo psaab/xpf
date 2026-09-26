@@ -353,6 +353,10 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // counted.
     state.status.gre_decap_unsupported_version_refusals_total =
         state.afxdp.gre_decap_unsupported_version_refusals_total();
+    // #10865: GRE PT/nibble mismatch refusals at a configured endpoint. A
+    // refusal is not a drop and ordinary transit GRE is not counted.
+    state.status.gre_decap_pt_nibble_mismatch_refusals_total =
+        state.afxdp.gre_decap_pt_nibble_mismatch_refusals_total();
     // #2472: locally-generated error-reply per-reason token-bucket drops.
     // Nonzero = an error-amplification / reflection flood (or a routing loop)
     // being clamped before it emits unbounded generated ICMP/RST errors.

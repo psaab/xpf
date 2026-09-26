@@ -777,6 +777,17 @@ impl super::Coordinator {
         self.forwarding.gre_decap_counters.unsupported_version_refusals()
     }
 
+    /// #10865: configured native-GRE endpoints that refused decapsulation
+    /// because the GRE Protocol Type disagreed with the inner IP version
+    /// nibble. This is a refusal, not a drop; ordinary transit GRE is not
+    /// counted. Surfaced as
+    /// `xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total`.
+    pub fn gre_decap_pt_nibble_mismatch_refusals_total(&self) -> u64 {
+        self.forwarding
+            .gre_decap_counters
+            .pt_nibble_mismatch_refusals()
+    }
+
     /// #2472: locally-generated ICMP/ICMPv6 Time Exceeded replies dropped
     /// because the per-reason token bucket was empty. The TTL/hop-limit error
     /// generator is rate-limited (global-per-reason, Linux `icmp_msgs_per_sec`

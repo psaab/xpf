@@ -1242,7 +1242,7 @@ fn gre_decap_well_formed_udp_inner_v4_still_decaps_with_ports() {
 /// inspected the version nibble, so this decapped exactly like the
 /// #2376 happy path. FAILS if the nibble guard is removed.
 #[test]
-fn gre_decap_drops_pt_v4_inner_nibble_v6_mismatch() {
+fn gre_decap_refuses_pt_v4_inner_nibble_v6_mismatch() {
     let forwarding = build_forwarding_state(&gre_to_self_snapshot());
     let mut inner = build_gre_inner_v4(PROTO_UDP, 8 + 4); // full UDP header + 4B payload
     inner[20..28].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x00, 0x10, 0x00, 0x00]);
@@ -1254,10 +1254,18 @@ fn gre_decap_drops_pt_v4_inner_nibble_v6_mismatch() {
     inner[11] = sum as u8;
     let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
     let meta = gre_to_self_outer_meta(0, frame.len());
+    let before = forwarding
+        .gre_decap_counters
+        .pt_nibble_mismatch_refusals();
     assert!(
         try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
         "PT=IPv4 with an inner version nibble of 6 must fail closed \
          (no decap), not adjudicate-as-v4 and deliver-as-v6"
+    );
+    assert_eq!(
+        forwarding.gre_decap_counters.pt_nibble_mismatch_refusals(),
+        before + 1,
+        "a PT/nibble mismatch offered to a configured GRE endpoint is a counted refusal"
     );
 }
 
@@ -1267,17 +1275,65 @@ fn gre_decap_drops_pt_v4_inner_nibble_v6_mismatch() {
 /// has no header checksum to reseal). FAILS if the nibble guard is
 /// removed.
 #[test]
-fn gre_decap_drops_pt_v6_inner_nibble_v4_mismatch() {
+fn gre_decap_refuses_pt_v6_inner_nibble_v4_mismatch() {
     let forwarding = build_forwarding_state(&gre_to_self_snapshot());
     let mut inner = build_gre_inner_v6(PROTO_UDP, 8 + 4); // full UDP header + 4B payload
     inner[40..48].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x00, 0x10, 0x00, 0x00]);
     inner[0] = 0x40; // version 4, TC-high 0 — PT still claims IPv6
     let frame = build_gre_to_self_outer_frame_with_inner(0x86dd, &inner);
     let meta = gre_to_self_outer_meta(0, frame.len());
+    let before = forwarding
+        .gre_decap_counters
+        .pt_nibble_mismatch_refusals();
     assert!(
         try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
         "PT=IPv6 with an inner version nibble of 4 must fail closed \
          (no decap), not adjudicate-as-v6 and deliver-as-v4"
+    );
+    assert_eq!(
+        forwarding.gre_decap_counters.pt_nibble_mismatch_refusals(),
+        before + 1,
+        "a PT/nibble mismatch offered to a configured GRE endpoint is a counted refusal"
+    );
+}
+
+/// Transit GRE can encounter the same malformed PT/nibble pair, but without
+/// a matching tunnel endpoint that is not a refused decapsulation and is not
+/// included in the endpoint-specific counter.
+#[test]
+fn gre_decap_pt_nibble_mismatch_counter_ignores_transit_gre() {
+    let forwarding = ForwardingState::default();
+    let mut inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    inner[0] = 0x65;
+    inner[10] = 0;
+    inner[11] = 0;
+    let sum = checksum16(&inner[0..20]);
+    inner[10] = (sum >> 8) as u8;
+    inner[11] = sum as u8;
+    let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+
+    assert!(try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none());
+    assert_eq!(
+        forwarding.gre_decap_counters.pt_nibble_mismatch_refusals(),
+        0,
+        "transit GRE without a matching configured endpoint is not counted"
+    );
+}
+
+/// An empty inner has no version nibble to disagree with. It is refused, but
+/// is not charged to the PT/nibble mismatch counter.
+#[test]
+fn gre_decap_pt_nibble_mismatch_counter_ignores_missing_inner_nibble() {
+    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &[]);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+
+    assert!(try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none());
+    assert_eq!(
+        forwarding.gre_decap_counters.pt_nibble_mismatch_refusals(),
+        0,
+        "a missing inner nibble is not a PT/nibble mismatch"
     );
 }
 
@@ -1303,6 +1359,11 @@ fn gre_decap_pt_v6_inner_nibble_v6_still_decaps() {
         &decap.frame[decap.meta.l3_offset as usize..],
         &inner[..],
         "synthetic frame and inner meta must stay self-consistent"
+    );
+    assert_eq!(
+        forwarding.gre_decap_counters.pt_nibble_mismatch_refusals(),
+        0,
+        "matched PT/nibble traffic does not increment the refusal counter"
     );
 }
 

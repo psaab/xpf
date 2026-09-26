@@ -750,6 +750,12 @@ type ProcessStatus struct {
 	// xpf_userspace_gre_decap_unsupported_version_refusals_total. Omitempty
 	// for wire compat with older helpers (defaults to 0).
 	GreDecapUnsupportedVersionRefusalsTotal uint64 `json:"gre_decap_unsupported_version_refusals_total,omitempty"`
+	// #10865: native-GRE endpoints that refused decapsulation because the
+	// GRE Protocol Type disagreed with the inner packet's IP version nibble.
+	// This is a refusal, not a drop; ordinary transit GRE is not counted.
+	// Surfaced as xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total.
+	// Omitempty for wire compat with older helpers (defaults to 0).
+	GreDecapPtNibbleMismatchRefusalsTotal uint64 `json:"gre_decap_pt_nibble_mismatch_refusals_total,omitempty"`
 	// #10695 (#9506 counter slice): D14 zone-gate refusals — IPsec-inner
 	// frames refused before zone admission because no zone claimed the
 	// ingress (unzoned), the STN/ifid resolution was unknown or ambiguous,
