@@ -660,13 +660,17 @@ real traffic and prove the image actually routes.
 ### Self-tests — `make selftest`
 
 The day-0/image/dist/deploy tooling has a suite of hermetic self-tests
-(no root, no incus, no cluster, no network). `make selftest`
-(`scripts/run-selftests.sh`) is the single entry point that discovers and
-runs them all in one fast pass — before this they were reachable from no
-target and a regression re-introducing sign-before-validate (#4017) or
-breaking the grow-root stamp discipline (#2047) merged green. A leg whose
-external tool is missing SKIPs rather than fails, so the runner is green
-on a minimal host and only goes RED on a genuine regression. It covers:
+(no incus, no cluster, no network). Most legs need no root; the #6923 BPF
+leg is the exception: it SKIPs unless passwordless sudo is available, then
+runs its compiled probe via `sudo -n` (never prompting for a password).
+Consequently, `make selftest` uses root for this probe on hosts where
+`sudo -n true` succeeds. `make selftest` (`scripts/run-selftests.sh`) is the
+single entry point that discovers and runs them all in one fast pass — before
+this they were reachable from no target and a regression re-introducing
+sign-before-validate (#4017) or breaking the grow-root stamp discipline
+(#2047) merged green. A leg whose external tool is missing SKIPs rather than
+fails, so the runner is green on a minimal host and only goes RED on a genuine
+regression. It covers:
 
 - shell parse-check (`sh`/`bash -n`) + `shellcheck` over the image/dist
   shell scripts (`xpf-day0-config`, `xpf-grow-root`, `xpf-uefi-slots`,

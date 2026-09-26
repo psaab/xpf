@@ -24,8 +24,103 @@
 # run is worse than one that reports SKIP.
 set -e
 cd "$(dirname "$0")"
+SELF=$(pwd)/$(basename "$0")
+
+if [ "${1:-}" = "--selftest" ]; then
+    # Exercise the real leg's privilege boundary without creating a BPF map or
+    # invoking host sudo. Fake tools require sudo's non-interactive flag and
+    # provide a harmless probe executable.
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' EXIT INT TERM
+    mkdir "${tmp}/bin"
+
+    cat >"${tmp}/bin/cc" <<'EOF'
+#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        out=$1
+        break
+    fi
+    shift
+done
+[ -n "$out" ] || exit 2
+cat >"$out" <<'PROBE'
+#!/bin/sh
+echo BPF_SUDO_CONTRACT_PROBE_RAN
+PROBE
+chmod +x "$out"
+EOF
+    cat >"${tmp}/bin/sudo" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"${SUDO_CALLS:?}"
+[ "${1:-}" = "-n" ] || exit 98
+shift
+if [ "${1:-}" = "true" ]; then
+    [ "${FAKE_SUDO_AVAILABLE:-}" = "yes" ]
+    exit $?
+fi
+[ "${FAKE_SUDO_AVAILABLE:-}" = "yes" ] || exit 99
+exec "$@"
+EOF
+    chmod +x "${tmp}/bin/cc" "${tmp}/bin/sudo"
+
+    if out=$(PATH="${tmp}/bin:$PATH" FAKE_SUDO_AVAILABLE=no \
+        SUDO_CALLS="${tmp}/no-sudo.calls" sh "$SELF" --run-live 2>&1); then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -ne 77 ] || ! echo "$out" | grep -q "SKIP: no passwordless sudo"; then
+        echo "FAIL: unavailable sudo did not SKIP cleanly (rc=$rc): $out"
+        exit 1
+    fi
+    if [ "$(cat "${tmp}/no-sudo.calls")" != "-n true" ]; then
+        echo "FAIL: unavailable sudo was not probed non-interactively"
+        exit 1
+    fi
+    echo "PASS: missing passwordless sudo SKIPs before running the probe"
+
+    if out=$(PATH="${tmp}/bin:$PATH" FAKE_SUDO_AVAILABLE=yes \
+        SUDO_CALLS="${tmp}/sudo.calls" sh "$SELF" --run-live 2>&1); then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -ne 0 ] || ! echo "$out" | grep -q "PASS: BPF_SUDO_CONTRACT_PROBE_RAN"; then
+        echo "FAIL: available sudo did not run the probe: rc=$rc: $out"
+        exit 1
+    fi
+    if [ "$(wc -l <"${tmp}/sudo.calls")" -ne 2 ]; then
+        echo "FAIL: expected non-interactive sudo check and probe invocation"
+        exit 1
+    fi
+    first=$(sed -n '1p' "${tmp}/sudo.calls")
+    second=$(sed -n '2p' "${tmp}/sudo.calls")
+    if [ "$first" != "-n true" ]; then
+        echo "FAIL: passwordless sudo check omitted -n: $first"
+        exit 1
+    fi
+    case "$second" in
+        "-n "*"/probe") ;;
+        *) echo "FAIL: BPF probe omitted sudo -n: $second"; exit 1 ;;
+    esac
+    echo "PASS: available passwordless sudo runs the probe via sudo -n"
+    exit 0
+fi
+
+if [ "${1:-}" = "--run-live" ]; then
+    shift
+fi
+
+if [ "$#" -ne 0 ]; then
+    echo "usage: $0 [--selftest]" >&2
+    exit 2
+fi
 
 command -v cc >/dev/null 2>&1 || { echo "SKIP: no C compiler"; exit 77; }
+
 sudo -n true >/dev/null 2>&1 || { echo "SKIP: no passwordless sudo (BPF_MAP_CREATE needs CAP_BPF)"; exit 77; }
 
 tmp="$(mktemp -d)"

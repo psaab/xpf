@@ -602,9 +602,10 @@ docs-check:
 # but were reachable from NO target — a regression re-introducing
 # sign-before-validate (#4017) or breaking the grow-root stamp discipline
 # (#2047) merged green because nothing ran them. `make selftest` discovers and
-# runs them all in one fast (<a few seconds), hermetic pass (no root, no incus,
-# no cluster, no network); a leg whose external tool is missing SKIPs rather
-# than fails. Standalone by design — same posture as audit-check / docs-check /
+# runs them all in one fast (<a few seconds), hermetic pass (no incus, no
+# cluster, no network; most legs need no root, but the #6923 BPF leg uses
+# `sudo -n` whenever passwordless sudo exists and SKIPs otherwise). A leg whose
+# external tool is missing SKIPs rather than fails. Standalone by design —
 # test-deploy-lib (this repo has no CI; every gate is developer-invoked). It is
 # the one command to run before touching image/day-0/dist/deploy tooling, and
 # the single hook a future CI would call. The incus/QEMU image boot matrix
