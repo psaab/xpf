@@ -8,8 +8,8 @@
 # against the buggy version, because the buggy version's arithmetic was fine
 # for the one unit it recognised.
 #
-# Hermetic — sources the lib and feeds it literal [SUM] lines. No incus, no
-# cluster, no network, no iperf3.
+# Hermetic — sources the lib and feeds it literal [SUM] lines. No incus,
+# cluster, network, or iperf3.
 #
 # Usage: ./test/incus/iperf-throughput-selftest.sh   (rc 0 = all pass)
 set -euo pipefail
@@ -91,8 +91,8 @@ ok "absent and unparseable verdicts are distinguishable"
 # #9690/#9691: these cells used to read test-failover.sh ONLY, and its four
 # siblings kept both defects it had fixed: a Gbits-only parse with no else
 # (#6897), and the 5201 default port that cos-iperf-config.set shapes to 100m
-# (#7673). The list is every harness that starts an iperf3 client against
-# IPERF_TARGET and judges its throughput.
+# This legacy source-shape guard covers four sibling harnesses. test-failover
+# is covered behaviorally by its interval/stream oracle tests instead.
 #
 # The port cells assert the AGREEMENT between each harness and the CoS set rather
 # than pinning either to a literal. Pinning the port alone would encode which
@@ -100,7 +100,7 @@ ok "absent and unparseable verdicts are distinguishable"
 # suspected. Port to class is read in two steps (port to term, term to class)
 # rather than assuming term 11.
 COS_SET="$(dirname "$0")/cos-iperf-config.set"
-SMOKES=(test-failover.sh test-double-failover.sh test-chained-crash.sh test-active-active.sh test-stress-failover.sh)
+SMOKES=(test-double-failover.sh test-chained-crash.sh test-active-active.sh test-stress-failover.sh)
 for smoke in "${SMOKES[@]}"; do
 	f="${SCRIPT_DIR}/${smoke}"
 	[[ -f "$f" ]] || bad "$smoke not found at $f"
@@ -135,6 +135,7 @@ for smoke in "${SMOKES[@]}"; do
 	fi
 	ok "$smoke: -p \${IPERF_PORT} default $port -> term $term -> $fc/$sched, unshaped"
 done
+
 
 echo
 echo "iperf-throughput-lib self-test: $PASS passed"
