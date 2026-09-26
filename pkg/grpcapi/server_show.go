@@ -603,9 +603,11 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 	default:
 		// Handle "log:<filename>[:<count>]" for syslog file destinations
 		if req.Topic == "monitor-security-flow" {
-			buf.WriteString("  Monitor security flow session status: Inactive\n")
-			buf.WriteString("  Monitor security flow trace file: (not configured)\n")
-			buf.WriteString("  Monitor security flow filters: 0\n")
+			// This state belongs to the local CLI session and cannot be observed
+			// through remote gRPC. Do not imply that tracing is inactive.
+			buf.WriteString("  Monitor security flow session status: Unknown (per-CLI-session state)\n")
+			buf.WriteString("  Monitor security flow trace file: Unknown (per-CLI-session state)\n")
+			buf.WriteString("  Monitor security flow filters: Unknown (per-CLI-session state)\n")
 			buf.WriteString("\n  Note: Flow monitor state is per-CLI-session.\n")
 			buf.WriteString("  Use the local CLI on the firewall for flow tracing.\n")
 		} else if strings.HasPrefix(req.Topic, "log:") {

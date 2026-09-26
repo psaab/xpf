@@ -17,7 +17,7 @@
   "internet-options": "Internet options:\n  no-ipv6-reject-zero-hop-limit: disabled\n",
   "ipv6-router-advertisement": "Router Advertisements: not available\n",
   "login": "User             UID    Class          SSH Keys\nadmin            -      super-user     0\n",
-  "monitor-security-flow": "  Monitor security flow session status: Inactive\n  Monitor security flow trace file: (not configured)\n  Monitor security flow filters: 0\n\n  Note: Flow monitor state is per-CLI-session.\n  Use the local CLI on the firewall for flow tracing.\n",
+  "monitor-security-flow": "  Monitor security flow session status: Unknown (per-CLI-session state)\n  Monitor security flow trace file: Unknown (per-CLI-session state)\n  Monitor security flow filters: Unknown (per-CLI-session state)\n\n  Note: Flow monitor state is per-CLI-session.\n  Use the local CLI on the firewall for flow tracing.\n",
   "policies-hit-count": "From zone    To zone      Policy                   Action        Packets            Bytes\n----------------------------------------------------------------------------------------\ntrust        untrust      p1                       permit              0                0\n-            -            default-policy           deny                0                0\n----------------------------------------------------------------------------------------\nTotal                                                                0                0\n",
   "root-authentication": "No root authentication configured\n",
   "route-instance": "Usage: show route instance \u003cname\u003e\n",

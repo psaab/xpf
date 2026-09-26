@@ -82,15 +82,6 @@ func TestAppendClockSkewAlarm10025(t *testing.T) {
 // `show system alarms` renderer, not only the shared callback binding.
 func TestShowSystemAlarmsListsClockSkew10025(t *testing.T) {
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
-	if err := store.EnterConfigure(); err != nil {
-		t.Fatalf("EnterConfigure: %v", err)
-	}
-	if err := store.SetFromInput("system host-name skewtest"); err != nil {
-		t.Fatalf("SetFromInput: %v", err)
-	}
-	if _, err := store.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
 	s := &Server{
 		store: store,
 		clockSkewAlarmsFn: func() []clockskew.ActiveAlarm {

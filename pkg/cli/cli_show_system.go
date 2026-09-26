@@ -1114,12 +1114,12 @@ func (c *CLI) handleShowSystem(args []string) error {
 	case "alarms":
 		cfg := c.store.ActiveConfig()
 		var warnings []string
-		var divergence string
+		// #9530: divergence is store-resident and remains actionable during
+		// bootstrap/rollback windows where no compiled config is active.
+		divergence := c.store.ConfigSyncDivergenceAlarm()
 		if cfg != nil {
 			warnings = config.ValidateConfig(cfg)
 			warnings = append(warnings, config.ToleratedTypedLeafWarnings(cfg)...)
-			// #9530: a peer config sync that discarded a local commit is an alarm too.
-			divergence = c.store.ConfigSyncDivergenceAlarm()
 		}
 		// #10025: daemon-resident pre-break fabric-auth clock alarms remain
 		// visible while a bootstrap or rollback has temporarily removed the
