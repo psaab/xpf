@@ -108,6 +108,59 @@ func TestUserspaceXDPDegradedCtrlDisabledDropsTransit(t *testing.T) {
 	assertUserspaceXDPDegradedPathStat(t, coll, "ctrl_disabled")
 	assertUserspaceXDPDegradedPathStat(t, coll, "transit_drop")
 }
+func TestUserspaceXDPDegradedCtrlDisabledNDPRequiresLocalDestination(t *testing.T) {
+	local := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	transit := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20}
+	src := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10}
+
+	for _, tc := range []struct {
+		name       string
+		dst        [16]byte
+		isLocal    bool
+		wantAction uint32
+		wantStat   string
+	}{
+		{
+			name:       "global destination drops",
+			dst:        transit,
+			wantAction: xdpActionDrop,
+			wantStat:   "transit_drop",
+		},
+		{
+			name:       "configured local destination passes",
+			dst:        local,
+			isLocal:    true,
+			wantAction: xdpActionPass,
+			wantStat:   "pass_to_kernel",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coll := loadUserspaceXDPTestCollection(t)
+			updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
+				Enabled:            0,
+				MetadataVersion:    userspaceMetadataVersion,
+				Workers:            1,
+				QueueCount:         1,
+				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+			})
+			if tc.isLocal {
+				updateUserspaceXDPTestLocalV6(t, coll, tc.dst)
+			}
+
+			ret := runUserspaceXDPTestPacket(t, coll, icmpv6TestPacket(src, tc.dst, 135))
+			if ret != tc.wantAction {
+				t.Fatalf("ctrl-disabled NDP action = %d, want %d", ret, tc.wantAction)
+			}
+			assertUserspaceXDPDegradedPathStat(t, coll, "ctrl_disabled")
+			assertUserspaceXDPDegradedPathStat(t, coll, tc.wantStat)
+			if tc.isLocal {
+				assertUserspaceXDPDegradedPathStatAbsent(t, coll, "transit_drop")
+			} else {
+				assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
+			}
+		})
+	}
+}
 
 func TestUserspaceXDPDegradedCtrlDisabledPassesLocalControl(t *testing.T) {
 	coll := loadUserspaceXDPTestCollection(t)
@@ -237,16 +290,22 @@ func TestUserspaceXDPNDPUsesCPUMapWhenAvailable(t *testing.T) {
 	})
 	updateUserspaceXDPTestHeartbeat(t, coll, 0)
 
+	// #10640: unicast NDP uses the healthy local-destination arm, not a
+	// type-only early pass.
+	local := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	updateUserspaceXDPTestLocalV6(t, coll, local)
+
 	ret := runUserspaceXDPTestPacket(t, coll, icmpv6TestPacket(
 		[16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10},
-		[16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01},
+		local,
 		136,
 	))
 	if ret != xdpActionRedirect {
 		t.Fatalf("NDP action with cpumap = %d, want XDP_REDIRECT", ret)
 	}
-	assertUserspaceXDPDegradedPathStat(t, coll, "early_filter")
-	assertUserspaceXDPDegradedPathStat(t, coll, "pass_to_kernel")
+	// Healthy local delivery is not counted as a degraded-path fallback.
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "early_filter")
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
 }
 
 func TestUserspaceXDPDegradedESPToInterfaceNATPassesLocalControl(t *testing.T) {
@@ -463,6 +522,10 @@ func updateUserspaceXDPTestHeartbeat(t *testing.T, coll *ebpf.Collection, slot u
 func updateUserspaceXDPTestLocalV4(t *testing.T, coll *ebpf.Collection, ip [4]byte) {
 	t.Helper()
 	updateUserspaceXDPTestMap(t, coll, "userspace_local_v4", binary.BigEndian.Uint32(ip[:]), uint8(1))
+}
+func updateUserspaceXDPTestLocalV6(t *testing.T, coll *ebpf.Collection, ip [16]byte) {
+	t.Helper()
+	updateUserspaceXDPTestMap(t, coll, "userspace_local_v6", userspaceLocalV6Key{Addr: ip}, uint8(1))
 }
 
 func updateUserspaceXDPTestInterfaceNATV4(t *testing.T, coll *ebpf.Collection, ip [4]byte) {

@@ -70,6 +70,7 @@ const USERSPACE_CTRL_FLAG_STRICT: u32 = 8;
 /// property.
 const USERSPACE_CTRL_FLAG_WG_RX: u32 = 16;
 mod binding_index;
+mod degraded_ndp;
 mod early_filter;
 mod gre_classify;
 mod ipv4_len_gate;
@@ -1424,10 +1425,18 @@ fn is_degraded_local_or_control(
     if should_fallback_early(parsed) {
         return true;
     }
-    if parsed.protocol == PROTO_ICMPV6 && parsed.icmp_type >= 133 && parsed.icmp_type <= 137 {
+    // #10863: NDP is local control only when its destination is local. The
+    // early filter above already handles multicast and link-local NDP.
+    if is_icmp_to_interface_nat_local(parsed) {
         return true;
     }
-    if is_icmp_to_interface_nat_local(parsed) || is_local_destination(parsed) {
+    let destination_is_local = is_local_destination(parsed);
+    if parsed.protocol == PROTO_ICMPV6
+        && degraded_ndp::is_local_ndp_control(parsed.icmp_type, destination_is_local)
+    {
+        return true;
+    }
+    if destination_is_local {
         return true;
     }
     if degraded_interface_nat_esp_passes_to_kernel(parsed.protocol, parsed.wire_protocol)
