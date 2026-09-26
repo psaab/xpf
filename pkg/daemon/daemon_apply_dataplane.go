@@ -814,6 +814,7 @@ func (d *Daemon) finishRethMemberLinkTail(linuxName string, mac net.HardwareAddr
 			subName := l.Attrs().Name
 			// Suppress auto link-local on VLAN sub-interfaces too.
 			setVLANSubAddrGenMode(subName)
+			clearDadFailed(subName)
 			if !bytes.Equal(l.Attrs().HardwareAddr, mac) {
 				if err := netlink.LinkSetHardwareAddr(l, mac); err != nil {
 					slog.Warn("failed to propagate MAC to VLAN sub-interface",

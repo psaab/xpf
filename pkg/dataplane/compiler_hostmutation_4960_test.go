@@ -7,6 +7,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // #4960. pkg/dataplane.CompileConfig mutates live host state in Phase 2
@@ -227,7 +228,7 @@ func TestPlanAddressReconcileConvergedIsEmpty(t *testing.T) {
 	}
 	desired := []string{"10.0.0.1/24", "2001:db8::1/64"}
 
-	del, add := planAddressReconcile(existing, desired, "ge-0/0/0")
+	del, add, _ := planAddressReconcile(existing, desired, "ge-0/0/0")
 	if len(del) != 0 || len(add) != 0 {
 		t.Fatalf("a converged interface must plan no change, got del=%d add=%d", len(del), len(add))
 	}
@@ -239,14 +240,14 @@ func TestPlanAddressReconcileConvergedIsEmpty(t *testing.T) {
 // nothing.
 func TestPlanAddressReconcileDivergentPlansChange(t *testing.T) {
 	t.Run("missing address is added", func(t *testing.T) {
-		del, add := planAddressReconcile(nil, []string{"10.0.0.1/24"}, "ge-0/0/0")
+		del, add, _ := planAddressReconcile(nil, []string{"10.0.0.1/24"}, "ge-0/0/0")
 		if len(add) != 1 || len(del) != 0 {
 			t.Fatalf("want one add and no delete, got del=%d add=%d", len(del), len(add))
 		}
 	})
 	t.Run("stale address is deleted", func(t *testing.T) {
 		existing := []netlink.Addr{mkAddr(t, "192.0.2.5/24")}
-		del, add := planAddressReconcile(existing, []string{"10.0.0.1/24"}, "ge-0/0/0")
+		del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24"}, "ge-0/0/0")
 		if len(del) != 1 || len(add) != 1 {
 			t.Fatalf("want one delete and one add, got del=%d add=%d", len(del), len(add))
 		}
@@ -254,6 +255,41 @@ func TestPlanAddressReconcileDivergentPlansChange(t *testing.T) {
 			t.Errorf("wrong address planned for deletion: %s", got)
 		}
 	})
+}
+
+func TestPlanAddressReconcileRepairsFailedDesiredIPv6(t *testing.T) {
+	for _, flag := range []int{unix.IFA_F_DADFAILED, unix.IFA_F_TENTATIVE} {
+		existing := []netlink.Addr{mkAddr(t, "2001:db8::1/64")}
+		existing[0].Flags = flag
+
+		del, add, dadfailedCount := planAddressReconcile(existing, []string{"2001:db8::1/64"}, "ge-0/0/0")
+		if dadfailedCount != 1 {
+			t.Errorf("flag %#x: dadfailed count = %d, want 1", flag, dadfailedCount)
+		}
+		if len(del) != 1 || len(add) != 1 {
+			t.Fatalf("flag %#x: want one delete and one add, got del=%d add=%d", flag, len(del), len(add))
+		}
+		if got := del[0].IPNet.String(); got != "2001:db8::1/64" {
+			t.Errorf("flag %#x: delete address = %s, want configured global IPv6", flag, got)
+		}
+		if got := add[0].IPNet.String(); got != "2001:db8::1/64" {
+			t.Errorf("flag %#x: add address = %s, want configured global IPv6", flag, got)
+		}
+		if add[0].Flags&unix.IFA_F_NODAD == 0 {
+			t.Errorf("flag %#x: re-added address flags = %#x, want IFA_F_NODAD", flag, add[0].Flags)
+		}
+	}
+}
+
+func TestPlanAddressReconcileIgnoresDADFlagsOnIPv4(t *testing.T) {
+	existing := []netlink.Addr{mkAddr(t, "192.0.2.1/24")}
+	existing[0].Flags = unix.IFA_F_DADFAILED
+
+	del, add, dadfailedCount := planAddressReconcile(existing, []string{"192.0.2.1/24"}, "ge-0/0/0")
+	if len(del) != 0 || len(add) != 0 || dadfailedCount != 0 {
+		t.Fatalf("IPv4 DAD flags must not trigger a repair, got del=%d add=%d count=%d",
+			len(del), len(add), dadfailedCount)
+	}
 }
 
 // TestPlanAddressReconcileSkipsLinkLocal keeps the kernel's own addresses out of
@@ -265,7 +301,7 @@ func TestPlanAddressReconcileSkipsLinkLocal(t *testing.T) {
 		mkAddr(t, "fe80::1/64"),
 		mkAddr(t, "10.0.0.1/24"),
 	}
-	del, add := planAddressReconcile(existing, []string{"10.0.0.1/24"}, "ge-0/0/0")
+	del, add, _ := planAddressReconcile(existing, []string{"10.0.0.1/24"}, "ge-0/0/0")
 	if len(del) != 0 || len(add) != 0 {
 		t.Fatalf("link-local must be left alone and the v4 address is already correct, "+
 			"so the plan must be empty; got del=%d add=%d", len(del), len(add))
@@ -280,7 +316,7 @@ func TestPlanAddressReconcileIsDeterministic(t *testing.T) {
 	desired := []string{"10.0.0.1/24", "10.0.1.1/24", "10.0.2.1/24", "2001:db8::1/64"}
 	first := ""
 	for i := 0; i < 20; i++ {
-		_, add := planAddressReconcile(nil, desired, "ge-0/0/0")
+		_, add, _ := planAddressReconcile(nil, desired, "ge-0/0/0")
 		got := ""
 		for _, a := range add {
 			got += a.IPNet.String() + ";"
@@ -336,7 +372,7 @@ func TestCompileZonesRecordsNoMutationWhenConverged(t *testing.T) {
 	// Prove the premise before relying on it: if this plan were non-empty the
 	// test would be about to mutate the host, and a green result would mean the
 	// opposite of what it claims.
-	if del, add := planAddressReconcile(addrs, desired, "lo"); len(del) != 0 || len(add) != 0 {
+	if del, add, _ := planAddressReconcile(addrs, desired, "lo"); len(del) != 0 || len(add) != 0 {
 		t.Fatalf("premise broken: the converged plan is not empty (del=%d add=%d); "+
 			"refusing to run a test that would modify this host", len(del), len(add))
 	}

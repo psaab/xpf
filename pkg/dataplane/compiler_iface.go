@@ -402,7 +402,11 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
 	// is a redesign — and it is what makes the converged case testable without
 	// root: an empty plan is the discriminator that keeps the host-mutation
 	// flag meaningful.
-	del, add := planAddressReconcile(existing, desired, ifaceName)
+	del, add, dadfailedCount := planAddressReconcile(existing, desired, ifaceName)
+	if dadfailedCount > 0 {
+		slog.Warn("repairing configured IPv6 addresses with failed or stuck DAD",
+			"name", ifaceName, "dadfailed_count", dadfailedCount)
+	}
 
 	for _, addr := range del {
 		key := addr.IPNet.String()
@@ -450,12 +454,15 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
 // about it. An unparseable desired address is skipped with a warning rather
 // than aborting: it was already skipped before this extraction, and turning it
 // into a failure here would change apply behaviour for a defect this change
-// does not own.
+// does not own. A desired IPv6 address with IFA_F_DADFAILED or
+// IFA_F_TENTATIVE is replaced with IFA_F_NODAD so a peer cannot keep winning
+// DAD by answering each new probe.
 //
 // Both slices are ordered deterministically: deletes follow the kernel's list
 // order, adds follow the order the addresses were authored, so the netlink call
-// sequence does not vary run to run.
-func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName string) (del []*netlink.Addr, add []*netlink.Addr) {
+// sequence does not vary run to run. dadfailedCount counts flagged desired
+// IPv6 addresses the planner schedules for repair.
+func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName string) (del []*netlink.Addr, add []*netlink.Addr, dadfailedCount int) {
 	// Desired set keyed by "ip/mask", plus the authored order for the adds.
 	want := make(map[string]*netlink.Addr, len(desired))
 	order := make([]string, 0, len(desired))
@@ -473,26 +480,32 @@ func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName s
 		want[key] = addr
 	}
 
+	present := make(map[string]bool, len(want))
 	for i := range existing {
 		addr := &existing[i]
 		if addr.IP.IsLinkLocalUnicast() || addr.IP.IsLinkLocalMulticast() {
 			continue
 		}
 		key := addr.IPNet.String()
-		if _, ok := want[key]; ok {
-			// Already present: neither deleted nor re-added.
-			delete(want, key)
+		if desiredAddr, ok := want[key]; ok {
+			if addr.IP.To4() == nil && addr.Flags&(unix.IFA_F_DADFAILED|unix.IFA_F_TENTATIVE) != 0 {
+				del = append(del, addr)
+				desiredAddr.Flags = unix.IFA_F_NODAD
+				dadfailedCount++
+				continue
+			}
+			present[key] = true
 			continue
 		}
 		del = append(del, addr)
 	}
 
 	for _, key := range order {
-		if addr, ok := want[key]; ok {
+		if addr, ok := want[key]; ok && !present[key] {
 			add = append(add, addr)
 		}
 	}
-	return del, add
+	return del, add, dadfailedCount
 }
 
 // compileZones programs the zone/interface dataplane maps and derives the
