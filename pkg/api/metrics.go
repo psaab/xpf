@@ -113,7 +113,8 @@ type xpfCollector struct {
 
 	// #9040: dataplane drops taken on a degraded path, by reason. Sparse and
 	// status-dependent; see metrics_degraded_path_9040.go.
-	degradedPathTotal *prometheus.Desc
+	degradedPathTotal                    *prometheus.Desc
+	managementTLSCertificateInvalidTotal *prometheus.Desc
 
 	// Interface counters
 	ifacePacketsTotal *prometheus.Desc
@@ -948,6 +949,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.syncookieTotal
 	ch <- c.flowCacheTotal
 	ch <- c.counterReadErrorsTotal
+	ch <- c.managementTLSCertificateInvalidTotal
 	c.describeAdmissionRefusals(ch)
 	c.describeAuthzDenials(ch)
 	c.describeDataplaneSilentSkips(ch)
@@ -1411,6 +1413,10 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	// value before this change, since nothing after the former emit site
 	// (collectSessionGauges..collectUserspaceStatus) bumps it.
 	defer c.emitCounterReadErrors(ch)
+	defer func() {
+		ch <- prometheus.MustNewConstMetric(c.managementTLSCertificateInvalidTotal,
+			prometheus.CounterValue, float64(managementTLSCertificateInvalidEvents.Load()))
+	}()
 	// #8312: emitted through the SAME deferred, pre-gate route, and for the
 	// same reason. Admission refusals are a control-plane signal that does not
 	// depend on the dataplane being loaded — and the degraded/unloaded state is

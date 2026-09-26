@@ -163,10 +163,12 @@ type BootstrapImportSnapshot struct {
 
 // Config configures the API server.
 type Config struct {
-	Addr      string
-	HTTPSAddr string      // HTTPS listen address (empty = no HTTPS)
-	TLS       bool        // enable HTTPS with auto-generated certificate
-	Auth      *AuthConfig // nil = no authentication
+	Addr           string
+	HTTPSAddr      string      // HTTPS listen address (empty = no HTTPS)
+	TLS            bool        // enable HTTPS with a management certificate
+	TLSCertificate string      // optional PEM certificate-chain path
+	TLSPrivateKey  string      // optional PEM private-key path; pair must be configured together
+	Auth           *AuthConfig // nil = no authentication
 	// ListenFunc is the listener factory the server binds through (#5866).
 	// nil defaults to net.Listen; a test injects a fake so the
 	// make-before-break listener reconcile is exercised without real ports.
@@ -550,10 +552,10 @@ type Server struct {
 	// port change could never converge — the bug this replaces. sharedBase is the
 	// pre-auth mux+collector+CSRF handler both legs wrap (per-listener auth gate
 	// via listenerHandler), so the #4162 shared scrape limiter / session cache is
-	// preserved across a rebind. certGen resolves the HTTPS cert for a (re)bind:
-	// the self-signed cert is DURABLE (#1916 D6), so an existing on-disk pair is
-	// LOADED AS-IS and a fresh cert is minted ONLY when no on-disk pair exists —
-	// a rebind does not re-mint (that would churn remote clients' TOFU pins).
+	// preserved across a rebind. certGen loads the configured custom pair or
+	// the durable system-generated pair; an out-of-window generated pair is
+	// re-minted, while an invalid custom pair is refused. A valid durable pair
+	// is retained across rebinds to avoid churning client trust.
 	// bindHost is the listener's host (net.SplitHostPort of the bind addr); at
 	// FIRST mint it lands a non-loopback management IP in the cert SANs (#5719).
 	// A later bind change is NOT re-minted — a loaded cert whose SANs miss the
@@ -563,14 +565,24 @@ type Server struct {
 	// the session {ifindex, VLAN} -> interface-name table. nil means the real
 	// kernel lookup; tests inject a fixed table so the session-identity paths
 	// are exercisable without real netdevs (mirrors grpcapi).
-	ifindexByName func(string) (int, error)
-	sharedBase    http.Handler
-	certGen       func(bindHost string) (tls.Certificate, error)
-	lifeMu        sync.Mutex      // guards httpLeg/httpsLeg/rootCtx across reconciles
-	rootCtx       context.Context // daemon lifetime; every leg drains on its cancel
-	wg            sync.WaitGroup  // joins EVERY serve goroutine (live + retiring legs)
-	httpLeg       *listenerLeg    // live HTTP listener leg (nil = not started / HTTP off)
-	httpsLeg      *listenerLeg    // live HTTPS listener leg (nil = HTTPS off)
+	ifindexByName         func(string) (int, error)
+	sharedBase            http.Handler
+	certGen               func(bindHost string) (tls.Certificate, *x509.Certificate, error)
+	tlsCertificate        atomic.Pointer[managementTLSCertificateState]
+	tlsCertificateFiles   atomic.Pointer[managementTLSCertificateFiles]
+	tlsCertificateInvalid atomic.Bool
+	tlsDesired            atomic.Bool
+	tlsNow                func() time.Time
+	tlsCheckInterval      time.Duration
+	tlsMonitorOnce        sync.Once
+	tlsMonitorCancel      context.CancelFunc
+	tlsMonitorWG          sync.WaitGroup
+	tlsCertificateMu      sync.Mutex
+	lifeMu                sync.Mutex      // guards httpLeg/httpsLeg/rootCtx across reconciles
+	rootCtx               context.Context // daemon lifetime; every leg drains on its cancel
+	wg                    sync.WaitGroup  // joins EVERY serve goroutine (live + retiring legs)
+	httpLeg               *listenerLeg    // live HTTP listener leg (nil = not started / HTTP off)
+	httpsLeg              *listenerLeg    // live HTTPS listener leg (nil = HTTPS off)
 	// httpSlot / httpsSlot are the credential slots of the legs Start launches
 	// from the construction-time servers (#5561 round 14). Every leg gets one;
 	// a live slot follows s.auth, a retired one is pinned. See authSlot.
@@ -939,17 +951,24 @@ func NewServer(cfg Config) *Server {
 	// rebind (ReconcileHTTP/ReconcileHTTPS) can rebuild a single listener's
 	// http.Server for a new bind address without disturbing the sibling leg.
 	s.sharedBase = sharedBase
-	s.certGen = generateSelfSignedCert
+	s.tlsNow = time.Now
+	s.tlsCheckInterval = managementTLSCertificateCheckInterval
+	s.tlsCertificateFiles.Store(&managementTLSCertificateFiles{
+		certificate: cfg.TLSCertificate,
+		privateKey:  cfg.TLSPrivateKey,
+	})
+	s.tlsDesired.Store(cfg.TLS && cfg.HTTPSAddr != "")
+	s.certGen = generateSelfSignedCertWithStatus
 
 	if cfg.Addr != "" {
 		plan := s.planHTTPLeg(cfg.Addr)
 		s.httpSlot, s.httpServer = plan.slot, plan.srv
 	}
 
-	// Set up HTTPS server with auto-generated self-signed certificate
+	// Set up HTTPS with the configured or system-generated management certificate.
 	if cfg.TLS && cfg.HTTPSAddr != "" {
 		if plan, err := s.planHTTPSLeg(cfg.HTTPSAddr); err != nil {
-			slog.Warn("failed to generate self-signed certificate", "err", err)
+			slog.Error("failed to prepare HTTPS management certificate; HTTPS unavailable", "err", err)
 		} else {
 			s.httpsSlot, s.httpsServer = plan.slot, plan.srv
 		}
@@ -1131,25 +1150,18 @@ func (s *Server) buildHTTPServer(addr string, slot *authSlot) *http.Server {
 }
 
 // buildHTTPSServer constructs a fresh HTTPS *http.Server bound-for addr with
-// its durable self-signed certificate (#5866): certGen LOADS the existing
-// on-disk pair AS-IS and mints a fresh cert ONLY when no on-disk pair exists (a
-// rebind does not re-mint — #1916 D6). A cert-resolution failure is returned so
-// the caller retains the previous leg (fail-closed).
+// either the configured operator certificate or the durable system-generated
+// certificate (#1916 D6). A certificate-resolution failure is returned so the
+// caller retains the previous listener, whose shared selector fails closed when
+// the requested pair is invalid.
 func (s *Server) buildHTTPSServer(addr string, slot *authSlot) (*http.Server, error) {
-	// Thread the listener's host into cert generation so a non-loopback
-	// management bind IP (e.g. `web-management https interface 10.0.0.1`)
-	// lands in the cert's SANs and a remote client verifies under strict
-	// hostname checking (#5719 C001 residual). A wildcard/empty host
-	// (":8443") yields "" and is ignored by the SAN builder.
-	bindHost := ""
-	if h, _, err := net.SplitHostPort(addr); err == nil {
-		bindHost = h
-	}
-	tlsCert, err := s.certGen(bindHost)
+	s.tlsCertificateMu.Lock()
+	defer s.tlsCertificateMu.Unlock()
+	cert, err := s.loadManagementTLSCertificate(addr)
 	if err != nil {
 		return nil, err
 	}
-	// #7011: same hijack tracking as the HTTP leg — see trackHijackedConns.
+	s.installManagementTLSCertificate(cert)
 	return trackHijackedConns(&http.Server{
 		Addr:              addr,
 		Handler:           s.listenerHandler(addr, slot),
@@ -1161,8 +1173,8 @@ func (s *Server) buildHTTPSServer(addr string, slot *authSlot) (*http.Server, er
 		ConnContext: s.connContext,
 		// WriteTimeout intentionally unset — see the const block above.
 		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-			MinVersion:   tls.VersionTLS12,
+			GetCertificate: s.managementTLSGetCertificate,
+			MinVersion:     tls.VersionTLS12,
 		},
 	}), nil
 }
@@ -1185,6 +1197,12 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	monitorCtx, cancel := context.WithCancel(ctx)
+	s.startManagementTLSCertificateMonitor(monitorCtx)
+	defer func() {
+		cancel()
+		s.tlsMonitorWG.Wait()
+	}()
 	return s.serveBound(ctx, httpLn, httpsLn)
 }
 
@@ -1311,33 +1329,28 @@ func (s *Server) HTTPSLegDrainedForTest() bool {
 func (s *Server) HTTPSCertForTest() *tls.Certificate {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	// Read the LIVE HTTPS leg (post-reconcile), not the construction template, so
-	// the cert the rebound listener actually serves is observed (#5866).
 	srv := s.httpsServer
 	if s.httpsLeg != nil {
 		srv = s.httpsLeg.srv
 	}
-	if srv == nil || srv.TLSConfig == nil || len(srv.TLSConfig.Certificates) == 0 {
-		return nil
-	}
-	return &srv.TLSConfig.Certificates[0]
+	return s.managementTLSCertificateForServer(srv)
 }
 
 // SetTLSCertDirForTest points the server's HTTPS certificate generator at dir
 // instead of the production /etc/xpf/tls paths (#6381). Test-only: it lets a
 // cross-package test (pkg/daemon managementReconciler) exercise the DURABLE
 // self-signed-cert path (#1916 D6) against a WRITABLE temp dir, so an HTTPS
-// rebind LOADS the persisted pair AS-IS (the shipping behavior) instead of
+// rebind LOADS a valid persisted pair AS-IS (the shipping behavior) instead of
 // failing to persist and re-minting a fresh in-memory cert on every reconcile
 // (the CI-only artifact — an unwritable /etc/xpf/tls — that the old
 // TestMgmtReconcileTLSChange_5866 assertion silently depended on). It routes
 // through the real production generateSelfSignedCertAt, so the durable
 // load-as-is path is genuinely bound.
 func (s *Server) SetTLSCertDirForTest(dir string) {
-	s.lifeMu.Lock()
-	defer s.lifeMu.Unlock()
-	s.certGen = func(bindHost string) (tls.Certificate, error) {
-		return generateSelfSignedCertAt(dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), bindHost)
+	s.tlsCertificateMu.Lock()
+	defer s.tlsCertificateMu.Unlock()
+	s.certGen = func(bindHost string) (tls.Certificate, *x509.Certificate, error) {
+		return generateSelfSignedCertAtWithStatus(dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), bindHost)
 	}
 }
 
@@ -1420,9 +1433,8 @@ func (s *Server) serveBound(ctx context.Context, httpLn, httpsLn net.Listener) e
 		go func() {
 			defer wg.Done()
 			slog.Info("HTTPS API server listening", "addr", s.httpsServer.Addr)
-			// TLSConfig.Certificates is already populated in NewServer, so
-			// ServeTLS with empty cert/key file paths uses those certs
-			// (identical to the previous ListenAndServeTLS("", "")).
+			// The TLS config selects the current validated in-memory pair on
+			// every handshake, so timer-driven remints take effect immediately.
 			if err := s.httpsServer.ServeTLS(httpsLn, "", ""); err != http.ErrServerClosed {
 				errCh <- err
 			}
@@ -1506,7 +1518,12 @@ func isDNSSANSafeHostname(h string) bool {
 // generateSelfSignedCert creates or loads a self-signed TLS certificate
 // using the production /etc/xpf/tls paths. See generateSelfSignedCertAt.
 func generateSelfSignedCert(bindHost string) (tls.Certificate, error) {
-	return generateSelfSignedCertAt(tlsDir, certPath, keyPath, bindHost)
+	cert, _, err := generateSelfSignedCertWithStatus(bindHost)
+	return cert, err
+}
+
+func generateSelfSignedCertWithStatus(bindHost string) (tls.Certificate, *x509.Certificate, error) {
+	return generateSelfSignedCertAtWithStatus(tlsDir, certPath, keyPath, bindHost)
 }
 
 // ipSANsContain reports whether ip is already present in sans. net.IP.Equal
@@ -1919,14 +1936,19 @@ func (s *Server) WarnStaleMgmtCertForHostName(hostName string) bool {
 		srv = s.httpsLeg.srv
 	}
 	s.lifeMu.Unlock()
-	if srv == nil || srv.TLSConfig == nil || len(srv.TLSConfig.Certificates) == 0 {
+	if srv == nil || srv.TLSConfig == nil {
 		return false
 	}
-	cert := srv.TLSConfig.Certificates[0]
-	if len(cert.Certificate) == 0 {
+	certPtr := s.managementTLSCertificateForServer(srv)
+	if certPtr == nil || len(certPtr.Certificate) == 0 {
 		return false
 	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	cert := *certPtr
+	leaf := cert.Leaf
+	var err error
+	if leaf == nil {
+		leaf, err = x509.ParseCertificate(cert.Certificate[0])
+	}
 	if err != nil {
 		// A live leg is serving a certificate we cannot parse. The question WAS
 		// reached; re-parsing it later will fail identically, so report it
@@ -1972,28 +1994,33 @@ func (s *Server) WarnStaleMgmtCertForHostName(hostName string) bool {
 // httpsServer on the nil-error path). A non-nil error is returned ONLY for
 // a true generation failure (no usable cert at all).
 func generateSelfSignedCertAt(dir, certPath, keyPath, bindHost string) (tls.Certificate, error) {
-	// Try loading an existing on-disk pair. LoadX509KeyPair reads the cert
-	// first and errors on a key-only / mismatched state → falls through to
-	// regen, which restores a matching pair.
+	cert, _, err := generateSelfSignedCertAtWithStatus(dir, certPath, keyPath, bindHost)
+	return cert, err
+}
+
+func generateSelfSignedCertAtWithStatus(dir, certPath, keyPath, bindHost string) (tls.Certificate, *x509.Certificate, error) {
+	var invalidLoadedLeaf *x509.Certificate
+	// Load a usable pair as-is unless its leaf is outside its validity dates.
+	// Expiry/not-yet-valid is the one #1916 D6 durability exception: keeping
+	// serving it is never preferable to rotating the self-signed trust anchor.
 	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
-		// The on-disk cert is DURABLE (#1916 D6) and served AS-IS: neither the
-		// bind host NOR the kernel host name is re-baked on a reload, so an A→B
-		// management-IP rebind or a later `set system host-name` keeps the
-		// original cert rather than churning remote clients' TOFU pins. But a
-		// SAN the cert no longer covers makes strict remote verification fail
-		// silently — warn loudly (naming the uncovered identity and the cert's
-		// SANs) so an operator can re-mint (remove /etc/xpf/tls) instead of
-		// chasing a bare handshake failure. Re-minting here would violate the
-		// durable contract, so this is diagnostic only (#5719 C001 residual).
-		warnStaleLoadedCert(cert, bindHost)
-		return cert, nil
+		cert, leaf, leafErr := managementTLSCertificateLeaf(cert)
+		if leafErr == nil {
+			if validityErr := managementTLSCertificateValidityError(leaf, time.Now()); validityErr == nil {
+				// SAN coverage remains diagnostic only; a rebind still does not
+				// churn a valid durable cert.
+				warnStaleLoadedCert(cert, bindHost)
+				return cert, nil, nil
+			}
+			invalidLoadedLeaf = leaf
+		}
 	}
 
 	// Generate new ECDSA key + self-signed cert (true generation failures
 	// below return a non-nil error: there is no usable cert at all).
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, invalidLoadedLeaf, err
 	}
 
 	hostname, _ := tlsHostname()
@@ -2068,21 +2095,19 @@ func generateSelfSignedCertAt(dir, certPath, keyPath, bindHost string) (tls.Cert
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, invalidLoadedLeaf, err
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, invalidLoadedLeaf, err
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	inMemory, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		// The just-generated PEM does not parse — a true generation
-		// failure, not a persistence one.
-		return tls.Certificate{}, err
+		return tls.Certificate{}, invalidLoadedLeaf, err
 	}
 
 	// From here, any failure is a PERSISTENCE failure: log it and return
@@ -2091,7 +2116,7 @@ func generateSelfSignedCertAt(dir, certPath, keyPath, bindHost string) (tls.Cert
 		slog.Error("failed to persist self-signed TLS certificate; serving in-memory cert this boot (will regenerate next boot)",
 			"dir", dir, "err", err)
 	}
-	return inMemory, nil
+	return inMemory, invalidLoadedLeaf, nil
 }
 
 // persistSelfSignedCert implements the #1916 D5 STRICT write sequence. Any

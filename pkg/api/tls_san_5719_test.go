@@ -384,9 +384,10 @@ func TestCertCoversHostAndWarnable(t *testing.T) {
 func TestBuildHTTPSServerThreadsBindHost(t *testing.T) {
 	s := &Server{}
 	var got string
-	s.certGen = func(bindHost string) (tls.Certificate, error) {
+	cert := mintCert(t, "fw", "10.0.0.1")
+	s.certGen = func(bindHost string) (tls.Certificate, *x509.Certificate, error) {
 		got = bindHost
-		return tls.Certificate{}, nil
+		return cert, nil, nil
 	}
 	if _, err := s.buildHTTPSServer("10.0.0.1:8443", s.newAuthSlot()); err != nil {
 		t.Fatalf("buildHTTPSServer: %v", err)

@@ -88,3 +88,21 @@ func TestResolveAPIBindsRespectsWebManagementAuth(t *testing.T) {
 		t.Fatalf("Auth = %+v, want derived from web-management api-auth", apiCfg.Auth)
 	}
 }
+
+func TestResolveAPIBindsCarriesCustomTLSPaths(t *testing.T) {
+	d := &Daemon{}
+	cfg := &config.Config{}
+	cfg.System.Services = &config.SystemServicesConfig{
+		WebManagement: &config.WebManagementConfig{
+			HTTPS:          true,
+			TLSCertificate: "/etc/xpf/tls/management-chain.pem",
+			TLSPrivateKey:  "/etc/xpf/tls/management-key.pem",
+		},
+	}
+	apiCfg := api.Config{Addr: "127.0.0.1:8080"}
+	d.resolveAPIBinds(&apiCfg, cfg)
+	if !apiCfg.TLS || apiCfg.TLSCertificate != cfg.System.Services.WebManagement.TLSCertificate ||
+		apiCfg.TLSPrivateKey != cfg.System.Services.WebManagement.TLSPrivateKey {
+		t.Fatalf("resolved TLS config = %+v, want the configured custom certificate/key paths", apiCfg)
+	}
+}

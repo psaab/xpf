@@ -135,7 +135,7 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 
 	t.Run("ReconcileHTTPS", func(t *testing.T) {
 		s := retireTestServer(t, &AuthConfig{Users: map[string]string{"admin": "boot"}})
-		s.certGen = generateSelfSignedCert
+		s.certGen = generateSelfSignedCertWithStatus
 		if err := s.ReconcileHTTPS(true, "10.0.0.3:8443"); err != nil {
 			t.Fatalf("ReconcileHTTPS: %v", err)
 		}

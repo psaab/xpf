@@ -121,6 +121,11 @@ func (c *xpfCollector) initGlobalDescriptors() {
 			"is absent on a scrape that could not read the helper status (#9040).",
 		[]string{"reason"}, nil,
 	)
+	c.managementTLSCertificateInvalidTotal = prometheus.NewDesc(
+		"xpf_management_tls_certificate_invalid_total",
+		"Total management TLS certificates rejected for invalid validity dates or unusable credentials.",
+		nil, nil,
+	)
 	c.sessionsCreatedTotal = prometheus.NewDesc(
 		"xpf_sessions_created_total",
 		"Total sessions created.",
