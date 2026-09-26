@@ -173,6 +173,20 @@ class Day0ValidationMessageTests(unittest.TestCase):
         self.assertIn("day-0 config not validated on build host", output)
         self.assertNotIn("check-config validated", output)
 
+    def test_check_config_warnings_are_printed(self):
+        result = mock.Mock(
+            returncode=0,
+            stdout="PASS day0.conf\nwarning: replace the published cluster PSK",
+            stderr="",
+        )
+        with mock.patch.object(
+                xpf_deploy, "find_xpfd", return_value="/usr/local/sbin/xpfd"), \
+             mock.patch.object(xpf_deploy.subprocess, "run",
+                               return_value=result):
+            output = _capture_config_drive_output(_RealBuildRunner())
+        self.assertIn("WARNING: replace the published cluster PSK", output)
+
+
 
 if __name__ == "__main__":
     unittest.main()

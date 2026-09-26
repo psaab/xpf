@@ -485,6 +485,9 @@ def build_config_drive(ap, runner):
                            capture_output=True, text=True)
         if r.returncode != 0:
             die(f"day-0 config REJECTED by check-config:\n{r.stdout}{r.stderr}")
+        for line in r.stdout.splitlines():
+            if line.startswith("warning:"):
+                print(f"WARNING: {line.partition(':')[2].strip()}")
         print(f"==> day-0 config validated ({os.path.basename(cfg_path)})")
     else:
         print("WARNING: no xpfd binary found — day-0 config not validated on "

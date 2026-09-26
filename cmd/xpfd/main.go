@@ -406,6 +406,9 @@ func main() {
 			os.Exit(2)
 		}
 		fmt.Printf("PASS %s (strict commit-check: parse + schema + compile + device-map preflight)\n", path)
+		for _, warning := range compiled.Warnings {
+			fmt.Printf("warning: %s\n", warning)
+		}
 		return
 
 	case cmdUnknown:

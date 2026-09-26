@@ -306,6 +306,14 @@ try_device() {
 		umount "$MNT"
 		return 1
 	fi
+	# Successful check-config output can carry compiler advisories. Keep them
+	# visible in the first-boot journal without treating them as a rejection.
+	while IFS= read -r line; do
+		case "$line" in
+		"warning: "*) warn "${line#warning: }" ;;
+		esac
+	done <<<"$out"
+
 
 	mkdir -p "$XPF_DIR"
 	chmod 0750 "$XPF_DIR" 2>/dev/null || true
