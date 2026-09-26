@@ -23,6 +23,13 @@ import (
 	"github.com/chzyer/readline"
 )
 
+// DisableReadlineHistoryAutoSave prevents readline from persisting submitted
+// CLI lines, which may contain credentials.
+func DisableReadlineHistoryAutoSave(cfg *readline.Config) *readline.Config {
+	cfg.DisableAutoSaveHistory = true
+	return cfg
+}
+
 // ReadConfig collects a pasted configuration from readLine until the input is
 // COMMITTED by Ctrl-D (io.EOF). A readline.ErrInterrupt (Ctrl-C) or any other
 // read error is an ABORT: the partial input is discarded and a non-nil error

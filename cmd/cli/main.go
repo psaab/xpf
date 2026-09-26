@@ -198,7 +198,7 @@ func main() {
 	}
 
 	rc := &remoteCompleter{ctl: c}
-	rl, err := readline.NewEx(&readline.Config{
+	rl, err := readline.NewEx(cliterm.DisableReadlineHistoryAutoSave(&readline.Config{
 		Prompt:          c.operationalPrompt(),
 		HistoryFile:     filepath.Join(os.Getenv("HOME"), ".xpf_cli_history"),
 		HistoryLimit:    10000,
@@ -245,7 +245,7 @@ func main() {
 			rc.helpWritten = true
 			return cleanLine, pos - 1, true
 		}),
-	})
+	}))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cli: readline: %v\n", err)
 		os.Exit(1)

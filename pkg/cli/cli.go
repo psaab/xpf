@@ -14,6 +14,7 @@ import (
 
 	"github.com/chzyer/readline"
 	"github.com/psaab/xpf/pkg/bootstrapshow"
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
@@ -442,7 +443,7 @@ func (c *CLI) SetFabricPeer(addrFn func() []string, vrfDevice string) {
 func (c *CLI) Run() error {
 	var err error
 	completer := &cliCompleter{cli: c}
-	c.rl, err = readline.NewEx(&readline.Config{
+	c.rl, err = readline.NewEx(cliterm.DisableReadlineHistoryAutoSave(&readline.Config{
 		Prompt:          c.operationalPrompt(),
 		HistoryFile:     filepath.Join(os.Getenv("HOME"), ".xpf_history"),
 		HistoryLimit:    10000,
@@ -509,7 +510,7 @@ func (c *CLI) Run() error {
 			completer.helpWritten = true
 			return cleanLine, pos - 1, true
 		}),
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("readline init: %w", err)
 	}

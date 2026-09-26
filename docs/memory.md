@@ -65,7 +65,7 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 - **Junos-style prefix matching:** `resolveCommand()` + `cmdtree.KeysFromTree()` — no hardcoded lists
 - **`?` instant help:** readline `Listener` intercepts `?` key, shows help without Enter
 - **Tab descriptions:** Multi-match tab shows descriptions above prompt via `cmdtree.WriteHelp()`
-- **CLI history:** Persisted to `~/.xpf_history` for the local in-daemon CLI and `~/.xpf_cli_history` for the remote `cli` binary
+- **CLI history:** Readline can load existing `~/.xpf_history` and `~/.xpf_cli_history` files, but automatic saving of submitted lines is disabled because commands may contain credentials
 
 ### Chassis Cluster (HA)
 - **State machine:** StateSecondary(0), StatePrimary(1), SecondaryHold(2), Lost(3), Disabled(4); weight-based election
