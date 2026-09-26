@@ -65,7 +65,10 @@
 //! truncates the 32-bit ident to 16 bits (`nat64.rs`: `(frag.ident & 0xFFFF)`), so
 //! `0x00010001`/`0x00020001` share a post-key. The TX-site hook therefore re-checks
 //! [`translated_overlap_key`] (same byte ranges — translation preserves fragmentation
-//! geometry) and drops post-collisions. Pure port-PAT (no addr change, same domain)
+//! geometry) and drops post-collisions. IPv6's pre-key still drops the vary-able Next
+//! Header as required by reassembly, but the NAT64 post-key uses the parsed Fragment
+//! Header Next Header as IPv4 Protocol. Missing either NAT64 address rewrite is
+//! fail-closed because no downstream key exists. Pure port-PAT (no addr change, same domain)
 //! yields an identical key and is SKIPPED by the caller (same key+range would
 //! self-overlap — a false positive, not a finding). NAT64 v4→v6 needs no post-check:
 //! the v6 ident is the zero-extended v4 ident (`nat64.rs`: `u32::from(v4_ident)`) and
@@ -159,7 +162,7 @@ struct OverlapEntry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlapParse {
     NonFragment,
-    Fragment(OverlapKey, u32, u32, bool),
+    Fragment(OverlapKey, u8, u32, u32, bool),
     Unreadable,
 }
 
@@ -877,6 +880,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                     protocol: proto,
                     routing_domain: 0,
                 },
+                proto,
                 start,
                 end,
                 (frag_off & 0x2000) == 0 && wire >= declared,
@@ -911,6 +915,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
             let frag_data_off = (frag.header_offset + 8).saturating_sub(40);
             let declared = payload_len.saturating_sub(frag_data_off);
             let wire = l3_packet.len().saturating_sub(frag.header_offset + 8);
+            let next_header = bytes[0];
             let end = start.saturating_add(declared.min(wire) as u32);
             OverlapParse::Fragment(
                 OverlapKey {
@@ -921,6 +926,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                     protocol: 0,
                     routing_domain: 0,
                 },
+                next_header,
                 start,
                 end,
                 (frag_off & 1) == 0 && wire >= declared,
@@ -939,37 +945,49 @@ const fn map_v6_to_v4_proto(p: u8) -> u8 {
     }
 }
 
+/// Result of deriving the downstream overlap identity. Missing either NAT64 rewrite
+/// address on a v6 fragment is an explicit fail-closed outcome, not a skipped check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranslatedOverlapKey {
+    NotApplicable,
+    Key(OverlapKey),
+    DropMissingNat64Rewrite,
+}
+
 /// Compute the POST-translation overlap key for a fragment whose pre-translation key
-/// is `pre` under NAT decision `nat`. Returns `None` when no translation applies
-/// (caller skips — the pre-check sufficed) or when the translated key is identical to
-/// `pre` (pure port-PAT: same key+range would self-overlap — the caller MUST skip the
-/// post-check on key equality). Returns `None` for NAT64 v4→v6 by the injectivity proof
-/// in the module docs. `egress_domain` is the post-translation routing domain (the
-/// downstream receiver's domain, resolved from the egress interface).
+/// is `pre` under NAT decision `nat`. `fragment_next_header` is parsed from the packet,
+/// independently of the v6 pre-key's intentionally-zero protocol. NAT64 v6→v4 with
+/// either rewrite address missing yields an explicit fail-closed outcome. Returns
+/// `NotApplicable` when no post-check is needed. `egress_domain` is the downstream
+/// receiver's routing domain, resolved from the egress interface.
 pub(crate) fn translated_overlap_key(
     pre: &OverlapKey,
+    fragment_next_header: u8,
     nat: &NatDecision,
     egress_domain: u32,
-) -> Option<OverlapKey> {
+) -> TranslatedOverlapKey {
     if nat.nat64 {
         if pre.addr_family as i32 == libc::AF_INET6 {
             // v6→v4: pool + server addrs from the decision, ident truncated to 16 bits.
-            Some(OverlapKey {
+            let (Some(src), Some(dst)) = (nat.rewrite_src, nat.rewrite_dst) else {
+                return TranslatedOverlapKey::DropMissingNat64Rewrite;
+            };
+            TranslatedOverlapKey::Key(OverlapKey {
                 addr_family: libc::AF_INET as u8,
-                src: nat.rewrite_src?,
-                dst: nat.rewrite_dst?,
+                src,
+                dst,
                 ident: pre.ident & 0xFFFF,
-                protocol: map_v6_to_v4_proto(pre.protocol),
+                protocol: map_v6_to_v4_proto(fragment_next_header),
                 routing_domain: egress_domain,
             })
         } else {
             // v4→v6: post-key is injective in the pre-key (zero-extended ident +
             // injectively-derived v6 addrs under a fixed pool), so a post-collision
             // implies a pre-collision the pre-check already caught. No post-check.
-            None
+            TranslatedOverlapKey::NotApplicable
         }
     } else if nat.rewrite_src.is_some() || nat.rewrite_dst.is_some() {
-        Some(OverlapKey {
+        TranslatedOverlapKey::Key(OverlapKey {
             addr_family: pre.addr_family,
             src: nat.rewrite_src.unwrap_or(pre.src),
             dst: nat.rewrite_dst.unwrap_or(pre.dst),
@@ -978,7 +996,7 @@ pub(crate) fn translated_overlap_key(
             routing_domain: egress_domain,
         })
     } else {
-        None
+        TranslatedOverlapKey::NotApplicable
     }
 }
 
@@ -1002,6 +1020,30 @@ mod tests {
         let d0 = FRAG_OVERLAP_DROPPED.load(Ordering::Relaxed);
         f();
         FRAG_OVERLAP_DROPPED.load(Ordering::Relaxed).wrapping_sub(d0)
+    }
+
+    fn ipv6_fragment_packet(
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        next_header: u8,
+        ident: u32,
+        offset_bytes: u16,
+        more: bool,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut pkt = vec![0u8; 48 + payload.len()];
+        pkt[0] = 0x60;
+        pkt[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        pkt[6] = 44;
+        pkt[7] = 64;
+        pkt[8..24].copy_from_slice(&src.octets());
+        pkt[24..40].copy_from_slice(&dst.octets());
+        pkt[40] = next_header;
+        let frag_off = offset_bytes | u16::from(more);
+        pkt[42..44].copy_from_slice(&frag_off.to_be_bytes());
+        pkt[44..48].copy_from_slice(&ident.to_be_bytes());
+        pkt[48..].copy_from_slice(payload);
+        pkt
     }
 
     #[test]
@@ -1189,18 +1231,19 @@ mod tests {
         let mut pkt = first;
         pkt.extend_from_slice(&[0u8; 8]);
         match overlap_parse(&pkt, libc::AF_INET) {
-            OverlapParse::Fragment(k, s, e, is_last) => {
+            OverlapParse::Fragment(k, next_header, s, e, is_last) => {
                 assert_eq!((s, e), (0, 8));
                 assert!(!is_last);
                 assert_eq!(k.ident, 0xBEEF);
                 assert_eq!(k.protocol, 6);
+                assert_eq!(next_header, 6);
             }
             other => panic!("expected Fragment, got {other:?}"),
         }
         let mut truncated_last = pkt.clone();
         truncated_last[6..8].copy_from_slice(&0x0001u16.to_be_bytes());
         match overlap_parse(&truncated_last, libc::AF_INET) {
-            OverlapParse::Fragment(_, _, _, is_last) => {
+            OverlapParse::Fragment(_, _, _, _, is_last) => {
                 assert!(!is_last, "truncated IPv4 last fragment cannot complete");
             }
             other => panic!("expected truncated IPv4 Fragment, got {other:?}"),
@@ -1225,12 +1268,15 @@ mod tests {
         pkt[40] = 6;
         pkt[42..44].copy_from_slice(&0x0001u16.to_be_bytes());
         pkt[44..48].copy_from_slice(&0x01020304u32.to_be_bytes());
-        let (k, s, e, is_last) = match overlap_parse(&pkt, libc::AF_INET6) {
-            OverlapParse::Fragment(k, s, e, is_last) => (k, s, e, is_last),
+        let (k, next_header, s, e, is_last) = match overlap_parse(&pkt, libc::AF_INET6) {
+            OverlapParse::Fragment(k, next_header, s, e, is_last) => {
+                (k, next_header, s, e, is_last)
+            }
             other => panic!("expected Fragment, got {other:?}"),
         };
         assert_eq!((s, e), (0, 16));
         assert!(!is_last);
+        assert_eq!(next_header, 6);
         assert_eq!(k.protocol, 0);
         assert_eq!(k.ident, 0x01020304);
         // Same datagram, different Next Header (UDP=17): SAME key (proto dropped).
@@ -1238,18 +1284,21 @@ mod tests {
         let mut pkt2 = pkt.clone();
         pkt2[40] = 17;
         pkt2[42..44].copy_from_slice(&0x0009u16.to_be_bytes());
-        let (k2, s2, e2, is_last2) = match overlap_parse(&pkt2, libc::AF_INET6) {
-            OverlapParse::Fragment(k, s, e, is_last) => (k, s, e, is_last),
+        let (k2, next_header2, s2, e2, is_last2) = match overlap_parse(&pkt2, libc::AF_INET6) {
+            OverlapParse::Fragment(k, next_header, s, e, is_last) => {
+                (k, next_header, s, e, is_last)
+            }
             other => panic!("expected Fragment, got {other:?}"),
         };
         assert_eq!(k2, k);
         assert!(!is_last2);
+        assert_eq!(next_header2, 17);
         assert_eq!((s2, e2), (8, 24));
         let mut truncated_last = pkt.clone();
         truncated_last[42..44].copy_from_slice(&0x0008u16.to_be_bytes());
         truncated_last.truncate(60);
         match overlap_parse(&truncated_last, libc::AF_INET6) {
-            OverlapParse::Fragment(_, _, _, is_last) => {
+            OverlapParse::Fragment(_, _, _, _, is_last) => {
                 assert!(!is_last, "truncated IPv6 last fragment cannot complete");
             }
             other => panic!("expected truncated IPv6 Fragment, got {other:?}"),
@@ -1292,8 +1341,12 @@ mod tests {
         b.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
         b.dst = ext;
         assert_ne!(a, b);
-        let pa = translated_overlap_key(&a, &nat, 0).expect("post");
-        let pb = translated_overlap_key(&b, &nat, 0).expect("post");
+        let TranslatedOverlapKey::Key(pa) = translated_overlap_key(&a, a.protocol, &nat, 0) else {
+            panic!("same-family address translation requires a post-key");
+        };
+        let TranslatedOverlapKey::Key(pb) = translated_overlap_key(&b, b.protocol, &nat, 0) else {
+            panic!("same-family address translation requires a post-key");
+        };
         assert_eq!(pa, pb);
         assert_eq!(pa.src, pool);
         let t = OverlapTracker::new();
@@ -1304,15 +1357,19 @@ mod tests {
             FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed).wrapping_sub(p0),
             1
         );
-        // No rewrite → None (pre-check sufficed).
-        assert!(translated_overlap_key(&a, &NatDecision::default(), 0).is_none());
+        assert_eq!(
+            translated_overlap_key(&a, a.protocol, &NatDecision::default(), 0),
+            TranslatedOverlapKey::NotApplicable
+        );
         // Pure port-PAT (no addr rewrite) → identical key → caller must skip.
         let port_only = NatDecision {
             rewrite_src_port: Some(40000),
             ..NatDecision::default()
         };
-        // (No addr rewrite at all → None; addr-preserving covered by equality rule.)
-        assert!(translated_overlap_key(&a, &port_only, 0).is_none());
+        assert_eq!(
+            translated_overlap_key(&a, a.protocol, &port_only, 0),
+            TranslatedOverlapKey::NotApplicable
+        );
     }
 
     #[test]
@@ -1339,8 +1396,12 @@ mod tests {
         };
         let a = mk(0x0001_0001);
         let b = mk(0x0002_0001);
-        let pa = translated_overlap_key(&a, &nat, 0).expect("post");
-        let pb = translated_overlap_key(&b, &nat, 0).expect("post");
+        let TranslatedOverlapKey::Key(pa) = translated_overlap_key(&a, 6, &nat, 0) else {
+            panic!("NAT64 v6→v4 with both rewrites requires a post-key");
+        };
+        let TranslatedOverlapKey::Key(pb) = translated_overlap_key(&b, 6, &nat, 0) else {
+            panic!("NAT64 v6→v4 with both rewrites requires a post-key");
+        };
         assert_eq!(pa, pb);
         assert_eq!(pa.ident, 1);
         assert_eq!(pa.addr_family, libc::AF_INET as u8);
@@ -1354,8 +1415,203 @@ mod tests {
             nat64: true,
             ..NatDecision::default()
         };
-        assert!(translated_overlap_key(&v4pre, &nat64v4, 0).is_none());
+        assert_eq!(
+            translated_overlap_key(&v4pre, v4pre.protocol, &nat64v4, 0),
+            TranslatedOverlapKey::NotApplicable
+        );
     }
+    #[test]
+    fn nat64_tcp_udp_trains_with_colliding_truncated_ids_complete_10861() {
+        let tcp_src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let udp_src: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+        let pool_v4 = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 50));
+        let dst_v4 = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let nat = NatDecision {
+            rewrite_src: Some(pool_v4),
+            rewrite_dst: Some(dst_v4),
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            nat64: true,
+            nptv6: false,
+        };
+        let mut tcp_segment = [0u8; 72];
+        tcp_segment[0..2].copy_from_slice(&12345u16.to_be_bytes());
+        tcp_segment[2..4].copy_from_slice(&443u16.to_be_bytes());
+        tcp_segment[12] = 0x50;
+        tcp_segment[13] = 0x10;
+        let mut udp_segment = [0u8; 72];
+        udp_segment[0..2].copy_from_slice(&23456u16.to_be_bytes());
+        udp_segment[2..4].copy_from_slice(&443u16.to_be_bytes());
+        let udp_len = udp_segment.len() as u16;
+        udp_segment[4..6].copy_from_slice(&udp_len.to_be_bytes());
+
+        let tracker = OverlapTracker::new();
+        let mut tcp_post = None;
+        let mut udp_post = None;
+        for offset_bytes in [0u16, 24, 48] {
+            for (src, next_header, ident, segment) in [
+                (tcp_src, 6, 0x0001_0001, &tcp_segment),
+                (udp_src, 17, 0x0002_0001, &udp_segment),
+            ] {
+                let offset = offset_bytes as usize;
+                let packet = ipv6_fragment_packet(
+                    src,
+                    dst,
+                    next_header,
+                    ident,
+                    offset_bytes,
+                    offset_bytes < 48,
+                    &segment[offset..offset + 24],
+                );
+                let OverlapParse::Fragment(pre, parsed_next_header, start, end, is_last) =
+                    overlap_parse(&packet, libc::AF_INET6)
+                else {
+                    panic!("expected parsed NAT64 fragment");
+                };
+                assert_eq!(
+                    pre.protocol, 0,
+                    "v6 pre-key must remain protocol-independent"
+                );
+                assert_eq!(parsed_next_header, next_header);
+                let TranslatedOverlapKey::Key(post) =
+                    translated_overlap_key(&pre, parsed_next_header, &nat, 0)
+                else {
+                    panic!("NAT64 fragment with both rewrite addresses needs a post-key");
+                };
+                assert_eq!(post.src, pool_v4);
+                assert_eq!(post.dst, dst_v4);
+                assert_eq!(post.ident, 1, "the colliding low-16 idents are preserved");
+                assert_eq!(post.protocol, next_header);
+                let slot = if next_header == 6 {
+                    &mut tcp_post
+                } else {
+                    &mut udp_post
+                };
+                if let Some(previous) = *slot {
+                    assert_eq!(previous, post);
+                } else {
+                    *slot = Some(post);
+                }
+
+                let mut result = tracker.check_and_record_fragment_detailed(
+                    post,
+                    start,
+                    end,
+                    is_last,
+                    u64::from(offset_bytes) + u64::from(next_header),
+                    &FRAG_OVERLAP_POST_NAT_DROPPED,
+                );
+                assert!(!result.dropped, "TCP and UDP ranges must be independent");
+                let admission = result
+                    .admission
+                    .take()
+                    .expect("recorded fragment admission");
+                let completed = tracker.commit_admission(admission);
+                assert_eq!(completed, offset_bytes == 48);
+                if next_header == 6 && offset_bytes == 48 {
+                    assert_eq!(
+                        tracker.len(),
+                        1,
+                        "UDP train remains live after TCP completes"
+                    );
+                }
+            }
+        }
+        let tcp_post = tcp_post.expect("TCP post-key");
+        let udp_post = udp_post.expect("UDP post-key");
+        assert_ne!(tcp_post, udp_post);
+        assert_eq!(tcp_post.protocol, 6);
+        assert_eq!(udp_post.protocol, 17);
+        assert_eq!(tracker.len(), 0, "both trains complete independently");
+    }
+
+    #[test]
+    fn nat64_protocols_do_not_union_completion_coverage_10861() {
+        let src_tcp: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let src_udp: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let dst = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 50))),
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            nat64: true,
+            ..NatDecision::default()
+        };
+        let pre = |src, ident| OverlapKey {
+            addr_family: libc::AF_INET6 as u8,
+            src: IpAddr::V6(src),
+            dst,
+            ident,
+            protocol: 0,
+            routing_domain: 0,
+        };
+        let TranslatedOverlapKey::Key(tcp_key) =
+            translated_overlap_key(&pre(src_tcp, 0x0001_0001), 6, &nat, 0)
+        else {
+            panic!("TCP NAT64 post-key");
+        };
+        let TranslatedOverlapKey::Key(udp_key) =
+            translated_overlap_key(&pre(src_udp, 0x0002_0001), 17, &nat, 0)
+        else {
+            panic!("UDP NAT64 post-key");
+        };
+        let tracker = OverlapTracker::new();
+        let record = |key, start, end, is_last, now_ns| {
+            let mut result = tracker.check_and_record_fragment_detailed(
+                key,
+                start,
+                end,
+                is_last,
+                now_ns,
+                &FRAG_OVERLAP_POST_NAT_DROPPED,
+            );
+            assert!(!result.dropped);
+            let admission = result
+                .admission
+                .take()
+                .expect("recorded fragment admission");
+            tracker.commit_admission(admission);
+        };
+        // TCP has a gap [8,16); UDP's disjoint [8,16) range must not complete it.
+        record(tcp_key, 0, 8, false, 1_000);
+        record(udp_key, 8, 16, false, 2_000);
+        record(tcp_key, 16, 24, true, 3_000);
+        assert_eq!(tracker.len(), 2, "neither independent datagram is complete");
+    }
+
+    #[test]
+    fn nat64_missing_rewrite_pair_is_a_drop_10861() {
+        let pre = OverlapKey {
+            addr_family: libc::AF_INET6 as u8,
+            src: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            dst: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            ident: 0x0001_0001,
+            protocol: 0,
+            routing_domain: 0,
+        };
+        for nat in [
+            NatDecision {
+                nat64: true,
+                ..NatDecision::default()
+            },
+            NatDecision {
+                rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+                nat64: true,
+                ..NatDecision::default()
+            },
+            NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 50))),
+                nat64: true,
+                ..NatDecision::default()
+            },
+        ] {
+            assert_eq!(
+                translated_overlap_key(&pre, 6, &nat, 0),
+                TranslatedOverlapKey::DropMissingNat64Rewrite
+            );
+        }
+    }
+
     #[test]
     fn check_is_pure_and_agrees_with_record_9950() {
         // check_overlap mutates nothing: repeated checks never self-overlap and len stays
