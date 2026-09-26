@@ -878,7 +878,7 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 	return nil
 }
 
-func compileServices(node *Node, svc *ServicesConfig) error {
+func compileServices(node *Node, svc *ServicesConfig, warnings *[]string) error {
 	if fmNode := node.FindChild("flow-monitoring"); fmNode != nil {
 		if err := compileFlowMonitoring(fmNode, svc); err != nil {
 			return err
@@ -897,7 +897,56 @@ func compileServices(node *Node, svc *ServicesConfig) error {
 	if node.FindChild("application-identification") != nil {
 		svc.ApplicationIdentification = true
 	}
+	if warnings != nil {
+		*warnings = append(*warnings, servicesIdentityWarnings(node)...)
+	}
 	return nil
+}
+
+// servicesIdentityWarnings keeps Junos identity stanzas visible without
+// implying that xpf implements them. The raw config tree remains the source
+// for display and persistence; the typed service config has no identity runtime.
+func servicesIdentityWarnings(node *Node) []string {
+	var warnings []string
+	for _, child := range node.Children {
+		switch child.Name() {
+		case "user-identification":
+			var stanzas []string
+			addStanza := func(name string) {
+				switch name {
+				case "active-directory-access", "identity-management", "local-authentication-table":
+					for _, existing := range stanzas {
+						if existing == name {
+							return
+						}
+					}
+					stanzas = append(stanzas, name)
+				}
+			}
+			// Flat-set paths under an unmodeled parent are retained in the
+			// parent's remaining Keys rather than split into child nodes.
+			if len(child.Keys) > 1 {
+				addStanza(child.Keys[1])
+			}
+			for _, stanza := range child.Children {
+				addStanza(stanza.Name())
+			}
+			if len(stanzas) == 0 {
+				warnings = append(warnings,
+					"services user-identification configured but accepted-only — xpf does not implement identity-based policy mapping, so the stanza has no runtime effect (#10947)")
+			}
+			for _, stanza := range stanzas {
+				warnings = append(warnings, fmt.Sprintf(
+					"services user-identification %s configured but accepted-only — xpf does not implement user-identification and this stanza has no runtime effect (#10947)",
+					stanza))
+			}
+		case "active-directory-access", "identity-management", "local-authentication-table":
+			warnings = append(warnings, fmt.Sprintf(
+				"services %s configured but accepted-only — xpf does not implement identity-based policy mapping, so this stanza has no runtime effect (#10947)",
+				child.Name()))
+		}
+	}
+	return warnings
 }
 
 // compileIPMonitoring parses `services ip-monitoring` (#1827 PR-1b).
