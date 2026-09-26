@@ -421,9 +421,9 @@ func programRethMAC(ifName string, mac net.HardwareAddr, beforeCycle func() erro
 	return true, nil
 }
 
-// clearDadFailed removes any dadfailed or stuck-tentative IPv6 addresses and
-// re-adds them with IFA_F_NODAD so they become usable. It repairs global and
-// link-local addresses on RETH members and VLAN children after a link cycle.
+// clearDadFailed removes any dadfailed IPv6 addresses and re-adds them with
+// IFA_F_NODAD so they become usable. It repairs global and link-local
+// addresses on RETH members and VLAN children after a link cycle.
 func clearDadFailed(ifName string) {
 	link, err := netlink.LinkByName(ifName)
 	if err != nil {
@@ -435,7 +435,7 @@ func clearDadFailed(ifName string) {
 	}
 	repaired := 0
 	for _, addr := range addrs {
-		if addr.Flags&(unix.IFA_F_DADFAILED|unix.IFA_F_TENTATIVE) == 0 {
+		if addr.Flags&unix.IFA_F_DADFAILED == 0 {
 			continue
 		}
 		if err := netlink.AddrDel(link, &addr); err != nil {

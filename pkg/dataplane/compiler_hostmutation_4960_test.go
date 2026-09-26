@@ -257,27 +257,36 @@ func TestPlanAddressReconcileDivergentPlansChange(t *testing.T) {
 	})
 }
 
-func TestPlanAddressReconcileRepairsFailedDesiredIPv6(t *testing.T) {
-	for _, flag := range []int{unix.IFA_F_DADFAILED, unix.IFA_F_TENTATIVE} {
-		existing := []netlink.Addr{mkAddr(t, "2001:db8::1/64")}
-		existing[0].Flags = flag
+func TestPlanAddressReconcileRepairsDADFailedDesiredIPv6(t *testing.T) {
+	existing := []netlink.Addr{mkAddr(t, "2001:db8::1/64")}
+	existing[0].Flags = unix.IFA_F_DADFAILED
 
-		del, add, dadfailedCount := planAddressReconcile(existing, []string{"2001:db8::1/64"}, "ge-0/0/0")
-		if dadfailedCount != 1 {
-			t.Errorf("flag %#x: dadfailed count = %d, want 1", flag, dadfailedCount)
-		}
-		if len(del) != 1 || len(add) != 1 {
-			t.Fatalf("flag %#x: want one delete and one add, got del=%d add=%d", flag, len(del), len(add))
-		}
-		if got := del[0].IPNet.String(); got != "2001:db8::1/64" {
-			t.Errorf("flag %#x: delete address = %s, want configured global IPv6", flag, got)
-		}
-		if got := add[0].IPNet.String(); got != "2001:db8::1/64" {
-			t.Errorf("flag %#x: add address = %s, want configured global IPv6", flag, got)
-		}
-		if add[0].Flags&unix.IFA_F_NODAD == 0 {
-			t.Errorf("flag %#x: re-added address flags = %#x, want IFA_F_NODAD", flag, add[0].Flags)
-		}
+	del, add, dadfailedCount := planAddressReconcile(existing, []string{"2001:db8::1/64"}, "ge-0/0/0")
+	if dadfailedCount != 1 {
+		t.Errorf("dadfailed count = %d, want 1", dadfailedCount)
+	}
+	if len(del) != 1 || len(add) != 1 {
+		t.Fatalf("want one delete and one add, got del=%d add=%d", len(del), len(add))
+	}
+	if got := del[0].IPNet.String(); got != "2001:db8::1/64" {
+		t.Errorf("delete address = %s, want configured global IPv6", got)
+	}
+	if got := add[0].IPNet.String(); got != "2001:db8::1/64" {
+		t.Errorf("add address = %s, want configured global IPv6", got)
+	}
+	if add[0].Flags&unix.IFA_F_NODAD == 0 {
+		t.Errorf("re-added address flags = %#x, want IFA_F_NODAD", add[0].Flags)
+	}
+}
+
+func TestPlanAddressReconcileLeavesTentativeDesiredIPv6Alone(t *testing.T) {
+	existing := []netlink.Addr{mkAddr(t, "2001:db8::1/64")}
+	existing[0].Flags = unix.IFA_F_TENTATIVE
+
+	del, add, dadfailedCount := planAddressReconcile(existing, []string{"2001:db8::1/64"}, "ge-0/0/0")
+	if len(del) != 0 || len(add) != 0 || dadfailedCount != 0 {
+		t.Fatalf("tentative IPv6 is left to finish DAD, got del=%d add=%d count=%d",
+			len(del), len(add), dadfailedCount)
 	}
 }
 

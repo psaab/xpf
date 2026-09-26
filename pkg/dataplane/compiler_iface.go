@@ -404,7 +404,7 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
 	// flag meaningful.
 	del, add, dadfailedCount := planAddressReconcile(existing, desired, ifaceName)
 	if dadfailedCount > 0 {
-		slog.Warn("repairing configured IPv6 addresses with failed or stuck DAD",
+		slog.Warn("repairing configured IPv6 addresses after DAD failure",
 			"name", ifaceName, "dadfailed_count", dadfailedCount)
 	}
 
@@ -454,9 +454,8 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
 // about it. An unparseable desired address is skipped with a warning rather
 // than aborting: it was already skipped before this extraction, and turning it
 // into a failure here would change apply behaviour for a defect this change
-// does not own. A desired IPv6 address with IFA_F_DADFAILED or
-// IFA_F_TENTATIVE is replaced with IFA_F_NODAD so a peer cannot keep winning
-// DAD by answering each new probe.
+// does not own. A desired IPv6 address with IFA_F_DADFAILED is replaced with
+// IFA_F_NODAD so a peer cannot keep winning DAD by answering each new probe.
 //
 // Both slices are ordered deterministically: deletes follow the kernel's list
 // order, adds follow the order the addresses were authored, so the netlink call
@@ -488,7 +487,7 @@ func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName s
 		}
 		key := addr.IPNet.String()
 		if desiredAddr, ok := want[key]; ok {
-			if addr.IP.To4() == nil && addr.Flags&(unix.IFA_F_DADFAILED|unix.IFA_F_TENTATIVE) != 0 {
+			if addr.IP.To4() == nil && addr.Flags&unix.IFA_F_DADFAILED != 0 {
 				del = append(del, addr)
 				desiredAddr.Flags = unix.IFA_F_NODAD
 				dadfailedCount++
