@@ -30,25 +30,15 @@ func validateLoginClassRef(raw string, refs *schemaRefs) error {
 		raw, strings.Join(ValidLoginClasses(), ", "), raw)
 }
 
-// cryptModularIDs is the set of crypt(3) modular-hash identifiers xpf
-// accepts in an encrypted-password value. It is a permissive superset of
-// what Debian 13 glibc / libxcrypt actually verify against — the OS, not
-// this validator, is the final authority at PAM time, so we err toward
-// "clearly a hash" rather than a brittle per-id structural parse. yescrypt
-// ($y$) is the Debian 13 default; $6$ (sha512crypt) is universal; $2a$/
-// $2b$/$2y$ (bcrypt), $5$ (sha256crypt), $1$ (md5crypt), $7$ (scrypt) and
-// $gy$ (gost-yescrypt) are present via libxcrypt. #1944 §5.5.
+// cryptModularIDs is the set of crypt(3) modular-hash identifiers xpf accepts
+// for encrypted-password values. Weak md5crypt and sha256crypt are deliberately
+// excluded. #1944 §5.5, #10830.
 var cryptModularIDs = map[string]bool{
-	"1": true, "2a": true, "2b": true, "2y": true,
-	"5": true, "6": true, "7": true, "y": true, "gy": true,
+	"2a": true, "2b": true, "2y": true, "6": true, "7": true, "y": true, "gy": true,
 }
 
-// cryptFieldRune reports whether r is allowed inside a crypt(3) salt or
-// checksum field. The crypt-base64 alphabet is [./0-9A-Za-z]; modular
-// param fields (e.g. yescrypt $y$j9T$... or sha512crypt
-// $6$rounds=656000$...) additionally use '=' to introduce a parameter
-// value. We allow '=' here and reject ':' implicitly (not in the set) so
-// a value can never corrupt the `user:hash` chpasswd stdin line.
+// cryptFieldRune reports whether r is in crypt's modular-base64 alphabet.
+// Parameter fields are parsed separately; '=' is not part of that alphabet.
 func cryptFieldRune(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z':
@@ -57,44 +47,53 @@ func cryptFieldRune(r rune) bool {
 		return true
 	case r >= '0' && r <= '9':
 		return true
-	case r == '.' || r == '/' || r == '=':
+	case r == '.' || r == '/':
 		return true
 	}
 	return false
 }
 
-// ValidateCryptHash accepts a crypt(3) modular password hash or an
-// explicit lock sentinel, and HARD-REJECTS plaintext. It is shared by
-// `system root-authentication encrypted-password` and `system login user
-// <name> authentication encrypted-password` (#1944, E1).
+// cryptBase64Value returns a character's index in the crypt-base64 alphabet.
+func cryptBase64Value(b byte) int {
+	switch {
+	case b == '.':
+		return 0
+	case b == '/':
+		return 1
+	case b >= '0' && b <= '9':
+		return int(b-'0') + 2
+	case b >= 'A' && b <= 'Z':
+		return int(b-'A') + 12
+	case b >= 'a' && b <= 'z':
+		return int(b-'a') + 38
+	default:
+		return -1
+	}
+}
+
+const (
+	minCryptSaltLength = 8
+	minSHA512Rounds    = 5000
+	minBcryptCost      = 10
+	minYescryptCost    = 5
+)
+
+// ValidateCryptHash accepts a structurally valid, sufficiently costly crypt(3)
+// modular password hash or an explicit lock sentinel, and HARD-REJECTS
+// plaintext. It is shared by `system root-authentication encrypted-password`
+// and `system login user <name> authentication encrypted-password` (#1944, E1).
 //
-// Accepted:
-//   - A modular crypt hash: an optional leading "!" or "!!" (the
-//     locked-but-restorable form), then $<id>$<salt>$<checksum> where
-//     <id> ∈ cryptModularIDs, <salt> is non-empty (and may itself carry
-//     $-separated params such as rounds=N), and the FINAL $-field (the
-//     checksum) is non-empty. A trailing empty checksum ($6$salt$) is
-//     rejected — it writes a malformed shadow field PAM refuses.
-//   - A bare lock sentinel: "*", "!", or "!!". This is the intentional
-//     Unix way to lock an account and the only way to lock root via
-//     config (root is excluded from the per-user D2 auto-lock). Accepting
-//     a deliberate sentinel is NOT the plaintext footgun.
-//
-// Rejected: plaintext (no leading $-id, not a sentinel — the real
-// footgun), the empty string, an unknown $<id>$, an empty salt or empty
-// checksum, and any value carrying ':' (would corrupt chpasswd stdin) or
-// a control character. Legacy 13-char DES is deliberately NOT accepted so
-// that "reject plaintext" is an absolute guarantee (a 13-char alnum
-// password would otherwise pass).
+// Algorithms with fixed-size checksums are checked against their actual MCF
+// structure, not just the generic `$id$salt$checksum` shape. In particular,
+// `chpasswd -e` accepts malformed hashes without necessarily rejecting the
+// write, leaving PAM unable to verify the password.
 func ValidateCryptHash(raw string, _ *Config) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected a crypt(3) hash, e.g. from `openssl passwd -6`)")
 	}
-	// Bare lock sentinels — deliberate, accepted as-is.
 	if raw == "*" || raw == "!" || raw == "!!" {
 		return nil
 	}
-	// Modular crypt hash, with an optional locked-but-restorable prefix.
 	body := raw
 	if strings.HasPrefix(body, "!!") {
 		body = body[2:]
@@ -105,45 +104,102 @@ func ValidateCryptHash(raw string, _ *Config) error {
 		return fmt.Errorf("not an encrypted password hash (got %q) — plaintext is not "+
 			"allowed; generate a hash with `openssl passwd -6` or `mkpasswd -m sha512crypt`", raw)
 	}
-	// Split into $-separated fields: leading "$" yields an empty first
-	// element, so fields[0]=="" , fields[1]=<id>, fields[2..]=salt/params,
-	// fields[last]=checksum. Require at least id + salt + checksum.
 	fields := strings.Split(body, "$")
-	// fields[0] is the empty string before the first '$'.
 	if len(fields) < 4 {
-		return fmt.Errorf("malformed crypt hash %q — expected $<id>$<salt>$<checksum>", raw)
+		return fmt.Errorf("malformed crypt hash %q — expected a complete modular crypt hash", raw)
 	}
 	id := fields[1]
 	if !cryptModularIDs[id] {
-		return fmt.Errorf("unknown crypt hash id %q in %q — expected one of "+
-			"1, 2a, 2b, 2y, 5, 6, 7, y, gy", id, raw)
+		return fmt.Errorf("unsupported crypt hash id %q in %q — accepted ids: "+
+			"2a, 2b, 2y, 6, 7, y, gy", id, raw)
 	}
-	salt := fields[2]
-	checksum := fields[len(fields)-1]
-	if salt == "" {
-		return fmt.Errorf("empty salt in crypt hash %q", raw)
-	}
-	if checksum == "" {
-		return fmt.Errorf("empty checksum in crypt hash %q — a trailing $ "+
-			"with no checksum writes a malformed shadow field", raw)
-	}
-	// Every salt/param/checksum field must be NON-EMPTY and use only the
-	// crypt alphabet (which excludes ':' and whitespace), so the value can
-	// never corrupt the chpasswd `user:hash` stdin line or smuggle a
-	// separator. An empty intermediate field (e.g. "$6$salt$$hash", a
-	// doubled '$') is not a valid modular crypt hash — it would pass an
-	// alphabet-only check (no chars to reject) but fail at PAM, locking the
-	// operator out. Reject it at commit (Copilot #1944 review).
-	for _, f := range fields[2:] {
-		if f == "" {
-			return fmt.Errorf("empty field in crypt hash %q — a doubled "+
-				"'$' (e.g. $6$salt$$hash) is malformed", raw)
+	for i, field := range fields[2:] {
+		if field == "" {
+			return fmt.Errorf("empty field in crypt hash %q — a doubled or trailing '$' is malformed", raw)
 		}
-		for _, r := range f {
-			if !cryptFieldRune(r) {
+		for _, r := range field {
+			if !cryptFieldRune(r) && !(id == "6" && len(fields) == 5 && i == 0 && r == '=') {
 				return fmt.Errorf("invalid character %q in crypt hash %q", r, raw)
 			}
 		}
+	}
+
+	switch id {
+	case "6":
+		return validateSHA512Crypt(fields, raw)
+	case "2a", "2b", "2y":
+		return validateBcrypt(fields, raw)
+	case "y", "gy":
+		return validateYescrypt(fields, raw)
+	case "7":
+		return validateScrypt(fields, raw)
+	default:
+		return fmt.Errorf("unsupported crypt hash id %q", id)
+	}
+}
+
+func validateSHA512Crypt(fields []string, raw string) error {
+	if len(fields) != 4 && len(fields) != 5 {
+		return fmt.Errorf("malformed sha512crypt hash %q — expected optional rounds, salt, and 86-character checksum", raw)
+	}
+	saltField := 2
+	if len(fields) == 5 {
+		const prefix = "rounds="
+		if !strings.HasPrefix(fields[2], prefix) {
+			return fmt.Errorf("malformed sha512crypt parameters in %q", raw)
+		}
+		roundsText := strings.TrimPrefix(fields[2], prefix)
+		rounds, err := strconv.ParseUint(roundsText, 10, 32)
+		if err != nil || strconv.FormatUint(rounds, 10) != roundsText ||
+			rounds < minSHA512Rounds || rounds > 999_999_999 {
+			return fmt.Errorf("sha512crypt rounds in %q must be between %d and 999999999",
+				raw, minSHA512Rounds)
+		}
+		saltField = 3
+	}
+	if len(fields[saltField]) < minCryptSaltLength || len(fields[saltField]) > 16 {
+		return fmt.Errorf("sha512crypt salt in %q must be between %d and 16 characters",
+			raw, minCryptSaltLength)
+	}
+	if len(fields[saltField+1]) != 86 {
+		return fmt.Errorf("sha512crypt checksum in %q must be exactly 86 characters", raw)
+	}
+	return nil
+}
+
+func validateBcrypt(fields []string, raw string) error {
+	if len(fields) != 4 || len(fields[2]) != 2 || len(fields[3]) != 53 {
+		return fmt.Errorf("malformed bcrypt hash %q — expected a two-digit cost and 53-character salt/checksum field", raw)
+	}
+	if fields[2][0] < '0' || fields[2][0] > '9' || fields[2][1] < '0' || fields[2][1] > '9' {
+		return fmt.Errorf("bcrypt cost in %q must be a two-digit number", raw)
+	}
+	cost, err := strconv.Atoi(fields[2])
+	if err != nil || cost < minBcryptCost || cost > 31 {
+		return fmt.Errorf("bcrypt cost in %q must be between %d and 31", raw, minBcryptCost)
+	}
+	return nil
+}
+
+func validateYescrypt(fields []string, raw string) error {
+	if len(fields) != 5 || len(fields[2]) != 3 || fields[2][0] != 'j' ||
+		fields[2][2] != 'T' || len(fields[3]) < minCryptSaltLength ||
+		len(fields[3]) > 86 || len(fields[4]) != 43 {
+		return fmt.Errorf("malformed yescrypt hash %q — expected j<cost>T parameters, a salt of 8-86 characters, and a 43-character checksum", raw)
+	}
+	// In libxcrypt's yescrypt encoding, the second parameter character stores
+	// cost + 6 for costs 3-11. Require at least cost 5 (j9T, the default),
+	// and reject values above the supported maximum cost 11.
+	costCode := cryptBase64Value(fields[2][1])
+	if costCode < minYescryptCost+6 || costCode > 11+6 {
+		return fmt.Errorf("yescrypt cost in %q must be between %d and 11", raw, minYescryptCost)
+	}
+	return nil
+}
+
+func validateScrypt(fields []string, raw string) error {
+	if len(fields) != 4 || len(fields[2]) < 11 || len(fields[2]) > 97 || len(fields[3]) != 43 {
+		return fmt.Errorf("malformed scrypt hash %q — expected an 11-97-character setting and a 43-character checksum", raw)
 	}
 	return nil
 }

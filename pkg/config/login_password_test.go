@@ -10,23 +10,28 @@ import (
 // central guarantee is that plaintext is ABSOLUTELY rejected (legacy DES
 // is intentionally not accepted) while deliberate lock sentinels pass.
 func TestValidateCryptHash(t *testing.T) {
+	const (
+		sha512Hash       = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"
+		sha512HighRounds = "$6$rounds=656000$saltsalt$QBvWkidMIWbOshfFz5Mwxc3KCIWWyeVUXV3GSTG3LiicgXdKzNJUczsbxHkDB0EchggCeEhT9bfZcK07sAE5g."
+		yescryptHash     = "$y$j9T$saltsaltsaltsalt$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD"
+		gostYescryptHash = "$gy$j9T$saltsaltsaltsalt$rJwUc/Ira7bf5YaD7oIyqgudtsbNclaiv18Jg66v.j."
+		bcryptHash       = "$2b$12$saltsaltsaltsaltsaltsOEpXE0KLxzyVeEtX6R7qbkVGuSGecz6W"
+		scryptHash       = "$7$CU..../....wzCyKANN4/9UTyVyuWoQu1$lVUfDsI1kxYFAl5pqAlZ6cS/yB.G.1.M7XEebqH2T41"
+	)
 	accept := []string{
-		"$6$salt$hash",
-		"$6$saltsalt$abc123def456",
-		"$6$rounds=656000$salt$hash", // sha512crypt rounds param ('=' case)
-		"$5$rounds=5000$salt$hash",
-		"$y$j9T$saltsalt$hashhash",    // yescrypt (Debian 13 default)
-		"$2b$10$abcdefghijklmnopqrst", // bcrypt
-		"$2a$10$abcdefghijklmnopqrst",
-		"$2y$10$abcdefghijklmnopqrst",
-		"$1$salt$hash",      // md5crypt
-		"$7$salt$hash",      // scrypt
-		"$gy$j9T$salt$hash", // gost-yescrypt
-		"!$6$salt$hash",     // locked-but-restorable
-		"!!$6$salt$hash",    // locked-but-restorable (double bang)
-		"*",                 // bare lock sentinel
-		"!",                 // bare lock sentinel
-		"!!",                // bare lock sentinel
+		sha512Hash,
+		sha512HighRounds,
+		yescryptHash,     // yescrypt at its default cost (5)
+		gostYescryptHash, // gost-yescrypt at its default cost (5)
+		bcryptHash,
+		strings.Replace(bcryptHash, "$2b$", "$2a$", 1),
+		strings.Replace(bcryptHash, "$2b$", "$2y$", 1),
+		scryptHash,
+		"!" + sha512Hash,  // locked-but-restorable
+		"!!" + sha512Hash, // locked-but-restorable (double bang)
+		"*",               // bare lock sentinel
+		"!",               // bare lock sentinel
+		"!!",              // bare lock sentinel
 	}
 	for _, in := range accept {
 		if err := ValidateCryptHash(in, nil); err != nil {
@@ -35,19 +40,32 @@ func TestValidateCryptHash(t *testing.T) {
 	}
 
 	reject := []string{
-		"plaintext",      // the real footgun
-		"password12345",  // 13 alnum — the DES-drop case (r3 Major-2)
-		"",               // empty
-		"$99$bogus$x",    // unknown id
-		"$6$",            // no salt body / no checksum
-		"$6$salt$",       // empty checksum (r3 Major-3)
-		"$6$$hash",       // empty salt
-		"$6$salt:hash",   // colon would corrupt chpasswd stdin
-		"$6$salt$ab cd",  // space
-		"$6$salt$ab\tcd", // tab control char
-		"$6salt$hash",    // missing $ after id
-		"$6$salt$$hash",  // empty intermediate field / doubled $ (Copilot review)
-		"$6$$$hash",      // empty salt AND empty param
+		"plaintext",                          // the real footgun
+		"password12345",                      // 13 alnum — DES-looking plaintext
+		"",                                   // empty
+		"$99$bogus$x",                        // unknown id
+		"$1$saltsalt$qjXMvbEw8oaL.CzflDtaK/", // weak md5crypt
+		"$5$rounds=5000$saltsalt$gOjOtoMpVhru2uyjeJSEc/JaLQWOXMNmlOnj6T4AtC.", // weak sha256crypt
+		"$6$a$b",                                 // structurally impossible
+		"$6$saltsalt$",                           // empty checksum
+		"$6$$hash",                               // empty salt
+		"$6$salt123$" + strings.Repeat("a", 86),  // salt below floor
+		"$6$saltsalt$" + strings.Repeat("a", 85), // truncated checksum
+		"$6$saltsalt$" + strings.Repeat("a", 87), // overlong checksum
+		"$6$rounds=1000$saltsalt$" + strings.Repeat("a", 86),  // too few rounds
+		"$6$rounds=05000$saltsalt$" + strings.Repeat("a", 86), // non-canonical rounds
+		"$6$rounds=656000$saltsalt$" + strings.Repeat("a", 86) + "$extra",
+		"$6$saltsalt$ab:cd",  // colon corrupts chpasswd stdin
+		"$6$saltsalt$ab cd",  // space
+		"$6$saltsalt$ab\tcd", // control character
+		"$6salt$hash",        // missing $ after id
+		"$6$saltsalt$$hash",  // empty intermediate field
+		"$6$$$hash",          // empty salt and parameter
+		"$y$j8T$saltsaltsaltsalt$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD", // cost 4
+		"$y$j9T$salt$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD",             // short salt
+		"$y$j9T$saltsaltsaltsalt$" + strings.Repeat("a", 42),                  // truncated checksum
+		"$2b$09$saltsaltsaltsaltsaltsOEpXE0KLxzyVeEtX6R7qbkVGuSGecz6W",        // low cost
+		"$2b$12$saltsaltsalt", // truncated bcrypt payload
 	}
 	for _, in := range reject {
 		if err := ValidateCryptHash(in, nil); err == nil {
@@ -131,9 +149,9 @@ func TestParseLoginUserEncryptedPasswordFlatSet(t *testing.T) {
 }
 
 // TestLoginUserEncryptedPasswordSchemaGate proves the typed-leaf gate
-// hard-rejects a plaintext per-user encrypted-password at commit-check and
-// accepts a valid hash (#1944 §5.6 / §7.4), including the root-auth E1
-// parity (lock sentinel "*" accepted for root).
+// hard-rejects plaintext and weak or structurally incomplete hashes for both
+// root and per-user authentication while accepting strong hashes and the root
+// lock sentinel (#1944 §5.6 / #10830).
 func TestLoginUserEncryptedPasswordSchemaGate(t *testing.T) {
 	mustTree := func(t *testing.T, cmds ...string) *ConfigTree {
 		t.Helper()
@@ -150,24 +168,31 @@ func TestLoginUserEncryptedPasswordSchemaGate(t *testing.T) {
 		return tree
 	}
 
-	// Plaintext per-user → reject.
-	bad := mustTree(t, `set system login user op authentication encrypted-password "letmein"`)
-	if err := SchemaValidate(bad, nil); err == nil {
-		t.Error("SchemaValidate accepted plaintext per-user encrypted-password, want reject")
-	} else if !strings.Contains(err.Error(), "plaintext") {
-		t.Errorf("expected plaintext rejection, got %v", err)
+	for _, value := range []string{
+		"letmein",
+		"$1$saltsalt$qjXMvbEw8oaL.CzflDtaK/",
+		"$6$a$b",
+	} {
+		tree := mustTree(t, `set system login user op authentication encrypted-password "`+value+`"`)
+		if err := SchemaValidate(tree, nil); err == nil {
+			t.Errorf("SchemaValidate accepted invalid per-user encrypted-password %q, want reject", value)
+		}
+		rootTree := mustTree(t, `set system root-authentication encrypted-password "`+value+`"`)
+		if err := SchemaValidate(rootTree, nil); err == nil {
+			t.Errorf("SchemaValidate accepted invalid root encrypted-password %q, want reject", value)
+		}
 	}
 
-	// Valid hash per-user → accept.
-	good := mustTree(t, `set system login user op authentication encrypted-password "$6$salt$hash"`)
+	// Valid sha512crypt per-user → accept.
+	good := mustTree(t, `set system login user op authentication encrypted-password "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"`)
 	if err := SchemaValidate(good, nil); err != nil {
 		t.Errorf("SchemaValidate rejected a valid per-user hash: %v", err)
 	}
 
-	// Root-auth plaintext (E1 shared validator) → reject.
-	rootBad := mustTree(t, `set system root-authentication encrypted-password "letmein"`)
-	if err := SchemaValidate(rootBad, nil); err == nil {
-		t.Error("SchemaValidate accepted plaintext root encrypted-password, want reject")
+	// Valid yescrypt root → accept.
+	rootGood := mustTree(t, `set system root-authentication encrypted-password "$y$j9T$saltsaltsaltsalt$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD"`)
+	if err := SchemaValidate(rootGood, nil); err != nil {
+		t.Errorf("SchemaValidate rejected a valid root yescrypt hash: %v", err)
 	}
 
 	// Root-auth lock sentinel "*" → accept (the only way to lock root).

@@ -126,7 +126,7 @@ func TestLoginUserClassHeadIsStillRejected9391(t *testing.T) {
 func TestLoginUserAuthenticationBodyIsUntouched9391(t *testing.T) {
 	got := loginUsers9391(t,
 		"set system login user alice uid 2001 class super-user",
-		"set system login user alice authentication encrypted-password \"$6$abc$def\"",
+		"set system login user alice authentication encrypted-password \"$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/\"",
 	)
 	u := got["alice"]
 	if u.Class != "super-user" || u.UID != 2001 {

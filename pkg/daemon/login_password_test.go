@@ -212,19 +212,12 @@ func TestCurrentShadowHashParse(t *testing.T) {
 }
 
 // TestReconcileApplyBoundaryRevalidatesHash proves the defense-in-depth
-// re-validation in reconcileUserPassword (Codex #1944 r1 High #2): the
-// lenient Load/SyncApply ingress only downgrades a ValidateCryptHash
-// violation to a warning, so a persisted/synced plaintext value could
-// otherwise reach `chpasswd -e`. The apply boundary MUST re-check the hash
-// and skip the chpasswd exec for an invalid value, while still applying a
-// valid one. We detect whether chpasswd ran by shadowing it with a fake on
-// PATH that drops a sentinel file.
+// validation in reconcileUserPassword: lenient Load/SyncApply ingress may
+// carry weak or structurally impossible hashes, so the apply boundary must
+// reject them. It also proves a zero-exit chpasswd is not treated as success
+// until /etc/shadow contains the desired hash.
 func TestReconcileApplyBoundaryRevalidatesHash(t *testing.T) {
 	dir := t.TempDir()
-
-	// Temp /etc/shadow + /etc/passwd so passwordAction decides pwApply
-	// (op present with a DIFFERENT hash than desired) and lookupUID
-	// succeeds.
 	shadow := filepath.Join(dir, "shadow")
 	if err := os.WriteFile(shadow, []byte("op:$6$old$existinghash:19000:0:99999:7:::\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -239,42 +232,60 @@ func TestReconcileApplyBoundaryRevalidatesHash(t *testing.T) {
 	provisionedUsersDir = filepath.Join(dir, "provisioned-users")
 	t.Cleanup(func() { shadowPath, passwdPath, provisionedUsersDir = oldShadow, oldPasswd, oldDir })
 
-	// Fake chpasswd on PATH that records that it was invoked.
 	sentinel := filepath.Join(dir, "chpasswd-ran")
 	fakeBin := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\ntouch " + sentinel + "\ncat >/dev/null\n"
+	script := "#!/bin/sh\ntouch " + sentinel + "\nIFS=: read -r user hash\n" +
+		"if [ \"${CHPASSWD_NO_WRITE:-0}\" != 1 ]; then printf '%s:%s:19000:0:99999:7:::\\n' \"$user\" \"$hash\" > " + shadow + "; fi\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "chpasswd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-
 	d := &Daemon{}
 
-	// Invalid (plaintext) desired — guard must skip chpasswd entirely.
-	d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: "password12345"})
-	if _, err := os.Stat(sentinel); err == nil {
-		t.Fatal("chpasswd ran for an INVALID (plaintext) hash — apply-boundary guard missing")
-	}
-	if _, err := os.Stat(markerPath("op")); err == nil {
-		t.Fatal("provenance marker written despite skipped apply")
+	for _, invalid := range []string{
+		"password12345",
+		"$1$saltsalt$qjXMvbEw8oaL.CzflDtaK/",
+		"$6$a$b",
+	} {
+		err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.Secret(invalid)})
+		if err == nil {
+			t.Errorf("reconcileUserPassword accepted invalid hash %q, want error", invalid)
+		}
+		if _, err := os.Stat(sentinel); err == nil {
+			t.Fatalf("chpasswd ran for invalid hash %q", invalid)
+		}
+		if _, err := os.Stat(markerPath("op")); err == nil {
+			t.Fatalf("provenance marker written for invalid hash %q", invalid)
+		}
 	}
 
-	// Valid hash — chpasswd must run.
-	d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: "$6$newsalt$newhash"})
+	const validHash = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"
+	t.Setenv("CHPASSWD_NO_WRITE", "1")
+	if err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: validHash}); err == nil {
+		t.Fatal("reconcileUserPassword reported success when chpasswd did not update shadow")
+	}
 	if _, err := os.Stat(sentinel); err != nil {
-		t.Fatal("chpasswd did NOT run for a VALID hash — guard over-rejects")
+		t.Fatal("chpasswd did NOT run for a valid hash")
+	}
+	if actual, ok := currentShadowHash("op"); !ok || actual == validHash {
+		t.Fatalf("shadow readback = (%q, %t), want old value after fake no-write", actual, ok)
+	}
+
+	t.Setenv("CHPASSWD_NO_WRITE", "0")
+	if err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: validHash}); err != nil {
+		t.Fatalf("reconcileUserPassword rejected a valid hash after successful write: %v", err)
+	}
+	if actual, ok := currentShadowHash("op"); !ok || actual != validHash {
+		t.Fatalf("shadow readback = (%q, %t), want desired hash", actual, ok)
 	}
 }
 
 // TestRootAuthApplyBoundaryRevalidatesHash mirrors the per-user apply-boundary
-// guard for `system root-authentication encrypted-password` (#1944 E1 shares
-// ValidateCryptHash with root-auth; Codex r2 High). The lenient Load/SyncApply
-// ingress can carry an invalid value, so applyRootAuth must re-validate before
-// `chpasswd -e` — skipping the exec for plaintext while still applying a valid
-// hash.
+// checks for root authentication. The lenient ingress can carry an invalid
+// value, so applyRootAuth must reject it before `chpasswd -e`.
 func TestRootAuthApplyBoundaryRevalidatesHash(t *testing.T) {
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "chpasswd-ran")
@@ -282,20 +293,17 @@ func TestRootAuthApplyBoundaryRevalidatesHash(t *testing.T) {
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\ntouch " + sentinel + "\ncat >/dev/null\n"
+	shadow := filepath.Join(dir, "shadow")
+	if err := os.WriteFile(shadow, []byte("root:$6$existing$hash:19000:0:99999:7:::\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ntouch " + sentinel + "\nIFS=: read -r user hash\n" +
+		"printf '%s:%s:19000:0:99999:7:::\\n' \"$user\" \"$hash\" > " + shadow + "\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "chpasswd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
-	// applyRootAuth now drives reconcileUserPassword (name "root", UID 0) and
-	// records/reads a provenance marker + reconciles /root/.ssh — stage all of
-	// them at a throwaway tree so this apply-boundary test stays hermetic and
-	// never touches the real /etc/shadow, /var/lib/xpf, or /root/.ssh (#5276).
-	shadow := filepath.Join(dir, "shadow")
-	if err := os.WriteFile(shadow, []byte("root:$6$existing$hash:19000:0:99999:7:::\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	passwd := filepath.Join(dir, "passwd")
 	if err := os.WriteFile(passwd, []byte("root:x:0:0:root:/root:/bin/bash\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -307,23 +315,34 @@ func TestRootAuthApplyBoundaryRevalidatesHash(t *testing.T) {
 	t.Cleanup(func() {
 		shadowPath, passwdPath, provisionedUsersDir, rootSSHDir = origShadow, origPasswd, origDir, origRoot
 	})
-
 	d := &Daemon{}
 
-	// Invalid plaintext → no chpasswd.
-	cfgBad := &config.Config{}
-	cfgBad.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: "password12345"}
-	d.applyRootAuth(cfgBad)
-	if _, err := os.Stat(sentinel); err == nil {
-		t.Fatal("chpasswd ran for an INVALID root hash — apply-boundary guard missing")
+	for _, invalid := range []string{
+		"password12345",
+		"$1$saltsalt$qjXMvbEw8oaL.CzflDtaK/",
+		"$6$a$b",
+	} {
+		cfg := &config.Config{}
+		cfg.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.Secret(invalid)}
+		if err := d.applyRootAuth(cfg); err == nil {
+			t.Errorf("applyRootAuth accepted invalid root hash %q, want error", invalid)
+		}
+		if _, err := os.Stat(sentinel); err == nil {
+			t.Fatalf("chpasswd ran for invalid root hash %q", invalid)
+		}
 	}
 
-	// Valid hash → chpasswd runs.
+	const validHash = "$y$j9T$saltsaltsaltsalt$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD"
 	cfgGood := &config.Config{}
-	cfgGood.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: "$6$rootsalt$roothash"}
-	d.applyRootAuth(cfgGood)
+	cfgGood.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: validHash}
+	if err := d.applyRootAuth(cfgGood); err != nil {
+		t.Fatalf("applyRootAuth rejected a valid yescrypt hash: %v", err)
+	}
 	if _, err := os.Stat(sentinel); err != nil {
-		t.Fatal("chpasswd did NOT run for a VALID root hash — guard over-rejects")
+		t.Fatal("chpasswd did NOT run for a valid root hash")
+	}
+	if actual, ok := currentShadowHash("root"); !ok || actual != validHash {
+		t.Fatalf("root shadow readback = (%q, %t), want desired hash", actual, ok)
 	}
 }
 

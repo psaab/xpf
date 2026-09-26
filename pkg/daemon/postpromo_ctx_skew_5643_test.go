@@ -93,7 +93,7 @@ func TestPostPromotionCancelRunsHostAuthorizationCloseout(t *testing.T) {
 // branch and pipes `root:<hash>` to the (faked) chpasswd — a privilege-free
 // observable that applyRootAuth ran (writing root's authorized_keys instead
 // would need a root-only chown that unprivileged test runs cannot perform).
-const rootAuthCloseoutHash = "$6$xpf5643salt$rootclos" //nolint:gosec // test-only non-secret
+const rootAuthCloseoutHash = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/" //nolint:gosec // test-only non-secret
 
 // rootAuthCloseoutCfg builds a config whose system root-authentication sets a
 // root encrypted-password, so applyRootAuth (the SOLE manager of root's durable
