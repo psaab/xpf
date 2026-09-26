@@ -421,9 +421,9 @@ func programRethMAC(ifName string, mac net.HardwareAddr, beforeCycle func() erro
 	return true, nil
 }
 
-// clearDadFailed removes any dadfailed link-local IPv6 addresses and re-adds
-// them with IFA_F_NODAD so they become usable. This handles the case where the
-// virtual MAC was already set but accept_dad wasn't disabled at that time.
+// clearDadFailed removes any dadfailed IPv6 addresses and re-adds them with
+// IFA_F_NODAD so they become usable. It repairs global and link-local
+// addresses on RETH members and VLAN children after a link cycle.
 func clearDadFailed(ifName string) {
 	link, err := netlink.LinkByName(ifName)
 	if err != nil {
@@ -433,21 +433,24 @@ func clearDadFailed(ifName string) {
 	if err != nil {
 		return
 	}
+	repaired := 0
 	for _, addr := range addrs {
-		if !addr.IP.IsLinkLocalUnicast() {
-			continue
-		}
 		if addr.Flags&unix.IFA_F_DADFAILED == 0 {
 			continue
 		}
-		// Remove the dadfailed address and re-add with NODAD.
-		netlink.AddrDel(link, &addr)
+		if err := netlink.AddrDel(link, &addr); err != nil {
+			slog.Warn("failed to remove dadfailed IPv6 address", "iface", ifName, "addr", addr.IP, "err", err)
+			continue
+		}
 		addr.Flags = unix.IFA_F_NODAD
 		if err := netlink.AddrAdd(link, &addr); err != nil {
-			slog.Warn("failed to re-add link-local with NODAD", "iface", ifName, "err", err)
-		} else {
-			slog.Info("cleared dadfailed link-local", "iface", ifName, "addr", addr.IP)
+			slog.Warn("failed to re-add dadfailed IPv6 address with NODAD", "iface", ifName, "addr", addr.IP, "err", err)
+			continue
 		}
+		repaired++
+	}
+	if repaired > 0 {
+		slog.Warn("repaired dadfailed IPv6 addresses", "iface", ifName, "dadfailed_count", repaired)
 	}
 }
 
