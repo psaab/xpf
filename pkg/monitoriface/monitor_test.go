@@ -278,7 +278,7 @@ func TestRenderSingleInterfaceCounterResetMarksInvalidAndRebaselines(t *testing.
 		return ""
 	}
 	var first bytes.Buffer
-	RenderSingleInterface(&first, "host", "lo", "lo", current, &previous, baseline, start)
+	RenderSingleInterface(&first, "host", "lo", "lo", current, &previous, baseline, start, "")
 	for _, prefix := range []string{"Input  bytes:", "Input  packets:", "Input  errors:", "RX bytes:", "Direct TX packets:"} {
 		if got := line(first.String(), prefix); !strings.Contains(got, "[n/a]") {
 			t.Errorf("reset delta for %q = %q, want n/a", prefix, got)
@@ -306,7 +306,7 @@ func TestRenderSingleInterfaceCounterResetMarksInvalidAndRebaselines(t *testing.
 		},
 	}
 	var second bytes.Buffer
-	RenderSingleInterface(&second, "host", "lo", "lo", next, current, baseline, start)
+	RenderSingleInterface(&second, "host", "lo", "lo", next, current, baseline, start, "")
 	for prefix, want := range map[string]string{
 		"Input  bytes:":      "(96 bps)    [12]",
 		"Input  packets:":    "(8 pps)    [8]",
@@ -337,7 +337,7 @@ func TestRenderSingleInterfaceRebaselinesOnlyResetCounterSource(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	RenderSingleInterface(&buf, "host", "lo", "lo", current, &previous, baseline, start)
+	RenderSingleInterface(&buf, "host", "lo", "lo", current, &previous, baseline, start, "")
 
 	if baseline.RxBytes != 100 || baseline.RxPkts != 10 {
 		t.Errorf("userspace reset rebaselined unchanged interface counters: rxBytes=%d rxPkts=%d", baseline.RxBytes, baseline.RxPkts)
