@@ -248,24 +248,23 @@ xpf-deploy.py fetch --version <ver> --image-url https://dl.example.com/xpf
 xpf-deploy.py fetch --version <ver> --image-url ... --qcow2-only --install-libvirt
 xpf-deploy.py --hypervisor libvirt deploy <appliance.yaml>
 
-# Verify only (no install): fetch prints the exact `install` command that
-# copies the verified qcow2 into the golden path, gated on its digest.
+# Verify only (no install): fetch prints the command to stage the
+# qcow2 privately, verify that staged copy against its signed digest,
+# and install the same verified copy to the golden path.
 xpf-deploy.py fetch --version <ver> --image-url ... --qcow2-only
 ```
 
 **The digest that `--qcow2-only` / `--no-import` prints is the SIGNED one
-(#9170).** These two flags do not consume the image — they hand the operator a
-`sha256sum -c … && sudo install …` one-liner to run later — so the gap between
-this command's signature check and that install is unbounded, and `--out` stays
-writable by any local process for all of it. The printed digest is therefore
-taken from the signed manifest entry that authorised the artifact
-(`sign.verify_image_artifact` returns it), never re-hashed from the file in
-`--out` after verification. A re-hash would bind the bytes present at print
-time rather than the bytes that passed the signature, so a process that swapped
-`--out` in that window would get its bytes installed *and* get the operator's
-own verification command to bless them. The two importing paths do not need
-this: they consume the bytes in-process from a private staging copy
-(`_verified_private_artifacts`, #5817).
+(#9170).** These flags do not consume the image — they hand the operator a
+command to run later. Since `--out` stays writable by local processes, the
+command copies the qcow2 to a fresh private temporary directory, verifies that
+staged copy against the signed digest, then installs that same staged file
+(#10757). A swap before or during the copy is rejected by the staged check; a
+swap after the copy cannot change the installed bytes. The digest comes from
+the signed manifest entry that authorised the artifact
+(`sign.verify_image_artifact` returns it), never from a re-hash of the public
+`--out` file after verification. The in-process import paths use the same
+private-staging principle (`_verified_private_artifacts`, #5817).
 
 `deploy --hypervisor libvirt` never boots the golden directly — it creates a
 per-VM copy-on-write overlay backed read-only by the golden. `--install-libvirt`

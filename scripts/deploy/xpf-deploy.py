@@ -2020,9 +2020,8 @@ def cmd_fetch(args):
         # libvirt golden basename = deploy's `image:` default, so the incus alias
         # and the libvirt golden name AGREE (fable-165 H-30).
         img_name = args.alias or "xpf-appliance"
-        # Public path for the non-consuming (--no-import) message only. The two
-        # in-process consumers below read from a private staging dir, NOT this
-        # re-openable public path (#5817).
+        # Public path read by the printed non-consuming install command only.
+        # In-process consumers stage privately instead (#5817).
         qcow2_pub = os.path.join(out, names["qcow2"])
 
         # H-30: bridge the fetch -> libvirt gap. `deploy --hypervisor libvirt`
@@ -2040,37 +2039,30 @@ def cmd_fetch(args):
 
         if args.no_import or args.qcow2_only:
             golden = libvirt_golden_path(img_name)
-            # #8597 (muse-004 K08): the printed install must be GATED on the digest,
-            # not merely preceded by a verification that already happened.
+            # This command is run later, so it must preserve the verification
+            # boundary across the handoff. The public --out path is writable by
+            # another local process; checking it and then installing that same
+            # pathname opens it twice, letting a writer swap in unauthenticated
+            # bytes between the check and the root install (#10757).
             #
-            # The two importing paths above stage into a private directory
-            # (_verified_private_artifacts, #5817) and re-verify the staged copy, so
-            # "a post-verify swap in --out cannot poison the golden". This path
-            # cannot do that — it hands the operator a command to run LATER, so the
-            # gap between the verify and the install is unbounded and is exactly the
-            # window _verified_private_artifacts' own docstring names: "The public
-            # --out dir may be writable by another local process."
-            #
-            # Printing the expected digest and a verify-then-install one-liner moves
-            # the check to the moment of the write. `sha256sum -c` here is bound to
-            # THIS path and THIS digest on one line, so it is not the cwd-relative
-            # `sha256sum -c` sign.py warns about — the file being hashed is the file
-            # being installed.
-            # #9170: the digest is the SIGNED one, taken from the verification
-            # above — NOT a re-hash of qcow2_pub. A re-hash binds the bytes in
-            # --out at print time, which is after the signature check finished,
-            # so a dir-writer who wins that window gets its bytes installed AND
-            # gets the operator's own `sha256sum -c` to bless them. The gap is
-            # not sub-millisecond: a full verify_manifest_map -> verify_and_read
-            # -> minisign subprocess, two mkdtemp/rmtree cycles and the
-            # watermark os.replace sit inside it.
+            # Copy the public file into a fresh private directory, verify that
+            # staged copy against the signed digest, then install THAT same copy.
+            # A swap before/during the copy is caught by the staged check; a swap
+            # after the copy cannot change the bytes passed to install. The stage
+            # is outside --out and removed whether verification/install succeeds
+            # or fails.
             expected_sha = verified_sha["qcow2"]
             print(f"==> verified into {out} (not imported). For libvirt/KVM, install "
                   f"it to the golden path deploy reads — RE-VERIFY at install time, "
                   f"because {out} stays writable by any local process after this "
                   f"command exits and the golden is not re-checked downstream:\n"
-                  f"      echo '{expected_sha}  {qcow2_pub}' | sha256sum -c - && \\\n"
-                  f"        sudo install -m 0644 -D {qcow2_pub} {golden}\n"
+                  f"      ( stage=$(mktemp -d /tmp/xpf-fetch.XXXXXXXX) && \\\n"
+                  f"        trap 'rm -rf -- \"$stage\"' EXIT && \\\n"
+                  f"        cp -- {shlex.quote(qcow2_pub)} \"$stage/image\" && \\\n"
+                  f"        printf '%s  %s\\n' '{expected_sha}' \"$stage/image\" "
+                  f"| sha256sum -c - && \\\n"
+                  f"        sudo install -m 0644 -D \"$stage/image\" "
+                  f"{shlex.quote(golden)} )\n"
                   f"   (or re-run fetch with --install-libvirt, which stages the "
                   f"bytes privately and re-verifies them, #5817), then: "
                   f"xpf-deploy.py --hypervisor libvirt deploy <appliance.yaml> "

@@ -122,65 +122,6 @@ class DependentOverlaysFailsClosed8597(unittest.TestCase):
         self.assertTrue(unknown, "an unprobeable overlay stays UNKNOWN (#6760)")
 
 
-class NoImportPrintsADigestGate8597(unittest.TestCase):
-    """K08: the printed install must be gated on the digest.
-
-    Driving the whole fetch subcommand needs a signing key and a network, so
-    this asserts the two properties of the printed command that matter, on the
-    source text: it carries a `sha256sum -c` bound to the same path it
-    installs, and the two are joined by `&&` so a mismatch stops the install.
-
-    Stated plainly because it is a weaker instrument than the rest of this
-    file: it binds the SHAPE of the emitted command, not its execution. What it
-    can catch is the regression that actually happened — someone simplifying the
-    hint back to a bare `sudo install`.
-
-    #9170: this cell also USED to assert `assertIn("expected_sha", window)`
-    under the message "the digest must be computed from the verified file". The
-    message named the property; the predicate was a substring the defective
-    code satisfied, because `expected_sha` was present and merely derived from
-    a re-hash of the public path taken after verification. It was green over
-    that defect for its whole life. A substring check cannot see where a value
-    came from, so the WHERE-FROM property is now driven end-to-end in
-    test_xpf_deploy_signed_digest_9170.py and only its residue is asserted
-    here: that the re-hash spelling has not come back.
-    """
-
-    def setUp(self):
-        self.src = open(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "xpf-deploy.py")).read()
-
-    def test_printed_install_is_gated_on_sha256(self):
-        idx = self.src.find("sudo install -m 0644 -D {qcow2_pub} {golden}")
-        self.assertNotEqual(idx, -1,
-                            "the no-import hint no longer prints an install "
-                            "command; re-derive this cell against what it does "
-                            "print")
-        window = self.src[max(0, idx - 900):idx + 200]
-        self.assertIn("sha256sum -c", window,
-                      "the printed install must be preceded by a digest check "
-                      "bound to the same path: --out stays writable by any "
-                      "local process after fetch exits, and the golden is "
-                      "never re-verified downstream (#8597/K08)")
-        self.assertIn("&&", window,
-                      "the digest check and the install must be joined by `&&` "
-                      "so a mismatch STOPS the install rather than printing a "
-                      "warning above it")
-        self.assertIn("expected_sha", window,
-                      "the printed line must carry a digest, not leave it for "
-                      "the operator to look up")
-        # #9170. Necessary, not sufficient: this is one spelling of a re-hash
-        # and the source layer cannot tell where a value came from in general.
-        # The property itself is driven in
-        # test_xpf_deploy_signed_digest_9170.py, which swaps the public file
-        # after verification and reads what was printed.
-        self.assertNotIn(
-            "sign.sha256_file(qcow2_pub)", window,
-            "#9170: the printed digest is re-hashed from the PUBLIC file AFTER "
-            "signature verification finished. It must come from the signed "
-            "manifest (verify_image_artifact's return value), or a local "
-            "process that writes --out during the gap gets the operator's own "
-            "`sha256sum -c` to bless its bytes")
 
 
 if __name__ == "__main__":

@@ -1,39 +1,17 @@
 #!/usr/bin/env python3
-"""The `--no-import` install digest must be the SIGNED one, not a re-hash (#9170).
+"""No-import fetch preserves the signed digest and privately stages installs
+(#9170, #10757).
 
-`cmd_fetch --no-import` / `--qcow2-only` verifies the downloaded qcow2 against
-the signed manifest and then hands the operator a one-liner to run LATER:
+The printed command runs later, after `--out` is again writable by local
+processes. It copies the public qcow2 into a fresh private directory, checks
+that staged copy against the signed digest, and installs the checked copy. A
+writer swapping `--out` after the checksum cannot change the staged bytes.
 
-    echo '<sha>  <out>/xpf-<ver>.qcow2' | sha256sum -c - && sudo install ...
-
-That `<sha>` used to be produced by `sign.sha256_file(qcow2_pub)` — a SECOND
-read of the same public path, taken AFTER the signature check had already
-finished. So the printed digest bound "the bytes in --out at print time", not
-"the bytes that passed the signature", and the value that should have been
-printed had already been computed and thrown away inside
-`sign.verify_image_artifact`.
-
-Why that is a real window and not a formality: `--out` is the operator's own
-directory and `_verified_private_artifacts`' docstring says of it, in the same
-file, "The public --out dir may be writable by another local process". Between
-the verify read and the digest read sit a full `verify_manifest_map` ->
-`verify_and_read` -> `verify_signature` -> `subprocess.run(minisign)`, two
-mkdtemp/rmtree cycles and the watermark `os.replace`. A local process that wins
-that window gets its bytes installed AND gets the operator's own
-`sha256sum -c` to bless them — the last integrity check before `sudo install`
-puts an image on a firewall.
-
-WHY THIS FILE EXISTS SEPARATELY FROM test_xpf_deploy_golden_guard_8597.py.
-That file's K08 cell asserted `assertIn("expected_sha", window)` with the
-message "the digest must be computed from the verified file". The message named
-exactly the property the code lacked; the predicate was a substring the
-defective code satisfied, because `expected_sha` was present and merely derived
-from the wrong bytes. It was green over the defect for its whole life. A
-source-text assertion cannot see where a value came from, so the guard for this
-property has to DRIVE the path and read what it printed.
-
-Hermetic: a throwaway minisign keypair, a `file://` base URL, a private
-XDG_STATE_HOME, `incus` stubbed out. No network, no incus, no root.
+These tests drive `cmd_fetch`, execute the actual printed command under a fake
+`sudo`, and race a writer against the checksum/install boundary. The digest
+comes from `sign.verify_image_artifact`, never from a re-hash of the public
+path. Hermetic: throwaway minisign keys, `file://`, private `XDG_STATE_HOME`,
+and no real incus or root access.
 """
 
 from __future__ import annotations
@@ -69,7 +47,8 @@ VER = "1.2.3-4-gaaaaaaa"
 # The bytes a local dir-writer swaps in AFTER the signature check has passed.
 EVIL = b"MALICIOUS-UNAUTHENTICATED-QCOW2-BYTES" * 16
 
-_PRINTED = re.compile(r"echo '([0-9a-f]{64})  (\S+)' \| sha256sum -c -")
+_PRINTED = re.compile(
+    r"printf '%s  %s\\n' '([0-9a-f]{64})' \"\$stage/image\" \| sha256sum -c -")
 
 
 @unittest.skipUnless(shutil.which("minisign") and shutil.which("curl"),
@@ -89,6 +68,17 @@ class NoImportDigestIsTheSignedOne9170(unittest.TestCase):
         self.base = self.host.as_uri()
         self.out = self.tmp / "out"
         self.state = self.tmp / "state"
+        self.golden_dir = self.tmp / "golden"
+        self._libvirt_images = deploy.LIBVIRT_IMAGES
+        deploy.LIBVIRT_IMAGES = str(self.golden_dir)
+        self.addCleanup(setattr, deploy, "LIBVIRT_IMAGES", self._libvirt_images)
+
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.sudo = self.bin / "sudo"
+        self.sudo.write_text("#!/bin/sh\nexec \"$@\"\n")
+        self.sudo.chmod(0o755)
+        self.real_sha256sum = shutil.which("sha256sum")
 
         self._env = {}
         for k, v in (("XPF_IMAGE_PUBKEY", str(self.pub)),
@@ -178,20 +168,42 @@ class NoImportDigestIsTheSignedOne9170(unittest.TestCase):
     def _printed(self, text):
         m = _PRINTED.search(text)
         self.assertIsNotNone(
-            m, "the --no-import hint no longer prints a "
-               "`echo '<sha>  <path>' | sha256sum -c -` line; re-derive this "
-               f"cell against what it does print:\n{text}")
-        return m.group(1), m.group(2)
+            m, "the --no-import hint no longer verifies the staged image "
+               "against its signed digest; re-derive this cell from its output:\n"
+               f"{text}")
+        return m.group(1)
+
+    def _installer_command(self, text):
+        """Extract and run the command exactly as printed for the operator."""
+        lines = text.splitlines()
+        start = next((i for i, line in enumerate(lines)
+                      if line.startswith("      ")), None)
+        self.assertIsNotNone(start, f"no install command printed:\n{text}")
+        command = []
+        line = lines[start]
+        while True:
+            self.assertTrue(line.startswith("      "),
+                            f"unexpected command continuation: {line!r}")
+            command.append(line[6:])
+            if not line.rstrip().endswith("\\"):
+                break
+            start += 1
+            line = lines[start]
+        return "\n".join(command)
+
+    def _run_installer(self, text, extra_env=None):
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin}:{env['PATH']}"
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(["/bin/sh", "-c", self._installer_command(text)],
+                              env=env, text=True, capture_output=True)
 
     # ── the defect ──
 
     def test_a_post_verify_swap_does_not_change_the_printed_digest(self):
-        """THE DEFECT ROW. The public qcow2 is replaced the moment its
-        signature check returns. The digest handed to the operator must still
-        be the SIGNED one, so their `sha256sum -c` refuses the swapped bytes.
-
-        Before the fix the printed value is `sha256(EVIL)`: the swap is blessed
-        by the operator's own verification command."""
+        """The no-import command uses the signed digest even if --out changes
+        immediately after the signature check."""
         fired = self._swap_public_qcow2_after_its_verify()
         rc, text = self._run_fetch(no_import=True)
         self.assertEqual(rc, 0)
@@ -199,63 +211,63 @@ class NoImportDigestIsTheSignedOne9170(unittest.TestCase):
         self.assertTrue(fired, "the post-verify swap never fired — this cell "
                                "would be vacuous, not passing")
         self.assertEqual(self._pub_qcow2().read_bytes(), EVIL,
-                         "the swap did not land on the public path, so nothing "
-                         "was actually tested")
+                         "the swap did not land on the public path")
+        self.assertEqual(self._printed(text), self.signed_qcow2_sha)
 
-        sha, path = self._printed(text)
-        self.assertEqual(os.path.realpath(path),
-                         os.path.realpath(self._pub_qcow2()),
-                         "the printed digest must be bound to the path the "
-                         "printed `sudo install` reads")
-        self.assertNotEqual(
-            sha, hashlib.sha256(EVIL).hexdigest(),
-            "#9170: the printed digest is a re-hash of the PUBLIC file taken "
-            "after signature verification finished, so a local process that "
-            "swapped --out gets its bytes installed AND gets the operator's "
-            "own `sha256sum -c` to bless them")
-        self.assertEqual(
-            sha, self.signed_qcow2_sha,
-            "the printed digest must be the value from the SIGNED manifest — "
-            "the one the verification established — not any later read of a "
-            "path that stays writable after this command exits")
-
-    def test_the_swapped_file_fails_the_printed_check(self):
-        """The consequence, end-to-end: run the operator's own command. It must
-        REFUSE the swapped file. This is the property the digest exists for,
-        and it is not implied by the string comparison above — a fix that
-        printed a correct-looking but unrelated digest would pass that one and
-        fail this."""
+    def test_the_swapped_file_fails_the_printed_install(self):
+        """A pre-install swap to unauthenticated bytes must not be installed."""
         self._swap_public_qcow2_after_its_verify()
         _, text = self._run_fetch(no_import=True)
-        sha, path = self._printed(text)
+        result = self._run_installer(text)
+        self.assertNotEqual(result.returncode, 0,
+                            "the install command accepted unauthenticated bytes")
+        self.assertFalse((self.golden_dir / "xpf-appliance.qcow2").exists(),
+                         "a rejected image was left at the golden path")
 
-        r = subprocess.run(["sha256sum", "-c", "-"],
-                           input=f"{sha}  {path}\n", text=True,
-                           capture_output=True)
-        self.assertNotEqual(
-            r.returncode, 0,
-            "#9170: the operator's `sha256sum -c` ACCEPTED unauthenticated "
-            "bytes, because the digest it was given was computed from those "
-            "same bytes")
-
-    # ── controls that must still be ACCEPTED ──
-
-    def test_an_untampered_fetch_prints_a_line_that_actually_verifies(self):
-        """LOAD-BEARING CONTROL. With no tampering the printed one-liner must
-        SUCCEED. `sha256sum -c` is run for real, so a fix that printed a
-        constant, a placeholder, or the wrong artifact's digest reds here —
-        "refuse everything" does not satisfy this file."""
+    def test_an_untampered_fetch_installs_the_verified_image(self):
+        """The printed command must still install authentic bytes."""
         rc, text = self._run_fetch(no_import=True)
         self.assertEqual(rc, 0)
-        sha, path = self._printed(text)
-        self.assertEqual(sha, self.signed_qcow2_sha)
+        self.assertEqual(self._printed(text), self.signed_qcow2_sha)
 
-        r = subprocess.run(["sha256sum", "-c", "-"],
-                           input=f"{sha}  {path}\n", text=True,
-                           capture_output=True)
-        self.assertEqual(r.returncode, 0,
-                         "an untampered fetch must print a digest the operator "
-                         f"can verify; got {r.stdout}{r.stderr}")
+        result = self._run_installer(text)
+        self.assertEqual(result.returncode, 0,
+                         f"the authentic command failed: {result.stdout}{result.stderr}")
+        self.assertEqual((self.golden_dir / "xpf-appliance.qcow2").read_bytes(),
+                         self.authentic[self.names["qcow2"]])
+
+    def test_public_swap_after_stage_check_does_not_change_installed_bytes(self):
+        """A writer that swaps --out after the install-time checksum must not
+        affect the private staged file subsequently installed."""
+        rc, text = self._run_fetch(no_import=True)
+        self.assertEqual(rc, 0)
+
+        fired = self.tmp / "checksum-swap-fired"
+        shim = self.bin / "sha256sum"
+        shim.write_text(
+            "#!/bin/sh\n"
+            f"{self.real_sha256sum} \"$@\"\n"
+            "status=$?\n"
+            "if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"-\" ]; then\n"
+            "  printf '%s' \"$XPF_EVIL_BYTES\" > \"$XPF_PUBLIC_QCOW2\"\n"
+            "  : > \"$XPF_SWAP_FIRED\"\n"
+            "fi\n"
+            "exit \"$status\"\n")
+        shim.chmod(0o755)
+
+        result = self._run_installer(text, {
+            "XPF_PUBLIC_QCOW2": str(self._pub_qcow2()),
+            "XPF_SWAP_FIRED": str(fired),
+            "XPF_EVIL_BYTES": EVIL.decode(),
+        })
+        self.assertEqual(result.returncode, 0,
+                         f"the private staged image failed: {result.stdout}{result.stderr}")
+        self.assertTrue(fired.exists(), "the checksum-to-install swap did not fire")
+        self.assertEqual(self._pub_qcow2().read_bytes(), EVIL,
+                         "the race cell did not replace the public image")
+        self.assertEqual((self.golden_dir / "xpf-appliance.qcow2").read_bytes(),
+                         self.authentic[self.names["qcow2"]],
+                         "the install reopened --out after its digest check")
 
     def test_qcow2_only_takes_the_same_path(self):
         """--qcow2-only shares the branch with --no-import, so it must get the
@@ -263,7 +275,7 @@ class NoImportDigestIsTheSignedOne9170(unittest.TestCase):
         does not depend on the metadata artifact being present."""
         rc, text = self._run_fetch(qcow2_only=True)
         self.assertEqual(rc, 0)
-        sha, _ = self._printed(text)
+        sha = self._printed(text)
         self.assertEqual(sha, self.signed_qcow2_sha)
 
     def test_the_incus_import_path_is_unaffected(self):
@@ -322,7 +334,7 @@ class NoImportDigestIsTheSignedOne9170(unittest.TestCase):
                          "#9170: the digest is re-derived from the public path, "
                          "so removing that path aborts a fetch whose signature "
                          "check had already succeeded")
-        sha, _ = self._printed(text)
+        sha = self._printed(text)
         self.assertEqual(sha, self.signed_qcow2_sha)
 
 
