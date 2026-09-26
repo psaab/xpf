@@ -213,13 +213,13 @@ func TestSyncAuthHandshakeKeyedNodeRejectsLegacyPeer(t *testing.T) {
 		t.Fatalf("a keyed node must REJECT an unauthenticated peer, got mode=%d", ar.mode)
 	}
 
-// Assert the REASON, not just that some error occurred. A nil frame key is
-// the failure default of every error path in performSyncHandshake — a read
-// timeout or a write failure also produces it — so `err != nil` plus
-// `key == nil` would still pass if the connection died for an unrelated
-// reason. Under Noise this peer sent a session frame where msg2 was required,
-// so the diagnostic must identify the rejected Noise message rather than an
-// unrelated I/O failure.
+	// Assert the REASON, not just that some error occurred. A nil frame key is
+	// the failure default of every error path in performSyncHandshake — a read
+	// timeout or a write failure also produces it — so `err != nil` plus
+	// `key == nil` would still pass if the connection died for an unrelated
+	// reason. Under Noise this peer sent a session frame where msg2 was required,
+	// so the diagnostic must identify the rejected Noise message rather than an
+	// unrelated I/O failure.
 	if !strings.Contains(ar.err.Error(), "noise") {
 		t.Fatalf("rejection must come from the Noise handshake and name the cause; "+
 			"got %q, want it to mention the noise exchange", ar.err.Error())
@@ -321,7 +321,6 @@ func TestSyncFrameSealVerifyRoundTripAndReplay(t *testing.T) {
 		t.Fatalf("wrong-key frame must fail HMAC, got %v", err)
 	}
 }
-
 
 // #7163 SUPERSESSION NOTE. Four tests were removed from this file by the Noise
 // conversion, and they are recorded here rather than deleted quietly, because
@@ -514,5 +513,76 @@ func TestNoiseHandshakeRefusesWithoutIdentity7163(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "identity") {
 		t.Errorf("error should name the missing identity, got: %v", err)
+	}
+}
+
+// TestFabricSyncHandshakeArmsAuthGuardWithoutHeartbeat10783 reproduces the
+// keyed fabric-transport shape: no control-link heartbeat is running, but the
+// shared PSK is proved by session sync and must arm the gRPC downgrade guard.
+// RED on revert: without the handshake-to-Manager signal, both managers remain
+// unarmed indefinitely because fabric gRPC is otherwise only dialed on demand.
+func TestFabricSyncHandshakeArmsAuthGuardWithoutHeartbeat10783(t *testing.T) {
+	key := []byte("shared-control-link-secret-key")
+	aManager := NewManager(0, 22)
+	bManager := NewManager(1, 22)
+	for _, m := range []*Manager{aManager, bManager} {
+		m.mu.Lock()
+		m.controlAuthKey = append([]byte(nil), key...)
+		m.mu.Unlock()
+		if m.HeartbeatRunning() {
+			t.Fatal("fixture must not start a control-link heartbeat")
+		}
+		if m.HeartbeatPeerAuthSeen() {
+			t.Fatal("fixture must begin without authenticated peer proof")
+		}
+	}
+
+	a := NewSessionSync(":0", ":0", nil)
+	b := NewSessionSync(":0", ":0", nil)
+	a.SetAuthProvider(aManager)
+	b.SetAuthProvider(bManager)
+	ca, cb := net.Pipe()
+	defer ca.Close()
+	defer cb.Close()
+
+	aHandshake := runHandshake(a, ca, true)
+	bHandshake := runHandshake(b, cb, false)
+	ar := <-aHandshake
+	br := <-bHandshake
+	if ar.err != nil || br.err != nil {
+		t.Fatalf("keyed fabric session-sync handshake failed: initiator=%v responder=%v",
+			ar.err, br.err)
+	}
+	if ar.mode != syncAuthAuthenticated || br.mode != syncAuthAuthenticated {
+		t.Fatalf("handshake modes = (%v, %v), want authenticated on both ends",
+			ar.mode, br.mode)
+	}
+	if !aManager.HeartbeatPeerAuthSeen() || !bManager.HeartbeatPeerAuthSeen() {
+		t.Fatal("an authenticated fabric session-sync peer did not arm the fabric-auth guard")
+	}
+	if aManager.HeartbeatRunning() || bManager.HeartbeatRunning() {
+		t.Fatal("fabric session-sync must arm the guard without starting a heartbeat")
+	}
+}
+
+// TestFabricSyncUpgradeArmsAuthGuard10783 covers peers that already have an
+// established session-sync stream when the shared key is introduced.
+func TestFabricSyncUpgradeArmsAuthGuard10783(t *testing.T) {
+	const key = "shared-control-link-secret-key"
+	aManager := NewManager(0, upgClusterID)
+	bManager := NewManager(1, upgClusterID)
+	for _, m := range []*Manager{aManager, bManager} {
+		m.mu.Lock()
+		m.controlAuthKey = []byte(key)
+		m.mu.Unlock()
+	}
+
+	a := newUpgEnd(t, key, 0)
+	b := newUpgEnd(t, key, 1)
+	a.s.SetAuthProvider(aManager)
+	b.s.SetAuthProvider(bManager)
+	runUpgrade(t, a, b)
+	if !aManager.HeartbeatPeerAuthSeen() || !bManager.HeartbeatPeerAuthSeen() {
+		t.Fatal("the authenticated in-place sync upgrade did not arm both fabric-auth guards")
 	}
 }

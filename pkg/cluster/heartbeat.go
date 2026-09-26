@@ -1222,8 +1222,9 @@ func (s *heartbeatAuthState) peerBootEpoch() (uint64, bool) {
 	return s.highEpoch, s.epochSeen
 }
 
-// peerAuthenticated reports whether the peer has ever sent a valid
-// HMAC-authenticated heartbeat (sticky for the life of the process).
+// peerAuthenticated reports whether the peer has proved it holds the shared
+// control-link PSK, via a heartbeat or the authenticated session-sync handshake
+// (#10783). The state is sticky for the life of the process.
 func (s *heartbeatAuthState) peerAuthenticated() bool {
 	return s.peerAuthSeen.Load()
 }
@@ -1420,11 +1421,9 @@ type heartbeatReceiver struct {
 	auth *heartbeatAuthState
 }
 
-// peerAuthenticated reports whether the peer has ever sent a valid
-// HMAC-authenticated heartbeat (sticky). It proves the peer holds the
-// control-link PSK and is signing — the arming signal the gRPC fabric
-// listener reuses so its downgrade-guard engages within ~one heartbeat
-// interval of the peer coming up, not on the next on-demand fabric RPC.
+// peerAuthenticated reports whether the peer has proved it holds the shared
+// control-link PSK via a valid authenticated heartbeat. Session-sync may also
+// arm the shared process-lifetime signal (#10783).
 func (r *heartbeatReceiver) peerAuthenticated() bool {
 	return r.auth.peerAuthenticated()
 }
