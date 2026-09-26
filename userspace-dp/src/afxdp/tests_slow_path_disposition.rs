@@ -2121,12 +2121,31 @@ fn build_stage11_raw_v6_non_first_frame_10516(protocol: u8) -> Vec<u8> {
     // on LAN ifindex 24 — source the LAN MAC per arrival interface (#10504),
     // else this case recycles at the MAC gate and pins nothing about Stage 11.
     frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_LAN_MAC);
+    // #10810: the sibling v4 fragment is a LAN->WAN transit packet, so make
+    // this v6 frame's source belong to LAN as well; the WAN on-link dst
+    // (::200) has no neighbor row, matching the v4 MissingNeighbor case.
+    frame[14 + 8..14 + 24].copy_from_slice(
+        &"2001:559:8585:ef00::102"
+            .parse::<Ipv6Addr>()
+            .expect("v6 transit source fixture")
+            .octets(),
+    );
     frame[14 + 40] = protocol;
     frame
 }
 
 fn raw_v6_non_first_meta_10516(frame: &[u8]) -> UserspaceDpMeta {
     let mut meta = raw_v6_meta_10516(frame, 255);
+    // #10810: keep the v6 fragment metadata consistent with its frame. The
+    // whole-packet helper defaults to dst ef00::1 (the ingress interface's
+    // local address), which sends a non-first fragment down LocalDelivery
+    // rather than the v4 sibling's transit MissingNeighbor path.
+    meta.flow_dst_addr.copy_from_slice(
+        &"2001:559:8585:80::200"
+            .parse::<Ipv6Addr>()
+            .expect("v6 transit destination fixture")
+            .octets(),
+    );
     meta.l4_offset = 14 + 40 + 8;
     meta.payload_offset = meta.l4_offset;
     meta
@@ -2147,22 +2166,28 @@ fn stage11_raw_protocol_arm_is_fail_closed_10516() {
 
 /// Raw ESP/AH and non-first fragments are flowless before Stage 11. Exercise
 /// those shapes through the real descriptor poll to pin the §6.1 cell-7
-/// NotClaimed verdict and no SA telemetry. Whole packets recycle exactly
-/// once, as does the v6 non-first fragment (flowless default-deny); v4
-/// non-first fragments PARK in reassembly (recycled 0, forwarded 0) — held,
-/// not dropped and not forwarded. Flowless transit may still use an unrelated
-/// slow-path outlet after Stage 11 falls through; the SA counters are the
-/// observable proof that Stage 11 did not claim the packet.
+/// NotClaimed verdict and no SA telemetry. Whole host-bound packets recycle
+/// exactly once; transit non-first fragments PARK in neighbor-resolution
+/// buffering (recycled 0, forwarded 0, pending 1) — held for the unresolved
+/// on-link neighbor, not dropped and not forwarded. This is the MissingNeighbor
+/// `pending_neigh` buffer, not IP reassembly: the dataplane holds no reassembly
+/// state. Flowless transit may still use an unrelated slow-path outlet after
+/// Stage 11 falls through; the SA counters are the observable proof that Stage
+/// 11 did not claim the packet.
 ///
 /// #10648: the non-first cases used to ingress with unaccepted MACs and
 /// recycle pre-L3, pinning the MAC gate instead of Stage 11 (the vacuity
 /// #10504 closed, reopened). The funnels now witness MAC acceptance and
 /// validation, the fixtures ingress per arrival interface, and each
 /// disposal is pinned explicitly — a mutant that changes any disposal reds
-/// here. (The v4-park / v6-drop asymmetry is #10810; both arms below pin
-/// observed behavior, not a claim that the asymmetry is intended.)
+/// here.
+/// #10810: the v4-park / v6-drop asymmetry was caused by a fixture mismatch:
+/// v4 metadata described a transit packet, while v6 metadata described a
+/// host-bound packet even though its frame had a WAN-subnet destination.
+/// Transit tails use consistent frame + meta addresses now; both families
+/// take MissingNeighbor and park uniformly.
 /// #10679: the same-family flowless NAT fence leaves raw IPsec non-first
-/// fragments on this established reassembly path.
+/// fragments on this established park path.
 #[test]
 fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
     let v4_esp = build_stage11_raw_v4_frame_10516(PROTO_ESP);
@@ -2171,8 +2196,9 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
     let v4_esp_fragment = build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP);
     let v4_ah_fragment = build_stage11_raw_v4_non_first_frame_10516(PROTO_AH);
     let v6_esp_fragment = build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP);
+    let v6_ah_fragment = build_stage11_raw_v6_non_first_frame_10516(PROTO_AH);
     // (label, frame, meta, non-first, parked): whole packets recycle on
-    // NotClaimed; v4 non-first fragments park, while v6 follows its pinned drop.
+    // NotClaimed; transit non-first fragments park in both families (#10810).
     let cases = [
         (
             "v4 ESP",
@@ -2225,11 +2251,16 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
         (
             "v6 ESP non-first fragment",
             v6_esp_fragment,
-            raw_v6_non_first_meta_10516(
-                &build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP),
-            ),
+            raw_v6_non_first_meta_10516(&build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP)),
             true,
-            false,
+            true,
+        ),
+        (
+            "v6 AH non-first fragment",
+            v6_ah_fragment,
+            raw_v6_non_first_meta_10516(&build_stage11_raw_v6_non_first_frame_10516(PROTO_AH)),
+            true,
+            true,
         ),
     ];
     for (label, frame, meta, non_first, parked) in cases {
@@ -2243,6 +2274,37 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             "{label}: fixture must have the declared fragment shape"
         );
         if non_first {
+            // The flowless enforcement tuple is meta-derived. Keep the frame
+            // and metadata addresses aligned so the family comparison reaches
+            // the same forwarding disposition for equivalent fragments.
+            let l3 = meta.l3_offset as usize;
+            match meta.addr_family as i32 {
+                libc::AF_INET => {
+                    assert_eq!(
+                        &frame[l3 + 12..l3 + 16],
+                        &meta.flow_src_addr[..4],
+                        "{label}: v4 source metadata must describe the frame"
+                    );
+                    assert_eq!(
+                        &frame[l3 + 16..l3 + 20],
+                        &meta.flow_dst_addr[..4],
+                        "{label}: v4 destination metadata must describe the frame"
+                    );
+                }
+                libc::AF_INET6 => {
+                    assert_eq!(
+                        &frame[l3 + 8..l3 + 24],
+                        &meta.flow_src_addr,
+                        "{label}: v6 source metadata must describe the frame"
+                    );
+                    assert_eq!(
+                        &frame[l3 + 24..l3 + 40],
+                        &meta.flow_dst_addr,
+                        "{label}: v6 destination metadata must describe the frame"
+                    );
+                }
+                family => panic!("{label}: unexpected address family {family}"),
+            }
             assert_eq!(
                 meta.protocol,
                 u8::MAX,
@@ -2270,17 +2332,18 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             assert_eq!(
                 forwarded, 0,
                 "{label}: a parked non-first fragment must not forward (a forward here \
-                 means it bypassed reassembly)"
+                 means it bypassed the neighbor-resolution hold)"
             );
             assert_eq!(
                 pending, 1,
-                "{label}: blanket-only source NAT must preserve the raw non-first park path"
+                "{label}: blanket-only source NAT must preserve the raw non-first \
+                 pending-neighbor hold path"
             );
         } else {
             assert_eq!(recycled, 1, "{label}: descriptor was not recycled exactly once");
             assert_eq!(
                 pending, 0,
-                "{label}: only v4 non-first fragments are parked in this pinned behavior"
+                "{label}: only non-first fragments are parked in this pinned behavior"
             );
         }
     }
