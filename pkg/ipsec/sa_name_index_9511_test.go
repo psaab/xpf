@@ -233,7 +233,7 @@ func TestActiveSANamesPublishesResolvableChildNames9511(t *testing.T) {
 func TestSANameIndexSkipsUnsupportedAuthVPN9511(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		IKEProposals: map[string]*config.IKEProposal{
-			"prop-bad": {Name: "prop-bad", AuthMethod: "bogus"},
+			"prop-bad": {Name: "prop-bad", AuthMethod: "bogus", EncryptionAlg: "aes-256-cbc", AuthAlg: "sha-256"},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
 			"pol-bad": {Proposals: []string{"prop-bad"}},

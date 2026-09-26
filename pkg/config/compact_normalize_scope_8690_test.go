@@ -11,6 +11,19 @@ import (
 	"testing"
 )
 
+func proposalAlgorithmPair8690(parent []string, leaf string) (string, string, bool) {
+	switch strings.Join(parent, " ") + " " + leaf {
+	case "security ike encryption-algorithm", "security ipsec encryption-algorithm":
+		return "aes-128-cbc", "aes-256-cbc", true
+	case "security ike authentication-algorithm":
+		return "sha-1", "sha-256", true
+	case "security ipsec authentication-algorithm":
+		return "hmac-sha1-96", "hmac-sha-256-128", true
+	default:
+		return "", "", false
+	}
+}
+
 // #8690: the normalizer's SCOPE is a safety claim, and this re-derives it from
 // measurement on every run rather than trusting the list in
 // compactNormalizeInScope.
@@ -75,6 +88,9 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 				// determined for this site — it is UNKNOWN, not safe.
 				unsynthesizable = append(unsynthesizable, siteKeyEarly)
 				continue
+			}
+			if a, b, ok := proposalAlgorithmPair8690(parent, s.leaf); ok {
+				v1, v2 = a, b
 			}
 		}
 		ctx := contextFor(parent)
@@ -463,6 +479,7 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			"This gate was written to catch exactly this drop class, so the pass repairing the " +
 			"drop and the gate then passing is the intended interaction, not a disarm.",
 		"security ipsec proposal xpfarg authentication-algorithm": "the #9907 non-AEAD ESP integrity gate rejects the elided form because the compact spelling drops the authored authentication leaf before compilation. Measured: pass disabled yields an empty AuthAlg and the new strict gate rejects the proposal; pass enabled preserves the authentication leaf and the same proposal is accepted. The gate is refusing the CONSEQUENCE of the drop, not the packed spelling, so this is a benign normalizer repair rather than a disarm.",
+		"security ike proposal xpfarg authentication-algorithm": "the #10880 non-AEAD IKE integrity gate rejects the elided form when compact normalization drops authentication-algorithm. Measured with empty EncryptionAlg (the renderer defaults it to aes256, a non-AEAD cipher) and the supported sha-1/sha-256 alternatives: the pass-disabled form has no AuthAlg and strict compile rejects it; preserving either valid integrity value with the pass enabled compiles. The braced form is accepted either way, so this is a benign repair of the dropped leaf, not a refusal of the packed spelling.",
 		// The three sites admitted with the #8690 `open` residue. All three were
 		// re-measured HERE with the pair ADMITTED, which is the only state in
 		// which the measurement means anything: for an EXCLUDED pair the pass
