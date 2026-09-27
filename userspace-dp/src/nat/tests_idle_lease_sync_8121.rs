@@ -1044,7 +1044,8 @@ fn an_imported_lifetime_is_clamped_to_the_local_timeout_10789_f4() {
     assert_eq!(
         PortAllocator::new(1, 1024, 65535).import_idle_lease(&rec, &local_pool, 0, 100),
         IdleLeaseImport::SkippedExpired,
-        "a local rule without persistent NAT must not accept peer lease lifetime"
+        "a direct allocator call with an unconfigured timeout must not \
+         synthesize a minimum lifetime"
     );
     let alloc = PortAllocator::new(1, 1024, 65535);
 
