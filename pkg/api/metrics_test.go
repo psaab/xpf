@@ -480,14 +480,35 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 		userspaceEventStreamUnknownDropsTotal:    mkNoLabel("xpf_userspace_event_stream_unknown_frame_drops_total"),
 	}
 	status := dpuserspace.ProcessStatus{
-		EventStreamSent:                 101,
-		EventStreamDropped:              7,
-		EventStreamWriteStalls:          13,
-		EventStreamReplayEvictions:      4,
-		EventStreamSessionCloseSent:     90,
-		EventStreamSessionCloseDropped:  3,
-		EventStreamSessionCreateSent:    12,
-		EventStreamSessionCreateDropped: 1,
+		EventStreamSent:                      101,
+		EventStreamDropped:                   7,
+		EventStreamWriteStalls:               13,
+		EventStreamReplayEvictions:           4,
+		EventStreamPolicyDenySent:            11,
+		EventStreamPolicyDenyDropped:         12,
+		EventStreamPolicyDenyRateLimited:     13,
+		EventStreamPolicyDenyQueueFull:       14,
+		EventStreamPolicyDenyDisconnected:    15,
+		EventStreamScreenDropSent:            16,
+		EventStreamScreenDropDropped:         17,
+		EventStreamScreenDropRateLimited:     18,
+		EventStreamScreenDropQueueFull:       19,
+		EventStreamScreenDropDisconnected:    20,
+		EventStreamFilterLogSent:             21,
+		EventStreamFilterLogDropped:          22,
+		EventStreamFilterLogRateLimited:      23,
+		EventStreamFilterLogQueueFull:        24,
+		EventStreamFilterLogDisconnected:     25,
+		EventStreamSessionCloseSent:          90,
+		EventStreamSessionCloseDropped:       3,
+		EventStreamSessionCloseRateLimited:   26,
+		EventStreamSessionCloseQueueFull:     27,
+		EventStreamSessionCloseDisconnected:  28,
+		EventStreamSessionCreateSent:         12,
+		EventStreamSessionCreateDropped:      1,
+		EventStreamSessionCreateRateLimited:  29,
+		EventStreamSessionCreateQueueFull:    30,
+		EventStreamSessionCreateDisconnected: 31,
 		EventStream: &dpuserspace.EventStreamStatus{
 			FramesRead:          11,
 			FramesWritten:       7,
@@ -528,6 +549,36 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceEventStreamProducerFramesTotal, map[string]string{"outcome": "session_close_dropped"}, 3)
 	assertCounterClose(t, got, c.userspaceEventStreamProducerFramesTotal, map[string]string{"outcome": "session_create_sent"}, 12)
 	assertCounterClose(t, got, c.userspaceEventStreamProducerFramesTotal, map[string]string{"outcome": "session_create_dropped"}, 1)
+	// #10979: all event kinds retain their reason-specific drop accounting.
+	for _, item := range []struct {
+		outcome string
+		want    float64
+	}{
+		{"policy_deny_sent", 11},
+		{"policy_deny_dropped", 12},
+		{"policy_deny_rate_limited", 13},
+		{"policy_deny_queue_full", 14},
+		{"policy_deny_disconnected", 15},
+		{"screen_drop_sent", 16},
+		{"screen_drop_dropped", 17},
+		{"screen_drop_rate_limited", 18},
+		{"screen_drop_queue_full", 19},
+		{"screen_drop_disconnected", 20},
+		{"filter_log_sent", 21},
+		{"filter_log_dropped", 22},
+		{"filter_log_rate_limited", 23},
+		{"filter_log_queue_full", 24},
+		{"filter_log_disconnected", 25},
+		{"session_close_rate_limited", 26},
+		{"session_close_queue_full", 27},
+		{"session_close_disconnected", 28},
+		{"session_create_rate_limited", 29},
+		{"session_create_queue_full", 30},
+		{"session_create_disconnected", 31},
+	} {
+		assertCounterClose(t, got, c.userspaceEventStreamProducerFramesTotal,
+			map[string]string{"outcome": item.outcome}, item.want)
+	}
 	assertCounterClose(t, got, c.userspaceEventStreamDecodeErrorsTotal, nil, 2)
 	assertCounterClose(t, got, c.userspaceEventStreamSequenceGapsTotal, nil, 3)
 	assertCounterClose(t, got, c.userspaceEventStreamDataplaneEventsTotal, map[string]string{"type": "policy_deny"}, 5)

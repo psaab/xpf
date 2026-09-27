@@ -484,21 +484,41 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 	// distinct "invalid_ack" label so an impossible-ACK peer is observable.
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
 		prometheus.CounterValue, float64(status.EventStreamInvalidAcks), "invalid_ack")
-	// #2512: per-kind producer accounting for the RT_FLOW SESSION_CLOSE
-	// (type 14) and SESSION_CREATE (type 15) frames, which now ride the same
-	// helper-side rate limiter + queue budget as deny/screen/filter instead of
-	// a bare unaccounted try_send. Surfaced under the producer metric with
-	// distinct labels so a rate-limited or budget-shed close/create is
-	// observable (a dropped close loses only a flow-export record; the type-2
-	// HA close delta is a separate, never-rate-limited frame).
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
-		prometheus.CounterValue, float64(status.EventStreamSessionCloseSent), "session_close_sent")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
-		prometheus.CounterValue, float64(status.EventStreamSessionCloseDropped), "session_close_dropped")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
-		prometheus.CounterValue, float64(status.EventStreamSessionCreateSent), "session_create_sent")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
-		prometheus.CounterValue, float64(status.EventStreamSessionCreateDropped), "session_create_dropped")
+	// #10979: producer counters must remain distinguishable by event kind and
+	// terminal outcome; the aggregate dropped counter alone is kind-blind.
+	for _, item := range []struct {
+		outcome string
+		count   uint64
+	}{
+		{"policy_deny_sent", status.EventStreamPolicyDenySent},
+		{"policy_deny_dropped", status.EventStreamPolicyDenyDropped},
+		{"policy_deny_rate_limited", status.EventStreamPolicyDenyRateLimited},
+		{"policy_deny_queue_full", status.EventStreamPolicyDenyQueueFull},
+		{"policy_deny_disconnected", status.EventStreamPolicyDenyDisconnected},
+		{"screen_drop_sent", status.EventStreamScreenDropSent},
+		{"screen_drop_dropped", status.EventStreamScreenDropDropped},
+		{"screen_drop_rate_limited", status.EventStreamScreenDropRateLimited},
+		{"screen_drop_queue_full", status.EventStreamScreenDropQueueFull},
+		{"screen_drop_disconnected", status.EventStreamScreenDropDisconnected},
+		{"filter_log_sent", status.EventStreamFilterLogSent},
+		{"filter_log_dropped", status.EventStreamFilterLogDropped},
+		{"filter_log_rate_limited", status.EventStreamFilterLogRateLimited},
+		{"filter_log_queue_full", status.EventStreamFilterLogQueueFull},
+		{"filter_log_disconnected", status.EventStreamFilterLogDisconnected},
+		{"session_close_sent", status.EventStreamSessionCloseSent},
+		{"session_close_dropped", status.EventStreamSessionCloseDropped},
+		{"session_close_rate_limited", status.EventStreamSessionCloseRateLimited},
+		{"session_close_queue_full", status.EventStreamSessionCloseQueueFull},
+		{"session_close_disconnected", status.EventStreamSessionCloseDisconnected},
+		{"session_create_sent", status.EventStreamSessionCreateSent},
+		{"session_create_dropped", status.EventStreamSessionCreateDropped},
+		{"session_create_rate_limited", status.EventStreamSessionCreateRateLimited},
+		{"session_create_queue_full", status.EventStreamSessionCreateQueueFull},
+		{"session_create_disconnected", status.EventStreamSessionCreateDisconnected},
+	} {
+		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+			prometheus.CounterValue, float64(item.count), item.outcome)
+	}
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDecodeErrorsTotal,
 		prometheus.CounterValue, float64(es.DecodeErrors))
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamSequenceGapsTotal,

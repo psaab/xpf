@@ -616,16 +616,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
             es_stats.producer_seq_lock_acquisitions;
         state.status.event_stream_producer_seq_lock_contended_total =
             es_stats.producer_seq_lock_contended;
-        // #2512: surface the per-kind SESSION_CLOSE / SESSION_CREATE
-        // producer-side sent/dropped counters so a rate-limited or
-        // budget-shed close/create is observable in `show` / Prometheus.
-        state.status.event_stream_session_close_sent = es_stats.dataplane_events.session_close.sent;
-        state.status.event_stream_session_close_dropped =
-            es_stats.dataplane_events.session_close.dropped;
-        state.status.event_stream_session_create_sent =
-            es_stats.dataplane_events.session_create.sent;
-        state.status.event_stream_session_create_dropped =
-            es_stats.dataplane_events.session_create.dropped;
+        project_event_stream_producer_stats(&mut state.status, es_stats.dataplane_events);
     }
     state.status.last_cache_flush_at = state.afxdp.last_cache_flush_at();
     // #3773 (M13): surface the cumulative fabric-skip diagnostic atomics so an
@@ -639,6 +630,37 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // #9654: capped NOW, from the published runtime view and only while a live
     // worker serves it. None (key omitted) when no worker is live.
     state.status.learned_route_import_capped = state.afxdp.learned_route_import_capped_now();
+}
+
+pub(crate) fn project_event_stream_producer_stats(
+    status: &mut ProcessStatus,
+    events: crate::event_stream::DataplaneEventStats,
+) {
+    status.event_stream_policy_deny_sent = events.policy_deny.sent;
+    status.event_stream_policy_deny_dropped = events.policy_deny.dropped;
+    status.event_stream_policy_deny_rate_limited = events.policy_deny.rate_limited;
+    status.event_stream_policy_deny_queue_full = events.policy_deny.queue_full;
+    status.event_stream_policy_deny_disconnected = events.policy_deny.disconnected;
+    status.event_stream_screen_drop_sent = events.screen_drop.sent;
+    status.event_stream_screen_drop_dropped = events.screen_drop.dropped;
+    status.event_stream_screen_drop_rate_limited = events.screen_drop.rate_limited;
+    status.event_stream_screen_drop_queue_full = events.screen_drop.queue_full;
+    status.event_stream_screen_drop_disconnected = events.screen_drop.disconnected;
+    status.event_stream_filter_log_sent = events.filter_log.sent;
+    status.event_stream_filter_log_dropped = events.filter_log.dropped;
+    status.event_stream_filter_log_rate_limited = events.filter_log.rate_limited;
+    status.event_stream_filter_log_queue_full = events.filter_log.queue_full;
+    status.event_stream_filter_log_disconnected = events.filter_log.disconnected;
+    status.event_stream_session_close_sent = events.session_close.sent;
+    status.event_stream_session_close_dropped = events.session_close.dropped;
+    status.event_stream_session_close_rate_limited = events.session_close.rate_limited;
+    status.event_stream_session_close_queue_full = events.session_close.queue_full;
+    status.event_stream_session_close_disconnected = events.session_close.disconnected;
+    status.event_stream_session_create_sent = events.session_create.sent;
+    status.event_stream_session_create_dropped = events.session_create.dropped;
+    status.event_stream_session_create_rate_limited = events.session_create.rate_limited;
+    status.event_stream_session_create_queue_full = events.session_create.queue_full;
+    status.event_stream_session_create_disconnected = events.session_create.disconnected;
 }
 
 pub(crate) fn forwarding_unsupported_error(cap: &UserspaceCapabilities) -> String {
