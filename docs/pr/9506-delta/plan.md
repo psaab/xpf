@@ -10,7 +10,9 @@
   split K bounds (repeat-2/first-4) with admission-cap proof + new
   JOURNAL_FULL byte; pinned-tuple member enforcement at every kernel
   boundary + honest evidence record; boot-bound fresh-init decision
-  table with reboot-as-reset; capped K convergence with split 30s
+  table with reboot-as-reset + NIL-INVALIDATED tombstone across
+  Store(nil) (authority never unlinked; absent+absent reserved for
+  genuine first install); capped K convergence with split 30s
   sampling. All credited designs held and extended compatibly. The
   parent will re-dispatch the blinded gate against this committed
   revision.
@@ -853,8 +855,18 @@ all 35 design paths exist, as checked in §4.2.
   + rename + dir-fsync under the same flock) on EVERY fence completion —
   each `ipsecOverlayAcked.Store(desired|fallback)` site (`reconcile`
   `:237`/`:332`/`:361`/`:366`, wiring `:1519`/`:1689`) — and every epoch
-  change, removed/invalidated on every `Store(nil)` (`:287` retire nil,
-  `:1519`/`:1689` ambiguous nil). Graceful shutdown completes the fence
+  change. `Store(nil)` (`:287` retire nil, `:1519`/`:1689` ambiguous nil)
+  NEVER unlinks the file: it atomically rewrites it to a NIL-INVALIDATED
+  tombstone (same envelope: boot_id + HA epoch + install sequence +
+  status=nil-invalidated + retired generation + retire-vs-ambiguous
+  reason), created if absent (a pre-first-fence defensive nil still
+  proves the supervisor has acted — fail-closed thereafter). The
+  authority file, once created, is NEVER unlinked — only atomically
+  rewritten (VALID on fence completion, TOMBSTONE on nil, fresh VALID
+  on reboot-init) — so its mere EXISTENCE is the durable
+  ever-initialized signal; a crash mid-rewrite leaves either the old or
+  the new version, both present, both freezing without a marker.
+  Graceful shutdown completes the fence
   + writes the CLEAN marker (new `/var/lib/xpf/pmech-clean-shutdown`)
   at the end of `shutdownIpsecCapture` (`:1660`, after divert removal +
   fence ACK) or in `runShutdownSequence` immediately after it returns
@@ -868,29 +880,44 @@ all 35 design paths exist, as checked in §4.2.
   logged at `:1660-1699`): P2 changes it to return a new
   `ShutdownFenceVerdict{ok, reason}` collected from the fence-ACK and
   divert-removal results, and the marker writer requires `ok` (a failed
-  shutdown certifies nothing — next start freezes). STARTUP DECISION
+  shutdown certifies nothing — next start freezes). The shutdown proving
+  fence runs UNCONDITIONALLY — even with a nil overlay (nil ≠ no
+  in-flight I/O; the fence proves the negative) — so every marker write
+  is preceded by a VALID authority rewrite; marker+tombstone is
+  therefore unproducible by a clean path. STARTUP DECISION
   TABLE (evaluated in `startIpsecSupervisorLoop` BEFORE the tick
   goroutine spawns — no tick can open first — via new
   `resolveStartupAuthority()`, enforced again at
   `tryOpenIpsecPermitAfterFenceAck` which refuses unless startup
   resolved admissible): (1) authority file ABSENT + marker ABSENT →
-  FIRST INSTALL: no fence ever completed, hence no kernel obligations
-  can exist (OPEN requires fence completion) → initialize fresh
-  authority + admit normally. (2) authority.boot_id ≠ current boot
-  (regardless of marker state) → REBOOT happened: kernel state is
-  fresh, the retirement boundary has passed → FRESH INIT: unlink any
-  stale marker, establish fresh run identity via normal fence/census,
-  admit normally — reboot NEVER re-freezes. (3) authority.boot ==
-  current boot + marker present + boot match + triple match vs the
-  authority file → CLEAN RESTART: consume (read + unlink + dir-fsync
-  via new `fsatomic.RemoveDurable`, absent-still-syncs `#5835`
-  precedent, under flock), establish NEW run identity independently
-  (fresh generation/epoch via fence/census — marker values validated
-  then discarded, so nonzero prior identity reopens), admit.
-  (4) authority.boot == current boot + marker absent/torn/mismatched →
-  CRASH (or crash-between-unlink-and-OPEN, observationally identical)
-  → refuse OPEN (stay CLOSING) + permutation-freeze-until-reboot +
-  alarm. There is NO operator command clearing a freeze in place —
+  FIRST INSTALL — and ONLY genuine first install reaches here: the
+  authority file is created on the first fence completion OR the first
+  nil-invalidation (whichever proves the supervisor has acted) and is
+  NEVER unlinked thereafter, so absence means no fence ever completed
+  AND no nil was ever recorded, hence no kernel obligations can exist
+  (OPEN requires fence completion) → initialize fresh authority +
+  admit normally. (2) authority.boot_id ≠ current boot (VALID or
+  TOMBSTONE — a tombstone from a prior boot retires with the reboot
+  like any other state, regardless of marker state) → REBOOT happened:
+  kernel state is fresh, the retirement boundary has passed → FRESH
+  INIT: unlink any stale marker, atomically rewrite fresh VALID
+  authority (never unlink), establish fresh run identity via normal
+  fence/census, admit normally — reboot NEVER re-freezes. (3)
+  authority VALID + authority.boot == current boot + marker present +
+  boot match + triple match vs the authority file → CLEAN RESTART:
+  consume (read + unlink + dir-fsync via new `fsatomic.RemoveDurable`,
+  absent-still-syncs `#5835` precedent, under flock), establish NEW
+  run identity independently (fresh generation/epoch via fence/census
+  — marker values validated then discarded, so nonzero prior identity
+  reopens), admit. Marker+tombstone is INCONSISTENT (a fence
+  completion rewrites VALID before any marker write, so no clean path
+  produces it) → freeze as (4). (4) authority present (VALID or
+  TOMBSTONE) + authority.boot == current boot + marker
+  absent/torn/mismatched → CRASH (or crash-between-unlink-and-OPEN,
+  or crash-after-nil-invalidation without a later fence+clean-marker,
+  all observationally identical) → refuse OPEN (stay CLOSING) +
+  permutation-freeze-until-reboot + alarm. There is NO operator command
+  clearing a freeze in place —
   reboot is the ONLY reset (post-reboot fresh init reopens
   automatically); any manual state deletion outside reboot voids safety
   (operator-managed persistent state, same trust as binary/config
@@ -902,7 +929,15 @@ all 35 design paths exist, as checked in §4.2.
   OPEN, stale marker discarded) AND first install (must init + OPEN)
   AND boot-ID mismatch with current-boot authority (must freeze) AND
   crash-between-unlink-and-OPEN (must freeze) AND failed/partial clean
-  shutdown (verdict-not-ok → no marker → must freeze) — no path reuses
+  shutdown (verdict-not-ok → no marker → must freeze) AND
+  crash-after-nil-invalidation (retire nil AND ambiguous nil, each: nil
+  → tombstone present → crash, no later fence, no marker → must freeze;
+  authority file EXISTS — absent+absent is unreachable here) AND
+  nil-then-fence-then-clean (nil → later fence rewrites VALID → clean
+  marker → must OPEN — tombstone cleared by proof) AND
+  marker+tombstone-inconsistent (forged/coerced pair → must freeze) AND
+  crash-mid-tombstone-rewrite (kill -9 during Store(nil) persist →
+  either version present → must freeze) — no path reuses
   a consumed marker, and a genuinely clean restart reopens.
   Quarantine is a RESERVED `NatHolder::Quarantine` bit (127; `MAX==128`
   asserts updated) plus a session HOLD-gate extension, INSTALLED AT
@@ -1748,7 +1783,13 @@ slice commit's Validation section):
   failed/partial shutdown (verdict-not-ok → no marker) freezes AND
   first-install (absent+absent → fresh init + OPEN) AND crash→reboot→
   re-admit (fresh admissible) AND clean-shutdown→reboot (stale marker
-  discarded + OPEN); no consumed-marker reuse; `resolveStartupAuthority`
+  discarded + OPEN) AND crash-after-nil-invalidation (retire-nil and
+  ambiguous-nil variants: tombstone present, no later fence, no marker
+  → must freeze; proves absent+absent unreachable post-nil) AND
+  nil-then-fence-then-clean (must OPEN) AND marker+tombstone pair
+  (must freeze as inconsistent) AND crash-mid-tombstone-rewrite (kill
+  -9 during persist → either version → must freeze); no
+  consumed-marker reuse; `resolveStartupAuthority`
   runs before any tick; `tryOpen` refuses unless startup admissible);
   quarantine
   PREINSTALL fixture (start with a provisional reservation NOT yet uncertain,
