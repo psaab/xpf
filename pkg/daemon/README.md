@@ -202,12 +202,15 @@ reconnect reconciles the active config; an incapable or still-unlearned peer
 leaves a CRITICAL `show system alarms` entry (local CLI and gRPC) and a Config
 Sync cluster-history event. Deferral reports recheck their captured peer epoch
 and selected capability under the alarm lock, so a delayed v3 report cannot
-re-arm a same-text alarm after v4 recovery. Successful clears carry the epoch
-and capability of the authorizing write; a delayed clear from an old connection
-cannot erase a same-text alarm for its replacement. A successful push of the
-current active config clears an older deferral too; an in-flight stale config
-cannot clear the alarm for a newer active config. The same guarded push path is
-used after a later `ConfirmCommitAs` clears the commit-confirmed timer.
+re-arm a same-text alarm after v4 recovery. A stale authorization that finds a
+currently capable or disconnected peer does not re-anchor a CRITICAL report to
+the new observation; only a currently connected incompatible peer reports a
+deferral. Successful clears carry the epoch and capability of the authorizing
+write; a delayed clear from an old connection cannot erase a same-text alarm for
+its replacement. A successful push of the current active config clears an
+older deferral too; an in-flight stale config cannot clear the alarm for a
+newer active config. The same guarded push path is used after a later
+`ConfirmCommitAs` clears the commit-confirmed timer.
 
 `rollbackTargetAppliablePreflight` (`rollback_target_appliable_6707.go`) adds
 the missing property: the target must be **appliable at all**. The predicate is

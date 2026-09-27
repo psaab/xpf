@@ -283,9 +283,11 @@ func TestDeferredSnapshotAlarmClearRejectsOldPeerEpochRace10782(t *testing.T) {
 	d.configSyncMu.Lock()
 	d.syncPeerConnEpoch.Store(2)
 	d.configSyncMu.Unlock()
-	ss.SetPeerSnapshotProtocolVersionForTesting(3)
 	currentState := ss.SnapshotPeerSnapshotProtocol()
-	d.reportPeerSnapshotConfigSyncDeferred(configText, 2, currentState, "epoch-2 peer lacks snapshot v4")
+	if currentState != successState {
+		t.Fatalf("epoch change altered the peer capability state: success=%+v current=%+v", successState, currentState)
+	}
+	d.reportPeerSnapshotConfigSyncDeferred(configText, 2, currentState, "epoch-2 deferral for unchanged peer state")
 
 	close(releaseClear)
 	select {
@@ -293,7 +295,7 @@ func TestDeferredSnapshotAlarmClearRejectsOldPeerEpochRace10782(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("delayed epoch-1 clear did not finish")
 	}
-	if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "epoch-2 peer lacks snapshot v4") {
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "epoch-2 deferral for unchanged peer state") {
 		t.Fatalf("delayed epoch-1 success cleared the epoch-2 deferral: %q", alarm)
 	}
 }
@@ -346,5 +348,143 @@ func TestDeferredSnapshotAlarmReportRejectsOldCapabilityRace10782(t *testing.T) 
 	}
 	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
 		t.Fatalf("stale v3 observation re-armed the alarm after v4 success: %q", alarm)
+	}
+}
+
+// FAIL-ON-REVERT: a v4 authorization invalidated by a v4→v3→v4 capability
+// cycle cannot re-arm the alarm after the current same-text v4 push succeeds.
+func TestStaleSnapshotAuthorizationDoesNotRearmAfterSameTextSuccess10782(t *testing.T) {
+	d, store, _ := commitConfirmedSnapshotGateDaemon10782(t, 4, true)
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("promote multi-zone config: %v", err)
+	}
+	configText := store.ShowActive()
+	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(store.ActiveConfig())
+	if err != nil || auth == nil {
+		t.Fatalf("capture v4 authorization: auth=%v err=%v", auth, err)
+	}
+	ss := d.getSessionSync()
+	ss.SetPeerSnapshotProtocolVersionForTesting(3)
+	ss.SetPeerSnapshotProtocolVersionForTesting(4)
+
+	resultReady := make(chan struct{})
+	releaseRevalidation := make(chan struct{})
+	result := make(chan struct {
+		allowed bool
+		err     error
+	}, 1)
+	defer func() {
+		select {
+		case <-releaseRevalidation:
+		default:
+			close(releaseRevalidation)
+		}
+	}()
+	go func() {
+		close(resultReady)
+		<-releaseRevalidation
+		allowed, err := d.revalidatePeerSnapshotAuthorization(auth, configText)
+		result <- struct {
+			allowed bool
+			err     error
+		}{allowed: allowed, err: err}
+	}()
+	select {
+	case <-resultReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale authorization did not reach revalidation barrier")
+	}
+
+	pushes := 0
+	d.configSyncPushForTest = func() { pushes++ }
+	d.reconcileConfigSyncToPeer("same-text-v4-generation-refresh")
+	if pushes != 1 {
+		t.Fatalf("same-text current v4 reconciliation pushed %d times, want once", pushes)
+	}
+	d.configSyncMu.Lock()
+	pushed := d.configSyncHasPushed &&
+		d.configSyncPushedEpoch == auth.peerConnEpoch &&
+		d.configSyncPushedGen == configGenerationHash(configText)
+	d.configSyncMu.Unlock()
+	if !pushed {
+		t.Fatal("same-text current v4 reconciliation did not mark the successful push")
+	}
+
+	close(releaseRevalidation)
+	select {
+	case got := <-result:
+		if got.allowed || got.err == nil {
+			t.Fatalf("stale authorization revalidation = allowed %v, error %v; want stale rejection", got.allowed, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale authorization revalidation did not finish")
+	}
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
+		t.Fatalf("stale v4 authorization re-armed alarm after v4 success: %q", alarm)
+	}
+}
+
+// FAIL-ON-REVERT: a real commit holds its preflight token across apply. If
+// reconnect reconciliation wins before the commit's delayed peer push, that
+// stale push must not publish a fresh-looking deferral for the converged text.
+func TestCommitSnapshotStaleAuthDoesNotRearmAfterReconnect10782(t *testing.T) {
+	d, store, _ := commitConfirmedSnapshotGateDaemon10782(t, 4, true)
+	applyEntered := make(chan struct{})
+	releaseApply := make(chan struct{})
+	commitDone := make(chan error, 1)
+	d.applyBodyForTest = func(*config.Config) {
+		close(applyEntered)
+		<-releaseApply
+	}
+	defer func() {
+		select {
+		case <-releaseApply:
+		default:
+			close(releaseApply)
+		}
+	}()
+	go func() {
+		_, err := d.commitConfirmedAndApply(t.Context(), configstore.InternalCommitter(), 1, peerSyncAlways)
+		commitDone <- err
+	}()
+	select {
+	case <-applyEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("commit did not reach its post-preflight apply barrier")
+	}
+	configText := store.ShowActive()
+
+	d.configSyncMu.Lock()
+	d.syncPeerConnEpoch.Store(2)
+	d.configSyncMu.Unlock()
+	ss := d.getSessionSync()
+	ss.SetPeerSnapshotProtocolVersionForTesting(3)
+	ss.SetPeerSnapshotProtocolVersionForTesting(4)
+	pushes := 0
+	d.configSyncPushForTest = func() { pushes++ }
+	d.reconcileConfigSyncToPeer("reconnect-current-text-converged")
+	if pushes != 1 {
+		t.Fatalf("reconnect reconciliation pushed %d times, want once", pushes)
+	}
+	d.configSyncMu.Lock()
+	pushed := d.configSyncHasPushed &&
+		d.configSyncPushedEpoch == 2 &&
+		d.configSyncPushedGen == configGenerationHash(configText)
+	d.configSyncMu.Unlock()
+	if !pushed {
+		t.Fatal("reconnect reconciliation did not mark the current config push")
+	}
+
+	close(releaseApply)
+	select {
+	case err := <-commitDone:
+		if err == nil {
+			t.Fatal("commit push unexpectedly accepted its stale preflight token")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("commit did not finish after releasing apply barrier")
+	}
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
+		t.Fatalf("stale commit push re-armed the alarm after reconnect success: %q", alarm)
 	}
 }

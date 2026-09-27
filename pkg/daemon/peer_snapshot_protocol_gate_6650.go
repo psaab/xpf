@@ -98,8 +98,10 @@ func (d *Daemon) revalidatePeerSnapshotAuthorization(
 			d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, err.Error())
 			return false, err
 		}
-		reason := "peer connection or snapshot capability changed after commit preflight; config sync is deferred until reconciliation"
-		d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, reason)
+		if !current.Connected {
+			return false, nil
+		}
+		reason := "peer connection or snapshot capability changed after commit preflight; reconciliation will retry against the current peer state"
 		return false, fmt.Errorf("%w: %s", ErrPeerSnapshotProtocolAuthorizationStale, reason)
 	}
 	if !current.Connected {
