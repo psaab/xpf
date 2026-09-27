@@ -98,16 +98,19 @@ func TestResolveIKESettingsRejectsMixedConnectionSettings_10879(t *testing.T) {
 	}
 }
 
-func TestRenderConfigSkipsMixedIKEAuthentication_10879(t *testing.T) {
+func TestRenderConfigSkipsMixedIKEAuthenticationWithoutSuppressingHealthyVPN_10879(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {Name: "tun1", Gateway: "gw1", IPsecPolicy: "esp-pol"},
+			"tun1":     {Name: "tun1", Gateway: "gw1", IPsecPolicy: "esp-pol"},
+			"tun-good": {Name: "tun-good", Gateway: "gw-good", IPsecPolicy: "esp-pol"},
 		},
 		Gateways: map[string]*config.IPsecGateway{
-			"gw1": {Name: "gw1", Address: "192.0.2.1", IKEPolicy: "ike-pol"},
+			"gw1":     {Name: "gw1", Address: "192.0.2.1", IKEPolicy: "ike-pol"},
+			"gw-good": {Name: "gw-good", Address: "192.0.2.2", IKEPolicy: "ike-good"},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"ike-pol": {Name: "ike-pol", Proposals: []string{"ike-psk", "ike-ecdsa"}, PSK: config.Secret("shared-key")},
+			"ike-pol":  {Name: "ike-pol", Proposals: []string{"ike-psk", "ike-ecdsa"}, PSK: config.Secret("bad-shared-key")},
+			"ike-good": {Name: "ike-good", Proposals: []string{"ike-good-a", "ike-good-b"}, PSK: config.Secret("good-shared-key")},
 		},
 		IKEProposals: map[string]*config.IKEProposal{
 			"ike-psk": {
@@ -117,6 +120,14 @@ func TestRenderConfigSkipsMixedIKEAuthentication_10879(t *testing.T) {
 			"ike-ecdsa": {
 				Name: "ike-ecdsa", AuthMethod: "ecdsa-signatures", EncryptionAlg: "aes-128-cbc",
 				AuthAlg: "sha-256", DHGroup: 14, LifetimeSeconds: 3600,
+			},
+			"ike-good-a": {
+				Name: "ike-good-a", AuthMethod: "pre-shared-keys", EncryptionAlg: "aes-256-cbc",
+				AuthAlg: "sha-256", DHGroup: 14, LifetimeSeconds: 3600,
+			},
+			"ike-good-b": {
+				Name: "ike-good-b", AuthMethod: "pre-shared-keys", EncryptionAlg: "aes-128-cbc",
+				AuthAlg: "sha-256", DHGroup: 5, LifetimeSeconds: 3600,
 			},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
@@ -129,12 +140,16 @@ func TestRenderConfigSkipsMixedIKEAuthentication_10879(t *testing.T) {
 
 	text, rendered, err := New().renderConfig(cfg)
 	if err != nil {
-		t.Fatalf("renderConfig returned an error instead of skipping the conflicting VPN: %v", err)
+		t.Fatalf("renderConfig returned an error instead of skipping only the conflicting VPN: %v", err)
 	}
-	if rendered["tun1"] {
-		t.Fatal("renderConfig emitted a tunnel with mixed IKE authentication methods")
+	if rendered["tun1"] || !rendered["tun-good"] || len(rendered) != 1 {
+		t.Fatalf("rendered VPNs = %v, want only healthy tun-good", rendered)
 	}
 	doc := parseSwanctlDoc(t, text)
-	doc.at(t, "connections").hasNoChild(t, "tun1")
-	doc.at(t, "secrets").hasNoChild(t, "ike-tun1")
+	connections := doc.at(t, "connections")
+	connections.hasNoChild(t, "tun1")
+	connections.at(t, "tun-good").requireSetting(t, "proposals", "aes256-sha256-modp2048,aes128-sha256-modp1536")
+	secrets := doc.at(t, "secrets")
+	secrets.hasNoChild(t, "ike-tun1")
+	secrets.at(t, "ike-tun-good")
 }
