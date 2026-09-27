@@ -156,10 +156,14 @@ func TestDeferredSnapshotAlarmClearMatchesActiveGeneration10782(t *testing.T) {
 	d := &Daemon{}
 	configA := "set system host-name deferred-a\n"
 	configB := "set system host-name deferred-b\n"
-	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, "peer lacks v4 for A")
-	d.reportPeerSnapshotConfigSyncDeferred(configB, 2, "peer lacks v4 for B")
+	d.syncPeerConnEpoch.Store(1)
+	d.syncPeerConnected.Store(true)
+	state := cluster.PeerSnapshotState{}
+	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, state, "peer lacks v4 for A")
+	d.syncPeerConnEpoch.Store(2)
+	d.reportPeerSnapshotConfigSyncDeferred(configB, 2, state, "peer lacks v4 for B")
 
-	d.clearPeerSnapshotConfigSyncDeferred(configA)
+	d.clearPeerSnapshotConfigSyncDeferred(configA, 1, nil)
 	if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "peer lacks v4 for B") {
 		t.Fatalf("success for stale generation A cleared or replaced B's deferral: %q", alarm)
 	}
@@ -170,7 +174,7 @@ func TestDeferredSnapshotAlarmClearMatchesActiveGeneration10782(t *testing.T) {
 		t.Fatalf("deferred generation after stale clear = %d, want B generation %d", gotGen, want)
 	}
 
-	d.clearPeerSnapshotConfigSyncDeferred(configB)
+	d.clearPeerSnapshotConfigSyncDeferred(configB, 2, nil)
 	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
 		t.Fatalf("success for current generation B did not clear its deferral: %q", alarm)
 	}
@@ -184,7 +188,7 @@ func TestDeferredSnapshotAlarmClearsAfterNewCurrentGeneration10782(t *testing.T)
 		t.Fatalf("promote multi-zone A: %v", err)
 	}
 	configA := store.ShowActive()
-	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, "peer deferred A")
+	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, d.getSessionSync().SnapshotPeerSnapshotProtocol(), "peer deferred A")
 
 	if err := store.SetFromInput("system host-name deferred-b"); err != nil {
 		t.Fatalf("set config B: %v", err)
@@ -192,7 +196,7 @@ func TestDeferredSnapshotAlarmClearsAfterNewCurrentGeneration10782(t *testing.T)
 	if _, err := store.Commit(); err != nil {
 		t.Fatalf("promote multi-zone B: %v", err)
 	}
-	d.clearPeerSnapshotConfigSyncDeferred(configA)
+	d.clearPeerSnapshotConfigSyncDeferred(configA, 1, nil)
 	if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "peer deferred A") {
 		t.Fatalf("stale success for A cleared the alarm while B is active: %q", alarm)
 	}
@@ -217,7 +221,7 @@ func TestShapeRemovalPushClearsOlderSnapshotDeferral10782(t *testing.T) {
 		t.Fatalf("promote multi-zone A: %v", err)
 	}
 	configA := store.ShowActive()
-	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, "peer deferred multi-zone A")
+	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, d.getSessionSync().SnapshotPeerSnapshotProtocol(), "peer deferred multi-zone A")
 
 	if err := store.DeleteFromInput("security policies global policy multi-zone-deny"); err != nil {
 		t.Fatalf("remove multi-zone policy: %v", err)
@@ -238,5 +242,109 @@ func TestShapeRemovalPushClearsOlderSnapshotDeferral10782(t *testing.T) {
 	}
 	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
 		t.Fatalf("successful current shape-free config %q left the older deferral stuck: %q", configB, alarm)
+	}
+}
+
+// FAIL-ON-REVERT: an epoch-1 successful write may not clear a deferral installed
+// for the same active text after the peer has reconnected as epoch 2.
+func TestDeferredSnapshotAlarmClearRejectsOldPeerEpochRace10782(t *testing.T) {
+	d, store, _ := commitConfirmedSnapshotGateDaemon10782(t, 4, true)
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("promote multi-zone config: %v", err)
+	}
+	configText := store.ShowActive()
+	ss := d.getSessionSync()
+	successState := ss.SnapshotPeerSnapshotProtocol()
+	marked := make(chan struct{})
+	releaseClear := make(chan struct{})
+	clearDone := make(chan struct{})
+	markErr := make(chan bool, 1)
+	go func() {
+		if !d.markConfigSyncPushedAtEpoch(configText, 1) {
+			markErr <- false
+			close(marked)
+			return
+		}
+		markErr <- true
+		close(marked)
+		<-releaseClear
+		d.clearPeerSnapshotConfigSyncDeferred(configText, 1, &successState)
+		close(clearDone)
+	}()
+	select {
+	case <-marked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("epoch-1 push did not reach delayed-clear barrier")
+	}
+	if !<-markErr {
+		t.Fatal("epoch-1 push could not record success")
+	}
+
+	d.configSyncMu.Lock()
+	d.syncPeerConnEpoch.Store(2)
+	d.configSyncMu.Unlock()
+	ss.SetPeerSnapshotProtocolVersionForTesting(3)
+	currentState := ss.SnapshotPeerSnapshotProtocol()
+	d.reportPeerSnapshotConfigSyncDeferred(configText, 2, currentState, "epoch-2 peer lacks snapshot v4")
+
+	close(releaseClear)
+	select {
+	case <-clearDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delayed epoch-1 clear did not finish")
+	}
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "epoch-2 peer lacks snapshot v4") {
+		t.Fatalf("delayed epoch-1 success cleared the epoch-2 deferral: %q", alarm)
+	}
+}
+
+// FAIL-ON-REVERT: a stale v3 observation for the same text may not re-arm the
+// alarm after a same-epoch v4 reconciliation already succeeded and cleared it.
+func TestDeferredSnapshotAlarmReportRejectsOldCapabilityRace10782(t *testing.T) {
+	d, store, _ := commitConfirmedSnapshotGateDaemon10782(t, 3, true)
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("promote multi-zone config: %v", err)
+	}
+	configText := store.ShowActive()
+	ss := d.getSessionSync()
+	staleEpoch := d.syncPeerConnEpoch.Load()
+	staleState := ss.SnapshotPeerSnapshotProtocol()
+	reportReady := make(chan struct{})
+	releaseReport := make(chan struct{})
+	reportDone := make(chan struct{})
+	go func() {
+		close(reportReady)
+		<-releaseReport
+		d.reportPeerSnapshotConfigSyncDeferred(configText, staleEpoch, staleState, "stale v3 observation")
+		close(reportDone)
+	}()
+	select {
+	case <-reportReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale reporter did not reach barrier")
+	}
+
+	ss.SetPeerSnapshotProtocolVersionForTesting(4)
+	pushes := 0
+	d.configSyncPushForTest = func() { pushes++ }
+	d.reconcileConfigSyncToPeer("same-text-v4-success")
+	if pushes != 1 {
+		t.Fatalf("same-text v4 reconciliation pushed %d times, want once", pushes)
+	}
+	d.configSyncMu.Lock()
+	pushed := d.configSyncHasPushed && d.configSyncPushedEpoch == staleEpoch
+	d.configSyncMu.Unlock()
+	if !pushed {
+		t.Fatal("same-text v4 reconciliation did not record its successful push")
+	}
+
+	close(releaseReport)
+	select {
+	case <-reportDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delayed stale report did not finish")
+	}
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
+		t.Fatalf("stale v3 observation re-armed the alarm after v4 success: %q", alarm)
 	}
 }

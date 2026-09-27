@@ -27,7 +27,8 @@ func TestBootIDSwitchRelearnsSnapshotProtocolAndReconciles10782(t *testing.T) {
 
 	ss := d.getSessionSync()
 	epoch := d.syncPeerConnEpoch.Add(1)
-	d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, "previous peer lacked snapshot v4")
+	d.reportPeerSnapshotConfigSyncDeferred(
+		configText, epoch, ss.SnapshotPeerSnapshotProtocol(), "previous peer lacked snapshot v4")
 
 	local, peer := net.Pipe()
 	t.Cleanup(func() {

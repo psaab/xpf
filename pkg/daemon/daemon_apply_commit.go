@@ -490,7 +490,11 @@ func (d *Daemon) pushCommittedConfigToPeer(
 		var err error
 		peerSnapshotAuth, err = d.peerSnapshotProtocolAuthorizationForConfig(activeCfg)
 		if err != nil {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+			epoch, state := d.currentPeerSnapshotObservation()
+			if peerSnapshotAuth != nil {
+				epoch, state = peerSnapshotAuth.peerConnEpoch, peerSnapshotAuth.state
+			}
+			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, state, err.Error())
 			return err
 		}
 	}

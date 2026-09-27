@@ -95,8 +95,14 @@ func (d *Daemon) reportConfigSyncDivergence() {
 
 // reportPeerSnapshotConfigSyncDeferred raises one operator-visible alarm for a
 // deferred active config generation and peer epoch. A stale snapshot must not
-// replace the alarm for the current active config.
-func (d *Daemon) reportPeerSnapshotConfigSyncDeferred(configText string, epoch uint64, reason string) {
+// replace the alarm for the current active config, and a stale observation
+// must not re-arm it after the peer epoch or selected capability changes.
+func (d *Daemon) reportPeerSnapshotConfigSyncDeferred(
+	configText string,
+	epoch uint64,
+	observedState cluster.PeerSnapshotState,
+	reason string,
+) {
 	if d == nil {
 		return
 	}
@@ -114,6 +120,20 @@ func (d *Daemon) reportPeerSnapshotConfigSyncDeferred(configText string, epoch u
 		}
 	}
 	d.configSyncMu.Lock()
+	currentState := cluster.PeerSnapshotState{}
+	if ss := d.getSessionSync(); ss != nil {
+		currentState = ss.SnapshotPeerSnapshotProtocol()
+	}
+	// Observation-to-report freshness (#10782 round 4). Peer epoch updates
+	// serialize with configSyncMu; per-connection capability changes are
+	// checked against the full selected-connection state. A same-text v4
+	// success that wins this race changes the observation, so its delayed v3
+	// reporter cannot re-arm a false CRITICAL condition.
+	if epoch != d.syncPeerConnEpoch.Load() || observedState != currentState {
+		d.configSyncMu.Unlock()
+		d.pendingRenameMu.Unlock()
+		return
+	}
 	if d.configSyncPeerSnapshotDeferred &&
 		d.configSyncPeerSnapshotDeferredGen == gen &&
 		d.configSyncPeerSnapshotDeferredEpoch == epoch &&
@@ -134,12 +154,15 @@ func (d *Daemon) reportPeerSnapshotConfigSyncDeferred(configText string, epoch u
 	}
 }
 
-// clearPeerSnapshotConfigSyncDeferred clears a deferred generation only after
-// a successful push of the CURRENT active text. Requiring the current text
-// blocks an older in-flight success from clearing a newer deferral; allowing
-// current text to differ from the deferred text lets a newer successful config
-// supersede an obsolete alarm, including when it removes the gated policy shape.
-func (d *Daemon) clearPeerSnapshotConfigSyncDeferred(configText string) {
+// clearPeerSnapshotConfigSyncDeferred clears an alarm only for a successful
+// push still current on the active text and peer epoch. A gated snapshot also
+// carries its capability observation so a same-epoch downgrade cannot be
+// erased by a write authorized before that change.
+func (d *Daemon) clearPeerSnapshotConfigSyncDeferred(
+	configText string,
+	epoch uint64,
+	successState *cluster.PeerSnapshotState,
+) {
 	if d == nil {
 		return
 	}
@@ -153,7 +176,15 @@ func (d *Daemon) clearPeerSnapshotConfigSyncDeferred(configText string) {
 		}
 	}
 	d.configSyncMu.Lock()
+	currentState := cluster.PeerSnapshotState{}
+	if ss := d.getSessionSync(); ss != nil {
+		currentState = ss.SnapshotPeerSnapshotProtocol()
+	}
 	if !d.configSyncPeerSnapshotDeferred ||
+		epoch != d.syncPeerConnEpoch.Load() ||
+		!d.syncPeerConnected.Load() ||
+		epoch < d.configSyncPeerSnapshotDeferredEpoch ||
+		(successState != nil && currentState != *successState) ||
 		(d.store == nil && d.configSyncPeerSnapshotDeferredGen != gen) {
 		d.configSyncMu.Unlock()
 		d.pendingRenameMu.Unlock()
@@ -166,7 +197,7 @@ func (d *Daemon) clearPeerSnapshotConfigSyncDeferred(configText string) {
 	d.configSyncMu.Unlock()
 	d.pendingRenameMu.Unlock()
 	slog.Info("cluster: config sync resumed after peer snapshot-protocol deferral",
-		"generation", gen, "issue", "#10782")
+		"generation", gen, "peer_epoch", epoch, "issue", "#10782")
 	if d.cluster != nil {
 		d.cluster.RecordEvent(cluster.EventConfigSync, -1,
 			"Config sync resumed after peer snapshot-protocol deferral")

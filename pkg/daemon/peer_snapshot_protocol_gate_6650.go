@@ -61,6 +61,21 @@ func (d *Daemon) peerSnapshotProtocolAuthorizationForConfig(
 	return auth, err
 }
 
+// currentPeerSnapshotObservation captures the daemon epoch and selected
+// SessionSync capability for a deferral attempt. The report path compares both
+// again under its alarm lock and discards stale observations.
+func (d *Daemon) currentPeerSnapshotObservation() (uint64, cluster.PeerSnapshotState) {
+	if d == nil {
+		return 0, cluster.PeerSnapshotState{}
+	}
+	epoch := d.syncPeerConnEpoch.Load()
+	state := cluster.PeerSnapshotState{}
+	if ss := d.getSessionSync(); ss != nil {
+		state = ss.SnapshotPeerSnapshotProtocol()
+	}
+	return epoch, state
+}
+
 // revalidatePeerSnapshotAuthorization is the daemon-side pre-queue check. The
 // SessionSync queue repeats this atomically with its final socket write; this
 // check also protects the test seam and provides an operator-facing reason.
@@ -80,11 +95,11 @@ func (d *Daemon) revalidatePeerSnapshotAuthorization(
 	if ss != auth.session || currentEpoch != auth.peerConnEpoch || current != auth.state {
 		if current.Connected && current.Version < userspace.MinProtocolMultiZoneScopedPolicy {
 			err := peerSnapshotProtocolDecision(true, true, true, current.Version)
-			d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, err.Error())
+			d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, err.Error())
 			return false, err
 		}
 		reason := "peer connection or snapshot capability changed after commit preflight; config sync is deferred until reconciliation"
-		d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, reason)
+		d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, reason)
 		return false, fmt.Errorf("%w: %s", ErrPeerSnapshotProtocolAuthorizationStale, reason)
 	}
 	if !current.Connected {
@@ -92,7 +107,7 @@ func (d *Daemon) revalidatePeerSnapshotAuthorization(
 	}
 	if current.Version < userspace.MinProtocolMultiZoneScopedPolicy {
 		err := peerSnapshotProtocolDecision(true, true, true, current.Version)
-		d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, err.Error())
+		d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, err.Error())
 		return false, err
 	}
 	return true, nil

@@ -507,7 +507,11 @@ func (d *Daemon) pushConfigToPeerWithAuthorization(
 		var err error
 		auth, err = d.peerSnapshotProtocolAuthorizationForConfig(cfg)
 		if err != nil {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+			reportEpoch, reportState := d.currentPeerSnapshotObservation()
+			if auth != nil {
+				reportEpoch, reportState = auth.peerConnEpoch, auth.state
+			}
+			d.reportPeerSnapshotConfigSyncDeferred(configText, reportEpoch, reportState, err.Error())
 			return err
 		}
 	}
@@ -520,9 +524,9 @@ func (d *Daemon) pushConfigToPeerWithAuthorization(
 			return nil
 		}
 	}
-	epoch := d.syncPeerConnEpoch.Load()
+	epoch, attemptState := d.currentPeerSnapshotObservation()
 	if auth != nil {
-		epoch = auth.peerConnEpoch
+		epoch, attemptState = auth.peerConnEpoch, auth.state
 	}
 	if d.configSyncPushForTest != nil {
 		d.configSyncPushForTest()
@@ -539,11 +543,15 @@ func (d *Daemon) pushConfigToPeerWithAuthorization(
 			return nil
 		}
 		if d.syncPeerConnected.Load() && !d.markConfigSyncPushedAtEpoch(configText, epoch) {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
 				"peer connection changed while recording a config push; reconciliation will retry")
 			return ErrPeerSnapshotProtocolAuthorizationStale
 		}
-		d.clearPeerSnapshotConfigSyncDeferred(configText)
+		var successState *cluster.PeerSnapshotState
+		if auth != nil {
+			successState = &auth.state
+		}
+		d.clearPeerSnapshotConfigSyncDeferred(configText, epoch, successState)
 		return nil
 	}
 	if reservedGen == 0 {
@@ -578,20 +586,24 @@ func (d *Daemon) pushConfigToPeerWithAuthorization(
 	}
 	if !d.noteConfigSharedWithPeerAtEpoch(configText, epoch) {
 		if auth != nil {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
 				"peer connection changed after the config write; reconciliation will retry")
 		}
 		return nil
 	}
 	if d.syncPeerConnected.Load() && !d.markConfigSyncPushedAtEpoch(configText, epoch) {
 		if auth != nil {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
 				"peer connection changed while recording a config push; reconciliation will retry")
 			return ErrPeerSnapshotProtocolAuthorizationStale
 		}
 		return nil
 	}
-	d.clearPeerSnapshotConfigSyncDeferred(configText)
+	var successState *cluster.PeerSnapshotState
+	if auth != nil {
+		successState = &auth.state
+	}
+	d.clearPeerSnapshotConfigSyncDeferred(configText, epoch, successState)
 	return nil
 }
 
@@ -714,7 +726,11 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	gen := configGenerationHash(configText)
 	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(cfg)
 	if err != nil {
-		d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+		reportEpoch, reportState := d.currentPeerSnapshotObservation()
+		if auth != nil {
+			reportEpoch, reportState = auth.peerConnEpoch, auth.state
+		}
+		d.reportPeerSnapshotConfigSyncDeferred(configText, reportEpoch, reportState, err.Error())
 		return
 	}
 	if time.Since(d.startTime) < d.configSyncStableAfter() {
@@ -733,13 +749,17 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		gen = configGenerationHash(configText)
 		auth, err = d.peerSnapshotProtocolAuthorizationForConfig(cfg)
 		if err != nil {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+			reportEpoch, reportState := d.currentPeerSnapshotObservation()
+			if auth != nil {
+				reportEpoch, reportState = auth.peerConnEpoch, auth.state
+			}
+			d.reportPeerSnapshotConfigSyncDeferred(configText, reportEpoch, reportState, err.Error())
 			return
 		}
 	}
-	epoch := d.syncPeerConnEpoch.Load()
+	epoch, attemptState := d.currentPeerSnapshotObservation()
 	if auth != nil {
-		epoch = auth.peerConnEpoch
+		epoch, attemptState = auth.peerConnEpoch, auth.state
 		allowed, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
 		if authErr != nil {
 			return
@@ -755,7 +775,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	if d.syncPeerConnEpoch.Load() != epoch || !d.syncPeerConnected.Load() {
 		d.configSyncMu.Unlock()
 		if auth != nil {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
 				"peer connection changed before config queueing; reconciliation will retry")
 		}
 		return
@@ -806,12 +826,16 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	if !d.noteConfigSharedWithPeerAtEpoch(configText, epoch) {
 		d.clearConfigSyncPushedAtEpoch(epoch, gen)
 		if auth != nil {
-			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
 				"peer connection changed after config queueing; reconciliation will retry")
 		}
 		return
 	}
-	d.clearPeerSnapshotConfigSyncDeferred(configText)
+	var successState *cluster.PeerSnapshotState
+	if auth != nil {
+		successState = &auth.state
+	}
+	d.clearPeerSnapshotConfigSyncDeferred(configText, epoch, successState)
 }
 
 // configSyncReconcileLoop is the low-frequency level-triggered safety net for
