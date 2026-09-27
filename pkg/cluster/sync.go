@@ -1579,7 +1579,16 @@ type SessionSync struct {
 	// applied<=received invariant holds after a reboot restarts the sender's
 	// monotonic counter lower.
 	lastRecvConfigGen atomic.Uint64
-	configApplyCh     chan configApplyItem
+
+	// configEpochRoleMu tracks the config authority role when reverse stamps
+	// are produced. After becoming a non-authority, a retained applied mark is
+	// not proof that it belongs to the current authority tenure; require a
+	// strictly newer applied generation before tagging it.
+	configEpochRoleMu       sync.Mutex
+	configEpochRoleKnown    bool
+	configEpochRolePrimary  bool
+	configEpochReverseFloor uint64
+	configApplyCh           chan configApplyItem
 
 	// configGenMu makes the reconnect RESET of the three config-generation
 	// marks above atomic with respect to every ADVANCE of them (#5084).

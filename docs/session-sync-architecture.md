@@ -1173,49 +1173,61 @@ too, which is why the field bumps the protocol.
 **Bidirectional active/active guard (#11055; closes the #6419 residual).** The
 original #5274 comparison is meaningful only from the RG0 config authority to
 its peer: `configGenCounter` is the authority's outgoing namespace, and the
-non-authority's `lastAppliedConfigGen` records it. The reverse direction now
-uses that same namespace rather than comparing independent node-local seeds.
+non-authority's `lastAppliedConfigGen` records it. The reverse direction uses
+that same namespace rather than comparing independent node-local seeds.
 
 `ConfigEpoch` reserves its high bit as the stamp-source tag; the remaining
 63-bit range is ample for generations derived from `MonotonicNanos()`. The
 authority stamps its untagged outgoing generation. A non-authority stamps
-`tag | lastAppliedConfigGen` only when `lastAppliedConfigGen` is nonzero and
-equals `lastRecvConfigGen`; otherwise it stamps 0, preserving the existing
-fail-open behavior while behind, after a failed apply, or during reconnect
-reset. On receipt, an authority strips the tag and compares against its own
-`configGenCounter`; a non-authority accepts only untagged epochs and compares
-against `max(applyingConfigGen, lastAppliedConfigGen)`. A tag/role mismatch
-means the peers have not observed the same RG0 handover, so the generations are
+`tag | lastAppliedConfigGen` only when the peer has advertised tag support,
+the received and applied marks agree and are nonzero, and the applied mark is
+strictly newer than the floor captured on entry to its current non-authority
+tenure. A retained mark from before an RG0 role transition does not prove which
+authority namespace it names. Until a current-authority config is applied, or
+while the sender is behind, after a failed apply, or during reconnect reset, it
+stamps 0.
+
+On receipt, an authority strips the tag and compares against its own
+`configGenCounter` only after learning that the peer supports the encoding. A
+non-authority accepts only untagged epochs and compares against
+`max(applyingConfigGen, lastAppliedConfigGen)`. A tag/role mismatch means the
+peers have not observed the same RG0 handover, so the generations are
 incomparable and the guard admits rather than falsely rejecting during
 dual-active or delayed-frame windows.
 
 The tag is semantic encoding inside the existing length-gated `uint64` session
-trailer, not a layout change, so it requires no `ProtocolVersion` bump. A legacy
-receiver interprets a tagged value as a very large unsigned epoch and admits it
-against ordinary generation barriers: rolling upgrade remains fail-open, as
-before, until both peers run the tagged implementation.
+trailer, not a layout change, so it requires no `ProtocolVersion` bump. Its
+capability bit is carried in the existing peer-capabilities flags byte. An
+unlearned or legacy peer receives the original untagged local send-counter
+stamp, preserving its existing comparison (including the promoted-authority
+case). A current authority honors tagged epochs only after the peer advertises
+support; until then an untagged reverse frame fails open in the upgraded
+receiver.
 
 The promoted-authority case (#7323) is handled by role-specific comparison. A
-promoted node may retain a `lastAppliedConfigGen` from its earlier non-authority
-tenure, but as current authority it compares tagged reverse epochs against its
-own send counter, not that old receive mark. Once the peer has applied the
-promoted authority's pushed config, its tagged stamps and the authority's
-counter are again in one namespace. The role/tag mismatch admits queued frames
-from the handover itself without comparing independent monotonic seeds.
+promoted node may retain a `lastAppliedConfigGen` from its earlier
+non-authority tenure, but as current authority it compares tagged reverse
+epochs against its own send counter, not that old receive mark. The demoted
+node does not reuse a retained applied mark as a reverse stamp until a newer
+generation is successfully applied in the new authority tenure. The role/tag
+mismatch admits queued frames from the handover itself without comparing
+independent monotonic seeds.
 
-The sender's convergence precondition also avoids converting a failed apply or
-queue-full drop into permanent reverse-direction loss: while received and
-applied generations differ, sessions carry epoch 0. This is intentionally
-fail-open until the peer successfully applies a current config, consistent with
+For a capable peer, the sender's convergence and role-tenure preconditions
+avoid converting a failed apply, queue-full drop, unknown namespace, or
+retained pre-handover mark into a false stale verdict. Epoch 0 is used when
+received/applied marks do not converge or the namespace is unproven, preserving
 the existing config-sync recovery contract (#4151/#5563).
 
 `sync_config_epoch_11055_test.go` exercises actual v4/v6 stamp and install
 paths: a newer authority config rejects tagged stale sessions, a converged
 equal-generation reverse session is accepted, divergent sender marks stamp 0,
-and mismatched epochs survive role-handover cases without false rejection.
-`config_epoch_promoted_authority_7323_test.go` verifies that a promoted
-authority uses its own config generation rather than the retained applied
-high-water.
+capability negotiation gates tagged comparisons, and an old namespace retained
+across handover stamps 0 until a current generation is applied. It also asserts
+the stale reverse row is absent before its owning RG moves. The promoted
+authority test verifies comparison against its own generation rather than its
+retained applied high-water.
+
 
 ### RT_FLOW Session Id (#5212)
 

@@ -16,6 +16,7 @@ func TestPromotedAuthorityUsesOwnConfigEpoch11055(t *testing.T) {
 		dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
 		s := NewSessionSync(":0", "10.0.0.2:4785", dp)
 		s.IsPrimaryFn = func() bool { return true }
+		setConfigEpochPeerTagCapability11055(s, true)
 		s.configGenCounter.Store(100)
 		return s
 	}
