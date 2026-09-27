@@ -100,6 +100,42 @@ use super::poll_stages::{
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
 
+/// #11053: close the PPTP control channel locally, purge buffered Reply
+/// segments, and queue a channel-scoped forget for every peer worker. Full
+/// queues are recorded for retry by the periodic control-inbox drain.
+#[cold]
+pub(in crate::afxdp) fn forget_pptp_control_channel(
+    sessions: &mut SessionTable,
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    control_key: &SessionKey,
+    closed_ns: u64,
+) -> (usize, usize) {
+    let control = crate::session::pptp::ControlChannelId::new(
+        control_key.src_ip,
+        control_key.src_port,
+        control_key.dst_ip,
+        control_key.dst_port,
+    );
+    let forgotten = sessions.pptp_mut().forget_control_channel(control);
+    inbox.forget_channel(control);
+    let mut queued = 0;
+    let mut unsent = Vec::new();
+    for queue in peer_worker_commands {
+        let mut pending = crate::afxdp::worker_queue::lock_recover(queue);
+        if crate::afxdp::worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::ForgetPptpControlChannel { control, closed_ns },
+        ) {
+            queued += 1;
+        } else {
+            unsent.push(Arc::as_ptr(queue) as usize);
+        }
+    }
+    inbox.record_channel_forget(control, closed_ns, unsent);
+    (forgotten, queued)
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn emit_session_hit_policy_deny_event(
@@ -1241,9 +1277,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // inside stage_ipsec_passthrough_check); it is rebound
                 // below the helper call for the slow-path code.
                 // #9950: proven fragments AND unreadable packets never consult the cache.
+                // #11053: control traffic bypasses the flow cache so control
+                // segments can be captured only after the same session/policy
+                // admission path that governs their forwarding.
                 if !overlap_skip_cache_9950
                     && FlowCacheEntry::packet_eligible(meta)
                     && let Some(flow) = flow.as_ref()
+                    && !crate::afxdp::poll_stages::is_pptp_control_flow(flow)
                 {
                     let non_host_unicast_ip =
                         l2_group_unicast_ip && owned_packet_frame.is_none();
@@ -6881,6 +6921,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // `None` for every non-NAT64 flow.
                         session_nat64_reverse,
                     ) {
+                        // #11053: only an admitted control segment may teach
+                        // a PPTP call association. A control close removes all
+                        // calls learned through this channel on every worker.
+                        if let Some(flow) = flow.as_ref()
+                            && crate::afxdp::poll_stages::is_pptp_control_flow(flow)
+                        {
+                            if crate::tcp_flags::is_closing(meta.tcp_flags) {
+                                forget_pptp_control_channel(
+                                    sessions,
+                                    worker_ctx.pptp_control,
+                                    worker_ctx.peer_worker_commands,
+                                    &flow.forward_key,
+                                    now_ns,
+                                );
+                            } else {
+                                crate::afxdp::poll_stages::capture_pptp_control_segment(
+                                    packet_frame,
+                                    flow,
+                                    worker_ctx.pptp_control,
+                                    now_ns,
+                                );
+                            }
+                        }
                         // #2362: capture the per-packet L4 match inputs from the
                         // frame BEFORE `owned_packet_frame.take()` below moves the
                         // backing buffer out — the flow-cache log-only evaluation
@@ -8850,3 +8913,148 @@ pub(super) fn poll_binding_process_descriptor(
 #[cfg(test)]
 #[path = "named_pre_l3_10498_tests.rs"]
 mod named_pre_l3_10498_tests;
+
+#[cfg(test)]
+mod pptp_control_teardown_tests_11053 {
+    use super::*;
+    use crate::session::pptp::PptpCall;
+
+    fn control_key() -> (IpAddr, IpAddr, SessionKey) {
+        let (a, b): (IpAddr, IpAddr) = (
+            "198.51.100.7".parse().unwrap(),
+            "203.0.113.9".parse().unwrap(),
+        );
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: a,
+            dst_ip: b,
+            src_port: 49152,
+            dst_port: 1723,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        };
+        (a, b, key)
+    }
+
+    #[test]
+    fn control_close_clears_local_channel_and_queues_peer_forgets_11053() {
+        let (a, b, key) = control_key();
+        let channel = crate::session::pptp::ControlChannelId::new(a, 49152, b, 1723);
+        let mut sessions = SessionTable::new();
+        sessions
+            .pptp_mut()
+            .install(PptpCall::new(a, 0x1111, b, 0x2222), channel, 1)
+            .expect("first call");
+        sessions
+            .pptp_mut()
+            .install(PptpCall::new(a, 0x3333, b, 0x4444), channel, 1)
+            .expect("second call");
+        let inbox = crate::session::pptp_control::PptpControlInbox::default();
+        let peer_queues: Vec<_> = (0..3)
+            .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+            .collect();
+
+        assert_eq!(
+            forget_pptp_control_channel(&mut sessions, &inbox, &peer_queues, &key, 3),
+            (2, 3)
+        );
+        assert_eq!(sessions.pptp().resolve(a, 0x1111), None);
+        assert_eq!(sessions.pptp().resolve(b, 0x4444), None);
+        for (worker, queue) in peer_queues.iter().enumerate() {
+            let pending = queue.lock().expect("worker queue");
+            assert_eq!(pending.len(), 1, "worker {worker} missed channel close");
+            assert!(matches!(
+                &pending[0],
+                WorkerCommand::ForgetPptpControlChannel { control: queued, closed_ns: 3 }
+                    if *queued == channel
+            ));
+        }
+    }
+
+    #[test]
+    fn full_peer_queue_retries_control_forget_11053() {
+        let (a, _, key) = control_key();
+        let inbox = crate::session::pptp_control::PptpControlInbox::default();
+        let mut sessions = SessionTable::new();
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        {
+            let mut pending = queue.lock().expect("worker queue");
+            for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+                pending.push_back(WorkerCommand::DeleteSynced(key.clone()));
+            }
+        }
+
+        assert_eq!(
+            forget_pptp_control_channel(
+                &mut sessions,
+                &inbox,
+                std::slice::from_ref(&queue),
+                &key,
+                7
+            ),
+            (0, 0)
+        );
+        {
+            let mut pending = queue.lock().expect("worker queue");
+            pending.pop_front().expect("make one queue slot");
+        }
+
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &inbox,
+            &mut sessions,
+            std::slice::from_ref(&queue),
+            crate::session::pptp_control::CONTROL_DRAIN_INTERVAL_NS + 1,
+        );
+        let pending = queue.lock().expect("worker queue");
+        assert!(matches!(
+            pending.back(),
+            Some(WorkerCommand::ForgetPptpControlChannel { control, closed_ns: 7 })
+                if *control == crate::session::pptp::ControlChannelId::new(a, 49152, key.dst_ip, 1723)
+        ));
+    }
+
+    #[test]
+    fn close_purges_a_buffered_reply_before_the_next_drain_11053() {
+        let (a, b, key) = control_key();
+        let inbox = crate::session::pptp_control::PptpControlInbox::default();
+        assert!(
+            inbox.push(crate::session::pptp_control::PendingControlSegment {
+                src: a,
+                dst: b,
+                src_port: 49152,
+                dst_port: 1723,
+                captured_ns: 9,
+                payload: crate::session::pptp_control::fixtures_7699::outgoing_call_reply(
+                    0x1111, 0x2222, 1,
+                ),
+            })
+        );
+        assert_eq!(inbox.pending_len(), 1);
+
+        let mut sessions = SessionTable::new();
+        assert_eq!(
+            forget_pptp_control_channel(&mut sessions, &inbox, &[], &key, 10),
+            (0, 0)
+        );
+        assert_eq!(
+            inbox.pending_len(),
+            0,
+            "the close must purge the buffered Reply"
+        );
+        assert_eq!(
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(
+                &inbox,
+                &mut sessions,
+                &[],
+                2 * crate::session::pptp_control::CONTROL_DRAIN_INTERVAL_NS,
+            ),
+            0
+        );
+        assert_eq!(
+            sessions.pptp().resolve(b, 0x2222),
+            None,
+            "the queued Reply must not resurrect a call after close"
+        );
+    }
+}

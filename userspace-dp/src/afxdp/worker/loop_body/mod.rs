@@ -1848,6 +1848,25 @@ pub(crate) fn worker_loop(
             }};
         }
         let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns, Some(&ha_ctx));
+        // #11053: if the control TCP session idles out, forget its PPTP calls
+        // and replicate the exact control tuple to peer workers. The delete
+        // command also clears a peer's channel even if this worker's call rows
+        // already expired on their independent data-idle clock.
+        for expired in &expired_entries {
+            let key = &expired.key;
+            if key.protocol == crate::ip_proto::PROTO_TCP
+                && (key.src_port == crate::session::pptp_control::PPTP_CONTROL_PORT
+                    || key.dst_port == crate::session::pptp_control::PPTP_CONTROL_PORT)
+            {
+                crate::afxdp::poll_descriptor::forget_pptp_control_channel(
+                    &mut sessions,
+                    &pptp_control,
+                    &peer_worker_commands,
+                    key,
+                    loop_now_ns,
+                );
+            }
+        }
         // #2428: the "Current sessions" gauge Go derives as
         // (session_creates - session_expires) is a LOCAL-forwarding gauge.
         // `session_creates` is bumped ONLY on the four local poll-descriptor

@@ -1820,6 +1820,13 @@ pub(super) fn apply_worker_commands(
                 // onto a dead handle, so teardown must land on every worker.
                 sessions.pptp_mut().remove(handle);
             }
+            WorkerCommand::ForgetPptpControlChannel { control, closed_ns } => {
+                // #11053: tear down only the PPTP associations. The control
+                // TCP session may still be owned by this worker.
+                sessions
+                    .pptp_mut()
+                    .forget_control_channel_learned_by(control, closed_ns);
+            }
             WorkerCommand::VacateAllSharedExactSlots => {
                 // Trivial variant — kept inline (#1346 plan v2 §4.1).
                 // #941 Work item C: signal the outer poll loop to vacate

@@ -27,16 +27,13 @@
 //! Parsing does not run on the AF_XDP hot path. The control channel carries a
 //! handful of small messages per call and the data channel does not, and
 //! co-locating them buys nothing anyway because RSS hashes the flow tuple — the
-//! two channels are not reliably on the same worker. So the hot path COPIES a
-//! TCP/1723 segment into [`PptpControlInbox`] and moves on; the worker's
-//! periodic work drains it, parses, installs and broadcasts.
+//! two channels are not reliably on the same worker. Once the session/policy
+//! path admits a TCP/1723 segment, the data path COPIES it into this inbox and
+//! moves on; the worker's periodic work drains it, parses, installs and
+//! broadcasts. A denied pre-policy segment never enters the inbox.
 //!
-//! The precedent is `WorkerContext::dynamic_neighbors`, and it is the same
-//! constraint rather than an analogy: `stage_link_layer_classify`'s doc gives
-//! the rationale as "the caller does not need visibility into the learned
-//! neighbor for the same packet". An association learned from a control segment
-//! is likewise not needed for THAT segment — it is needed for the GRE data
-//! packets that follow.
+//! The association is not needed for the control packet itself — it is needed
+//! for the GRE data packets that follow.
 
 use std::net::IpAddr;
 use std::sync::Mutex;
@@ -47,13 +44,15 @@ use std::sync::Mutex;
 /// because the association is bound to the control CHANNEL that taught it
 /// ([`crate::session::pptp::ControlChannelId`]) — an association must not
 /// outlive its control connection, and without the ports there is no channel
-/// to bind it to.
+/// to bind it to. `captured_ns` preserves arrival order when a worker drains
+/// after a close has already been observed.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingControlSegment {
     pub(crate) src: IpAddr,
     pub(crate) dst: IpAddr,
     pub(crate) src_port: u16,
     pub(crate) dst_port: u16,
+    pub(crate) captured_ns: u64,
     pub(crate) payload: Vec<u8>,
 }
 
@@ -101,6 +100,17 @@ struct InboxInner {
     /// this one means the drain could not keep up, the other means the data
     /// simply arrived first.
     dropped: u64,
+    /// Control closes refused by a full peer queue, retried by periodic drain.
+    pending_forgets: Vec<PendingChannelForget>,
+    last_forget_retry_ns: u64,
+}
+
+/// A control close still waiting for bounded peer-worker queues to accept it.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingChannelForget {
+    pub(crate) control: crate::session::pptp::ControlChannelId,
+    pub(crate) closed_ns: u64,
+    pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
 impl PptpControlInbox {
@@ -168,6 +178,99 @@ impl PptpControlInbox {
             Ok(g) => g.pending.len(),
             Err(poisoned) => poisoned.into_inner().pending.len(),
         }
+    }
+
+    /// Drop buffered segments from a control channel that has closed.
+    ///
+    /// A Reply may be admitted into the interval-gated inbox just before FIN
+    /// or RST; purge it now so a later drain cannot resurrect the call.
+    pub(crate) fn forget_channel(
+        &self,
+        control: crate::session::pptp::ControlChannelId,
+    ) -> usize {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let before = inner.pending.len();
+        inner.pending.retain(|segment| {
+            crate::session::pptp::ControlChannelId::new(
+                segment.src,
+                segment.src_port,
+                segment.dst,
+                segment.dst_port,
+            ) != control
+        });
+        before - inner.pending.len()
+    }
+
+    /// Remember queues that refused a close so the periodic worker drain can
+    /// retry it without losing the per-recipient acknowledgement state.
+    pub(crate) fn record_channel_forget(
+        &self,
+        control: crate::session::pptp::ControlChannelId,
+        closed_ns: u64,
+        unsent_queue_ids: Vec<usize>,
+    ) {
+        if unsent_queue_ids.is_empty() {
+            return;
+        }
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(existing) = inner
+            .pending_forgets
+            .iter_mut()
+            .find(|pending| pending.control == control && pending.closed_ns == closed_ns)
+        {
+            for queue_id in unsent_queue_ids {
+                if !existing.unsent_queue_ids.contains(&queue_id) {
+                    existing.unsent_queue_ids.push(queue_id);
+                }
+            }
+        } else {
+            inner.pending_forgets.push(PendingChannelForget {
+                control,
+                closed_ns,
+                unsent_queue_ids,
+            });
+        }
+    }
+
+    /// Take a snapshot of due close retries. Queue locks are acquired only
+    /// after this inbox lock has been released.
+    pub(crate) fn take_channel_forget_retries(&self, now_ns: u64) -> Vec<PendingChannelForget> {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inner.last_forget_retry_ns != 0
+            && now_ns.saturating_sub(inner.last_forget_retry_ns) < CONTROL_DRAIN_INTERVAL_NS
+        {
+            return Vec::new();
+        }
+        inner.last_forget_retry_ns = now_ns;
+        inner.pending_forgets.clone()
+    }
+
+    /// Acknowledge a close accepted by one peer queue.
+    pub(crate) fn mark_channel_forget_sent(
+        &self,
+        control: crate::session::pptp::ControlChannelId,
+        closed_ns: u64,
+        queue_id: usize,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_forgets.retain_mut(|pending| {
+            if pending.control == control && pending.closed_ns == closed_ns {
+                pending.unsent_queue_ids.retain(|id| *id != queue_id);
+            }
+            !pending.unsent_queue_ids.is_empty()
+        });
     }
 }
 
@@ -464,6 +567,7 @@ mod inbox_drop_policy_tests_7699 {
             dst: "203.0.113.9".parse().unwrap(),
             src_port: PPTP_CONTROL_PORT,
             dst_port: 49152,
+            captured_ns: 0,
             payload: vec![n; 8],
         }
     }

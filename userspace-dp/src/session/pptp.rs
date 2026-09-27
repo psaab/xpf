@@ -155,6 +155,9 @@ struct AssociationRecord {
     call: PptpCall,
     /// The channel that taught it. Removing the channel removes the call.
     control: ControlChannelId,
+    /// Stable install time, used to keep a delayed close from deleting a call
+    /// learned on a reused TCP tuple.
+    learned_ns: u64,
     /// Last time a data packet resolved through it, or install time.
     ///
     /// This is what makes the lifetime independent of ever seeing a teardown:
@@ -189,6 +192,15 @@ pub(crate) enum PptpInstallError {
     /// #7625 the reserved deny name): refuse rather than let two calls share an
     /// identity, which is the exact collapse this class exists to prevent.
     HandleCollision { existing: PptpCall, handle: u32 },
+    /// A DIFFERENT call already owns one of this call's `(allocator, call-id)`
+    /// aliases (#11053).
+    ///
+    /// Data resolution is BY ALIAS ([`PptpAssociations::resolve`]), so silently
+    /// overwriting the entry would re-point the earlier call's data at the new
+    /// handle — the same identity collapse as a handle collision, through the
+    /// other index. Refused, with no mutation, for the same reason.
+    /// `owner` is the handle that already owns the alias.
+    AllocatorCollision { allocator: IpAddr, call_id: u16, owner: u32 },
 }
 
 /// The learned associations, indexed for packet resolution.
@@ -214,6 +226,9 @@ pub(crate) struct PptpAssociations {
 
 impl PptpAssociations {
     /// Learn a call. Idempotent for an identical association.
+    ///
+    /// #11053: the alias check runs BEFORE either insert, so a refusal mutates
+    /// nothing — there is no half-installed `by_handle` row to roll back.
     pub(crate) fn install(
         &mut self,
         call: PptpCall,
@@ -225,7 +240,11 @@ impl PptpAssociations {
             Some(existing) if existing.call == call => {
                 // Idempotent re-learn (a retransmitted reply). Refresh rather
                 // than refuse: the call is real and this is evidence of it.
-                self.by_handle.entry(handle).and_modify(|r| r.last_seen_ns = now_ns);
+                self.by_handle.entry(handle).and_modify(|r| {
+                    r.control = control;
+                    r.learned_ns = now_ns;
+                    r.last_seen_ns = now_ns;
+                });
                 return Ok(handle);
             }
             Some(existing) => {
@@ -236,9 +255,30 @@ impl PptpAssociations {
             }
             None => {}
         }
+        // A new handle, but the aliases it needs may belong to other calls.
+        // Each side's `(allocator, call-id it allocated)` must be unowned or
+        // owned by THIS handle (the latter is unreachable past the idempotent
+        // arm above, but comparing rather than merely probing keeps the refusal
+        // exact if this ever runs without it).
+        for (allocator, call_id) in [(call.lo, call.lo_call_id), (call.hi, call.hi_call_id)] {
+            if let Some(owner) = self.by_allocator.get(&(allocator, call_id))
+                && *owner != handle
+            {
+                return Err(PptpInstallError::AllocatorCollision {
+                    allocator,
+                    call_id,
+                    owner: *owner,
+                });
+            }
+        }
         self.by_handle.insert(
             handle,
-            AssociationRecord { call, control, last_seen_ns: now_ns },
+            AssociationRecord {
+                call,
+                control,
+                learned_ns: now_ns,
+                last_seen_ns: now_ns,
+            },
         );
         self.by_allocator.insert((call.lo, call.lo_call_id), handle);
         self.by_allocator.insert((call.hi, call.hi_call_id), handle);
@@ -314,22 +354,35 @@ impl PptpAssociations {
     /// An association must not outlive the channel that taught it: once the
     /// control session is gone the calls it set up cannot be renegotiated or
     /// torn down through it, so keeping them serves nothing and risks pairing a
-    /// reused call id. Intended to fire on FIN/RST or the control session's
-    /// own timeout, not waiting for per-call notifies that will never arrive.
-    ///
-    /// **Still no production caller, and #7699's DATA-channel resolve did not
-    /// change that either.** The dispatch added the control-channel LEARN path
-    /// and the resolve added the data-channel READ path; neither observes a
-    /// control channel CLOSING. Recognising the FIN/RST — or the control session's own timeout —
-    /// and calling this is a distinct piece of stage 3 that is not built, so
-    /// this path is bound by its cells and by nothing else, and the idle bound
-    /// above remains the only association lifetime that actually runs on a live
-    /// box.
+    /// reused call id. Production callers invoke this on FIN/RST or the control
+    /// session's own timeout, not waiting for per-call notifies that will never
+    /// arrive. The timeout sweep remains the fallback if no close is observed.
     pub(crate) fn forget_control_channel(&mut self, control: ControlChannelId) -> usize {
         let doomed: Vec<u32> = self
             .by_handle
             .iter()
             .filter(|(_, rec)| rec.control == control)
+            .map(|(handle, _)| *handle)
+            .collect();
+        for handle in &doomed {
+            self.remove(*handle);
+        }
+        doomed.len()
+    }
+
+    /// Drop associations on this channel learned no later than the close.
+    ///
+    /// Peer-worker commands can be delayed by a full queue; the stable learn
+    /// time keeps an old close from deleting calls on a later reused tuple.
+    pub(crate) fn forget_control_channel_learned_by(
+        &mut self,
+        control: ControlChannelId,
+        closed_ns: u64,
+    ) -> usize {
+        let doomed: Vec<u32> = self
+            .by_handle
+            .iter()
+            .filter(|(_, rec)| rec.control == control && rec.learned_ns <= closed_ns)
             .map(|(handle, _)| *handle)
             .collect();
         for handle in &doomed {
@@ -375,6 +428,7 @@ impl PptpAssociations {
             AssociationRecord {
                 call,
                 control: ControlChannelId::new(call.lo, 1723, call.hi, 1723),
+                learned_ns: 0,
                 last_seen_ns: 0,
             },
         );
@@ -545,6 +599,35 @@ mod tests_7699 {
             "re-learning an identical association must be idempotent"
         );
         assert_eq!(clean.len(), 1, "idempotent re-install must not add a row");
+    }
+
+    /// A call cannot take over an `(allocator, call-id)` alias from another
+    /// handle: data lookup is indexed by this alias, not by the call record.
+    #[test]
+    fn an_allocator_alias_collision_is_refused_without_repointing_11053() {
+        let (a, b, c) = (
+            ip("198.51.100.7"),
+            ip("203.0.113.9"),
+            ip("203.0.113.10"),
+        );
+        let original = PptpCall::new(a, 0x1111, b, 0x2222);
+        let colliding = PptpCall::new(a, 0x1111, c, 0x3333);
+        let mut table = PptpAssociations::default();
+        let original_handle = table.install(original, ctl(a, b), 10).expect("original");
+
+        assert_eq!(
+            table.install(colliding, ctl(a, c), 20),
+            Err(PptpInstallError::AllocatorCollision {
+                allocator: a,
+                call_id: 0x1111,
+                owner: original_handle,
+            }),
+            "a reused allocator alias must refuse the second association"
+        );
+        assert_eq!(table.resolve(a, 0x1111), Some(original_handle));
+        assert_eq!(table.resolve(b, 0x2222), Some(original_handle));
+        assert_eq!(table.resolve(c, 0x3333), None);
+        assert_eq!(table.len(), 1, "refusal must not leave a second handle");
     }
 
     /// The unassociated path: resolve to nothing, count, and do NOT drop.
@@ -718,16 +801,16 @@ mod expiry_tests_7699 {
         let other = ControlChannelId::new(pac, 49153, pns, 1723);
         let mut t = PptpAssociations::default();
 
-        let a = t
-            .install(PptpCall::new(pac, 0xAAAA, pns, 0xBBBB), doomed, T0)
+        t.install(PptpCall::new(pac, 0xAAAA, pns, 0xBBBB), doomed, T0)
             .expect("call A");
-        let b = t
-            .install(PptpCall::new(pac, 0xCCCC, pns, 0xDDDD), doomed, T0)
+        t.install(PptpCall::new(pac, 0xCCCC, pns, 0xDDDD), doomed, T0)
             .expect("call B");
         let survivor = t
             .install(PptpCall::new(pac, 0xEEEE, pns, 0xFFFF), other, T0)
             .expect("call on another channel");
 
+        assert!(t.resolve(pns, 0xBBBB).is_some());
+        assert!(t.resolve(pns, 0xDDDD).is_some());
         assert_eq!(
             t.forget_control_channel(doomed),
             2,
@@ -736,17 +819,29 @@ mod expiry_tests_7699 {
         );
         assert_eq!(t.resolve(pns, 0xBBBB), None);
         assert_eq!(t.resolve(pns, 0xDDDD), None);
-        let _ = (a, b);
-
-        // NEGATIVE CONTROL: a call on a DIFFERENT channel is untouched.
-        // Without it, `forget_control_channel` could clear the whole table and
-        // every assertion above would still pass.
         assert_eq!(
             t.resolve(pns, 0xFFFF),
             Some(survivor),
             "losing one control channel must not forget calls set up on another"
         );
         assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn a_delayed_control_close_preserves_a_relearned_call_11053() {
+        let (pac, pns) = (ip("198.51.100.7"), ip("203.0.113.9"));
+        let control = ControlChannelId::new(pac, 49152, pns, 1723);
+        let call = PptpCall::new(pac, 0xAAAA, pns, 0xBBBB);
+        let mut t = PptpAssociations::default();
+        let handle = t.install(call, control, 10).expect("first learn");
+        assert_eq!(t.install(call, control, 20), Ok(handle), "relearn");
+
+        assert_eq!(t.forget_control_channel_learned_by(control, 15), 0);
+        assert_eq!(
+            t.resolve(pns, 0xBBBB),
+            Some(handle),
+            "a delayed close must not delete a call learned after its close time"
+        );
     }
 }
 

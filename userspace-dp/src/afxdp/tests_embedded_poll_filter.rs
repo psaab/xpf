@@ -3480,8 +3480,21 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
 
 
 #[test]
-fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
+fn poll_descriptor_policy_deny_pptp_reply_emits_rt_flow_event_11053() {
+    run_pptp_control_reply_policy_case(true);
+}
+
+#[test]
+fn poll_descriptor_admitted_pptp_reply_is_learned_11053() {
+    run_pptp_control_reply_policy_case(false);
+}
+
+fn run_pptp_control_reply_policy_case(policy_denied: bool) {
     let mut snapshot = policy_deny_snapshot();
+    if !policy_denied {
+        snapshot.default_policy = "permit".to_string();
+        snapshot.policies.clear();
+    }
     snapshot.zones = vec![
         ZoneSnapshot {
             name: "lan".to_string(),
@@ -3513,7 +3526,21 @@ fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    let mut frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    frame[34..36].copy_from_slice(&1723u16.to_be_bytes());
+    frame[36..38].copy_from_slice(&49152u16.to_be_bytes());
+    frame[47] = TCP_FLAG_SYN | 0x08;
+    // SYN|PSH carries spoofed reply bytes on the denied first packet.
+    frame.extend_from_slice(
+        &crate::session::pptp_control::fixtures_7699::outgoing_call_reply(0x1234, 0x5678, 1),
+    );
+    let ip_len = (frame.len() - 14) as u16;
+    frame[16..18].copy_from_slice(&ip_len.to_be_bytes());
+    frame[24..26].fill(0);
+    let ip_checksum = crate::afxdp::frame::checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_checksum.to_be_bytes());
+    crate::afxdp::frame::recompute_l4_checksum_ipv4(&mut frame[14..], 20, PROTO_TCP, false)
+        .expect("valid TCP checksum");
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -3528,7 +3555,7 @@ fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
         pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_SYN,
+        tcp_flags: TCP_FLAG_SYN | 0x08,
         config_generation: 7,
         fib_generation: 9,
         ..UserspaceDpMeta::default()
@@ -3579,7 +3606,8 @@ fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
             burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -3637,34 +3665,101 @@ fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
         &mut telemetry,
     );
 
-    let event = event_rx
-        .try_recv()
-        .expect("policy-deny event from poll descriptor")
-        .decode_dataplane_event()
-        .expect("policy-deny payload");
+    if policy_denied {
+        let event = event_rx
+            .try_recv()
+            .expect("policy-deny event from poll descriptor")
+            .decode_dataplane_event()
+            .expect("policy-deny payload");
+        assert_eq!(
+            event.kind,
+            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+        );
+        assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+        assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
+        assert_eq!(event.ingress_ifindex, 24);
+        assert_eq!(event.src_port, 1723);
+        assert_eq!(event.dst_port, 49152);
+        assert!(
+            event.timestamp_ns > 0,
+            "policy-deny event from the poll path must carry a real wall-clock timestamp"
+        );
+        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+        assert!(telemetry.dbg.policy_deny >= 1);
+    } else {
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an admitted Reply is not a deny event"
+        );
+    }
+    let expected_learned = if policy_denied { 0 } else { 1 };
     assert_eq!(
-        event.kind,
-        crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+        __pptp_control_7699.pending_len(),
+        expected_learned,
+        "policy admission must control whether the Reply enters the learn inbox"
     );
-    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
-    assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
-    assert_eq!(event.ingress_ifindex, 24);
-    assert_eq!(event.src_port, 12345);
-    assert_eq!(event.dst_port, 5201);
-    // #2470: the poll path stamps the dataplane DECISION instant (wall-clock
-    // Unix ns) at emit time instead of 0, so the Go decoder reports decision
-    // time rather than receive time. This end-to-end check (a real
-    // CLOCK_MONOTONIC now_ns flows through the worker poll path) fails if the
-    // emitter is reverted to `timestamp_ns: 0`.
-    assert!(
-        event.timestamp_ns > 0,
-        "policy-deny event from the poll path must carry a real wall-clock \
-         timestamp, got 0"
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &__pptp_control_7699,
+            &mut sessions,
+            &peer_worker_commands,
+            123_000_000_000,
+        ),
+        expected_learned,
+        "the admitted Reply alone may teach a call association"
     );
-    assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
-    assert!(telemetry.dbg.policy_deny >= 1);
-}
+    let pac: std::net::IpAddr = "10.0.61.102".parse().unwrap();
+    let pns: std::net::IpAddr = "172.16.80.200".parse().unwrap();
+    let call_handle = sessions.pptp().resolve(pns, 0x5678);
+    if policy_denied {
+        assert_eq!(sessions.pptp().resolve(pac, 0x1234), None);
+        assert_eq!(call_handle, None);
+    } else {
+        let handle = call_handle.expect("an admitted Outgoing-Call-Reply learns its call");
+        assert_eq!(sessions.pptp().resolve(pac, 0x1234), Some(handle));
+    }
 
+    let mut gre = vec![0u8; 20];
+    gre[0] = 0x45;
+    gre[9] = crate::ip_proto::PROTO_GRE;
+    gre[12..16].copy_from_slice(&[10, 0, 61, 102]);
+    gre[16..20].copy_from_slice(&[172, 16, 80, 200]);
+    gre.extend_from_slice(&0x2001u16.to_be_bytes()); // PPTP GRE Key + version 1
+    gre.extend_from_slice(&0x880Bu16.to_be_bytes()); // PPP
+    gre.extend_from_slice(&0x05DCu16.to_be_bytes());
+    gre.extend_from_slice(&0x5678u16.to_be_bytes());
+    let total_len = gre.len() as u16;
+    gre[2..4].copy_from_slice(&total_len.to_be_bytes());
+    let mut gre_meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_GRE,
+        l3_offset: 0,
+        l4_offset: 20,
+        ..UserspaceDpMeta::default()
+    };
+    gre_meta.flow_src_addr[..4].copy_from_slice(&[10, 0, 61, 102]);
+    gre_meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    let gre_flow = crate::afxdp::gre_discriminator::pptp_data_session_flow(
+        &gre,
+        gre_meta,
+        &mut sessions,
+        123_000_000_000,
+    );
+    if policy_denied {
+        assert!(
+            gre_flow.is_none(),
+            "GRE must remain unassociated after the denied control segment"
+        );
+    } else {
+        assert_eq!(
+            gre_flow
+                .expect("GRE after the admitted Reply must resolve")
+                .forward_key
+                .discriminator,
+            crate::session::TunnelDiscriminator::Pptp(call_handle.expect("learned call"))
+        );
+    }
+}
 
 /// #3021 LITERAL fail-on-revert. Drives the real
 /// `poll_binding_process_descriptor` deny path with the ingress on a VLAN

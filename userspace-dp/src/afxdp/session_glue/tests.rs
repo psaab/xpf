@@ -11708,6 +11708,59 @@ fn worker_commands_install_and_forget_pptp_associations_7699() {
     assert_eq!(sessions.pptp().resolve(a, 0x1111), None);
 }
 
+#[test]
+fn forgetting_a_control_channel_forgets_every_association_11053() {
+    let (a, b): (std::net::IpAddr, std::net::IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let control = crate::session::pptp::ControlChannelId::new(a, 49152, b, 1723);
+    let mut sessions = SessionTable::new();
+    sessions
+        .pptp_mut()
+        .install(
+            crate::session::pptp::PptpCall::new(a, 0x1111, b, 0x2222),
+            control,
+            0,
+        )
+        .expect("first call");
+    sessions
+        .pptp_mut()
+        .install(
+            crate::session::pptp::PptpCall::new(a, 0x3333, b, 0x4444),
+            control,
+            0,
+        )
+        .expect("second call");
+    let commands = Arc::new(Mutex::new(VecDeque::from([
+        WorkerCommand::ForgetPptpControlChannel {
+            control,
+            closed_ns: 1,
+        },
+    ])));
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+
+    assert_eq!(sessions.pptp().resolve(a, 0x1111), None);
+    assert_eq!(sessions.pptp().resolve(b, 0x2222), None);
+    assert_eq!(sessions.pptp().resolve(a, 0x3333), None);
+    assert_eq!(sessions.pptp().resolve(b, 0x4444), None);
+}
+
 /// #7699 stage 2 END-TO-END: control-channel BYTES through to an association a
 /// data packet resolves against.
 ///
@@ -11734,12 +11787,13 @@ fn worker_commands_install_and_forget_pptp_associations_7699() {
 /// claim was unfalsifiable, which is worse than silence: it would be believed
 /// exactly as long as nobody tried it.
 ///
-/// **The production join now exists** (#7699's packet-path dispatch): the hot
-/// path copies a TCP/1723 segment into `PptpControlInbox` and the worker's
-/// periodic drain parses, installs and broadcasts it. Its own cell —
-/// `afxdp::poll_stages::tests::pptp_dispatch_join_tests_7699::the_stage_captures_a_control_segment_and_the_drain_learns_it_7699`
-/// — runs the REAL stage over real frame bytes, so deleting the push reds it.
-/// This cell stays as the parser/broadcast composition test it always was.
+/// **The production join now exists** (#7699/#11053): the packet stage only
+/// parses, and the poll descriptor copies an admitted TCP/1723 segment into
+/// `PptpControlInbox`; the worker's periodic drain parses, installs and
+/// broadcasts. Packet-stage tests exercise capture/drain mechanics; the real
+/// policy-deny boundary is covered by
+/// `poll_descriptor_policy_deny_pptp_reply_emits_rt_flow_event_11053`. This
+/// cell remains the parser/broadcast composition test it started as.
 #[test]
 fn a_control_segment_becomes_a_resolvable_association_7699() {
     use crate::session::pptp_control::{

@@ -725,7 +725,11 @@ pub(in crate::afxdp) fn broadcast_pptp_install(
         let mut pending = lock_recover(q);
         if push_bounded(
             &mut pending,
-            WorkerCommand::InstallPptpCall { call, control, learned_ns },
+            WorkerCommand::InstallPptpCall {
+                call,
+                control,
+                learned_ns,
+            },
         ) {
             accepted += 1;
         }
@@ -761,12 +765,38 @@ pub(in crate::afxdp) fn broadcast_pptp_install(
 /// that worker is as likely as any to be the one the call's GRE data lands on.
 /// The local install is not a duplicate of the broadcast; it is the half the
 /// broadcast structurally cannot reach.
+fn retry_pending_pptp_control_forgets(
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    now_ns: u64,
+) {
+    for retry in inbox.take_channel_forget_retries(now_ns) {
+        for queue in peer_worker_commands {
+            let queue_id = Arc::as_ptr(queue) as usize;
+            if !retry.unsent_queue_ids.contains(&queue_id) {
+                continue;
+            }
+            let mut pending = lock_recover(queue);
+            if push_bounded(
+                &mut pending,
+                WorkerCommand::ForgetPptpControlChannel {
+                    control: retry.control,
+                    closed_ns: retry.closed_ns,
+                },
+            ) {
+                inbox.mark_channel_forget_sent(retry.control, retry.closed_ns, queue_id);
+            }
+        }
+    }
+}
+
 pub(in crate::afxdp) fn drain_pptp_control_inbox(
     inbox: &crate::session::pptp_control::PptpControlInbox,
     sessions: &mut crate::session::SessionTable,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     now_ns: u64,
 ) -> usize {
+    retry_pending_pptp_control_forgets(inbox, peer_worker_commands, now_ns);
     let mut learned = 0;
     for seg in inbox.take_pending(now_ns) {
         let Some(call) = crate::session::pptp_control::learn_from_control_segment(
@@ -785,11 +815,11 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox(
             seg.dst,
             seg.dst_port,
         );
-        if let Err(e) = sessions.pptp_mut().install(call, control, now_ns) {
+        if let Err(e) = sessions.pptp_mut().install(call, control, seg.captured_ns) {
             debug_log!("PPTP association refused on the local worker: {:?}", e);
             continue;
         }
-        broadcast_pptp_install(peer_worker_commands, call, control, now_ns);
+        broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);
         learned += 1;
     }
     learned
