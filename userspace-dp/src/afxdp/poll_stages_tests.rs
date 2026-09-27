@@ -4097,31 +4097,15 @@ fn flowless_legitimate_ihl5_fragment_is_not_dropped_8298() {
     );
 }
 
-/// #7699: the PACKET-PATH DISPATCH — the production join.
+/// #7699/#11053: focused tests for PPTP control capture and draining.
 ///
-/// # Why this module exists and what was missing without it
-///
-/// Every #7699 cell before this one tested ONE hop. The parser cells build a
-/// segment and assert a parse; the table cells install a `PptpCall` and assert
-/// a resolve; the broadcast cells push a `WorkerCommand` and assert it lands.
-/// All of them stayed green against a build in which **nothing in the running
-/// dataplane called the parser at all** — each end worked and nothing joined
-/// them. `session_glue/tests.rs`'s stage-2 end-to-end cell says so in its own
-/// doc, and an earlier version of that comment named a falsifying mutation
-/// ("delete the call from the publish path") that could not be performed
-/// because there was no publish path to delete it from.
-///
-/// This module is the first point in the series where that mutation exists, so
-/// it is RUN rather than described. It binds **two** properties, because only
-/// the first is visible in what the association table ends up containing —
-/// which is exactly how #8399's placement defect survived a sound wiring
-/// mutation AND a sound function mutation:
-///
-///   - **connection**: deleting the `capture_pptp_control_segment` call from
-///     `stage_parse_flow_and_learn` reds
-///     `the_stage_captures_a_control_segment_and_the_drain_learns_it_7699`;
-///   - **frequency**: the drain runs once per `CONTROL_DRAIN_INTERVAL_NS`, not
-///     once per poll — `the_control_drain_runs_once_per_interval_not_per_call_7699`.
+/// `run_stage` models successful admission by running the real parser and then
+/// the capture helper. These cells bind copy/drain behavior and the interval
+/// gate, but do not model policy evaluation. `run_unadmitted_stage_with_meta`
+/// verifies that parsing alone leaves the inbox empty. The real poll-descriptor
+/// policy-deny boundary is exercised by
+/// `poll_descriptor_policy_deny_pptp_reply_emits_rt_flow_event_11053` in
+/// `tests_embedded_poll_filter.rs`.
 #[cfg(test)]
 mod pptp_dispatch_join_tests_7699 {
     use super::*;
@@ -4240,20 +4224,12 @@ mod pptp_dispatch_join_tests_7699 {
         neighbor_learn_ctx(forwarding).0
     }
 
-    /// Run the REAL stage over `frame`. `learn_from_live_frame: false` is
-    /// deliberate twice over: it keeps the neighbor-learn side (which would
-    /// dereference the UMEM) out of the way, AND it binds the decision that the
-    /// capture is NOT gated on that flag — adding `learn_from_live_frame &&` to
-    /// the capture condition reds every cell in this module.
-    fn run_stage(ctx: &WorkerContext<'_>, frame: &[u8]) {
-        run_stage_with_meta(ctx, frame, tcp_v4_meta(frame, 0x18));
-    }
-
-    fn run_stage_with_meta(
+    /// Run the real pre-policy parsing stage without simulating admission.
+    fn run_unadmitted_stage_with_meta(
         ctx: &WorkerContext<'_>,
         frame: &[u8],
         meta: UserspaceDpMeta,
-    ) {
+    ) -> Option<SessionFlow> {
         let area = MmapArea::new(4096).expect("mmap");
         let desc = crate::xsk_ffi::XdpDesc {
             addr: 0,
@@ -4269,7 +4245,27 @@ mod pptp_dispatch_join_tests_7699 {
             false,
             &mut last_learned,
             ctx,
-        );
+        )
+    }
+
+    /// Model an admitted control packet: the real stage parses it, then the
+    /// post-policy capture runs only on the successful forwarding path.
+    fn run_stage(ctx: &WorkerContext<'_>, frame: &[u8]) {
+        run_stage_with_meta(ctx, frame, tcp_v4_meta(frame, 0x18));
+    }
+
+    fn run_stage_with_meta(ctx: &WorkerContext<'_>, frame: &[u8], meta: UserspaceDpMeta) {
+        let flow = run_unadmitted_stage_with_meta(ctx, frame, meta);
+        if let Some(flow) = flow.as_ref()
+            && crate::afxdp::poll_stages::is_pptp_control_flow(flow)
+        {
+            crate::afxdp::poll_stages::capture_pptp_control_segment(
+                frame,
+                flow,
+                ctx.pptp_control,
+                0,
+            );
+        }
     }
 
     fn peer_queues(n: usize) -> Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> {
@@ -4278,16 +4274,10 @@ mod pptp_dispatch_join_tests_7699 {
             .collect()
     }
 
-    /// THE PRODUCTION JOIN: wire bytes -> the real stage -> the inbox -> the
-    /// real drain -> an association a data packet in EITHER direction resolves
-    /// against, AND the sibling workers told about it.
-    ///
-    /// RED ON REVERT: delete the `capture_pptp_control_segment(..)` call from
-    /// `stage_parse_flow_and_learn` and this fails at the first assert — the
-    /// inbox stays empty, so nothing is parsed, installed or broadcast. That
-    /// mutation was not available anywhere in #7699 before this change.
+    /// An admitted control segment is captured, drained and replicated, so
+    /// either GRE direction resolves through the resulting call association.
     #[test]
-    fn the_stage_captures_a_control_segment_and_the_drain_learns_it_7699() {
+    fn admitted_control_segment_is_captured_and_drain_learns_it_7699() {
         let ctx = stage_ctx();
         let inbox: &PptpControlInbox = ctx.pptp_control;
         let frame = call_reply_frame();
@@ -4296,9 +4286,7 @@ mod pptp_dispatch_join_tests_7699 {
         assert_eq!(
             inbox.pending_len(),
             1,
-            "the stage did not copy the TCP/1723 segment into the inbox — the \
-             hot-path push is the join, and without it every other #7699 cell \
-             still passes while the dataplane learns nothing"
+            "the admitted TCP/1723 segment was not copied into the control inbox"
         );
 
         let mut sessions = crate::session::SessionTable::new();
@@ -4335,6 +4323,73 @@ mod pptp_dispatch_join_tests_7699 {
                 "worker {i} was never told about the association"
             );
         }
+    }
+
+    /// The pre-policy stage must not publish call IDs. The denied-policy arm
+    /// exits before the admitted forwarding commit (the only production capture
+    /// site), so draining afterward installs nothing and a GRE packet remains
+    /// flowless.
+    #[test]
+    fn unadmitted_outgoing_call_reply_cannot_associate_subsequent_gre_11053() {
+        let ctx = stage_ctx();
+        let inbox: &PptpControlInbox = ctx.pptp_control;
+        let frame = call_reply_frame();
+        let flow = run_unadmitted_stage_with_meta(ctx, &frame, tcp_v4_meta(&frame, 0x18));
+        assert!(
+            flow.as_ref()
+                .is_some_and(crate::afxdp::poll_stages::is_pptp_control_flow),
+            "fixture must parse as the PPTP control flow"
+        );
+        assert_eq!(
+            inbox.pending_len(),
+            0,
+            "pre-policy parsing queued an Outgoing-Call-Reply before its verdict"
+        );
+
+        let mut sessions = crate::session::SessionTable::new();
+        let queues = peer_queues(2);
+        assert_eq!(
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(
+                inbox,
+                &mut sessions,
+                &queues,
+                T0,
+            ),
+            0
+        );
+        assert_eq!(sessions.pptp().resolve(IpAddr::V4(PAC), PAC_CALL_ID), None);
+        assert_eq!(sessions.pptp().resolve(IpAddr::V4(PNS), PNS_CALL_ID), None);
+
+        let mut gre = vec![0u8; 20];
+        gre[0] = 0x45;
+        gre[9] = crate::ip_proto::PROTO_GRE;
+        gre[12..16].copy_from_slice(&PNS.octets());
+        gre[16..20].copy_from_slice(&PAC.octets());
+        gre.extend_from_slice(&0x2001u16.to_be_bytes()); // PPTP GRE Key + version 1
+        gre.extend_from_slice(&0x880Bu16.to_be_bytes()); // PPP
+        gre.extend_from_slice(&0x05DCu16.to_be_bytes());
+        gre.extend_from_slice(&PAC_CALL_ID.to_be_bytes());
+        let total_len = gre.len() as u16;
+        gre[2..4].copy_from_slice(&total_len.to_be_bytes());
+        let mut meta = UserspaceDpMeta {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_GRE,
+            l3_offset: 0,
+            l4_offset: 20,
+            ..UserspaceDpMeta::default()
+        };
+        meta.flow_src_addr[..4].copy_from_slice(&PNS.octets());
+        meta.flow_dst_addr[..4].copy_from_slice(&PAC.octets());
+        assert!(
+            crate::afxdp::gre_discriminator::pptp_data_session_flow(
+                &gre,
+                meta,
+                &mut sessions,
+                T0,
+            )
+            .is_none(),
+            "GRE must remain unassociated after the denied control segment"
+        );
     }
 
     /// FREQUENCY, at the production site. The drain is CALLED every poll

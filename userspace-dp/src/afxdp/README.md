@@ -384,38 +384,37 @@ sync.
     sibling completeness fix on the success path and is preserved.
 - `poll_stages.rs` — sibling of `worker/`, not inside it. Holds the
   per-packet pipeline stages extracted in #946 Phase 1.
-  - **#7699 — the PPTP control-segment dispatch.**
-    `stage_parse_flow_and_learn` recognises a TCP flow with 1723 on EITHER
-    side (`is_pptp_control_flow`) and copies the segment's payload into
-    `WorkerContext::pptp_control` (`capture_pptp_control_segment`, `#[cold]`).
-    It does NOT parse. The worker's periodic drain
-    (`worker_queue::drain_pptp_control_inbox`, called from `loop_body`
-    beside the association expiry) parses, installs into the local table and
-    broadcasts to the siblings. Three things about this are load-bearing:
-    - **Why a stage and not `loop_body`.** No `&mut SessionTable` site in the
-      worker loop has a packet frame, and no stage has a mutable session
-      table — frame and table are never co-located. Writing through a shared
-      handle on `WorkerContext` is the same solution `dynamic_neighbors`
-      already uses, under the identical constraint its doc states: *the caller
-      does not need visibility into what was learned for the same packet*. An
-      association is needed by the GRE data packets that FOLLOW, never by the
-      control segment that taught it.
+  - **#7699/#11053 — admitted PPTP control-segment dispatch.**
+    `stage_parse_flow_and_learn` recognizes TCP flows with port 1723 but does
+    NOT capture their bytes: control association learning is authorization-
+    sensitive. The descriptor path bypasses the flow cache for control traffic
+    and copies a segment only after `build_live_forward_request_from_frame`
+    succeeds, which is after the session/policy and output-filter checks. The
+    cold copy goes into `WorkerContext::pptp_control`; parsing, installing and
+    broadcasting happen on the worker's periodic drain.
+    - **Why capture is post-admission.** A pre-policy segment, including a
+      spoofed Outgoing-Call-Reply, must not teach call IDs when its packet will
+      be denied. The association is needed by later GRE data, not by the
+      control segment itself.
     - **The interval gate lives in `PptpControlInbox::take_pending`, not at
       the call site.** The drain's caller runs at packet rate, so a call-site
       gate is one edit from becoming per-poll work — the defect #8399 shipped
-      when the association expiry landed above `expire_stale_entries_ha`'s
-      gate. Keeping it in the callee makes "how often" a property of the
-      function.
+      when association expiry landed above `expire_stale_entries_ha`'s gate.
     - **The drain installs locally AND broadcasts.**
-      `WorkerContext::peer_worker_commands` EXCLUDES this worker, so a
+      `WorkerContext::peer_worker_commands` excludes this worker, so a
       broadcast alone teaches everyone but the worker that saw the segment —
-      and RSS does not co-locate the control and data channels, so that
-      worker is as likely as any to be the one the GRE data lands on.
+      and RSS does not co-locate control and data channels.
+    - **Control-channel close is replicated.** An admitted FIN/RST calls
+      `forget_pptp_control_channel`; control-session expiry uses the same path.
+      The helper clears local calls, purges buffered Reply segments, and queues
+      a dedicated channel-scoped forget. Full peer queues are retried by the
+      periodic control-inbox drain; the close timestamp prevents a delayed
+      command from deleting a later call learned on a reused tuple.
 
-    Recognising the port is two comparisons on a tuple the stage already
-    parsed; COPYING additionally needs the TCP data-offset read
-    (`frame::tcp_payload_offset`). "Off the hot path" buys the parse, not the
-    test for whether to parse.
+    The control-port test is two comparisons on an already-parsed tuple;
+    copying additionally needs the TCP data-offset read
+    (`frame::tcp_payload_offset`) and remains cold/off the usual forwarding
+    path.
 
     **The DATA-channel resolve is wired** (`gre_discriminator::
     pptp_data_session_flow`, called from `poll_descriptor/mod.rs`). A version-1
