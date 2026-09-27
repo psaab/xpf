@@ -1165,7 +1165,7 @@ all 35 design paths exist, as checked in §4.2.
   `kernel-source-revision` manifest key beside the `:708-721` hold-verify
   fragment; value treated as an opaque exact-match token —
   agreement-checked, never parsed). REVIEW RECORD (SUPPLIED, not
-  deferred): `docs/reviews/reports/result-9506-kernel-allowlist-7.0.0-30.md`
+  deferred): `docs/pr/9506-delta/kernel-allowlist-7.0.0-30.md`
   — member identity (exact strings), source binding, per-branch table
   (RPS-map, RFS-table, TUN dispatch, 4KSTACKS, GRO, XDP, v4/v6 symmetry)
   each with claim + cited basis + machine-checked closing gate, Kconfig
