@@ -213,6 +213,11 @@ type Manager struct {
 	openInstanceSocket func(vi *vrrpInstance) error
 	runInstance        func(vi *vrrpInstance)
 	stopInstance       func(vi *vrrpInstance)
+	// ensureVIPFamilySockets proves a newly introduced address family has a
+	// send socket (and, on raw-socket fallback, starts its receiver) before
+	// updateVIPs publishes that family's addresses. Tests replace this with a
+	// no-network stub; production uses the instance socket setup.
+	ensureVIPFamilySockets func(vi *vrrpInstance, vips []string) error
 }
 
 // SetOnEventDrop registers a callback invoked when a VRRP event is dropped
@@ -237,9 +242,12 @@ func NewManager() *Manager {
 		subscribeAddrs:     netlink.AddrSubscribe,
 		resolveLinkName:    netlinkLinkName,
 		resolveIface:       net.InterfaceByName,
-		openInstanceSocket: func(vi *vrrpInstance) error { return vi.openSocket() },
-		runInstance:        func(vi *vrrpInstance) { go vi.run() },
-		stopInstance:       func(vi *vrrpInstance) { vi.stop() },
+		openInstanceSocket:    func(vi *vrrpInstance) error { return vi.openSocket() },
+		runInstance:           func(vi *vrrpInstance) { go vi.run() },
+		stopInstance:          func(vi *vrrpInstance) { vi.stop() },
+		ensureVIPFamilySockets: func(vi *vrrpInstance, vips []string) error {
+			return vi.ensureVIPFamilySockets(vips)
+		},
 	}
 }
 
@@ -542,10 +550,10 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	// buildFailReason records, per desired key, WHY its build did not complete
 	// on this pass (resolve / socket / family capability). It annotates the
 	// #5641 unbuilt-desired record computed after the loop; keys that build
-	// successfully are absent. A key whose build fails while an OLD instance
-	// keeps advertising (build-before-teardown, #2156) stays in m.instances
-	// under its key and is therefore NOT counted as unbuilt below — the RG is
-	// still in election with its previous VIP set, not dark.
+	// successfully are absent. If an ifindex-rebind build fails while an OLD
+	// instance remains registered under its key, that key is not counted as
+	// unbuilt below; its sockets may still be bound to the retired ifindex, so
+	// registration alone does not assert that the key is currently advertising.
 	buildFailReason := make(map[instanceKey]string)
 
 	// Add or update instances.
@@ -590,6 +598,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			// updateConfig arm below — otherwise a commit changing only
 			// reth-advertise-interval or gratuitous-arp-count is silently dropped
 			// until an unrelated restart (#5087).
+			existingVIPs := existing.vipsSnapshot()
 			if !ifindexChanged &&
 				existing.cfg.Priority == inst.Priority &&
 				existing.cfg.Preempt == inst.Preempt &&
@@ -598,18 +607,38 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 				existing.cfg.GARPCount == inst.GARPCount &&
 				existing.cfg.TrackInterface == inst.TrackInterface &&
 				existing.cfg.TrackPriorityCost == inst.TrackPriorityCost &&
-				vipsEqual(existing.cfg.VirtualAddresses, inst.VirtualAddresses) {
+				vipsEqual(existingVIPs, inst.VirtualAddresses) {
 				continue // No change.
 			}
-			// If only priority/preempt/tracking/advertise-interval/GARP-count
-			// changed (and the ifindex is unchanged), update in-place without
-			// stopping. Restarting would cause a 3s master-down gap where the
-			// node falsely becomes MASTER before hearing the peer. An ifindex
-			// change is NOT in-place-updatable — it requires a fresh socket — so
-			// it skips this arm and falls through to the build-before-teardown
-			// path.
-			if !ifindexChanged && vipsEqual(existing.cfg.VirtualAddresses, inst.VirtualAddresses) {
-				slog.Info("vrrp: priority update", "key", existing.key(),
+			// Config changes on a bound interface update in place. In
+			// particular, a VIP-set edit must never stop a MASTER: stop()
+			// sends priority-zero resignation adverts, which cause an
+			// immediate peer takeover and an unannounced out-and-back RG
+			// transition. If the edit introduces a new address family, open
+			// its send socket (and raw fallback receiver) before publishing
+			// the set; family sockets are retained when a family loses its
+			// last VIP.
+			if !ifindexChanged {
+				vipSetChanged := !vipsEqual(existingVIPs, inst.VirtualAddresses)
+				vipSocketsReady := true
+				if vipSetChanged {
+					oldV4, oldV6 := vipFamiliesIn(existingVIPs)
+					newV4, newV6 := vipFamiliesIn(inst.VirtualAddresses)
+					if (newV4 && !oldV4) || (newV6 && !oldV6) {
+						ensure := m.ensureVIPFamilySockets
+						if ensure == nil {
+							ensure = func(vi *vrrpInstance, vips []string) error {
+								return vi.ensureVIPFamilySockets(vips)
+							}
+						}
+						if err := ensure(existing, inst.VirtualAddresses); err != nil {
+							slog.Warn("vrrp: failed to open newly configured VIP family; keeping existing set",
+								"key", existing.key(), "err", err)
+							vipSocketsReady = false
+						}
+					}
+				}
+				slog.Info("vrrp: in-place config update", "key", existing.key(),
 					"old_pri", existing.cfg.Priority, "new_pri", inst.Priority)
 				trackIfaceChanged := existing.cfg.TrackInterface != inst.TrackInterface
 				instCfg := *inst
@@ -623,45 +652,41 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 				if trackIfaceChanged {
 					m.seedTrackState(existing, inst.TrackInterface)
 				}
+				if vipSetChanged && vipSocketsReady {
+					if err := existing.updateVIPs(inst.VirtualAddresses); err != nil {
+						slog.Warn("vrrp: VIP set updated with kernel truth; reconcile will retry incomplete actuation",
+							"key", existing.key(), "err", err)
+					}
+				}
 				continue
 			}
-			// VIPs changed OR the ifindex drifted — the instance must be
-			// restarted (changing the VIP set or rebinding to a new ifindex
-			// requires re-opening sockets and re-running the state machine).
+			// Ifindex drift cannot be updated in place: the old per-interface
+			// sockets remain bound to the stale ifindex, so a replacement with
+			// fresh sockets is required. VIP-set commits do not enter this path.
 			// BUILD THE REPLACEMENT BEFORE TEARING DOWN the old one (#2156):
 			// a transient member-link failure (carrier flap, mid-rename by
 			// networkd) used to delete the working instance and then
 			// `continue` on InterfaceByName/openSocket error, orphaning the
-			// RG out of VRRP election until an operator re-commit. Falls
-			// through to the shared build block below; the old instance is
-			// only stopped+replaced on a fully-built replacement. The restart
-			// preserves the configured priority/preempt/tracking (it rebuilds
-			// from the same desired `inst`) and re-applies sync-hold
-			// suppression below, so an ifindex rebind cannot spuriously
-			// preempt or break the sync hold. RG role in the cluster state
-			// machine is driven separately (heartbeat / debounced priority),
-			// not reset here.
-			if ifindexChanged {
-				slog.Info("vrrp: restarting instance (ifindex changed)",
-					"key", existing.key(), "old_ifindex", existing.iface.Index)
-			} else {
-				slog.Info("vrrp: restarting instance", "key", existing.key(),
-					"old_pri", existing.cfg.Priority, "new_pri", inst.Priority)
-			}
+			// RG out of VRRP election until an operator re-commit. The old
+			// instance is only stopped+replaced on a fully-built replacement.
+			slog.Info("vrrp: restarting instance (ifindex changed)",
+				"key", existing.key(), "old_ifindex", existing.iface.Index)
 		}
 
 		// Build the (possibly replacement) instance. On ANY build failure we
-		// leave m.instances untouched: an existing instance keeps advertising
-		// its old VIP set (strictly better than dropping out of election), and
-		// a brand-new key is simply not created yet. The 2s reconcile re-drive
-		// (daemon reconcileVRRPInstances) and the two existing UpdateInstances
-		// callers retry until the interface returns. No placeholder state is
-		// added to m.instances; a brand-new key with no live instance is instead
-		// recorded in m.unbuiltDesired below (#5641) so RGVRRPReady reports the
-		// RG NOT ready while a sibling VIP is dark, rather than reporting ready
-		// off the mere existence of one built key. This resolve is the
-		// authoritative one bound into the new instance; the #2294 drift probe
-		// above is only a cheap detector.
+		// leave m.instances untouched: an existing instance keeps its previous
+		// config/state in the map, while a brand-new key is simply not created.
+		// For ifindex drift its socket may remain bound to the retired ifindex;
+		// this ordering avoids destroying the old object before the replacement
+		// is proven buildable, but it does not claim that a stale socket is
+		// still advertising. The 2s reconcile re-drive (daemon
+		// reconcileVRRPInstances) and the two existing UpdateInstances callers
+		// retry until the interface returns. No placeholder state is added to
+		// m.instances; a brand-new key with no live instance is instead recorded
+		// in m.unbuiltDesired below (#5641) so RGVRRPReady reports the RG NOT
+		// ready while a sibling VIP is dark, rather than reporting ready off the
+		// mere existence of one built key. This resolve is authoritative;
+		// #2294's drift probe above is only a cheap detector.
 		iface, err := m.resolveIface(inst.Interface)
 		if err != nil {
 			slog.Warn("vrrp: interface not found, keeping existing instance",
@@ -1056,10 +1081,8 @@ func (m *Manager) Status() string {
 		// m.mu.RLock races a concurrent failover priority update — a
 		// diagnostic-only data race go test -race flags. Mirrors the snapshot
 		// idiom in advertInterval/getPriority (#6230). VirtualAddresses is
-		// immutable per instance (a VIP change rebuilds the whole instance under
-		// m.mu.Lock, see instance_addr.go vipAddrSet / instance.go vipFamilies),
-		// so reading it under only m.mu.RLock was already race-free; it is
-		// deep-copied here defensively alongside the genuinely-raced fields.
+		// mutable under vi.mu on an in-place VIP-set commit (#10780), so it is
+		// deep-copied under this same lock alongside the raced scalar fields.
 		// getState() already RLocks internally, so it stays outside this block;
 		// vi.key() reads only immutable identity fields.
 		vi.mu.RLock()

@@ -155,6 +155,13 @@ func GatewayProbeTarget(ipNet *net.IPNet) (net.IP, bool) {
 //
 // This method may be called in a goroutine from becomeMaster().
 func (vi *vrrpInstance) sendGARP(force bool) {
+	vi.sendGARPFor(vi.vipsSnapshot(), force)
+}
+
+// sendGARPFor emits a burst for a stable VIP snapshot. The in-place commit
+// path passes only newly-added VIPs so an address-set edit does not flap
+// neighbor entries for addresses that remained owned throughout.
+func (vi *vrrpInstance) sendGARPFor(vips []string, force bool) {
 	epoch := vi.garpEpoch.Load()
 	ownerGen := vi.ownerGen.Load()
 	if !vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen) {
@@ -193,7 +200,7 @@ func (vi *vrrpInstance) sendGARP(force bool) {
 	stillMaster := func() bool {
 		return vi.getState() == StateMaster && vi.garpEpoch.Load() == epoch
 	}
-	for _, vip := range vi.cfg.VirtualAddresses {
+	for _, vip := range vips {
 		ip, ipNet, err := net.ParseCIDR(vip)
 		if err != nil {
 			continue

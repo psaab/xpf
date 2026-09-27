@@ -58,11 +58,11 @@ func (vi *vrrpInstance) setLocalIPv6(ip net.IP) {
 // vipAddrSet returns the configured virtual addresses (prefix stripped) as a
 // set. Used to EXCLUDE VIPs when selecting our own advert source: during
 // split-brain both nodes hold the VIP, so sending from it would make the peer
-// filter our adverts as self-sent. cfg.VirtualAddresses is set once at
-// newInstance and never mutated in place (VIP changes go through a full
-// instance rebuild), so reading it without the lock is safe — the same
-// pattern the sendPacket() lazy resolve already relies on.
+// filter our adverts as self-sent. VIP sets may be updated in place at config
+// commit (#10780), so read the mutable slice under vi.mu.
 func (vi *vrrpInstance) vipAddrSet() map[string]bool {
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
 	s := make(map[string]bool, len(vi.cfg.VirtualAddresses))
 	for _, vip := range vi.cfg.VirtualAddresses {
 		addr := vip
