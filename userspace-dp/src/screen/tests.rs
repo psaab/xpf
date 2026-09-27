@@ -141,6 +141,21 @@ fn make_state(zone: &str, profile: ScreenProfile) -> ScreenState {
     state
 }
 
+#[test]
+fn destination_session_limit_gate_requires_destination_limit_11057() {
+    let no_profile = ScreenState::new();
+    assert!(!no_profile.any_session_limit_dst_configured());
+
+    let mut profile = default_profile();
+    profile.session_limit_src = 128;
+    let source_only = make_state("trust", profile.clone());
+    assert!(!source_only.any_session_limit_dst_configured());
+
+    profile.session_limit_dst = 256;
+    let destination_configured = make_state("trust", profile);
+    assert!(destination_configured.any_session_limit_dst_configured());
+}
+
 // ================================================================
 // Land attack
 // ================================================================

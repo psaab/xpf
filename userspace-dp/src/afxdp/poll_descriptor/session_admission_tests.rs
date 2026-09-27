@@ -1,14 +1,13 @@
 use super::*;
 
-/// #2134/#10985: tests for the new-flow session-limit enforcement decision.
-/// These drive `new_flow_session_limit_drop` against real `SessionTable`
-/// counts, pinning the threshold boundary, per-zone accounting, and the
-/// unconfigured-zone short-circuit.
+/// #2134/#10985/#11057: tests for new-flow session-limit enforcement. These
+/// drive the decision against real SessionTable counts, including default
+/// source caps, overrides, and per-zone isolation.
 #[cfg(test)]
 mod new_flow_session_limit_tests {
     use super::*;
-    use crate::screen::ScreenProfile;
-    use crate::session::{SessionMetadata, SessionOrigin};
+    use crate::screen::{ScreenProfile, ScreenState};
+    use crate::session::{DEFAULT_MAX_SESSIONS_PER_SOURCE, SessionMetadata, SessionOrigin};
     use crate::test_zone_ids::{TEST_DMZ_ZONE_ID, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID};
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -140,23 +139,79 @@ mod new_flow_session_limit_tests {
     }
 
     #[test]
-    fn unconfigured_zone_never_drops() {
-        // Zone present but no limit configured.
-        let fw = forwarding_with_limit("untrust", 0, 0);
+    fn default_session_limit_source_quota_caps_one_source_without_blocking_others() {
+        let fw = ForwardingState::default();
         let mut table = SessionTable::new();
-        table.set_session_limit_active(true);
-        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 52));
+        // Mirrors worker startup with an empty screen-profile snapshot.
+        let no_profile_snapshot = ScreenState::new();
+        table.set_session_limit_active(no_profile_snapshot.any_session_limit_dst_configured());
+        let attacker = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 52));
+        let other = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 53));
         let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
-        install_n(&mut table, TEST_LAN_ZONE_ID, src, dst, 40000, 50);
-        assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "untrust", TEST_LAN_ZONE_ID, src, dst),
-            None,
-            "no limit configured -> never drop"
+
+        install_n(
+            &mut table,
+            TEST_LAN_ZONE_ID,
+            attacker,
+            dst,
+            40000,
+            DEFAULT_MAX_SESSIONS_PER_SOURCE,
         );
-        // Unknown zone name -> short-circuit None.
         assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "nonexistent", TEST_LAN_ZONE_ID, src, dst),
-            None
+            table.session_limit_src_count(TEST_LAN_ZONE_ID, attacker),
+            DEFAULT_MAX_SESSIONS_PER_SOURCE
+        );
+        assert_eq!(
+            new_flow_session_limit_drop(
+                &fw,
+                &table,
+                "unconfigured",
+                TEST_LAN_ZONE_ID,
+                attacker,
+                dst
+            ),
+            Some("session-limit-src"),
+            "default source quota applies without a screen profile"
+        );
+        let zero_limit_fw = forwarding_with_limit("unconfigured", 0, 0);
+        assert_eq!(
+            new_flow_session_limit_drop(
+                &zero_limit_fw,
+                &table,
+                "unconfigured",
+                TEST_LAN_ZONE_ID,
+                attacker,
+                dst
+            ),
+            Some("session-limit-src"),
+            "zero source limit selects the default rather than disabling protection"
+        );
+
+        install_n(&mut table, TEST_DMZ_ZONE_ID, attacker, dst, 50000, 1);
+        assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, attacker), 1);
+        assert_eq!(
+            new_flow_session_limit_drop(
+                &fw,
+                &table,
+                "other-zone",
+                TEST_DMZ_ZONE_ID,
+                attacker,
+                dst
+            ),
+            None,
+            "the default source quota is independently enforced per ingress zone"
+        );
+        assert_eq!(
+            new_flow_session_limit_drop(
+                &fw,
+                &table,
+                "unconfigured",
+                TEST_LAN_ZONE_ID,
+                other,
+                dst
+            ),
+            None,
+            "one source reaching its quota must not block another source"
         );
     }
 
@@ -184,10 +239,10 @@ mod new_flow_session_limit_tests {
         let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 54));
         let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5));
 
-        // Rebuilding after enabling must keep the ten trust sessions out of
-        // dmz's two-slot count.
+        // Source accounting is always active for the default quota; enabling
+        // the optional destination counter must not change its zone scope.
         install_n(&mut table, TEST_TRUST_ZONE_ID, src, dst, 41000, 10);
-        assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
+        assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 10);
         table.set_session_limit_active(true);
         assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 10);
         assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 0);

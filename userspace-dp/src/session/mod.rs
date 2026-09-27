@@ -101,6 +101,9 @@ pub(crate) const WHEEL_TICK_NS_FOR_TEST: u64 = wheel::WHEEL_TICK_NS;
 #[cfg(test)]
 pub(crate) const WHEEL_BUCKETS_FOR_TEST: usize = wheel::WHEEL_BUCKETS;
 const DEFAULT_MAX_SESSIONS: usize = 131072;
+/// Default per-worker concurrent sessions per source IP and ingress zone.
+/// A positive `limit-session source-ip-based` value overrides this ceiling.
+pub(crate) const DEFAULT_MAX_SESSIONS_PER_SOURCE: u32 = 4096;
 /// #9856: one page of deferred terminal removals per worker. Overflow is
 /// counted and makes the active export fail closed rather than growing an
 /// unbounded `ExpiredSession` queue.
@@ -1421,29 +1424,20 @@ pub(crate) struct SessionTable {
     /// dropped_gone / expired / re_bucketed). Accumulator overhead
     /// is 4-5 increments per popped entry — sub-µs at typical loads.
     last_pop_stats: WheelPopStats,
-    /// #2134/#10985: OFF-gate for per-zone, per-IP session-limit accounting. True iff any
-    /// screen profile configures `limit-session source-ip-based` /
-    /// `destination-ip-based`. When false (the ~99% deployment), every
-    /// counter-maintenance op below short-circuits so install/remove pay
-    /// nothing for an unconfigured feature (#1357 codegen-sensitivity).
-    /// Set by `set_session_limit_active`, driven from the worker's
-    /// forwarding/screen-profile snapshot apply.
+    /// #2134/#10985/#11057: optional destination-IP count gate. The source-IP
+    /// map is always maintained for the default per-source quota.
+    /// Set by `set_session_limit_active`, driven from the worker's applied
+    /// forwarding/screen-profile snapshot.
     session_limit_active: bool,
-    /// #2134/#3122/#10310/#10985: per-source-IP count of PRESENT forward-
-    /// direction logical sessions, keyed by ingress zone and source IP.
-    /// The shared counted-class predicate is
-    /// `!is_reverse && install::session_limit_origin_counted(origin)`: true
-    /// HA-peer-synced sessions count for failover enforcement, while a
-    /// WorkerLocalImport replica does not consume a second logical slot.
-    /// Incremented at the two create sinks (fresh install + synced import),
-    /// decremented at the sole removal sink (`remove_entry`); in-place HA
-    /// transitions are balanced, with only an uncounted-replica→local
-    /// promotion adding a slot. Evicted the moment a count hits 0 so the map
-    /// is bounded by distinct live (zone, IP) pairs (#2128 — no phantom-zero
-    /// entries). Read non-mutating at the new-flow check.
+    /// #2134/#3122/#10310/#10985/#11057: per-source-IP count of present
+    /// forward-direction logical sessions, keyed by ingress zone and source
+    /// IP. Always maintained, including when no screen profile configures a
+    /// session limit. HA-peer-synced sessions count; WorkerLocalImport
+    /// replicas and transient local seeds do not.
+    /// Evicted at zero so the map is bounded by distinct live (zone, IP) pairs.
     session_limit_src_counts: SeededZoneIpMap<u32>,
-    /// #2134/#10985: per-(ingress-zone, destination-IP) mirror of the
-    /// source-IP count map.
+    /// #2134/#10985/#11057: optional per-(ingress-zone, destination-IP)
+    /// mirror, maintained only when destination-session limits are configured.
     session_limit_dst_counts: SeededZoneIpMap<u32>,
     /// #4915: per-worker monotonic session-id counter. Starts at 1 (so a real
     /// id is never 0 — 0 is the "unknown" wire sentinel) and is bumped once per
@@ -2135,63 +2129,22 @@ impl SessionTable {
         self.opening_overrides.get(&ingress_zone).copied()
     }
 
-    /// #2134/#10985: drive the per-zone, per-IP session-limit OFF-gate from the worker's
-    /// applied screen-profile snapshot. `active` is "any zone configures
-    /// `limit-session source-ip-based`/`destination-ip-based`" (mirrors
-    /// `ScreenState::has_advanced_features`'s limit predicate). Called at
-    /// startup and on every runtime forwarding-snapshot rotation, right
-    /// next to `set_timeouts` / `ScreenState::update_profiles`.
+    /// #2134/#10985/#11057: drive optional destination-IP session-limit
+    /// accounting from the applied screen-profile snapshot. Source-IP counts
+    /// remain active independently to enforce the default per-source quota.
     ///
-    /// Clear-on-disable: when the gate transitions to false, both count
-    /// maps are cleared. Removing `limit-session` at runtime stops the
-    /// decrement paths, so without this the maps would freeze at stale,
-    /// over-counted values and a later re-enable would resume from wrong
-    /// values and spuriously block an under-limit IP. Mirrors the
-    /// `ScreenState::update_profiles` retain discipline.
-    ///
-    /// #4377 back-count-on-enable: on the OFF->ON edge the maps are
-    /// REBUILT from the live slab so they reflect EVERY session that will
-    /// later fire the decrement. Not back-counting is NOT benign for the
-    /// decrement side: the sole removal sink (`remove_entry`) decrements
-    /// for any forward non-seed entry whenever the gate is active at
-    /// removal, with no per-entry record of whether the entry was ever
-    /// counted. A forward session installed while the gate was OFF (or
-    /// after a disable cleared the maps) is therefore uncounted, yet its
-    /// teardown while ON still decrements — an increment-less decrement
-    /// that drives `count[X]` BELOW the live counted-session count for X.
-    /// `saturating_sub` + evict-at-0 hide the underflow, so X's count can
-    /// reach 0 while sessions are live and X is handed a fresh full
-    /// allotment (cap bypass). Rebuilding on enable makes every decrement
-    /// balance an increment. The walk uses the same shared counted-class
-    /// predicate as the install/decrement sinks (`!is_reverse &&
-    /// install::session_limit_origin_counted(origin)`): true peer-SYNCED
-    /// sessions are counted, while WorkerLocalImport replicas are excluded
-    /// and only the two transient-local seeds remain uncounted. O(N) once per
-    /// rare enable, no per-entry memory cost.
+    /// Destination counts clear on disable and are rebuilt on the OFF->ON
+    /// edge, so live sessions are represented before teardown can decrement.
     pub fn set_session_limit_active(&mut self, active: bool) {
         if !active {
-            self.session_limit_src_counts.clear();
             self.session_limit_dst_counts.clear();
         } else if !self.session_limit_active {
-            // #4377: OFF->ON edge — rebuild the count maps from every live
-            // counted-class session so decrements always balance an
-            // increment. Walk via `key_to_handle` (the authoritative
-            // primary index, matching `iter_with_origin`) so an orphan
-            // slab record without a forward-key mapping is skipped.
-            // Disjoint-field borrows (`key_to_handle` / `entries` read,
-            // count maps mutated) — inline the increment rather than call
-            // `session_limit_inc`, which would take `&mut self` whole.
             for (key, handle) in &self.key_to_handle {
                 if let Some(record) = self.entries.get(*handle as usize) {
                     let ingress_zone = record.entry.metadata.ingress_zone;
                     if !record.entry.metadata.is_reverse
                         && install::session_limit_origin_counted(record.entry.origin)
                     {
-                        let c = self
-                            .session_limit_src_counts
-                            .entry((ingress_zone, key.src_ip))
-                            .or_insert(0);
-                        *c = c.saturating_add(1);
                         let c = self
                             .session_limit_dst_counts
                             .entry((ingress_zone, key.dst_ip))
@@ -2225,21 +2178,20 @@ impl SessionTable {
             .unwrap_or(0)
     }
 
-    /// #2134/#3122/#10310/#10985: increment the per-zone, per-IP counts for
-    /// a freshly-counted session. Caller MUST have already evaluated the
-    /// shared counted-class predicate (`!is_reverse &&
-    /// install::session_limit_origin_counted(origin)`) — this helper only
-    /// adds the OFF-gate guard. `saturating_add` never wraps.
+    /// #2134/#3122/#10310/#10985/#11057: increment the always-on source count
+    /// and, when enabled, the optional destination count for a freshly
+    /// counted session. Caller MUST have evaluated the shared counted-class
+    /// predicate (`!is_reverse && install::session_limit_origin_counted(origin)`).
     #[inline]
     fn session_limit_inc(&mut self, ingress_zone: u16, src_ip: IpAddr, dst_ip: IpAddr) {
-        if !self.session_limit_active {
-            return;
-        }
         let c = self
             .session_limit_src_counts
             .entry((ingress_zone, src_ip))
             .or_insert(0);
         *c = c.saturating_add(1);
+        if !self.session_limit_active {
+            return;
+        }
         let c = self
             .session_limit_dst_counts
             .entry((ingress_zone, dst_ip))
@@ -2247,20 +2199,21 @@ impl SessionTable {
         *c = c.saturating_add(1);
     }
 
-    /// #2134/#10985: decrement one zone/IP pair for a removed counted session
-    /// and evict each map entry the moment its count reaches 0 (#2128).
-    /// Caller MUST have evaluated the counted-class predicate.
+    /// #2134/#10985/#11057: decrement the always-on source count and optional
+    /// destination count for a removed counted session, evicting each map
+    /// entry at zero (#2128). Caller MUST have evaluated the counted-class
+    /// predicate.
     #[inline]
     fn session_limit_dec(&mut self, ingress_zone: u16, src_ip: IpAddr, dst_ip: IpAddr) {
-        if !self.session_limit_active {
-            return;
-        }
         let src_key = (ingress_zone, src_ip);
         if let Some(c) = self.session_limit_src_counts.get_mut(&src_key) {
             *c = c.saturating_sub(1);
             if *c == 0 {
                 self.session_limit_src_counts.remove(&src_key);
             }
+        }
+        if !self.session_limit_active {
+            return;
         }
         let dst_key = (ingress_zone, dst_ip);
         if let Some(c) = self.session_limit_dst_counts.get_mut(&dst_key) {

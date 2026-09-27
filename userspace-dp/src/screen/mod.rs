@@ -1621,16 +1621,13 @@ impl ScreenState {
         })
     }
 
-    /// #2134: true iff any zone configures a per-IP session limit
-    /// (`limit-session source-ip-based` / `destination-ip-based`). Drives
-    /// the `SessionTable` session-limit OFF-gate so install/remove pay
-    /// nothing when the feature is unconfigured. Separate from
-    /// `has_advanced_features` (which also covers port-scan / ip-sweep,
-    /// neither of which touches the SessionTable count).
-    pub fn any_session_limit_configured(&self) -> bool {
+    /// #2134/#11057: true iff any zone configures a destination-IP session
+    /// limit. Drives optional destination accounting; source accounting
+    /// remains active for the default per-source quota.
+    pub fn any_session_limit_dst_configured(&self) -> bool {
         self.zones
             .values()
-            .any(|z| z.profile.session_limit_src > 0 || z.profile.session_limit_dst > 0)
+            .any(|z| z.profile.session_limit_dst > 0)
     }
 }
 

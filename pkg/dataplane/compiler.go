@@ -3,7 +3,9 @@ package dataplane
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -22,6 +25,50 @@ import (
 	"github.com/psaab/xpf/pkg/networkd"
 	"github.com/vishvananda/netlink"
 )
+
+const rssHashKeySize = 40
+
+var (
+	rssHashKeyOnce sync.Once
+	rssHashKey     [rssHashKeySize]byte
+	rssHashKeyErr  error
+)
+
+// readRSSHashKey is separated from the CSPRNG source so tests can supply a
+// deterministic reader without pinning production's per-boot key.
+func readRSSHashKey(source io.Reader) ([rssHashKeySize]byte, error) {
+	var key [rssHashKeySize]byte
+	if _, err := io.ReadFull(source, key[:]); err != nil {
+		return [rssHashKeySize]byte{}, err
+	}
+	return key, nil
+}
+
+// rssHashKeyForBoot returns one cryptographically random key shared by every
+// interface for this dataplane process lifetime. Production callers cannot
+// configure a deterministic key; tests inject their fixed vector into
+// configureRSSHashKeyWithKey where deterministic command/output assertions are
+// needed.
+func rssHashKeyForBoot() ([rssHashKeySize]byte, error) {
+	rssHashKeyOnce.Do(func() {
+		rssHashKey, rssHashKeyErr = readRSSHashKey(cryptorand.Reader)
+	})
+	return rssHashKey, rssHashKeyErr
+}
+
+func formatRSSHashKey(key [rssHashKeySize]byte) string {
+	const digits = "0123456789abcdef"
+	var encoded [rssHashKeySize*3 - 1]byte
+	for i, b := range key {
+		offset := i * 3
+		encoded[offset] = digits[b>>4]
+		encoded[offset+1] = digits[b&0x0f]
+		if i+1 < len(key) {
+			encoded[offset+2] = ':'
+		}
+	}
+	return string(encoded[:])
+}
 
 // runEthtool runs `ethtool <args...>` bounded by a 15s timeout. Every
 // caller in this file executes during dp.ApplyConfig under the daemon's
@@ -1764,6 +1811,9 @@ func (r *CompileResult) tuneInterfaceBuffers(link netlink.Link) {
 	// Increase ring buffers via ethtool -G. Query current/max first.
 	out, err := runEthtool("-g", name)
 	if err != nil {
+		// A failed ring query does not prevent RSS programming. No subsequent
+		// ethtool -G reset can erase this key because the query failed.
+		configureRSSHashKey(name)
 		r.ethtoolApplied["buffers:"+name] = true
 		return
 	}
@@ -1815,14 +1865,24 @@ func (r *CompileResult) tuneInterfaceBuffers(link netlink.Link) {
 	r.ethtoolApplied["buffers:"+name] = true
 }
 
-// configureRSSHashKey sets a well-distributed RSS hash key via ethtool -X.
-// This improves AF_XDP queue utilization when traffic has limited source
-// diversity (e.g. few clients with same src IP, varying only src port).
+// configureRSSHashKey sets the per-boot Toeplitz key via ethtool -X. Sharing a
+// CSPRNG key across interfaces keeps each box's tuple-to-worker mapping stable
+// for its process lifetime without exposing a fleet-wide precomputable key.
 func configureRSSHashKey(name string) {
-	key := "6d:5a:56:da:25:5b:0e:c2:41:67:25:3d:43:a3:8f:b0:" +
-		"d0:ca:2b:cb:ae:7b:30:b4:77:cb:2d:a3:80:30:f2:0c:" +
-		"8c:da:5b:6a:25:30:17:9a"
-	out, err := runEthtool("-X", name, "hkey", key)
+	key, err := rssHashKeyForBoot()
+	if err != nil {
+		slog.Warn("failed to generate per-boot RSS hash key",
+			"interface", name, "err", err)
+		return
+	}
+	configureRSSHashKeyWithKey(name, key)
+}
+
+// configureRSSHashKeyWithKey is the deterministic seam for tests: production
+// always supplies rssHashKeyForBoot(), while tests can pin known tuples/key
+// vectors without making the deployed RSS key predictable.
+func configureRSSHashKeyWithKey(name string, key [rssHashKeySize]byte) {
+	out, err := runEthtool("-X", name, "hkey", formatRSSHashKey(key))
 	if err != nil {
 		slog.Debug("failed to set RSS hash key",
 			"interface", name, "err", fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out))))

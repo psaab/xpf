@@ -2148,16 +2148,16 @@ live-session-create publish site, and `cli_show_flow.go` renders `val.SessionID`
 fallback ONLY when `val.SessionID == 0` (an absent/legacy id). Additive and
 node-local-safe.
 
-## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation)
+## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation; #11057 default quota)
 
 Junos `set security screen ids-option <name> limit-session
-source-ip-based <n>` / `destination-ip-based <n>` applies the configured
-threshold to traffic entering that zone. The `SessionTable` owns each
-per-zone, per-IP count (`session_limit_src_counts` /
-`session_limit_dst_counts`), keyed by `(ingress_zone_id, IP)`, NOT by IP
-alone or by `ScreenState`. This prevents sessions from other zones from
-consuming this zone's allowance while still tracking real session lifecycle
-at the create/remove choke points.
+source-ip-based <n>` overrides the default per-source quota when `<n>` is
+positive. An unset or zero source limit uses the default of 4096 concurrent
+sessions per source IP, ingress zone, and worker. Destination limits remain
+opt-in through `destination-ip-based <n>`. The `SessionTable` owns per-zone,
+per-IP counts (`session_limit_src_counts` / `session_limit_dst_counts`),
+keyed by `(ingress_zone_id, IP)`, NOT by IP alone or by `ScreenState`. This
+prevents sessions from other zones from consuming this zone's allowance.
 
 **Counted-class predicate (#3122 / #10310).** A session counts iff it is
 forward-direction and real, and is not a worker-local replica:
@@ -2178,14 +2178,14 @@ peer-synced session must NOT re-emit a delta (that would echo the peer's
 own session back to it, a sync loop). Before #3122 the two shared one
 condition; they diverged when the count became origin-agnostic.
 
-**Maintenance sites (all OFF-gated by `session_limit_active`).** The
-per-zone, per-IP count is incremented at the two CREATE sinks and decremented
-at the sole REMOVE sink. The in-place HA origin transitions keep the count
-balanced for already-counted rows: an ordinary counted import → local promote
-and local → `SyncImport` demote are count-neutral. A `WorkerLocalImport`
-replica → local promote or `SyncImport` demote crosses from uncounted to
-counted and increments exactly once. An in-place ingress-zone change moves a
-counted session from its old zone/IP pair to its new one.
+**Maintenance sites.** The source-IP count is always incremented at the two
+CREATE sinks and decremented at the sole REMOVE sink to enforce the default
+quota. The optional destination-IP mirror is gated by
+`session_limit_active`. In-place HA origin transitions keep counted rows
+balanced: an ordinary counted import → local promote and local → `SyncImport`
+demote are count-neutral. A `WorkerLocalImport` replica → local promote or
+`SyncImport` demote crosses from uncounted to counted and increments once. An
+in-place ingress-zone change moves a counted session between zone/IP pairs.
 
 | Transition | Site | Action |
 |---|---|---|
@@ -2222,58 +2222,39 @@ per new flow, before its session exists, via a non-mutating query for the
 `(ingress_zone_id, IP)` pair matching the profile's zone, and emits the
 `session-limit-src` / `session-limit-dst` screen-drop event + counter.
 
-**OFF-gate + clear-on-disable + back-count-on-enable (#4377).**
-`set_session_limit_active(active)` is driven from the applied
-screen-profile snapshot (startup + runtime-reload, next to `set_timeouts`
-/ `ScreenState::update_profiles`). When no zone configures `limit-session`
-the gate is OFF and every maintenance op short-circuits, so the ~99% of
-deployments pay nothing. On an ON→OFF runtime transition the gate setter
-**clears both count maps** — otherwise the decrement paths stop firing
-and a later re-enable would resume from stale, over-counted values and
-spuriously block an under-limit IP.
+**Optional destination-map gate and back-count-on-enable (#4377).**
+`set_session_limit_active(active)` is driven by applied profiles with a
+destination session limit; source-limit overrides do not enable it. The gate
+controls only optional destination-IP accounting. Source counts remain always
+maintained for the default source quota, even when no zone configures
+`limit-session`. Disabling destination accounting clears that map, while
+source counts remain current. On an OFF→ON edge, the setter rebuilds
+destination counts from the live slab using the same
+`!is_reverse && session_limit_origin_counted(origin)` predicate as the
+install/removal sinks. This ensures every later destination decrement has a
+matching increment; source counts need no rebuild. WorkerLocalImport replicas
+remain excluded from both maps until the existing promote/demote transition
+classifies them as counted.
 
-On an OFF→ON transition the gate setter **rebuilds both count maps from
-the live slab** (#4377). This is NOT optional / benign: install and
-`remove_entry` share the same counted-class predicate but keep no per-entry
-record of whether the entry was actually charged — each is gated only on
-`session_limit_active` at the moment of the op. A forward session
-installed while the gate was OFF (or after a disable cleared the maps) is
-uncounted, yet its teardown while ON still fires the sole-sink decrement.
-That increment-less decrement drives `count[X]` BELOW the live
-counted-session count; `saturating_sub` + evict-at-0 hide the underflow,
-so `count[X]` can reach 0 while sessions are live and X is handed a fresh
-full allotment — a **cap bypass** on the enable edge (or any
-disable→enable toggle). The back-count walks `key_to_handle` (the
-authoritative primary index) and increments each counted-class entry's
-`(ingress_zone_id, IP)` map pairs
-(`!is_reverse && session_limit_origin_counted(origin)`).
-This is the SAME predicate as the install/decrement sinks: peer-SYNCED
-sessions are back-counted exactly as their later teardown will decrement
-them, while WorkerLocalImport replicas are not charged a second time. Now
-every decrement balances an increment and the cap enforces on the true
-logical count. O(N) once per rare enable, no per-entry memory. Regression:
-`session_limit_backcount_on_enable_covers_preexisting_sessions`,
+Regressions: `session_limit_destination_backcount_on_enable_covers_preexisting_sessions`,
 `session_limit_clear_on_disable`, and the two-zone
-`session_limit_counts_and_thresholds_are_isolated_per_zone_10985` acceptance
-cell covering rebuild, both count maps, and the threshold boundary.
+`session_limit_counts_and_thresholds_are_isolated_per_zone_10985` cell cover
+the destination-map rebuild, source-map persistence, and threshold boundary.
 
-**Per-worker scoping — the effective cap is `configured × num_workers`
-(#2186), without replica double-charging (#10310).** Each worker owns its
-`SessionTable` by value, so per-zone, per-IP counts are maintained
-independently per worker (per RX queue). With RSS spreading *distinct*
-source/destination across all N RX queues, the limit is enforced N times in
-parallel, so the effective admitted cap is approximately
-`configured_limit × number_of_RX_queues/workers`. A `WorkerLocalImport`
-replica of one logical flow does not add another slot on every sibling.
-The configured value is the per-worker ceiling.
+**Per-worker scoping (#2186), without replica double-charging (#10310).**
+Each worker owns its `SessionTable` by value, so source quotas are enforced
+independently per worker and ingress zone. The unconfigured default is
+4096 sessions per source IP, per zone, per worker; a positive configured
+`source-ip-based <n>` replaces 4096 with `<n>` on each worker. With RSS
+spreading flows across N workers, the effective admitted cap is approximately
+`per_worker_limit × N`. A `WorkerLocalImport` replica of one logical flow
+does not add another slot on every sibling.
 
-Worked example (loss userspace cluster, 6 mlx5 RX queues → 6 workers):
-`limit-session source-ip-based 2` admits approximately 12 distinct sessions
-(2 × 6) from one source in one ingress zone before screen-drops engage. A
-single session
-not six slots. Operators sizing a cap should divide the desired global ceiling
-by the worker count, or treat the configured value as an approximate
-per-source/destination bound that scales with queue count.
+For example, on a 6-worker loss-userspace cluster, the default allows at most
+approximately 24,576 sessions from one source IP in one ingress zone if RSS
+distributes that source's flows evenly. Configuring
+`limit-session source-ip-based 2` instead allows approximately 12. Operators
+sizing a node-wide threshold should account for the worker count.
 
 Decision record: `docs/research/2128-2134-screen-session-limit/plan.md`.
 
