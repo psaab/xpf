@@ -770,9 +770,21 @@ fix9506_wait_outer_paths() {
 
 fix9506_install_inner_routes() {
     local shape="$1" count="$2" node i route stn
+    local deadline=$(($(date +%s) + FIX9506_CONVERGE_TIMEOUT))
     for node in "$FIX9506_NODE0" "$FIX9506_NODE1"; do
         for ((i = 0; i < count; i++)); do
             stn="$(fix9506_stn "$i")"
+            # Config commit returns before the async XFRM reconcile creates
+            # the kernel link. Wait for that applied state before installing
+            # routes, rather than turning the normal convergence window into
+            # an immediate "Cannot find device" setup failure.
+            while ! fix9506_remote "$node" "ip link show dev $stn" >/dev/null 2>&1; do
+                if (( $(date +%s) >= deadline )); then
+                    echo "fix9506: timed out waiting for $stn on $node before route install" >&2
+                    return 1
+                fi
+                sleep 1
+            done
             if [[ "$(fix9506_shape_family "$shape")" == v4 ]]; then
                 route="$(fix9506_inner4 "$i")"
                 fix9506_remote "$node" "ip route replace $route dev $stn" || return 1

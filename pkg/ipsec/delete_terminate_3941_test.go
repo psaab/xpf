@@ -1,6 +1,7 @@
 package ipsec
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -55,6 +56,17 @@ func (r *swanctlRecorder) terminateCalls() []string {
 	return names
 }
 
+// initiateCalls returns the child names passed to `swanctl --initiate`.
+func (r *swanctlRecorder) initiateCalls() []string {
+	var names []string
+	for _, c := range r.calls {
+		if len(c) == 3 && c[0] == "--initiate" && c[1] == "--child" {
+			names = append(names, c[2])
+		}
+	}
+	return names
+}
+
 func (r *swanctlRecorder) sawListSAs() bool {
 	for _, c := range r.calls {
 		if len(c) > 0 && c[0] == "--list-sas" {
@@ -73,16 +85,19 @@ func newRecordingManager(t *testing.T, rec *swanctlRecorder) *Manager {
 	return m
 }
 
-// vpnCfg builds an IPsecConfig whose VPNs each name a direct peer IP + PSK so
-// renderConfig emits a real connection block.
+// vpnCfg builds an IPsecConfig whose VPNs each name a stable direct peer IP
+// plus PSK, so removing another VPN does not change a survivor's fingerprint.
 func vpnCfg(names ...string) *config.IPsecConfig {
 	vpns := make(map[string]*config.IPsecVPN, len(names))
-	for i, n := range names {
+	for _, n := range names {
+		peerOctet := 0
+		for _, r := range n {
+			peerOctet = (peerOctet*31 + int(r)) % 254
+		}
 		vpns[n] = &config.IPsecVPN{
 			LocalAddr: "10.0.1.1",
-			// distinct routable peer per VPN
-			Gateway: "10.0.2." + string(rune('1'+i)),
-			PSK:     config.Secret("secret-" + n),
+			Gateway:   "10.0.2." + strconv.Itoa(peerOctet+1),
+			PSK:       config.Secret("secret-" + n),
 		}
 	}
 	return &config.IPsecConfig{
@@ -193,10 +208,10 @@ func TestDeleteVPNNoActiveSAIsNoOp(t *testing.T) {
 	// decision, but it must never have issued a --terminate.
 }
 
-// TestAddAndModifyVPNDoNotTerminate: adding a new VPN or modifying an
-// existing one leaves every SA in place — no --terminate, and no --list-sas
-// probe at all when nothing was removed.
-func TestAddAndModifyVPNDoNotTerminate(t *testing.T) {
+// TestAddingVPNDoesNotTerminate: adding a new VPN leaves existing SAs in
+// place and does not query the live-SA list when no connection departed or
+// changed.
+func TestAddingVPNDoesNotTerminate(t *testing.T) {
 	rec := &swanctlRecorder{}
 	m := newRecordingManager(t, rec)
 
@@ -205,7 +220,6 @@ func TestAddAndModifyVPNDoNotTerminate(t *testing.T) {
 	}
 	rec.listSAs = liveSA("site-a")
 
-	// Add site-b (site-a unchanged).
 	if err := m.Apply(vpnCfg("site-a", "site-b")); err != nil {
 		t.Fatalf("add Apply: %v", err)
 	}
@@ -213,17 +227,136 @@ func TestAddAndModifyVPNDoNotTerminate(t *testing.T) {
 		t.Fatalf("adding a VPN must not terminate, got %v", got)
 	}
 	if rec.sawListSAs() {
-		t.Fatalf("adding a VPN must not query SAs (nothing removed)")
+		t.Fatalf("adding a VPN must not query SAs (nothing removed or changed)")
+	}
+}
+
+// TestChangedVPNSecurityTerminatesAndReinitiatesLiveSA proves a same-name
+// PSK rotation and narrowed traffic selector evict the established SA and
+// negotiate a replacement using the newly loaded settings.
+func TestChangedVPNSecurityTerminatesAndReinitiatesLiveSA(t *testing.T) {
+	rec := &swanctlRecorder{}
+	m := newRecordingManager(t, rec)
+
+	old := vpnCfg("site-a")
+	old.VPNs["site-a"].LocalID = "10.10.0.0/24"
+	old.VPNs["site-a"].RemoteID = "10.20.0.0/24"
+	if err := m.Apply(old); err != nil {
+		t.Fatalf("initial Apply: %v", err)
 	}
 
-	// Modify site-a's PSK; still no removal.
-	mod := vpnCfg("site-a", "site-b")
-	mod.VPNs["site-a"].PSK = config.Secret("rotated")
-	if err := m.Apply(mod); err != nil {
-		t.Fatalf("modify Apply: %v", err)
+	rec.listSAs = liveSA("site-a")
+	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
+	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
+	changed.VPNs["site-a"].RemoteID = "10.20.0.0/24"
+	if err := m.Apply(changed); err != nil {
+		t.Fatalf("changed Apply: %v", err)
+	}
+
+	if got := rec.terminateCalls(); len(got) != 1 || got[0] != "site-a" {
+		t.Fatalf("same-name security change must terminate the old IKE SA, got %v", got)
+	}
+	if got := rec.initiateCalls(); len(got) != 1 || got[0] != "site-a" {
+		t.Fatalf("live changed connection must be reinitiated with its new settings, got %v", got)
+	}
+	terminateAt, initiateAt := -1, -1
+	for i, call := range rec.calls {
+		if len(call) == 3 && call[0] == "--terminate" && call[1] == "--ike" {
+			terminateAt = i
+		}
+		if len(call) == 3 && call[0] == "--initiate" && call[1] == "--child" {
+			initiateAt = i
+		}
+	}
+	if terminateAt < 0 || initiateAt < 0 || terminateAt >= initiateAt {
+		t.Fatalf("replacement must be initiated after stale SA termination, got calls %v", rec.calls)
+	}
+}
+
+// TestTrafficSelectorOnlyChangeTerminatesAndReinitiatesLiveSA proves a
+// selector change by itself invalidates an established connection.
+func TestTrafficSelectorOnlyChangeTerminatesAndReinitiatesLiveSA(t *testing.T) {
+	rec := &swanctlRecorder{}
+	m := newRecordingManager(t, rec)
+
+	old := vpnCfg("site-a")
+	old.VPNs["site-a"].LocalID = "10.10.0.0/24"
+	old.VPNs["site-a"].RemoteID = "10.20.0.0/24"
+	if err := m.Apply(old); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+
+	rec.listSAs = liveSA("site-a")
+	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
+	changed.VPNs["site-a"].RemoteID = "10.20.0.0/24"
+	if err := m.Apply(changed); err != nil {
+		t.Fatalf("selector-only Apply: %v", err)
+	}
+
+	if got := rec.terminateCalls(); len(got) != 1 || got[0] != "site-a" {
+		t.Fatalf("selector change must terminate the old IKE SA, got %v", got)
+	}
+	if got := rec.initiateCalls(); len(got) != 1 || got[0] != "site-a" {
+		t.Fatalf("selector change must reinitiate the live connection, got %v", got)
+	}
+}
+
+// TestUnchangedRenderedContentDoesNotFlap proves repeated and cosmetic-only
+// applies leave an established connection alone.
+func TestUnchangedRenderedContentDoesNotFlap(t *testing.T) {
+	rec := &swanctlRecorder{}
+	m := newRecordingManager(t, rec)
+	if err := m.Apply(vpnCfg("site-a")); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+	rec.calls = nil
+	rec.listSAs = liveSA("site-a")
+
+	cosmetic := vpnCfg("site-a")
+	cosmetic.VPNs["site-a"].Name = "display-only"
+	if err := m.Apply(cosmetic); err != nil {
+		t.Fatalf("cosmetic-only Apply: %v", err)
 	}
 	if got := rec.terminateCalls(); len(got) != 0 {
-		t.Fatalf("modifying a VPN must not terminate, got %v", got)
+		t.Fatalf("non-rendered VPN name must not terminate an SA, got %v", got)
+	}
+	if got := rec.initiateCalls(); len(got) != 0 {
+		t.Fatalf("non-rendered VPN name must not trigger renegotiation, got %v", got)
+	}
+	if rec.sawListSAs() {
+		t.Fatal("identical rendered connection content must not query live SAs")
+	}
+}
+
+func TestChangedVPNTerminateDebtIsRetried(t *testing.T) {
+	rec := &swanctlRecorder{}
+	m := newRecordingManager(t, rec)
+	old := vpnCfg("site-a")
+	if err := m.Apply(old); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+	rec.listSAs = liveSA("site-a")
+	rec.terminateErr = map[string]error{"site-a": errTerminate}
+	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
+	if err := m.Apply(changed); err == nil {
+		t.Fatal("changed Apply must report a failed stale-SA termination")
+	}
+	if got := rec.initiateCalls(); len(got) != 0 {
+		t.Fatalf("failed termination must not start a replacement, got %v", got)
+	}
+
+	rec.terminateErr = nil
+	if err := m.Apply(changed); err != nil {
+		t.Fatalf("retry Apply: %v", err)
+	}
+	if got := rec.terminateCalls(); len(got) != 2 || got[1] != "site-a" {
+		t.Fatalf("changed-connection teardown debt must be retried, got %v", got)
+	}
+	if got := rec.initiateCalls(); len(got) != 1 || got[0] != "site-a" {
+		t.Fatalf("successful retry must reinitiate the changed connection, got %v", got)
 	}
 }
 

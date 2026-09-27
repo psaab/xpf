@@ -1318,6 +1318,10 @@ test-dhcp-lease-failover:
 test-t12-g2-9506:
 	./test/incus/with-cluster.sh '9506 S5 T12/G2' -- ./test/incus/t12-g2-9506.sh
 
+.PHONY: test-ipsec-content-change-10878
+test-ipsec-content-change-10878:
+	./test/incus/with-cluster.sh '10878 IPsec content change' -- ./test/incus/ipsec-content-change-10878.sh
+
 # Hermetic selftest for the T12/G2 harness (parser/observer units, no cluster).
 test-t12-g2-9506-lib:
 	./test/incus/t12-g2-9506.sh --selftest
