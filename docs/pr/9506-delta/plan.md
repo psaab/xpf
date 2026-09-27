@@ -1,9 +1,10 @@
 # 9506 delta plan: ship P-MECH permits on the current master (research/9506-delta)
 
-- Review state: **PARENT REVIEW PENDING; this worker assigns no final
-  PLAN-READY/PLAN-KILL verdict.** Parent will dispatch three independent,
-  blinded plan reviewers (Opus-lens, hostile, security) against this committed
-  revision and determine the terminal plan verdict.
+- Review state: **v2 revision; parent re-dispatch pending; this worker assigns
+  no final PLAN-READY/PLAN-KILL verdict.** Round one at `7b99163fa` returned
+  2-of-3 NEEDS-MAJOR (Opus-lens + security; hostile READY with 3 minors).
+  This revision addresses those findings; the parent will re-dispatch the
+  blinded gate against this committed revision.
 - Date: 2026-09-27. Worktree `/var/tmp/worktrees/9506-research`, branch `research/9506-delta`.
 - Pins: `origin/master = 028c4e4e2` (assessed); Sep-20 code tip `b71c52d60`
   ("pmech: land deny-only D11 bridge (#9506) (#10483)"); Sep-20 design tip
@@ -28,8 +29,8 @@ and no branch-only behavior to adopt:
   quarantine fallback, A1–A5 cells.
 - Master since Sep-20 is a **deny-only + shadow** data plane with the full D11
   verdict/attestation/counter/witness substrate. The original defect's
-  enforcement half is still open: no production ACCEPT exists on the diverted
-  path (see §4 absence proofs).
+  enforcement half is still open: no production policy-permit/q0-write join
+  exists on the diverted path (see §4 absence proofs).
 
 Remaining slice order (from the Sep-25 delta assessment, still current):
 **P1 → P2 → V1(structural) → P3 → V2**. F1 is done. P2 is the issue-closing
@@ -85,6 +86,9 @@ it does not retire it.
   crypto authority); AF_XDP bind on xfrmi/B1 (refuted on four independent
   grounds); nftables `hook forward` while armed outside the fence model
   (refuted); re-litigating B2 economics without loss-cluster numbers.
+- Closure boundary: stateful INPUT is out of the proposed #9506 acceptance
+  only if the issue owner signs off before P2 lands. No such sign-off is
+  claimed here; without it, P2 cannot be called issue-closing.
 
 ## 3. Prior-work inventory (branches + commits + docs)
 
@@ -108,7 +112,7 @@ present and identical).
 
 ### 4.1 b71c52d60 file set: churn summary
 
-25 of 33 files changed since the bridge; 8 are unchanged. This census is the
+24 of 33 files changed since the bridge; 9 are unchanged. This census is the
 complete file set from `git diff-tree --no-commit-id --name-only -r b71c52d60`,
 compared with `origin/master` at `028c4e4e2`. Changed-file counts and latest
 commit identifiers below come from `git log b71c52d60..origin/master -- <path>`.
@@ -150,7 +154,7 @@ No file was deleted or renamed.
 | `userspace-dp/src/slowpath_reinject_9506_tests.rs` | 1; `5312ec41d` attestation | Test-only attestation coverage; does not prove general permit/session/NAT behavior. |
 | `userspace-dp/tests/runtime_view_publish_canary.rs` | unchanged (0) | Publisher canary unchanged; still useful for the D13 no-extra-view-load contract. |
 
-Thus 25 changed + 8 unchanged = all 33 Sep-20 commit paths. The change classes
+Thus 24 changed + 9 unchanged = all 33 Sep-20 commit paths. The change classes
 are not uniform: protocol/test fixtures moved through v35; NFQUEUE fragment and
 authority behavior changed; worker/session/policy code had substantial unrelated
 security hardening; D11 counters and F1 were added. The affected consumer
@@ -186,7 +190,7 @@ of the most recent file drift, not a claim that intervening changes are absent.
 | `userspace-dp/src/protocol/snapshot.rs` | 4; `0722b51f7` SYN-admission selectors | `IpsecTunnelRowSnapshot` and `ipsec_tunnel_rows` carry current row identity (`:501,541`), alongside generation-bound snapshot semantics. P1’s protocol change must keep both serialized row shape and Go/Rust equality in lockstep. |
 | `userspace-dp/src/afxdp/ipsec_inner.rs` | 1; `1838aaf59` counter export | The module contract says the final V1 join is deny-only with no q0 enqueue or NF_ACCEPT (`:3-7`); `adjudicate_descriptor` is the worker decision entry (`:394`). P2 needs a new explicit permit outcome and join. |
 | `userspace-dp/src/afxdp/ipsec_inner_queue.rs` | 0; unchanged | `IpsecInnerDescriptor` and `IpsecInnerVerdict` define the bounded request/result types (`:145,183`); `try_enqueue`/`close_and_drain` enforce bounded admission and retirement (`:488,512`). No production Permit variant exists. |
-| `userspace-dp/src/afxdp/poll_descriptor/mod.rs` | 60; `ec59234a1` fragment lifetime hardening | The ordinary packet path calls `evaluate_policy_result_with_icmp` (`:3992`); its fragment/policy order changed materially. Re-derive G3 consult order at P2; do not transplant the D11 worker entry into this path blindly. |
+| `userspace-dp/src/afxdp/poll_descriptor/mod.rs` | 60; `ec59234a1` fragment lifetime hardening | The ordinary packet path calls `evaluate_policy_result_with_icmp` at TWO consult sites (`:3992` and `:7645`); fragment/policy order changed materially. Re-derive G3 consult order at P2 from both sites; do not transplant the D11 worker entry into this path blindly. |
 | `userspace-dp/src/afxdp/logical_ingress.rs` | 0; unchanged | `build_logical_ingress_packet` is the shared logical-frame synthesis/reparse helper (`:79`), already called by `ipsec_inner.rs:289`; keep one canonical path with explicit inputs. |
 | `userspace-dp/src/slowpath_reinject_9506.rs` | 1; `5312ec41d` attestation | `ADMIT_INPUT_HOOK=6` and `ADMIT_TUNNEL_ROW_MISSING=12` remain closed (`:51,54`); `resolve_ipsec_inner_verdict` maps success only to `WouldPermit`, explicitly never q0/NF_ACCEPT (`:1103-1118`). P2 needs a distinct q0-written terminal join. |
 | `userspace-dp/src/slowpath.rs` | 2; `b157b8e23` test gating | `submit_ipsec_inner_v1` sends an admitted descriptor to the bounded D11 transport (`:1283-1333`); `submit_adjudicated_frame` selects it (`:1337-1344`). The existing `tx_delegated` writer is separate; join worker Permit to that single writer without NF_ACCEPTing the held original. |
@@ -203,6 +207,21 @@ of the most recent file drift, not a claim that intervening changes are absent.
 This is 35/35 design paths; the 33-file code-commit census above is separately
 closed. Each path now records its current master symbols (or explicit absence),
 not just a generic drift consequence. Core permit gaps follow.
+
+#### 4.2.1 v2 gate-only paths beyond the canonical 35
+
+These additional paths were introduced by the round-one review blockers; they
+are not part of the canonical §5.2 35-path count above.
+
+| Additional P2/evidence path | Current symbol evidence at master `028c4e4e2` | Gate implication |
+|---|---|---|
+| `pkg/routing/rules.go` | `ribGroupLeakRulePriority=30000` (`:64-70`); rib-group rules set Dst/Table/Priority/Family but no IifName (`:675-678`); next-table rules set IifName (`:329-333`); PBR rejects missing IifName (`:937-948`). | M1 must evaluate actual live selector/action/order; PBR/FBF-only refusal is not sufficient. |
+| `pkg/nftables/transit_barrier.go` | `TransitFenceDeliveredCounterName` is documented as a downstream-of-TUN witness, not a verdict (`:17-22`); q0 mark/interface conjunction is declared at `:32-43`, counter increments at `:276-280`. | `delivered` proves fence-match only; M2 requires a separate egress-table oracle. |
+| `userspace-dp/src/server/helpers/session_sync.rs` | `resolve_synced_discriminator` accepts absent tags as `None` for non-GRE imports, refuses unknown tags, and treats absent/unknown DELETE as `None` (`:100-131`). | P1 must define authority-scoped absent-tag handling for IPsec-inner TCP/UDP while preserving native imports. |
+| `pkg/dataplane/userspace/protocol_ha.go` | `TunnelDiscriminator` is carried as opaque u64 and explicitly owned by Rust `session/discriminator.rs` (`:188-225,398-411`). | No Go codec: P1 updates the carrier only if wire shape changes; codec tests live with Rust owner. |
+| `pkg/cluster/sync_protocol.go` | HA session values encode the opaque discriminator (`:252-258,422-424`) and decode length-gated values (`:801-804,987-990`). | P1 consumer census includes binary encode/decode, import, delete, and old-peer absence paths. |
+| `test/incus/t12-g2-9506.sh` | Local executable defaults to `xpfd` and compares remote running `xpfd` hashes on both nodes (`:2894-2902`); no userspace-dp helper attestation is present there. | O5 requires source-bound manifests plus running hashes for both binaries on both nodes and kernel/classifier identity; wrong/missing artifact is VOID. |
+
 
 ### 4.3 Symbol-level drift (design §5.2 / Sep-25 coverage map vs master)
 
@@ -236,20 +255,28 @@ ABSENT (still owed — the mechanism; each verified by negative grep this run):
   drop (`pipeline.go:743-745`). `VerdictAccept` exists only for
   `PipelineShadow` (`pipeline.go:460-484,811-812`). `submit_adjudicated_frame`
   → `submit_ipsec_inner_v1` admits to worker transport only — no
-  verdict→`tx_delegated` split. The D11 attestation arm
-  (`dispatchAttestEligible`, `pipeline_attest_10484.go:778-797`) is narrow and
-  selector-armed only; ordinary frames stay deny-only. **This is the original
-  defect, still open.**
+  verdict→`tx_delegated` split, no production policy-permit/q0-write join.
+  The D11 attestation arm (`dispatchAttestEligible`,
+  `pipeline_attest_10484.go:778-797`) is narrow and selector-armed only;
+  ordinary frames stay deny-only. **This is the original defect, still open.**
 - S9.5 INPUT (D12a-A): `ADMIT_INPUT_HOOK=6` refusal stands; **no
   `InputPermitCommitter` / `CompletionInputReady` anywhere**; D12a-C1/C2 proof
   cells not run.
-- M1: no `xpf-usp1` exclusion in any `pkg/routing` rule manager (negative
-  grep) — RPDB non-steering unproven, likely false under PBR/FBF.
-- M2: no main-table egress oracle (no post-write domain confirmation;
-  `delivered` counts fence matches, not egress table).
-- M3/M4: `ingress_prefixes` frozen-membership enforcement + commit
-  revalidation, and shared-device hook/conntrack inventory, not found outside
-  design text (verify at P2 slice time; coarse VRF-enslaved refusal exists).
+- M1: no q0 RPDB non-steering proof. The current fallback is wrong-sized:
+  rib-group leak rules carry Dst/Table/Priority/Family with NO ingress selector
+  at pref 30000, before main (`rules.go:64-70,675-678`), so PBR-free config can
+  still steer q0 off main; ordinary PBR rules are already ingress-scoped
+  (`rules.go:939-948`), so PBR presence alone is not proof q0 is steered.
+- M2: no post-write egress-domain oracle. `delivered` is the
+  `xpf_transit_q0_delivered` fence-match witness (`transit_barrier.go:17-22,
+  276-280`), not proof of the table selected for q0 egress.
+- M3: per-tunnel `ingress_prefixes` membership and all-six-D5c commit
+  revalidation are absent outside design text; this is a blocking P2-entry
+  gate, not a slice-time follow-up. Route-based selector pairs default to
+  `0.0.0.0/0,::/0`, so selectors provide zero inner-source admission.
+- M4: shared-device hook/conntrack/RPF/martian/`accept_local` inventory is
+  absent outside design text; prove it or refuse the q0 configuration before
+  any policy Permit.
 
 New constraints since Sep-20 (compatible, must be respected):
 
@@ -285,63 +312,173 @@ all 35 design paths exist, as checked in §4.2.
 
 ### P1 — S9.4 session discriminator (pre-req for stateful permits)
 
-- Files: `userspace-dp/src/session/{discriminator.rs,key.rs,lookup.rs,mod.rs}`
-  + HA wire codec (`routing_domain_wire.rs` + Go mirror) + protocol floor bump
-  (both planes lockstep, exact-equality handshake; current v35).
-- Work: `Ipsec(if_id)` class (forward + reverse arms), cross-discriminator
-  alias index (bounded, multiplicity/eviction/generation checks), ambiguous-
-  reverse refusal, unknown-tag fail-closed import, E9/E10/E30 mapping.
-  Follow the `Pptp(handle)` precedent (direction-symmetric derived handle,
-  own wire-tag window) — do not build the discriminator from a
-  direction-varying packet value (#8382 lesson).
-- Acceptance: forward separation; reverse unique/ambiguous/native-miss;
-  unknown-tag import refusal; HA wire round-trip; unit cells fail-on-revert.
+- Files: `userspace-dp/src/session/{discriminator.rs,key.rs,lookup.rs,mod.rs}`;
+  `userspace-dp/src/afxdp/{flow_cache.rs,session_delta.rs,ha/session_domain.rs,worker/loop_body/mod.rs,cos/flow_hash.rs,icmp_embed/{parse.rs,mod.rs,nat64_match.rs}}`;
+  `userspace-dp/src/event_stream/codec/session_sync.rs`;
+  Rust interfaces `protocol/{binding.rs,control.rs,security.rs}` and
+  `server/{helpers/session_sync.rs,handlers/sync_session.rs}`; Go carriers
+  `pkg/dataplane/userspace/{eventstream.go,manager_sessionsync_request.go,protocol.go,protocol_ha.go,daemon_ha_userspace_convert.go}`;
+  `pkg/cluster/sync_protocol.go`. `discriminator.rs` owns the u64 tag codec;
+  allocate a disjoint IPsec class there; `routing_domain_wire.rs` is a separate
+  u32 routing-domain codec and MUST NOT encode the P-MECH discriminator.
+  Go/cluster remain opaque carriers. Gate use on explicit peer support for the
+  new identity; config-snapshot v35 alone is not an HA session-sync capability.
+  Unknown tags remain fail-closed.
+- Work: add `Ipsec(if_id)` as a config/tunnel-row-derived identity, never from
+  packet contents. Carry it through forward/reverse key transforms, bounded
+  cross-discriminator aliasing, import/export, install/delete/expiry,
+  worker-local/shared lookup, flow-cache, and HA paths. State native-exact-hit
+  precedence explicitly: reject colliding identities atomically at install, or
+  count native and IPsec candidates before choosing; an exact native hit MUST
+  NOT hide an ambiguous IPsec alias. Keep `None` as the native/untagged class
+  and update the enum's "everything but GRE" documentation. For an
+  authority-known IPsec tunnel, absent or unknown tags MUST NOT downgrade an
+  imported TCP/UDP key to native `None`; ordinary untagged native imports
+  remain importable.
+- Consumer contract: `worker/loop_body.rs` policy rebind currently accepts a
+  non-`None` tag only for protocol 47; extend it to recover IPsec identity only
+  from an exact peer/tunnel-generation authority. CoS flow hashing must mix
+  `if_id`; IPv4/IPv6 ICMP quoted-key and NAT64 matching must derive the same
+  identity from an authoritative unique tunnel, otherwise remain unresolved/
+  miss rather than wildcard across `if_id`s. Session open/close codecs,
+  session-delta JSON, binary HA, shared/local indices, reverse/NAT transforms,
+  expiry, and flow-cache consumers must preserve one identity end to end.
+  DELETE handling must never treat absent/unknown IPsec identity as a wildcard
+  or purge sibling IPsec aliases; legacy broad purge stays GRE-only.
+- Stability gate: P1 is strictly blocking for P2. Before any Permit exists,
+  prove xfrmi recreate, `if_id` change, and zone-move fencing with a
+  generation-bound STALE→DROP result, including HA unknown-tag refusal. If an
+  `if_id` cannot be frozen per generation under a total order, replace it with
+  a daemon-minted stable handle; do not fall back to tuple-only identity.
+- Acceptance: two `if_id`s with overlapping 5-tuples, both insertion orders,
+  native exact-hit collision precedence; reverse unique/ambiguous/native-miss;
+  same-tuple different-worker lookup; alias multiplicity/eviction/generation;
+  disjoint wire-tag round-trip against GRE/PPTP tags; absent/unknown and
+  old/mixed-peer refusal on JSON and binary HA paths; authority-scoped
+  policy-rebind; CoS separation; and IPv4/IPv6 ICMP/NAT64 quote resolution (no
+  authority/ambiguous `if_id` remains an unresolved miss). Test exact HA
+  import/delete and absent-tag under-match (never delete sibling IPsec keys),
+  generation retirement, xfrmi recreate/if_id-change/zone-move races.
+  Compile-valid behavioral mutant: collapsing IPsec identity to `None` must
+  merge sessions and fail.
 
-### P2 — S9.5 FORWARD permit join (closes the original defect)
+### P2 — S9.5 FORWARD policy-permit/q0-write join (closes the original defect)
 
-- Files: `pkg/nfqueue/pipeline.go` (replace the `V1PermitSuppressed` deny
-  with a policy-permit-to-q0 join; the held NFQUEUE original remains terminal
-  `VerdictDrop` after completion, including written and uncertain outcomes);
-  `pkg/nfqueue/reinject_socket.go` (existing submit/completion authority);
-  `userspace-dp/src/slowpath.rs` and
-  `userspace-dp/src/slowpath_reinject_9506.rs` (join worker policy Permit to
-  the single `tx_delegated` q0 writer and report its terminal outcome);
-  worker stage order (`afxdp/poll_descriptor/`, G3 consult order);
-  `pkg/routing/{routes,routing}.go` (D_usp1/main-254 inventory, ECMP
-  ownership, frozen `ingress_prefixes`); `pkg/daemon/ipsec_reinject_supervisor.go`
-  (owner/lease commit); `pkg/ipsec/policy.go` (selector provenance for
-  M3); metrics/witness join.
-- Verdict contract: a policy permit is **not** `nfqueue.VerdictAccept`.
-  P2’s permitted forwarding path is a successful q0 write; the original held
-  NFQUEUE skb is terminally DROPed so the same frame cannot also continue
-  through the kernel path. Definitive q0 refusal rolls back state exactly
-  once; ambiguous/timeout completion is possibly-emitted, is never retried,
-  and still terminally DROPs the held original. Any alternate design using
-  NF_ACCEPT must first replace the q0 path and prove there is exactly one
-  forwarding path for every result.
-- Work: FORWARD session/NAT state provisional until the q0 write linearizes
-  commit. Re-ground G3 order against #10679 and outer-claim against #10516 at
-  slice time (do not copy Sep-20 assumptions).
-- Acceptance: the issue's bar — denied AND permitted IPv4/IPv6
-  decrypted-ingress flows with policy/session/counter evidence, and an
-  observed single-path outcome (one q0 write plus original DROP, never both
-  q0 write and NF_ACCEPT); HA + MTU behaviour, pricing gate (same-thread
-  ~111ns or batched B>=3), M1–M4 must-proves or authorized scope cuts,
-  fail-closed at every intermediate.
+- Files: `pkg/nfqueue/pipeline.go` and its fragment/permit regression
+  contract in `pipeline_9506_test.go`; `pkg/nfqueue/nfqueue.go` (per-packet
+  verdict partials); `pkg/nfqueue/reinject_socket.go`; Rust
+  `afxdp/ipsec_inner_queue.rs`, `afxdp/ipsec_inner.rs`, worker context and
+  `afxdp/worker/loop_body/mod.rs`; `slowpath.rs` and
+  `slowpath_reinject_9506.rs`; `pkg/daemon/ipsec_reinject_supervisor.go`,
+  `ipsec_topology_owner_9506.go`, and `ipsec_host_fence_reconcile_9506.go`;
+  `pkg/routing/{rules,routes,routing}.go`; `pkg/ipsec/policy.go`; API
+  metrics/witness and the separate V1/V2 evidence harness. The writer is the
+  existing single `tx_delegated` outlet unless its early P2 single-writer/
+  limiter proof fails; in that case land the bounded queue split BEFORE
+  enabling a policy Permit.
+- P2-entry blockers — ALL must PASS before any production policy Permit can
+  enqueue a q0 write:
+  1. P1 identity, HA, and stale-generation gates above.
+  2. M1 exact admitted-RPDB proof or an equally exact mandatory refusal gate
+     (defined below), both address families, with a named lifecycle owner that
+     closes/fences permits before any rule/route change invalidates the proof.
+  3. M2 q0 egress-oracle design and packet-correlated proof plan; `delivered`
+     alone cannot authorize a Permit. If no oracle can distinguish main-table
+     254 egress from other routing domains, remain deny-only/re-plan.
+  4. M3 frozen per-tunnel source membership, every-frame check, all-six-identity
+     commit revalidation, and the E21 cross-tunnel-source cell below.
+  5. G3 consult-vs-skip order re-derived from both current
+     `poll_descriptor/mod.rs` sites (`:3992`, `:7645`), `policy.rs`, NAT,
+     fragment, and route code BEFORE the permit arm. SA-gated outer/inner
+     interaction (#10516), teardown-from-source, MTU and IPv6-parity cells
+     pass here, not after permits in V2.
+  6. Refuse both-family fragments before `FragPool`/worker admission; test
+     late fragments and generation/name reuse for zero q0 writes. Replace the
+     current `pipeline_9506_test.go` late-fragment expectation of a new
+     incomplete pool set with the fail-closed no-pool/no-q0 contract.
+  7. Add generation-bound `PMechFlipAuthorizer` (or an owner-approved
+     equivalent activation protocol) to the single shared OPEN predicate at
+     `tryOpenIpsecPermitAfterFenceAck`/`tryOpenPermit`; recheck peer
+     compatibility and failover-refusal state at that writer. A race with
+     ordinary host-fence reconciliation, incomplete activation, stale
+     generation, or incompatible peer MUST leave OPEN false.
+  8. Prove the single-writer `tx_delegated` plus limiter split before the
+     Permit arm; if it fails, implement and bound the queue split first.
+  9. Parent records owner sign-off that stateful INPUT is OUT of #9506 closure
+     scope; without that explicit sign-off, P2 cannot be called issue-closing.
+- Ownership/state-publication contract: current `IpsecInnerVerdict` carries
+  only request/decision data and `drain_verdicts_into` releases slab/flow/
+  tombstone ownership before exposing it. P2 must replace that safe-for-deny
+  boundary with a Permit-owned payload or immutable slab handle plus an
+  owner-held provisional session/NAT transaction (actual resources/references
+  and undo data, not only a phase enum). The sole state owner performs
+  `CommitProvisional` or `RollbackProvisional`; transition is monotonic and
+  compare-by-expected-phase, never an owner-matching phase overwrite.
+  Required phases: `Queued → Adjudicated → Prepared → WriteSubmitted →
+  Written | Refused | Uncertain → Finalized`. The writer returns exactly one
+  terminal result to the owner. Provisional state is not visible as an
+  established session: related reverse lookups during preparation fail closed;
+  on `Written`, owner commit/publication precedes release to ordinary lookups.
+  `Refused` means proven no write and rolls back once. `Uncertain` is possibly
+  emitted: no retry and no rollback; retain a generation-fenced uncertain
+  owner record, deny reuse/related lookup until safe owner retirement, and
+  release bytes only after the writer relinquishes its reference. Define the
+  post-restart/worker-death owner recovery for every phase before coding.
+- Exactly-one-path contract: policy Permit is NOT `nfqueue.VerdictAccept`.
+  A permitted frame has one successful q0 write and the original held NFQUEUE
+  skb terminally DROPs; never pair `VerdictBatch(ACCEPT)` with q0 for the same
+  frame. A partial NFQUEUE batch must reconcile each disposed prefix packet
+  and every uncertain suffix packet by identity; no retry-forward. Bound or
+  remove worker-verdict requeue so terminal results are idempotent and cannot
+  be replayed as a second write. Definitive refusal rolls back once; timeout,
+  write-started error, lost completion, or partial-batch ambiguity is
+  possibly-emitted/no-retry/no-rollback and still cannot NF_ACCEPT the original.
+- Acceptance: the issue bar — denied AND permitted IPv4/IPv6 decrypted-ingress
+  with policy/session/counter evidence; packet-correlated one-q0-write plus
+  original-DROP proof; HA, MTU, M3, fragments, and teardown cells; pricing gate
+  (same-thread ~111ns or measured batched B>=3); M1–M4 gates; and deterministic
+  ownership checks for deny, pre-write refusal, successful write, write-started
+  uncertainty, lost/duplicate/late completion, and worker death in every phase.
 
-### M1–M4 must-proves (kill-conditioned, owned by P2/G5)
+### P2-entry M1–M4 safety gates (all PASS before a production Permit)
 
-- M1 RPDB non-steering: live proof on loss cluster that no RPDB rule steers
-  q0 ingress off main, or a V1 config gate refusing PBR/FBF coexistence —
-  else K2 re-plan. Currently ABSENT (§4.3).
-- M2 egress oracle: post-commit confirmation of q0-egress domain. Currently
-  ABSENT. Without it, `delivered` is a fence-match witness, not an egress proof.
-- M3 overlap/domain admission + commit revalidation: expected-domain stamp,
-  route-resolution and commit-time revalidation incl. the §5.4 M3
-  cross-tunnel-source cell (A-stamped frame with B-only inner source →
-  E21 DROP-and-count, no shared-q0 fallback).
-- M4 shared-device inventory: hook/conntrack/RPF/martian/`accept_local`
-  inventory for the q0 shared device.
+- M1 admitted-RPDB predicate: enumerate the live rule set for IPv4 AND IPv6 and
+  evaluate the actual q0 packet selectors/actions/order against D_usp1 =
+  kernel main table 254. Include destination-only rib-group rules
+  (`pkg/routing/rules.go:64-70,675-678`), ingress-scoped next-table rules
+  (`:327-333`), PBR/FBF selectors (`:937-948`), probe and mark rules, all
+  externally-owned rules, and any other installed selector/action that can
+  change the lookup. A PBR/FBF-only refusal is invalid: a PBR-free rib-group
+  Dst rule can still leak q0, while unrelated ingress-scoped PBR need not.
+  Distinguish `expected_routing_domain=0` from kernel `expected_fib_table=254`;
+  the current descriptor fields are initialized to 0 and have no production
+  readers (`slowpath.rs:781-782`, `ipsec_inner_queue.rs:162-164`).
+  Admission is permitted only for a proved matching predicate; unknown/external
+  rule ownership or a mismatch means deny-only. Make the existing S4
+  `ipsecSupervisor` the sole OPEN/CLOSING lifecycle owner: every in-process
+  rule/route writer closes the permit before mutation, applies the change,
+  re-snapshots/re-evaluates the predicate, and reopens only on PASS. Any
+  externally-owned rule must have a proven synchronous pre-mutation fence
+  contract; otherwise refuse admission (an after-the-fact watcher is not a
+  safety gate). Fixtures: a no-PBR/FBF rib-group leak refuses; ingress-scoped
+  PBR on an unrelated interface does not.
+- M2 egress oracle: before the first Permit is coded, approve a design that
+  correlates each q0 submission to the actual selected egress table/domain and
+  observes post-write disposition. The nft `delivered` witness is only a
+  fence-mark match (`transit_barrier.go:17-22,276-280`), never this oracle.
+  If table-254 egress cannot be distinguished from other routing domains, keep
+  every production policy result advisory/deny-only and re-plan.
+- M3 overlap/source admission: selectors for route-based VPNs default to
+  `0.0.0.0/0,::/0` (`pkg/ipsec/policy.go:593-600,672-675`) and give ZERO inner
+  source admission. Freeze each tunnel's non-empty `ingress_prefixes`; check
+  membership on every frame before policy/state mutation; revalidate all six
+  D5c identities at commit: D_usp1/main-254 route-domain, FIB generation,
+  inventory generation, tunnel/if_id plus prefix membership, zone/policy hash,
+  and RuntimeView generation. The E21 cell uses disjoint A/B sets: A-stamped
+  frame with B-only inner source → E21 DROP-and-count, no shared-q0 fallback.
+- M4 shared-device inventory: prove hook/conntrack/RPF/martian/`accept_local`
+  behavior for the q0 shared device and both families before permitting; any
+  owner-unknown or unbounded shared state refuses the configuration.
 
 ### P3 — D12a Option A stateless INPUT (conditional, after P2)
 
@@ -359,21 +496,27 @@ all 35 design paths exist, as checked in §4.2.
   decode + Prometheus — verify in-flip); remaining are harness-owned exact
   observers (dynamic fence-set, per-rule provenance/PF-bind,
   same-priority-chain absence, VRF transition, workload latency;
-  `test/incus/*`, zero product overlap) + per-round attested exe on both
-  firewalls. T12 structural cells flip VOID→MATCH with archive-verbatim
-  ATTEST/RESTORE/SUMMARY; G2 consumer cells stay VOID until P2 (recorded
-  dependency: they need `delivered>0` by construction).
-- V2 post-P2: consumer round with permits flowing — `delivered>0`, per-shape
-  stage rates, B>=3 economics, memory accounting (skbs→verdict queues→TUN),
-  teardown-from-source, fragment head-of-line cost.
+  `test/incus/*`, zero product overlap). Before any live verdict, require
+  source-bound manifests and running-process hashes for BOTH `xpfd` and
+  `userspace-dp` on BOTH firewalls, plus the relevant kernel/classifier
+  identity. T12 structural cells flip VOID→MATCH with archive-verbatim
+  ATTEST/RESTORE/SUMMARY; G2 consumer cells remain VOID until P2 gates pass.
+- V2 after entry gates and permit implementation: consumer round with permits
+  flowing; packet-correlated one-q0-write/original-DROP proof; per-shape stage
+  rates, measured B>=3 economics, memory accounting
+  (skbs→verdict queues→TUN), and throughput/fairness. Teardown-from-source,
+  SA-gated outer/inner, fragment, MTU, and IPv6 parity are P2-entry gates, not
+  V2 afterthoughts.
 
 ### Scope cuts (explicit)
 
-- Single-writer q0 + `tx_delegated` sharing + limiter proof-or-split stays a
-  must-prove cell (G1/T8), not a P2 refactor, unless the cell fails.
-- `logical_ingress.rs` and `policy.rs`: reuse as-is per design (extend only
-  with all-fields-required params / call-site flag respectively).
-- No harness files in product slices; no new harness in G5.
+- Single-writer `tx_delegated` + `RateLimiter` split is proven BEFORE the
+  permit arm; if it fails, land a bounded queue split before P2 can pass its
+  entry gate. It is not a post-failure fallback.
+- `logical_ingress.rs` and `policy.rs`: reuse the canonical ingress builder
+  and existing evaluator, but re-derive the G3 stage/call-site order first.
+- Product changes remain separate from the evidence harness; harness work is
+  required for V1/V2 attestation and packet-correlated proof, not prohibited.
 
 ## 6. Risks
 
@@ -389,51 +532,76 @@ all 35 design paths exist, as checked in §4.2.
 - R3 — G3 order rot: #10679 (NAT fence) and #10516 (SA-gated passthrough)
   postdate the design's consult table. Mitigation: P2 re-grounds §3 against
   master before coding; consult-vs-skip table re-derived, not copied.
-- R4 — Protocol-floor skew on P1 tags: v35 exact-equality means a one-plane
-  bump bricks mixed-version pairs fail-closed (safe) but also bricks the P1
-  slice's own upgrade path if floors are wrong. Mitigation: lockstep bump +
-  immutable per-feature floor + mixed-version matrix cells (§5.6 procedure).
-- R5 — M1/M2 kill polarity: if RPDB steers q0 under PBR/FBF (likely) or the
-  oracle proves unbuildable, V1 scope must cut (config gate) or K2 re-plan
-  triggers. Mitigation: M1/M2 proof cells scheduled inside P2, not after;
-  owner pre-authorizes the config-gate cut.
-- R6 — D12a boundary creep: pressure to permit stateful INPUT without the
-  Option B atomicity proof (NF_ACCEPT vs session publication not atomic).
-  Mitigation: hard boundary — stateful INPUT misses stay E37; any Option B
-  claim needs a proven two-resource prepare/finalize protocol + owner sign-off.
-- R7 — Single-writer/limiter coupling: adjudicated + delegated share
-  `tx_delegated` + one `RateLimiter`. If the proof-or-split cell fails, P2
-  grows a queue split. Mitigation: cell runs early in P2; split is the
-  pre-authorized fallback, not a redesign.
-- R8 — Live-proof dependence: S9.7/M-cells/V2 need the loss cluster with XFRM
-  SAs + traffic + attested exe on both firewalls. Prior rounds burned the
-  attestation budget on wrong-binary/fixtures-missing VOIDs. Mitigation: V1
-  structural flips first (cheap, no permits); executable attestation before
-  any fixture-dependent round; budget the rounds explicitly.
+- R4 — P1 wire compatibility: the config-snapshot protocol at v35 and the
+  length-gated HA session-sync discriminator are separate contracts. P1 must
+  define an immutable per-feature floor/peer capability for any required
+  snapshot shape, plus absent/unknown-tag import behavior; do not assume a v35
+  config bump alone gates the HA tag.
+- R5 — M1/M2 kill polarity: no production Permit code until the exact admitted-
+  RPDB predicate and M2 egress-oracle design pass. Any admitted config that
+  fails or later invalidates M1 remains fenced/deny-only; absent M2 proof means
+  re-plan, not mid-P2 permit testing. See the P2-entry gates.
+- R6 — D12a boundary creep: stateful INPUT misses stay E37; before P2 lands,
+  the issue owner must record sign-off that stateful INPUT is outside #9506
+  closure scope. No sign-off means P2 cannot be declared issue-closing; any
+  later Option B claim still needs two-resource prepare/finalize proof.
+- R7 — Single-writer/limiter coupling: prove the shared `tx_delegated` outlet
+  and limiter split before enabling Permit. If that proof fails, implement the
+  bounded queue split and re-run the entry gate; never expose a second writer.
+- R8 — Live-proof dependence: P1/P2 entry gates and V1/V2 need the loss cluster
+  with XFRM SAs, traffic, source-bound builds, and attested `xpfd` +
+  `userspace-dp` processes on both firewalls. Prior rounds burned the
+  attestation budget on wrong-binary/fixtures-missing VOIDs. Run structural
+  flips first; no fixture-dependent live round may report PASS without complete
+  artifact, kernel/classifier, restore, and packet-correlation evidence.
 
 ## 7. Test plan
 
 Per slice (each cell fail-on-revert; RED-on-revert evidence required in the
 slice commit's Validation section):
 
-- P1 cells: forward separation (two `if_id`s, overlapping 5-tuples → distinct
-  sessions); reverse unique/ambiguous/native-miss; wire round-trip incl.
-  unknown-tag import refusal; alias-index multiplicity/eviction/generation;
-  E9/E10/E30 mapping. Revert check: removing the `Ipsec` arm must re-merge the
-  separation cells (FAIL).
-- P2 cells: zone-map matrix (zoned/unzoned/ambiguous/cross-spelling/
-  duplicate-if_id/stale); Go hook pass/drop/nil/stale/shadow matrix; admit
-  codes (each new code + unknown-code refusal); supervisor committer matrix
-  (incl. `Accepted+error`, timeout-uncertainty no-retry, retained-handle only
-  pre-committer); route-domain identity (exact D_usp1 vs other-domain E22);
-  M3 cross-tunnel-source E21 cell; taxonomy fault-injection for every touched
-  E-row (counter+event exactly once, no unmapped terminal). Live: denied +
-  permitted v4/v6 flows with policy/session/counter evidence; HA failover +
-  MTU/fragment behaviour; pricing gate (same-thread or B>=3).
+- P1 cells: disjoint IPsec tag round-trip against every existing GRE/PPTP tag;
+  Go JSON plus cluster binary open/close preservation; two `if_id`s with
+  overlapping 5-tuples in both insertion orders; native exact-hit precedence,
+  reverse unique/ambiguous/native-miss, different-worker lookup, and alias
+  multiplicity/eviction/generation; authority-scoped policy-rebind and absent/
+  unknown/old-peer import refusal for IPsec while preserving untagged native
+  imports; absent/unknown DELETE under-matches without deleting sibling IPsec
+  keys; CoS separation; IPv4/IPv6 ICMP and NAT64 quote resolution or unresolved
+  miss without unique tunnel authority; HA delete/generation retirement; and
+  xfrmi recreate/if_id-change/zone-move fencing with STALE→DROP. Revert mutant:
+  compile-valid collapse of `Ipsec` to `None` must merge sessions and fail.
+- P2-entry cells must PASS before production Permit code: exact admitted-RPDB
+  IPv4/IPv6 fixture with PBR-free rib-group leak refusal and unrelated
+  ingress-scoped-PBR control; external rule-owner/post-admission mutation
+  fences before change; packet-correlated M2 table-254 egress proof; M3
+  all-six-D5c revalidation and A-stamped/B-only-source E21 DROP; owner sign-off
+  that stateful INPUT is outside closure; host-fence reconciliation racing
+  incomplete activation/peer incompatibility leaves OPEN false; both-family
+  fragments (including late fragments) refuse before FragPool with zero q0.
+- P2 ownership/terminal cells assert real session/NAT resources and slab/flow
+  ownership at every monotonic phase: deny, pre-write refusal/rollback once,
+  Written/commit once, write-started uncertainty/no retry/no rollback, lost or
+  duplicate/late completion, and worker death in every phase. Exercise partial
+  NFQUEUE batches (disposed prefix vs uncertain suffix) without retry-forward;
+  bound/remove verdict requeue and prove exactly-one `tx_delegated` writer +
+  limiter behavior before a Permit arm.
+- Compile-valid semantic mutants each fail a named behavioral check:
+  collapse IPsec identity to None; bypass policy deny; remove q0 enqueue;
+  change original DROP to NF_ACCEPT; duplicate q0 submit; omit refusal rollback;
+  roll back after uncertain emission. Build failure, missing test, or wrong
+  artifact is VOID, never a behavioral RED or PASS.
+- P2 live: packet-correlated one q0 write plus original DROP, denied and
+  permitted v4/v6 with policy/session/counter evidence; HA failover, MTU and
+  teardown-from-source; measure stage rates, throughput/fairness, memory, and
+  same-thread ~111ns or actual batched B>=3 economics.
 - P3 cells: D12a-C1/C2 proof cells (must PASS before any INPUT permit ships);
   stateless-shape matrix; stateful-miss E37/E59 DROP matrix.
 - V1/V2: T12/G2 rounds per `docs/log/9506-observe.md` — archive-verbatim
-  ATTEST/RESTORE/SUMMARY, restore/residue clean, per-round attested exe.
+  ATTEST/RESTORE/SUMMARY, restore/residue clean, and source-bound manifests +
+  running-process hashes for BOTH `xpfd` and `userspace-dp` on BOTH firewalls,
+  plus kernel/classifier identity. Mismatched/stale-helper negative must fail
+  attestation; `delivered>0` alone never passes.
 - Scoped commands (examples; lane re-grounds at slice time):
   `go test ./pkg/nfqueue/ -run 'TestCapture|TestPipeline|TestD11' -count=1`,
   `go test ./pkg/daemon/ -run 'TestIpsec|TestPMech|TestFence' -count=1`,
@@ -460,12 +628,14 @@ slice commit's Validation section):
    does not kill the plan but kills its "fail-closed at every intermediate"
    claim — F1-style hardening must precede P1. Assessment: unknown until a
    bypass-hunt cell covers all three; scheduled as P1-entry work.
-3. **Can M1 (RPDB non-steering) pass on any realistic config, or is the V1
-   config gate (refuse PBR/FBF coexistence) the only shippable shape?** The
-   design admits the premise is "UNPROVEN and likely FALSE". KILL POLARITY: if
-   the gate is unacceptable to the owner AND the proof fails, K2 re-plan
-   triggers and this delta is dead. Assessment: gate is pre-authorized in §5;
-   needs explicit owner confirmation before P2 codes against it.
+3. **Can M1 admit a precisely inventoried RPDB state, and can M2 prove actual
+   q0 egress domain before emission?** A PBR/FBF-only refusal is disproven as a
+   complete fallback: a Dst-only rib-group rule may still steer q0, while
+   unrelated ingress-scoped PBR need not. KILL POLARITY: if the admitted-RPDB
+   predicate cannot be enforced against every rule owner/family/change or M2
+   cannot distinguish table 254, all policy Permits remain deny-only and K2
+   re-plan triggers. Assessment: both are blocking P2-entry gates; no permit
+   implementation is authorized until they pass.
 4. **Is the D11 attestation path close enough to a production permit that P2
    should extend it rather than build the §2.5 committer?** The attestation arm
    already proves a bounded transport/verdict/reinject join with
