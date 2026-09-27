@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -87,6 +88,18 @@ func canonAddr(s string) string {
 		return ip.String()
 	}
 	return s
+}
+
+// canonicalVIPIdentity returns the address and prefix in normalized form for
+// set comparisons. Invalid tokens remain distinct so actuation reports them
+// through the existing parse-error path.
+func canonicalVIPIdentity(vip string) string {
+	ip, ipNet, err := net.ParseCIDR(vip)
+	if err != nil {
+		return vip
+	}
+	ones, _ := ipNet.Mask.Size()
+	return ip.String() + "/" + strconv.Itoa(ones)
 }
 
 // resolveLocalIPv4 deterministically selects our IPv4 advert source: the

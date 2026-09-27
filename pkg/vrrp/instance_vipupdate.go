@@ -43,27 +43,37 @@ func (vi *vrrpInstance) getAdvertCapacityErr() error {
 	return vi.advertCapacityErr
 }
 
-// vipSetDelta partitions a desired VIP set against the current one into added
-// (in want, not in old, in want order) and removed (in old, not in want, in
-// old order). Set semantics: an order-only difference yields an empty delta,
-// so a reordered-but-identical set never touches the kernel or the wire.
+// vipSetDelta partitions a desired VIP set against the current one by parsed
+// address and prefix identity. Added entries follow want order; removed entries
+// follow old order. Textual spelling and order differences alone produce an
+// empty delta, so they never touch the kernel or advance the GARP epoch.
 func vipSetDelta(old, want []string) (added, removed []string) {
 	oldSet := make(map[string]struct{}, len(old))
 	for _, vip := range old {
-		oldSet[vip] = struct{}{}
+		oldSet[canonicalVIPIdentity(vip)] = struct{}{}
 	}
 	wantSet := make(map[string]struct{}, len(want))
 	for _, vip := range want {
-		wantSet[vip] = struct{}{}
+		wantSet[canonicalVIPIdentity(vip)] = struct{}{}
 	}
+	seenAdded := make(map[string]struct{}, len(want))
 	for _, vip := range want {
-		if _, ok := oldSet[vip]; !ok {
-			added = append(added, vip)
+		id := canonicalVIPIdentity(vip)
+		if _, ok := oldSet[id]; !ok {
+			if _, seen := seenAdded[id]; !seen {
+				added = append(added, vip)
+				seenAdded[id] = struct{}{}
+			}
 		}
 	}
+	seenRemoved := make(map[string]struct{}, len(old))
 	for _, vip := range old {
-		if _, ok := wantSet[vip]; !ok {
-			removed = append(removed, vip)
+		id := canonicalVIPIdentity(vip)
+		if _, ok := wantSet[id]; !ok {
+			if _, seen := seenRemoved[id]; !seen {
+				removed = append(removed, vip)
+				seenRemoved[id] = struct{}{}
+			}
 		}
 	}
 	return added, removed
@@ -115,8 +125,10 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 
 	added, removed := vipSetDelta(old, want)
 	if len(added) == 0 && len(removed) == 0 {
-		// Order-only difference: adopt the desired order so the next
-		// reconcile converges, without touching the kernel or the wire.
+		// Equivalent-address spelling or order-only change: adopt the
+		// requested representation without netlink churn or a new epoch.
+		// Preserve pending first-frame work across a raw spelling change.
+		vi.pendingGARPForSetLocked(want, nil, false)
 		vi.mu.Lock()
 		if !vipsEqual(old, want) {
 			vi.cfg.VirtualAddresses = want

@@ -274,8 +274,8 @@ type vrrpInstance struct {
 	lastGARPEpoch    atomic.Uint64 // epoch reserved by the most recent sendGARPFor
 	lastGARPTime     atomic.Int64  // Unix nanos of the most recent synchronous burst
 	lastGARPOwnerGen atomic.Uint64 // owner generation of the last reserved burst
-	// Current VIPs lacking a successful synchronous first GARP/NA frame.
-	// Guarded by vipMu and pruned to the current membership set.
+	// VIP spellings lacking a successful synchronous first GARP/NA frame.
+	// Guarded by vipMu; updates re-key by parsed address/prefix identity.
 	pendingGARPVIPs map[string]struct{}
 	// lastMasterReaffirmTime independently rate-limits winner-side refreshes
 	// triggered by repeated peer MASTER advertisements.

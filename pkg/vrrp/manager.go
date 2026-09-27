@@ -1520,7 +1520,9 @@ func htons(v uint16) uint16 {
 	return binary.NativeEndian.Uint16(b[:])
 }
 
-// vipsEqual compares two VIP slices for equality.
+// vipsEqual compares ordered configured representations. Spelling/order-only
+// changes must reach updateVIPs, whose delta compares parsed identities and
+// adopts the desired representation without kernel actuation.
 func vipsEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

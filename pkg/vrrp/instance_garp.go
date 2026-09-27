@@ -198,9 +198,13 @@ func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, include
 		vi.pendingGARPVIPs = nil
 		return nil
 	}
+	pendingIDs := make(map[string]struct{}, len(vi.pendingGARPVIPs))
+	for vip := range vi.pendingGARPVIPs {
+		pendingIDs[canonicalVIPIdentity(vip)] = struct{}{}
+	}
 	next := make(map[string]struct{}, len(vi.pendingGARPVIPs)+len(added))
 	for _, vip := range current {
-		if _, pending := vi.pendingGARPVIPs[vip]; pending {
+		if _, pending := pendingIDs[canonicalVIPIdentity(vip)]; pending {
 			next[vip] = struct{}{}
 		}
 	}

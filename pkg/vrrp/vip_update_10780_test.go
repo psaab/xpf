@@ -14,6 +14,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
+	"golang.org/x/sys/unix"
 )
 
 func goroutineWaitingOnVIPMu(vi *vrrpInstance, caller string, stack []byte) bool {
@@ -849,6 +850,147 @@ func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testi
 				t.Fatalf("VIP set after removal-only update = %v, want [%s]", got, keepVIP)
 			}
 		})
+	}
+}
+
+// TestVIPSpellingAliasKeepsKernelAddressAndMasterReady covers raw IPv6
+// spellings that parse to the same address/prefix. The fake kernel models
+// EEXIST by binary address identity so add-first followed by delete would
+// reproduce the dark-but-ready failure without a live interface.
+func TestVIPSpellingAliasKeepsKernelAddressAndMasterReady(t *testing.T) {
+	const iface = "reth10780-alias"
+	const oldVIP = "2001:0DB8:0:0::1/64"
+	const newVIP = "2001:db8::1/64"
+
+	changedPrefix := "2001:db8::1/128"
+	added, removed := vipSetDelta([]string{oldVIP}, []string{changedPrefix})
+	if !vipsEqual(added, []string{changedPrefix}) || !vipsEqual(removed, []string{oldVIP}) {
+		t.Fatalf("prefix change delta = added %v, removed %v; want replacement", added, removed)
+	}
+
+	m, _ := newTestManagerNoNetwork()
+	defer stopManagerForTest(m)
+	vi := newInstance(Instance{
+		Interface: iface, GroupID: 101, Priority: 200, AdvertiseInterval: 100,
+		GARPCount: 1, VirtualAddresses: []string{oldVIP},
+	}, &net.Interface{Name: iface, Index: 1}, m.eventCh, nil)
+	vi.setState(StateMaster)
+	vi.vipMu.Lock()
+	vi.addPendingGARPVIPsLocked([]string{oldVIP})
+	vi.vipMu.Unlock()
+	initialGarpEpoch := vi.garpEpoch.Load()
+	installFakeVIPNetlink(vi)
+
+	kernelVIPs := map[string]bool{canonicalVIPIdentity(oldVIP): true}
+	var addCalls, deleteCalls int
+	vi.addrAddFn = func(_ netlink.Link, addr *netlink.Addr) error {
+		addCalls++
+		key := canonicalVIPIdentity(addr.IPNet.String())
+		if kernelVIPs[key] {
+			return unix.EEXIST
+		}
+		kernelVIPs[key] = true
+		return nil
+	}
+	vi.addrDelFn = func(_ netlink.Link, addr *netlink.Addr) error {
+		deleteCalls++
+		key := canonicalVIPIdentity(addr.IPNet.String())
+		if !kernelVIPs[key] {
+			return unix.EADDRNOTAVAIL
+		}
+		delete(kernelVIPs, key)
+		return nil
+	}
+	key := instanceKey{iface: iface, groupID: 101}
+	m.mu.Lock()
+	m.instances[key] = vi
+	m.mu.Unlock()
+
+	oldSend, oldGARP, oldNA, oldProbe := sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn
+	t.Cleanup(func() {
+		sendPacketFn = oldSend
+		garpBurstFn, naBurstFn, arpProbeFn = oldGARP, oldNA, oldProbe
+	})
+	var advertised [][]string
+	var advertFamilies []bool
+	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, isIPv6 bool) error {
+		ips := make([]string, len(pkt.IPAddresses))
+		for i, ip := range pkt.IPAddresses {
+			ips[i] = ip.String()
+		}
+		advertised = append(advertised, ips)
+		advertFamilies = append(advertFamilies, isIPv6)
+		return nil
+	}
+	var garped []string
+	burst := func(_ string, ip net.IP, _ int, _ cluster.BurstStillValid) error {
+		garped = append(garped, ip.String())
+		return nil
+	}
+	garpBurstFn, naBurstFn = burst, burst
+	arpProbeFn = func(string, net.IP, net.IP) error { return nil }
+
+	if err := m.UpdateInstances([]*Instance{{
+		Interface: iface, GroupID: 101, Priority: 200, AdvertiseInterval: 100,
+		GARPCount: 1, VirtualAddresses: []string{newVIP},
+	}}); err != nil {
+		t.Fatalf("spelling-only update: %v", err)
+	}
+	if !kernelVIPs[canonicalVIPIdentity(newVIP)] {
+		t.Fatal("canonical VIP is absent from the fake kernel after the update")
+	}
+	if got := vi.garpEpoch.Load(); got != initialGarpEpoch {
+		t.Fatalf("spelling-only update advanced GARP epoch: got %d, want %d",
+			got, initialGarpEpoch)
+	}
+	if addCalls != 0 || deleteCalls != 0 {
+		t.Fatalf("spelling-only update touched netlink: adds=%d deletes=%d", addCalls, deleteCalls)
+	}
+	vi.vipMu.Lock()
+	var pendingVIPs []string
+	for vip := range vi.pendingGARPVIPs {
+		pendingVIPs = append(pendingVIPs, vip)
+	}
+	vi.vipMu.Unlock()
+	if !vipsEqual(pendingVIPs, []string{newVIP}) {
+		t.Fatalf("pending VIPs after spelling adoption = %v, want [%s]", pendingVIPs, newVIP)
+	}
+	if got := vi.vipsSnapshot(); !vipsEqual(got, []string{newVIP}) {
+		t.Fatalf("stored VIP spelling = %v, want [%s]", got, newVIP)
+	}
+	if vi.getState() != StateMaster || vi.vipUpdateDiverged.Load() {
+		t.Fatalf("state=%s diverged=%v, want healthy MASTER", vi.getState(), vi.vipUpdateDiverged.Load())
+	}
+	if ready, reasons := m.RGVRRPReady(1, true); !ready {
+		t.Fatalf("RGVRRPReady = false after spelling-only update: %v", reasons)
+	}
+	if len(advertised) != 0 || len(garped) != 0 {
+		t.Fatalf("spelling-only update caused a duplicate announcement: adverts=%v GARP/NA=%v",
+			advertised, garped)
+	}
+
+	// Exercise the normal send paths after adoption: both must name the
+	// normalized address once, without manufacturing a second update burst.
+	vi.sendAdvert(vi.getPriority())
+	vi.garpEpoch.Add(1)
+	vi.sendGARP(true)
+	vi.vipMu.Lock()
+	pendingCount := len(vi.pendingGARPVIPs)
+	vi.vipMu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("successful canonical announcement left %d pending VIPs", pendingCount)
+	}
+	if len(advertised) != 1 || !advertFamilies[0] ||
+		!vipsEqual(advertised[0], []string{"2001:db8::1"}) {
+		t.Fatalf("IPv6 advert addresses = %v (families=%v), want one canonical VIP",
+			advertised, advertFamilies)
+	}
+	if !vipsEqual(garped, []string{"2001:db8::1"}) {
+		t.Fatalf("GARP/NA addresses = %v, want one canonical VIP", garped)
+	}
+	if addCalls != 0 || deleteCalls != 0 || len(garped) != 1 {
+		t.Fatalf("duplicate or netlink work after send: adds=%d deletes=%d GARP/NA=%v",
+			addCalls, deleteCalls, garped)
 	}
 }
 

@@ -61,6 +61,8 @@ This is the package that drives chassis-cluster failover.
   updates. Partial netlink failure stores the addresses that actually remain
   actuated, exposes the divergence in `InstanceStates`, and keeps
   `RGVRRPReady` false until the 2s reconcile retry converges the delta.
+  Textual IP spelling changes with the same parsed address/prefix identity
+  are adopted without netlink churn or a new GARP epoch.
   Priority/preempt/track and the wire/timer/burst fields **advertise-interval**
   and **gratuitous-arp-count** also update in-place (no restart or master-down
   gap): the no-change gate compares `AdvertiseInterval` and `GARPCount` so a
