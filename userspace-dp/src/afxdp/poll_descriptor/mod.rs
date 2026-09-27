@@ -86,7 +86,7 @@ use nat64_icmp_error::try_translate_nat64_icmp_error;
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow};
 use session_hit_authority::{
-    ForeignHitVerdict, HitAuthority, OwnerHitIcmpVerdict, foreign_hit_verdict,
+    ForeignHitVerdict, HitAuthority, HitPolicyDeny, OwnerHitIcmpVerdict, foreign_hit_verdict,
     owner_hit_icmp_verdict, session_hit_authority,
 };
 
@@ -99,6 +99,35 @@ use super::poll_stages::{
 };
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn emit_session_hit_policy_deny_event(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    decision: SessionDecision,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_id: u16,
+    egress_zone_id: u16,
+    deny: HitPolicyDeny,
+    now_ns: u64,
+) {
+    emit_policy_deny_event(
+        event_stream,
+        flow,
+        &decision.nat,
+        meta,
+        ingress_zone_id,
+        egress_zone_id,
+        owner_rg_for_resolution(forwarding, decision.resolution),
+        deny.result.policy_id,
+        deny.result.action,
+        resolve_policy_deny_app_id(&forwarding.app_catalog, flow, deny.policy_dst_port),
+        false,
+        now_ns,
+    );
+}
 
 #[inline]
 fn transit_source_class_disposition(disposition: ForwardingDisposition) -> bool {
@@ -1971,11 +2000,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // only `Some` for a forward hit or a reverse
                         // non-answer hit, never both at once.
                         let reverse_icmp_denied =
-                            matches!(owner_icmp_verdict, Some(OwnerHitIcmpVerdict::Drop))
+                            matches!(owner_icmp_verdict, Some(OwnerHitIcmpVerdict::Drop(_)))
                                 && resolved.metadata.is_reverse;
-                        if matches!(owner_icmp_verdict, Some(OwnerHitIcmpVerdict::Drop))
-                            && !reverse_icmp_denied
+                        if !reverse_icmp_denied
+                            && let Some(OwnerHitIcmpVerdict::Drop(deny)) = owner_icmp_verdict
                         {
+                            emit_session_hit_policy_deny_event(
+                                worker_ctx.forwarding,
+                                worker_ctx.event_stream,
+                                resolved.decision,
+                                flow,
+                                meta,
+                                resolved.metadata.ingress_zone,
+                                resolved.metadata.egress_zone,
+                                deny,
+                                now_ns,
+                            );
                             telemetry.dbg.policy_deny += 1;
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
@@ -2016,7 +2056,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 may_revoke,
                             ) {
                                 ForeignHitVerdict::Forward => None,
-                                ForeignHitVerdict::Drop => {
+                                ForeignHitVerdict::Drop(deny) => {
+                                    emit_session_hit_policy_deny_event(
+                                        worker_ctx.forwarding,
+                                        worker_ctx.event_stream,
+                                        resolved.decision,
+                                        flow,
+                                        meta,
+                                        arrival_zone,
+                                        resolved.metadata.egress_zone,
+                                        deny,
+                                        now_ns,
+                                    );
                                     telemetry.dbg.foreign_authority_drops += 1;
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
@@ -2095,6 +2146,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // denial never double-count: exactly one terminal
                         // reason per packet.
                         if reverse_icmp_denied {
+                            if let Some(OwnerHitIcmpVerdict::Drop(deny)) = owner_icmp_verdict {
+                                emit_session_hit_policy_deny_event(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    resolved.decision,
+                                    flow,
+                                    meta,
+                                    resolved.metadata.ingress_zone,
+                                    resolved.metadata.egress_zone,
+                                    deny,
+                                    now_ns,
+                                );
+                            }
                             telemetry.dbg.policy_deny += 1;
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
