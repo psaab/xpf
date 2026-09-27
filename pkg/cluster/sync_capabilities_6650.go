@@ -41,8 +41,9 @@ package cluster
 // version for advertisement to the peer. The daemon calls it at bring-up,
 // mirroring Manager.SetSoftwareVersion.
 //
-// 0 (never called) suppresses the advertisement entirely — see sendCapabilities
-// for why silence beats advertising a literal 0.
+// A zero version is advertised as zero. Receivers treat a connected peer
+// with no nonzero protocol version as incapable, independently of the trailing
+// capability flags carried in the same frame.
 func (s *SessionSync) SetLocalSnapshotProtocolVersion(v uint16) {
 	if s == nil {
 		return
@@ -63,4 +64,51 @@ func (s *SessionSync) PeerSnapshotProtocolVersion() uint16 {
 		return 0
 	}
 	return uint16(s.peerSnapshotProtocol.Load())
+}
+
+// PeerSnapshotState is the capability observation that authorizes an outgoing
+// config snapshot. Learned follows the existing #6650 convention: nonzero
+// versions are learned, while 0 is incapable whether absent or explicit.
+// Generation changes when the advertised protocol changes or is cleared, so a
+// sender can bind a later queue operation to this exact observation.
+type PeerSnapshotState struct {
+	Version    uint16
+	Learned    bool
+	Generation uint64
+	Connected  bool
+}
+
+// SnapshotPeerSnapshotProtocol returns the peer capability and connection
+// state under the same lock used to replace connections and update the
+// advertised protocol.
+func (s *SessionSync) SnapshotPeerSnapshotProtocol() PeerSnapshotState {
+	if s == nil {
+		return PeerSnapshotState{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peerSnapshotStateLocked()
+}
+
+// peerSnapshotStateLocked binds the session-global advertisement to the
+// SELECTED connection's own proof. A replacement installed into the empty
+// alternate slot can become the preferred active socket while the other fabric
+// survives, without tripping the supersession or epoch-reboot classifiers.
+// Production connections are authConn wrappers; direct unwrapped connections
+// are test fixtures and retain the injected session-level observation. Caller
+// holds s.mu.
+func (s *SessionSync) peerSnapshotStateLocked() PeerSnapshotState {
+	version := uint16(s.peerSnapshotProtocol.Load())
+	selected := s.activeConnLocked()
+	if selected != nil && !s.connIsCurrentIncarnationLocked(selected) {
+		version = 0
+	} else if ac, ok := selected.(*authConn); ok && ac.peerSnapshotVersion < version {
+		version = ac.peerSnapshotVersion
+	}
+	return PeerSnapshotState{
+		Version:    version,
+		Learned:    version != 0,
+		Generation: s.peerSnapshotProtocolGeneration,
+		Connected:  s.stats.Connected.Load(),
+	}
 }
