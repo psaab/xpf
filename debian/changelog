@@ -49,5 +49,8 @@ xpf (0.0.0) unstable; urgency=medium
     overlap checks use the encoded zone's routing domain (#10917).
   * Stamp POLICY_DENY records with their evaluating config generation and
     leave stale queued or replayed policy IDs unattributed (#10978).
+  * Seed fragment-association sharding, scope admission quotas to
+    session identity, and drop associations when their admitting
+    session closes (#11058).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

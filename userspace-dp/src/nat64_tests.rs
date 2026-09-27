@@ -11,11 +11,10 @@ use super::*;
 // `fn` silently steals the `#[test]` attribute). Imported here instead so the
 // move stays motion-only and no guard changes.
 use crate::fragment_assoc::{
-    FragAuthority, FRAG_CAP_PER_SHARD, FRAG_CAP_PER_SOURCE, FRAG_MAX_LIFETIME_EVICTIONS,
-    FRAG_MAX_LIFETIME_NS, NAT64_FRAG_CROSS_DOMAIN_MISSES,
-    NAT64_FRAG_PROTOCOL_ALIAS_MISSES, FRAG_SHARDS, FRAG_TTL_NS, FragAssoc,
-    FragKey, frag_shard_index, first_fragment_key,
-    nonfirst_fragment_key,
+    FRAG_CAP_PER_SESSION_PER_SHARD, FRAG_CAP_PER_SHARD, FRAG_MAX_LIFETIME_EVICTIONS,
+    FRAG_MAX_LIFETIME_NS, FRAG_SHARDS, FRAG_TTL_NS, FragAssoc, FragAuthority, FragKey,
+    NAT64_FRAG_CROSS_DOMAIN_MISSES, NAT64_FRAG_PROTOCOL_ALIAS_MISSES, first_fragment_key,
+    frag_shard_index, frag_shard_index_seeded, nonfirst_fragment_key,
 };
 
 /// #5798: a fixed ingress authority for fragment-key tests that are not ABOUT
@@ -5107,7 +5106,7 @@ fn nat64_frag_assoc_cache_is_bounded() {
     };
     for sources in &sources_by_shard {
         for &src in &sources[..2] {
-            for ident in 0..FRAG_CAP_PER_SOURCE as u32 {
+            for ident in 0..FRAG_CAP_PER_SESSION_PER_SHARD as u32 {
                 cache.install(make_key(src, ident), decision, None, 1_000, 1, 0);
             }
         }
@@ -5126,78 +5125,253 @@ fn nat64_frag_assoc_cache_is_bounded() {
     );
 }
 #[test]
-fn frag_assoc_source_limit_is_network_wide_10714() {
-    // #10714: a source's quota is charged across the whole cache, not
-    // independently in each old tuple-hash shard. Vary identifiers so the
-    // pre-fix hash spreads one sender's flood across multiple shards.
-    // RED-on-revert: without source-based sharding and the source cap, one
-    // source exceeds its quota and evicts same-shard and foreign associations.
+fn frag_assoc_consult_requires_admitting_session_incarnation_11058() {
+    let key = FragKey {
+        addr_family: libc::AF_INET as u8,
+        src: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        dst: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        ident: 0x11058,
+        protocol: PROTO_UDP,
+        authority: frag_test_authority(),
+    };
+    let session_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        src_ip: key.src,
+        dst_ip: key.dst,
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let decision = frag_test_decision(Nat64State::forward_decision(
+        Ipv4Addr::new(203, 0, 113, 8),
+        Ipv4Addr::new(198, 51, 100, 20),
+        5000,
+    ));
+    let session_id = 0x11058;
+
+    let live_cache = FragAssoc::new();
+    live_cache.install_with_session(
+        key,
+        decision,
+        None,
+        session_key.clone(),
+        session_id,
+        1_000,
+        1,
+        0,
+    );
     assert!(
-        FRAG_CAP_PER_SOURCE < FRAG_CAP_PER_SHARD,
-        "a source quota below shard capacity reserves room for other sources"
+        live_cache
+            .lookup_with_session(
+                &key,
+                1_001,
+                1,
+                |admitted, current_id| admitted == &session_key && current_id == session_id,
+                |_| true,
+            )
+            .is_some(),
+        "the exact live admitting session must preserve legitimate fragmented traffic"
+    );
+
+    let closed_cache = FragAssoc::new();
+    closed_cache.install_with_session(
+        key,
+        decision,
+        None,
+        session_key.clone(),
+        session_id,
+        1_000,
+        1,
+        0,
+    );
+    assert!(
+        closed_cache
+            .lookup_with_session(&key, 1_001, 1, |_, _| false, |_| true)
+            .is_none(),
+        "a closed admitting session must make later fragments miss"
+    );
+    assert_eq!(
+        closed_cache.len(),
+        0,
+        "a closed session's association must be removed at consult"
+    );
+
+    let reused_cache = FragAssoc::new();
+    reused_cache.install_with_session(
+        key,
+        decision,
+        None,
+        session_key.clone(),
+        session_id,
+        1_000,
+        1,
+        0,
+    );
+    assert!(
+        reused_cache
+            .lookup_with_session(
+                &key,
+                1_001,
+                1,
+                |admitted, current_id| admitted == &session_key && current_id == session_id + 1,
+                |_| true,
+            )
+            .is_none(),
+        "a same-tuple replacement session must not inherit the old session's association"
+    );
+}
+
+#[test]
+fn frag_assoc_shard_hash_seed_defeats_offline_collisions_11058() {
+    let dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+    let make_key = |src| FragKey {
+        addr_family: libc::AF_INET as u8,
+        src,
+        dst,
+        ident: 1,
+        protocol: PROTO_UDP,
+        authority: frag_test_authority(),
+    };
+    let victim = make_key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    let same_low_nibble = make_key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 17)));
+    let attacker_a = make_key(IpAddr::V4(Ipv4Addr::new(198, 51, 1, 9)));
+    let attacker_b = make_key(IpAddr::V4(Ipv4Addr::new(198, 51, 1, 25)));
+    let legacy_index = |src: IpAddr| {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |byte: u8| {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        match src {
+            IpAddr::V4(ip) => ip.octets().into_iter().for_each(&mut mix),
+            IpAddr::V6(ip) => ip.octets().into_iter().for_each(&mut mix),
+        }
+        (hash as usize) & (FRAG_SHARDS - 1)
+    };
+    // Offline search against the former fixed FNV low-bit index found this
+    // victim and both attack sources in one shard. The .1/.17 pair also keeps
+    // the same low nibble, which collided for every seed before full-width mix.
+    let unseeded_shard = legacy_index(victim.src);
+    assert_eq!(legacy_index(attacker_a.src), unseeded_shard);
+    assert_eq!(legacy_index(attacker_b.src), unseeded_shard);
+    assert_eq!(legacy_index(same_low_nibble.src), legacy_index(victim.src));
+
+    // The same fixed inputs separate after high-bit avalanche; a fixed seed
+    // keeps this deterministic while production supplies its per-process seed.
+    let seeded = 0x0123_4567_89ab_cdef;
+    let victim_shard = frag_shard_index_seeded(&victim, seeded);
+    assert_ne!(
+        frag_shard_index_seeded(&same_low_nibble, seeded),
+        victim_shard
+    );
+    assert_ne!(frag_shard_index_seeded(&attacker_a, seeded), victim_shard);
+    assert_ne!(frag_shard_index_seeded(&attacker_b, seeded), victim_shard);
+    let process_shard = frag_shard_index(&victim);
+    assert_eq!(frag_shard_index(&victim), process_shard);
+}
+
+#[test]
+fn frag_assoc_quota_is_admitting_session_scoped_11058() {
+    // A sender spoofs the victim's claimed source and fills its own session
+    // quota before the legitimate session's first fragment arrives. The
+    // verified admitting-session identity must keep those quotas independent.
+    assert!(
+        FRAG_CAP_PER_SESSION_PER_SHARD < FRAG_CAP_PER_SHARD,
+        "a session quota below shard capacity leaves bounded shared capacity"
     );
     let cache = FragAssoc::new();
-    let attacker_src = IpAddr::V6("2001:db8::1071".parse().unwrap());
+    let claimed_src = IpAddr::V6("2001:db8::1071".parse().unwrap());
     let dst = IpAddr::V6("64:ff9b::0808:0808".parse().unwrap());
-    let make_key = |src, ident| FragKey {
+    let make_key = |ident| FragKey {
         addr_family: libc::AF_INET6 as u8,
-        src,
+        src: claimed_src,
         dst,
         ident,
         protocol: PROTO_UDP,
         authority: frag_test_authority(),
     };
-    let attacker_shard = frag_shard_index(&make_key(attacker_src, 0));
-    let sources = frag_sources_in_one_shard(
-        attacker_src,
-        dst,
-        libc::AF_INET6 as u8,
-        2,
-    );
-    let victim_key = (0..4_096)
-        .map(|ident| make_key(sources[1], ident))
-        .find(|key| frag_shard_index(key) == attacker_shard)
-        .expect("a foreign source has keys in the attacker's shard");
-    assert_eq!(frag_shard_index(&victim_key), attacker_shard);
+    let session_for = |src_port| crate::session::SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        src_ip: claimed_src,
+        dst_ip: dst,
+        src_port,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let attacker_session = session_for(31_001);
+    let victim_session = session_for(42_002);
     let decision = frag_test_decision(Nat64State::forward_decision(
         Ipv4Addr::new(198, 51, 100, 1),
         Ipv4Addr::new(8, 8, 8, 8),
         5000,
     ));
 
-    cache.install(victim_key, decision, None, 1_000, 1, 0);
-    let mut first_attacker_key = None;
-    let mut last_attacker_key = None;
-    for ident in 0..(FRAG_CAP_PER_SOURCE * 4) as u32 {
-        let key = make_key(attacker_src, ident);
-        first_attacker_key.get_or_insert(key);
-        last_attacker_key = Some(key);
-        cache.install(key, decision, None, 1_000, 1, 0);
+    for ident in 0..FRAG_CAP_PER_SESSION_PER_SHARD as u32 {
+        cache.install_with_session(
+            make_key(ident),
+            decision,
+            None,
+            attacker_session.clone(),
+            101,
+            1_000,
+            1,
+            0,
+        );
     }
-
     assert_eq!(
         cache.len(),
-        FRAG_CAP_PER_SOURCE + 1,
-        "one source may own at most its network-wide quota alongside the \
-         same-shard victim, regardless of how many identifiers it spreads across"
+        FRAG_CAP_PER_SESSION_PER_SHARD,
+        "the attacker filled its own session quota first"
+    );
+
+    let victim_key = make_key(FRAG_CAP_PER_SESSION_PER_SHARD as u32);
+    cache.install_with_session(
+        victim_key,
+        decision,
+        None,
+        victim_session.clone(),
+        202,
+        1_000,
+        1,
+        0,
+    );
+    assert_eq!(
+        cache.len(),
+        FRAG_CAP_PER_SESSION_PER_SHARD + 1,
+        "a spoofed claimed source must not spend the victim session's quota"
     );
     assert!(
-        cache
-            .lookup(&victim_key, 1_001, 1, |_| true)
-            .is_some(),
-        "a source flood must not evict a live same-shard association"
+        cache.lookup(&victim_key, 1_001, 1, |_| true).is_some(),
+        "the victim's first-fragment association is admitted after the spoof flood"
     );
     assert!(
-        cache
-            .lookup(&first_attacker_key.unwrap(), 1_001, 1, |_| true)
-            .is_none(),
-        "the source's oldest association is the one sacrificed at its quota"
+        cache.lookup(&make_key(0), 1_001, 1, |_| true).is_some(),
+        "the spoofing session's earlier live association remains intact"
+    );
+
+    let refused_key = make_key((FRAG_CAP_PER_SESSION_PER_SHARD + 1) as u32);
+    cache.install_with_session(
+        refused_key,
+        decision,
+        None,
+        attacker_session,
+        101,
+        1_000,
+        1,
+        0,
+    );
+    assert_eq!(
+        cache.len(),
+        FRAG_CAP_PER_SESSION_PER_SHARD + 1,
+        "one session cannot exceed its own bounded quota"
     );
     assert!(
-        cache
-            .lookup(&last_attacker_key.unwrap(), 1_001, 1, |_| true)
-            .is_some(),
-        "the newest association from the capped source remains usable"
+        cache.lookup(&refused_key, 1_001, 1, |_| true).is_none(),
+        "the over-quota association is refused"
     );
 }
 
@@ -5335,13 +5509,13 @@ fn frag_assoc_reinstall_restarts_absolute_lifetime_9901() {
 #[test]
 fn frag_assoc_absolute_reclaim_frees_shard_slots_9901() {
     // #9901 (F-010): install-time reclaim must treat an absolute-expired but
-    // idle-fresh entry as dead space, not a live victim. A source's association
-    // quota is capped within its source-based shard; expired entries are pruned
-    // before the next install can sacrifice a still-live association.
+    // idle-fresh entry as dead space, not a live victim. A session's association
+    // quota is capped within each source-based shard; expired entries are
+    // pruned before refusing a new association.
     let src: IpAddr = "2001:db8::1".parse().unwrap();
     let dst: IpAddr = "64:ff9b::0808:0808".parse().unwrap();
     let family = libc::AF_INET6 as u8;
-    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_SOURCE + 1);
+    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_SESSION_PER_SHARD + 1);
     let mk = |ident: u32| FragKey {
         addr_family: family,
         src,
@@ -5357,34 +5531,39 @@ fn frag_assoc_absolute_reclaim_frees_shard_slots_9901() {
     ));
     let cache = FragAssoc::new();
     let t0 = 1_000u64;
-    for &ident in &idents[..FRAG_CAP_PER_SOURCE] {
+    for &ident in &idents[..FRAG_CAP_PER_SESSION_PER_SHARD] {
         cache.install(mk(ident), decision, None, t0, 1, 0);
     }
     // Touch every entry every second to +9s: idle-fresh (deadline +11s) but
     // absolutely old.
     for s in 1..=9u64 {
-        for &ident in &idents[..FRAG_CAP_PER_SOURCE] {
-            assert!(cache.lookup(&mk(ident), t0 + s * 1_000_000_000, 1, |_| true).is_some());
+        for &ident in &idents[..FRAG_CAP_PER_SESSION_PER_SHARD] {
+            assert!(
+                cache
+                    .lookup(&mk(ident), t0 + s * 1_000_000_000, 1, |_| true)
+                    .is_some()
+            );
         }
     }
-    let evicted_live =
-        cache.install(mk(idents[FRAG_CAP_PER_SOURCE]), decision, None, t0 + 10_500_000_000, 1, 0);
+    let new_key = mk(idents[FRAG_CAP_PER_SESSION_PER_SHARD]);
+    cache.install(new_key, decision, None, t0 + 10_500_000_000, 1, 0);
+    assert_eq!(
+        cache.len(),
+        1,
+        "#9901: install reclaim removes all associations past absolute lifetime"
+    );
     assert!(
-        !evicted_live,
-        "#9901: install reclaim must prune absolute-expired entries before \
-         evicting; every source association was past its absolute lifetime",
+        cache
+            .lookup(&new_key, t0 + 10_500_000_001, 1, |_| true)
+            .is_some(),
+        "an association can use a slot reclaimed from absolute-expired entries"
     );
 }
 
 /// Collect `count` distinct identifiers that map to one shard for a fixed
-/// source. This keeps quota fixtures explicit about their shared-shard setup;
-/// source-based sharding co-locates all identifiers from that source.
-fn frag_idents_in_one_shard(
-    src: IpAddr,
-    dst: IpAddr,
-    family: u8,
-    count: usize,
-) -> Vec<u32> {
+/// source. Each source's identifiers stay together, making quota fixtures
+/// explicit about their shared-shard setup.
+fn frag_idents_in_one_shard(src: IpAddr, dst: IpAddr, family: u8, count: usize) -> Vec<u32> {
     let mut out = Vec::with_capacity(count);
     let target = frag_shard_index(&FragKey {
         addr_family: family,
@@ -5418,14 +5597,9 @@ fn frag_idents_in_one_shard(
 }
 
 /// Collect distinct source addresses that hash to the same fragment shard.
-/// This lets cap tests distinguish per-source eviction from unrelated-source
-/// eviction without depending on a particular hash result.
-fn frag_sources_in_one_shard(
-    seed: IpAddr,
-    dst: IpAddr,
-    family: u8,
-    count: usize,
-) -> Vec<IpAddr> {
+/// This lets cap tests create separate admitting-session identities sharing
+/// one shard without depending on a particular hash result.
+fn frag_sources_in_one_shard(seed: IpAddr, dst: IpAddr, family: u8, count: usize) -> Vec<IpAddr> {
     let make_key = |src| FragKey {
         addr_family: family,
         src,
@@ -5457,9 +5631,9 @@ fn frag_sources_in_one_shard(
 
 #[test]
 fn frag_assoc_full_shard_refuses_foreign_eviction_10714() {
-    // A source below its quota cannot evict a foreign live entry just because
+    // A session below its quota cannot evict a foreign live entry just because
     // both source addresses collide into a full shard.
-    assert_eq!(FRAG_CAP_PER_SOURCE * 2, FRAG_CAP_PER_SHARD);
+    assert_eq!(FRAG_CAP_PER_SESSION_PER_SHARD * 2, FRAG_CAP_PER_SHARD);
     let family = libc::AF_INET6 as u8;
     let dst = IpAddr::V6("64:ff9b::0808:0808".parse().unwrap());
     let sources = frag_sources_in_one_shard(
@@ -5482,7 +5656,7 @@ fn frag_assoc_full_shard_refuses_foreign_eviction_10714() {
         5000,
     ));
     let cache = FragAssoc::new();
-    for ident in 0..FRAG_CAP_PER_SOURCE as u32 {
+    for ident in 0..FRAG_CAP_PER_SESSION_PER_SHARD as u32 {
         for &source in &sources[..2] {
             cache.install(make_key(source, ident), decision, None, 1_000, 1, 0);
         }
@@ -5490,16 +5664,13 @@ fn frag_assoc_full_shard_refuses_foreign_eviction_10714() {
     assert_eq!(
         cache.len(),
         FRAG_CAP_PER_SHARD,
-        "two source quotas fill the shared shard"
+        "two admission-session quotas fill the shared shard"
     );
 
     let first_source_oldest = make_key(sources[0], 0);
     let second_source_oldest = make_key(sources[1], 0);
     let rejected_key = make_key(sources[2], 0);
-    assert!(
-        !cache.install(rejected_key, decision, None, 1_000, 1, 0),
-        "a third source below quota must be refused rather than evicting a live neighbor"
-    );
+    cache.install(rejected_key, decision, None, 1_000, 1, 0);
     assert_eq!(cache.len(), FRAG_CAP_PER_SHARD, "full shard stays bounded");
     assert!(
         cache
@@ -5520,13 +5691,14 @@ fn frag_assoc_full_shard_refuses_foreign_eviction_10714() {
 }
 
 #[test]
-fn nat64_frag_assoc_install_prunes_expired_before_evicting_live() {
-    // #5447: when the source quota fills with one LIVE association and expired
-    // entries, install must reclaim the expired slots before evicting the live
-    // association whose non-first fragments have not yet arrived.
+fn nat64_frag_assoc_install_prunes_expired_before_quota_refusal_5447() {
+    // #5447: a full session quota containing one live association and expired
+    // entries must prune the expired entries before refusing a new first
+    // fragment. The live association is preserved, and the new key can use a
+    // reclaimed slot.
     //
-    // RED-on-revert: removing the prune makes the live association the oldest
-    // source entry and the lookup below misses.
+    // RED-on-revert: removing the prune leaves the session at quota, so the
+    // new association is refused and the lookup below misses.
     let src = IpAddr::V6("2001:db8::1".parse().unwrap());
     let dst = IpAddr::V6("64:ff9b::0808:0808".parse().unwrap());
     let family = libc::AF_INET6 as u8;
@@ -5536,7 +5708,7 @@ fn nat64_frag_assoc_install_prunes_expired_before_evicting_live() {
         5000,
     ));
 
-    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_SOURCE + 1);
+    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_SESSION_PER_SHARD + 1);
     let mk = |ident: u32| FragKey {
         addr_family: family,
         src,
@@ -5551,25 +5723,27 @@ fn nat64_frag_assoc_install_prunes_expired_before_evicting_live() {
     let live_key = mk(idents[0]);
     cache.install(live_key, decision, None, 2 * FRAG_TTL_NS, 1, 0);
 
-    // Fill the rest of the source quota with entries that expire at TTL.
-    for &ident in &idents[1..FRAG_CAP_PER_SOURCE] {
+    // Fill the rest of this session's quota with entries that expire at TTL.
+    for &ident in &idents[1..FRAG_CAP_PER_SESSION_PER_SHARD] {
         cache.install(mk(ident), decision, None, 0, 1, 0);
     }
     assert_eq!(
         cache.len(),
-        FRAG_CAP_PER_SOURCE,
-        "source quota filled with 1 live and the rest expired"
+        FRAG_CAP_PER_SESSION_PER_SHARD,
+        "session quota filled with 1 live and the rest expired"
     );
 
     // A new first fragment arrives just past those expired deadlines, but the
     // original live entry is still within its own deadline.
     let flood_now = FRAG_TTL_NS + 1;
-    let new_key = mk(idents[FRAG_CAP_PER_SOURCE]);
+    let new_key = mk(idents[FRAG_CAP_PER_SESSION_PER_SHARD]);
     cache.install(new_key, decision, None, flood_now, 1, 0);
 
     assert!(
-        cache.lookup(&live_key, flood_now + 1, 1, |_| true).is_some(),
-        "#5447: expired entries must be reclaimed before a live source entry"
+        cache
+            .lookup(&live_key, flood_now + 1, 1, |_| true)
+            .is_some(),
+        "#5447: expired entries must be reclaimed before a live session entry"
     );
     assert!(
         cache.lookup(&new_key, flood_now + 1, 1, |_| true).is_some(),
@@ -5577,150 +5751,6 @@ fn nat64_frag_assoc_install_prunes_expired_before_evicting_live() {
     );
 }
 
-#[test]
-fn nat64_frag_assoc_install_reports_only_live_evictions_7054() {
-    // #7054: an install that reaches a source's live quota sacrifices one of
-    // that source's associations and reports it so the caller can count it.
-    // A full shard that cannot admit another source is refused without an
-    // eviction, so the live-victim signal is limited to self-replacement.
-    //
-    // REACHABILITY IS ALREADY PROVEN and is not re-proven here:
-    // `nat64_frag_assoc_install_all_live_still_evicts_oldest` below drives a
-    // source at quota and shows its oldest association evicted. This cell adds
-    // the signal and checks the false cases.
-    //
-    // THE FALSE CASES ARE THE POINT. `assert!(evicted)` alone passes against a
-    // function that returns `true` unconditionally — and a counter that fires on
-    // every install is worse than no counter, because it reads as constant
-    // capacity pressure. So the three ordinary paths are asserted false: a plain
-    // install into a shard with room, a REFRESH of an existing key, and an
-    // install that reclaimed an EXPIRED slot (the #5447 prune, which must not be
-    // reported as a live eviction).
-    let src = IpAddr::V6("2001:db8::7054".parse().unwrap());
-    let dst = IpAddr::V6("64:ff9b::0707:0707".parse().unwrap());
-    let family = libc::AF_INET6 as u8;
-    let decision = frag_test_decision(Nat64State::forward_decision(
-        Ipv4Addr::new(198, 51, 100, 7),
-        Ipv4Addr::new(7, 7, 7, 7),
-        5007,
-    ));
-    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_SOURCE + 2);
-    let mk = |ident: u32| FragKey {
-        addr_family: family,
-        src,
-        dst,
-        ident,
-        protocol: PROTO_UDP,
-        authority: frag_test_authority(),
-    };
-
-    let cache = FragAssoc::new();
-
-    // FALSE 1 — a plain install with room in the shard.
-    assert!(
-        !cache.install(mk(idents[0]), decision, None, 1_000, 1, 0),
-        "an install into a shard with room evicted nothing and must report false"
-    );
-    // FALSE 2 — a REFRESH of the same key. It takes the early return and cannot
-    // evict; reporting true here would count every retransmitted first fragment.
-    assert!(
-        !cache.install(mk(idents[0]), decision, None, 2_000, 1, 0),
-        "a same-key refresh evicts nothing and must report false"
-    );
-
-    for &ident in &idents[1..FRAG_CAP_PER_SOURCE] {
-        assert!(
-            !cache.install(mk(ident), decision, None, 1_000, 1, 0),
-            "filling the source quota must not report an eviction before it is full"
-        );
-    }
-    assert_eq!(
-        cache.len(),
-        FRAG_CAP_PER_SOURCE,
-        "fixture: the source quota must be full before testing self-eviction"
-    );
-
-    // TRUE — every source entry is live and its quota is at cap: replace its oldest.
-    assert!(
-        cache.install(mk(idents[FRAG_CAP_PER_SOURCE]), decision, None, 1_000, 1, 0),
-        "an install that evicted a still-LIVE association from its source must report it"
-    );
-    assert!(
-        cache
-            .lookup(&mk(idents[0]), 1_000, 1, |_| true)
-            .is_none(),
-        "control: the reported eviction really did remove the front entry"
-    );
-
-    // FALSE 3 — the #5447 prune path. Advance past the TTL so every entry is
-    // expired; the install then reclaims a dead slot and must NOT be reported as
-    // a live eviction.
-    let past_ttl = 1_000 + FRAG_TTL_NS + 1;
-    assert!(
-        !cache.install(
-            mk(idents[FRAG_CAP_PER_SOURCE + 1]),
-            decision,
-            None,
-            past_ttl,
-            1,
-            0
-        ),
-        "an install that reclaimed EXPIRED slots sacrificed no live association \
-         and must report false — otherwise the counter fires on ordinary TTL \
-         turnover and tells an operator nothing (#5447/#7054)"
-    );
-}
-
-#[test]
-fn nat64_frag_assoc_install_all_live_still_evicts_oldest() {
-    // Control: a source at its live per-source quota evicts its own oldest
-    // association. This keeps the source bounded without charging another
-    // source's entry; the hard per-shard ceiling remains in force as well.
-    let src = IpAddr::V6("2001:db8::2".parse().unwrap());
-    let dst = IpAddr::V6("64:ff9b::0909:0909".parse().unwrap());
-    let family = libc::AF_INET6 as u8;
-    let decision = frag_test_decision(Nat64State::forward_decision(
-        Ipv4Addr::new(198, 51, 100, 2),
-        Ipv4Addr::new(9, 9, 9, 9),
-        5001,
-    ));
-
-    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_SOURCE + 1);
-    let mk = |ident: u32| FragKey {
-        addr_family: family,
-        src,
-        dst,
-        ident,
-        protocol: PROTO_UDP,
-        authority: frag_test_authority(),
-    };
-
-    let cache = FragAssoc::new();
-    // Fill this source's quota with entries that are ALL live at the times below.
-    for &ident in &idents[..FRAG_CAP_PER_SOURCE] {
-        cache.install(mk(ident), decision, None, 1_000, 1, 0);
-    }
-    assert_eq!(cache.len(), FRAG_CAP_PER_SOURCE, "source quota filled");
-
-    let oldest_key = mk(idents[0]);
-    let new_key = mk(idents[FRAG_CAP_PER_SOURCE]);
-    // Reinstalling a new key at quota evicts this source's oldest association.
-    assert!(cache.install(new_key, decision, None, 1_000, 1, 0));
-
-    assert!(
-        cache.lookup(&oldest_key, 1_000, 1, |_| true).is_none(),
-        "the source's oldest live association is evicted at its quota",
-    );
-    assert!(
-        cache.lookup(&new_key, 1_000, 1, |_| true).is_some(),
-        "new association installed",
-    );
-    assert_eq!(
-        cache.len(),
-        FRAG_CAP_PER_SOURCE,
-        "source usage remains at quota",
-    );
-}
 
 #[test]
 fn nat64_frag_assoc_generation_change_invalidates_stale_association() {

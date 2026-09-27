@@ -777,6 +777,7 @@ impl ResolvedSessionLookup {
 #[derive(Clone, Debug)]
 pub(super) struct ResolvedFlowSessionDecision {
     pub(super) key: SessionKey,
+    pub(super) session_id: u64,
     pub(super) decision: SessionDecision,
     pub(super) metadata: SessionMetadata,
     pub(super) origin: SessionOrigin,
