@@ -1,7 +1,10 @@
 package vrrp
 
 import (
+	"fmt"
 	"net"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +15,23 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
+
+func demotionWaitingOnVIPMu(vi *vrrpInstance, stack []byte) bool {
+	n := runtime.Stack(stack, true)
+	lockFrame := fmt.Sprintf("lockSlow(%p)", &vi.vipMu)
+	for _, goroutine := range strings.Split(string(stack[:n]), "\n\n") {
+		lineEnd := strings.IndexByte(goroutine, '\n')
+		if lineEnd < 0 || !strings.Contains(goroutine[:lineEnd], "sync.Mutex.Lock") {
+			continue
+		}
+		if strings.Contains(goroutine, "becomeBackup") &&
+			strings.Contains(goroutine, lockFrame) &&
+			strings.Contains(goroutine, "sync.(*Mutex).Lock") {
+			return true
+		}
+	}
+	return false
+}
 
 // TestUpdateInstances_VIPSetChangeKeepsMasterWithoutResignation covers a
 // single-unit dual-stack RETH instance. The existing run loop is real so a
@@ -832,13 +852,23 @@ func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testi
 	}
 }
 
+// sync.Mutex permits barging in normal mode, so this proves a mid-burst
+// starvation-mode handoff rather than requiring an exact one-VIP handoff. The
+// parked demoter and paced 16-VIP burst keep contention active beyond Go's
+// ~1ms waiter threshold; per-VIP unlocks provide a handoff point before the
+// whole burst completes.
 func TestGARPPerVIPLockBoundsDemotionWait(t *testing.T) {
 	for _, isIPv6 := range []bool{false, true} {
 		family := "ipv4"
-		vips := []string{"198.18.107.80/32", "198.18.107.81/32", "198.18.107.82/32"}
-		if isIPv6 {
-			family = "ipv6"
-			vips = []string{"2001:db8:1078::1/64", "2001:db8:1078::2/64", "2001:db8:1078::3/64"}
+		const vipCount = 16
+		vips := make([]string, vipCount)
+		for i := range vips {
+			if isIPv6 {
+				family = "ipv6"
+				vips[i] = fmt.Sprintf("2001:db8:1078::%x/64", i+1)
+			} else {
+				vips[i] = fmt.Sprintf("198.18.107.%d/32", 80+i)
+			}
 		}
 		t.Run(family, func(t *testing.T) {
 			vi := newInstance(Instance{
@@ -851,14 +881,25 @@ func TestGARPPerVIPLockBoundsDemotionWait(t *testing.T) {
 			oldGARP, oldNA, oldProbe := garpBurstFn, naBurstFn, arpProbeFn
 			t.Cleanup(func() { garpBurstFn, naBurstFn, arpProbeFn = oldGARP, oldNA, oldProbe })
 			var burstCalls atomic.Int32
+			var burstsAtDemotion atomic.Int32
+			var firstDelete sync.Once
+			vi.addrDelFn = func(netlink.Link, *netlink.Addr) error {
+				firstDelete.Do(func() { burstsAtDemotion.Store(burstCalls.Load()) })
+				return nil
+			}
 			firstFrame, releaseFrame := make(chan struct{}), make(chan struct{})
 			var releaseOnce sync.Once
 			release := func() { releaseOnce.Do(func() { close(releaseFrame) }) }
 			defer release()
 			burst := func(string, net.IP, int, cluster.BurstStillValid) error {
-				if burstCalls.Add(1) == 1 {
+				call := burstCalls.Add(1)
+				if call == 1 {
 					close(firstFrame)
 					<-releaseFrame
+				} else {
+					// Keep the remaining send loop active beyond the mutex
+					// starvation threshold while a verified waiter is queued.
+					time.Sleep(5 * time.Millisecond)
 				}
 				return nil
 			}
@@ -882,17 +923,29 @@ func TestGARPPerVIPLockBoundsDemotionWait(t *testing.T) {
 				advertTimer.Stop()
 			})
 			demoteDone := make(chan error, 1)
-			demoteStarted := make(chan struct{})
 			go func() {
-				close(demoteStarted)
 				demoteDone <- vi.becomeBackup(masterDownTimer, advertTimer)
 			}()
-			<-demoteStarted
+			stack := make([]byte, 1<<20)
+			parkDeadline := time.Now().Add(time.Second)
+			for !demotionWaitingOnVIPMu(vi, stack) && time.Now().Before(parkDeadline) {
+				runtime.Gosched()
+			}
+			if !demotionWaitingOnVIPMu(vi, stack) {
+				release()
+				t.Fatalf("becomeBackup did not park on vipMu while the first frame was blocked:\n%s",
+					stack[:runtime.Stack(stack, true)])
+			}
+			time.Sleep(10 * time.Millisecond)
+			if !demotionWaitingOnVIPMu(vi, stack) {
+				release()
+				t.Fatal("becomeBackup stopped waiting on vipMu before the frame was released")
+			}
 			select {
 			case err := <-demoteDone:
 				release()
 				t.Fatalf("demotion completed while the current VIP first frame was blocked: %v", err)
-			case <-time.After(10 * time.Millisecond):
+			default:
 			}
 
 			releaseAt := time.Now()
@@ -903,18 +956,24 @@ func TestGARPPerVIPLockBoundsDemotionWait(t *testing.T) {
 					t.Fatalf("becomeBackup: %v", err)
 				}
 			case <-time.After(time.Second):
-				t.Fatal("demotion did not resume after the current per-VIP frame returned")
+				t.Fatal("demotion did not resume after a per-VIP frame returned")
 			}
 			if elapsed := time.Since(releaseAt); elapsed > 250*time.Millisecond {
-				t.Fatalf("demotion waited %s after releasing one VIP frame; want <250ms", elapsed)
+				t.Fatalf("demotion waited %s after releasing a VIP frame; want <250ms", elapsed)
 			}
 			select {
 			case <-sendDone:
 			case <-time.After(time.Second):
 				t.Fatal("GARP sender did not stop after demotion")
 			}
-			if got := burstCalls.Load(); got != 1 {
-				t.Fatalf("bursts sent before demotion completed = %d, want only current VIP's frame", got)
+			gotAtDemotion := burstsAtDemotion.Load()
+			if gotAtDemotion <= 0 || gotAtDemotion >= vipCount {
+				t.Fatalf("demotion acquired vipMu after %d bursts; want mid-burst acquisition before %d VIPs finished",
+					gotAtDemotion, vipCount)
+			}
+			if got := burstCalls.Load(); got != gotAtDemotion {
+				t.Fatalf("bursts continued after demotion acquired vipMu: at acquisition=%d final=%d",
+					gotAtDemotion, got)
 			}
 			if vi.getState() != StateBackup {
 				t.Fatalf("state after demotion = %s, want BACKUP", vi.getState())
