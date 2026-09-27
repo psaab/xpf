@@ -175,3 +175,68 @@ func TestDeferredSnapshotAlarmClearMatchesActiveGeneration10782(t *testing.T) {
 		t.Fatalf("success for current generation B did not clear its deferral: %q", alarm)
 	}
 }
+
+// FAIL-ON-REVERT: a stale success for A must not clear its deferral after B
+// became active, while successful reconciliation of current v4 B must clear it.
+func TestDeferredSnapshotAlarmClearsAfterNewCurrentGeneration10782(t *testing.T) {
+	d, store, _ := commitConfirmedSnapshotGateDaemon10782(t, 4, true)
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("promote multi-zone A: %v", err)
+	}
+	configA := store.ShowActive()
+	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, "peer deferred A")
+
+	if err := store.SetFromInput("system host-name deferred-b"); err != nil {
+		t.Fatalf("set config B: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("promote multi-zone B: %v", err)
+	}
+	d.clearPeerSnapshotConfigSyncDeferred(configA)
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "peer deferred A") {
+		t.Fatalf("stale success for A cleared the alarm while B is active: %q", alarm)
+	}
+
+	pushes := 0
+	d.configSyncPushForTest = func() { pushes++ }
+	d.reconcileConfigSyncToPeer("new-current-multi-zone-generation")
+	if pushes != 1 {
+		t.Fatalf("current v4 generation B reconciliation pushed %d times, want once", pushes)
+	}
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
+		t.Fatalf("successful current generation B left A's deferral alarm stuck: %q", alarm)
+	}
+}
+
+// A successful ungated push after the active config removes the multi-zone
+// shape is still a success of the CURRENT desired config and supersedes the
+// older deferral.
+func TestShapeRemovalPushClearsOlderSnapshotDeferral10782(t *testing.T) {
+	d, store, _ := commitConfirmedSnapshotGateDaemon10782(t, 3, true)
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("promote multi-zone A: %v", err)
+	}
+	configA := store.ShowActive()
+	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, "peer deferred multi-zone A")
+
+	if err := store.DeleteFromInput("security policies global policy multi-zone-deny"); err != nil {
+		t.Fatalf("remove multi-zone policy: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("promote shape-free B: %v", err)
+	}
+	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(store.ActiveConfig())
+	if err != nil || auth != nil {
+		t.Fatalf("shape-free current config should use the ungated push path: auth=%v err=%v", auth, err)
+	}
+	configB := store.ShowActive()
+	pushes := 0
+	d.configSyncPushForTest = func() { pushes++ }
+	d.reconcileConfigSyncToPeer("current-shape-free-generation")
+	if pushes != 1 {
+		t.Fatalf("shape-free current config pushed %d times, want once", pushes)
+	}
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
+		t.Fatalf("successful current shape-free config %q left the older deferral stuck: %q", configB, alarm)
+	}
+}
