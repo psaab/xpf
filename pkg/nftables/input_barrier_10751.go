@@ -4,10 +4,9 @@
 // persisted 10-xpf-*.network files (static addresses + IPv6 link-locals) BEFORE
 // xpfd starts (xpfd orders After=network-online.target frr.service, and
 // wait-online is disabled), while the host-inbound table is installed only in
-// the first apply tail. The only boot-time nft unit is FORWARD-only by design
-// (xpf-transit-closed.service: INPUT/OUTPUT are never touched), so every
-// host-bound listener that starts from persisted config (sshd with no
-// ListenAddress, charon, bgpd, kea/chrony where enabled) is reachable with NO
+// the first apply tail. Without this pre-networkd guard, every host-bound
+// listener that starts from persisted config (sshd with no ListenAddress,
+// charon, bgpd, kea/chrony where enabled) would be reachable without
 // host-input enforcement until the first apply lands.
 //
 // This file closes the window with a SEPARATE inet table, installed by a
@@ -25,28 +24,32 @@
 //  3. meta l4proto { 50, 51 } accept (host-terminated ESP/AH).
 //  4. ICMPv6 errors/PMTUD and ND; ICMPv4 errors/PMTUD.
 //  5. meta l4proto { 89, 112 } accept (OSPF and VRRP control plane).
-//  6. TCP dport { 179, 4785 } accept (BGP and xpf HA session sync).
+//  6. TCP dport { 4785 } accept (xpf HA session sync only; BGP 179 is
+//     deferred until the first host-inbound handoff).
 //  7. UDP dport { 520, 521, 3784, 3785, 4784 } accept (RIP/RIPng, BFD,
 //     xpf HA heartbeat).
 //
 // Rules 2-4 are hostInboundFenceMandatoryAdmitsNetlink(p, nil): the SAME shared
 // admits as the #5644 cold-boot fence and #5789 gap fence, minus configured
 // WireGuard ports (unknown before config loads). Rules 5-7 preserve the
-// config-free FRR and HA protocols needed during the boot handoff. The firewall
-// service ports (including SSH, IKE UDP 500/4500, DHCP server, web/API, and
-// monitoring) are deliberately absent; no config is read to authorize them.
-// No named counters, no address scoping — at Before-networkd install time NO
-// addresses exist yet, so a daddr-scoped fence is unexpressable and policy DROP
-// is the fail-closed shape. Only return traffic, loopback, core L3, and the
-// routing/HA control plane pass.
+// config-free routing and HA protocols needed during the boot handoff. The
+// firewall service ports (including SSH 22, BGP 179, IKE UDP 500/4500, DHCP
+// server, web/API, and monitoring) are deliberately absent; no config is read
+// to authorize them, and an unconditional 179/500/4500 admit would recreate the
+// boot bypass on every data interface. No named counters, no address scoping —
+// at Before-networkd install time NO addresses exist yet, so a daddr-scoped
+// fence is unexpressable and policy DROP is the fail-closed shape. Only return
+// traffic, loopback, core L3, and the routing/HA control plane pass.
 //
 // PRIORITY. 12 evaluates STRICTLY AFTER the whole local-delivery cluster
 // (lo0 0 < host-inbound 10 < gap 11). Before the first apply the barrier stands
-// alone and drops everything new. During handoff, base-chain ACCEPTs from the
-// real host-inbound table do not prevent a later base chain from dropping the
-// packet, so this barrier may temporarily reject traffic the real table would
-// allow. That is intentionally fail-closed; terminal DROPs remain enforced.
-// Removing this chain restores the configured host-input posture.
+// alone and drops everything new. During handoff, an ACCEPT in the real
+// host-inbound base chain does NOT bypass this later base chain, so the barrier
+// still drops unadmitted traffic throughout the overlap. That overlap is the
+// install-to-delete window inside one apply tail: configured SSH/IKE/new
+// services may drop once and retry (TCP/IKE retransmit), which is acceptable
+// versus fail-open. Terminal DROPs remain enforced. Removing this chain restores
+// the configured host-input posture.
 // FAMILY. inet only, matching xpf_hostinbound. Locally-delivered IP packets
 // always traverse the inet input hook regardless of ingress interface, so no
 // bridge leg is needed (unlike forward, where bridged frames never consult the
@@ -79,9 +82,10 @@ const EarlyInputBarrierTableName = "xpf_input_barrier"
 // enforcement during the handoff overlap. See the file doc comment.
 const earlyInputBarrierPriority = hostInboundGapPriority + 1
 
-// earlyInputBarrierControlTCPPorts are the config-free TCP listener ports needed
-// by FRR BGP and xpf's TCP session-sync control link.
-var earlyInputBarrierControlTCPPorts = []uint16{179, 4785}
+// earlyInputBarrierControlTCPPorts is the config-free TCP listener port for
+// xpf's TCP session-sync control link. BGP 179 is deliberately absent: it is an
+// issue-listed exposed service and stays deferred until handoff.
+var earlyInputBarrierControlTCPPorts = []uint16{4785}
 
 // earlyInputBarrierControlUDPPorts are the config-free UDP listener ports needed
 // by xpf heartbeat, FRR RIP/RIPng and BFD.

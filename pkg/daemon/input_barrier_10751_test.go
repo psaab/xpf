@@ -38,6 +38,24 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		}
 	})
 
+	t.Run("real install surfaces barrier removal failure", func(t *testing.T) {
+		removeErr := errors.New("early input barrier removal failed")
+		nftInstaller = &fakeNftInstaller{
+			hostInbound: func(xnft.HostInboundSpec) error { return nil },
+			earlyInputBarrierRemove: func() error {
+				return removeErr
+			},
+		}
+		d := &Daemon{}
+		err := d.applyHostInboundFilter(hostInboundTestConfig())
+		if !errors.Is(err, removeErr) {
+			t.Fatalf("handoff error = %v, want early barrier removal failure", err)
+		}
+		if !d.hostInboundEnforced.Load() {
+			t.Fatal("real host-inbound enforcement was not retained after removal failure")
+		}
+	})
+
 	t.Run("address-scoped fallback fence", func(t *testing.T) {
 		var events []string
 		installErr := errors.New("real host-inbound load failed")

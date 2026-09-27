@@ -60,11 +60,27 @@ func TestEarlyInputBarrierPlanClosesHostServicesAndPreservesControl10751(t *test
 	if got := inputBarrierLookupSet10751(t, p, p.rules[6]); !reflect.DeepEqual(got, [][]byte{{89}, {112}}) {
 		t.Fatalf("routing protocol set = %v, want OSPF(89) + VRRP(112)", got)
 	}
-	if got := inputBarrierLookupPorts10751(t, p, p.rules[7]); !reflect.DeepEqual(got, []uint16{179, 4785}) {
-		t.Fatalf("early TCP admits = %v, want BGP 179 + HA session sync 4785 (not SSH 22)", got)
+	tcpPorts := inputBarrierLookupPorts10751(t, p, p.rules[7])
+	if !reflect.DeepEqual(tcpPorts, []uint16{4785}) {
+		t.Fatalf("early TCP admits = %v, want only HA session-sync 4785 (SSH 22 and BGP 179 must remain blocked)", tcpPorts)
 	}
-	if got := inputBarrierLookupPorts10751(t, p, p.rules[8]); !reflect.DeepEqual(got, []uint16{520, 521, 3784, 3785, 4784}) {
-		t.Fatalf("early UDP admits = %v, want RIP/RIPng, BFD, HA heartbeat only", got)
+	for _, blocked := range []uint16{22, 179} {
+		for _, admitted := range tcpPorts {
+			if admitted == blocked {
+				t.Errorf("early TCP barrier admits exposed service port %d", blocked)
+			}
+		}
+	}
+	udpPorts := inputBarrierLookupPorts10751(t, p, p.rules[8])
+	if !reflect.DeepEqual(udpPorts, []uint16{520, 521, 3784, 3785, 4784}) {
+		t.Fatalf("early UDP admits = %v, want RIP/RIPng, BFD, HA heartbeat only", udpPorts)
+	}
+	for _, blocked := range []uint16{500, 4500} {
+		for _, admitted := range udpPorts {
+			if admitted == blocked {
+				t.Errorf("early UDP barrier admits exposed IKE service port %d", blocked)
+			}
+		}
 	}
 }
 
@@ -102,15 +118,41 @@ func inputBarrierLookupSet10751(t *testing.T, p *nlPlan, rule []expr.Any) [][]by
 
 func inputBarrierLookupPorts10751(t *testing.T, p *nlPlan, rule []expr.Any) []uint16 {
 	t.Helper()
-	keys := inputBarrierLookupSet10751(t, p, rule)
-	out := make([]uint16, len(keys))
-	for i, key := range keys {
-		if len(key) != 2 {
-			t.Fatalf("port set key = %x, want 2 bytes", key)
+	for i, e := range rule {
+		payload, ok := e.(*expr.Payload)
+		if !ok || payload.Base != expr.PayloadBaseTransportHeader || payload.Offset != 2 || payload.Len != 2 {
+			continue
 		}
-		out[i] = binary.BigEndian.Uint16(key)
+		if i+1 >= len(rule) {
+			continue
+		}
+		var keys [][]byte
+		switch match := rule[i+1].(type) {
+		case *expr.Cmp:
+			keys = [][]byte{match.Data}
+		case *expr.Lookup:
+			elements, ok := p.sets[match.SetID]
+			if !ok {
+				t.Fatalf("port rule references unrecorded nft set %d", match.SetID)
+			}
+			keys = make([][]byte, len(elements))
+			for j := range elements {
+				keys[j] = elements[j].Key
+			}
+		default:
+			continue
+		}
+		out := make([]uint16, len(keys))
+		for j, key := range keys {
+			if len(key) != 2 {
+				t.Fatalf("port match key = %x, want 2 bytes", key)
+			}
+			out[j] = binary.BigEndian.Uint16(key)
+		}
+		return out
 	}
-	return out
+	t.Fatalf("rule has no transport-header destination-port match: %#v", rule)
+	return nil
 }
 
 func TestEarlyInputBarrierNetlinkLifecycle10751(t *testing.T) {

@@ -127,23 +127,26 @@ TRANSIT_IPV4_SYSCTL=/proc/sys/net/ipv4/ip_forward
 TRANSIT_IPV6_SYSCTL=/proc/sys/net/ipv6/conf/all/forwarding
 
 cleanup_transit_state() {
-    # Keep the removal command before unlinking /usr/local/sbin/xpfd: the
+    # Keep the removal commands before unlinking /usr/local/sbin/xpfd: the
     # versioned runtime remains available until the purge tree cleanup below.
     # Only invoke a package-owned link; an operator-repointed xpfd is not ours.
-    # If the runtime is unavailable or cannot remove the barrier, leave the
-    # sysctls untouched rather than opening forwarding behind a stale fence.
+    # Attempt both independent tables even if the transit deletion fails. Do
+    # not restore forwarding sysctls unless the transit table is gone, and do
+    # not let package removal skip early-input cleanup on that failure.
     if ! link_is_owned "$SBIN/xpfd" || [ ! -x "$SBIN/xpfd" ]; then
-        echo "xpf: cannot remove the transit barrier; package xpfd is unavailable" >&2
+        echo "xpf: cannot remove the transit and input barriers; package xpfd is unavailable" >&2
         return 0
     fi
+    transit_removed=yes
     if ! "$SBIN/xpfd" transit-barrier remove; then
         echo "xpf: transit barrier removal failed; leaving forwarding sysctls unchanged" >&2
-        return 0
+        transit_removed=no
     fi
     if ! "$SBIN/xpfd" input-barrier remove; then
         echo "xpf: early input barrier removal failed; leaving host input closed" >&2
         return 0
     fi
+    [ "$transit_removed" = yes ] || return 0
     # Restore the normal forwarding posture after deleting the xpf fence.
     # These are best-effort procfs writes; a non-booted package-build/chroot
     # has no live sysctls and must not fail package removal.

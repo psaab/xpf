@@ -8,10 +8,9 @@
 #
 # Keep this separate from xpf-transit-closed.service: the #9852 forward unit and
 # its xpfd command are deliberately forward-only. The early input barrier admits
-# loopback, established/related, mandatory L3 control, and the FRR/HA control-plane
-# ports/protocols needed during the boot handoff. All ordinary host services are
-# denied until xpfd atomically installs host-inbound enforcement (or completes a
-# no-enforcement teardown) and removes this barrier.
+# loopback, established/related, mandatory L3, and selected FRR/HA control-plane
+# traffic. BGP and ordinary host services remain denied until xpfd atomically
+# installs host-inbound enforcement (or completes a no-enforcement teardown).
 #
 # RequiredBy=systemd-networkd.service is essential, not merely an ordering hint:
 # a failed barrier install MUST prevent systemd-networkd from bringing up any
