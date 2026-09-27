@@ -302,7 +302,7 @@ fn transit_forward_install_publishes_a_conntrack_row_6965() {
          the conntrack map and there is no row for it — not a row with a zeroed \
          identity, no row at all"
     );
-    let row = published[0];
+    let row = &published[0];
     assert!(
         !row.is_reverse,
         "the published row must be the FORWARD one; every show/clear call site \
