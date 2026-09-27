@@ -234,10 +234,9 @@ func fabricRPCProbes() map[string]fabricRPCProbe {
 		},
 		pb.BpfrxService_SystemAction_FullMethodName: {
 			// Not in fabricAllowedUnaryMethods — admitted by the separate
-			// isFabricSafeSystemAction branch for the two cross-node
-			// cluster-failover forms only. Audited because it IS fabric
-			// reachable; the failover response carries RG ownership state, no
-			// config render.
+			// isFabricSafeSystemAction branch for well-formed cross-node
+			// cluster failover and the exact persistent-NAT clear action.
+			// Audited because these are fabric reachable peer operations.
 			render: func(t *testing.T, s *Server) []string {
 				resp, err := s.SystemAction(context.Background(),
 					&pb.SystemActionRequest{Action: "cluster-failover:1:node1"})

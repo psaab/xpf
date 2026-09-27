@@ -146,7 +146,11 @@ impl PortAllocator {
         let live = self.lock_live();
         live.persistent_by_source
             .iter()
-            .filter(|(_, lease)| lease.active_flows == 0 && lease.expires_at_ns > now_ns)
+            .filter(|(key, lease)| {
+                !live.revoked_persistent.contains(key)
+                    && lease.active_flows == 0
+                    && lease.expires_at_ns > now_ns
+            })
             .map(|(key, lease)| IdleLeaseRecord {
                 protocol: key.protocol,
                 src_ip: key.src_ip,
@@ -184,7 +188,10 @@ impl PortAllocator {
         let live = self.lock_live();
         live.persistent_by_source
             .iter()
-            .filter(|(_, lease)| lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+            .filter(|(key, lease)| {
+                !live.revoked_persistent.contains(key)
+                    && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+            })
             .map(|(key, lease)| DisplayLeaseRecord {
                 protocol: key.protocol,
                 src_ip: key.src_ip,
@@ -233,7 +240,7 @@ impl PortAllocator {
             remote: rec.remote,
         };
         let mut live = self.lock_live();
-        if live.persistent_by_source.contains_key(&key) {
+        if live.revoked_persistent.contains(&key) || live.persistent_by_source.contains_key(&key) {
             return IdleLeaseImport::SkippedExisting;
         }
         // Module note 4: take the occupancy bit BEFORE installing, and refuse

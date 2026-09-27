@@ -122,6 +122,20 @@ impl Coordinator {
         self.export_display_persistent_leases(monotonic_nanos())
     }
 
+    /// Revoke every persistent source-NAT lease owned by the current
+    /// forwarding snapshot. Shared pool allocators are cleared exactly once.
+    pub(crate) fn clear_persistent_nat_leases(&self) -> usize {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut cleared = 0;
+        for rule in &self.forwarding.source_nat_rules {
+            if !rule.pool_mode || !seen.insert(rule.pool_name.as_str()) {
+                continue;
+            }
+            cleared += rule.pool_allocator.clear_persistent_leases();
+        }
+        cleared
+    }
+
     /// Install a batch of peer idle leases.
     pub(crate) fn import_idle_persistent_leases(
         &self,

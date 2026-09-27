@@ -843,7 +843,11 @@ pub(crate) struct ControlResponse {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub session_policy_per_worker_errors: Vec<String>,
-    #[serde(rename = "session_deltas", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "session_deltas",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub session_deltas: Vec<SessionDeltaInfo>,
     /// #9344/#9856: `true` when an export answer is capped by `max` and
     /// the helper still holds entries from the same tokenized window.
@@ -889,8 +893,15 @@ pub(crate) struct ControlResponse {
     pub policy_delete_outcomes: Vec<String>,
     #[serde(rename = "policy_delete_complete", default)]
     pub policy_delete_complete: bool,
-    #[serde(rename = "policy_delete_errors", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "policy_delete_errors",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub policy_delete_errors: Vec<String>,
+    /// #10784: authoritative persistent-lease bindings revoked by clear.
+    #[serde(rename = "persistent_nat_lease_count", default)]
+    pub persistent_nat_lease_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1078,7 +1089,11 @@ pub(crate) struct SessionSyncRequest {
     /// stated) and family tags compact 4/6. Set only with operation
     /// `mirror_delete_policy_batch`; `None` for every other verb. Additive:
     /// an old helper rejects the unknown verb.
-    #[serde(rename = "policy_matches", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "policy_matches",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub policy_matches: Option<Vec<SessionPolicyMatch>>,
     /// #3301: the admitting policy's ID (#3056 namespace), carried so a
     /// peer-PROMOTED session resolves the admitting policy on its live-session
@@ -1283,7 +1298,11 @@ pub(crate) struct SessionPolicyMatch {
     pub routing_domain: u32,
     #[serde(default)]
     pub tuple: SessionPolicyTuple,
-    #[serde(rename = "reverse_key", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "reverse_key",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reverse_key: Option<SessionPolicyTuple>,
     #[serde(rename = "policy_id", default)]
     pub policy_id: u32,

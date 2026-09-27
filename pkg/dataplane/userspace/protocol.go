@@ -502,18 +502,18 @@ type DisplayLeaseWire struct {
 }
 
 type ControlRequest struct {
-	Type           string                    `json:"type"`
-	SuppressStatus bool                      `json:"suppress_status,omitempty"`
-	Snapshot       *ConfigSnapshot           `json:"snapshot,omitempty"`
-	Forwarding     *ForwardingControlRequest `json:"forwarding,omitempty"`
-	HAState        *HAStateUpdateRequest     `json:"ha_state,omitempty"`
-	Queue          *QueueControlRequest      `json:"queue,omitempty"`
-	Binding        *BindingControlRequest    `json:"binding,omitempty"`
-	Packet         *InjectPacketRequest      `json:"packet,omitempty"`
-	SessionSync    *SessionSyncRequest       `json:"session_sync,omitempty"`
+	Type              string                    `json:"type"`
+	SuppressStatus    bool                      `json:"suppress_status,omitempty"`
+	Snapshot          *ConfigSnapshot           `json:"snapshot,omitempty"`
+	Forwarding        *ForwardingControlRequest `json:"forwarding,omitempty"`
+	HAState           *HAStateUpdateRequest     `json:"ha_state,omitempty"`
+	Queue             *QueueControlRequest      `json:"queue,omitempty"`
+	Binding           *BindingControlRequest    `json:"binding,omitempty"`
+	Packet            *InjectPacketRequest      `json:"packet,omitempty"`
+	SessionSync       *SessionSyncRequest       `json:"session_sync,omitempty"`
 	SessionPolicyList *SessionPolicyListRequest `json:"session_policy_list,omitempty"`
-	SessionDeltas  *SessionDeltaDrainRequest `json:"session_deltas,omitempty"`
-	SessionExport  *SessionExportRequest     `json:"session_export,omitempty"`
+	SessionDeltas     *SessionDeltaDrainRequest `json:"session_deltas,omitempty"`
+	SessionExport     *SessionExportRequest     `json:"session_export,omitempty"`
 	// #7919: the 5-tuple for the read-only `session_counters` verb. An ADDED
 	// field, never a redefinition — an old helper ignores it, and this control
 	// plane never sends it to one twice (the first refusal is sticky per call).
@@ -543,14 +543,14 @@ type ControlRequest struct {
 }
 
 type ControlResponse struct {
-	OK            bool               `json:"ok"`
-	Error         string             `json:"error,omitempty"`
-	Status        *ProcessStatus     `json:"status,omitempty"`
-	SessionPolicyMatches []SessionPolicyMatch `json:"session_policy_matches,omitempty"`
-	SessionPolicyComplete bool `json:"session_policy_complete,omitempty"`
-	SessionPolicyContinuation string `json:"session_policy_continuation,omitempty"`
-	SessionPolicyPerWorkerErrors []string `json:"session_policy_per_worker_errors,omitempty"`
-	SessionDeltas []SessionDeltaInfo `json:"session_deltas,omitempty"`
+	OK                           bool                 `json:"ok"`
+	Error                        string               `json:"error,omitempty"`
+	Status                       *ProcessStatus       `json:"status,omitempty"`
+	SessionPolicyMatches         []SessionPolicyMatch `json:"session_policy_matches,omitempty"`
+	SessionPolicyComplete        bool                 `json:"session_policy_complete,omitempty"`
+	SessionPolicyContinuation    string               `json:"session_policy_continuation,omitempty"`
+	SessionPolicyPerWorkerErrors []string             `json:"session_policy_per_worker_errors,omitempty"`
+	SessionDeltas                []SessionDeltaInfo   `json:"session_deltas,omitempty"`
 	// SessionExportMore reports that an export_owner_rg_sessions answer was
 	// CAPPED by the request's Max and the helper still holds deltas from the
 	// same window (#9344).
@@ -586,11 +586,11 @@ type ControlResponse struct {
 	// ErrSessionCountersUnsupported, never as an empty answer.
 	SessionCounters []SessionCounterRow `json:"session_counters,omitempty"`
 	// #10512: helper-owned clear transaction metadata.
-	SessionMirrorV4Count          uint64 `json:"session_mirror_v4_count,omitempty"`
-	SessionMirrorV6Count          uint64 `json:"session_mirror_v6_count,omitempty"`
-	SessionMirrorComplete         bool   `json:"session_mirror_complete,omitempty"`
-	SessionMirrorFenceID          uint64 `json:"session_mirror_fence_id,omitempty"`
-	SessionMirrorContinuation     string `json:"session_mirror_continuation,omitempty"`
+	SessionMirrorV4Count      uint64 `json:"session_mirror_v4_count,omitempty"`
+	SessionMirrorV6Count      uint64 `json:"session_mirror_v6_count,omitempty"`
+	SessionMirrorComplete     bool   `json:"session_mirror_complete,omitempty"`
+	SessionMirrorFenceID      uint64 `json:"session_mirror_fence_id,omitempty"`
+	SessionMirrorContinuation string `json:"session_mirror_continuation,omitempty"`
 	// PolicyDeleteOutcomes is the per-match outcome vector for one
 	// mirror_delete_policy_batch micro-batch (#10512, plan §2.4), positional
 	// against the request's PolicyMatches: applied | stale_forward |
@@ -600,6 +600,9 @@ type ControlResponse struct {
 	PolicyDeleteOutcomes []string `json:"policy_delete_outcomes,omitempty"`
 	PolicyDeleteComplete bool     `json:"policy_delete_complete,omitempty"`
 	PolicyDeleteErrors   []string `json:"policy_delete_errors,omitempty"`
+	// PersistentNatLeaseCount reports the authoritative allocator population
+	// revoked by clear_persistent_nat_leases (#10784).
+	PersistentNatLeaseCount uint64 `json:"persistent_nat_lease_count,omitempty"`
 }
 
 // QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than
@@ -666,6 +669,7 @@ type IpsecTunnelRowSnapshot struct {
 	IfID           uint32 `json:"if_id"`
 	LogicalIfindex int32  `json:"logical_ifindex"`
 }
+
 // IpsecBindlessSelectorSnapshot is one complete pair of IPsec traffic-selector
 // sides for a policy-based VPN with no bind-interface. Empty sides are not
 // published: they resolve to dynamic endpoints rather than a shape the helper
@@ -693,7 +697,7 @@ type ConfigSnapshot struct {
 	// policy-based IPsec selector pairs. The helper drops matching transit even
 	// while no SA is present: AF_XDP TX bypasses kernel XFRM and SA state is not
 	// a safe authorization oracle.
-	BindlessSelectorFenceEnabled bool `json:"bindless_selector_fence_enabled,omitempty"`
+	BindlessSelectorFenceEnabled bool                            `json:"bindless_selector_fence_enabled,omitempty"`
 	BindlessSelectorRows         []IpsecBindlessSelectorSnapshot `json:"bindless_selector_rows,omitempty"`
 	// IpsecTunnelSnapshotGeneration is the daemon capture-generation stamp
 	// paired with IpsecTunnelRows. It is distinct from ConfigSnapshot.Generation:
@@ -938,10 +942,10 @@ type FlowSnapshot struct {
 	// #10703: TCP session-MISS SYN admission. The v34 version fence prevents a
 	// v33 helper from ignoring no-syn-check and silently keeping the default
 	// drop; strict-syn-check takes precedence when both fields are set.
-	TCPNoSynCheck     bool `json:"tcp_no_syn_check,omitempty"`
-	TCPStrictSynCheck bool `json:"tcp_strict_syn_check,omitempty"`
-	UDPSessionTimeout  int `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
-	ICMPSessionTimeout int `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
+	TCPNoSynCheck      bool `json:"tcp_no_syn_check,omitempty"`
+	TCPStrictSynCheck  bool `json:"tcp_strict_syn_check,omitempty"`
+	UDPSessionTimeout  int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
+	ICMPSessionTimeout int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
 	// GREAcceleration carries `security flow gre-performance-acceleration`
 	// (#3360). On vSRX this extracts the GRE key/call-id into the session tuple
 	// so multiple GRE tunnels between the same endpoints map to distinct

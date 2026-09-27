@@ -601,6 +601,26 @@ func (a *LegacyDataPlaneAdapter) ClearAllSessions() (int, int, error) {
 	return m.ClearAllSessions()
 }
 
+// ClearPersistentNATLeases overrides the promoted mirror-only path. The
+// helper owns lease reuse; only after its revoke is acknowledged do we clear
+// the persistent-NAT table consumed by SHOW.
+func (a *LegacyDataPlaneAdapter) ClearPersistentNATLeases() (uint64, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0, err
+	}
+	count, err := m.ClearPersistentNATLeases()
+	if err != nil {
+		return count, err
+	}
+	if a.DataPlane != nil {
+		if table := a.DataPlane.GetPersistentNAT(); table != nil {
+			table.Clear()
+		}
+	}
+	return count, nil
+}
+
 func (a *LegacyDataPlaneAdapter) SetDeferWorkers(v bool) {
 	m, err := a.managerOrErr()
 	if err != nil {
@@ -863,6 +883,7 @@ func (a *LegacyDataPlaneAdapter) BatchDeleteSessionsScopedV6(scoped []dataplane.
 	}
 	return m.BatchDeleteSessionsScopedV6(scoped)
 }
+
 // ListSessionsByPolicy performs the helper-owned READ phase (#10512). It is an
 // optional capability so non-userspace runtimes retain their existing
 // SessionStore surface.
@@ -874,7 +895,7 @@ func (a *LegacyDataPlaneAdapter) ListSessionsByPolicy(
 		return ControlResponse{}, err
 	}
 	return m.ListSessionsByPolicy(req)
-	}
+}
 
 // DeletePolicySessions forwards the helper-first identity-conditional policy
 // invalidation path to the published userspace adapter.

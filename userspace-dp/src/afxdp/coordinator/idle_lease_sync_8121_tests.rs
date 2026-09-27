@@ -108,3 +108,33 @@ fn an_import_routes_by_pool_name_and_counts_an_unknown_pool_8121() {
         "a record for an unknown pool must be counted, not misrouted: {counts:?}"
     );
 }
+
+/// Clearing reaches each distinct pool allocator once and keeps a pre-clear
+/// full-set push from reinstalling the revoked idle lease (#10784).
+#[test]
+fn clear_revokes_allocator_leases_and_rejects_stale_peer_import_10784() {
+    let mut coord = Coordinator::new();
+    coord.forwarding.source_nat_rules = parse_source_nat_rules(&[
+        pool_rule("r1", "P", &["203.0.113.1"]),
+        pool_rule("r2", "P", &["203.0.113.1"]),
+    ]);
+    let stale = record("P", "10.0.61.50", "203.0.113.1", 1024);
+    let seeded = coord.import_idle_persistent_leases(&[stale.clone()], 3_000);
+    assert_eq!(
+        seeded.installed, 1,
+        "setup: the authoritative lease must exist"
+    );
+    assert_eq!(coord.export_display_persistent_leases(4_000).len(), 1);
+
+    assert_eq!(
+        coord.clear_persistent_nat_leases(),
+        1,
+        "a shared allocator must be counted once, not once per rule"
+    );
+    assert!(coord.export_idle_persistent_leases(4_001).is_empty());
+    assert!(coord.export_display_persistent_leases(4_001).is_empty());
+
+    let delayed = coord.import_idle_persistent_leases(&[stale], 4_001);
+    assert_eq!(delayed.installed, 0);
+    assert_eq!(delayed.skipped_existing, 1);
+}

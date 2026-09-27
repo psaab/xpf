@@ -142,13 +142,14 @@ func TestFabricAllowlistUnary_SystemActionNestedGate(t *testing.T) {
 		"cluster-failover-data:node1",
 		"cluster-failover:1:node0",
 		"cluster-failover:2:node1",
+		"clear-persistent-nat",
 	}
 	for _, action := range allowedActions {
 		probe := &unaryCallProbe{}
 		req := &pb.SystemActionRequest{Action: action}
 		_, err := s.fabricAllowlistUnaryInterceptor(context.Background(), req, info, probe.handler)
 		if err != nil {
-			t.Errorf("SystemAction %q: expected allow (cross-node failover proxy), got %v", action, err)
+			t.Errorf("SystemAction %q: expected allow (authorized peer-coordination action), got %v", action, err)
 		}
 		if !probe.called {
 			t.Errorf("SystemAction %q: handler was not invoked", action)

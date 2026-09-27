@@ -51,6 +51,47 @@ fn mint_persistent(
         .expect("a fresh persistent allocation must succeed")
 }
 
+fn mint_persistent_any_remote(
+    alloc: &PortAllocator,
+    addrs: &[Ipv4Addr],
+    f: SourceNatFlowKey,
+    now_ns: u64,
+) -> TranslatedTuple {
+    alloc
+        .allocate_translation(
+            f,
+            PoolAddressFamily::V4(addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            now_ns,
+            NatHolder::Untracked,
+        )
+        .expect("a fresh persistent allocation must succeed")
+}
+
+fn mint_persistent_address_only_any_remote(
+    alloc: &PortAllocator,
+    addrs: &[Ipv4Addr],
+    f: SourceNatFlowKey,
+    now_ns: u64,
+) -> TranslatedTuple {
+    alloc
+        .reserve_address_only_persistent(
+            f,
+            PoolAddressFamily::V4(addrs),
+            0,
+            false,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            now_ns,
+            NatHolder::Untracked,
+        )
+        .expect("a fresh address-only persistent allocation must succeed")
+}
+
 fn ipv4_pool(addrs: &[Ipv4Addr]) -> Vec<IpAddr> {
     addrs.iter().copied().map(IpAddr::V4).collect()
 }
@@ -335,12 +376,21 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     // BORN ON THE ACTIVE. Reaches a standby by one of the two routes below,
     // depending on whether it still has live flows when the sync happens.
     ("allocate_translation_locked", "local PAT mint"),
-    ("reserve_address_only_persistent", "local address-only mint (#6041)"),
+    (
+        "reserve_address_only_persistent",
+        "local address-only mint (#6041)",
+    ),
     // REBUILT ON THE STANDBY from a synced SESSION — the population with live
     // flows. Two arms because the port-bearing and address-only reserves are
     // different functions, which is why they needed separate fixes.
-    ("reserve_flow_maybe_persistent", "#7360, from synced sessions"),
-    ("reserve_address_only_maybe_persistent", "#8132, from synced sessions"),
+    (
+        "reserve_flow_maybe_persistent",
+        "#7360, from synced sessions",
+    ),
+    (
+        "reserve_address_only_maybe_persistent",
+        "#8132, from synced sessions",
+    ),
     // INSTALLED ON THE STANDBY from an exported lease — the IDLE population,
     // which has no session to be rebuilt from and is exactly why #8121 exists.
     ("import_idle_lease", "#8121, from the idle-lease sync"),
@@ -561,4 +611,145 @@ fn the_display_export_drops_a_lease_that_is_idle_and_expired_8615() {
          display export with no filter at all passes the two cells above and \
          fails here"
     );
+}
+
+/// Clearing revokes idle allocator leases, returns their occupancy, and
+/// prevents a lease exported before the clear from being re-imported (#10784).
+#[test]
+fn clearing_idle_leases_revokes_allocator_and_stale_ha_import_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 1024, 65535);
+    let decoy = flow("10.0.61.51", 40001);
+    let client = flow("10.0.61.50", 40000);
+    let _decoy_translation = mint_persistent(&allocator, &addrs, decoy, 1_000);
+    let original = mint_persistent(&allocator, &addrs, client, 1_000);
+    assert!(
+        allocator.debug_is_port_occupied(
+            addrs.iter().position(|ip| *ip == original.ip).unwrap(),
+            original.port,
+        ),
+        "control: the target translation must own its allocator port before clear"
+    );
+    assert!(allocator.release_flow(client, original, 2_000, NatHolder::Untracked));
+    assert!(allocator.release_flow(decoy, _decoy_translation, 2_000, NatHolder::Untracked));
+    let stale = allocator
+        .export_idle_leases(3_000)
+        .into_iter()
+        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
+        .expect("control: the target idle lease must be exportable before clear");
+
+    assert_eq!(allocator.clear_persistent_leases(), 2);
+    assert!(allocator.export_idle_leases(3_001).is_empty());
+    assert!(allocator.export_display_leases(3_001).is_empty());
+    let original_index = addrs.iter().position(|ip| *ip == original.ip).unwrap();
+    assert!(
+        !allocator.debug_is_port_occupied(original_index, original.port),
+        "an idle PAT lease clear must return the port occupancy token"
+    );
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), 3_001),
+        IdleLeaseImport::SkippedExisting,
+        "a pre-clear HA export must not reinstall a revoked mapping"
+    );
+
+    let replacement = mint_persistent(&allocator, &addrs, client, 4_000);
+    assert_ne!(
+        (replacement.ip, replacement.port),
+        (original.ip, original.port),
+        "a post-clear allocation must not reuse the revoked translation merely \
+         because the old lease survived in the allocator"
+    );
+    assert_eq!(allocator.export_display_leases(4_000).len(), 1);
+}
+
+/// A live lease keeps its occupied tuple until its existing flows drain, while
+/// new flows bypass the revoked mapping. The drain then expires the shell rather
+/// than rearming persistence (#10784).
+#[test]
+fn clearing_live_lease_drains_without_reuse_or_port_leak_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent_any_remote(&allocator, &addrs, client, 1_000);
+    let original_index = addrs.iter().position(|ip| *ip == original.ip).unwrap();
+
+    assert_eq!(allocator.clear_persistent_leases(), 1);
+    assert!(
+        allocator.debug_is_port_occupied(original_index, original.port),
+        "a live flow must keep its translated tuple occupied during clear"
+    );
+    assert!(allocator.export_display_leases(2_000).is_empty());
+
+    let mut new_flow = flow("10.0.61.50", 40000);
+    new_flow.dst_ip = "1.1.1.1".parse().unwrap();
+    let unpinned = mint_persistent_any_remote(&allocator, &addrs, new_flow, 2_000);
+    assert_ne!(
+        (unpinned.ip, unpinned.port),
+        (original.ip, original.port),
+        "a new flow must not reuse a mapping after the operator revoked it"
+    );
+
+    assert!(allocator.release_flow(client, original, 3_000, NatHolder::Untracked));
+    assert!(allocator.release_flow(new_flow, unpinned, 3_000, NatHolder::Untracked));
+
+    // A new allocation runs the ordinary bounded GC and proves the draining
+    // shell released its port instead of leaking it after the last flow closed.
+    let _other = mint_persistent_any_remote(&allocator, &addrs, flow("10.0.61.52", 40002), 4_000);
+    assert!(
+        !allocator.debug_is_port_occupied(original_index, original.port),
+        "the final holder release must make the revoked tuple reclaimable"
+    );
+    let replacement = mint_persistent_any_remote(&allocator, &addrs, client, 5_000);
+    assert_eq!(allocator.export_display_leases(5_000).len(), 2);
+    assert_ne!(
+        (replacement.ip, replacement.port),
+        (original.ip, original.port),
+        "the first new mapping after drain must be minted afresh"
+    );
+}
+/// Address-only leases share the same clear/tombstone contract as PAT leases,
+/// despite owning no translated-port bit (#10784).
+#[test]
+fn clearing_address_only_lease_blocks_reuse_and_stale_import_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(addrs.len(), 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent_address_only_any_remote(&allocator, &addrs, client, 1_000);
+    assert_eq!(allocator.export_display_leases(1_000).len(), 1);
+
+    assert_eq!(allocator.clear_persistent_leases(), 1);
+    let mut next_flow = client;
+    next_flow.dst_ip = "1.1.1.1".parse().unwrap();
+    let next = mint_persistent_address_only_any_remote(&allocator, &addrs, next_flow, 2_000);
+    assert!(
+        allocator.export_display_leases(2_000).is_empty(),
+        "a new flow must not reactivate the address-only lease while its old holder drains"
+    );
+    assert!(allocator.release_flow(client, original, 3_000, NatHolder::Untracked));
+    assert!(allocator.release_flow(next_flow, next, 3_000, NatHolder::Untracked));
+
+    let replacement = mint_persistent_address_only_any_remote(&allocator, &addrs, client, 4_000);
+    assert_eq!(allocator.export_display_leases(4_000).len(), 1);
+    assert_eq!(replacement.port, client.src_port);
+}
+
+#[test]
+fn clearing_idle_address_only_lease_rejects_stale_import_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(addrs.len(), 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let translated = mint_persistent_address_only_any_remote(&allocator, &addrs, client, 1_000);
+    assert!(allocator.release_flow(client, translated, 2_000, NatHolder::Untracked));
+    let stale = allocator
+        .export_idle_leases(3_000)
+        .into_iter()
+        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
+        .expect("address-only lease must be exportable before clear");
+
+    assert_eq!(allocator.clear_persistent_leases(), 1);
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), 3_001),
+        IdleLeaseImport::SkippedExisting
+    );
+    assert!(allocator.export_display_leases(3_001).is_empty());
 }
