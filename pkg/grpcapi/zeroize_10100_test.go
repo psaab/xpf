@@ -378,6 +378,10 @@ func TestZeroizeReportsInteriorDirLink10100(t *testing.T) {
 // snapshot planting.
 func hermeticWipe10100(t *testing.T, root string) (versionsDir string) {
 	t.Helper()
+	isolateZeroizeSealPaths(t, root)
+	origPendingPath := configstore.FactoryResetPendingPath
+	configstore.FactoryResetPendingPath = filepath.Join(root, "etc", "xpf", configstore.Day0ConfigAppliedBase)
+	t.Cleanup(func() { configstore.FactoryResetPendingPath = origPendingPath })
 	origFRR, origSwan, origK4, origK6 := zeroizeFRRConf, zeroizeSwanctlSnippet, zeroizeKea4Conf, zeroizeKea6Conf
 	origBPF, origND, origVer := zeroizeBPFPinDir, zeroizeNetworkdDir, zeroizeVersionsDir
 	t.Cleanup(func() {

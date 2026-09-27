@@ -621,7 +621,9 @@ func (d *Daemon) enqueueDHCPApply(cfg *config.DHCPServerConfig, reason string) {
 }
 
 func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig, reason string, fullCfg *config.Config, masters map[int]bool) {
-	if d.dhcpServer == nil {
+	d.ddnsResetMu.Lock()
+	defer d.ddnsResetMu.Unlock()
+	if d.isResetting() || d.dhcpServer == nil {
 		return
 	}
 	if cfg == nil {

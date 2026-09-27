@@ -347,6 +347,11 @@ func PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir string
 }
 
 var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
+	// External cleanup authority must be proven empty before beginZeroize
+	// writes a marker or any destructive leg can remove provider credentials.
+	if err := zeroizeCheckOwnershipStateEmpty(); err != nil {
+		return err
+	}
 	record, err := beginZeroize(configDir, configBase, archiveDir, inv)
 	if err != nil {
 		return err
@@ -356,6 +361,11 @@ var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir 
 
 	var errs []error
 	if err := performZeroizeWipe(configDir, configBase, archiveDir); err != nil {
+		if errors.Is(err, errZeroizeDDNSOwnership) ||
+			errors.Is(err, errZeroizeIPsecOwnership) ||
+			errors.Is(err, errZeroizeKeaStop) {
+			return err
+		}
 		errs = append(errs, err)
 	}
 	if err := zeroizeFirewallLogs(inv); err != nil {

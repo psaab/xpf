@@ -1524,12 +1524,33 @@ func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
 }
 
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
+	// Kea's lease database is live service state. Stop both servers before
+	// removing any durable reset state, then erase the lease files below.
+	if err := zeroizeStopKeaUnits(); err != nil {
+		return fmt.Errorf("%w: %w", errZeroizeKeaStop, err)
+	}
+	// DDNS ownership and IPsec teardown debt are durable external-delete
+	// authorities. Refuse the on-disk wipe unless manager withdrawal has emptied
+	// both stores; otherwise the credentials needed for cleanup would be erased.
+	if err := zeroizeEraseDDNSState(); err != nil {
+		return err
+	}
+	if err := zeroizeEraseIPsecState(); err != nil {
+		return err
+	}
+
+	// Factory-seal state that is safe to regenerate is removed before the other
+	// wipe legs.
+	sealErr := zeroizeImageSealResidue()
+
 	// Wipe every security-critical artifact outside the config root first. The
 	// durable pending marker lets boot fail closed if any later leg is
 	// interrupted; the config root is erased last by the shared wrapper.
 	// Every leg error is retained and joined so later diagnostics are not lost.
 	var legErrs []error
-
+	if sealErr != nil {
+		legErrs = append(legErrs, sealErr)
+	}
 	// Rendered service configs (#4585): also security-critical — routing-auth
 	// keys in a world-readable frr.conf, IKE PSKs, Kea configs. A post-zeroize
 	// boot enters bootstrap / nil-active-config normal boot and SKIPS the

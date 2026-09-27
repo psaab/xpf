@@ -109,11 +109,13 @@ const (
 	kea6Config = DefaultKea6ConfPath
 	kea4Svc    = "kea-dhcp4-server"
 	kea6Svc    = "kea-dhcp6-server"
-	// Kea memfile lease databases (per family). Shared by the display
-	// reader, the DDNS reconciler, and the #2239 lease-sync memfile
-	// fallback so the path is defined once.
-	keaLeaseFile4 = "/var/lib/kea/kea-leases4.csv"
-	keaLeaseFile6 = "/var/lib/kea/kea-leases6.csv"
+	// Kea memfile lease databases hold prior clients' MAC, hostname, and IP
+	// data. Export the defaults so factory reset can erase these exact files
+	// only after both Kea units have been stopped.
+	DefaultKeaLeaseFile4Path = "/var/lib/kea/kea-leases4.csv"
+	DefaultKeaLeaseFile6Path = "/var/lib/kea/kea-leases6.csv"
+	keaLeaseFile4            = DefaultKeaLeaseFile4Path
+	keaLeaseFile6            = DefaultKeaLeaseFile6Path
 )
 
 // libDHCPLeaseCmdsPath is the absolute path of the lease_cmds hook library.

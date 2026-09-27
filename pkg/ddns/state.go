@@ -72,6 +72,12 @@ const defaultDDNSStatePath = "/var/lib/xpf/dhcp-ddns-state.json"
 // defaultDDNSTTL is the record TTL when the operator does not set one.
 const defaultDDNSTTL = 300
 
+// DefaultLeaseStatePath returns the production DHCP-lease (Surface B) DDNS
+// ownership-store path. Exported so the factory-reset daemon hook
+// (pkg/daemon withdrawDDNSForReset, #10769 d05-F6) erases the same file the
+// manager owns — never a re-spelled literal that can drift.
+func DefaultLeaseStatePath() string { return defaultDDNSStatePath }
+
 // Family is the address family a scope/record applies to (#2691 P1b,
 // plan §5.4). It is the FIRST and load-bearing ScopeKey axis: v4 and v6
 // ownership/policy are INDEPENDENT (#2663), so a v4 conflict can never block

@@ -7,6 +7,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,10 +17,23 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
+func isolateFactoryResetOwnershipPaths(t *testing.T) {
+	t.Helper()
+	oldLease, oldSurfaceA, oldIPsec := resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath
+	root := t.TempDir()
+	resetDDNSLeaseStatePath = filepath.Join(root, "dhcp-ddns-state.json")
+	resetDDNSSurfaceAPath = filepath.Join(root, "interface-ddns-state.json")
+	resetIPsecStatePath = filepath.Join(root, "ipsec-conn-state.json")
+	t.Cleanup(func() {
+		resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath = oldLease, oldSurfaceA, oldIPsec
+	})
+}
+
 // factoryReset must Acquire applySem BEFORE wiping, enter the terminal reset
 // generation on success, release the gate afterward, and thereafter REJECT new
 // config work (commit / HA-sync).
 func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	// (1) Gate-first: hold applySem externally with a tight deadline. factoryReset
@@ -88,6 +102,7 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 // resumes (the SystemAction handler then reports the reset incomplete and does
 // NOT stop the daemon).
 func TestFactoryResetFailClosedClearsResetGeneration(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	wantErr := errors.New("wipe boom")

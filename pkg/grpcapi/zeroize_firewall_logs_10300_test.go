@@ -56,11 +56,11 @@ func TestPerformZeroizeWipeErasesFirewallLogs10300(t *testing.T) {
 	mustWriteFile(t, filepath.Join(rsyslogDir, "10-xpf-messages.conf"), []byte("*.*\t/var/log/messages\n"))
 	mustWriteFile(t, filepath.Join(rsyslogDir, "10-xpf-audit.conf"), []byte("*.*\t/var/log/audit\n"))
 	mustWriteFile(t, filepath.Join(rsyslogDir, "50-default.conf"), []byte("*.*\t/var/log/syslog\n"))
-	// Bystanders prove the leg is not a blanket /var/log removal, including a
-	// basename the renderer rejects even if a lenient config reaches the wipe.
-	mustWriteFile(t, filepath.Join(varLog, "messages-other"), []byte("operator log"))
-	mustWriteFile(t, filepath.Join(varLog, "auth.log"), []byte("host log"))
-	mustWriteFile(t, filepath.Join(varLog, "operator log"), []byte("unmanaged log"))
+	// The image seal's `logfiles` operation clears prior-tenant host logs as
+	// well as the narrower xpf syslog/trace outputs asserted below.
+	for _, name := range []string{"messages-other", "auth.log", "operator log"} {
+		mustWriteFile(t, filepath.Join(varLog, name), []byte("prior tenant log"))
+	}
 
 	inv := ZeroizeLogInventory{SyslogFiles: []string{"messages", "audit", "operator log"}, TraceFile: "trace.log"}
 	if err := PerformZeroizeWipeWithLogInventory(configDir, "xpf.conf", "", inv); err != nil {
@@ -80,7 +80,7 @@ func TestPerformZeroizeWipeErasesFirewallLogs10300(t *testing.T) {
 	}
 	assertPresent(t, filepath.Join(rsyslogDir, "50-default.conf"))
 	for _, name := range []string{"messages-other", "auth.log", "operator log"} {
-		assertPresent(t, filepath.Join(varLog, name))
+		assertAbsent(t, filepath.Join(varLog, name))
 	}
 }
 

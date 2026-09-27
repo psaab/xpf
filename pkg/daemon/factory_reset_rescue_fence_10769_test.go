@@ -19,6 +19,7 @@ import (
 // through the post-wipe stop grace. A failed wipe must instead resume saves.
 func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 	t.Run("successful wipe remains fenced", func(t *testing.T) {
+		isolateFactoryResetOwnershipPaths(t)
 		dir := t.TempDir()
 		store, err := configstore.New(filepath.Join(dir, "xpf.conf"))
 		if err != nil {
@@ -70,6 +71,7 @@ func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 	})
 
 	t.Run("failed wipe resumes saves", func(t *testing.T) {
+		isolateFactoryResetOwnershipPaths(t)
 		store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 		if err != nil {
 			t.Fatalf("configstore.New: %v", err)

@@ -167,6 +167,8 @@ var declaredUnboundedForks = []unboundedForkExemption{
 		"zeroizeUserdel / zeroizeLockRootPassword: a factory reset must run to " +
 			"completion; a half-zeroized box that left root unlocked because the " +
 			"semaphore was busy is strictly worse than a slow one"},
+	{"server_diag_zeroize_seal_10769.go", "stopKeaUnits", "combinedOutputTimeoutUnlimited",
+		"factory reset must stop Kea before erasing tenant lease data and cannot be refused by diagnostic backpressure"},
 }
 
 // unboundedForkCallees are the helpers that fork WITHOUT drawing a diagnostic

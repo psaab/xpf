@@ -152,6 +152,11 @@ func (d *Daemon) runGuardedSurfaceADDNSReconcile(ctx context.Context) {
 	if d.surfaceA.mgr == nil {
 		return
 	}
+	d.ddnsResetMu.Lock()
+	defer d.ddnsResetMu.Unlock()
+	if d.isResetting() {
+		return
+	}
 	if !d.surfaceA.reconcileInFlight.CompareAndSwap(false, true) {
 		return
 	}

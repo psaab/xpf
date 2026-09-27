@@ -29,6 +29,7 @@ import (
 // pkg/cli.)
 func TestPerformZeroizeWipeErasesFullSecretSet_5890(t *testing.T) {
 	root := t.TempDir()
+	hermeticWipe10100(t, root)
 
 	// --- Config root (the PerformZeroizeWipe parameter): .configdb + master.key
 	// + tls/ private key + the live config text. ---
