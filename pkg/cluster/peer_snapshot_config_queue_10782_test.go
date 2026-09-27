@@ -13,11 +13,13 @@ import (
 func TestQueueConfigRevalidatesPeerSnapshotProtocolAtWrite10782(t *testing.T) {
 	const text = "set system host-name guarded-snapshot\n"
 	for _, tc := range []struct {
-		name      string
-		downgrade bool
+		name              string
+		downgrade         bool
+		incarnationSwitch bool
 	}{
 		{name: "stable v4 sends"},
 		{name: "downgrade after preparation withholds", downgrade: true},
+		{name: "boot-id incarnation switch withholds", incarnationSwitch: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &SessionSync{}
@@ -33,9 +35,16 @@ func TestQueueConfigRevalidatesPeerSnapshotProtocolAtWrite10782(t *testing.T) {
 			s.SetPeerSnapshotProtocolVersionForTesting(userspace.MinProtocolMultiZoneScopedPolicy)
 			expected := s.SnapshotPeerSnapshotProtocol()
 			const peerEpoch = 4
-			if tc.downgrade {
+			if tc.downgrade || tc.incarnationSwitch {
 				s.testBeforePeerSnapshotConfigWrite = func() {
-					s.SetPeerSnapshotProtocolVersionForTesting(3)
+					if tc.downgrade {
+						s.SetPeerSnapshotProtocolVersionForTesting(3)
+					}
+					if tc.incarnationSwitch {
+						s.mu.Lock()
+						s.applyPeerIncarnationSwitchLocked(0)
+						s.mu.Unlock()
+					}
 				}
 			}
 			queued := make(chan bool, 1)
@@ -44,7 +53,7 @@ func TestQueueConfigRevalidatesPeerSnapshotProtocolAtWrite10782(t *testing.T) {
 					text, nil, 17, expected, userspace.MinProtocolMultiZoneScopedPolicy,
 					peerEpoch, func() uint64 { return peerEpoch })
 			}()
-			if tc.downgrade {
+			if tc.downgrade || tc.incarnationSwitch {
 				_ = peer.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 				buf := make([]byte, 1)
 				n, err := peer.Read(buf)

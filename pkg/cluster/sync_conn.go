@@ -260,7 +260,14 @@ func (s *SessionSync) connIsCurrentIncarnationLocked(conn net.Conn) bool {
 // keepIdx names the priming connection's slot; it is re-stamped and never
 // evicted. Returns whether anything was evicted, for the caller's log.
 func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
+	// #10782: this alternate-fabric boot-id edge also retires the learned
+	// snapshot version. Serialize the incarnation advance and clear against an
+	// outgoing queue that already passed its final authorization check.
+	s.peerSnapshotProtocolWriteMu.Lock()
 	s.peerIncarnation++
+	s.peerSnapshotProtocol.Store(0)
+	s.peerSnapshotProtocolGeneration++
+	s.peerSnapshotProtocolWriteMu.Unlock()
 	retiredIdentity := s.peerIdentity
 	s.peerHeartbeatAckEver.Store(false)
 	// Clock provenance (fold-2 HIGH-1): the kept conn primed the new boot —
@@ -961,6 +968,8 @@ type connColdPrimeDecision struct {
 func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.peerSnapshotProtocolWriteMu.Lock()
+	defer s.peerSnapshotProtocolWriteMu.Unlock()
 	d := connColdPrimeDecision{activeBefore: -1, activeAfter: -1}
 	d.wasDisconnected = s.conn0 == nil && s.conn1 == nil
 	d.activeBefore = s.preferredFabricLocked()
@@ -1100,10 +1109,8 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 		s.peerIncarnation++
 		s.peerHeartbeatAckEver.Store(false)
 		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
-		s.peerSnapshotProtocolWriteMu.Lock()
 		s.peerSnapshotProtocol.Store(0)
 		s.peerSnapshotProtocolGeneration++
-		s.peerSnapshotProtocolWriteMu.Unlock()
 		// #10512: learned capability state belongs to the superseded
 		// incarnation — a same-slot replacement that skips full disconnect
 		// would otherwise inherit the old peer's bits (including the
@@ -1403,6 +1410,8 @@ func (s *SessionSync) fabricConnectLoop(ctx context.Context, fabricIdx int, peer
 func (s *SessionSync) handleDisconnect(conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.peerSnapshotProtocolWriteMu.Lock()
+	defer s.peerSnapshotProtocolWriteMu.Unlock()
 	if ac, ok := conn.(*authConn); ok {
 		ac.pendingRetirement = false
 		ac.peerCapabilitiesExpected = false
@@ -1511,10 +1520,8 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// an OLDER process (that is the rolling-upgrade case this gate exists
 		// for), so a retained capability would authorise a push the new
 		// incarnation cannot represent.
-		s.peerSnapshotProtocolWriteMu.Lock()
 		s.peerSnapshotProtocol.Store(0)
 		s.peerSnapshotProtocolGeneration++
-		s.peerSnapshotProtocolWriteMu.Unlock()
 		// #7147: the capability flags are scoped to the same peer incarnation
 		// for the same reason, and a retained fence-ack bit is worse than a
 		// retained version: it would make every confirmed-fence takeover wait
