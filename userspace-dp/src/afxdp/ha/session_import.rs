@@ -217,9 +217,9 @@ fn strict_mirror_publish_failed(result: crate::afxdp::bpf_map::ConntrackPublishR
 // `RuntimeView` — the same state the packet workers hold. See
 // `session_domain.rs` for why that is the more correct source rather than a
 // concession, and why the two cannot diverge in production.
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 struct AllocatorHolderSnapshot {
-    source_nat: Option<u128>,
+    source_nat: Option<crate::nat::SourceNatReservationSnapshot>,
     nat64: Option<u128>,
 }
 impl crate::afxdp::ha::SessionDomain {
@@ -498,7 +498,8 @@ impl crate::afxdp::ha::SessionDomain {
                 now_ns,
             );
             if snat_restored {
-                if let Some(mask) = holder_snapshot.source_nat {
+                if let Some(snapshot) = holder_snapshot.source_nat.as_ref() {
+                    let mask = snapshot.holder_mask();
                     for worker_id in 0u32..128 {
                         if mask & (1u128 << worker_id) != 0
                             && !crate::nat::reserve_synced_source_nat_allocation_for_worker(
@@ -514,6 +515,9 @@ impl crate::afxdp::ha::SessionDomain {
                         {
                             snat_restored = false;
                         }
+                    }
+                    if snat_restored && !snapshot.restore_metadata() {
+                        snat_restored = false;
                     }
                 }
             }
@@ -2606,25 +2610,48 @@ mod rejected_mirror_reservation_10790_tests {
         );
     }
 
-    fn persistent_snat_forwarding() -> ForwardingState {
+    fn persistent_snat_forwarding(address_only: bool) -> ForwardingState {
         let mut forwarding = ForwardingState::default();
+        let pool_addresses = vec![
+            "203.0.113.2/32".to_string(),
+            "203.0.113.3/32".to_string(),
+        ];
         forwarding.source_nat_rules =
-            crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
-                name: "pool-snat".to_string(),
-                from_zone: "lan".to_string(),
-                to_zone: "wan".to_string(),
-                source_addresses: vec!["0.0.0.0/0".to_string()],
-                pool_name: "p".to_string(),
-                pool_addresses: vec!["203.0.113.2/32".to_string()],
-                port_low: 1024,
-                port_high: 65535,
-                persistent_nat: true,
-                persistent_nat_permit_any_remote_host: true,
-                persistent_nat_inactivity_timeout: 300,
-                ..crate::SourceNATRuleSnapshot::default()
-            }]);
+            crate::nat::parse_source_nat_rules(&[
+                crate::SourceNATRuleSnapshot {
+                    name: "persistent-snat".to_string(),
+                    from_zone: "lan".to_string(),
+                    to_zone: "wan".to_string(),
+                    source_addresses: vec!["0.0.0.0/0".to_string()],
+                    pool_name: "p".to_string(),
+                    pool_addresses: pool_addresses.clone(),
+                    port_low: 1024,
+                    port_high: 65535,
+                    pool_no_translation: address_only,
+                    persistent_nat: true,
+                    persistent_nat_permit_any_remote_host: true,
+                    persistent_nat_inactivity_timeout: 300,
+                    ..crate::SourceNATRuleSnapshot::default()
+                },
+                crate::SourceNATRuleSnapshot {
+                    name: "replacement-snat".to_string(),
+                    from_zone: "guest".to_string(),
+                    to_zone: "wan".to_string(),
+                    source_addresses: vec!["0.0.0.0/0".to_string()],
+                    pool_name: "p".to_string(),
+                    pool_addresses,
+                    port_low: 1024,
+                    port_high: 65535,
+                    pool_no_translation: address_only,
+                    ..crate::SourceNATRuleSnapshot::default()
+                },
+            ]);
         forwarding.zone_name_to_id.insert("lan".to_string(), 1);
         forwarding.zone_name_to_id.insert("wan".to_string(), 2);
+        forwarding.zone_name_to_id.insert("guest".to_string(), 3);
+        forwarding.zone_id_to_name.insert(1, "lan".to_string());
+        forwarding.zone_id_to_name.insert(2, "wan".to_string());
+        forwarding.zone_id_to_name.insert(3, "guest".to_string());
         forwarding
     }
 
@@ -2670,17 +2697,26 @@ mod rejected_mirror_reservation_10790_tests {
         }
     }
 
-    #[test]
-    fn strict_mirror_refusal_replays_imported_lease_and_holder_mask_11476_10789_f4() {
-        const IMPORTED_AT_NS: u64 = 1_000;
+    fn assert_strict_mirror_replay_restores_imported_lease(address_only: bool) {
         const PEER_REMAINING_NS: u64 = 45_000_000_000;
         const PEER_TIMEOUT_NS: u64 = 60_000_000_000;
         const LOCAL_TIMEOUT_NS: u64 = 300_000_000_000;
         const PEER_PORT: u16 = 51_010;
+        const REPLACEMENT_PORT: u16 = 52_010;
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
+        let replacement_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 3));
+        let imported_at_ns = monotonic_nanos();
 
         let (coordinator, commands) =
-            worker_registered_coordinator(persistent_snat_forwarding());
+            worker_registered_coordinator(persistent_snat_forwarding(address_only));
         let key = v4_key();
+        assert!(
+            coordinator.forwarding.source_nat_rules[0]
+                .pool_allocator
+                .same_allocator(&coordinator.forwarding.source_nat_rules[1].pool_allocator),
+            "both zone rules must share the allocator to displace the incumbent"
+        );
+        let peer_port = if address_only { key.src_port } else { PEER_PORT };
         assert_eq!(
             coordinator.import_idle_persistent_leases(
                 &[crate::afxdp::PoolIdleLease {
@@ -2691,51 +2727,72 @@ mod rejected_mirror_reservation_10790_tests {
                         src_port: key.src_port,
                         routing_scope: key.routing_domain,
                         remote: None,
-                        translated_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)),
-                        translated_port: PEER_PORT,
-                        address_only: false,
+                        translated_ip: peer_ip,
+                        translated_port: peer_port,
+                        address_only,
                         remaining_ns: PEER_REMAINING_NS,
                         timeout_ns: PEER_TIMEOUT_NS,
                     },
                 }],
-                IMPORTED_AT_NS,
+                imported_at_ns,
             )
             .installed,
             1
         );
 
-        // The local 0 -> 1 reservation gets a promotion marker but remains
-        // peer-owned until its final ordinary release. Two worker holders make
-        // the strict-mirror replay exercise the #11476 mask snapshot as well.
+        // Adopt the peer lease locally, with both worker holders. A same-key
+        // peer replacement matches a second, non-persistent rule over the same
+        // pool and chooses a distinct accepted tuple, forcing actual incumbent
+        // displacement before strict-mirror publication refuses it.
+        let first_local_reserve_ns = imported_at_ns + 1_000;
         let local_nat = reserve_local_with_holder(
             &coordinator,
             &key,
             crate::nat::NatHolder::Worker(0),
-            2_000,
+            first_local_reserve_ns,
         );
-        assert_eq!(local_nat.rewrite_src_port, Some(PEER_PORT));
+        assert_eq!(local_nat.rewrite_src, Some(peer_ip));
+        assert_eq!(
+            local_nat.rewrite_src_port,
+            (!address_only).then_some(PEER_PORT)
+        );
+        let second_local_reserve_ns = first_local_reserve_ns + 1_000;
         assert_eq!(
             reserve_local_with_holder(
                 &coordinator,
                 &key,
                 crate::nat::NatHolder::Worker(1),
-                2_001,
+                second_local_reserve_ns,
             ),
             local_nat
         );
         let local_flow = source_nat_flow(&key, local_nat);
+        let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
         let source_allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
         assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), Some(0b11));
-        assert!(source_allocator.debug_is_port_occupied(0, PEER_PORT));
+        if !address_only {
+            assert!(source_allocator.debug_is_port_occupied(0, PEER_PORT));
+        }
+        let before_replay = source_allocator
+            .debug_persistent_lease_for_flow(&local_flow, permit)
+            .expect("the local flow still references the imported lease");
+        assert!(before_replay.imported);
+        assert_eq!(before_replay.timeout_ns, PEER_TIMEOUT_NS);
+        assert_eq!(before_replay.active_flows, 1);
+        assert_eq!(before_replay.translated.ip, peer_ip);
+        assert_eq!(before_replay.translated.port, peer_port);
 
         let mut previous = synced_entry(key.clone(), local_nat, 5, 510);
         previous.origin = crate::session::SessionOrigin::ForwardFlow;
         publish_seeded_shared_entry(&coordinator, &previous);
 
-        // Keep the wire translation identical. A different tuple is refused at
-        // the allocator before reaching strict-mirror rollback; this bumped
-        // same-key replacement reaches the refusal/replay path under test.
-        let replacement = synced_entry(key.clone(), local_nat, 6, 511);
+        let replacement_nat = NatDecision {
+            rewrite_src: Some(replacement_ip),
+            rewrite_src_port: (!address_only).then_some(REPLACEMENT_PORT),
+            ..local_nat
+        };
+        let mut replacement = synced_entry(key.clone(), replacement_nat, 6, 511);
+        replacement.metadata.ingress_zone = 3;
         assert_eq!(
             coordinator
                 .session_domain
@@ -2745,8 +2802,20 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(
             source_allocator.holder_mask_for_flow(&local_flow),
             Some(0b11),
-            "strict-mirror refusal must restore both incumbent worker holders"
+            "strict-mirror refusal must replay both displaced incumbent holders"
         );
+        let after_replay = source_allocator
+            .debug_persistent_lease_for_flow(&local_flow, permit)
+            .expect("the incumbent persistent lease is restored");
+        assert_eq!(
+            after_replay, before_replay,
+            "replay restores the complete imported expiry/completion snapshot"
+        );
+        assert_eq!(after_replay.translated.ip, peer_ip);
+        assert_eq!(after_replay.translated.port, peer_port);
+        if !address_only {
+            assert!(source_allocator.debug_is_port_occupied(0, PEER_PORT));
+        }
         let stored = lock_shared_recover(&coordinator.session_domain.sessions.synced)
             .get(&key)
             .cloned()
@@ -2755,16 +2824,17 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(stored.generation, 5);
         assert!(worker_queue::lock_recover(&commands).is_empty());
 
-        // Rollback after the replay must still restore the imported idle lease's
-        // peer timeout and remaining-lifetime snapshot, without making it
-        // exportable.
+        // Rolling back the re-adopted local flow after replay returns exactly
+        // to the imported idle lifetime; neither holder-mask nor metadata
+        // replay may consume the local promotion marker.
+        let rollback_at_ns = monotonic_nanos();
         crate::nat::rollback_source_nat_allocation_for_worker(
             &coordinator.forwarding.iface_nat_allocators,
             &coordinator.forwarding.source_nat_rules,
             &key,
             local_nat,
             false,
-            3_000,
+            rollback_at_ns,
             0,
         );
         assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), Some(0b10));
@@ -2774,38 +2844,57 @@ mod rejected_mirror_reservation_10790_tests {
             &key,
             local_nat,
             false,
-            4_000,
+            rollback_at_ns + 1,
             1,
         );
         assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), None);
-        let rolled_back = coordinator.export_display_persistent_leases(5_000);
+        let idle_after_rollback = source_allocator
+            .debug_persistent_lease_for_flow(&local_flow, permit)
+            .expect("the failed adoption leaves the imported lease installed");
+        assert!(idle_after_rollback.imported);
+        assert_eq!(idle_after_rollback.active_flows, 0);
+        assert_eq!(idle_after_rollback.completed_flows, 0);
+        assert!(!idle_after_rollback.activation_saw_completion);
+        assert_eq!(idle_after_rollback.timeout_ns, PEER_TIMEOUT_NS);
+        assert_eq!(
+            idle_after_rollback.expires_at_ns,
+            imported_at_ns + PEER_REMAINING_NS
+        );
+        let display_at_ns = rollback_at_ns + 2;
+        let rolled_back = coordinator.export_display_persistent_leases(display_at_ns);
         assert_eq!(rolled_back.len(), 1);
         assert_eq!(rolled_back[0].lease.active_flows, 0);
         assert_eq!(rolled_back[0].lease.timeout_ns, PEER_TIMEOUT_NS);
         assert_eq!(
             rolled_back[0].lease.remaining_ns,
-            PEER_REMAINING_NS - (5_000 - IMPORTED_AT_NS)
+            (imported_at_ns + PEER_REMAINING_NS).saturating_sub(display_at_ns)
         );
         assert!(
-            coordinator.export_idle_persistent_leases(5_000).is_empty(),
+            coordinator
+                .export_idle_persistent_leases(display_at_ns)
+                .is_empty(),
             "the rolled-back imported lease must remain non-exportable"
         );
 
-        // Repeat the adoption/replay, then complete it normally. The marker
-        // must survive the refusal until the final holder releases.
+        // Repeat, then complete normally. The restored per-flow marker must
+        // promote only when both incumbent worker holders release successfully.
+        let second_adoption_ns = monotonic_nanos();
         let promoted_nat = reserve_local_with_holder(
             &coordinator,
             &key,
             crate::nat::NatHolder::Worker(0),
-            6_000,
+            second_adoption_ns,
         );
         assert_eq!(promoted_nat, local_nat);
         reserve_local_with_holder(
             &coordinator,
             &key,
             crate::nat::NatHolder::Worker(1),
-            6_001,
+            second_adoption_ns + 1,
         );
+        let before_second_replay = source_allocator
+            .debug_persistent_lease_for_flow(&local_flow, permit)
+            .expect("the second adoption is active");
         assert_eq!(
             coordinator
                 .session_domain
@@ -2815,15 +2904,22 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(
             source_allocator.holder_mask_for_flow(&local_flow),
             Some(0b11),
-            "the second replay must restore the re-adopted holder mask"
+            "the second refusal must replay the re-adopted worker holders"
         );
+        assert_eq!(
+            source_allocator
+                .debug_persistent_lease_for_flow(&local_flow, permit)
+                .expect("the second incumbent is restored"),
+            before_second_replay
+        );
+        let release_at_ns = monotonic_nanos();
         crate::nat::release_source_nat_allocation_for_worker(
             &coordinator.forwarding.iface_nat_allocators,
             &coordinator.forwarding.source_nat_rules,
             &key,
             promoted_nat,
             false,
-            7_000,
+            release_at_ns,
             0,
         );
         assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), Some(0b10));
@@ -2833,14 +2929,29 @@ mod rejected_mirror_reservation_10790_tests {
             &key,
             promoted_nat,
             false,
-            8_000,
+            release_at_ns + 1,
             1,
         );
-        let promoted = coordinator.export_idle_persistent_leases(9_000);
+        let promoted = coordinator.export_idle_persistent_leases(release_at_ns + 2);
         assert_eq!(promoted.len(), 1);
-        assert_eq!(promoted[0].lease.translated_port, PEER_PORT);
+        assert_eq!(promoted[0].lease.translated_ip, peer_ip);
+        assert_eq!(promoted[0].lease.translated_port, peer_port);
+        assert_eq!(promoted[0].lease.address_only, address_only);
         assert_eq!(promoted[0].lease.timeout_ns, LOCAL_TIMEOUT_NS);
         assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), None);
+        let local_owned = source_allocator
+            .debug_persistent_lease_for_flow(&local_flow, permit)
+            .expect("successful release preserves the idle local lease");
+        assert!(!local_owned.imported);
+        assert_eq!(local_owned.timeout_ns, LOCAL_TIMEOUT_NS);
+        assert_eq!(local_owned.completed_flows, 1);
+    }
+
+    #[test]
+    fn strict_mirror_refusal_replays_imported_lease_and_holder_mask_11476_10789_f4() {
+        for address_only in [false, true] {
+            assert_strict_mirror_replay_restores_imported_lease(address_only);
+        }
     }
 
     #[test]

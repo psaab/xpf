@@ -127,15 +127,14 @@ pub(crate) enum IdleLeaseImport {
 }
 
 impl PortAllocator {
-    /// Every locally-originated lease that is idle AND still inside its
-    /// persistence timeout — the population #7360 cannot reach. Imported idle
-    /// leases stay local: re-exporting them would echo the same reservation
-    /// between peers indefinitely, refreshing its receiver-clock lifetime and
-    /// allowing it to resurrect after its originator retires it. The local
-    /// 0 -> 1 join clears the origin bit; until then this node has only a
-    /// peer-owned reservation. A lease with live flows is not exported either:
-    /// the peer rebuilds it from sessions, and sending both would race two
-    /// mechanisms onto one key.
+    /// Every locally owned lease that is idle and still inside its persistence
+    /// timeout. Imported idle leases remain peer-owned through a tentative local
+    /// reserve; only ordinary local `release_flow` completion promotes them for
+    /// export. This prevents echoing the reservation between peers, refreshing
+    /// receiver-clock lifetime or resurrecting a lease after its originator
+    /// retires it. A lease with live flows is not exported either: the peer
+    /// rebuilds it from sessions, and sending both would race two mechanisms
+    /// onto one key.
     pub(crate) fn export_idle_leases(&self, now_ns: u64) -> Vec<IdleLeaseRecord> {
         let live = self.lock_live();
         live.persistent_by_source

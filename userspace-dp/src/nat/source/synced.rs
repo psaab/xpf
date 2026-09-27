@@ -10,6 +10,7 @@
 //! signature changed.
 
 use super::*;
+use crate::nat::SourceNatReservationSnapshot;
 
 /// #6211: the ACTIVE node's `(from_zone, to_zone)` NAME pair for a synced
 /// session, when the standby could resolve BOTH from the wire-carried zone
@@ -198,8 +199,8 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
         &mut previous_holders,
     )
 }
-/// Coordinator twin that also captures the incumbent holder mask before a
-/// same-flow translated-tuple replacement can retire it.
+/// Coordinator twin that also captures the incumbent reservation state before
+/// a same-flow translated-tuple replacement can retire it.
 pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapshot(
     iface_allocs: &InterfaceNatAllocators,
     rules: &[SourceNatRule],
@@ -208,7 +209,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
     is_reverse: bool,
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
-) -> (bool, Option<u128>) {
+) -> (bool, Option<SourceNatReservationSnapshot>) {
     let mut previous_holders = None;
     let reserved = reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
@@ -258,7 +259,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
     now_ns: u64,
     holder: NatHolder,
     capture_previous_holders: bool,
-    previous_holders: &mut Option<u128>,
+    previous_holders: &mut Option<SourceNatReservationSnapshot>,
 ) -> bool {
     // NAT64's translated source belongs exclusively to its NAT64 allocator.
     // Reserving it in a peer source-NAT pool first makes the NAT64 leg's
@@ -461,7 +462,7 @@ fn reserve_synced_interface_identity(
     now_ns: u64,
     holder: NatHolder,
     capture_previous_holders: bool,
-    previous_holders: &mut Option<u128>,
+    previous_holders: &mut Option<SourceNatReservationSnapshot>,
 ) -> bool {
     if nat.nat64 {
         return true;
@@ -479,7 +480,7 @@ fn reserve_synced_interface_identity(
     // the same reconstruction `release_source_nat_allocation_with_mode` uses,
     // so the reservation and its eventual release name one tuple.
     let incumbent_holders = capture_previous_holders
-        .then(|| alloc.holder_mask_for_flow(&flow))
+        .then(|| alloc.reservation_snapshot_for_flow(&flow))
         .flatten();
     match alloc.reserve_interface_identity(flow, rewrite_src, translated_port, now_ns, holder) {
         InterfaceDomainReserve::Owned => {
@@ -580,7 +581,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
     // records N holders on ONE allocator record.
     holder: NatHolder,
     capture_previous_holders: bool,
-    previous_holders: &mut Option<u128>,
+    previous_holders: &mut Option<SourceNatReservationSnapshot>,
 ) -> SyncedReserveOutcome {
     // #7581: `saw_candidate` records whether ANY rule's pool actually owned the
     // translated address. Without it, "no owner" and "every owner declined"
@@ -664,7 +665,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 )
             });
             let incumbent_holders = capture_previous_holders
-                .then(|| rule.pool_allocator.holder_mask_for_flow(&flow))
+                .then(|| rule.pool_allocator.reservation_snapshot_for_flow(&flow))
                 .flatten();
             if let Ok(translated) = rule.pool_allocator.reserve_address_only_maybe_persistent(
                 flow,
@@ -787,7 +788,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
             port: rewrite_src_port,
         };
         let incumbent_holders = capture_previous_holders
-            .then(|| rule.pool_allocator.holder_mask_for_flow(&flow))
+            .then(|| rule.pool_allocator.reservation_snapshot_for_flow(&flow))
             .flatten();
         if rule.pool_allocator.reserve_flow_maybe_persistent(
             flow,
