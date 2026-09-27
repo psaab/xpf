@@ -78,17 +78,7 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 		}
 	}
 }
-func TestPersistentNatLeaseDecodeRejectsUnboundedLifetimes(t *testing.T) {
-	const maxLifetime uint64 = 86_400_000_000_000
-	atLimit := sampleIdleLease()
-	atLimit.RemainingNs = maxLifetime
-	atLimit.TimeoutNs = maxLifetime
-	if _, ok := decodePersistentNatLeasePayload(
-		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{atLimit}),
-	); !ok {
-		t.Fatal("a lifetime at the schema maximum must decode")
-	}
-
+func TestPersistentNatLeaseDecodeRejectsInvalidLifetimes(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*userspace.IdleLeaseWire)
@@ -96,9 +86,6 @@ func TestPersistentNatLeaseDecodeRejectsUnboundedLifetimes(t *testing.T) {
 		{"zero remaining", func(l *userspace.IdleLeaseWire) { l.RemainingNs = 0 }},
 		{"zero timeout", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = 0 }},
 		{"subsecond timeout", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = 1 }},
-		{"remaining exceeds timeout", func(l *userspace.IdleLeaseWire) { l.RemainingNs = l.TimeoutNs + 1 }},
-		{"remaining exceeds maximum", func(l *userspace.IdleLeaseWire) { l.RemainingNs = maxLifetime + 1 }},
-		{"timeout exceeds maximum", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = maxLifetime + 1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := sampleIdleLease()
@@ -106,9 +93,42 @@ func TestPersistentNatLeaseDecodeRejectsUnboundedLifetimes(t *testing.T) {
 			if _, ok := decodePersistentNatLeasePayload(
 				encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{rec}),
 			); ok {
-				t.Fatal("out-of-bounds lifetime must reject the whole payload")
+				t.Fatal("invalid lifetime must reject the whole payload")
 			}
 		})
+	}
+}
+
+func TestPersistentNatLeaseDecodeClampsLifetimeSkew(t *testing.T) {
+	const maxLifetime uint64 = 86_400_000_000_000
+	skewed := sampleIdleLease()
+	skewed.RemainingNs = skewed.TimeoutNs + 1_000_000
+	other := sampleIdleLease()
+	other.Pool = "Q"
+	out, ok := decodePersistentNatLeasePayload(
+		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{skewed, other}),
+	)
+	if !ok || len(out) != 2 {
+		t.Fatalf("honest clock skew must not drop this record or its batch: len=%d ok=%v", len(out), ok)
+	}
+	if out[0].TimeoutNs != skewed.TimeoutNs || out[0].RemainingNs != skewed.TimeoutNs {
+		t.Fatalf("skewed remaining lifetime was not clamped: %+v", out[0])
+	}
+	if !equalIdleLeaseWire(out[1], other) {
+		t.Fatalf("a sibling record in the batch changed: got %+v want %+v", out[1], other)
+	}
+
+	oversized := sampleIdleLease()
+	oversized.TimeoutNs = maxLifetime + 200
+	oversized.RemainingNs = maxLifetime + 300
+	out, ok = decodePersistentNatLeasePayload(
+		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{oversized}),
+	)
+	if !ok || len(out) != 1 {
+		t.Fatalf("oversized peer lifetimes must be clamped, not rejected: len=%d ok=%v", len(out), ok)
+	}
+	if out[0].TimeoutNs != maxLifetime || out[0].RemainingNs != maxLifetime {
+		t.Fatalf("oversized lifetimes were not clamped to the schema ceiling: %+v", out[0])
 	}
 }
 

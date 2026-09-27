@@ -239,13 +239,17 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	l.RemainingNs = binary.LittleEndian.Uint64(buf[off:])
 	l.TimeoutNs = binary.LittleEndian.Uint64(buf[off+8:])
 	off += 16
-	// Bound untrusted peer lifetimes to the persistent-NAT schema maximum and
-	// require remaining lifetime to fit within the advertised timeout.
-	if l.RemainingNs == 0 || l.TimeoutNs < minPersistentNatLeaseTimeoutNS ||
-		l.RemainingNs > maxPersistentNatLeaseLifetimeNS ||
-		l.TimeoutNs > maxPersistentNatLeaseLifetimeNS ||
-		l.RemainingNs > l.TimeoutNs {
+	// Clamp peer lifetimes to the schema maximum and advertised timeout.
+	// Export samples its clock before taking the allocator lock, so a release
+	// can legitimately re-arm expiry between the remaining/timeout snapshots.
+	if l.RemainingNs == 0 || l.TimeoutNs < minPersistentNatLeaseTimeoutNS {
 		return l, false
+	}
+	if l.TimeoutNs > maxPersistentNatLeaseLifetimeNS {
+		l.TimeoutNs = maxPersistentNatLeaseLifetimeNS
+	}
+	if l.RemainingNs > l.TimeoutNs {
+		l.RemainingNs = l.TimeoutNs
 	}
 	// A v25 record is self-contained: trailing bytes are not an append-only
 	// extension because they could be a legacy sender's unscoped payload.
