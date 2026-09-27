@@ -770,6 +770,152 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
 }
 
 
+// --- #8121: the lease POPULATION census -------------------------------------
+//
+// WHY THIS EXISTS. #8121, #7360 and #8132 each cover one route by which an
+// active node's persistent lease reaches a standby, and the three together are
+// claimed to be exhaustive.
+//
+// #8573 acted on that claim: the #1449 capability gate, which disarmed
+// forwarding for every HA persistent-NAT config on the stated reason that
+// "leases are not HA-synchronized", was REMOVED after the three routes were
+// measured working on the loss userspace cluster (lease visible on the standby
+// with an identical translated identity, surviving an RG0 failover, and honoured
+// after failback). This census is therefore no longer an argument against a
+// gate — it is the thing holding the gate's removal up, and a sixth unclassified
+// insert site now means clustered persistent-NAT is silently forwarding with
+// leases that do not survive a failover.
+//
+// A claim that load-bearing must not live in prose. Defining a population by a
+// mechanism ("things that insert a lease") is a CLAIM that the mechanism is the
+// only route, and the way that claim fails is a SIXTH site appearing later that
+// nobody classifies — at which point the three-route argument is quietly false
+// and everything resting on it inherits the error.
+//
+// So this pins the sites by CONTENT and by enclosing function, and a new one
+// reds until somebody says which sync route carries it.
+
+/// Every production site that creates a persistent lease, with the route by
+/// which such a lease reaches a standby.
+///
+/// Pinned by enclosing function rather than by count: a stale entry cannot hide
+/// behind a coincidental total.
+const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
+    // BORN ON THE ACTIVE. Reaches a standby by one of the two routes below,
+    // depending on whether it still has live flows when the sync happens.
+    ("allocate_translation_locked", "local PAT mint"),
+    ("reserve_address_only_persistent", "local address-only mint (#6041)"),
+    // REBUILT ON THE STANDBY from a synced SESSION — the population with live
+    // flows. Two arms because the port-bearing and address-only reserves are
+    // different functions, which is why they needed separate fixes.
+    ("reserve_flow_maybe_persistent", "#7360, from synced sessions"),
+    ("reserve_address_only_maybe_persistent", "#8132, from synced sessions"),
+    // INSTALLED ON THE STANDBY from an exported lease — the IDLE population,
+    // which has no session to be rebuilt from and is exactly why #8121 exists.
+    ("import_idle_lease", "#8121, from the idle-lease sync"),
+];
+
+/// The census. Reds when a lease is created somewhere the three-route argument
+/// has not accounted for.
+///
+/// FAIL-ON-REVERT is not the useful framing here — nothing to revert. What this
+/// catches is ADDITION: a sixth creation site landing in a future change,
+/// silently making "the population is covered by #7360 + #8132 + #8121" false
+/// while every existing cell stays green, because every existing cell tests a
+/// route rather than the set of routes.
+#[test]
+fn every_persistent_lease_creation_site_has_a_sync_route_8121() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nat");
+    let mut files = Vec::new();
+    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+
+    let mut found: Vec<String> = Vec::new();
+    for path in files {
+        let rel = path
+            .strip_prefix(&root)
+            .expect("under src/nat")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if crate::afxdp::worker_queue::tests::is_fixture(&root, &rel) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read source");
+        let cleaned = crate::afxdp::worker_queue::tests::blank_comments_and_strings(&src);
+        // The enclosing `fn` of each insert: walk forward tracking the most
+        // recent top-level-ish `fn` declaration, which is what makes the pin
+        // survive line-number churn.
+        let mut current = String::new();
+        for line in cleaned.lines() {
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("fn ").or_else(|| {
+                t.strip_prefix("pub fn ")
+                    .or_else(|| t.split("fn ").nth(1).filter(|_| t.contains("fn ")))
+            }) {
+                if let Some(name) = rest.split(['(', '<']).next() {
+                    current = name.trim().to_string();
+                }
+            }
+            if t.contains("persistent_by_source.insert(") {
+                found.push(current.clone());
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+
+    let mut want: Vec<String> = LEASE_CREATION_SITES_8121
+        .iter()
+        .map(|(f, _)| (*f).to_string())
+        .collect();
+    want.sort();
+
+    assert_eq!(
+        found, want,
+        "the set of persistent-lease CREATION sites under src/nat changed.\n\
+         Every such site is a lease that must reach a standby somehow. The three \
+         routes that exist are: rebuilt from a synced session while it has live \
+         flows (#7360 port-bearing, #8132 address-only), or exported and \
+         imported while it is IDLE (#8121).\n\
+         If the new site creates a lease on the ACTIVE, say which of those \
+         carries it and add it above. If it creates one on the STANDBY, it IS a \
+         new route and the exhaustiveness argument — which the #1449 capability \
+         gate's stated reason rests on — has to be re-made rather than \
+         inherited (#8121)"
+    );
+}
+
+/// POSITIVE CONTROL for the census: it must actually FIND things.
+///
+/// A scanner whose pattern has rotted matches nothing and compares empty to
+/// empty — passing forever while measuring no population at all. This asserts
+/// the walk reaches real source and that a known site is among what it found,
+/// so the census cannot degenerate into a tautology.
+#[test]
+fn the_lease_census_actually_finds_its_population_8121() {
+    assert_eq!(
+        LEASE_CREATION_SITES_8121.len(),
+        5,
+        "the expected-site list is empty or has been trimmed to nothing, which \
+         would make the census compare empty to empty"
+    );
+    assert!(
+        LEASE_CREATION_SITES_8121
+            .iter()
+            .any(|(f, _)| *f == "import_idle_lease"),
+        "the idle-lease import is not in the census, so #8121's own route is \
+         unpinned by the guard that exists to pin the routes"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nat");
+    let mut files = Vec::new();
+    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+    assert!(
+        files.len() > 5,
+        "the source walk found {} files under src/nat — the pattern or the root \
+         is wrong, and the census above is scanning nothing",
+        files.len()
+    );
+}
+
 // --- #8615: the DISPLAY export ------------------------------------------
 //
 // Read these against `a_lease_with_live_flows_is_not_exported_8121` above. That
