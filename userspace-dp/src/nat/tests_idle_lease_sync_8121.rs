@@ -127,7 +127,7 @@ fn an_idle_lease_survives_export_and_import_and_keeps_the_port_8121() {
     let local_pool = ipv4_pool(&addrs);
     for rec in &exported {
         assert_eq!(
-            standby.import_idle_lease(rec, &local_pool, standby_now),
+            standby.import_idle_lease(rec, &local_pool, TIMEOUT_NS, standby_now),
             IdleLeaseImport::Installed
         );
     }
@@ -192,7 +192,7 @@ fn an_imported_idle_lease_expires_on_the_receivers_clock_8121() {
     let standby = PortAllocator::new(1, 1024, 65535);
     let local_pool = ipv4_pool(&addrs);
     assert_eq!(
-        standby.import_idle_lease(&rec, &local_pool, standby_now),
+        standby.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, standby_now),
         IdleLeaseImport::Installed
     );
 
@@ -207,7 +207,7 @@ fn an_imported_idle_lease_expires_on_the_receivers_clock_8121() {
     // value the code falls back to.
     let fresh_node = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        fresh_node.import_idle_lease(&rec, &local_pool, standby_now),
+        fresh_node.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, standby_now),
         IdleLeaseImport::Installed
     );
     // Exported => it is idle (active_flows == 0, or it would not qualify) AND
@@ -265,7 +265,7 @@ fn an_import_refuses_rather_than_install_over_a_held_port_8121() {
     );
 
     assert_eq!(
-        standby.import_idle_lease(&rec, &local_pool, 11_000),
+        standby.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, 11_000),
         IdleLeaseImport::SkippedPortBusy,
         "#8121: installing over a held identity would duplicate a translation \
          and later free someone else's occupancy bit"
@@ -290,14 +290,14 @@ fn an_import_refuses_an_address_this_pool_does_not_have_8121() {
         "198.51.100.8".parse().unwrap(),
     ];
     assert_eq!(
-        standby.import_idle_lease(&rec, &different, 11_000),
+        standby.import_idle_lease(&rec, &different, TIMEOUT_NS, 11_000),
         IdleLeaseImport::SkippedUnknownAddress
     );
 
     // CONTROL: the same record against the RIGHT pool installs, so the refusal
     // above is attributable to the address and not to the record being junk.
     assert_eq!(
-        standby.import_idle_lease(&rec, &ipv4_pool(&addrs), 11_000),
+        standby.import_idle_lease(&rec, &ipv4_pool(&addrs), TIMEOUT_NS, 11_000),
         IdleLeaseImport::Installed
     );
 }
@@ -317,7 +317,7 @@ fn a_local_lease_is_not_overwritten_by_an_imported_one_8121() {
     let local_pool = ipv4_pool(&addrs);
     let _local = mint_persistent(&standby, &addrs, client, 10_000);
     assert_eq!(
-        standby.import_idle_lease(&rec, &local_pool, 11_000),
+        standby.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, 11_000),
         IdleLeaseImport::SkippedExisting
     );
 }
@@ -337,7 +337,7 @@ fn an_imported_idle_lease_is_not_echoed_10789_f4() {
 
     let standby = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        standby.import_idle_lease(&sent[0], &local_pool, 10_000),
+        standby.import_idle_lease(&sent[0], &local_pool, TIMEOUT_NS, 10_000),
         IdleLeaseImport::Installed
     );
     assert_eq!(
@@ -354,7 +354,7 @@ fn an_imported_idle_lease_is_not_echoed_10789_f4() {
     // Model A applying B's next additive push. B advertised nothing, so A
     // receives no lease record and its original local binding stays present.
     for rec in &echoed {
-        active.import_idle_lease(rec, &local_pool, 12_000);
+        active.import_idle_lease(rec, &local_pool, TIMEOUT_NS, 12_000);
     }
     assert_eq!(active.export_idle_leases(12_000).len(), 1);
 }
@@ -373,7 +373,7 @@ fn an_imported_idle_lease_cannot_resurrect_a_retired_lease_10789_f4() {
 
     let standby = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        standby.import_idle_lease(&sent, &local_pool, 10_000),
+        standby.import_idle_lease(&sent, &local_pool, TIMEOUT_NS, 10_000),
         IdleLeaseImport::Installed
     );
     let peer_push = standby.export_idle_leases(11_000);
@@ -401,7 +401,7 @@ fn an_imported_idle_lease_cannot_resurrect_a_retired_lease_10789_f4() {
     assert_eq!(active.debug_occupied_count(), 0, "retirement releases A's port");
 
     for rec in &peer_push {
-        active.import_idle_lease(rec, &local_pool, 12_000);
+        active.import_idle_lease(rec, &local_pool, TIMEOUT_NS, 12_000);
     }
     assert!(
         !active.debug_live().persistent_by_source.contains_key(&key),
@@ -417,16 +417,18 @@ fn a_local_join_promotes_an_imported_idle_lease_10789_f4() {
     let local_pool = ipv4_pool(&addrs);
 
     let pat_flow = flow("10.0.61.50", 40000);
-    let pat_rec = idle_record_for(
+    let mut pat_rec = idle_record_for(
         pat_flow,
         IpAddr::V4(addrs[0]),
         2048,
         false,
         Some((pat_flow.dst_ip, pat_flow.dst_port)),
     );
+    pat_rec.timeout_ns = 60 * 1_000_000_000;
+    pat_rec.remaining_ns = 45 * 1_000_000_000;
     let pat = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        pat.import_idle_lease(&pat_rec, &local_pool, 1_000),
+        pat.import_idle_lease(&pat_rec, &local_pool, TIMEOUT_NS, 1_000),
         IdleLeaseImport::Installed
     );
     assert!(
@@ -442,6 +444,10 @@ fn a_local_join_promotes_an_imported_idle_lease_10789_f4() {
         (pat_rec.translated_ip, pat_rec.translated_port)
     );
     assert!(pat.release_flow(pat_flow, pat_tuple, 3_000, NatHolder::Untracked));
+    let pat_lease = pat.debug_live().persistent_by_source
+        [&pat_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)];
+    assert_eq!(pat_lease.timeout_ns, TIMEOUT_NS);
+    assert_eq!(pat_lease.expires_at_ns, 3_000 + TIMEOUT_NS);
     assert_eq!(pat.export_idle_leases(4_000).len(), 1);
     assert!(
         !pat.debug_live()
@@ -452,16 +458,18 @@ fn a_local_join_promotes_an_imported_idle_lease_10789_f4() {
     );
 
     let address_flow = flow("10.0.61.51", 40001);
-    let address_rec = idle_record_for(
+    let mut address_rec = idle_record_for(
         address_flow,
         IpAddr::V4(addrs[0]),
         address_flow.src_port,
         true,
         Some((address_flow.dst_ip, address_flow.dst_port)),
     );
+    address_rec.timeout_ns = 60 * 1_000_000_000;
+    address_rec.remaining_ns = 45 * 1_000_000_000;
     let address_only = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        address_only.import_idle_lease(&address_rec, &local_pool, 1_000),
+        address_only.import_idle_lease(&address_rec, &local_pool, TIMEOUT_NS, 1_000),
         IdleLeaseImport::Installed
     );
     let address_tuple = address_only
@@ -483,6 +491,10 @@ fn a_local_join_promotes_an_imported_idle_lease_10789_f4() {
         3_000,
         NatHolder::Untracked
     ));
+    let address_lease = address_only.debug_live().persistent_by_source
+        [&address_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)];
+    assert_eq!(address_lease.timeout_ns, TIMEOUT_NS);
+    assert_eq!(address_lease.expires_at_ns, 3_000 + TIMEOUT_NS);
     assert_eq!(address_only.export_idle_leases(4_000).len(), 1);
     assert!(
         !address_only
@@ -515,7 +527,7 @@ fn a_synced_join_does_not_promote_an_imported_idle_lease_10789_f4() {
     );
     let pat = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        pat.import_idle_lease(&pat_rec, &local_pool, 1_000),
+        pat.import_idle_lease(&pat_rec, &local_pool, TIMEOUT_NS, 1_000),
         IdleLeaseImport::Installed
     );
     let pat_key = pat_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
@@ -555,7 +567,7 @@ fn a_synced_join_does_not_promote_an_imported_idle_lease_10789_f4() {
     );
     let address_only = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        address_only.import_idle_lease(&address_rec, &local_pool, 1_000),
+        address_only.import_idle_lease(&address_rec, &local_pool, TIMEOUT_NS, 1_000),
         IdleLeaseImport::Installed
     );
     let address_key = address_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
@@ -584,6 +596,177 @@ fn a_synced_join_does_not_promote_an_imported_idle_lease_10789_f4() {
             .unwrap()
             .imported
     );
+}
+
+/// Joining an already-active imported lease is tentative until a local flow
+/// completes. Once it does, the lease is locally owned even while a synced
+/// flow remains active; both PAT and address-only arms must re-advertise it
+/// after the final flow drains.
+#[test]
+fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
+    let addrs = pool();
+    let local_pool = ipv4_pool(&addrs);
+
+    let pat_flow = flow("10.0.61.50", 40000);
+    let synced_pat_flow = SourceNatFlowKey {
+        dst_ip: "9.9.9.9".parse().unwrap(),
+        dst_port: 443,
+        ..pat_flow
+    };
+    let local_pat_flow = SourceNatFlowKey {
+        dst_ip: "1.1.1.1".parse().unwrap(),
+        dst_port: 443,
+        ..pat_flow
+    };
+    let pat_rec = idle_record_for(pat_flow, IpAddr::V4(addrs[0]), 2048, false, None);
+    let pat = PortAllocator::new(1, 1024, 65535);
+    assert_eq!(
+        pat.import_idle_lease(&pat_rec, &local_pool, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let pat_key = pat_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let pat_tuple = TranslatedTuple {
+        ip: pat_rec.translated_ip,
+        port: pat_rec.translated_port,
+    };
+    assert!(pat.reserve_flow_maybe_persistent(
+        synced_pat_flow,
+        pat_tuple,
+        0,
+        false,
+        2_000,
+        NatHolder::Untracked,
+        Some((pat_key, TIMEOUT_NS)),
+    ));
+    let local_pat_tuple = pat
+        .allocate_translation(
+            local_pat_flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            3_000,
+            NatHolder::Untracked,
+        )
+        .expect("local N -> N+1 join reuses the active imported lease");
+    assert!(pat.debug_live().persistent_by_source[&pat_key].imported);
+    assert!(pat.rollback_flow(local_pat_flow, local_pat_tuple, 3_500, NatHolder::Untracked));
+    let after_rollback = pat.debug_live().persistent_by_source[&pat_key];
+    assert!(after_rollback.imported);
+    assert_eq!(after_rollback.active_flows, 1);
+    let local_pat_tuple = pat
+        .allocate_translation(
+            local_pat_flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            3_600,
+            NatHolder::Untracked,
+        )
+        .expect("a later local reserve can still join after tentative rollback");
+    assert!(pat.release_flow(local_pat_flow, local_pat_tuple, 4_000, NatHolder::Untracked));
+    let pat_lease = pat.debug_live().persistent_by_source[&pat_key];
+    assert!(!pat_lease.imported);
+    assert_eq!(pat_lease.active_flows, 1, "the synced flow remains active");
+    assert_eq!(pat_lease.timeout_ns, TIMEOUT_NS);
+    assert!(pat.export_idle_leases(4_500).is_empty(), "live leases are not exported");
+    assert!(pat.release_flow(synced_pat_flow, pat_tuple, 5_000, NatHolder::Untracked));
+    assert_eq!(pat.export_idle_leases(5_001).len(), 1);
+
+    let address_flow = flow("10.0.61.51", 40001);
+    let synced_address_flow = SourceNatFlowKey {
+        dst_ip: "9.9.9.9".parse().unwrap(),
+        dst_port: 443,
+        ..address_flow
+    };
+    let local_address_flow = SourceNatFlowKey {
+        dst_ip: "1.1.1.1".parse().unwrap(),
+        dst_port: 443,
+        ..address_flow
+    };
+    let address_rec = idle_record_for(
+        address_flow,
+        IpAddr::V4(addrs[0]),
+        address_flow.src_port,
+        true,
+        None,
+    );
+    let address_only = PortAllocator::new(1, 1024, 65535);
+    assert_eq!(
+        address_only.import_idle_lease(&address_rec, &local_pool, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let address_key = address_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let synced_address_tuple = address_only
+        .reserve_address_only_maybe_persistent(
+            synced_address_flow,
+            address_rec.translated_ip,
+            0,
+            2_000,
+            NatHolder::Untracked,
+            Some((address_key, TIMEOUT_NS)),
+        )
+        .expect("synced flow joins the imported address-only lease");
+    let local_address_tuple = address_only
+        .reserve_address_only_persistent(
+            local_address_flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            3_000,
+            NatHolder::Untracked,
+        )
+        .expect("local N -> N+1 join reuses the active imported lease");
+    assert!(address_only.debug_live().persistent_by_source[&address_key].imported);
+    assert!(address_only.rollback_flow(
+        local_address_flow,
+        local_address_tuple,
+        3_500,
+        NatHolder::Untracked
+    ));
+    let after_rollback = address_only.debug_live().persistent_by_source[&address_key];
+    assert!(after_rollback.imported);
+    assert_eq!(after_rollback.active_flows, 1);
+    let local_address_tuple = address_only
+        .reserve_address_only_persistent(
+            local_address_flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            3_600,
+            NatHolder::Untracked,
+        )
+        .expect("a later local reserve can still join after tentative rollback");
+    assert!(address_only.release_flow(
+        local_address_flow,
+        local_address_tuple,
+        4_000,
+        NatHolder::Untracked
+    ));
+    let address_lease = address_only.debug_live().persistent_by_source[&address_key];
+    assert!(!address_lease.imported);
+    assert_eq!(address_lease.active_flows, 1, "the synced flow remains active");
+    assert_eq!(address_lease.timeout_ns, TIMEOUT_NS);
+    assert!(
+        address_only.export_idle_leases(4_500).is_empty(),
+        "live address-only leases are not exported"
+    );
+    assert!(address_only.release_flow(
+        synced_address_flow,
+        synced_address_tuple,
+        5_000,
+        NatHolder::Untracked
+    ));
+    assert_eq!(address_only.export_idle_leases(5_001).len(), 1);
 }
 
 // --- #8121: the lease POPULATION census -------------------------------------
@@ -846,4 +1029,156 @@ fn the_display_export_drops_a_lease_that_is_idle_and_expired_8615() {
          display export with no filter at all passes the two cells above and \
          fails here"
     );
+}
+/// Peer-provided lifetimes are bounded by the matching local rule timeout even
+/// when the record itself carries the maximum integer values.
+#[test]
+fn an_imported_lifetime_is_clamped_to_the_local_timeout_10789_f4() {
+    let addrs = pool();
+    let local_pool = ipv4_pool(&addrs);
+    let f = flow("10.0.61.50", 40000);
+    let mut rec = idle_record_for(f, IpAddr::V4(addrs[0]), 2048, false, None);
+    rec.remaining_ns = u64::MAX;
+    rec.timeout_ns = u64::MAX;
+    let local_timeout_ns = 30 * 1_000_000_000;
+    assert_eq!(
+        PortAllocator::new(1, 1024, 65535).import_idle_lease(&rec, &local_pool, 0, 100),
+        IdleLeaseImport::SkippedExpired,
+        "a local rule without persistent NAT must not accept peer lease lifetime"
+    );
+    let alloc = PortAllocator::new(1, 1024, 65535);
+
+    assert_eq!(
+        alloc.import_idle_lease(&rec, &local_pool, local_timeout_ns, 100),
+        IdleLeaseImport::Installed
+    );
+    let shown = alloc.export_display_leases(100);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].remaining_ns, local_timeout_ns);
+    assert_eq!(shown[0].timeout_ns, local_timeout_ns);
+
+    let translated = alloc
+        .allocate_translation(
+            f,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            local_timeout_ns,
+            200,
+            NatHolder::Untracked,
+        )
+        .expect("local flow adopts the bounded imported lease");
+    assert!(alloc.release_flow(f, translated, 500, NatHolder::Untracked));
+    let key = f.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let lease = alloc.debug_live().persistent_by_source[&key];
+    assert_eq!(lease.timeout_ns, local_timeout_ns);
+    assert_eq!(lease.expires_at_ns, 500 + local_timeout_ns);
+    let exported = alloc.export_idle_leases(500);
+    assert_eq!(exported.len(), 1);
+    assert_eq!(exported[0].remaining_ns, local_timeout_ns);
+    assert_eq!(exported[0].timeout_ns, local_timeout_ns);
+}
+
+/// A local reserve is tentative until the production admission path accepts it.
+/// Rolling it back must restore peer origin, expiry and re-arm timeout in both
+/// allocator modes, so the imported record remains suppressed from export.
+#[test]
+fn rollback_restores_imported_origin_and_timeout_for_both_modes_10789_f4() {
+    let addrs = pool();
+    let local_pool = ipv4_pool(&addrs);
+    let local_timeout_ns = TIMEOUT_NS;
+    let imported_timeout_ns = 60 * 1_000_000_000;
+    let remaining_ns = 45 * 1_000_000_000;
+
+    let pat_flow = flow("10.0.61.50", 40000);
+    let mut pat_rec = idle_record_for(
+        pat_flow,
+        IpAddr::V4(addrs[0]),
+        2048,
+        false,
+        Some((pat_flow.dst_ip, pat_flow.dst_port)),
+    );
+    pat_rec.remaining_ns = remaining_ns;
+    pat_rec.timeout_ns = imported_timeout_ns;
+    let pat = PortAllocator::new(1, 1024, 65535);
+    assert_eq!(
+        pat.import_idle_lease(&pat_rec, &local_pool, local_timeout_ns, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let pat_tuple = pat
+        .allocate_translation(
+            pat_flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::TargetHostPort,
+            local_timeout_ns,
+            2_000,
+            NatHolder::Untracked,
+        )
+        .expect("the local flow must tentatively adopt the imported PAT lease");
+    assert_eq!(pat.debug_live().persistent_by_source[&pat_flow
+        .persistent_source_key(PersistentNatPermit::TargetHostPort)]
+        .timeout_ns, local_timeout_ns);
+    assert!(pat.rollback_flow(pat_flow, pat_tuple, 3_000, NatHolder::Untracked));
+    let pat_lease = pat.debug_live().persistent_by_source
+        [&pat_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)];
+    assert!(pat_lease.imported);
+    assert_eq!(pat_lease.timeout_ns, imported_timeout_ns);
+    assert_eq!(pat_lease.expires_at_ns, 1_000 + remaining_ns);
+    assert!(pat.export_idle_leases(4_000).is_empty());
+
+    let address_flow = flow("10.0.61.51", 40001);
+    let mut address_rec = idle_record_for(
+        address_flow,
+        IpAddr::V4(addrs[0]),
+        address_flow.src_port,
+        true,
+        Some((address_flow.dst_ip, address_flow.dst_port)),
+    );
+    address_rec.remaining_ns = remaining_ns;
+    address_rec.timeout_ns = imported_timeout_ns;
+    let address_only = PortAllocator::new(1, 1024, 65535);
+    assert_eq!(
+        address_only.import_idle_lease(
+            &address_rec,
+            &local_pool,
+            local_timeout_ns,
+            1_000
+        ),
+        IdleLeaseImport::Installed
+    );
+    let address_tuple = address_only
+        .reserve_address_only_persistent(
+            address_flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::TargetHostPort,
+            local_timeout_ns,
+            2_000,
+            NatHolder::Untracked,
+        )
+        .expect("the local flow must tentatively adopt the imported address-only lease");
+    assert_eq!(
+        address_only.debug_live().persistent_by_source[&address_flow
+            .persistent_source_key(PersistentNatPermit::TargetHostPort)]
+            .timeout_ns,
+        local_timeout_ns
+    );
+    assert!(address_only.rollback_flow(
+        address_flow,
+        address_tuple,
+        3_000,
+        NatHolder::Untracked
+    ));
+    let address_lease = address_only.debug_live().persistent_by_source
+        [&address_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)];
+    assert!(address_lease.imported);
+    assert_eq!(address_lease.timeout_ns, imported_timeout_ns);
+    assert_eq!(address_lease.expires_at_ns, 1_000 + remaining_ns);
+    assert!(address_only.export_idle_leases(4_000).is_empty());
 }

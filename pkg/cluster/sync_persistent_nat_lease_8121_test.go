@@ -78,6 +78,40 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 		}
 	}
 }
+func TestPersistentNatLeaseDecodeRejectsUnboundedLifetimes(t *testing.T) {
+	const maxLifetime uint64 = 86_400_000_000_000
+	atLimit := sampleIdleLease()
+	atLimit.RemainingNs = maxLifetime
+	atLimit.TimeoutNs = maxLifetime
+	if _, ok := decodePersistentNatLeasePayload(
+		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{atLimit}),
+	); !ok {
+		t.Fatal("a lifetime at the schema maximum must decode")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*userspace.IdleLeaseWire)
+	}{
+		{"zero remaining", func(l *userspace.IdleLeaseWire) { l.RemainingNs = 0 }},
+		{"zero timeout", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = 0 }},
+		{"subsecond timeout", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = 1 }},
+		{"remaining exceeds timeout", func(l *userspace.IdleLeaseWire) { l.RemainingNs = l.TimeoutNs + 1 }},
+		{"remaining exceeds maximum", func(l *userspace.IdleLeaseWire) { l.RemainingNs = maxLifetime + 1 }},
+		{"timeout exceeds maximum", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = maxLifetime + 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := sampleIdleLease()
+			tc.mutate(&rec)
+			if _, ok := decodePersistentNatLeasePayload(
+				encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{rec}),
+			); ok {
+				t.Fatal("out-of-bounds lifetime must reject the whole payload")
+			}
+		})
+	}
+}
+
 
 // #4892 shape: a string field longer than the uint16 length prefix can describe
 // must DROP that record, never narrow the prefix. A wrapped length misframes the

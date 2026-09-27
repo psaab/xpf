@@ -155,7 +155,7 @@ impl Coordinator {
                 .collect();
             match rule
                 .pool_allocator
-                .import_idle_lease(&rec.lease, &addrs, now_ns)
+                .import_idle_lease(&rec.lease, &addrs, rule.persistent_nat_timeout_ns, now_ns)
             {
                 IdleLeaseImport::Installed => counts.installed += 1,
                 IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,

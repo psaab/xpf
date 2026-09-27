@@ -12,7 +12,10 @@
 use super::super::ServerState;
 use crate::ControlResponse;
 use crate::afxdp::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
-use crate::nat::IdleLeaseRecord;
+use crate::nat::{
+    IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
+    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
+};
 use crate::protocol::{DisplayLeaseWire, IdleLeaseWire};
 use std::net::IpAddr;
 
@@ -74,7 +77,13 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
 /// `None` when the record cannot be understood. The caller counts these rather
 /// than substituting a default.
 pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
-    if w.pool_name.is_empty() || w.remaining_ns == 0 {
+    if w.pool_name.is_empty()
+        || w.remaining_ns == 0
+        || w.remaining_ns > MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS
+        || w.timeout_ns > MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS
+        || w.timeout_ns < MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
+        || w.remaining_ns > w.timeout_ns
+    {
         return None;
     }
     // #10018: an old helper omits this field and serde maps that to `None`.
@@ -309,6 +318,31 @@ mod tests {
             (
                 "zero remaining",
                 Box::new(|w: &mut IdleLeaseWire| w.remaining_ns = 0),
+            ),
+            (
+                "zero timeout",
+                Box::new(|w: &mut IdleLeaseWire| w.timeout_ns = 0)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
+            ),
+            (
+                "subsecond timeout",
+                Box::new(|w: &mut IdleLeaseWire| w.timeout_ns = 1)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
+            ),
+            (
+                "remaining above timeout",
+                Box::new(|w: &mut IdleLeaseWire| w.remaining_ns = w.timeout_ns + 1)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
+            ),
+            (
+                "oversized remaining",
+                Box::new(|w: &mut IdleLeaseWire| w.remaining_ns = u64::MAX)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
+            ),
+            (
+                "oversized timeout",
+                Box::new(|w: &mut IdleLeaseWire| w.timeout_ns = u64::MAX)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
             ),
             (
                 "bad src",

@@ -55,7 +55,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
-  * Prevent peer-echoed idle persistent-NAT leases by keeping imported leases
-    local until use and treating lease advertisements as additive (#10789).
+  * Prevent peer-echoed idle persistent-NAT leases, make local adoption
+    rollback-safe and promote active leases only after successful local flow
+    completion, and bound peer-advertised lifetimes to the local schema ceiling
+    (#10789).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

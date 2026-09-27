@@ -208,7 +208,8 @@ pub(crate) struct NatScopeCtx<'a> {
 }
 
 pub(crate) use allocator::{
-    DeterministicV6, MAX_NAT_HOLDER_WORKERS, NatHolder, PortAllocator, PortAllocatorSnapshot,
+    DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
+    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PortAllocator, PortAllocatorSnapshot,
 };
 pub(crate) use destination::{DnatKey, DnatTable, DnatValue};
 pub(crate) use iface_registry::{

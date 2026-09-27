@@ -213,11 +213,19 @@ impl PortAllocator {
         &self,
         rec: &IdleLeaseRecord,
         pool_addresses: &[IpAddr],
+        local_timeout_ns: u64,
         now_ns: u64,
     ) -> IdleLeaseImport {
-        if rec.remaining_ns == 0 {
+        if local_timeout_ns < super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
+            || rec.remaining_ns == 0
+            || rec.timeout_ns < super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
+        {
             return IdleLeaseImport::SkippedExpired;
         }
+        let timeout_ns = super::allocator::bounded_persistent_nat_timeout_ns(
+            local_timeout_ns.min(rec.timeout_ns),
+        );
+        let remaining_ns = rec.remaining_ns.min(timeout_ns);
         let Some(addr_index) = pool_addresses.iter().position(|a| *a == rec.translated_ip) else {
             return IdleLeaseImport::SkippedUnknownAddress;
         };
@@ -241,7 +249,7 @@ impl PortAllocator {
                 Some(true) => {}
             }
         }
-        let expires_at_ns = now_ns.saturating_add(rec.remaining_ns);
+        let expires_at_ns = now_ns.saturating_add(remaining_ns);
         live.persistent_by_source.insert(
             key,
             PersistentLease {
@@ -251,16 +259,19 @@ impl PortAllocator {
                 },
                 addr_index,
                 expires_at_ns,
-                timeout_ns: rec.timeout_ns,
+                timeout_ns,
                 // Module note 1: rebuilt locally, and legitimately zero here.
                 active_flows: 0,
                 completed_flows: 0,
                 activation_saw_completion: false,
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
+                activation_previous_imported: false,
+                activation_previous_timeout_ns: 0,
                 address_only: rec.address_only,
-                // Imported state stays out of the sync export until a local
-                // flow adopts it (the local 0 -> 1 join clears this bit).
+                // Imported state stays out of sync export until local traffic
+                // adopts it: 0 -> 1 promotion is rollback-safe, while a local
+                // N -> N+1 join promotes only after `release_flow` completes.
                 imported: true,
             },
         );

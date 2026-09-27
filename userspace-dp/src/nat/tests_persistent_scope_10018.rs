@@ -387,7 +387,7 @@ fn idle_lease_sync_carries_scope_and_matches_it_on_import_10018() {
     let standby_now = 9_000_000_000_000u64;
     for rec in &exported {
         assert_eq!(
-            standby.import_idle_lease(rec, &standby_pool, standby_now),
+            standby.import_idle_lease(rec, &standby_pool, TIMEOUT_NS, standby_now),
             super::idle_lease_sync_8121::IdleLeaseImport::Installed,
             "each scoped record must install"
         );

@@ -62,10 +62,17 @@ func (d *Daemon) wirePersistentNatLeaseCallbacks(ss *cluster.SessionSync) {
 }
 
 // runPersistentNatLeaseSyncLoop re-advertises locally-owned idle leases on a
-// slow tick. Imported leases are filtered at the allocator; a local flow's
-// 0 -> 1 reuse promotes one for future export. The node-level RG-master gate
-// still cannot identify per-RG lease ownership, so an imported idle lease on a
-// newly-mastered RG remains suppressed until locally used.
+// slow tick. Imported leases are filtered at the allocator. Local 0 -> 1
+// adoption transfers ownership provisionally and rollback restores peer origin
+// if later admission rejects it; a local N -> N+1 join on an imported active
+// lease carries a per-flow marker and transfers ownership only at successful
+// `release_flow` completion. Synced joins never promote. Once locally owned,
+// the lease is re-advertised after its final flow drains on the next tick, so
+// the former owner can rebuild it for failback/restart; failback before local
+// completion intentionally leaves the lease peer-owned.
+// The node-level RG-master gate still cannot identify per-RG lease ownership,
+// so an imported idle lease on a newly-mastered RG remains suppressed until
+// locally used.
 //
 // A peer running the old helper can echo records during a rolling upgrade; the
 // accepted bounded window ends when that peer upgrades/restarts. A copy already
