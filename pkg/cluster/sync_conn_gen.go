@@ -378,27 +378,67 @@ const configEpochReverseTag = uint64(1) << 63
 
 const configEpochGenMask = ^configEpochReverseTag
 
-// stampConfigEpoch returns the config epoch to stamp on an outbound synced
-// session (#11055). On the RG0 config-sync authority (IsPrimaryFn true) — and
-// on an unwired node (nil, i.e. standalone/tests) — it is today's value: the
-// local send counter, tag clear. On a converged non-authority it is the
-// APPLIED generation in the AUTHORITY's namespace, tagged: the peer applies
-// only authority-pushed configs, so lastAppliedConfigGen names a generation
-// the authority minted and its counter can judge. A non-authority that is not
-// converged (received and applied marks disagree, or applied is zero) stamps
-// 0, the documented disable value — today's fail-OPEN — instead of a stale
-// value a climbing authority threshold would refuse forever (#6419 reason 3:
-// a pinned apply-failure mark, a queue-full drop, or a bulk re-prime reset
-// must not convert into total reverse-direction loss).
-func (s *SessionSync) stampConfigEpoch() uint64 {
-	if s.IsPrimaryFn != nil && !s.IsPrimaryFn() {
-		applied := s.lastAppliedConfigGen.Load()
-		if applied == 0 || applied != s.lastRecvConfigGen.Load() {
-			return 0
+// observeConfigEpochRole records role transitions without taking configGenMu.
+// A retained applied high-water from before promotion does not identify the
+// current authority's generation namespace, so demotion establishes a floor
+// that only a newly applied generation can cross.
+func (s *SessionSync) observeConfigEpochRole(primary bool) {
+	s.configEpochRoleMu.Lock()
+	defer s.configEpochRoleMu.Unlock()
+	if !s.configEpochRoleKnown {
+		s.configEpochRoleKnown = true
+		s.configEpochRolePrimary = primary
+		if !primary {
+			s.configEpochReverseFloor = s.lastAppliedConfigGen.Load()
 		}
-		return configEpochReverseTag | (applied & configEpochGenMask)
+		return
 	}
-	return s.configGenCounter.Load()
+	if s.configEpochRolePrimary == primary {
+		return
+	}
+	s.configEpochRolePrimary = primary
+	if !primary {
+		s.configEpochReverseFloor = s.lastAppliedConfigGen.Load()
+	}
+}
+
+func (s *SessionSync) resetConfigEpochReverseFloor() {
+	s.configEpochRoleMu.Lock()
+	s.configEpochReverseFloor = 0
+	s.configEpochRoleMu.Unlock()
+}
+
+// stampConfigEpoch returns the config epoch to stamp on an outbound synced
+// session (#11055). An authority — and an unwired node — stamps its local
+// send counter. A non-authority uses its converged applied generation. It
+// sends that generation tagged only after the peer advertises support and the
+// mark is newer than the floor captured on entry to this authority tenure.
+// An unlearned or legacy peer gets the original untagged local send-counter
+// stamp; divergent or unproven capable-peer namespaces get epoch 0 to preserve
+// fail-open behavior.
+func (s *SessionSync) stampConfigEpoch() uint64 {
+	if s.IsPrimaryFn == nil {
+		return s.configGenCounter.Load()
+	}
+	primary := s.IsPrimaryFn()
+	s.observeConfigEpochRole(primary)
+	if primary {
+		return s.configGenCounter.Load()
+	}
+	if !s.peerCapabilitiesLearned() || !s.PeerConfigEpochReverseTagCapable() {
+		return s.configGenCounter.Load()
+	}
+	applied := s.lastAppliedConfigGen.Load()
+	if applied == 0 || applied != s.lastRecvConfigGen.Load() {
+		return 0
+	}
+	s.configEpochRoleMu.Lock()
+	floor := s.configEpochReverseFloor
+	s.configEpochRoleMu.Unlock()
+	if applied <= floor {
+		return 0
+	}
+	return configEpochReverseTag | (applied & configEpochGenMask)
 }
 
 // stampInstallGenV4 assigns a fresh install generation to a v4 session being
@@ -1214,6 +1254,7 @@ func (s *SessionSync) resetRecvGen() {
 	// (received on receive, applied on successful apply).
 	s.lastRecvConfigGen.Store(0)
 	s.configGenMu.Unlock()
+	s.resetConfigEpochReverseFloor()
 	// #5706: reset the full-set (IPsec/DHCP) ordering high-water marks for the
 	// same reason. A reconnecting peer that OS-rebooted restarts its monotonic
 	// incarnation LOWER; without this reset the guard would refuse its fresh
@@ -1274,27 +1315,21 @@ func (s *SessionSync) fullSetGuardsLocked() []*fullSetSeqGuard {
 // two loops apply at once: in steady state one loop applies and the lock is
 // uncontended.
 // configEpochStale reports whether a synced session was stamped under an older
-// config that may deny it (#5274/#11055). The top bit of ConfigEpoch marks the
-// non-authority's stamp: a converged non-authority uses its last-applied
-// authority generation with the tag set, and an authority compares that
-// generation against its own configGenCounter. The authority's own sessions
-// carry an untagged generation; a non-authority compares it against the
-// max(applyingConfigGen, lastAppliedConfigGen) receiver barrier as before.
-//
-// RG0 ownership is not learned atomically. If the stamp's source tag does not
-// match this node's current role, the two roles disagree about who is
-// authoritative (including the handover/dual-active window), so the namespace
-// is not comparable and the guard fails open. A non-authority also stamps 0
-// until its received and applied marks converge, preserving the existing
-// fail-open behavior during reset and failed config apply rather than creating
-// permanent reverse-direction refusal.
+// config that may deny it (#5274/#11055). A current authority interprets a
+// tagged epoch in its own send-counter namespace only when the peer advertised
+// reverse-tag support. Untagged frames at an authority and tagged frames at a
+// non-authority are role mismatches and fail open. The non-authority continues
+// comparing untagged authority epochs against its apply-in-progress and
+// last-applied barriers.
 func (s *SessionSync) configEpochStale(epoch uint64) bool {
 	if epoch == 0 {
 		return false
 	}
 	if s.IsPrimaryFn != nil {
-		if s.IsPrimaryFn() {
-			if epoch&configEpochReverseTag == 0 {
+		primary := s.IsPrimaryFn()
+		s.observeConfigEpochRole(primary)
+		if primary {
+			if epoch&configEpochReverseTag == 0 || !s.peerCapabilitiesLearned() || !s.PeerConfigEpochReverseTagCapable() {
 				return false
 			}
 			epoch &= configEpochGenMask

@@ -185,13 +185,17 @@ const (
 	// invite scoped frames this binary applies as bare deletes. The apply
 	// slice adds it to localCapabilityFlags atomically with honoring it.
 	capFlagScopedPolicyDelete uint8 = 1 << 5
+	// capFlagConfigEpochReverseTag: the peer decodes reverse-direction
+	// ConfigEpoch stamps and compares them in the authority's generation
+	// namespace. Absent => use the legacy untagged reverse stamp.
+	capFlagConfigEpochReverseTag uint8 = 1 << 6
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
 // constant: the capability is a property of the BINARY, not of runtime
 // turn off. In particular it is deliberately independent of
 // localSnapshotProtocol — see sendCapabilities for why that mattered.
-const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry
+const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry | capFlagConfigEpochReverseTag
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -384,6 +388,17 @@ func (s *SessionSync) ConfigAncestryCapable() bool {
 // capabilities frame, distinguishing "not learned yet" from "incapable".
 func (s *SessionSync) ConfigAncestryNegotiated() bool {
 	return s.peerCapabilitiesLearned()
+}
+
+// PeerConfigEpochReverseTagCapable reports whether the current peer
+// advertised support for reverse-direction ConfigEpoch stamps. Callers must
+// also check peerCapabilitiesLearned to distinguish an unlearned incarnation
+// from a peer that explicitly lacks this bit.
+func (s *SessionSync) PeerConfigEpochReverseTagCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags.Load())&capFlagConfigEpochReverseTag != 0
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been

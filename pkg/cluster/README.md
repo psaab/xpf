@@ -3912,21 +3912,24 @@ outside the monitor loop:
   (`sync_protocol.go`). `configEpochStale` interprets that value by the
   receiver's current RG0 role: a non-authority compares an untagged authority
   generation against `max(applyingConfigGen, lastAppliedConfigGen)`, while an
-  authority strips the reverse-source tag and compares the non-authority's
-  applied generation against its own `configGenCounter` (#11055). The
-  non-authority stamps `tag | lastAppliedConfigGen` only when its received and
-  applied marks are equal and nonzero; otherwise it stamps 0. A tag/role
-  mismatch during RG0 handover disables comparison rather than comparing
-  independent generations and falsely rejecting a session.
-  `epoch == 0` (legacy peer / local-origin) disables the check (rolling-upgrade
-  safe); the reconnect `resetRecvGen` zeroes `lastAppliedConfigGen` so a
-  rebooted-peer bulk re-prime is never falsely rejected. **That zeroing is
-  serialized against every advance of the mark by `configGenMu` (#5084)** — the
-  advance is a load/compare/store and the clear runs on a different goroutine
-  (a receive loop, versus `configApplyLoop` for the applied mark and the *other*
-  receive loop for the received mark), so a clear could land inside an advance
-  and be lost, leaving a pre-reboot generation that refuses every generation the
-  reconnected peer can produce. Writers of the three config-generation marks:
+  authority compares a tagged reverse epoch against its own `configGenCounter`
+  only after the peer advertises the reverse-tag capability (#11055). A
+  non-authority stamps `tag | lastAppliedConfigGen` only when the peer is known
+  capable, received and applied marks agree and are nonzero, and the applied
+  mark is newer than the floor captured on entry to the current non-authority
+  tenure. An unlearned/legacy peer receives the original untagged local send
+  counter, preserving the legacy comparison. Divergent marks or an unproven
+  capable-peer namespace produces epoch 0. A tag/role mismatch during RG0
+  handover disables comparison.
+  `epoch == 0` disables the check; reconnect `resetRecvGen` zeroes
+  `lastAppliedConfigGen` so a rebooted-peer bulk re-prime is never falsely
+  rejected. **That zeroing is serialized against every advance of the mark by
+  `configGenMu` (#5084)** — the advance is a load/compare/store and the clear runs
+  on a different goroutine (a receive loop, versus `configApplyLoop` for the
+  applied mark and the *other* receive loop for the received mark), so a clear
+  could land inside an advance and be lost, leaving a pre-reboot generation
+  that refuses every generation the reconnected peer can produce. Writers of
+  the three config-generation marks:
 
   | writer | mark(s) | goroutine | synchronisation |
   |---|---|---|---|

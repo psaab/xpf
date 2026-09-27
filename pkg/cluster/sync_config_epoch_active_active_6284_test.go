@@ -80,6 +80,7 @@ func TestActiveActiveConfigEpochDirectionalCoverage6284(t *testing.T) {
 	ssB := NewSessionSync(":0", "10.0.0.2:4785", dpB)
 	ssB.IsPrimaryFn = func() bool { return false }
 	ssB.configGenCounter.Store(frozenEpoch) // frozen boot seed; this node never sends config
+	setConfigEpochPeerTagCapability11055(ssB, true)
 	ssB.recordRecvConfigGen(10)
 	ssB.recordAppliedConfigGen(10) // applies the authority's config (real path)
 	ssB.recordRecvConfigGen(11)

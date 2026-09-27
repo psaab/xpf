@@ -461,6 +461,9 @@ func (s *SessionSync) recordAppliedConfigGen(gen uint64) {
 	if gen == 0 {
 		return
 	}
+	if s.IsPrimaryFn != nil {
+		s.observeConfigEpochRole(s.IsPrimaryFn())
+	}
 	s.configGenMu.Lock()
 	defer s.configGenMu.Unlock()
 	if gen > s.lastAppliedConfigGen.Load() {
