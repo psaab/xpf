@@ -382,3 +382,412 @@ func newIPv6TestPacketConn(t *testing.T) net.PacketConn {
 	})
 	return ipv6TestPacketConn{Conn: conn}
 }
+
+func TestUpdateInstances_PartialNetlinkFailureGatesReadinessAndRetries(t *testing.T) {
+	tests := []struct {
+		name          string
+		oldVIPs       []string
+		desiredVIPs   []string
+		failedVIP     string
+		failAdd       bool
+		wantAfterFail []string
+		wantGARP      string
+	}{
+		{
+			name:          "add",
+			oldVIPs:       []string{"172.16.83.1/32"},
+			desiredVIPs:   []string{"172.16.83.1/32", "172.16.83.2/32"},
+			failedVIP:     "172.16.83.2/32",
+			failAdd:       true,
+			wantAfterFail: []string{"172.16.83.1/32"},
+			wantGARP:      "172.16.83.2",
+		},
+		{
+			name:          "remove",
+			oldVIPs:       []string{"172.16.84.1/32", "172.16.84.2/32"},
+			desiredVIPs:   []string{"172.16.84.2/32"},
+			failedVIP:     "172.16.84.1/32",
+			wantAfterFail: []string{"172.16.84.2/32", "172.16.84.1/32"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newTestManagerNoNetwork()
+			defer stopManagerForTest(m)
+			const iface = "reth10780-partial"
+			key := instanceKey{iface: iface, groupID: 101}
+			vi := seedRunningInstance(m, key, Instance{
+				Interface: iface, GroupID: key.groupID, Priority: 200,
+				VirtualAddresses: append([]string(nil), tc.oldVIPs...),
+			}, 1)
+			vi.setState(StateMaster)
+			installFakeVIPNetlink(vi)
+
+			failMutation := true
+			vi.addrAddFn = func(_ netlink.Link, addr *netlink.Addr) error {
+				if failMutation && tc.failAdd && addr.IPNet.String() == tc.failedVIP {
+					return errSocketOpenFailed
+				}
+				return nil
+			}
+			vi.addrDelFn = func(_ netlink.Link, addr *netlink.Addr) error {
+				if failMutation && !tc.failAdd && addr.IPNet.String() == tc.failedVIP {
+					return errSocketOpenFailed
+				}
+				return nil
+			}
+
+			oldSend, oldGARP, oldNA, oldProbe := sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn
+			t.Cleanup(func() {
+				sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn = oldSend, oldGARP, oldNA, oldProbe
+			})
+			var adverts [][]string
+			sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
+				addrs := make([]string, 0, len(pkt.IPAddresses))
+				for _, addr := range pkt.IPAddresses {
+					addrs = append(addrs, addr.String())
+				}
+				adverts = append(adverts, addrs)
+				return nil
+			}
+			var garps []string
+			garpBurstFn = func(_ string, ip net.IP, _ int, _ cluster.BurstStillValid) error {
+				garps = append(garps, ip.String())
+				return nil
+			}
+			naBurstFn = func(_ string, _ net.IP, _ int, _ cluster.BurstStillValid) error { return nil }
+			arpProbeFn = func(string, net.IP, net.IP) error { return nil }
+
+			desired := &Instance{
+				Interface: iface, GroupID: key.groupID, Priority: 200,
+				VirtualAddresses: append([]string(nil), tc.desiredVIPs...),
+			}
+			if err := m.UpdateInstances([]*Instance{desired}); err != nil {
+				t.Fatalf("UpdateInstances with injected netlink failure: %v", err)
+			}
+			if got := vi.vipsSnapshot(); !vipsEqual(got, tc.wantAfterFail) {
+				t.Fatalf("VIPs after partial failure = %v, want %v", got, tc.wantAfterFail)
+			}
+			if vi.getState() != StateMaster {
+				t.Fatalf("state after partial failure = %s, want MASTER", vi.getState())
+			}
+			if vi.vipUpdateFailures.Load() != 1 || !vi.vipUpdateDiverged.Load() {
+				t.Fatalf("partial failure status: failures=%d diverged=%v, want 1/true",
+					vi.vipUpdateFailures.Load(), vi.vipUpdateDiverged.Load())
+			}
+			if ready, reasons := m.RGVRRPReady(1, true); ready || len(reasons) == 0 {
+				t.Fatalf("RGVRRPReady after partial failure = %v, reasons=%v; want not ready with reason",
+					ready, reasons)
+			}
+			states := m.InstanceStates()
+			if len(states) != 1 || !states[0].VIPDiverged ||
+				states[0].VIPUpdateFailures != 1 ||
+				!vipsEqual(states[0].VIPs, tc.wantAfterFail) {
+				t.Fatalf("InstanceStates did not expose partial VIP divergence: %+v", states)
+			}
+			if len(adverts) == 0 || !vipsEqual(adverts[len(adverts)-1], wantIPs(tc.wantAfterFail)) {
+				t.Fatalf("advertised addresses after partial failure = %v, want current safe set %v",
+					adverts, wantIPs(tc.wantAfterFail))
+			}
+			if len(garps) != 0 {
+				t.Fatalf("GARP sent for incomplete delta: %v", garps)
+			}
+
+			failMutation = false
+			if err := m.UpdateInstances([]*Instance{desired}); err != nil {
+				t.Fatalf("UpdateInstances retry: %v", err)
+			}
+			if got := vi.vipsSnapshot(); !vipsEqual(got, tc.desiredVIPs) {
+				t.Fatalf("VIPs after retry = %v, want %v", got, tc.desiredVIPs)
+			}
+			if vi.getState() != StateMaster {
+				t.Fatalf("state after retry = %s, want MASTER", vi.getState())
+			}
+			if vi.vipUpdateFailures.Load() != 1 || vi.vipUpdateDiverged.Load() {
+				t.Fatalf("retry status: failures=%d diverged=%v, want 1/false",
+					vi.vipUpdateFailures.Load(), vi.vipUpdateDiverged.Load())
+			}
+			if ready, reasons := m.RGVRRPReady(1, true); !ready {
+				t.Fatalf("RGVRRPReady after successful retry = false: %v", reasons)
+			}
+			if tc.wantGARP != "" && (len(garps) != 1 || garps[0] != tc.wantGARP) {
+				t.Fatalf("GARP after successful add retry = %v, want [%s]", garps, tc.wantGARP)
+			}
+			if tc.wantGARP == "" && len(garps) != 0 {
+				t.Fatalf("GARP after remove retry = %v, want none", garps)
+			}
+		})
+	}
+}
+
+func wantIPs(vips []string) []string {
+	out := make([]string, 0, len(vips))
+	for _, vip := range vips {
+		ip, _, err := net.ParseCIDR(vip)
+		if err != nil {
+			continue
+		}
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+func TestUpdateInstances_CapacityBoundaryFailedRemovalStaysAdvertisable(t *testing.T) {
+	for _, isIPv6 := range []bool{false, true} {
+		family := "ipv4"
+		if isIPv6 {
+			family = "ipv6"
+		}
+		t.Run(family, func(t *testing.T) {
+			m, _ := newTestManagerNoNetwork()
+			defer stopManagerForTest(m)
+
+			const iface = "reth10780-capacity"
+			key := instanceKey{iface: iface, groupID: 101}
+			capacity := MaxConfiguredVIPs(isIPv6)
+			oldVIPs := make([]string, 0, capacity)
+			for i := 1; i <= capacity; i++ {
+				oldVIPs = append(oldVIPs, capacityBoundaryVIP(isIPv6, i))
+			}
+			removedVIP := oldVIPs[len(oldVIPs)-1]
+			desiredVIPs := append([]string(nil), oldVIPs[:len(oldVIPs)-1]...)
+			desiredVIPs = append(desiredVIPs, capacityBoundaryVIP(isIPv6, capacity+1))
+
+			vi := seedRunningInstance(m, key, Instance{
+				Interface: iface, GroupID: key.groupID, Priority: 200,
+				VirtualAddresses: append([]string(nil), oldVIPs...),
+			}, 1)
+			vi.setState(StateMaster)
+			vi.suppressGARP.Store(true)
+			installFakeVIPNetlink(vi)
+			addCalls, delCalls := 0, 0
+			vi.addrAddFn = func(netlink.Link, *netlink.Addr) error {
+				addCalls++
+				return nil
+			}
+			vi.addrDelFn = func(_ netlink.Link, addr *netlink.Addr) error {
+				delCalls++
+				if addr.IPNet.String() == removedVIP {
+					return errSocketOpenFailed
+				}
+				return nil
+			}
+
+			oldSend := sendPacketFn
+			t.Cleanup(func() { sendPacketFn = oldSend })
+			marshalErrs := make([]error, 0, 1)
+			sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, ipv6 bool) error {
+				src, dst := net.ParseIP("198.18.255.254"), net.ParseIP("224.0.0.18")
+				wire := *pkt
+				if ipv6 {
+					src, dst = net.ParseIP("fe80::1"), net.ParseIP("ff02::12")
+					wire.IPAddresses = append([]net.IP{src}, pkt.IPAddresses...)
+				}
+				_, err := wire.Marshal(ipv6, src, dst)
+				marshalErrs = append(marshalErrs, err)
+				return err
+			}
+
+			desired := &Instance{
+				Interface: iface, GroupID: key.groupID, Priority: 200,
+				VirtualAddresses: desiredVIPs,
+			}
+			if err := m.UpdateInstances([]*Instance{desired}); err != nil {
+				t.Fatalf("UpdateInstances at capacity boundary: %v", err)
+			}
+			if addCalls != 0 || delCalls != 1 {
+				t.Fatalf("netlink operations after failed delete: adds=%d deletes=%d, want 0/1",
+					addCalls, delCalls)
+			}
+			if got := vi.vipsSnapshot(); !vipsEqual(got, oldVIPs) {
+				t.Fatalf("stored VIPs after failed delete = %d addresses, want original %d",
+					len(got), len(oldVIPs))
+			}
+			if err := vi.getAdvertCapacityErr(); err != nil {
+				t.Fatalf("retained advertisement set exceeds capacity: %v", err)
+			}
+			if vi.getState() != StateMaster {
+				t.Fatalf("state after failed delete = %s, want MASTER", vi.getState())
+			}
+			if ready, reasons := m.RGVRRPReady(1, true); ready || len(reasons) == 0 {
+				t.Fatalf("RGVRRPReady after incomplete delete = %v, reasons=%v; want not ready",
+					ready, reasons)
+			}
+			if len(marshalErrs) != 1 || marshalErrs[0] != nil {
+				t.Fatalf("advert Marshal results = %v, want one successful legal packet", marshalErrs)
+			}
+			states := m.InstanceStates()
+			if len(states) != 1 || !states[0].VIPDiverged ||
+				len(states[0].VIPs) != capacity {
+				t.Fatalf("InstanceStates after capacity failure = %+v; want divergent full legal set", states)
+			}
+		})
+	}
+}
+
+func TestUpdateInstances_RejectsOverCapacityDesiredWithoutStoppingMaster(t *testing.T) {
+	m, rec := newTestManagerNoNetwork()
+	defer stopManagerForTest(m)
+
+	const iface = "reth10780-rejected"
+	key := instanceKey{iface: iface, groupID: 101}
+	const oldVIP = "198.18.111.1/32"
+	vi := seedRunningInstance(m, key, Instance{
+		Interface: iface, GroupID: key.groupID, Priority: 200,
+		VirtualAddresses: []string{oldVIP},
+	}, 1)
+	vi.setState(StateMaster)
+
+	overCapacity := []string{oldVIP}
+	for i := 1; i <= MaxConfiguredVIPs(false); i++ {
+		overCapacity = append(overCapacity, capacityBoundaryVIP(false, i))
+	}
+	if err := m.UpdateInstances([]*Instance{{
+		Interface: iface, GroupID: key.groupID, Priority: 200,
+		VirtualAddresses: overCapacity,
+	}}); err != nil {
+		t.Fatalf("UpdateInstances over-capacity desired set: %v", err)
+	}
+	m.mu.RLock()
+	retained := m.instances[key]
+	m.mu.RUnlock()
+	if retained != vi || vi.getState() != StateMaster || !vipsEqual(vi.vipsSnapshot(), []string{oldVIP}) {
+		t.Fatalf("rejected desired config changed live Master: same=%v state=%s VIPs=%v",
+			retained == vi, vi.getState(), vi.vipsSnapshot())
+	}
+	if open, run, stop := rec.snapshot(); open != 0 || run != 0 || stop != 0 {
+		t.Fatalf("rejected desired config caused lifecycle churn: open=%d run=%d stop=%d",
+			open, run, stop)
+	}
+	if ready, reasons := m.RGVRRPReady(1, true); ready || len(reasons) == 0 {
+		t.Fatalf("RGVRRPReady after rejected over-capacity config = %v, reasons=%v; want not ready",
+			ready, reasons)
+	}
+
+	if err := m.UpdateInstances([]*Instance{{
+		Interface: iface, GroupID: key.groupID, Priority: 200,
+		VirtualAddresses: []string{oldVIP},
+	}}); err != nil {
+		t.Fatalf("UpdateInstances restoring valid desired set: %v", err)
+	}
+	if ready, reasons := m.RGVRRPReady(1, true); !ready {
+		t.Fatalf("RGVRRPReady did not recover after valid desired set: %v", reasons)
+	}
+}
+
+func capacityBoundaryVIP(isIPv6 bool, index int) string {
+	if isIPv6 {
+		ip := append(net.IP(nil), net.ParseIP("2001:db8::1").To16()...)
+		ip[4] = byte(index >> 8)
+		ip[5] = byte(index)
+		ip[15] = 1
+		return ip.String() + "/64"
+	}
+	return net.IPv4(198, 18, byte(index>>8), byte(index)).String() + "/32"
+}
+
+func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testing.T) {
+	for _, isIPv6 := range []bool{false, true} {
+		family := "ipv4"
+		if isIPv6 {
+			family = "ipv6"
+		}
+		t.Run(family, func(t *testing.T) {
+			oldVIP, newVIP := "198.18.107.80/32", "198.18.107.81/32"
+			if isIPv6 {
+				oldVIP, newVIP = "2001:db8:1078::1/64", "2001:db8:1078::2/64"
+			}
+			vi := newInstance(Instance{
+				Interface: "reth10780-epoch", GroupID: 101, Priority: 200,
+				VirtualAddresses: []string{oldVIP},
+			}, &net.Interface{Name: "reth10780-epoch", Index: 10782}, nil, nil)
+			vi.setState(StateMaster)
+			installFakeVIPNetlink(vi)
+			vi.addrsFn = func() ([]net.Addr, error) { return nil, nil }
+
+			oldSend, oldGARP, oldNA, oldProbe := sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn
+			t.Cleanup(func() {
+				sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn = oldSend, oldGARP, oldNA, oldProbe
+			})
+			sendPacketFn = func(*vrrpInstance, *VRRPPacket, bool) error { return nil }
+
+			var entered, release = make(chan struct{}), make(chan struct{})
+			var callsMu sync.Mutex
+			var sent []string
+			burst := func(_ string, ip net.IP, _ int, valid cluster.BurstStillValid) error {
+				callsMu.Lock()
+				sent = append(sent, ip.String())
+				first := len(sent) == 1
+				callsMu.Unlock()
+				if first {
+					close(entered)
+					<-release
+				}
+				if !valid() {
+					t.Errorf("burst for %s was invalid while VIP update waited on the send lock", ip)
+				}
+				return nil
+			}
+			garpBurstFn, naBurstFn = burst, burst
+			arpProbeFn = func(string, net.IP, net.IP) error { return nil }
+
+			fullBurstDone := make(chan struct{})
+			go func() {
+				vi.sendGARP(false)
+				close(fullBurstDone)
+			}()
+			<-entered
+			updateDone := make(chan error, 1)
+			updateStarted := make(chan struct{})
+			go func() {
+				close(updateStarted)
+				updateDone <- vi.updateVIPs([]string{oldVIP, newVIP})
+			}()
+			<-updateStarted
+			select {
+			case err := <-updateDone:
+				close(release)
+				t.Fatalf("VIP update completed while the old burst still held vipMu: %v", err)
+			case <-time.After(10 * time.Millisecond):
+			}
+			close(release)
+			<-fullBurstDone
+			if err := <-updateDone; err != nil {
+				t.Fatalf("updateVIPs after serialized full-set burst: %v", err)
+			}
+			callsMu.Lock()
+			gotSent := append([]string(nil), sent...)
+			callsMu.Unlock()
+			oldIP, _, _ := net.ParseCIDR(oldVIP)
+			newIP, _, _ := net.ParseCIDR(newVIP)
+			if len(gotSent) != 2 || gotSent[0] != oldIP.String() || gotSent[1] != newIP.String() {
+				t.Fatalf("GARP/NA burst order = %v, want [%s %s]", gotSent, oldIP, newIP)
+			}
+
+			callbackVI := newInstance(Instance{
+				Interface: "reth10780-remove", GroupID: 101, Priority: 200,
+				VirtualAddresses: []string{oldVIP},
+			}, &net.Interface{Name: "reth10780-remove", Index: 10783}, nil, nil)
+			callbackVI.setState(StateMaster)
+			installFakeVIPNetlink(callbackVI)
+			callbackVI.addrsFn = func() ([]net.Addr, error) { return nil, nil }
+			var stillCurrent func() bool
+			capture := func(_ string, _ net.IP, _ int, valid cluster.BurstStillValid) error {
+				stillCurrent = valid
+				return nil
+			}
+			garpBurstFn, naBurstFn = capture, capture
+			callbackVI.sendGARP(false)
+			if stillCurrent == nil || !stillCurrent() {
+				t.Fatal("captured callback is not valid before membership removal")
+			}
+			if err := callbackVI.updateVIPs(nil); err != nil {
+				t.Fatalf("updateVIPs removing last VIP: %v", err)
+			}
+			if stillCurrent() {
+				t.Fatal("callback from removed VIP epoch remained valid")
+			}
+		})
+	}
+}

@@ -16,7 +16,9 @@ func (vi *vrrpInstance) emitEvent() {
 		Family:    vi.cfg.Family,
 		GroupID:   vi.cfg.GroupID,
 		State:     vi.getState(),
-		VIPs:      vi.vipsSnapshot(),
+		VIPs:              vi.vipsSnapshot(),
+		VIPDiverged:       vi.vipDiverged.Load() || vi.vipUpdateDiverged.Load(),
+		VIPUpdateFailures: vi.vipUpdateFailures.Load(),
 	}
 	select {
 	case vi.eventCh <- evt:
@@ -158,6 +160,7 @@ func (vi *vrrpInstance) sendPacket(pkt *VRRPPacket, isIPv6 bool) error {
 	}
 
 	if err := rawConn.SetMulticastInterface(vi.iface); err != nil {
+		return fmt.Errorf("set multicast interface: %w", err)
 	}
 
 	cm := &ipv4.ControlMessage{
@@ -165,6 +168,7 @@ func (vi *vrrpInstance) sendPacket(pkt *VRRPPacket, isIPv6 bool) error {
 	}
 
 	if err := rawConn.WriteTo(hdr, data, cm); err != nil {
+		return fmt.Errorf("writeto: %w", err)
 	}
 
 	return nil

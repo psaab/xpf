@@ -59,11 +59,13 @@ func (s VRRPState) String() string {
 
 // VRRPEvent is emitted when a VRRP instance changes state.
 type VRRPEvent struct {
-	Interface string
-	Family    string
-	GroupID   int
-	State     VRRPState
-	VIPs      []string
+	Interface         string
+	Family            string
+	GroupID           int
+	State             VRRPState
+	VIPs              []string
+	VIPDiverged       bool
+	VIPUpdateFailures uint64
 }
 
 // deafMasterDownInterval is the master-down interval used while this node is
@@ -268,7 +270,7 @@ type vrrpInstance struct {
 
 	// GARP suppression for strict-vip-ownership mode.
 	suppressGARP     atomic.Bool   // when true, becomeMaster() skips GARP/NA
-	garpEpoch        atomic.Uint64 // incremented on each becomeMaster()/ReconcileVIPs transition
+	garpEpoch        atomic.Uint64 // ownership tenure, MAC reconcile, or VIP membership generation
 	lastGARPEpoch    atomic.Uint64 // epoch of last completed sendGARP()
 	lastGARPTime     atomic.Int64  // Unix nanos of last GARP send
 	lastGARPOwnerGen atomic.Uint64 // owner generation in which the last GARP completed
@@ -311,6 +313,13 @@ type vrrpInstance struct {
 	// an async reconcile removes it). Atomic so log/test readers stay lock-free.
 	vipRemoveFailures atomic.Uint64
 	vipDiverged       atomic.Bool
+
+	// vipUpdateFailures/vipUpdateDiverged surface an in-place configuration
+	// delta that could not be fully reflected in the kernel. The manager retries
+	// desired != stored on its next reconciliation and gates RG readiness while
+	// the divergence remains.
+	vipUpdateFailures  atomic.Uint64
+	vipUpdateDiverged atomic.Bool
 
 	// vipReconcileBackoff overrides the spacing between stale-VIP remove-reconcile
 	// retries (#5482). Zero ⇒ defaultVIPReconcileBackoff. A per-instance field

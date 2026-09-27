@@ -171,9 +171,25 @@ func TestUpdateInstances_BuildBeforeTeardown_KeepsOldOnSocketFailure(t *testing.
 		t.Errorf("original VIP = %q, want 172.16.50.1/24 (unchanged)", got.cfg.VirtualAddresses[0])
 	}
 
-	// RGVRRPReady stays truthful — never a phantom-ready hole.
-	if ready, reasons := m.RGVRRPReady(1, true); !ready {
-		t.Fatalf("RGVRRPReady(1) should stay true through the failed restart: %v", reasons)
+	// The stale socket is retained safely, but the RG is not ready until rebind.
+	if ready, reasons := m.RGVRRPReady(1, true); ready {
+		t.Fatal("RGVRRPReady(1) must be false while the retained instance may be bound to a stale ifindex")
+	} else if len(reasons) == 0 || !strings.Contains(strings.Join(reasons, " "), "ifindex rebind failed") {
+		t.Fatalf("stale-ifindex readiness reason missing: %v", reasons)
+	}
+
+	// A later transient probe error must not erase a previously observed,
+	// unresolved rebind from RG readiness.
+	m.resolveIface = func(string) (*net.Interface, error) {
+		return nil, errSocketOpenFailed
+	}
+	if err := m.UpdateInstances(desired); err != nil {
+		t.Fatalf("UpdateInstances after transient resolve failure: %v", err)
+	}
+	if ready, reasons := m.RGVRRPReady(1, true); ready ||
+		!strings.Contains(strings.Join(reasons, " "), "ifindex rebind failed") {
+		t.Fatalf("stale-ifindex readiness was cleared by a probe error: ready=%v reasons=%v",
+			ready, reasons)
 	}
 }
 

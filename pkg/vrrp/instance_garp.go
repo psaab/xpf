@@ -153,18 +153,27 @@ func GatewayProbeTarget(ipNet *net.IPNet) (net.IP, bool) {
 // dampening when it follows a completed MASTER tenure that has since ended;
 // neighbors may have learned the peer's MAC while this node was BACKUP.
 //
-// This method may be called in a goroutine from becomeMaster().
 func (vi *vrrpInstance) sendGARP(force bool) {
-	vi.sendGARPFor(vi.vipsSnapshot(), force)
-}
-
-// sendGARPFor emits a burst for a stable VIP snapshot. The in-place commit
-// path passes only newly-added VIPs so an address-set edit does not flap
-// neighbor entries for addresses that remained owned throughout.
-func (vi *vrrpInstance) sendGARPFor(vips []string, force bool) {
+	vi.vipMu.Lock()
+	vips := vi.vipsSnapshot()
 	epoch := vi.garpEpoch.Load()
 	ownerGen := vi.ownerGen.Load()
-	if !vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen) {
+	vi.vipMu.Unlock()
+	vi.sendGARPFor(vips, epoch, ownerGen, force)
+}
+
+// sendGARPFor emits a burst for a stable VIP snapshot and its captured epochs.
+// The synchronous first frame is serialized with VIP actuation; later
+// follow-ups validate the same epochs and stop when an update supersedes them.
+// The in-place commit path passes only newly-added VIPs so it does not flap
+// neighbor entries for addresses that remained owned throughout.
+func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force bool) {
+	vi.vipMu.Lock()
+	defer vi.vipMu.Unlock()
+	if vi.getState() != StateMaster ||
+		vi.ownerGen.Load() != ownerGen ||
+		vi.garpEpoch.Load() != epoch ||
+		!vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen) {
 		return
 	}
 	// #8597 (muse-004 K20): under vi.mu — updateConfig writes this field on the
@@ -187,18 +196,13 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, force bool) {
 		}
 		count = clamped
 	}
-	// Abdication gate for the detached burst follow-up loops (#2867). The
-	// cluster burst helpers send the first frame synchronously, then fan the
-	// remaining (count-1) frames out over a background goroutine spanning
-	// (count-1)*50ms. If the node loses master (becomes BACKUP) or a newer
-	// burst supersedes this one (garpEpoch bumps) before the loop drains, the
-	// loop must STOP — otherwise it keeps poisoning neighbor caches with GARP
-	// /NA for VIPs this node no longer owns. The closure re-reads live state
-	// before every follow-up frame; it is consulted only AFTER the
-	// synchronous first frame, so the immediate failover advert is never
-	// suppressed.
+	// Abdication gate for detached burst follow-ups (#2867). The immediate
+	// frame was serialized with VIP actuation above; every later frame is
+	// valid only while this ownership and VIP snapshot remains current.
 	stillMaster := func() bool {
-		return vi.getState() == StateMaster && vi.garpEpoch.Load() == epoch
+		return vi.getState() == StateMaster &&
+			vi.ownerGen.Load() == ownerGen &&
+			vi.garpEpoch.Load() == epoch
 	}
 	for _, vip := range vips {
 		ip, ipNet, err := net.ParseCIDR(vip)

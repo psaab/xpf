@@ -137,11 +137,11 @@ func (vi *vrrpInstance) becomeMaster() bool {
 		vi.emitEvent()
 		return false
 	}
+	vi.garpEpoch.Add(1)
 	vi.vipMu.Unlock()
 
 	vi.sendAdvert(pri)
 	vi.emitEvent()
-	vi.garpEpoch.Add(1)
 	if !vi.suppressGARP.Load() {
 		// Non-forced: a routine MASTER transition is rate-limited by the
 		// 500ms dampener (the epoch dedup still guarantees one burst per

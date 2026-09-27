@@ -174,18 +174,14 @@ type Manager struct {
 	// reconcile on that first event instead. Guarded by mu.
 	desiredIfaces map[string]struct{}
 
-	// unbuiltDesired records the desired VRRP keys from the most recent
-	// UpdateInstances that have NO live instance in m.instances — a key whose
-	// build failed (interface resolve failure / socket bind failure / family
-	// capability failure) or that was never yet built. It is the source of
-	// truth RGVRRPReady consults so a PARTIALLY-built RG is not reported ready
-	// (#5641): before this, RGVRRPReady returned READY as soon as ANY single
-	// instance existed for the RG's VRID, so if one of several desired member /
-	// VLAN-sub / family keys failed to build, its VIP was silently dark while
-	// the cluster state machine released the sync hold / preempted / claimed
-	// ownership. The value is a human-readable failure reason. Recomputed
-	// wholesale each reconcile off the authoritative desiredMap-vs-m.instances
-	// diff, so a key that recovers on a later pass clears itself. Guarded by mu.
+	// unbuiltDesired records desired VRRP keys that are not currently proven
+	// ready: a missing instance, a retained instance whose ifindex rebind failed,
+	// or an in-place VIP delta/socket update that remains incomplete. It is the
+	// source of truth RGVRRPReady consults so a partially built or dark RG is not
+	// reported ready. The value is a human-readable failure reason. Recomputed
+	// wholesale each reconcile from build/actuation outcomes and the authoritative
+	// desiredMap-versus-m.instances diff, so a recovered key clears itself.
+	// Guarded by mu.
 	unbuiltDesired map[instanceKey]string
 
 	// resolveLinkName maps a kernel ifindex to its current link NAME. The
@@ -453,6 +449,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		if err := validateInstanceFamily(inst); err != nil {
 			return err
 		}
+		key := instanceKey{iface: inst.Interface, groupID: inst.GroupID, family: inst.Family}
 		// #4573 defensive VRID range guard. The GroupID is truncated onto the
 		// single VRID wire byte (uint8(vi.cfg.GroupID) in instance.go). An
 		// out-of-range id normally cannot reach here — the config commit gate
@@ -462,7 +459,6 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		// an aliased VRID (257→1). Refuse to build such an instance rather than
 		// emit a wrong-VRID advert that a strict RFC peer discards.
 		if inst.GroupID < MinVRID || inst.GroupID > MaxVRID {
-			key := instanceKey{iface: inst.Interface, groupID: inst.GroupID, family: inst.Family}
 			rejectedDesired[key] = fmt.Sprintf(
 				"VRID %d out of range %d..%d",
 				inst.GroupID, MinVRID, MaxVRID)
@@ -483,13 +479,14 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		// no-brick), so refuse to build the instance rather than seat a silent
 		// non-advertiser.
 		if err := checkAdvertCapacity(inst.VirtualAddresses); err != nil {
+			rejectedDesired[key] = fmt.Sprintf(
+				"virtual addresses cannot produce a legal advertisement: %v", err)
 			slog.Warn("vrrp: skipping instance whose virtual addresses cannot "+
 				"produce a legal advertisement",
 				"interface", inst.Interface, "group_id", inst.GroupID,
 				"vip_count", len(inst.VirtualAddresses), "err", err)
 			continue
 		}
-		key := instanceKey{iface: inst.Interface, groupID: inst.GroupID, family: inst.Family}
 		if _, exists := desiredMap[key]; exists {
 			return fmt.Errorf(
 				"duplicate VRRP instance identity interface=%q VRID=%d family=%q; refusing non-deterministic last-wins reconciliation",
@@ -540,25 +537,31 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 
 	// Remove instances no longer desired.
 	for key, vi := range m.instances {
-		if _, ok := desiredMap[key]; !ok {
-			slog.Info("vrrp: removing instance", "key", vi.key())
-			vi.stop()
-			delete(m.instances, key)
+		if _, ok := desiredMap[key]; ok {
+			continue
 		}
+		if reason, rejected := rejectedDesired[key]; rejected {
+			// Keep the last advertisable config active when a same-key desired
+			// set is rejected. Readiness remains false until a valid config lands.
+			slog.Warn("vrrp: retaining instance for rejected desired config",
+				"key", vi.key(), "reason", reason)
+			continue
+		}
+		slog.Info("vrrp: removing instance", "key", vi.key())
+		vi.stop()
+		delete(m.instances, key)
 	}
 
-	// buildFailReason records, per desired key, WHY its build did not complete
-	// on this pass (resolve / socket / family capability). It annotates the
-	// #5641 unbuilt-desired record computed after the loop; keys that build
-	// successfully are absent. If an ifindex-rebind build fails while an OLD
-	// instance remains registered under its key, that key is not counted as
-	// unbuilt below; its sockets may still be bound to the retired ifindex, so
-	// registration alone does not assert that the key is currently advertising.
+	// buildFailReason records, per desired key, why its state is not yet
+	// proven ready: build/ifindex rebind failure, new-family socket failure,
+	// or incomplete in-place VIP actuation. RGVRRPReady reports these reasons
+	// even when build-before-teardown retained an old instance in the map.
 	buildFailReason := make(map[instanceKey]string)
 
 	// Add or update instances.
 	for key, inst := range desiredMap {
 		existing, ok := m.instances[key]
+		ifindexChanged := false
 		if ok {
 			// #2294: detect ifindex drift on an otherwise-unchanged
 			// instance. The per-instance AF_PACKET / raw / IPv6 sockets are
@@ -585,9 +588,17 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			// the normal no-change / in-place path runs with no churn. This
 			// runs every ~2s reconcile tick (daemon reconcileVRRPInstances),
 			// so it neither allocates nor restarts on a steady config.
-			ifindexChanged := false
-			if probe, perr := m.resolveIface(inst.Interface); perr == nil && probe.Index != existing.iface.Index {
+
+			probe, probeErr := m.resolveIface(inst.Interface)
+			if probeErr == nil && probe.Index != existing.iface.Index {
 				ifindexChanged = true
+			} else if probeErr != nil {
+				// Once a drifted socket was observed, a later transient
+				// probe failure cannot erase that unresolved rebind from readiness.
+				if reason := m.unbuiltDesired[key]; strings.HasPrefix(reason, "ifindex rebind failed:") {
+					ifindexChanged = true
+					buildFailReason[key] = reason
+				}
 			}
 
 			// Check if config changed (and the live ifindex is unchanged).
@@ -634,6 +645,9 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 						if err := ensure(existing, inst.VirtualAddresses); err != nil {
 							slog.Warn("vrrp: failed to open newly configured VIP family; keeping existing set",
 								"key", existing.key(), "err", err)
+							existing.vipUpdateFailures.Add(1)
+							existing.vipUpdateDiverged.Store(true)
+							buildFailReason[key] = fmt.Sprintf("new VIP family socket open failed: %v", err)
 							vipSocketsReady = false
 						}
 					}
@@ -656,6 +670,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 					if err := existing.updateVIPs(inst.VirtualAddresses); err != nil {
 						slog.Warn("vrrp: VIP set updated with kernel truth; reconcile will retry incomplete actuation",
 							"key", existing.key(), "err", err)
+						buildFailReason[key] = err.Error()
 					}
 				}
 				continue
@@ -691,7 +706,11 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		if err != nil {
 			slog.Warn("vrrp: interface not found, keeping existing instance",
 				"interface", inst.Interface, "have_existing", ok, "err", err)
-			buildFailReason[key] = fmt.Sprintf("interface %q resolve failed: %v", inst.Interface, err)
+			reason := fmt.Sprintf("interface %q resolve failed: %v", inst.Interface, err)
+			if ok && ifindexChanged {
+				reason = "ifindex rebind failed: " + reason
+			}
+			buildFailReason[key] = reason
 			continue
 		}
 
@@ -720,15 +739,19 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 
 		// PROOF step: open the per-instance socket. This is the operation
 		// that fails on a transient member-link problem. On failure the new
-		// instance is discarded WITHOUT touching m.instances — the old one
-		// (if any) keeps running and advertising its old VIPs
-		// (build-before-teardown). run() has NOT been started, so there is
-		// no goroutine to stop and no fd leak (openSocket closes its own
-		// conn on error).
+		// instance is discarded WITHOUT touching m.instances — an old instance
+		// retains its prior config/state, but its socket may still be bound to
+		// the retired ifindex. buildFailReason keeps that stale key unready.
+		// run() has NOT been started, so there is no goroutine to stop and no fd
+		// leak (openSocket closes its own conn on error).
 		if err := m.openInstanceSocket(vi); err != nil {
 			slog.Warn("vrrp: failed to open socket, keeping existing instance",
 				"interface", inst.Interface, "have_existing", ok, "err", err)
-			buildFailReason[key] = fmt.Sprintf("interface %q socket open failed: %v", inst.Interface, err)
+			reason := fmt.Sprintf("interface %q socket open failed: %v", inst.Interface, err)
+			if ok && ifindexChanged {
+				reason = "ifindex rebind failed: " + reason
+			}
+			buildFailReason[key] = reason
 			continue
 		}
 
@@ -742,30 +765,29 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		}
 		m.instances[key] = vi
 		m.runInstance(vi)
+		delete(buildFailReason, key)
 	}
 
-	// #5641: record every desired key that has NO live instance after this
-	// reconcile so RGVRRPReady can refuse to report a partially-built RG as
-	// ready. The authoritative test is desiredMap-vs-m.instances (not "did a
-	// continue fire"): a key kept alive by the build-before-teardown path is
-	// still in m.instances and correctly excluded, while a brand-new key or a
-	// sibling member/VLAN-sub/family key that failed to build is flagged with
-	// its captured reason (or a generic fallback if it was omitted upstream,
-	// e.g. the out-of-range VRID guard). Replaced wholesale so recovered keys
-	// clear.
+	// #5641: a desired key is ready only when its instance is built AND the
+	// latest update/rebind was proven complete. Retained old instances are
+	// deliberately included when a stale-ifindex replacement, family socket
+	// open, or VIP delta failed: map presence alone does not prove dataplane
+	// readiness. Recompute wholesale so successful retries clear the reason.
 	unbuilt := make(map[instanceKey]string, len(buildFailReason)+len(rejectedDesired))
 	for key, reason := range rejectedDesired {
 		unbuilt[key] = reason
 	}
+	for key, reason := range buildFailReason {
+		if _, wanted := desiredMap[key]; wanted {
+			unbuilt[key] = reason
+		}
+	}
 	for key := range desiredMap {
-		if _, built := m.instances[key]; built {
-			continue
+		if _, built := m.instances[key]; !built {
+			if _, recorded := unbuilt[key]; !recorded {
+				unbuilt[key] = "instance not built"
+			}
 		}
-		reason := buildFailReason[key]
-		if reason == "" {
-			reason = "instance not built"
-		}
-		unbuilt[key] = reason
 	}
 	m.unbuiltDesired = unbuilt
 
@@ -931,22 +953,20 @@ func (m *Manager) SetGARPSuppression(rgID int, suppress bool) {
 }
 
 // RGVRRPReady reports whether EVERY desired VRRP instance for the given
-// redundancy group has a live state machine — not merely whether one exists.
+// redundancy group has a live state machine and a completed desired-state
+// update — not merely whether one instance exists.
 // The RG ID is mapped to VRID as 100 + rgID (the standard RETH VRID
 // convention). hasRETH indicates whether the RG has any RETH interfaces
 // configured. Returns (true, nil) if ready, (false, reasons) if not.
 //
 // #5641: an RG commonly has SEVERAL desired RETH keys under one VRID — a
 // VLAN-tagged reth yields one instance per sub-interface (reth0.50, reth0.80),
-// and multiple reths can share the RG. If one key's build failed (interface
-// resolve failure / socket bind failure / family capability failure) its VIP
-// is dark even though a sibling instance for the same VRID is live. Reporting
-// READY off the mere existence of one instance let the cluster state machine
-// release the sync hold / preempt / claim ownership while that VIP never
-// advertised. This consults m.unbuiltDesired (populated by UpdateInstances) so
-// any un-built desired key for the RG forces (false, reasons) naming it. This
-// is a pure readiness READ; it does not touch advert timing, sockets, or the
-// failover datapath.
+// and multiple reths can share the RG. A missing key, failed ifindex rebind,
+// unopened new-family socket, or incomplete VIP delta leaves a desired VIP
+// unavailable or the old socket possibly dark even when a sibling instance is
+// live. Reporting READY off map presence alone would release sync hold/preempt
+// while the desired dataplane is incomplete. m.unbuiltDesired carries those
+// reasons and is recomputed by UpdateInstances after each retry.
 func (m *Manager) RGVRRPReady(rgID int, hasRETH bool) (bool, []string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -961,15 +981,16 @@ func (m *Manager) RGVRRPReady(rgID int, hasRETH bool) (bool, []string) {
 			rgID, MinVRID, MaxVRID)}
 	}
 
-	// A desired RETH key for this RG that failed to build leaves a dark VIP.
-	// RETH keys carry an empty family; VRID == 100+rgID maps a key to this RG.
-	// A family-tagged generic VRRP key that happens to share the numeric VRID
-	// is a separate election domain and must not gate this RG.
+	// A desired RETH key for this RG that lacks a built instance or a complete
+	// rebind/VIP update leaves its desired dataplane unproven. RETH keys carry
+	// an empty family; VRID == 100+rgID maps a key to this RG. A family-tagged
+	// generic VRRP key that happens to share the numeric VRID is a separate
+	// election domain and must not gate this RG.
 	var unready []string
 	for key, reason := range m.unbuiltDesired {
 		if key.family == "" && key.groupID == vrid {
 			unready = append(unready, fmt.Sprintf(
-				"vrrp: desired RETH instance %s (VRID %d) not built: %s",
+				"vrrp: desired RETH instance %s (VRID %d) not ready: %s",
 				key.iface, vrid, reason))
 		}
 	}
@@ -1007,10 +1028,9 @@ func (m *Manager) States() map[string]string {
 	return states
 }
 
-// InstanceStates returns structured per-instance state. Each entry contains
-// the interface name, group ID, and current VRRP state. Used by the
-// reconciliation loop to verify that rg_active and blackhole routes match
-// actual VRRP state.
+// InstanceStates returns structured per-instance state, the currently
+// published VIP set, and any surfaced VIP divergence. Callers can distinguish
+// MASTERship from a configuration delta that has not fully actuated.
 func (m *Manager) InstanceStates() []VRRPEvent {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1018,10 +1038,13 @@ func (m *Manager) InstanceStates() []VRRPEvent {
 	out := make([]VRRPEvent, 0, len(m.instances))
 	for _, vi := range m.instances {
 		out = append(out, VRRPEvent{
-			Interface: vi.cfg.Interface,
-			Family:    vi.cfg.Family,
-			GroupID:   vi.cfg.GroupID,
-			State:     vi.getState(),
+			Interface:         vi.cfg.Interface,
+			Family:            vi.cfg.Family,
+			GroupID:           vi.cfg.GroupID,
+			State:             vi.getState(),
+			VIPs:              vi.vipsSnapshot(),
+			VIPDiverged:       vi.vipDiverged.Load() || vi.vipUpdateDiverged.Load(),
+			VIPUpdateFailures: vi.vipUpdateFailures.Load(),
 		})
 	}
 	return out

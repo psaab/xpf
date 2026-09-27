@@ -76,23 +76,22 @@ func vipSetDelta(old, want []string) (added, removed []string) {
 // no takeover window.
 //
 // Actuation rules:
-//   - MASTER: add the added VIPs (first, so a subnet change never opens a gap
-//     with neither address present), remove the removed VIPs, then announce:
-//     one immediate advert carrying the new set plus a forced GARP/NA burst
-//     for the added VIPs only. Surviving VIPs are never withdrawn or
-//     re-announced — no MAC/GARP flap for the untouched set.
-//   - BACKUP (or INIT): a backup holds no VIPs, so added VIPs need no
-//     actuation (a later promotion adds the full stored set); removed VIPs
-//     are swept best-effort in case a stale address lingers. No advert, no
-//     GARP — a backup never announces.
+//   - MASTER: normally add the added VIPs first, then remove the removed VIPs.
+//     If the old+added union exceeds advert capacity, remove first and defer
+//     additions until every removal succeeds; a failed delete therefore leaves
+//     the old legal set rather than an unadvertisable union. Then announce the
+//     stored set and GARP/NA only newly added VIPs. Membership changes advance
+//     the burst epoch, invalidating callbacks for withdrawn addresses.
+//   - BACKUP (or INIT): added VIPs need no actuation (promotion adds the stored
+//     set); removed VIPs are swept best-effort in case a stale address lingers.
+//     If a failed removal would make the stored union over-capacity, defer the
+//     new set until removal succeeds.
 //
 // Failure semantics are kernel-truth (#5082 fail-closed doctrine): a VIP
-// whose add failed is EXCLUDED from the stored set (we must not advertise
-// what we cannot back), a VIP whose remove failed is KEPT (it is still on the
-// wire). Either way the next ~2s reconcile observes desired != stored and
-// retries the remainder, so a transient netlink failure self-heals exactly
-// like the #2156 re-drive. The returned error is for the manager's warn log;
-// the commit itself still succeeds.
+// whose add failed or was deferred is EXCLUDED from the stored set, and a VIP
+// whose remove failed is KEPT (it remains on the wire). The next ~2s reconcile
+// observes desired != stored and retries. Incomplete deltas are surfaced on
+// the instance and gate RGVRRPReady until a successful retry.
 //
 // Locking: vipMu is held across the state read, the delta actuation, and the
 // snapshot swap, so a demotion either completes fully before this section (we
@@ -124,15 +123,23 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 		return nil
 	}
 
+	// If the old+added union cannot fit on the wire, delete first. A failed
+	// removal then leaves a legal subset of the old set and defers additions;
+	// no address-owning MASTER is published with an over-capacity union.
+	union := make([]string, 0, len(old)+len(added))
+	union = append(union, old...)
+	union = append(union, added...)
+	deleteFirst := checkAdvertCapacity(union) != nil
+
 	var addRes vipActuationResult
-	if state == StateMaster && len(added) > 0 {
-		addRes = vi.addVIPsListLocked(added)
-	}
 	var removeErr error
 	var removedFailed map[string]struct{}
-	if len(removed) > 0 {
-		var failed []string
-		failed, removeErr = vi.removeVIPsResultLocked(removed)
+	remove := func() {
+		if len(removed) == 0 {
+			return
+		}
+		failed, err := vi.removeVIPsResultLocked(removed)
+		removeErr = err
 		if len(failed) > 0 {
 			removedFailed = make(map[string]struct{}, len(failed))
 			for _, vip := range failed {
@@ -140,10 +147,29 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 			}
 		}
 	}
+	add := func() {
+		if state == StateMaster && len(added) > 0 {
+			addRes = vi.addVIPsListLocked(added)
+		}
+	}
+	if deleteFirst {
+		remove()
+		if len(removed) > 0 && removeErr == nil {
+			add()
+		} else if len(added) > 0 {
+			// These additions were not attempted. Mark them unapplied so the
+			// stored kernel-truth set remains within the old legal capacity.
+			addRes.failed = append(addRes.failed, added...)
+		}
+	} else {
+		add()
+		remove()
+	}
 
-	// Build the stored set in want order, minus failed adds, plus failed
-	// removes (kept: still on the wire). On BACKUP nothing was added, so
-	// addedOK stays empty and no GARP is ever emitted for this path.
+	// Build the stored set in want order, minus failed/deferred adds, plus
+	// failed removes (kept: still on the wire). On BACKUP, added VIPs are
+	// configured but not actuated unless an over-capacity failed removal
+	// requires deferring them to keep the stored set advertisable.
 	failedAdd := make(map[string]struct{}, len(addRes.failed))
 	for _, vip := range addRes.failed {
 		failedAdd[vip] = struct{}{}
@@ -171,18 +197,34 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	vi.cfg.VirtualAddresses = newSet
 	capErr := checkAdvertCapacity(newSet)
 	vi.advertCapacityErr = capErr
-	// Ownership revalidation, mirroring reconcileVIP (#5082): becomeMaster
-	// publishes MASTER (setState, bumping ownerGen) BEFORE taking vipMu, so
-	// vipMu alone does not serialize ownership transitions. A superseding
-	// transition rolls back exactly the VIPs this update added and
-	// suppresses the announcement. (Unreachable on the MASTER branch today
-	// — becomeBackup publishes BACKUP inside vipMu — but the tenure
-	// protocol's ordering hazard is exactly what this guards.)
+	addedSet, removedSet := vipSetDelta(old, newSet)
+	updateGarpEpoch := vi.garpEpoch.Load()
+	if len(addedSet) > 0 || len(removedSet) > 0 {
+		updateGarpEpoch = vi.garpEpoch.Add(1)
+	}
+	actuationIncomplete := len(addRes.failed) > 0 || addRes.linkErr != nil || removeErr != nil
+	if actuationIncomplete || capErr != nil {
+		vi.vipUpdateFailures.Add(1)
+		vi.vipUpdateDiverged.Store(true)
+	} else {
+		vi.vipUpdateDiverged.Store(false)
+	}
 	curState := vi.state
 	curGen := vi.ownerGen.Load()
 	vi.mu.Unlock()
 
-	announce := state == StateMaster
+	var capCleanupErr error
+	if capErr != nil && state == StateMaster {
+		// Defensive fail-closed path. The capacity-aware ordering above keeps
+		// every validated old/new transition legal, but a future bypass must
+		// never leave an address-owning MASTER that cannot serialize adverts.
+		vi.setState(StateBackup)
+		capCleanupErr = vi.removeVIPsLocked(nil)
+		curState = vi.getState()
+		curGen = vi.ownerGen.Load()
+	}
+
+	announce := state == StateMaster && capErr == nil
 	if announce && (curState != StateMaster || curGen != gen) {
 		// #9509 rationale, same as the superseded-reconcile path: the only
 		// transition that can supersede an update holding vipMu is
@@ -200,14 +242,12 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	vi.vipMu.Unlock()
 
 	if capErr != nil {
-		// Same operator-facing Error as construction (#6779): the stored
-		// set cannot advertise, so this instance will not claim MASTER
-		// until a later update repairs it. Unreachable via UpdateInstances
-		// (the manager refuses to route an over-capacity desired set to
-		// this path), but updateVIPs stays fail-closed for any caller.
 		slog.Error("vrrp: updated virtual addresses cannot produce a legal "+
-			"advertisement; this instance will not claim MASTER (fail-closed)",
+			"advertisement; refusing MASTER ownership and withdrawing VIPs",
 			"key", vi.key(), "vip_count", len(newSet), "err", capErr)
+		if state == StateMaster {
+			vi.surfaceStaleVIP(capCleanupErr, "update-capacity-fail-closed")
+		}
 	}
 
 	// A new VIP can coincide with the cached advert source (e.g. the VIP
@@ -225,19 +265,17 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	if announce && vi.getState() == StateMaster {
 		vi.sendAdvert(vi.getPriority())
 		if len(addedOK) > 0 && !vi.suppressGARP.Load() {
-			// Bump garpEpoch so the epoch-dedup does not block this send
-			// (same as ReconcileVIPs), and force past the 500ms dampener:
-			// a newly-claimed VIP must be announced NOW, not when a
-			// routine burst happens to be due.
-			vi.garpEpoch.Add(1)
-			vi.sendGARPFor(addedOK, true)
+			// updateGarpEpoch names the published VIP membership. sendGARPFor
+			// validates it under vipMu so an older full-set snapshot cannot
+			// satisfy the added-only announcement's epoch.
+			vi.sendGARPFor(addedOK, updateGarpEpoch, gen, true)
 		}
 	}
 	vi.emitEvent()
 
-	if len(addRes.failed) > 0 || addRes.linkErr != nil || removeErr != nil {
-		return fmt.Errorf("vrrp: VIP set update incomplete on %s: %d/%d adds failed (link_err=%v) remove_err=%v; stored set holds kernel truth, reconcile will retry",
-			vi.key(), len(addRes.failed), len(added), addRes.linkErr, removeErr)
+	if actuationIncomplete || capErr != nil || capCleanupErr != nil {
+		return fmt.Errorf("vrrp: VIP set update incomplete on %s: %d/%d adds failed/deferred (link_err=%v) remove_err=%v capacity_err=%v cleanup_err=%v; stored set holds kernel truth, reconcile will retry",
+			vi.key(), len(addRes.failed), len(added), addRes.linkErr, removeErr, capErr, capCleanupErr)
 	}
 	return nil
 }
