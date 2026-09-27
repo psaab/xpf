@@ -409,10 +409,10 @@ fn an_imported_idle_lease_cannot_resurrect_a_retired_lease_10789_f4() {
     );
 }
 
-/// A local 0 -> 1 join promotes a peer-imported idle lease to local ownership,
-/// for both PAT (#7360) and address-only (#8132) persistent-NAT.
+/// A local 0 -> 1 reserve stays tentative; ordinary `release_flow` promotes
+/// the peer-imported idle lease to local ownership in both allocator modes.
 #[test]
-fn a_local_join_promotes_an_imported_idle_lease_10789_f4() {
+fn a_local_idle_adoption_promotes_only_on_release_10789_f4() {
     let addrs = pool();
     let local_pool = ipv4_pool(&addrs);
 
