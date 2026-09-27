@@ -1432,6 +1432,52 @@ fn gre_decap_default_vrf_transport_unaffected_10653() {
     );
 }
 
+/// #11054: the outer GRE packet must pass host-inbound on its actual ingress
+/// zone before it can be reattributed as the tunnel's logical ingress zone.
+/// The tuple, key, and transport VRF still match in the refused leg; only the
+/// ingress zone's GRE admission changes.
+#[test]
+fn gre_outer_host_inbound_denial_blocks_decap_11054() {
+    let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let inner = build_gre_inner_icmp_packet_v4();
+    let frame = build_gre_to_self_outer_frame_v4(0, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_some(),
+        "the configured tunnel's host-inbound-permitted outer must still decap"
+    );
+
+    // This is an ingress-zone change only: the tunnel tuple, GRE key,
+    // transport VRF, and inner packet are identical.
+    let ingress_ifindex = meta.ingress_ifindex as i32;
+    let blocked_zone = 99;
+    forwarding
+        .ifindex_to_zone_id
+        .insert(ingress_ifindex, blocked_zone);
+    forwarding.zone_host_inbound.insert(
+        blocked_zone,
+        crate::afxdp::types::ZoneHostInbound::default(),
+    );
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "a matching tuple/key/VRF arriving in a zone that denies GRE must not decap"
+    );
+
+    // An interface-level override is the effective host-inbound set and must
+    // deny even when the zone-level set admits all services.
+    let mut interface_denied = build_forwarding_state(&gre_to_self_snapshot());
+    interface_denied.ifindex_host_inbound.insert(
+        ingress_ifindex,
+        crate::afxdp::types::ZoneHostInbound::default(),
+    );
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &interface_denied).is_none(),
+        "an ingress-interface host-inbound override that denies GRE must block decap"
+    );
+}
+
+
 /// #10516 required poll composition: native GRE decapsulation must expose the
 /// inner local UDP/4500 ESP payload to the Stage-11 SA gate, which may then
 /// delegate the packet only after a matching SA hit.
@@ -1622,6 +1668,13 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
     );
     frame[34] = 0x0B; // ICMPv4 time-exceeded (11) — an error type in the #3171 set
     let meta = gre_to_self_outer_meta(0, frame.len());
+    // The outer GRE must reach decap so this test exercises the INNER
+    // host-inbound check; only GRE is admitted on the underlay interface.
+    let outer_gre =
+        crate::afxdp::forwarding::zone_host_inbound_from_tokens(&["gre".to_string()], &[]);
+    forwarding
+        .ifindex_host_inbound
+        .insert(meta.ingress_ifindex as i32, outer_gre);
 
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -1739,6 +1792,12 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
             .zone_host_inbound
             .insert(id, crate::afxdp::types::ZoneHostInbound::default());
     }
+    // Keep the outer GRE admissible while the decapped inner echo is denied.
+    let outer_gre =
+        crate::afxdp::forwarding::zone_host_inbound_from_tokens(&["gre".to_string()], &[]);
+    forwarding
+        .ifindex_host_inbound
+        .insert(meta.ingress_ifindex as i32, outer_gre);
 
     // Pass 2 — session-HIT: the host-inbound re-check reads the INNER ICMP type.
     let (batch2, dbg2) = txn_run_descriptor_checked(

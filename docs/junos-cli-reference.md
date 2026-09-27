@@ -466,7 +466,12 @@ From zone: guest, To zone: lan
     LOGICAL ifindex and is delivered to an address some OTHER interface
     registered, so a tunnel is a host-inbound exposure without carrying an
     address of its own — the one shape for which "address-less means not
-    exposed" is false. A cold dataplane, before any snapshot is applied, has
+    exposed" is false.
+    Native GRE decapsulation (#11054) also requires the outer GRE packet to pass
+    host-inbound admission on its actual logical ingress interface/zone before
+    decapsulation can reattribute the inner packet to the tunnel; the inner
+    packet then undergoes its own host-inbound check as tunnel ingress.
+    A cold dataplane, before any snapshot is applied, has
     an EMPTY zone table in which every id would take that same admit arm — that
     state is never observable, because a worker thread exists only while a
     snapshot-derived forwarding state is published (#6873), not because the
