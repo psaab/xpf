@@ -55,5 +55,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
+  * Flush box-oriented host-inbound conntrack entries and guard denied TCP/UDP
+    replies before established accepts; disable TCP loose pickup at boot/runtime
+    (#10752/#10764).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

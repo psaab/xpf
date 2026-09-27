@@ -50,6 +50,9 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	if len(spec.Programs) > 0 {
 		// junos-host path — coarse-then-fine order (#4146).
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
+		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
+			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
+		))
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		for i, prog := range spec.Programs {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
@@ -58,6 +61,9 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
+		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
+			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
+		))
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundICMPAcceptsNetlink(p)
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
@@ -86,6 +92,28 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	emitUnzonedHostInboundDenyNetlink(p, famV6, "ip6", spec.UnzonedV6)
 	for i, prog := range spec.Programs {
 		p.inChain(chains[i], func() { emitJunosHostProgramChainNetlink(p, prog) })
+	}
+}
+
+// emitHostInboundStaleReplyGuards mirrors hostInboundStaleReplyGuardText:
+// catalogued box-originated replies to a currently denied local service are
+// dropped before the broad reply-direction accept.
+func emitHostInboundStaleReplyGuards(p *nlPlan, guards []StaleReplyGuardRule) {
+	for _, guard := range guards {
+		family := famV4
+		if guard.Family == "ip6" {
+			family = famV6
+		}
+		proto := uint8(protoTCP)
+		if guard.Proto == config.HostInboundProtoUDP {
+			proto = protoUDP
+		}
+		p.rule().
+			ctEstablishedRelated().
+			ctDirectionReply().
+			daddr(family, guard.Addresses, false).
+			l4Port(proto, "dport", portsFromUint16(guard.Ports), false).
+			emit(verdictDrop()...)
 	}
 }
 

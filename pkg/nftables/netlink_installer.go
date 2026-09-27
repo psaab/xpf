@@ -48,10 +48,10 @@ type Installer interface {
 	// (the xpf_hostinbound table reduced to mandatory admits + address drops).
 	InstallColdBootFence(spec FenceSpec) error
 	// InstallLo0ColdBootFence installs the #6476 lo0 cold-boot fail-closed fence:
-	// the SAME fence body as InstallColdBootFence (mandatory admits + firewall-
-	// local address drops) but in the xpf_lo0 table at the lo0 filter priority, so
-	// a failed boot-time InstallLo0 does not leave the RE-protection input path
-	// open. A later successful InstallLo0 atomically replaces it (same table).
+	// the shared mandatory admits + firewall-local address drops, but not the
+	// host-inbound-only stale-reply guard; lo0 must preserve its established-flow
+	// admit. It is installed into xpf_lo0 at the lo0 filter priority so a later
+	// successful InstallLo0 atomically replaces it.
 	InstallLo0ColdBootFence(spec FenceSpec) error
 	// InstallGapFence installs the #5789 additive coverage-gap fence.
 	InstallGapFence(spec GapFenceSpec) error
@@ -240,16 +240,13 @@ func (in *netlinkInstaller) InstallColdBootFence(spec FenceSpec) error {
 	return err
 }
 
-// InstallLo0ColdBootFence installs the #6476 lo0 cold-boot fence: the SAME fence
-// body as InstallColdBootFence (buildHostInboundFenceNetlink — mandatory admits
-// plus firewall-local address DROPs) but into the xpf_lo0 table at the lo0 filter
-// priority. Reusing the shared fence builder keeps the two fences bit-identical
-// in rule shape; only the table wrapper (name + priority, produced generically by
-// replaceTable) differs, so a later successful InstallLo0 atomically replaces the
-// fence with the operator's real RE-protection filter.
+// InstallLo0ColdBootFence installs the #6476 lo0 cold-boot fence: the shared
+// mandatory admits and firewall-local address DROPs, without the host-inbound-
+// specific stale-reply guard. It preserves established-flow admits for lo0's
+// distinct RE-protection policy, in xpf_lo0 at the lo0 filter priority.
 func (in *netlinkInstaller) InstallLo0ColdBootFence(spec FenceSpec) error {
 	_, err := in.replaceTable(Lo0TableName, lo0FilterPriority, func(p *nlPlan) {
-		buildHostInboundFenceNetlink(p, spec)
+		buildLo0FenceNetlink(p, spec)
 	})
 	return err
 }

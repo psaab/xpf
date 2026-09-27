@@ -571,54 +571,78 @@ diverged.
 
 ## Stale kernel authorization on a tightening (#5566)
 
-The `ct state established,related accept` above is the FIRST rule in the chain
-(and, in the `to-zone junos-host` program branch, the residual established accept
-follows the fine DROP but still precedes the per-zone coarse drops). Replacing the
-`xpf_hostinbound` table does **not** flush Linux netfilter conntrack. So an
-EXISTING direct-kernel host connection admitted under a looser prior config — an
-SSH / HTTPS / SNMP session to a firewall-local address — kept riding that leading
-established-accept after the operator REMOVED the service: the new per-zone
-catch-all DROP never saw the flow's original-direction packets. That was a
-host-inbound false-allow confined to the direct-kernel delivery path; the Rust
-userspace local-delivery path already re-checks the effective host-inbound set on
-every session hit and tears a now-denied session down
-(`userspace-dp/src/afxdp/poll_descriptor/mod.rs`), but the kernel path had no
-equivalent teardown.
+The leading `ct state established,related ct direction reply accept` is ahead
+of ingress-zone judgement (and the `to-zone junos-host` program's residual
+established accept follows the fine DROP but precedes the per-zone coarse
+drops). Replacing the `xpf_hostinbound` table does **not** flush Linux netfilter
+conntrack. An existing direct-kernel host connection admitted under a looser
+prior config — SSH / HTTPS / SNMP to a firewall-local address — therefore kept
+riding the reply-direction accept after the operator REMOVED the service. The
+Rust userspace local-delivery path already re-checks the effective set on every
+session hit and tears a denied session down
+(`userspace-dp/src/afxdp/poll_descriptor/mod.rs`); the kernel path did not.
 
-**Fix — conntrack reconcile after every successful apply**
-(`pkg/daemon/host_inbound_conntrack_flush.go`, wired at the tail of
-`applyHostInboundFilter`). After the real `xpf_hostinbound` table loads, the
-daemon deletes every established/related **kernel** conntrack entry whose
-original-direction destination is a **covered** firewall-local host-inbound
-address (an address that carries a default-deny — the same `desiredDrop` set as
-#5789) and whose `(proto, dport)` the CURRENT coarse rules no longer admit. The
-next original-direction packet is then re-evaluated and dropped by the per-zone
-catch-all instead of short-circuiting on the established-accept. Properties:
+The original #5566 reconcile keyed only on the conntrack original destination.
+That finds peer-first entries (`ORIG peer:ephemeral → box:service`) but misses
+box-oriented entries (`ORIG box:service → peer:ephemeral`): for those, the
+original destination is the peer, even though the peer's packet is now a
+conntrack reply to the firewall-local service. TCP could acquire that
+orientation through loose mid-stream pickup (`nf_conntrack_tcp_loose=1`); UDP
+does not need a loose-pickup setting, so firewall-originated IKE DPD/rekey
+datagrams can recreate a box-oriented entry immediately after the apply-time
+flush (#10764).
 
-- **Reconcile, not a delta.** The flush condition is "not admitted by the CURRENT
-  config", derived from the SAME structured SSOT the nft chain renders from
-  (`config.HostInboundServiceMatch` / `HostInboundProtocolMatch`), so the admit
-  decision cannot drift from the chain's per-zone accepts. No prior-config
-  snapshot is persisted; the sweep is a no-op on loosening / unchanged commits
-  because still-permitted flows are kept. A service that stays configured is never
-  flushed (no connection-reset regression).
-- **Lifeline-safe.** Only addresses in the covered default-deny set are eligible;
-  management / cluster-control lifelines (fxp0 / em0 / fab<N>) are excluded from the
-  host-inbound views, so their conntrack is never flushed. Addressed-but-unzoned
-  addresses (#4420 HI-2) are covered with an empty admit set (fully denied except
-  the global exemptions below).
-- **Global exemptions preserved.** ESP/AH (proto 50/51), ICMP ND/PMTUD/error, and
-  the configured WireGuard listen port (#5582) are never flushed, mirroring the
-  chain's global accepts. ICMP echo conntrack is short-lived and left to age out.
+**Fix — reconcile both orientations and guard the reply accept
+(#10752/#10764).** After every successful real apply, the daemon deletes
+now-denied peer-oriented entries by `(proto, dport)` and box-oriented entries
+only when `(proto, sport)` is in the shared, sorted service-port catalog and is
+not admitted for the covered box address. Ephemeral egress, DHCP/NTP client
+ports, BGP/LDP/MSDP and legacy reserved-client TCP ports, ranges, bare IP
+protocols, and ICMP are deliberately outside that catalog: a conntrack tuple
+alone cannot prove that those flows are stale instead of a live box-originated
+client/control-plane exchange. The matcher remains conservative about them.
+
+Flush is necessary but not sufficient for the UDP twin: after deleting an IKE
+entry, the firewall's next DPD datagram can create a fresh box-oriented entry.
+The real `xpf_hostinbound` ruleset now places a catalogued stale-reply DROP
+ahead of the broad reply-direction accept. For each covered local address it
+drops only catalog TCP/UDP reply destination ports denied by the CURRENT set;
+still-admitted service replies and non-catalog client/ephemeral replies keep
+the old fast accept. The text oracle and production netlink renderer consume
+the same `pkg/nftables.HostInboundStaleReplyGuardRules` result. Cold-boot and
+coverage-gap fences use the same port catalog with their all-services-denied
+address sets, and the #9506 fence conntrack predicate now also recognizes
+catalogued box-oriented entries.
+
+TCP loose pickup is disabled both at runtime bringup
+(`/proc/sys/net/netfilter/nf_conntrack_tcp_loose=0`) and by the appliance's
+early-boot `/etc/sysctl.d/99-xpf.conf` drop-in. This prevents conntrack from
+adopting otherwise-unassociated mid-stream TCP packets as new flows. The reply
+guard remains the revocation backstop for entries predating that posture and
+for UDP.
+
+Properties:
+
+- **Reconcile, not a delta.** The admit decision is derived from the same
+  structured SSOT as the chain (`config.HostInboundServiceMatch` /
+  `HostInboundProtocolMatch`). No prior-config snapshot is persisted; a
+  still-permitted tuple is not flushed or dropped.
+- **Lifeline-safe.** Only addresses in the covered default-deny set are
+  eligible for the ordinary reconcile/guard. Management / cluster-control
+  lifelines (fxp0 / em0 / fab<N>) remain excluded from the host-inbound views.
+  Addressed-but-unzoned addresses (#4420 HI-2) are covered with an empty admit
+  set.
+- **Global exemptions preserved.** ESP/AH (proto 50/51), ICMP ND/PMTUD/error,
+  and configured WireGuard listen ports (#5582) are never flushed by the
+  ordinary matcher. ICMP echo conntrack is short-lived and left to age out.
+- **Bounded client-role exceptions.** DHCPv4/6, NTP, routing/client-role ports,
+  port ranges and bare-protocol tuples remain outside the box-oriented guard;
+  the guard does not claim to revoke those indistinguishable outbound tuples.
 - **Not a commit failure — but it IS retried and IS visible (#6802).** The nft
   table is already applied, so enforcement for NEW connections holds regardless,
   and failing the commit would roll back correct enforcement over a transient
-  conntrack-subsystem error. That rationale is unchanged. What #6802 corrected is
-  the rest of it: before #6802 the flush returned nothing, set no dirty flag,
-  bumped no counter, published no metric, and no ticker re-ran it — every ticker
-  under `pkg/daemon` was enumerated and none re-drives `applyConfig`,
-  `applyHostInboundFilter` or the flush, so the only re-attempt was the next
-  externally-triggered apply. See "Revocation failure is retried" below.
+  conntrack-subsystem error. The existing retry owner retains failed flush debt;
+  see "Revocation failure is retried" below.
 
 Kernel netfilter conntrack on this appliance tracks only host-terminated /
 kernel-forwarded flows (transit forwarding runs through userspace-dp's own session

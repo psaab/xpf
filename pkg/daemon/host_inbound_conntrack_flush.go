@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
 // #5566: stale kernel host-inbound authorization on a coarse tightening.
@@ -109,13 +110,54 @@ func (a *hostInboundAdmit) add(m config.L4Match) {
 
 // hostInboundConntrackFlushFilter is the netlink CustomConntrackFilter that
 // selects now-denied host-inbound kernel conntrack entries for deletion (#5566).
-// It matches a flow iff the flow's ORIGINAL-direction destination is a covered
-// firewall-local host-inbound address AND the flow's (proto, dport) is not
-// admitted by the current coarse host-inbound set for that address and is not a
-// global exemption (ESP/AH, ICMP ND/PMTUD, the WireGuard listen port).
+// Ordinary peer-oriented flows are selected by their original destination and
+// destination port. Box-oriented entries are selected only when the local
+// original source address and source port match a guardable host-service tuple;
+// this bounded catalog avoids flushing ephemeral egress and client-role ports.
 type hostInboundConntrackFlushFilter struct {
-	admit   map[netip.Addr]*hostInboundAdmit
-	wgPorts []uint16
+	admit    map[netip.Addr]*hostInboundAdmit
+	wgPorts  []uint16
+	guardTCP map[uint16]struct{}
+	guardUDP map[uint16]struct{}
+}
+
+func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flow *netlink.ConntrackFlow) bool {
+	a := f.admit[addr.Unmap()]
+	if a == nil || a.allowsAll {
+		return false
+	}
+	port := flow.Forward.SrcPort
+	var guard map[uint16]struct{}
+	switch flow.Forward.Protocol {
+	case config.HostInboundProtoTCP:
+		guard = f.guardTCP
+	case config.HostInboundProtoUDP:
+		guard = f.guardUDP
+		if f.isWireGuardPort(port) {
+			return false
+		}
+	default:
+		return false
+	}
+	if _, ok := guard[port]; !ok {
+		return false
+	}
+	return !f.flowAdmitted(a, flow.Forward.Protocol, port)
+}
+
+func (f *hostInboundConntrackFlushFilter) flowAdmitted(a *hostInboundAdmit, proto uint8, port uint16) bool {
+	switch proto {
+	case 50, 51:
+		return true
+	case config.HostInboundProtoICMP, config.HostInboundProtoICMPv6:
+		return true
+	case config.HostInboundProtoTCP:
+		return portInRanges(port, a.tcp)
+	case config.HostInboundProtoUDP:
+		return portInRanges(port, a.udp)
+	default:
+		return a.protos[proto]
+	}
 }
 
 // MatchConntrackFlow reports whether the flow is a now-denied host-inbound entry
@@ -123,59 +165,24 @@ type hostInboundConntrackFlushFilter struct {
 // flow it cannot prove is denied — so it can never delete a permitted or
 // non-host-inbound flow.
 func (f *hostInboundConntrackFlushFilter) MatchConntrackFlow(flow *netlink.ConntrackFlow) bool {
-	if flow == nil {
+	if f == nil || flow == nil {
 		return false
 	}
-	// Original-direction destination = the firewall-local address the remote
-	// client connected to. Transit / host-originated flows have a non-local
-	// original destination and so are never in the covered admit map.
-	dst, ok := netip.AddrFromSlice(flow.Forward.DstIP)
-	if !ok {
-		return false
-	}
-	a := f.admit[dst.Unmap()]
-	if a == nil {
-		// Not a covered host-inbound deny address (includes every lifeline /
-		// fully-permitted / non-local destination) — never flush.
-		return false
-	}
-	if a.allowsAll {
-		// Zone opened to all services (`system-services all`) — keep everything.
-		// buildHostInboundConntrackFlushFilter already drops allows-all addresses
-		// from the covered map, so this is a defensive guard that keeps the matcher
-		// correct if that exclusion is ever changed.
-		return false
-	}
-	proto := flow.Forward.Protocol
-	switch proto {
-	case 50, 51:
-		// Raw ESP / AH: globally exempt (host-terminated IPsec is decrypted by the
-		// kernel XFRM stack before any host-inbound deny) — mirror the chain accept.
-		return false
-	case config.HostInboundProtoICMP, config.HostInboundProtoICMPv6:
-		// ND / PMTUD / ICMP-error are globally accepted and echo conntrack is
-		// short-lived — never flush ICMP.
-		return false
-	case config.HostInboundProtoTCP:
-		if portInRanges(flow.Forward.DstPort, a.tcp) {
-			return false
-		}
-	case config.HostInboundProtoUDP:
-		if f.isWireGuardPort(flow.Forward.DstPort) {
-			return false
-		}
-		if portInRanges(flow.Forward.DstPort, a.udp) {
-			return false
-		}
-	default:
-		if a.protos[proto] {
-			return false
+	if dst, ok := netip.AddrFromSlice(flow.Forward.DstIP); ok {
+		if a := f.admit[dst.Unmap()]; a != nil && !a.allowsAll {
+			return !f.flowAdmitted(a, flow.Forward.Protocol, flow.Forward.DstPort) &&
+				!(flow.Forward.Protocol == config.HostInboundProtoUDP && f.isWireGuardPort(flow.Forward.DstPort))
 		}
 	}
-	// Covered address, current config does not admit this (proto, dport), and it is
-	// not a global exemption → the entry rides the leading established-accept under
-	// stale authorization. Flush it so the next packet is re-evaluated.
-	return true
+	// UDP can re-create an entry after the apply-time flush when the firewall
+	// sends (for example) an IKE DPD packet. With ORIG box→peer, the incoming
+	// peer packet is conntrack direction reply and the ordinary reply accept
+	// precedes zone judgement. Match only catalogued local service source
+	// ports; ephemeral egress and client-role ports are intentionally kept.
+	if src, ok := netip.AddrFromSlice(flow.Forward.SrcIP); ok {
+		return f.boxOrientedDenied(src.Unmap(), flow)
+	}
+	return false
 }
 
 // isWireGuardPort reports whether the destination UDP port is a configured
@@ -270,7 +277,20 @@ func buildHostInboundConntrackFlushFilter(views []dpuserspace.ZoneHostInboundVie
 	if len(admit) == 0 {
 		return nil
 	}
-	return &hostInboundConntrackFlushFilter{admit: admit, wgPorts: wgListenPorts}
+	guardTCP := map[uint16]struct{}{}
+	guardUDP := map[uint16]struct{}{}
+	for _, family := range []string{"ip", "ip6"} {
+		catalog := xnft.HostInboundStaleReplyCatalog(family)
+		for _, port := range catalog.TCP {
+			guardTCP[port] = struct{}{}
+		}
+		for _, port := range catalog.UDP {
+			guardUDP[port] = struct{}{}
+		}
+	}
+	return &hostInboundConntrackFlushFilter{
+		admit: admit, wgPorts: wgListenPorts, guardTCP: guardTCP, guardUDP: guardUDP,
+	}
 }
 
 // flushDeniedHostInboundConntrack reconciles Linux netfilter conntrack against

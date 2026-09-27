@@ -705,6 +705,10 @@ func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
 var hostForwardingPostureSysctls = map[string]string{
 	"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
 	"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
+	// Disable loose mid-stream TCP pickup. Otherwise a firewall-originated
+	// packet can recreate a revoked host-inbound conntrack entry box-oriented,
+	// whose peer packets would bypass zone judgement via the reply accept.
+	"/proc/sys/net/netfilter/nf_conntrack_tcp_loose": "0",
 	// Allow management sockets to be accepted from a VRF context.
 	"/proc/sys/net/ipv4/tcp_l3mdev_accept": "1",
 	"/proc/sys/net/ipv4/udp_l3mdev_accept": "1",
