@@ -725,10 +725,16 @@ func (t *ConfigTree) FormatPathXML(path []string) string {
 func formatXMLNodes(b *strings.Builder, nodes []*Node, indent int) {
 	prefix := strings.Repeat("    ", indent)
 	for _, n := range nodes {
-		if n.IsLeaf {
+		if isXMLZonePair(n) {
+			formatXMLZonePair(b, n, prefix, indent)
+		} else if n.IsLeaf {
 			formatXMLLeaf(b, n, prefix)
 		} else {
 			tag := xmlTag(n.Keys[0])
+			if tag != n.Keys[0] {
+				formatXMLNamedEntry(b, n, prefix, indent)
+				continue
+			}
 			fmt.Fprintf(b, "%s<%s%s>\n", prefix, tag, xmlInactiveAttr(n))
 			// Extra keys become <name> elements.
 			for _, k := range n.Keys[1:] {
@@ -738,6 +744,32 @@ func formatXMLNodes(b *strings.Builder, nodes []*Node, indent int) {
 			fmt.Fprintf(b, "%s</%s>\n", prefix, tag)
 		}
 	}
+}
+
+func isXMLZonePair(n *Node) bool {
+	return n != nil && len(n.Keys) == 4 &&
+		n.Keys[0] == "from-zone" && n.Keys[2] == "to-zone"
+}
+
+func formatXMLZonePair(b *strings.Builder, n *Node, prefix string, indent int) {
+	fmt.Fprintf(b, "%s<from-zone%s>\n", prefix, xmlInactiveAttr(n))
+	fmt.Fprintf(b, "%s    <name>%s</name>\n", prefix, xmlEscape(n.Keys[1]))
+	fmt.Fprintf(b, "%s    <to-zone>\n", prefix)
+	fmt.Fprintf(b, "%s        <name>%s</name>\n", prefix, xmlEscape(n.Keys[3]))
+	if !n.IsLeaf {
+		formatXMLNodes(b, n.Children, indent+2)
+	}
+	fmt.Fprintf(b, "%s    </to-zone>\n", prefix)
+	fmt.Fprintf(b, "%s</from-zone>\n", prefix)
+}
+
+func formatXMLNamedEntry(b *strings.Builder, n *Node, prefix string, indent int) {
+	fmt.Fprintf(b, "%s<entry%s>\n", prefix, xmlInactiveAttr(n))
+	for _, key := range n.Keys {
+		fmt.Fprintf(b, "%s    <name>%s</name>\n", prefix, xmlEscape(key))
+	}
+	formatXMLNodes(b, n.Children, indent+1)
+	fmt.Fprintf(b, "%s</entry>\n", prefix)
 }
 
 // xmlInactiveAttr returns the Junos ` inactive="inactive"` element
@@ -752,15 +784,26 @@ func xmlInactiveAttr(n *Node) string {
 func formatXMLLeaf(b *strings.Builder, n *Node, prefix string) {
 	attr := xmlInactiveAttr(n)
 	if len(n.Keys) == 1 {
-		// Boolean leaf: <keyword/>
-		fmt.Fprintf(b, "%s<%s%s/>\n", prefix, xmlTag(n.Keys[0]), attr)
+		if tag := xmlTag(n.Keys[0]); tag != n.Keys[0] {
+			fmt.Fprintf(b, "%s<name%s>%s</name>\n", prefix, attr, xmlEscape(n.Keys[0]))
+		} else {
+			// Boolean leaf: <keyword/>
+			fmt.Fprintf(b, "%s<%s%s/>\n", prefix, tag, attr)
+		}
 		return
 	}
 	// Leaf with value: <keyword>value</keyword>
 	// For multi-key leaves like "address 10.0.1.0/24", emit
 	// <keyword><name>val1</name></keyword>
 	tag := xmlTag(n.Keys[0])
-	if len(n.Keys) == 2 {
+	if tag != n.Keys[0] {
+		fmt.Fprintf(b, "%s<entry%s>\n", prefix, attr)
+		fmt.Fprintf(b, "%s    <name>%s</name>\n", prefix, xmlEscape(n.Keys[0]))
+		for _, value := range n.Keys[1:] {
+			fmt.Fprintf(b, "%s    <value>%s</value>\n", prefix, xmlEscape(value))
+		}
+		fmt.Fprintf(b, "%s</entry>\n", prefix)
+	} else if len(n.Keys) == 2 {
 		fmt.Fprintf(b, "%s<%s%s>%s</%s>\n", prefix, tag, attr, xmlEscape(n.Keys[1]), tag)
 	} else {
 		fmt.Fprintf(b, "%s<%s%s>\n", prefix, tag, attr)
@@ -771,10 +814,42 @@ func formatXMLLeaf(b *strings.Builder, n *Node, prefix string) {
 	}
 }
 
-// xmlTag sanitizes a Junos keyword into a valid XML element name.
+// xmlTag returns a namespace-neutral XML element name, or "entry" for a
+// Junos value that cannot itself be represented as an element name.
 func xmlTag(s string) string {
-	// Junos keywords already use valid XML chars (letters, digits, hyphens).
+	if !xmlNameValid(s) {
+		return "entry"
+	}
 	return s
+}
+
+func xmlNameValid(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if !xmlNameStart(r) {
+				return false
+			}
+		} else if !xmlNameStart(r) && r != '-' && r != '.' &&
+			(r < '0' || r > '9') && r != 0xB7 &&
+			(r < 0x300 || r > 0x36F) && (r < 0x203F || r > 0x2040) {
+			return false
+		}
+	}
+	return true
+}
+
+func xmlNameStart(r rune) bool {
+	return r == '_' ||
+		(r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') ||
+		(r >= 0xC0 && r <= 0xD6) || (r >= 0xD8 && r <= 0xF6) ||
+		(r >= 0xF8 && r <= 0x2FF) || (r >= 0x370 && r <= 0x37D) ||
+		(r >= 0x37F && r <= 0x1FFF) || (r >= 0x200C && r <= 0x200D) ||
+		(r >= 0x2070 && r <= 0x218F) || (r >= 0x2C00 && r <= 0x2FEF) ||
+		(r >= 0x3001 && r <= 0xD7FF) || (r >= 0xF900 && r <= 0xFDCF) ||
+		(r >= 0xFDF0 && r <= 0xFFFD) || (r >= 0x10000 && r <= 0xEFFFF)
 }
 
 // xmlEscape escapes special XML characters in text content.
