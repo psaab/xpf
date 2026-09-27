@@ -1,32 +1,30 @@
 # 9506 delta plan: ship P-MECH permits on the current master (research/9506-delta)
 
- - Review state: **v10 revision; parent re-dispatch pending; this worker assigns
-  no verdict.** Round nine at `2a72b2f86` returned NEEDS-MAJOR 3-of-3
-  (P2O-01 FIXED; K-poll + journal-cap CLOSED and HELD) with twelve
-  residuals across Opus/Sec/Hostile, plus a blocker advisory on TUN
-  batching. This revision closes all twelve + the advisory, no
-  slice-time deferrals: instantiated member tuple (archive-pinned
-  source `linux 7.0.0-30.30`, tag `Ubuntu-7.0.0-30.30` @ `d974a4063`,
-  SHA-verified debs, captured config) with member-tree-text branch
-  review (B1–B8 incl. `more`/batching/enqueue-shape audit) and
-  per-boundary MEMBERSHIP recipes with executed gap-vs-verdict probes;
-  non-erasing authority (tombstone across ALL nil sites `:17`/`:24`/
-  `:287`/`:1519`/`:1689`, INVALID reason enum, persist orders, async
-  epoch triple-refresh with skip-if-stale); strict read semantics
-  (IsNotExist-absent, error/torn freeze, tamper recovery, strict
-  boot_id); boot-bound self-clearing permutation freeze; preserved-
-  incarnation discipline (Option A: live writers + generation fence,
-  bundle ownership, no destructive shutdown in `stop_inner`);
-  shared pending-slot arbitration (winner-retained proof, retry-
-  terminalize, named cv + heartbeat-steal); three-lock fence scan as
-  the SOLE scope (M1/M3 rewritten, precedence pinned) with
-  barrier-deterministic handoff fixtures; helper-incarnation handoff
-  (durable clean/unclean verdicts, replay gating, generation fencing);
-  rx_batched==0 readback + structural `!more` proof + adversarial
-  cells (ENOTSOCK executed). All credited designs held. The parent
-  will re-dispatch the blinded gate against this committed revision.
+ - Review state: **v11 revision; parent re-dispatch pending; this worker assigns
+  no verdict.** Round ten at `ac6c8862d` returned NEEDS-MAJOR 3-of-3
+  (FRESH-01/P3O-01/R9O-01 FIXED; R9-SEC-01/F2/F4 CLOSED and HELD)
+  with eight evidence-retention + lifecycle/atomicity residuals,
+  plus four advisories (batching correction, timestamp bypass,
+  SHA scope, torn-recovery order). This revision closes all of
+  them + the pending artifact-path question, no slice-time
+  deferrals: RETAINED runnable F0–F9 recipes + per-boundary output
+  matrix (ALL-HERE-OK) + content hashes (`f0f9-recipes.md`),
+  blob-SHA-pinned member tree identity, bytes-verified all-four
+  deb SHAs, B7-timestamp branch (member text + phydev belt + PTP
+  cell), B8 P2-entry evidence contract (member ENOTSOCK control,
+  rx_batched drift, v4+v6 kprobe windows, no-partial-credit OPEN);
+  handshake-`Fail` stops+joins the reaper (`reaper_shutdown` +
+  `unpark`, shared `abort_construction`); third `cfg(test)` gate
+  (post-terminalize/pre-insert) with deterministic split-commit
+  mutant; flag write-side rules (stale-boot RESET on write,
+  write-failure → live-freeze + sticky daemon mirror,
+  hygiene-unlink outcome, unlink retry); Done-check-then-abandon
+  on stolen slots; sentinel-FIRST torn recovery (fsync before
+  unlink) + SIGKILL-between-steps + sick-disk fixtures. All
+  credited designs held. The parent will re-dispatch the blinded
+  gate against this committed revision.
 - Date: 2026-09-27. Worktree `/var/tmp/worktrees/9506-research`, branch `research/9506-delta`.
- - Pins: `origin/master = fd32d2df5` (v10; verified at `3be469bc3` +
+ - Pins: `origin/master = fd32d2df5` (v11; verified at `3be469bc3` +
   NAT-only delta `fd32d2df5` audited: touches no cited file; §4 drift
   base stays `028c4e4e2`); Sep-20 code tip `b71c52d60`
   ("pmech: land deny-only D11 bridge (#9506) (#10483)"); Sep-20 design tip
@@ -601,20 +599,35 @@ all 35 design paths exist, as checked in §4.2.
   trusted → spawn delegated → spawn d11-reaper (new) → handshake
   (`:866-888`) — all three spawns via new `spawn_named_worker()`
   (`cfg(test)` failpoint seam). Failure teardown per site, all
-  join-before-return: second-spawn `Err` (`:846`) → drop trusted
-  sender, join trusted handle (prompt: `recv`-`Err` exit), THEN `Err`;
-  handshake `Fail` (`:875-885`) → drop BOTH senders, take+join BOTH
-  handles outside locks, death scan asserts empty (pre-publish —
-  NOTHING submitted yet), THEN `Err`; reaper-spawn `Err` → drop both
-  senders, join both handles, THEN `Err`. (`RingWriter::new`
-  `io::Result` failure is NOT construction failure: the sync arm
-  takes over per `classify_io_uring_write`, existing behavior.)
+  join-before-return, via shared `abort_construction()` (drop
+  senders, signal+join every SPAWNED thread, death-scan-asserts-
+  empty): second-spawn `Err` (`:846`) → drop trusted sender, join
+  trusted handle (prompt: `recv`-`Err` exit; reaper not yet
+  spawned), THEN `Err`; handshake `Fail` (`:875-885`) → drop BOTH
+  senders + STOP the reaper (named mechanism: writers exit on
+  `recv`-`Err`, the reaper ticks on `park_timeout(1ms)` so stop
+  is `reaper_shutdown: AtomicBool` store + `reaper_thread.unpark()`
+  → reaper observes flag and exits — THREE live threads at Fail,
+  all three joined) → take+join BOTH writer handles + join the
+  reaper handle, all outside locks, death scan asserts empty
+  (pre-publish — NOTHING submitted yet), THEN `Err`;
+  reaper-spawn `Err` → drop both senders, join both handles
+  (reaper never spawned), THEN `Err`. No leaked reaper is
+  possible post-fix (dual-reaper sweeping need not be
+  analyzed); backstop if one ever leaks despite this:
+  `ACCOUNTED` first-terminal-wins makes a double commit a
+  no-op second `false`, never a double terminal.
+  (`RingWriter::new` `io::Result` failure is NOT construction
+  failure: the sync arm takes over per `classify_io_uring_write`,
+  existing behavior.)
   Caller fallback on `new`-`Err` is the REAL `snapshot.rs:669-680`
   None-arm: `last_error` into `last_slow_path_status`, `slow_path =
   None`, NO authority publish (`:686` skipped) = q0 deny — this exact
   arm is what the construction-failure cells pin. `shutdown()` (new,
   idempotent, on `SlowPathReinjector`): disable enqueue → take/drop
-  senders → take handles → join outside all locks → death decisions.
+  senders + store `reaper_shutdown` + `unpark` → take writer
+  handles → join writers + reaper outside all locks → death
+  decisions.
   DOUBLE-STOP (PINNED): slots `Done` → `Ok` no-op; slots
   `Pending` → wait-on-`joined_done`-then-`Ok` (loser semantics
   below). Last-Arc-drop without `shutdown()` is FORBIDDEN and
@@ -651,9 +664,16 @@ all 35 design paths exist, as checked in §4.2.
   probe-evidence + `STOLEN_COMMIT_ZOMBIE` gauge (the handle died
   with its owner; the thread DID exit — `is_finished` has no
   false-positive for exit — reclamation is skipped, resources
-  freed at process exit). TOTAL BOUND (no infinite patience —
-  heartbeat-advancing ≠ commit-progressing under a wedged lock
-  holder): `STOP_LOSER_WAIT_MAX_NS = 1_000_000_000` (1s, new
+  freed at process exit). DONE-CHECK-THEN-ABANDON (R9 Host-8 —
+  a wedged-not-dead original winner resuming after a steal must
+  NOT double-commit): EVERY slot access (proof-write, every
+  retry re-read, commit) re-checks slot state under the slot
+  mutex FIRST — `Done` (or owner ≠ me) → ABANDON (drop local
+  handle/result, no proof-write, no commit). A stale proof-write
+  into a `Done` slot is therefore impossible by construction,
+  and exactly-once holds across steal+resume. TOTAL BOUND (no
+  infinite patience — heartbeat-advancing ≠ commit-progressing
+  under a wedged lock holder): `STOP_LOSER_WAIT_MAX_NS = 1_000_000_000` (1s, new
   const); exceed with slot still `Pending` → `TEARDOWN_COMMIT_
   STALL` alarm + process ABORT (fail-stop — NEVER proceed
   without death decisions); recovery is the (g) helper-handoff
@@ -796,10 +816,12 @@ all 35 design paths exist, as checked in §4.2.
   to blocking ordered acquisition, reaper-winner retries next tick
   from the shared proof; never re-take). TEST SEAM (R9-SEC-02 —
   deterministic, sleeps never proof): `cfg(test)`-only rendezvous
-  gates at handoff pre-commit and scan pre-second-lock plus a
-  `std::sync::Barrier` two-thread harness; production compiles zero
-  hooks. Tombstone `ACCOUNTED` is the exactly-once linearizer for
-  counters/events;
+  gates at handoff pre-commit, scan pre-second-lock, AND handoff
+  post-terminalize/pre-`Leaked`-insert (no-op in the correct atomic
+  path — the hold never releases there — active ONLY in the
+  split-commit mutant) plus a `std::sync::Barrier` two-thread
+  harness; production compiles zero hooks. Tombstone `ACCOUNTED`
+  is the exactly-once linearizer for counters/events;
   `resolve_write` rejects after journal finalization (checks token state
   too) — EXCEPT the ownership-transferred arm: `lease` + `WriteStarted`
   match with `entry.transferred` terminalizes through the coordinated pair
@@ -1043,14 +1065,26 @@ all 35 design paths exist, as checked in §4.2.
   crash. NAMED RECOVERY (the ONLY operator path, and it cannot
   clear a legitimate freeze): `xpfd reset-torn-fence-authority`
   REFUSES unless the authority file fails to parse (valid or
-  INVALID records are never touched), deletes ONLY the torn file,
-  and writes a `RESET-PENDING-REBOOT` sentinel recording the
-  CURRENT boot; `resolve()` freezes while a sentinel names the
-  current boot, and on boot change removes the sentinel and
-  proceeds (absent+absent post-reboot → first-install admit —
-  sound because the reboot retired all kernel obligations). Torn
-  marker → mismatch-freeze (never consumed; reboot unlinks stale
-  markers). Cases: (1) authority file ABSENT + marker ABSENT →
+  INVALID records are never touched; absent file is NOT torn —
+  refuse). ORDER (blocker: crash-safe sequencing): under the
+  SAME flock as resolve/writers, FIRST durably write the
+  `RESET-PENDING-REBOOT` sentinel recording the CURRENT boot
+  (write-temp + fsync + rename + dir-fsync — the sentinel is
+  COMPLETE before any unlink), THEN unlink ONLY the torn file
+  (+ dir-fsync). Crash between the steps leaves sentinel +
+  torn file → still freeze (torn rule fires; re-run is
+  idempotent: torn still present → rewrite sentinel + unlink).
+  Crash after unlink leaves sentinel + absent → freeze via the
+  sentinel (NEVER first-install: `resolve()` checks the
+  sentinel BEFORE the absent+absent case and freezes while it
+  names the current boot). On boot change `resolve()` removes
+  the sentinel and proceeds (absent+absent post-reboot →
+  first-install admit — sound because the reboot retired all
+  kernel obligations). Re-run with sentinel present + file
+  already absent (no reboot yet) → REFUSE ("already reset,
+  reboot required"). Torn marker → mismatch-freeze (never consumed;
+  reboot unlinks stale markers). Cases: (1) authority file ABSENT +
+  marker ABSENT + NO current-boot sentinel →
   FIRST INSTALL — and ONLY genuine first install reaches here: the
   authority file is created on the first fence completion OR the
   first nil-invalidation (whichever proves the supervisor has
@@ -1112,20 +1146,28 @@ all 35 design paths exist, as checked in §4.2.
   retries) AND torn-authority (unparseable/unknown-status/newer-
   version → tamper freeze + alarm; reboot does NOT clear; ONLY
   `reset-torn-fence-authority` + reboot recovers; the command
-  REFUSES valid/INVALID files) AND torn-marker (→ mismatch-freeze,
-  never consumed) AND boot_id-unreadable (3× retry → freeze +
-  alarm) AND persist-failure outcomes (VALID-persist fail → no
-  Store + retry; nil-persist fail → live-freeze-until-reboot +
-  alarm; fresh-init-write fail → freeze) AND epoch-flusher cells
-  (all four CAS sites signal; skip-if-stale suppresses a stale
-  flush after a newer write; revoke path never blocks on fsync —
-  measured, not asserted) AND freeze-flag cells (case-4 writes
-  boot-bound flag; post-reboot mutation allowed again; stale-
-  unlink-failure → refuse + alarm) AND crash-during-fresh-init
-  (crash after case-2 rewrite, before OPEN → case-4 freeze;
-  NEXT reboot re-enters case-2 and admits — recovery, not loop)
-  — no path reuses a consumed marker, and a genuinely clean
-  restart reopens.
+  REFUSES valid/INVALID/absent files; writes sentinel BEFORE
+  unlink (SIGKILL-between-steps fixture: kill -9 after sentinel
+  durably written, before unlink → sentinel + torn → freeze;
+  kill -9 after unlink → sentinel + absent → freeze via
+  sentinel, NEVER first-install; re-run idempotent; SICK-DISK:
+  sentinel write fails → NO unlink, torn intact, command
+  errors, still frozen; reboot then admits)) AND torn-marker
+  (→ mismatch-freeze, never consumed) AND boot_id-unreadable
+  (3× retry → freeze + alarm) AND persist-failure outcomes
+  (VALID-persist fail → no Store + retry; nil-persist fail →
+  live-freeze-until-reboot + alarm; fresh-init-write fail → freeze)
+  AND epoch-flusher cells (all four CAS sites signal; skip-if-stale
+  suppresses a stale flush after a newer write; revoke path never
+  blocks on fsync — measured, not asserted) AND freeze-flag cells
+  (case-4 writes boot-bound flag; post-reboot mutation allowed again;
+  stale-unlink-failure → refuse + alarm; stale-boot RESET on write;
+  write-failure → live-freeze + sticky daemon mirror;
+  hygiene-unlink-failure → mutation-SET + OPEN iff admissible)
+  AND crash-during-fresh-init (crash after case-2 rewrite, before
+  OPEN → case-4 freeze; NEXT reboot re-enters case-2 and admits —
+  recovery, not loop) — no path reuses a consumed marker, and a
+  genuinely clean restart reopens.
   Quarantine is a RESERVED `NatHolder::Quarantine` bit (127; `MAX==128`
   asserts updated) plus a session HOLD-gate extension, INSTALLED AT
   RESERVE — NOT at death/transfer: `ProvisionalJournal::register` plus
@@ -1581,7 +1623,10 @@ all 35 design paths exist, as checked in §4.2.
   via `os.ReadFile` (`process.go:465-490` pattern); ethtool GRO line
   (`compiler_rxvlan_classify_9946.go:58-65` parse) + ethtool
   coalesce `rx_max_coalesced_frames == 0` (same channel/cadence;
-  nonzero → refuse + drift path); XDP via netlink
+  nonzero → refuse + drift path); phydev-absent (no
+  `/sys/class/net/xpf-usp{0,1}/phydev` — belt over the member-text
+  proof that TUN never takes `skb_defer_rx_timestamp`; present →
+  refuse + drift path); XDP via netlink
   `Info().XDP()` (`armproof.go:849-860`, modes `:786-802`); TC via `tc
   filter show` / netlink TC dump (clsact prio `0x7fff`); `uname -r` +
   manifest `guest_kernel` + allowlist match. KERNEL ALLOWLIST
@@ -1597,7 +1642,7 @@ all 35 design paths exist, as checked in §4.2.
   `mixed_version_matrix` precedent) — updated ONLY by reviewed
   commit alongside a new review record. The F0 recording is
   CONFIRMATION (bake rows must EQUAL these pins), never blank
-  enrollment. REVIEW RECORD (COMPLETED v10):
+  enrollment. REVIEW RECORD (COMPLETED v11):
   `docs/pr/9506-delta/kernel-allowlist-7.0.0-30.md` — instantiated
   tuple + source/tree identity + SHA-verified deb capture + member
   config capture + per-branch MEMBER-TEXT review (B1–B8 at the
@@ -1674,16 +1719,43 @@ all 35 design paths exist, as checked in §4.2.
   `flag.boot` vs current boot FIRST: stale boot → best-effort
   unlink + treat as CLEAR (post-reboot mutation allowed again
   after fresh-init + re-admission — no re-freeze, no forever-
-  refused mutation); current boot + non-empty entries → mutation
-  REFUSED. Stale-unlink failure → refuse + alarm (disk broken ⇒
-  deny, consistent with authority persist failures). Non-ENOENT
-  read error → treat as SET (fail-closed) + alarm. Case-(2)
-  fresh-init ALSO unlinks the flag as hygiene (belt; the
-  self-clear is the normative mechanism, order-independent).
-  Same-env reopen is allowed after full re-admission (fresh
-  predicate PASS incl. mode) + zero old-epoch I/O outstanding,
-  but routing-env mutation stays refused while boot-current
-  entries exist.
+  refused mutation; the unlink is RETRIED on every stale read
+  until it succeeds — best-effort, one syscall per read);
+  current boot + non-empty entries → mutation REFUSED.
+  Stale-unlink failure → refuse + alarm (disk broken ⇒ deny,
+  consistent with authority persist failures). Non-ENOENT read
+  error → treat as SET (fail-closed) + alarm. WRITE SIDE
+  (R9 Host-6/7 — cumulative appends are FORBIDDEN without a
+  boot check): every flag write runs read-modify-write under
+  the flag flock (same `withEpochFileLock` pattern as the
+  authority file; NEVER hold both flocks simultaneously):
+  absent/ENOENT → write `{current-boot, [new-entry]}`;
+  file boot STALE (≠ current) → RESET to `{current-boot,
+  [new-entry]}`, DROPPING stale entries (a read-modify-append
+  lane recording a current-boot freeze under a stale boot_id
+  would self-clear on next read — legitimate freeze silently
+  evaporates; the reset closes exactly this); file boot
+  current → append. Malformed file → treat as SET + writes
+  OVERWRITE with `{current-boot, [new-entry]}` (fail-closed
+  preserved: the new entry keeps it SET). WRITE FAILURE →
+  live-freeze-until-reboot + alarm (SAME as authority
+  nil-persist-fail: revoke if OPEN + bar OPEN + bar mutation —
+  never silent-allow step-6 with untrackable skbs). DAEMON
+  IN-MEMORY MIRROR (the write-failure backstop survives helper
+  restart): the daemon holds `fenceFlagLive` (sticky SET on
+  any write failure, cleared ONLY by reboot-init); the
+  mutation/OPEN gates check file OR mirror (either SET →
+  refuse); daemon restart re-reads the file (mirror cleared,
+  file persists). HYGIENE-UNLINK FAILURE (case-(2) belt):
+  alarm + flag treated as SET for mutation (fail-closed)
+  while OPEN proceeds iff otherwise admissible (same-env
+  reopen; mutation refused until a later stale-read unlink
+  succeeds). Case-(2) fresh-init ALSO unlinks the flag as
+  hygiene (belt; the self-clear is normative,
+  order-independent). Same-env reopen is allowed after full
+  re-admission (fresh predicate PASS incl. mode) + zero
+  old-epoch I/O outstanding, but routing-env mutation stays
+  refused while boot-current entries exist.
   ENFORCEMENT: admission verifies every predicate field; change attempts
   while OPEN are refused; a kernel change means deny until reviewed and
   listed. While permits are OPEN the refused-change set is (6): any
@@ -1732,14 +1804,19 @@ all 35 design paths exist, as checked in §4.2.
   §7); KPROBE SYNC-PROOF (P2 on the member kernel — the timing
   bar no code read can give): `ip_forward`/`ip6_forward`
   entry+exit strictly inside the `tun_chr_write_iter` window for
-  xpf-shape writes, both families; MISSING-QUEUE FIXTURE — empty
-  rx-* dir set → refuse; ALLOWLIST-EVIDENCE FIXTURES — completed
-  v10 record + tuple-MEMBERSHIP reject at EVERY boundary
+  xpf-shape writes, both families; PTP NO-DEFER CELL (P2 on the
+  member kernel — B7-ts adversarial): PTP-class inner frames both
+  families route inline (no `skb_defer_rx_timestamp` stall — phydev
+  NULL) + no `/sys/class/net/xpf-usp*/phydev` readback;
+  MISSING-QUEUE FIXTURE — empty rx-* dir set → refuse;
+  ALLOWLIST-EVIDENCE FIXTURES — completed v11 record +
+  tuple-MEMBERSHIP reject at EVERY boundary
   (bake/sign/publish/validate/LANE-1/arm + ordinary-boot +
   rollback, F0–F9 incl F0 pin-confirmation, F5b booted-non-member,
   F5c rollback-non-member; coherent-B `-31` + revision-skew
-  REJECTED at each — recipes EXECUTED as probes, record §7,
-  LANDED gates at P2 entry) + per-branch member-text table
+  REJECTED at each — recipes RETAINED+EXECUTED (`f0f9-recipes.md`
+  matrix ALL-HERE-OK + record §7–§8, LANDED gates at P2 entry) +
+  per-branch member-text table
   (B1–B8 with file:line@tag) + honest F-statuses
   (RECIPE-EXECUTED, never LANDED pre-P2); DRIFT FIXTURE — inject
   mode drift → revoke + fence + boot-bound permutation-freeze
@@ -2149,7 +2226,9 @@ slice commit's Validation section):
   permanently fenced); mutants (each must flip its cell RED):
   single-lock scan (drop journal/obligation from the scan hold →
   (i) false-acks), split commit (release between terminalize and
-  row insert → (ii) false-acks); cross-restart marker fixtures
+  row insert; mutant pauses on the THIRD gate in the gap → rescan
+  acquires the (c) trio → assert false-ack (RED) → release →
+  mutant completes the insert); cross-restart marker fixtures
   (clean-stop→restart
   →crash→restart AND crash-without-prior-clean-stop AND clean same-boot
   restart with nonzero prior identity reopens AND boot-ID mismatch
@@ -2169,15 +2248,23 @@ slice commit's Validation section):
   persist → either version → must freeze) AND read-error freezes
   (EACCES/EIO either file → freeze+alarm; reboot retries) AND
   torn-authority (freeze+tamper alarm; reboot does NOT clear;
-  `reset-torn-fence-authority` REFUSES valid files, deletes ONLY
-  torn + sentinel, reboot then admits) AND torn-marker (freeze,
-  never consumed) AND boot_id-unreadable (freeze+alarm) AND
-  persist-failure outcomes (VALID-no-Store+retry; nil-live-freeze;
-  fresh-init-freeze) AND epoch-flusher (four CAS sites signal;
-  skip-if-stale; revoke never blocks) AND freeze-flag
+  `reset-torn-fence-authority` REFUSES valid/INVALID/absent files,
+  writes sentinel BEFORE unlink (SIGKILL-between-steps: kill -9
+  after sentinel → sentinel+torn → freeze; kill -9 after unlink
+  → sentinel+absent → freeze via sentinel, NEVER first-install;
+  re-run idempotent; SICK-DISK: sentinel write fails → NO unlink,
+  torn intact, command errors, still frozen), reboot then admits)
+  AND torn-marker (freeze, never consumed) AND boot_id-unreadable
+  (freeze+alarm) AND persist-failure outcomes (VALID-no-Store+retry;
+  nil-live-freeze; fresh-init-freeze) AND epoch-flusher (four CAS
+  sites signal; skip-if-stale; revoke never blocks) AND freeze-flag
   (case-4 writes boot-bound flag; post-reboot mutation allowed
-  again; stale-unlink-failure refuses) AND crash-during-fresh-init
-  (freeze; next reboot admits); no consumed-marker reuse;
+  again; stale-unlink-failure refuses; stale-boot RESET on write
+  (current-boot entry under stale boot_id → reset, no evaporate);
+  write-failure → live-freeze-until-reboot + alarm + sticky
+  daemon mirror; hygiene-unlink-failure → mutation-SET + OPEN
+  iff admissible) AND crash-during-fresh-init (freeze; next
+  reboot admits); no consumed-marker reuse;
   `resolveStartupAuthority` runs before any tick; `tryOpen`
   refuses unless startup admissible);
   quarantine
@@ -2196,8 +2283,12 @@ slice commit's Validation section):
   (fail delegated `spawn_named_worker` → trusted sender dropped +
   trusted handle joined pre-`Err` (thread reaped, join proves it) +
   `snapshot.rs:669-680` None-arm pins `last_error` + no authority);
-  handshake-`Fail` (`:875-885` → BOTH senders dropped + BOTH handles
-  taken+joined outside locks + death scan asserts empty pre-`Err`);
+  handshake-`Fail` (`:875-885` → BOTH senders dropped + reaper
+  stopped (`reaper_shutdown` + `unpark`) + ALL THREE handles
+  joined outside locks + death scan asserts empty pre-`Err`;
+  cell asserts the reaper handle joined (a fixture implementing
+  writers-only teardown FAILS this cell — leaked reaper) + retry
+  incarnation spawns exactly one reaper (no dual sweep));
   reaper-construction failure (fail reaper spawn → both senders
   dropped + both handles joined + `Err`, same discipline);
   double-stop (second `shutdown()` with slots `Done` → `Ok`
@@ -2208,7 +2299,10 @@ slice commit's Validation section):
   contention → winner-retained proof + retry-terminalize, never
   re-take; steal path with `STOLEN_COMMIT_ZOMBIE` gauge; 1s total
   bound → `TEARDOWN_COMMIT_STALL` alarm + fail-stop abort (never
-  proceed); reaper pending-age → `REAPER_COMMIT_STALL` + deny-all);
+  proceed); reaper pending-age → `REAPER_COMMIT_STALL` + deny-all;
+  steal-then-resume (stall reaper mid-commit → drive steal →
+  resume reaper → original winner ABANDONS on `Done`/owner≠me:
+  no proof-write, no second commit — exactly-once holds));
   normal-vs-unhealthy replacement (healthy → preserved Arc stays
   LIVE, generation fence retires old D11 gen, NO destructive
   shutdown in `stop_inner`; unhealthy → else-arm `old.shutdown()`
@@ -2411,10 +2505,20 @@ docs/log/9506-observe.md tail                       # 30/30 VOID (G2 consumer un
  grep/sed member tun.c/dev.c/ip_input.c/ip6_input.c  # B1-B8 branch lines (record §7)
  python3 ENOTSOCK probe  # sendmsg on TUN char fd → errno 88 (non-socket)
  python3 sign/publish/floor/member probes  # gaps SIGN/PUBLISH/PASS -31; predicate REJECTs
+ # v11 additions (retained recipes + member-tree deltas + lifecycle cites)
+ curl -O linux-headers/linux-modules 7.0.0-30.30 debs; sha256sum  # f3be8e8d/d61aa07f MATCH
+ git rev-parse 'Ubuntu-7.0.0-30.30:<f>' (6 files)  # blob SHAs (record §8)
+ sha256sum u30bi/.../config  # b07d3cb0… (full config pin)
+ grep -n 'phydev|phylib|hwprov|hwtstamp' member tun.c  # ZERO hits (B7-ts)
+ sed -n '67,112p' member net/core/timestamping.c  # defer gate (B7-ts)
+ awk-extract f0f9-recipes.md; ./run_all.sh  # MATRIX: ALL-HERE-OK (15 scripts)
+ sha256sum -c <recorded pins>  # 15/15 OK (extraction stability)
+ grep -rn 'setHostInputFenceOverlay|clearHostInputFenceOverlayAfterAck' pkg/daemon/
+   # callers: conntrack :274/:280 (retire), reconcile :290 (restore) — binding complete
  ```
 
  Prior-review note: the Sep-25 delta assessment comment (issue #9506) and its
  D11-clarification comment were used as the starting inventory and every load-bearing
- claim in them was re-verified; v10 re-verified all load-bearing cites at
+ claim in them was re-verified; v10/v11 re-verified all load-bearing cites at
  `3be469bc3` above (nil/epoch sites, helper lifecycle, spawn sites, image gates);
  the two corrections versus Sep-25 stand: (a) F1 landed (#11107), (b) v35.

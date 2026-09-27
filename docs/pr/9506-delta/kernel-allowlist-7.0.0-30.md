@@ -1,6 +1,6 @@
 # Kernel allowlist member review: 7.0.0-30-generic (#9506 P-MECH receive proof)
 
-Review base: research/9506-delta at v10 (plan `docs/pr/9506-delta/plan.md`).
+Review base: research/9506-delta at v11 (plan `docs/pr/9506-delta/plan.md`; recipes `docs/pr/9506-delta/f0f9-recipes.md`).
 Purpose: this record is the completed per-member evidence the M1
 ENFORCED RECEIVE MODE invariant requires. It binds the exact guest
 kernel identity to its source revision, Kconfig posture, and the
@@ -44,7 +44,7 @@ nonempty/agreement/version-floor alone anymore.
   `bake.py:1143-1178`): `base_release: 26.04`,
   `base_image_sha256: 9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05`,
   `base_image_pinned: true`, `guest_kernel: 7.0.0-30-generic`.
-- Archive pocket: resolute-security, `main/binary-amd64`
+ - Archive pocket: resolute-security, `main/binary-amd64`
   (`http://archive.ubuntu.com/ubuntu/dists/resolute-security/`,
   queried 2026-09-27, §7). Full binary rows:
   `linux-image-7.0.0-30-generic_7.0.0-30.30_amd64.deb`
@@ -53,10 +53,20 @@ nonempty/agreement/version-floor alone anymore.
   SHA256 `d61aa07f5bed438788bbad6c5c95dd15e9bf02cbe949183959abe90107955292`;
   `linux-headers-7.0.0-30-generic_7.0.0-30.30_amd64.deb`
   SHA256 `f3be8e8d73b1f6050c406c04e372f6d556811d548fd12fc4eef32128b11f0e14`.
-  Downloads of image + buildinfo re-verified against these SHAs (§7).
-- Source identity: `linux` source `7.0.0-30.30`, Ubuntu kernel git tag
+  ALL FOUR SHAs (image, modules, headers, + buildinfo §3) are
+  bytes-verified — each deb downloaded from the archive and
+  `sha256sum`-matched against the Packages index (§7); no
+  index-only pins remain.
+ - Source identity: `linux` source `7.0.0-30.30`, Ubuntu kernel git tag
   `Ubuntu-7.0.0-30.30` → commit `d974a4063f5c03c13b4f241a9ab511750e0b9f12`
-  (`git ls-remote` + shallow-clone `git log`, §7). (Image binary's
+  (`git ls-remote` + shallow-clone `git log`, §7). Remote:
+  `https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/resolute`.
+  Reviewed-file blob SHAs at the tag (content pins — `git rev-parse
+  TAG:path`, §7): `net/core/dev.c` `fab5a0be…8451a`,
+  `drivers/net/tun.c` `ca0ae5df…5e8e13`, `net/core/net-sysfs.c`
+  `b9740a39…769f4b8`, `net/ipv4/ip_input.c` `19d3141d…583e9256`,
+  `net/ipv6/ip6_input.c` `2bcb981c…acde`, `net/core/timestamping.c`
+  `a50a7ef4…83af26` (full hashes §8 ledger). (Image binary's
   `Source:` field reads `linux-signed` — the signing wrapper; the tree
   is `linux`, same version.)
 Status: ESTABLISHED (repo pins + Tier-2 pass + archive records, all
@@ -193,9 +203,26 @@ family-blind (mark/`queue_mapping` only, `slowpath.rs:188-263`); TUN
 jump label only SKIPS the `get_rps_cpu` check when no RPS exists
 anywhere; with RPS configured (XDP NICs are), the check runs and
 the per-queue predicate (cpu=-1) decides — the gate is
-label-independent by construction. Closing gate: same predicate
-both families + TC readback + IPv6-parity cells. Status: REVIEWED +
-GATE SPECIFIED.
+ label-independent by construction. PRE-RPS TIMESTAMP BRANCH
+ (concern advisory — the `cpu>=0`-only claim OVERLOOKED it):
+ member `netif_receive_skb_internal` (`dev.c:6378`) returns early
+ `if (skb_defer_rx_timestamp(skb))`; member
+ `net/core/timestamping.c:67-112` defers ONLY with a PHYLIB
+ hwtstamp provider (`hwprov` with `source==HWTSTAMP_SOURCE_PHYLIB`
+ + `phydev`, or `skb->dev->phydev` with
+ `phy_is_default_hwtstamp`) AND a PTP-class skb AND
+ `mii_ts->rxtstamp`. TUN CANNOT take this branch: zero
+ `phydev`/`phylib`/`hwprov`/`hwtstamp` references in member
+ `drivers/net/tun.c` (both pointers NULL by zero-init → the
+ first checks return false), and no MDIO/PHYLIB attach path
+ exists for TUN (no `phy_connect`, no ethtool-phy ops).
+ Closing belt (in addition to the member-text proof):
+ per-tick readback asserts no `/sys/class/net/xpf-usp*/phydev`
+ + PTP adversarial cell (PTP-class frame through USP still
+ routes inline — proves no-defer on the member kernel).
+ Closing gate: same predicate both families + TC readback +
+ IPv6-parity cells + phydev-absent readback. Status: REVIEWED +
+ GATE SPECIFIED.
 
 B8 TUN batching/`more` (NEW — blocker advisory). Claim: no q0 skb is
 held across its write's return in `tun_rx_batched`. Basis:
@@ -212,12 +239,19 @@ Queue-empty induction: entries enter the batch queue ONLY via the
 more-path (`:1496-1498`) or the NAPI path (`:1936`, napi off) —
 under all-`!more` writes from a fresh TUN the queue is always
 empty, so `(!more && empty)` dispatches inline on every write
-REGARDLESS of `rx_batched`. Closing gates (defense in depth, BOTH):
-(i) structural `!more` + empty-queue proof above (primary); (ii)
-`rx_batched==0` readback every tick via ethtool coalesce
-(`rx_max_coalesced_frames`) + no-change-while-OPEN + drift →
-revoke+fence+freeze (same cadence/channel as the GRO readback).
-Adversarial fixtures: ENOTSOCK probe (EXECUTED §7, re-executed on
+ REGARDLESS of `rx_batched`. Closing gates (defense in depth, BOTH):
+ (i) structural `!more` + empty-queue proof above (primary — and per
+ the corrected advisory, the `more=true` branch is UNREACHABLE from
+ q0 writes, so gate (ii) is NOT source-mandated); (ii)
+ `rx_batched==0` readback every tick via ethtool coalesce
+ (`rx_max_coalesced_frames`) + no-change-while-OPEN + drift →
+ revoke+fence+freeze (same cadence/channel as the GRO readback),
+ RETAINED SOLELY as belt against future write-path changes +
+ operator coalesce drift. The exact call chain pinned:
+ `tun_chr_write_iter` (`:1985-2002`, `more=false`) → `tun_get_user`
+ (`:1952-53`, non-NAPI + `!4KSTACKS` arm) → `tun_rx_batched`
+ (`:1482-87`, `(!more && empty)` → inline `netif_receive_skb`).
+ Adversarial fixtures: ENOTSOCK probe (EXECUTED §7, re-executed on
 the member kernel by P2); rx_batched-drift fixture (ethtool-set 64
 while OPEN → must revoke+freeze); sendmsg-mutant cell (route USP
 writes through sendmsg → must fail loud `ENOTSOCK`, never silent
@@ -310,11 +344,12 @@ at P2 entry; statuses below are honest per gate.
 ## 6. Limits (explicit, no hand-waving)
 
 - The member tree WAS reviewed textually: tag `Ubuntu-7.0.0-30.30`
-  (`d974a4063`), files `net/core/dev.c`, `drivers/net/tun.c`,
-  `net/core/net-sysfs.c`, `net/ipv4/ip_input.c`,
-  `net/ipv6/ip6_input.c` (shallow clone + sparse checkout, §7).
+(`d974a4063`), files `net/core/dev.c`, `drivers/net/tun.c`,
+`net/core/net-sysfs.c`, `net/ipv4/ip_input.c`,
+`net/ipv6/ip6_input.c`, `net/core/timestamping.c` (shallow clone
++ sparse checkout, §7).
   Review scope is exactly the receive-path branches cited in §4
-  (RPS/RFS dispatch, TUN write/dispatch/batching/coalesce, v4/v6
+  (RPS/RFS dispatch, TUN write/dispatch/batching/coalesce/timestamp, v4/v6
   receive→forward chains) — not a whole-tree audit; whole-tree
   behavior is bounded by exact-version pinning (same bits ⇒ same
   branches) + the runtime predicates, not by broader reading.
@@ -333,7 +368,7 @@ at P2 entry; statuses below are honest per gate.
   via reviewed commit; non-members deny by default at every
   boundary.
 
-## 7. Executed-evidence transcript (v10, research lane; read-only)
+## 7. Executed-evidence transcript (v10–v11, research lane; read-only)
 
 Suite + pocket (2026-09-27):
 
@@ -373,6 +408,12 @@ $ sha256sum linux-image-….deb
 $ curl -O …/linux-buildinfo-7.0.0-30-generic_7.0.0-30.30_amd64.deb
 $ sha256sum linux-buildinfo-….deb
 24af1791fba89c89927ebf221d19acb72c044edda2699f68172e116d64daa520  (MATCHES)
+$ curl -O …/linux-headers-7.0.0-30-generic_7.0.0-30.30_amd64.deb
+$ sha256sum linux-headers-….deb
+f3be8e8d73b1f6050c406c04e372f6d556811d548fd12fc4eef32128b11f0e14  (MATCHES)
+$ curl -O …/linux-modules-7.0.0-30-generic_7.0.0-30.30_amd64.deb  (169 MB)
+$ sha256sum linux-modules-….deb
+d61aa07f5bed438788bbad6c5c95dd15e9bf02cbe949183959abe90107955292  (MATCHES)
 $ grep -E '^CONFIG_4KSTACKS=|^# CONFIG_4KSTACKS is not set' config || echo ABSENT
 ABSENT-FROM-CONFIG
 $ grep -E '^CONFIG_BRIDGE=|^CONFIG_NF_TABLES_BRIDGE=' config
@@ -403,6 +444,9 @@ $ sed -n '564,575p' net/ipv4/ip_input.c  # ip_rcv → … → ip_rcv_finish (B7)
 $ grep -n '^int ip_forward(' net/ipv4/ip_forward.c  → 83
 $ sed -n '304,313p' net/ipv6/ip6_input.c # ipv6_rcv → … → ip6_rcv_finish (B7)
 $ grep -n 'int ip6_forward(' net/ipv6/ip6_output.c → 497
+$ sed -n '6378,6380p' net/core/dev.c     # if (skb_defer_rx_timestamp(skb)) return (B7-ts)
+$ sed -n '67,112p' net/core/timestamping.c  # defers ONLY w/ PHYLIB hwprov+phydev+PTP+rxtstamp
+$ grep -n 'phydev\|phylib\|hwprov\|hwtstamp' drivers/net/tun.c  # ZERO hits → TUN never defers
 ```
 
 xpf shape (repo, read-only):
@@ -433,7 +477,76 @@ member (7.0.0-30-generic, 7.0.0-30.30) -> ACCEPT
 ```
 
 Scope honesty: this transcript is archive/tree/code evidence +
-recipe probes executed by the research lane. It is NOT landed-gate
-execution (P2) and NOT member-kernel execution (kprobe/readbacks) —
-those remain the P2-entry bar, now with exact expected values.
-```
+ recipe probes executed by the research lane. It is NOT landed-gate
+ execution (P2) and NOT member-kernel execution (kprobe/readbacks) —
+ those remain the P2-entry bar, now with exact expected values.
+
+ ## 8. Artifact retention ledger (v11 — answers the gate artifact question)
+
+ Lane rule permits only `docs/pr/9506-delta/*.md` writes, so durable
+ retention is git-pinned .md + content hashes; `/tmp` bytes are
+ ephemeral by location but bit-reproducible via the cited commands.
+ Per item, exact status (RETAINED = in-branch now; EPHEMERAL =
+ present at `/tmp` paths below at v11 time, re-fetchable;
+ TRANSCRIPT-ONLY = command+output in §7, no separate bytes):
+
+ - Member tree bytes: EPHEMERAL at `/tmp/u30tree` (shallow clone,
+  `--depth 1 --branch Ubuntu-7.0.0-30.30`, sparse: the six files
+  below). Identity RETAINED (§1 + here): remote
+  `https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/resolute`,
+  tag `Ubuntu-7.0.0-30.30`, tag-obj
+  `399867a77d094ee10790dd9051938ed243954779`, commit
+  `d974a4063f5c03c13b4f241a9ab511750e0b9f12`. Reviewed-blob SHAs
+  RETAINED (verbatim, `git rev-parse TAG:path`):
+  `net/core/dev.c` `fab5a0bebd924ee6240dcd57d7b477570218451a`,
+  `drivers/net/tun.c` `ca0ae5df73af78a3391841cbb1f115e42a5e8e13`,
+  `net/core/net-sysfs.c` `b9740a397f55b8313ec66490be520b050769f4b8`,
+  `net/ipv4/ip_input.c` `19d3141dad1f8b031981aea40c311509583e9256`,
+  `net/ipv6/ip6_input.c` `2bcb981c91aa83fe08d782c29a185c8559aeacde`,
+  `net/core/timestamping.c` `a50a7ef49ae894bfd23462f2a9eb3c762483af26`.
+  Reviewed line excerpts RETAINED (§7 branch block).
+ - Deb/config bytes: EPHEMERAL at
+  `/tmp/linux-image-7.0.0-30-generic_7.0.0-30.30_amd64.deb`,
+  `/tmp/linux-modules-7.0.0-30-generic_7.0.0-30.30_amd64.deb`,
+  `/tmp/linux-headers-7.0.0-30-generic_7.0.0-30.30_amd64.deb`,
+  `/tmp/linux-buildinfo-7.0.0-30-generic_7.0.0-30.30_amd64.deb`
+  (+ `/tmp/u30bi/usr/lib/linux/7.0.0-30-generic/config`,
+  `/tmp/resolute-*-Packages.gz`, `/tmp/resolute-sec-Sources.gz`).
+  SHAs RETAINED (§1: all four debs bytes-verified) + full config
+  SHA256 RETAINED:
+  `b07d3cb0d53236b021d73038e315018801fa6b843529d53129ad94a2a5233bf6`;
+  P-MECH config excerpt RETAINED (§3 + F8 fixture). Re-fetch:
+  §7 URLs + `sha256sum -c` against these pins.
+ - F0–F9 recipe scripts: RETAINED in-branch at
+  `docs/pr/9506-delta/f0f9-recipes.md` (verbatim blocks,
+  extraction command + per-file sha256 pins in-file; 15/15
+  verified post-extraction at v11).
+ - Per-boundary outputs: RETAINED in `f0f9-recipes.md` output
+  matrix (member-ACCEPT + revision-skew/coherent-B-REJECT per
+  boundary + current-code gap verdicts; `MATRIX: ALL-HERE-OK`,
+  exit 0, 2026-09-27). The v10 aggregate probe outputs they
+  supersede remain TRANSCRIPT-ONLY (§7 v10 block).
+ - ENOTSOCK probe script: RETAINED (`enotsock_probe.py` in
+  recipes file); fd/device identity RETAINED (matrix:
+  `/dev/net/tun` 10:200, build host `7.0.13+deb14-amd64`,
+  char fd O_RDWR); raw output RETAINED in the matrix
+  (`socket-op: errno=88 … [OK]`) — no separate raw-output file
+  exists (TRANSCRIPT-ONLY beyond the matrix paste). Member-
+  kernel/USP-device positive control: NOT executed (P2).
+ - rx_batched drift / kprobe sync-proof / PTP cells: scripts
+  RETAINED as specified text (recipes file, exit 3 =
+  not-run-here); outputs do NOT exist (P2 member-kernel bar).
+ - P2-ENTRY EVIDENCE CONTRACT (B8, airtight): permits stay
+  CLOSED until ALL of the following exist as LANDED, member-
+  kernel-executed evidence: (i) ENOTSOCK positive control on
+  the member USP device (same script, `$TUNDEV`, errno 88);
+  (ii) rx_batched set/readback/drift/revoke fixture (set 64
+  → readback → revoke+fence+freeze within one audit tick);
+  (iii) IPv4+IPv6 kprobe timing proof (forward entry+exit
+  strictly inside the `tun_chr_write_iter` window per
+  xpf-shape write); (iv) every per-tick readback in §4
+  executing against the member (RPS/RFS/GRO/XDP/TC/coalesce/
+  phydev). ANY missing path, observation, or readback keeps
+  permits CLOSED — no partial-credit OPEN. The B8 gates above
+  are RECIPE-EXECUTED (i–iv specified + retained); LANDED is
+  P2's entry bar.
