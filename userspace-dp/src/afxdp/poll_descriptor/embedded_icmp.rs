@@ -352,17 +352,18 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
 }
 
 /// Authorize the queued disposition and, for locally forwardable frames, apply
-/// the flowless transit zone-policy gate. The input/PBR filters are intentionally
-/// evaluated by the caller before either ICMP arm (#7359/#9528); this helper is
-/// the missing final authorization that the queued prebuilt otherwise skips
-/// (#9948).
+/// the flowless transit zone-policy gate. Only `ForwardCandidate` dispositions
+/// are policy-evaluated here; non-forward dispositions fail closed without a
+/// fabricated policy event. The input/PBR filters are intentionally evaluated
+/// by the caller before either ICMP arm (#7359/#9528); this helper is the missing
+/// final authorization that the queued prebuilt otherwise skips (#9948).
 /// The policy direction is the packet's actual arrival zone to the queued
 /// resolution's egress zone, not the quoted session's original direction.
 /// That keeps a forged error arriving from an untrusted zone subject to the
 /// same `wan -> lan` policy as any other flowless transit packet, while a
 /// genuine PMTUD error arriving from the quoted session's far side rides the
 /// RELATED bypass (#10666) and an explicitly permitted error still passes (#7169).
-pub(super) fn enforce_queued_embedded_icmp_policy(
+pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     queued_frame: &[u8],
     ingress_meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
@@ -384,15 +385,18 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
     // by the type- and zone-scoped RELATED contract (#10286/#10684); a
     // NAT'd/NAT64 PMTUD error whose arrival the match arm validated against
     // the quoted session's forward direction rides the same bypass (#10666).
-    // Keep HA/route dispositions authoritative, but do not re-run the reverse
-    // flowless zone pair for either: that pair describes the error's
-    // arrival direction, not the permitted flow it quotes. Anything else
-    // retains the policy gate below.
+    // Keep the reverse flowless zone pair scoped to ForwardCandidate; a
+    // non-forward disposition is not a policy verdict.
     if related_admit && resolution.disposition == ForwardingDisposition::ForwardCandidate {
         return true;
     }
-    // Every terminal/non-sendable disposition must fail closed here rather
-    // than be treated as peer-owned by default.
+    // Only a ForwardCandidate is adjudicated by this gate. Other local
+    // dispositions have an authoritative non-policy cause (for example,
+    // HAInactive or an upstream PolicyDenied); do not invent a default-policy
+    // verdict or duplicate its event here.
+    if resolution.disposition != ForwardingDisposition::ForwardCandidate {
+        return false;
+    }
     let Some((policy_flow, mut policy_meta)) = queued_embedded_icmp_identity(queued_frame)
     else {
         // A prebuilt frame that cannot expose an L3 policy identity is not
@@ -424,34 +428,20 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
     // #10729 X2-F6: same effective-proto-51 substitution as the transit
     // flowless arms (identity today: prebuilts carry no AH).
     let policy_proto = crate::afxdp::frame::flowless_effective_protocol(queued_frame, policy_meta);
-    let policy_result = if resolution.disposition == ForwardingDisposition::ForwardCandidate {
-        crate::policy::evaluate_policy_result_l3_aware(
-            &worker_ctx.forwarding.policy,
-            from_zone_id,
-            to_zone_id,
-            policy_flow.src_ip,
-            policy_flow.dst_ip,
-            policy_proto,
-            0,
-            0,
-            super::policy_packet_icmp(queued_frame, policy_meta),
-            queued_frame.len() as u64,
-            false,
-        )
-    } else {
-        // HAInactive, PolicyDenied, and all unresolved route dispositions are
-        // not transmit-authorized even when their eventual zone pair would
-        // permit the packet. Preserve the deny event's normal default-policy
-        // identity while making the queue ownership decision fail closed.
-        crate::policy::PolicyEvaluationResult {
-            action: PolicyAction::Deny,
-            policy_id: crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-            ..Default::default()
-        }
-    };
-    if resolution.disposition == ForwardingDisposition::ForwardCandidate
-        && matches!(policy_result.action, PolicyAction::Permit)
-    {
+    let policy_result = crate::policy::evaluate_policy_result_l3_aware(
+        &worker_ctx.forwarding.policy,
+        from_zone_id,
+        to_zone_id,
+        policy_flow.src_ip,
+        policy_flow.dst_ip,
+        policy_proto,
+        0,
+        0,
+        super::policy_packet_icmp(queued_frame, policy_meta),
+        queued_frame.len() as u64,
+        false,
+    );
+    if matches!(policy_result.action, PolicyAction::Permit) {
         return true;
     }
     let owner_rg_id = super::owner_rg_for_resolution(worker_ctx.forwarding, resolution);

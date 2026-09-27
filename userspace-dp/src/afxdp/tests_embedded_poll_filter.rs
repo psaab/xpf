@@ -733,6 +733,32 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     expect_related_admit: bool,
     quote_reply_reverse_half: bool,
 ) {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition(
+        allow_reverse_policy,
+        ha_state,
+        expect_denied,
+        expect_fabric_redirect,
+        outer_ttl,
+        outer_pmtud,
+        arrival_ifindex,
+        expect_related_admit,
+        quote_reply_reverse_half,
+        ForwardingDisposition::ForwardCandidate,
+    );
+}
+
+fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition(
+    allow_reverse_policy: bool,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+    expect_denied: bool,
+    expect_fabric_redirect: bool,
+    outer_ttl: u8,
+    outer_pmtud: bool,
+    arrival_ifindex: u32,
+    expect_related_admit: bool,
+    quote_reply_reverse_half: bool,
+    initial_disposition: ForwardingDisposition,
+) {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
@@ -921,6 +947,54 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         cold_path_sample_mask: 0xff,
     };
 
+    if initial_disposition == ForwardingDisposition::PolicyDenied {
+        let resolution = ForwardingResolution {
+            disposition: ForwardingDisposition::PolicyDenied,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        };
+        assert!(
+            !super::poll_descriptor::enforce_queued_embedded_icmp_policy(
+                &frame,
+                meta,
+                None,
+                resolution,
+                &worker_ctx,
+                123_000_000_000,
+                123,
+                false,
+            ),
+            "PolicyDenied is non-transmitting and is not a new policy evaluation"
+        );
+        let mut denied_batch = BatchCounters::default();
+        let mut denied_dbg = DebugPollCounters::default();
+        let mut denied_telemetry = TelemetryContext {
+            dbg: &mut denied_dbg,
+            counters: &mut denied_batch,
+        };
+        super::poll_descriptor::record_queued_embedded_icmp_refusal(
+            Some(resolution),
+            frame.len() as u32,
+            meta,
+            &worker_ctx,
+            &mut denied_telemetry,
+        );
+        assert_eq!(denied_telemetry.dbg.policy_deny, 1);
+        assert_eq!(denied_telemetry.counters.policy_denied_packets, 1);
+        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 0);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an upstream PolicyDenied disposition is suppressed with its disposition counter only"
+        );
+        return;
+    }
+
     // Install the forward NAT session (client:client_port -> server:80 SNAT'd
     // to snat_ip:snat_port) so the embedded reversal can recover the client.
     let mut sessions = SessionTable::new();
@@ -946,7 +1020,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         forward_key.clone(),
         SessionDecision {
             resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
+                disposition: initial_disposition,
                 local_ifindex: 0,
                 egress_ifindex: 12,
                 tx_ifindex: 12,
@@ -1161,45 +1235,84 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
             1,
             "a policy-denied reversed error recycles its owned descriptor"
         );
-        assert_eq!(
-            telemetry.dbg.policy_deny, 1,
-            "a queued reversal denial increments the policy-deny debug counter"
-        );
-        let event = event_rx
-            .try_recv()
-            .expect("queued reversal policy-deny event")
-            .decode_dataplane_event()
-            .expect("queued reversal policy-deny payload");
-        assert_eq!(
-            event.kind,
-            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
-        );
-        assert_eq!(
-            event.ingress_zone_id,
-            match ingress_ifindex {
-                24 => TEST_LAN_ZONE_ID,
-                32 => TEST_UNTRUST_ZONE_ID,
-                _ => TEST_WAN_ZONE_ID,
+        let refused_disposition = if initial_disposition == ForwardingDisposition::PolicyDenied {
+            ForwardingDisposition::PolicyDenied
+        } else if ha_state.values().any(|group| !group.active) {
+            ForwardingDisposition::HAInactive
+        } else {
+            ForwardingDisposition::ForwardCandidate
+        };
+        match refused_disposition {
+            ForwardingDisposition::ForwardCandidate => {
+                assert_eq!(telemetry.dbg.policy_deny, 1);
+                let event = event_rx
+                    .try_recv()
+                    .expect("evaluated queued policy-deny event")
+                    .decode_dataplane_event()
+                    .expect("queued reversal policy-deny payload");
+                assert_eq!(
+                    event.kind,
+                    crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+                );
+                assert_eq!(
+                    event.ingress_zone_id,
+                    match ingress_ifindex {
+                        24 => TEST_LAN_ZONE_ID,
+                        32 => TEST_UNTRUST_ZONE_ID,
+                        _ => TEST_WAN_ZONE_ID,
+                    }
+                );
+                assert_eq!(
+                    event.egress_zone_id,
+                    if quote_reply_reverse_half {
+                        TEST_WAN_ZONE_ID
+                    } else {
+                        TEST_LAN_ZONE_ID
+                    }
+                );
+                assert_eq!(event.ingress_ifindex, ingress_ifindex as i32);
+                assert_eq!(
+                    event.dst_ip,
+                    IpAddr::V4(if quote_reply_reverse_half {
+                        server_ip
+                    } else {
+                        client_ip
+                    })
+                );
+                assert_eq!(
+                    event.policy_id,
+                    crate::policy::DEFAULT_POLICY_SENTINEL_ID,
+                    "an evaluated default-policy deny keeps its default-policy identity"
+                );
+                assert_eq!(event.rule_id, crate::policy::DEFAULT_POLICY_SENTINEL_ID);
+                assert_eq!(
+                    event.reason, 5,
+                    "a real policy deny keeps the policy reason"
+                );
+                assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
             }
-        );
-        assert_eq!(
-            event.egress_zone_id,
-            if quote_reply_reverse_half {
-                TEST_WAN_ZONE_ID
-            } else {
-                TEST_LAN_ZONE_ID
+            ForwardingDisposition::HAInactive => {
+                assert_eq!(telemetry.dbg.policy_deny, 0);
+                assert_eq!(telemetry.dbg.ha_inactive, 1);
+                assert_eq!(telemetry.counters.exception_packets, 1);
+                assert_eq!(telemetry.counters.policy_denied_packets, 0);
+                assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 0);
+                assert!(
+                    event_rx.try_recv().is_err(),
+                    "HA suppression is counted without a policy event"
+                );
             }
-        );
-        assert_eq!(event.ingress_ifindex, ingress_ifindex as i32);
-        assert_eq!(
-            event.dst_ip,
-            IpAddr::V4(if quote_reply_reverse_half {
-                server_ip
-            } else {
-                client_ip
-            })
-        );
-        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+            ForwardingDisposition::PolicyDenied => {
+                assert_eq!(telemetry.dbg.policy_deny, 1);
+                assert_eq!(telemetry.counters.policy_denied_packets, 1);
+                assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 0);
+                assert!(
+                    event_rx.try_recv().is_err(),
+                    "an upstream PolicyDenied disposition must not synthesize another policy event"
+                );
+            }
+            other => panic!("unexpected refused embedded-ICMP disposition: {other:?}"),
+        }
         if !allow_reverse_policy {
             // #10667: the actual policy-refused reversal must refund the
             // matcher's pre-policy token; the complete 64-token burst remains
@@ -1362,6 +1475,24 @@ fn poll_descriptor_embedded_icmp_reversal_ha_inactive_denies_9948() {
         12,
         false,
         false,
+    );
+}
+
+/// #10982: an upstream PolicyDenied disposition is not re-adjudicated as a
+/// default-policy deny by the queued embedded-ICMP gate.
+#[test]
+fn poll_descriptor_embedded_icmp_upstream_policy_denied_is_not_reattributed_10982() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition(
+        false,
+        txn_ha_state(),
+        true,
+        false,
+        64,
+        false,
+        12,
+        false,
+        false,
+        ForwardingDisposition::PolicyDenied,
     );
 }
 
@@ -1772,7 +1903,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    let (_batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
+    let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -1858,28 +1989,46 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
             "a NAT64 translated ICMP error must not queue under WAN->LAN default deny"
         );
         assert_eq!(binding.scratch.scratch_recycle.len(), 1);
-        assert_eq!(dbg.policy_deny, 1);
-        let event = event_rx
-            .try_recv()
-            .expect("NAT64 queued policy-deny event")
-            .decode_dataplane_event()
-            .expect("NAT64 queued policy-deny payload");
-        assert_eq!(
-            event.kind,
-            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
-        );
-        assert_eq!(
-            event.ingress_zone_id,
-            if arrival_ifindex == 32 { TEST_UNTRUST_ZONE_ID } else { TEST_WAN_ZONE_ID }
-        );
-        assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
-        assert_eq!(event.ingress_ifindex, arrival_ifindex as i32);
-        assert_eq!(
-            event.src_ip,
-            "64:ff9b::ac10:5001".parse::<IpAddr>().expect("NAT64 event src")
-        );
-        assert_eq!(event.dst_ip, IpAddr::V6(n6472_client_v6()));
-        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+        if ha_state.values().any(|group| !group.active) {
+            assert_eq!(dbg.policy_deny, 0);
+            assert_eq!(dbg.ha_inactive, 1);
+            assert_eq!(batch.exception_packets, 1);
+            assert_eq!(batch.policy_denied_packets, 0);
+            assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 0);
+            assert!(
+                event_rx.try_recv().is_err(),
+                "NAT64 HA suppression is counted without a policy event"
+            );
+        } else {
+            assert_eq!(dbg.policy_deny, 1);
+            let event = event_rx
+                .try_recv()
+                .expect("NAT64 queued policy-deny event")
+                .decode_dataplane_event()
+                .expect("NAT64 queued policy-deny payload");
+            assert_eq!(
+                event.kind,
+                crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+            );
+            assert_eq!(
+                event.ingress_zone_id,
+                if arrival_ifindex == 32 { TEST_UNTRUST_ZONE_ID } else { TEST_WAN_ZONE_ID }
+            );
+            assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
+            assert_eq!(event.ingress_ifindex, arrival_ifindex as i32);
+            assert_eq!(
+                event.src_ip,
+                "64:ff9b::ac10:5001".parse::<IpAddr>().expect("NAT64 event src")
+            );
+            assert_eq!(event.dst_ip, IpAddr::V6(n6472_client_v6()));
+            assert_eq!(event.policy_id, crate::policy::DEFAULT_POLICY_SENTINEL_ID);
+            assert_eq!(event.rule_id, crate::policy::DEFAULT_POLICY_SENTINEL_ID);
+            assert_eq!(
+                event.reason, 5,
+                "a real policy deny keeps the policy reason"
+            );
+            assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+        }
         return;
     }
     assert_eq!(
