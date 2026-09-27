@@ -103,8 +103,14 @@ pub(crate) struct DataplaneEventPayload {
     pub(crate) application_id: u16,
     pub(crate) filter_id: u32,
     pub(crate) screen_id: u32,
+    /// Config generation that evaluated a POLICY_DENY. The event encoder
+    /// carries this in duplicate rule/term slots so Go can refuse to resolve
+    /// its positional policy ID from another generation's name map.
+    pub(crate) config_generation: u64,
     pub(crate) timestamp_ns: u64,
 }
+
+pub(super) const POLICY_DENY_GENERATION_MARKER: u32 = u32::from_le_bytes(*b"GEN1");
 
 impl EventFrame {
     /// #2460: Encode an RT_FLOW SESSION_CLOSE (type 14) frame.
@@ -513,8 +519,18 @@ impl EventFrame {
         buf[base + 53] = event.protocol;
         buf[base + 54] = event.action;
         buf[base + 55] = wire_af;
-        buf[base + 56..base + 60].copy_from_slice(&event.rule_id.to_le_bytes());
-        buf[base + 60..base + 64].copy_from_slice(&event.term_id.to_le_bytes());
+        if event.kind == DataplaneEventKind::PolicyDeny {
+            // #10978: POLICY_DENY's rule_id duplicates policy_id and term_id
+            // is zero. Use those eight bytes for the producing policy-table
+            // generation; the marker in reserved [140:144] distinguishes
+            // these frames from older producers and eBPF records.
+            buf[base + 56..base + 64].copy_from_slice(&event.config_generation.to_le_bytes());
+            buf[base + 140..base + 144]
+                .copy_from_slice(&POLICY_DENY_GENERATION_MARKER.to_le_bytes());
+        } else {
+            buf[base + 56..base + 60].copy_from_slice(&event.rule_id.to_le_bytes());
+            buf[base + 60..base + 64].copy_from_slice(&event.term_id.to_le_bytes());
+        }
         buf[base + 64..base + 66].copy_from_slice(&event.owner_rg_id.to_le_bytes());
         write_ip_opt_16(&mut buf, base + 72, event.nat_src_ip);
         write_ip_opt_16(&mut buf, base + 88, event.nat_dst_ip);

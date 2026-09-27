@@ -5,7 +5,7 @@
 
 use std::net::IpAddr;
 
-use super::rt_flow::{DataplaneEventKind, DataplaneEventPayload};
+use super::rt_flow::{DataplaneEventKind, DataplaneEventPayload, POLICY_DENY_GENERATION_MARKER};
 use super::wire::*;
 
 #[allow(dead_code)]
@@ -27,6 +27,13 @@ pub(crate) fn decode_dataplane_event(
         return None;
     }
     let policy_or_reason_id = u32::from_le_bytes(payload[44..48].try_into().ok()?);
+    let policy_generation_stamped = event_kind == DataplaneEventKind::PolicyDeny
+        && u32::from_le_bytes(payload[140..144].try_into().ok()?) == POLICY_DENY_GENERATION_MARKER;
+    let config_generation = if policy_generation_stamped {
+        u64::from_le_bytes(payload[56..64].try_into().ok()?)
+    } else {
+        0
+    };
 
     Some(DataplaneEventPayload {
         kind: event_kind,
@@ -44,8 +51,16 @@ pub(crate) fn decode_dataplane_event(
         ingress_zone_id: u16::from_le_bytes(payload[48..50].try_into().ok()?),
         egress_zone_id: u16::from_le_bytes(payload[50..52].try_into().ok()?),
         ingress_ifindex: i32::from_le_bytes(payload[128..132].try_into().ok()?),
-        rule_id: u32::from_le_bytes(payload[56..60].try_into().ok()?),
-        term_id: u32::from_le_bytes(payload[60..64].try_into().ok()?),
+        rule_id: if policy_generation_stamped {
+            policy_or_reason_id
+        } else {
+            u32::from_le_bytes(payload[56..60].try_into().ok()?)
+        },
+        term_id: if policy_generation_stamped {
+            0
+        } else {
+            u32::from_le_bytes(payload[60..64].try_into().ok()?)
+        },
         owner_rg_id: i16::from_le_bytes(payload[64..66].try_into().ok()?),
         policy_id: if event_kind == DataplaneEventKind::PolicyDeny {
             policy_or_reason_id
@@ -64,6 +79,7 @@ pub(crate) fn decode_dataplane_event(
         } else {
             0
         },
+        config_generation,
         timestamp_ns: u64::from_le_bytes(payload[0..8].try_into().ok()?),
         src_ip: read_ip_16(&payload[8..24], wire_af)?,
         dst_ip: read_ip_16(&payload[24..40], wire_af)?,

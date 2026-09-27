@@ -84,7 +84,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	// nil-safe) — a separate dataplane() guard here would observe a
 	// different publication than the result read (Codex PR #6743 r3-7).
 	if cr := d.applyResult(); cr != nil {
-		er.SetPolicyNames(cr.PolicyNames)
+		er.SetPolicyNamesForGeneration(cr.Generation, cr.PolicyNames)
 		if cr.AppNames != nil {
 			er.SetAppNames(cr.AppNames)
 		}

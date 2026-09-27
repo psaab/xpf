@@ -45,13 +45,14 @@ fn test_event(kind: DataplaneEventKind, ingress_zone_id: u16) -> DataplaneEventP
         egress_zone_id: 9,
         ingress_ifindex: 42,
         policy_id: 101,
-        rule_id: 202,
-        term_id: 303,
+        rule_id: if kind == DataplaneEventKind::PolicyDeny { 101 } else { 202 },
+        term_id: if kind == DataplaneEventKind::PolicyDeny { 0 } else { 303 },
         reason: 5,
         owner_rg_id: 1,
         application_id: 404,
         filter_id: 505,
         screen_id: 606,
+        config_generation: if kind == DataplaneEventKind::PolicyDeny { 41 } else { 0 },
         timestamp_ns: 123_456_789,
     }
 }
@@ -66,13 +67,14 @@ fn dataplane_event_emit_queues_frame_and_counts_sent() {
     assert_eq!(outcome, DataplaneEventEmitOutcome::Queued { seq: 1 });
     let frame = rx.try_recv().expect("queued event frame");
     assert_eq!(frame.seq, 1);
-    assert_eq!(
-        frame
-            .decode_dataplane_event()
-            .expect("decode queued dataplane event")
-            .kind,
-        DataplaneEventKind::PolicyDeny
-    );
+    let decoded = frame
+        .decode_dataplane_event()
+        .expect("decode queued dataplane event");
+    assert_eq!(decoded.kind, DataplaneEventKind::PolicyDeny);
+    assert_eq!(decoded.policy_id, 101);
+    assert_eq!(decoded.config_generation, 41);
+    assert_eq!(decoded.rule_id, 101);
+    assert_eq!(decoded.term_id, 0);
     assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 1);
     assert_eq!(shared.frames_dropped.load(Ordering::Relaxed), 0);
 

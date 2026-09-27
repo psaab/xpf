@@ -141,12 +141,23 @@ const (
 	eventTypePolicyDeny   = 3
 	eventTypeScreenDrop   = 4
 	eventTypeFilterLog    = 6
-)
 
+	policyDenyGenerationMarker    = uint32(0x314E4547) // "GEN1" in little endian
+	policyDenyGenerationMarkerOff = 140
+)
 const (
 	addrFamilyInet  = 2
 	addrFamilyInet6 = 10
 )
+
+func policyDenyConfigGeneration(data []byte) (uint64, bool) {
+	if len(data) < rawEventWireSize ||
+		data[52] != eventTypePolicyDeny ||
+		binary.LittleEndian.Uint32(data[policyDenyGenerationMarkerOff:policyDenyGenerationMarkerOff+4]) != policyDenyGenerationMarker {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(data[56:64]), true
+}
 
 const protoICMPv6 = 58
 
@@ -206,24 +217,26 @@ var screenFlagNames = map[uint32]string{
 
 // EventReader reads events from an EventSource.
 type EventReader struct {
-	source            EventSource
-	buffer            *EventBuffer
-	syslogMu          sync.RWMutex
-	syslogClients     []*SyslogClient
-	localMu           sync.RWMutex
-	localWriters      []*LocalLogWriter
-	callbackMu        sync.RWMutex
-	callbacks         []EventCallback
-	zoneNamesMu       sync.RWMutex
-	zoneNames         map[uint16]string // zone ID -> zone name
-	policyNamesMu     sync.RWMutex
-	policyNames       map[uint32]string // rule_id -> policy name
-	filterSyslogRoute filterSyslogRoute // #6859; see filter_log_syslog_route.go
-	ifNamesMu         sync.RWMutex
-	ifNames           map[uint32]string // ifindex -> interface name
-	appNamesMu        sync.RWMutex
-	appNames          map[uint16]string // app_id -> application name
-	sessionSeq        uint64            // #4915: per-EVENT monotonic ordinal (EventSeq), NOT a session id
+	source                   EventSource
+	buffer                   *EventBuffer
+	syslogMu                 sync.RWMutex
+	syslogClients            []*SyslogClient
+	localMu                  sync.RWMutex
+	localWriters             []*LocalLogWriter
+	callbackMu               sync.RWMutex
+	callbacks                []EventCallback
+	zoneNamesMu              sync.RWMutex
+	zoneNames                map[uint16]string // zone ID -> zone name
+	policyNamesMu            sync.RWMutex
+	policyNames              map[uint32]string // rule_id -> policy name
+	policyNamesGeneration    uint64            // generation of the positional policy ID map
+	policyNamesGenerationSet bool
+	filterSyslogRoute        filterSyslogRoute // #6859; see filter_log_syslog_route.go
+	ifNamesMu                sync.RWMutex
+	ifNames                  map[uint32]string // ifindex -> interface name
+	appNamesMu               sync.RWMutex
+	appNames                 map[uint16]string // app_id -> application name
+	sessionSeq               uint64            // #4915: per-EVENT monotonic ordinal (EventSeq), NOT a session id
 }
 
 // NewEventReader creates a new event reader for the given event source.
@@ -252,9 +265,24 @@ func (er *EventReader) resolveZoneName(id uint16) string {
 }
 
 // SetPolicyNames updates the rule ID to policy name mapping (goroutine-safe).
+// It marks the map as legacy/unversioned so stamped events cannot resolve
+// against it.
 func (er *EventReader) SetPolicyNames(names map[uint32]string) {
 	er.policyNamesMu.Lock()
 	er.policyNames = names
+	er.policyNamesGeneration = 0
+	er.policyNamesGenerationSet = false
+	er.policyNamesMu.Unlock()
+}
+
+// SetPolicyNamesForGeneration publishes a policy name map and its positional
+// ID generation atomically. Stamped events from any other generation are
+// deliberately unattributed rather than named after a new policy at that ID.
+func (er *EventReader) SetPolicyNamesForGeneration(generation uint64, names map[uint32]string) {
+	er.policyNamesMu.Lock()
+	er.policyNames = names
+	er.policyNamesGenerationSet = true
+	er.policyNamesGeneration = generation
 	er.policyNamesMu.Unlock()
 }
 
@@ -282,6 +310,23 @@ func (er *EventReader) resolvePolicyName(id uint32) string {
 		return name
 	}
 	er.policyNamesMu.RLock()
+	name := er.policyNames[id]
+	er.policyNamesMu.RUnlock()
+	if name != "" {
+		return name
+	}
+	return fmt.Sprintf("%d", id)
+}
+
+func (er *EventReader) resolvePolicyNameAtGeneration(id uint32, generation uint64) string {
+	if name, ok := dataplane.ReservedPolicyName(id); ok {
+		return name
+	}
+	er.policyNamesMu.RLock()
+	if !er.policyNamesGenerationSet || er.policyNamesGeneration != generation {
+		er.policyNamesMu.RUnlock()
+		return dataplane.UnattributedPolicyName
+	}
 	name := er.policyNames[id]
 	er.policyNamesMu.RUnlock()
 	if name != "" {
@@ -537,7 +582,6 @@ func InvalidCreatedNanos() uint64 {
 	return invalidCreatedNanos.Load()
 }
 
-
 func (er *EventReader) logEvent(data []byte) {
 	var evt rawEvent
 	evt.Timestamp = binary.LittleEndian.Uint64(data[0:8])
@@ -552,6 +596,7 @@ func (er *EventReader) logEvent(data []byte) {
 	evt.Protocol = data[53]
 	evt.Action = data[54]
 	evt.AddrFamily = data[55]
+	policyGeneration, policyDenyStamped := policyDenyConfigGeneration(data)
 
 	// Parse NAT fields (offsets 72..112) if data is long enough
 	if len(data) >= 112 {
@@ -643,8 +688,12 @@ func (er *EventReader) logEvent(data []byte) {
 		rec.ScreenCheck = screenFlagName(evt.PolicyID)
 	}
 	if evt.EventType != eventTypeSessionClose && len(data) >= rawEventWireSize {
-		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
-		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		if policyDenyStamped {
+			rec.RuleID = evt.PolicyID
+		} else {
+			rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
+			rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		}
 		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
 		if evt.EventType == eventTypeFilterLog && data[134] != 0 {
 			rec.Reason = filterLogSourceName(data[134])
@@ -689,7 +738,11 @@ func (er *EventReader) logEvent(data []byte) {
 	// policy ID from the trailing [136:140] slot, so the close record resolves
 	// the admitting policy name instead of policy 0.
 	if evt.EventType != eventTypeScreenDrop {
-		rec.PolicyName = er.resolvePolicyName(rec.PolicyID)
+		if policyDenyStamped {
+			rec.PolicyName = er.resolvePolicyNameAtGeneration(rec.PolicyID, policyGeneration)
+		} else {
+			rec.PolicyName = er.resolvePolicyName(rec.PolicyID)
+		}
 	}
 
 	// #4915: stamp the per-EVENT monotonic ordinal into EventSeq (it increments
@@ -958,6 +1011,7 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	evt.IngressIfindex = binary.LittleEndian.Uint32(data[128:132])
 	evt.AppID = binary.LittleEndian.Uint16(data[132:134])
 	evt.CloseReason = data[134]
+	_, policyDenyStamped := policyDenyConfigGeneration(data)
 
 	var srcStr, dstStr, natSrcStr, natDstStr string
 	switch evt.AddrFamily {
@@ -1032,8 +1086,12 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	if evt.EventType != eventTypeSessionClose {
 		rec.SessionPkts = 0
 		rec.SessionBytes = 0
-		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
-		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		if policyDenyStamped {
+			rec.RuleID = evt.PolicyID
+		} else {
+			rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
+			rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		}
 		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
 		if evt.EventType == eventTypeFilterLog && evt.CloseReason != 0 {
 			rec.Reason = filterLogSourceName(evt.CloseReason)
@@ -1043,6 +1101,13 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	}
 	if evt.EventType == eventTypeScreenDrop {
 		rec.ScreenCheck = screenFlagName(evt.PolicyID)
+	}
+	if evt.EventType == eventTypePolicyDeny && policyDenyStamped {
+		if name, ok := dataplane.ReservedPolicyName(evt.PolicyID); ok {
+			rec.PolicyName = name
+		} else {
+			rec.PolicyName = dataplane.UnattributedPolicyName
+		}
 	}
 	// #4915: the dataplane's stable session id rides the additive [152:160] slot
 	// on a SESSION_CREATE / SESSION_CLOSE frame. Read it ONLY when the frame

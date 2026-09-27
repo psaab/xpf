@@ -188,6 +188,9 @@ pub(super) fn emit_policy_deny_event(
         policy_id,
         rule_id: policy_id,
         term_id: 0,
+        // #10978: the numeric ID is positional; its map is trustworthy only
+        // for the config generation that evaluated the deny.
+        config_generation: meta.config_generation,
         reason: RT_FLOW_CLOSE_REASON_POLICY,
         owner_rg_id: owner_rg_id_to_wire(owner_rg_id),
         // #2520: carry the resolved AppID (the caller runs the same
@@ -262,6 +265,7 @@ pub(super) fn emit_host_inbound_deny_event(
         policy_id: 0,
         rule_id: 0,
         term_id: 0,
+        config_generation: meta.config_generation,
         reason: RT_FLOW_CLOSE_REASON_HOST_INBOUND,
         // Host-local sessions are not policy-forwarded; owner_rg_id 0.
         owner_rg_id: 0,
@@ -311,6 +315,7 @@ pub(super) fn emit_screen_drop_event(
         application_id: 0,
         filter_id: 0,
         screen_id: screen_reason_id(reason),
+        config_generation: 0,
         // #2470: stamp the dataplane DECISION instant (wall-clock Unix ns) at
         // emit time. `now_ns` is CLOCK_MONOTONIC.
         timestamp_ns: crate::event_stream::mono_ns_to_wall_clock_unix_ns(now_ns),
@@ -367,6 +372,7 @@ pub(super) fn emit_screen_alarm_event(
         application_id: 0,
         filter_id: 0,
         screen_id: screen_reason_id(reason),
+        config_generation: 0,
         // #2470: stamp the dataplane DECISION instant (wall-clock Unix ns) at
         // emit time, same as the screen-drop path. `now_ns` is CLOCK_MONOTONIC.
         timestamp_ns: crate::event_stream::mono_ns_to_wall_clock_unix_ns(now_ns),
@@ -516,6 +522,7 @@ pub(super) fn emit_filter_log_event(
         application_id: app_id,
         filter_id,
         screen_id: 0,
+        config_generation: 0,
         // #2470: stamp the dataplane DECISION instant (wall-clock Unix ns) at
         // emit time. `now_ns` is CLOCK_MONOTONIC.
         timestamp_ns: crate::event_stream::mono_ns_to_wall_clock_unix_ns(now_ns),
