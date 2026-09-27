@@ -440,12 +440,12 @@ type Config struct {
 	// xpf_scheduler_republish_stale_seconds gauge. Optional; if nil, the
 	// gauge is not emitted.
 	SchedulerRepublishStaleSecondsFn func() float64
-	// SchedulerRepublishFailClosedFn reports whether the scheduler-republish
-	// failure streak has persisted past the bounded age and the scheduler has
-	// escalated to fail-closed — forcing scheduled policies inactive (deny) so
-	// a permit stops forwarding past its window close (#5669). Backs the
-	// xpf_scheduler_republish_fail_closed gauge (0/1, no labels). Optional; if
-	// nil, the gauge is not emitted.
+	// SchedulerRepublishFailClosedFn reports whether the scheduler's bounded-age
+	// republish failure latch is set (#5669). The scheduler state is forced
+	// inactive, but a wedged dataplane may still enforce the last-known schedule
+	// and permit traffic (#10906). Backs xpf_scheduler_republish_fail_open_stale
+	// and the deprecated xpf_scheduler_republish_fail_closed alias (0/1, no
+	// labels). Optional; if nil, neither gauge is emitted.
 	SchedulerRepublishFailClosedFn func() bool
 	// FeedsFn surfaces live dynamic-address feed status for the
 	// xpf_feed_seconds_since_last_success / xpf_feed_stale gauges (#2050).

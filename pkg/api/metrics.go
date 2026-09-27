@@ -314,12 +314,13 @@ type xpfCollector struct {
 	// failure streak in seconds (0 when healthy).
 	schedulerRepublishFailed *prometheus.Desc
 	schedulerRepublishStale  *prometheus.Desc
-	// #5669: 0/1 gauge — 1 while the scheduler-republish failure streak has
-	// persisted past the bounded age and the scheduler has escalated to
-	// fail-closed (forcing scheduled policies inactive/deny), distinct from the
-	// climbing stale-seconds age so an operator can alarm on the crisp
-	// fail-closed crossing.
-	schedulerRepublishFailClosed *prometheus.Desc
+	// #10906: 0/1 gauge for the bounded-age FAIL-OPEN-STALE condition. The
+	// latch forces scheduler state inactive, but a wedged helper may still
+	// enforce the last-known schedule (including a permit). This is the
+	// honest alerting name; schedulerRepublishFailClosed is a compatibility
+	// alias for existing consumers.
+	schedulerRepublishFailOpenStale *prometheus.Desc
+	schedulerRepublishFailClosed    *prometheus.Desc
 
 	// #1799: 0/1 gauge — 1 while the running active config failed to
 	// persist to disk and the configstore's background retry has not
@@ -1029,6 +1030,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.schedulerRepublishFailed
 	ch <- c.schedulerRepublishStale
 	ch <- c.schedulerRepublishFailClosed
+	ch <- c.schedulerRepublishFailOpenStale
 	ch <- c.hostInboundConntrackRevocationPending
 	ch <- c.hostInboundConntrackRevocationFailures
 	ch <- c.managedServiceReloadPending
@@ -1667,6 +1669,9 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 		if c.srv.schedulerRepublishFailClosedFn() {
 			v = 1
 		}
+		// Preserve the old series as a deprecated alias for existing alerts.
+		ch <- prometheus.MustNewConstMetric(c.schedulerRepublishFailOpenStale,
+			prometheus.GaugeValue, v)
 		ch <- prometheus.MustNewConstMetric(c.schedulerRepublishFailClosed,
 			prometheus.GaugeValue, v)
 	}
