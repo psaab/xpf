@@ -784,6 +784,10 @@ def virt_customize(work_qcow, xpf_deb):
         # prevent networkd from creating bridge forwarding.
         "--copy-in", f"{HERE}/xpf-transit-closed.service:/usr/lib/systemd/system",
         "--run-command", "systemctl enable xpf-transit-closed.service",
+        # #10751: stage and enable the separate host-input barrier. It runs
+        # before networkd, and RequiredBy keeps address setup blocked on failure.
+        "--copy-in", f"{HERE}/xpf-input-closed.service:/usr/lib/systemd/system",
+        "--run-command", "systemctl enable xpf-input-closed.service",
         "--copy-in", f"{HERE}/xpf-uefi-slots:/usr/local/sbin",
         "--copy-in", f"{HERE}/xpf-uefi-slots.service:/usr/lib/systemd/system",
         "--run-command", "chmod 0755 /usr/local/sbin/xpf-uefi-slots",

@@ -65,6 +65,11 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   boot unit runs it before `systemd-networkd.service`.
 - `xpfd transit-barrier remove` — removes both transit-barrier tables so package
   removal can release the boot/shutdown fence.
+- `xpfd input-barrier close` — installs the host-input DROP barrier without
+  loading configuration or taking the daemon lock. Its separate early-boot
+  unit closes host input before `systemd-networkd.service`.
+- `xpfd input-barrier remove` — removes the host-input barrier after the real
+  firewall or a safe fallback owns host-input enforcement.
 - A kernel without bridge nf_tables reports degraded success with a warning
   when the inet barrier is active; inet failures and real bridge errors fail.
 

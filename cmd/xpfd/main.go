@@ -48,6 +48,7 @@ const (
 	cmdCheckConfig
 	cmdExportConfig
 	cmdTransitBarrier
+	cmdInputBarrier
 	cmdUnknown
 )
 
@@ -125,6 +126,8 @@ func classifyCommand(argv []string) xpfdCommand {
 		return cmdExportConfig
 	case "transit-barrier":
 		return cmdTransitBarrier
+	case "input-barrier":
+		return cmdInputBarrier
 	}
 	// Reject unknown positional arguments — prevents accidentally starting
 	// a second daemon when running "xpfd show ..." outside the CLI. Use the
@@ -218,6 +221,12 @@ func main() {
 
 	case cmdTransitBarrier:
 		code := runTransitBarrierSubcommand(os.Args[2:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
+	case cmdInputBarrier:
+		code := runInputBarrierSubcommand(os.Args[2:], os.Stdout, os.Stderr)
 		if code != 0 {
 			os.Exit(code)
 		}

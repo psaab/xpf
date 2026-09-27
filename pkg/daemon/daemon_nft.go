@@ -652,12 +652,18 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// so this cannot race a subsequent install.
 		d.hostInboundEnforced.Store(false)
 		// #7181: both tables are gone, so no gap fence stands and the last
-		// attempt succeeded. Leaving the staleness flag set here would render a
-		// deliberate teardown as a failed render.
+		// attempt succeeded. Leaving staleness set would render teardown as failure.
 		d.hostInboundGapFenceActive.Store(false)
 		d.hostInboundLastApplyFailed.Store(false)
 		d.hostInboundLastFailureUnixNano.Store(0)
 		d.hostInboundCoveredAddrs = nil
+		// Enforcement is intentionally absent; only now may the pre-networkd
+		// barrier hand off to the configured no-enforcement posture.
+		if err := nftInstaller.RemoveEarlyInputBarrier(); err != nil {
+			err = tagNftInstallErr(err)
+			slog.Warn("failed to remove early host-input barrier after no-enforcement teardown", "err", err)
+			return fmt.Errorf("remove early host-input barrier after host-inbound teardown: %w", err)
+		}
 		return nil
 	}
 	// #5582: the configured WireGuard listen port(s). The XDP shim steers
@@ -772,12 +778,23 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				d.hostInboundGapFenceActive.Store(true)
 			}
 		}
+		var barrierHandoffErr error
+		if d.hostInboundEnforced.Load() {
+			// The real table or an address-scoped cold-boot/gap fence now
+			// protects the current address snapshot. A zero-drop fallback
+			// deliberately leaves the early barrier installed until a later
+			// successful install or no-enforcement teardown.
+			if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
+				barrierErr = tagNftInstallErr(barrierErr)
+				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
+				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
+			}
+		}
 		// #7181: the retained generation is unchanged and may still be
 		// protecting, so this marks the applied state STALE rather than
 		// clearing Established -- exactly the distinction a sticky bool cannot
 		// express.
-		d.noteHostInboundApplyFailed(time.Now())
-		return fmt.Errorf("apply host-inbound nftables filter: %w", err)
+		return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), barrierHandoffErr)
 	}
 	if overlay != nil {
 		if verifyErr := nftInstaller.VerifyHostInboundOverlay(*overlay); verifyErr != nil {
@@ -821,6 +838,12 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		slog.Warn("failed to delete obsolete host-inbound gap fence after successful real install",
 			"err", err)
 	}
+	var barrierHandoffErr error
+	if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
+		barrierErr = tagNftInstallErr(barrierErr)
+		slog.Warn("failed to remove early host-input barrier after real install", "err", barrierErr)
+		barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound install: %w", barrierErr)
+	}
 	// #5566: reconcile Linux netfilter conntrack against the just-applied
 	// host-inbound set. The early reply-direction established accept precedes
 	// the per-zone coarse drops, while original-direction established traffic
@@ -849,7 +872,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	slog.Info("host-inbound filter applied", "zones", len(views),
 		"unzoned_deny_v4", len(unzonedV4), "unzoned_deny_v6", len(unzonedV6),
 		"junos_host_deny_programs", len(programs))
-	return nil
+	return barrierHandoffErr
 }
 
 // installHostInboundGapFence installs the #5789 ADDITIVE gap fence for the

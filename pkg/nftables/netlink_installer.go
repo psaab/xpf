@@ -39,6 +39,12 @@ const (
 )
 
 type Installer interface {
+	// InstallEarlyInputBarrier installs the #10751 pre-networkd host-input
+	// barrier, a separate config-free DROP chain removed on daemon apply
+	// handoff.
+	InstallEarlyInputBarrier() error
+	// RemoveEarlyInputBarrier idempotently removes that boot-only input barrier.
+	RemoveEarlyInputBarrier() error
 	// InstallHostInbound installs the real host-inbound table (#3070/#3333).
 	InstallHostInbound(spec HostInboundSpec) error
 	// VerifyHostInboundOverlay reads back the exact marker and leading DROP
@@ -55,14 +61,8 @@ type Installer interface {
 	InstallLo0ColdBootFence(spec FenceSpec) error
 	// InstallGapFence installs the #5789 additive coverage-gap fence.
 	InstallGapFence(spec GapFenceSpec) error
-	// InstallLo0 installs the lo0 loopback input filter (#3445/#3392) and
-	// reports how many kernel rules the spec lowered to. ZERO rules means the
-	// installed table is an empty `policy accept` shell that enforces NOTHING —
-	// a filter name that resolves to no filter, a filter with no terms, or one
-	// whose every term lowers to zero rules (a Junos match-nothing scope). The
-	// caller must not record such an install as a real operator filter being
-	// loaded (#6529); a bare "the install succeeded" boolean cannot tell the two
-	// apart.
+	// InstallLo0 installs the #3445/#3392 loopback input filter and reports
+	// how many kernel rules the spec lowered to.
 	InstallLo0(spec Lo0FilterSpec) (rules int, err error)
 	// DeleteTable idempotently removes a table (absent -> nil; a genuine
 	// kernel/permission failure -> error, preserving the fail-closed teardown
@@ -84,7 +84,6 @@ type Installer interface {
 	// exact equality; all other calls retain replace-on-call behavior.
 	InstallArmedTransitFence(spec ForwardFenceSpec) error
 	// RemoveTransitBarrier removes the barrier from both families.
-
 	// Idempotent; a genuine failure is returned because a table that survives
 	// teardown leaves the box transit-closed while armed — the black hole this
 	// design exists to avoid.

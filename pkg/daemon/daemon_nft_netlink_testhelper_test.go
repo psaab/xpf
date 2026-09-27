@@ -35,20 +35,20 @@ func init() {
 // no kernel state.
 type noopNftInstaller struct{}
 
+func (noopNftInstaller) InstallEarlyInputBarrier() error                           { return nil }
+func (noopNftInstaller) RemoveEarlyInputBarrier() error                            { return nil }
 func (noopNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error             { return nil }
 func (noopNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverlay) error { return nil }
 func (noopNftInstaller) InstallColdBootFence(xnft.FenceSpec) error                 { return nil }
 func (noopNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error              { return nil }
 func (noopNftInstaller) InstallGapFence(xnft.GapFenceSpec) error                   { return nil }
 func (noopNftInstaller) InstallTransitBarrier() error                              { return nil }
-func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error {
-	return nil
-}
-func (noopNftInstaller) RemoveTransitBarrier() error                   { return nil }
-func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error { return nil }
-func (noopNftInstaller) RemoveIpsecDivert() error                      { return nil }
-func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)  { return fakeLo0Rules(s), nil }
-func (noopNftInstaller) DeleteTable(string) error                      { return nil }
+func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error      { return nil }
+func (noopNftInstaller) RemoveTransitBarrier() error                               { return nil }
+func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error             { return nil }
+func (noopNftInstaller) RemoveIpsecDivert() error                                  { return nil }
+func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)              { return fakeLo0Rules(s), nil }
+func (noopNftInstaller) DeleteTable(string) error                                  { return nil }
 
 // fakeNftInstaller is the per-test failure-injection seam. A nil hook succeeds
 // (returns nil); a set hook decides the result and can capture the spec/name for
@@ -62,8 +62,11 @@ type fakeNftInstaller struct {
 	lo0              func(xnft.Lo0FilterSpec) error
 	// lo0Rules overrides the rendered rule count InstallLo0 reports (#6529).
 	// nil means "derive it from the spec" (fakeLo0Rules).
-	lo0Rules *int
-	del      func(string) error
+	lo0Rules                 *int
+	earlyInputBarrierCalls   []string
+	earlyInputBarrierInstall func() error
+	earlyInputBarrierRemove  func() error
+	del                      func(string) error
 	// #7191: barrier call recorder. barrierCalls appends "install"/"remove" in
 	// order so a test can assert the SEQUENCE, not just that a call happened —
 	// install-then-remove and remove-then-install have opposite meanings for a
@@ -86,6 +89,22 @@ type fakeNftInstaller struct {
 	quarantineGuard func(xnft.IpsecDivertSpec) error
 	quarantineCalls []string
 	overlayReadback func(xnft.HostInputFenceOverlay) error
+}
+
+func (f *fakeNftInstaller) InstallEarlyInputBarrier() error {
+	f.earlyInputBarrierCalls = append(f.earlyInputBarrierCalls, "install")
+	if f.earlyInputBarrierInstall != nil {
+		return f.earlyInputBarrierInstall()
+	}
+	return nil
+}
+
+func (f *fakeNftInstaller) RemoveEarlyInputBarrier() error {
+	f.earlyInputBarrierCalls = append(f.earlyInputBarrierCalls, "remove")
+	if f.earlyInputBarrierRemove != nil {
+		return f.earlyInputBarrierRemove()
+	}
+	return nil
 }
 
 func (f *fakeNftInstaller) InstallHostInbound(s xnft.HostInboundSpec) error {
@@ -167,6 +186,8 @@ func (c countingNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverla
 	return nil
 }
 
+func (c countingNftInstaller) InstallEarlyInputBarrier() error               { *c.calls++; return nil }
+func (c countingNftInstaller) RemoveEarlyInputBarrier() error                { *c.calls++; return nil }
 func (c countingNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error { *c.calls++; return nil }
 func (c countingNftInstaller) InstallColdBootFence(xnft.FenceSpec) error     { *c.calls++; return nil }
 func (c countingNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error  { *c.calls++; return nil }

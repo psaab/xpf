@@ -13,6 +13,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Install live-address host-input fences on #1960/#10297 fail-closed
     cold boots, preserving management addresses while blocking data addresses
     until a valid config can be applied (#10732).
+  * Install a separate pre-networkd host-input barrier before addresses become
+    reachable, preserve loopback/FRR/HA control traffic, and hand off only after
+    the first host-inbound enforcement or no-enforcement teardown (#10751).
   * Register day-0 and Debian maintainer-script regression tests with
     `make selftest` and census both test locations (#10747).
   * Mark subscriber-overrun gaps in CLI flow and packet-drop, gRPC packet-drop,

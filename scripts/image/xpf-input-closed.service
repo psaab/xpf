@@ -1,0 +1,39 @@
+# xpf #10751 boot host-input fence.
+#
+# Persisted systemd-networkd .network files install addresses and IPv6 link-local
+# addresses before xpfd starts. xpfd starts after network-online + FRR, and its
+# first host-inbound table is installed in the first apply tail. This separate
+# input-only unit installs a config-free inet input DROP chain before networkd
+# can bring addresses up, closing the host-listener window at cold boot.
+#
+# Keep this separate from xpf-transit-closed.service: the #9852 forward unit and
+# its xpfd command are deliberately forward-only. The early input barrier admits
+# loopback, established/related, mandatory L3 control, and the FRR/HA control-plane
+# ports/protocols needed during the boot handoff. All ordinary host services are
+# denied until xpfd atomically installs host-inbound enforcement (or completes a
+# no-enforcement teardown) and removes this barrier.
+#
+# RequiredBy=systemd-networkd.service is essential, not merely an ordering hint:
+# a failed barrier install MUST prevent systemd-networkd from bringing up any
+# addresses. ExecStart is deliberately bare, without systemd's '-' prefix.
+# xpfd's `input-barrier` command loads no config and takes no daemon lock.
+[Unit]
+DefaultDependencies=no
+After=nftables.service
+Before=network-pre.target systemd-networkd.service frr.service xpfd.service
+Wants=network-pre.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/usr/local/sbin/xpfd input-barrier close
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xpf-input-closed
+
+[Install]
+WantedBy=sysinit.target
+RequiredBy=systemd-networkd.service
