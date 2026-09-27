@@ -478,10 +478,18 @@ fn reserve_synced_interface_identity(
     // it PAT'd the flow, the flow's own source port when it preserved it —
     // the same reconstruction `release_source_nat_allocation_with_mode` uses,
     // so the reservation and its eventual release name one tuple.
-    let incumbent_holders = capture_previous_holders
-        .then(|| alloc.holder_mask_for_flow(&flow))
-        .flatten();
-    match alloc.reserve_interface_identity(flow, rewrite_src, translated_port, now_ns, holder) {
+    #[cfg(test)]
+    crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+    let mut incumbent_holders = None;
+    match alloc.reserve_interface_identity(
+        flow,
+        rewrite_src,
+        translated_port,
+        now_ns,
+        holder,
+        capture_previous_holders,
+        &mut incumbent_holders,
+    ) {
         InterfaceDomainReserve::Owned => {
             *previous_holders = incumbent_holders;
             true
@@ -663,9 +671,9 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     rule.persistent_nat_timeout_ns,
                 )
             });
-            let incumbent_holders = capture_previous_holders
-                .then(|| rule.pool_allocator.holder_mask_for_flow(&flow))
-                .flatten();
+            #[cfg(test)]
+            crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+            let mut incumbent_holders = None;
             if let Ok(translated) = rule.pool_allocator.reserve_address_only_maybe_persistent(
                 flow,
                 rewrite_src,
@@ -673,6 +681,8 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 now_ns,
                 holder,
                 persistent,
+                capture_previous_holders,
+                &mut incumbent_holders,
             ) {
                 *previous_holders = incumbent_holders;
                 // #8115 R2: the identity the ACTIVE node chose may be one a
@@ -786,9 +796,9 @@ fn reserve_synced_on_first_pool_owner<'a>(
             ip: rewrite_src,
             port: rewrite_src_port,
         };
-        let incumbent_holders = capture_previous_holders
-            .then(|| rule.pool_allocator.holder_mask_for_flow(&flow))
-            .flatten();
+        #[cfg(test)]
+        crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+        let mut incumbent_holders = None;
         if rule.pool_allocator.reserve_flow_maybe_persistent(
             flow,
             translated,
@@ -797,6 +807,8 @@ fn reserve_synced_on_first_pool_owner<'a>(
             now_ns,
             holder,
             persistent,
+            capture_previous_holders,
+            &mut incumbent_holders,
         ) {
             *previous_holders = incumbent_holders;
             // #8115 R2: see the address-only arm above. `reserve_flow` checks
