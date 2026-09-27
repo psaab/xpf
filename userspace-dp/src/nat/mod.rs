@@ -233,7 +233,8 @@ pub(crate) use source::{
     // #6600: the coordinator's pre-publish reservation and its rollback. NOT
     // test-only, unlike the untracked entry points below — these are the
     // production import path.
-    reserve_synced_source_nat_allocation_untracked, retained_pool_index_map,
+    reserve_synced_source_nat_allocation_untracked,
+    reserve_synced_source_nat_allocation_untracked_with_holder_snapshot, retained_pool_index_map,
     retained_pool_index_map_v4,
     rollback_source_nat_allocation_for_worker,
 };

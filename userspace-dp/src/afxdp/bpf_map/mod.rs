@@ -659,6 +659,22 @@ struct BpfSessionValueV6 {
     routing_domain: u32,
 }
 
+/// Exact conntrack value observed before a strict mirror overwrite.
+pub(crate) struct ConntrackEntrySnapshot(ConntrackEntrySnapshotData);
+
+enum ConntrackEntrySnapshotData {
+    V4 {
+        key: [u8; std::mem::size_of::<BpfSessionKeyV4>()],
+        value: [u8; std::mem::size_of::<BpfSessionValueV4>()],
+    },
+    V6 {
+        key: [u8; std::mem::size_of::<BpfSessionKeyV6>()],
+        value: [u8; std::mem::size_of::<BpfSessionValueV6>()],
+    },
+    #[cfg(test)]
+    Test(ConntrackPublishRecord),
+}
+
 #[inline]
 fn restamp_bpf_value_v4(value: &mut BpfSessionValueV4, metadata: &SessionMetadata) {
     value.policy_id = metadata.policy_id;
@@ -756,8 +772,10 @@ fn refresh_cluster_synced_flags(flags: u16, origin: Option<SessionOrigin>) -> u1
 /// from a publish of the WRONG row, and the three pre-existing call sites all
 /// publish rows this fixture must not be satisfied by.
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ConntrackPublishRecord {
+    pub(super) key: SessionKey,
+    pub(super) nat: NatDecision,
     pub(super) is_reverse: bool,
     pub(super) ingress_ifindex: u32,
     pub(super) ingress_vlan_id: u16,
@@ -766,6 +784,7 @@ pub(super) struct ConntrackPublishRecord {
     pub(super) app_id: u16,
     pub(super) session_id: u64,
     pub(super) cluster_synced: bool,
+    pub(super) result: Option<ConntrackPublishResult>,
 }
 
 // #8105: the recorder is THREAD-LOCAL, not process-global.
@@ -796,6 +815,58 @@ pub(super) struct ConntrackPublishRecord {
 thread_local! {
     static CONNTRACK_PUBLISHES: std::cell::RefCell<Vec<ConntrackPublishRecord>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONNTRACK_PUBLISH_OVERRIDES:
+        std::cell::RefCell<std::collections::VecDeque<ConntrackPublishResult>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+#[cfg(test)]
+pub(crate) const CONNTRACK_TEST_MAP_FD: c_int = -2;
+
+#[cfg(test)]
+thread_local! {
+    static CONNTRACK_TEST_ROWS:
+        std::cell::RefCell<std::collections::HashMap<SessionKey, ConntrackPublishRecord>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    static CONNTRACK_RESTORE_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn bare_conntrack_test_key(key: &SessionKey) -> SessionKey {
+    let mut key = key.clone();
+    key.routing_domain = 0;
+    key.discriminator = Default::default();
+    key
+}
+
+#[cfg(test)]
+pub(crate) fn conntrack_row_for_test(key: &SessionKey) -> Option<ConntrackPublishRecord> {
+    CONNTRACK_TEST_ROWS.with(|rows| rows.borrow().get(&bare_conntrack_test_key(key)).cloned())
+}
+
+#[cfg(test)]
+pub(crate) struct ConntrackRestoreFailureGuard;
+
+#[cfg(test)]
+impl Drop for ConntrackRestoreFailureGuard {
+    fn drop(&mut self) {
+        CONNTRACK_RESTORE_FAIL.with(|fail| fail.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn force_conntrack_restore_failure_for_test() -> ConntrackRestoreFailureGuard {
+    CONNTRACK_RESTORE_FAIL.with(|fail| fail.set(true));
+    ConntrackRestoreFailureGuard
+}
+
+#[cfg(test)]
+pub(crate) fn clear_conntrack_rows_for_test() {
+    CONNTRACK_TEST_ROWS.with(|rows| rows.borrow_mut().clear());
 }
 
 /// #6965/#8105: clear this thread's recorder so a sampling test starts from a
@@ -830,6 +901,29 @@ pub(crate) enum ConntrackPublishResult {
     GateBusy,
     KernelError,
     NoMap,
+}
+
+/// #10788-F1: override conntrack publish outcomes on this test thread. This
+/// drives the strict import's forward-success / reverse-failure compensation
+/// branch without requiring a privileged live BPF map.
+#[cfg(test)]
+pub(crate) struct ConntrackPublishOverrideGuard;
+
+#[cfg(test)]
+impl Drop for ConntrackPublishOverrideGuard {
+    fn drop(&mut self) {
+        CONNTRACK_PUBLISH_OVERRIDES.with(|results| results.borrow_mut().clear());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_conntrack_publish_results_for_test(
+    results: &[ConntrackPublishResult],
+) -> ConntrackPublishOverrideGuard {
+    CONNTRACK_PUBLISH_OVERRIDES.with(|slot| {
+        *slot.borrow_mut() = results.iter().copied().collect();
+    });
+    ConntrackPublishOverrideGuard
 }
 
 pub(crate) fn publish_bpf_conntrack_entry(
@@ -900,6 +994,8 @@ fn publish_bpf_conntrack_entry_raw(
     {
         CONNTRACK_PUBLISHES.with(|records| {
             records.borrow_mut().push(ConntrackPublishRecord {
+                key: key.clone(),
+                nat: decision.nat,
                 is_reverse: metadata.is_reverse,
                 ingress_ifindex: metadata.ingress_ifindex,
                 ingress_vlan_id: metadata.ingress_vlan_id,
@@ -908,6 +1004,7 @@ fn publish_bpf_conntrack_entry_raw(
                 app_id,
                 session_id,
                 cluster_synced: origin.is_cluster_synced_origin(),
+                result: None,
             });
         });
     }
@@ -926,7 +1023,7 @@ fn publish_bpf_conntrack_entry_raw(
     }
     flags = cluster_synced_flags(flags, origin.is_cluster_synced_origin());
 
-    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
+    let result = match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
         (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
             publish_conntrack::publish_v4_session(
                 conntrack_v4_fd,
@@ -966,7 +1063,40 @@ fn publish_bpf_conntrack_entry_raw(
         (libc::AF_INET, IpAddr::V4(..), IpAddr::V4(..)) => ConntrackPublishResult::NoMap,
         (libc::AF_INET6, IpAddr::V6(..), IpAddr::V6(..)) => ConntrackPublishResult::NoMap,
         _ => ConntrackPublishResult::IntentionallySkipped,
+    };
+    #[cfg(test)]
+    let result = if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD
+        || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD
+    {
+        ConntrackPublishResult::Written
+    } else {
+        result
+    };
+    #[cfg(test)]
+    let result = CONNTRACK_PUBLISH_OVERRIDES
+        .with(|results| results.borrow_mut().pop_front())
+        .unwrap_or(result);
+    #[cfg(test)]
+    {
+        let record = CONNTRACK_PUBLISHES.with(|records| {
+            let mut records = records.borrow_mut();
+            records.last_mut().map(|record| {
+                record.result = Some(result);
+                record.clone()
+            })
+        });
+        if result == ConntrackPublishResult::Written
+            && (conntrack_v4_fd == CONNTRACK_TEST_MAP_FD
+                || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD)
+            && let Some(record) = record
+        {
+            CONNTRACK_TEST_ROWS.with(|rows| {
+                rows.borrow_mut()
+                    .insert(bare_conntrack_test_key(&record.key), record);
+            });
+        }
     }
+    result
 }
 
 /// Publish while the caller owns the tuple admission lease.
@@ -1000,6 +1130,129 @@ pub(crate) fn publish_bpf_conntrack_entry_under_gate(
         timeout_secs,
         origin,
     )
+}
+
+/// Snapshot the exact bare-key row while the caller owns the tuple admission
+/// lease. `Err(())` means lookup failed for a reason other than a missing row.
+pub(crate) fn snapshot_bpf_conntrack_entry_under_gate(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> Result<Option<ConntrackEntrySnapshot>, ()> {
+    #[cfg(test)]
+    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+        return Ok(conntrack_row_for_test(key)
+            .map(|record| ConntrackEntrySnapshot(ConntrackEntrySnapshotData::Test(record))));
+    }
+    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
+        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+            let bpf_key =
+                bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
+            let mut value = [0u8; std::mem::size_of::<BpfSessionValueV4>()];
+            let rc = unsafe {
+                libbpf_sys::bpf_map_lookup_elem(
+                    conntrack_v4_fd,
+                    (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                    value.as_mut_ptr().cast::<c_void>(),
+                )
+            };
+            if rc == 0 {
+                let mut key_bytes = [0u8; std::mem::size_of::<BpfSessionKeyV4>()];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        (&bpf_key as *const BpfSessionKeyV4).cast::<u8>(),
+                        key_bytes.as_mut_ptr(),
+                        key_bytes.len(),
+                    );
+                }
+                Ok(Some(ConntrackEntrySnapshot(ConntrackEntrySnapshotData::V4 {
+                    key: key_bytes,
+                    value,
+                })))
+            } else if rc == -libc::ENOENT
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
+            {
+                Ok(None)
+            } else {
+                Err(())
+            }
+        }
+        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+            let bpf_key =
+                bpf_session_key_v6(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
+            let mut value = [0u8; std::mem::size_of::<BpfSessionValueV6>()];
+            let rc = unsafe {
+                libbpf_sys::bpf_map_lookup_elem(
+                    conntrack_v6_fd,
+                    (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                    value.as_mut_ptr().cast::<c_void>(),
+                )
+            };
+            if rc == 0 {
+                let mut key_bytes = [0u8; std::mem::size_of::<BpfSessionKeyV6>()];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        (&bpf_key as *const BpfSessionKeyV6).cast::<u8>(),
+                        key_bytes.as_mut_ptr(),
+                        key_bytes.len(),
+                    );
+                }
+                Ok(Some(ConntrackEntrySnapshot(ConntrackEntrySnapshotData::V6 {
+                    key: key_bytes,
+                    value,
+                })))
+            } else if rc == -libc::ENOENT
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
+            {
+                Ok(None)
+            } else {
+                Err(())
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Restore the exact row bytes captured by
+/// `snapshot_bpf_conntrack_entry_under_gate`, without acquiring another gate.
+pub(crate) fn restore_bpf_conntrack_entry_under_gate(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    snapshot: &ConntrackEntrySnapshot,
+) -> bool {
+    match &snapshot.0 {
+        ConntrackEntrySnapshotData::V4 { key, value } if conntrack_v4_fd >= 0 => unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v4_fd,
+                key.as_ptr().cast::<c_void>(),
+                value.as_ptr().cast::<c_void>(),
+                libbpf_sys::BPF_ANY as u64,
+            ) == 0
+        },
+        ConntrackEntrySnapshotData::V6 { key, value } if conntrack_v6_fd >= 0 => unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v6_fd,
+                key.as_ptr().cast::<c_void>(),
+                value.as_ptr().cast::<c_void>(),
+                libbpf_sys::BPF_ANY as u64,
+            ) == 0
+        },
+        #[cfg(test)]
+        ConntrackEntrySnapshotData::Test(record)
+            if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD
+                || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD =>
+        {
+            if CONNTRACK_RESTORE_FAIL.with(std::cell::Cell::get) {
+                return false;
+            }
+            CONNTRACK_TEST_ROWS.with(|rows| {
+                rows.borrow_mut()
+                    .insert(bare_conntrack_test_key(&record.key), record.clone());
+            });
+            true
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1041,6 +1294,12 @@ fn delete_bpf_conntrack_entry_raw(
     conntrack_v6_fd: c_int,
     key: &SessionKey,
 ) -> bool {
+    #[cfg(test)]
+    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+        return CONNTRACK_TEST_ROWS
+            .with(|rows| rows.borrow_mut().remove(&bare_conntrack_test_key(key)))
+            .is_some();
+    }
     match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
         (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
             let bpf_key = bpf_session_key_v4(
