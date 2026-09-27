@@ -873,14 +873,20 @@ func nodesToJSON(nodes []*Node) map[string]interface{} {
 			result[n.KeyPath()+" @inactive"] = "inactive"
 		}
 		if n.IsLeaf {
-			// Leaf node: key is first key, value is remaining keys joined.
+			// Leaf node: a lone value is scalar; multiple values remain separate
+			// JSON array elements so quoted tokens cannot be confused with joined
+			// unquoted tokens.
 			var val interface{}
 			if len(n.Keys) == 1 {
 				val = true
 			} else if len(n.Keys) == 2 {
 				val = n.Keys[1]
 			} else {
-				val = strings.Join(n.Keys[1:], " ")
+				values := make([]interface{}, len(n.Keys)-1)
+				for i, value := range n.Keys[1:] {
+					values[i] = value
+				}
+				val = values
 			}
 			key := n.Keys[0]
 			// #5194 A3-b2-F11: a REPEATED leaf statement (e.g. two `name-server`
@@ -888,16 +894,12 @@ func nodesToJSON(nodes []*Node) map[string]interface{} {
 			// repeats as an ordered array. Promote the second and later
 			// occurrences of a key to a []interface{}, appending in document
 			// order, so no configured value is silently dropped. A single
-			// occurrence stays scalar (unchanged). A prior container map under
-			// the same key (a malformed mixed leaf/container shape) is left
+			// occurrence retains its scalar or multi-value shape. A prior
+			// container map under the same key (a malformed mixed shape) is left
 			// alone — the container branch owns that key.
 			if existing, ok := result[key]; ok {
 				if _, isMap := existing.(map[string]interface{}); !isMap {
-					if arr, isArr := existing.([]interface{}); isArr {
-						result[key] = append(arr, val)
-					} else {
-						result[key] = []interface{}{existing, val}
-					}
+					result[key] = mergeJSONValues(existing, val)
 				}
 			} else {
 				result[key] = val
