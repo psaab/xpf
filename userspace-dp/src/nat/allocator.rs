@@ -2848,6 +2848,13 @@ impl PortAllocator {
         }
     }
 
+    /// Snapshot the current worker-holder mask before a coordinator
+    /// same-flow reservation can retire the incumbent translated tuple.
+    pub(crate) fn holder_mask_for_flow(&self, flow: &SourceNatFlowKey) -> Option<u128> {
+        let live = self.lock_live();
+        live.live_by_flow.get(flow).map(|allocation| allocation.holders)
+    }
+
     pub(super) fn release_flow(
         &self,
         flow: SourceNatFlowKey,
