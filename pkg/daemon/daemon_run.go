@@ -850,6 +850,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		shell.SetNATPoolExhaustionAlarmsFn(d.natPoolExhaustionAlarms)
 		// #10025: active pre-break fabric-auth clock alarms.
 		shell.SetClockSkewAlarmsFn(d.clockSkewAlarms)
+		shell.SetPeerSnapshotProtocolAlarmFn(d.peerSnapshotProtocolDeferredAlarm)
 		shell.SetFeedsFn(func() map[string]feeds.FeedInfo {
 			if d.feeds != nil {
 				return d.feeds.AllFeeds()

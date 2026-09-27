@@ -190,6 +190,17 @@ before promotion (#10782). This refuses a connected pre-v4 peer that would
 narrow a multi-zone scoped policy; a disconnected peer remains a liveness
 exception because it cannot receive the config yet.
 
+The offline exception is not a permanent bypass: the active multi-zone config
+is held back at the config-push boundary and the reconnect reconciler repeats
+the gate before queueing. The preflight records the peer snapshot-protocol
+generation and connection epoch; a disconnect/reconnect or capability change
+between preflight and queueing withholds the config and leaves the
+`(peer-epoch, config-generation)` push marker unclaimed. A capable reconnect
+reconciles the active config; an incapable or still-unlearned peer leaves a
+CRITICAL `show system alarms` entry (local CLI and gRPC) and a Config Sync
+cluster-history event until a compatible push succeeds. The same guarded push
+path is used after a later `ConfirmCommitAs` clears the commit-confirmed timer.
+
 `rollbackTargetAppliablePreflight` (`rollback_target_appliable_6707.go`) adds
 the missing property: the target must be **appliable at all**. The predicate is
 `dpuserspace.PolicyContentRejectionReasons`, the Go single source of truth for

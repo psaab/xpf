@@ -1102,7 +1102,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			slog.Debug("cluster sync: ignoring capabilities from a superseded connection")
 			return
 		}
+		s.peerSnapshotProtocolWriteMu.Lock()
+		if s.peerSnapshotProtocol.Load() != uint32(peerProto) {
+			s.peerSnapshotProtocolGeneration++
+		}
 		s.peerSnapshotProtocol.Store(uint32(peerProto))
+		s.peerSnapshotProtocolWriteMu.Unlock()
 		s.peerCapabilityFlags.Store(uint32(peerFlags))
 		s.peerSessionSyncWire.Store(uint32(peerWire))
 		s.mu.Unlock()

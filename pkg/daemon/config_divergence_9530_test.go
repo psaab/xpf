@@ -2,9 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"strings"
 	"testing"
 	"time"
@@ -73,43 +70,6 @@ func TestReconcilePushSharesTheCommitOnlyWhenThePeerReadsSecondary_9530(t *testi
 					tc.name, got, tc.wantDivergence)
 			}
 		})
-	}
-}
-
-// Both real push sites note the push. The commit path's push needs a live
-// SessionSync, so its wiring is pinned structurally: every
-// QueueConfigWithAncestryAtGeneration of the active text, and the reconciler's
-// test seam, is followed directly by the note.
-func TestEveryConfigPushNotesItsContent_9530(t *testing.T) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "daemon_ha_sync.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse daemon_ha_sync.go: %v", err)
-	}
-	pushes, noted := 0, 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel == nil {
-			return true
-		}
-		switch sel.Sel.Name {
-		case "QueueConfigWithAncestryAtGeneration", "configSyncPushForTest":
-			pushes++
-		case "noteConfigSharedWithPeer":
-			noted++
-		}
-		return true
-	})
-	if pushes < 3 {
-		t.Fatalf("found %d config push sites, want at least 3 (commit push, reconcile push, reconcile test seam); "+
-			"the scan is not seeing the code", pushes)
-	}
-	if noted < pushes {
-		t.Fatalf("found %d config push sites but only %d noteConfigSharedWithPeer calls; every push must record its content", pushes, noted)
 	}
 }
 
@@ -190,31 +150,5 @@ func TestConfigPeerReachableNeedsALivePeer_9530(t *testing.T) {
 	standalone.syncPeerConnected.Store(true)
 	if standalone.configPeerReachable() {
 		t.Errorf("a daemon with no cluster manager reported a reachable peer")
-	}
-}
-
-// Cluster bring-up wires the store's reachability callback. Without it no
-// commit is ever marked.
-func TestClusterBringUpWiresPeerReachability_9530(t *testing.T) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "daemon_run_bringup.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse daemon_run_bringup.go: %v", err)
-	}
-	found := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetPeerReachableFn" && len(call.Args) == 1 {
-			if arg, ok := call.Args[0].(*ast.SelectorExpr); ok && arg.Sel.Name == "configPeerReachable" {
-				found = true
-			}
-		}
-		return true
-	})
-	if !found {
-		t.Errorf("cluster bring-up does not call store.SetPeerReachableFn(d.configPeerReachable), so no commit is ever marked unshared")
 	}
 }

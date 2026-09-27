@@ -224,6 +224,7 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	// the promoted generation: the pre-flighted candidate is the one promoted, or
 	// the commit conflicts and re-validates. Plain commit has no auto-rollback
 	// target, so the pre-flight passes nil.
+	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
 		func(cand *config.Config) error {
 			// #5840: reject a standalone<->cluster topology change BEFORE store
@@ -270,9 +271,11 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			// preflights: the topology/identity gates above decide whether this
 			// node may be clustered at all, and this one only has meaning once
 			// that is settled.
-			if perr := d.peerSnapshotProtocolCommitPreflight(cand); perr != nil {
+			auth, perr := d.peerSnapshotProtocolCommitPreflight(cand)
+			if perr != nil {
 				return perr
 			}
+			peerSnapshotAuth = auth
 			return d.deviceMapCommitPreflight(cand, nil)
 		},
 		func(gen uint64) (*config.Config, error) {
@@ -282,7 +285,7 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	if err != nil {
 		return nil, err
 	}
-	return d.applyAndSyncCommitted(oldActive, compiled, syncPeer)
+	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
 }
 
 // applyAndSyncCommitted runs the reconcile pipeline for a config the store has
@@ -306,6 +309,14 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 // committed config is returned alongside the error so the operator sees the
 // failure while the standby still converges.
 func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncPeer peerSyncPolicy) (*config.Config, error) {
+	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, nil)
+}
+
+func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
+	oldActive, compiled *config.Config,
+	syncPeer peerSyncPolicy,
+	peerSnapshotAuth *peerSnapshotProtocolAuthorization,
+) (*config.Config, error) {
 	var activeGen uint64
 	if d.store != nil {
 		activeGen, _ = d.store.ActiveSnapshot()
@@ -374,10 +385,11 @@ func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncP
 	// pre-#5962 code resolved rg0ConfigSyncAuthority in commitAndApplyOperator
 	// instead — before Commit — so a promotion landing between the two checks
 	// produced a successful commit with the push silently skipped.
+	var peerPushErr error
 	if syncPeer.wantsPush(d.cluster) {
-		d.pushCommittedConfigToPeer()
+		peerPushErr = d.pushCommittedConfigToPeer(peerSnapshotAuth)
 	}
-	joined := errors.Join(applyErr, clearErr)
+	joined := errors.Join(applyErr, clearErr, peerPushErr)
 	// The store-side candidate lineage was already retired at bind time in
 	// commitWithGenBinding, which transferred ownership to the daemon-side
 	// descriptor copy keyed by activeGen. That copy is retained here in every
@@ -466,12 +478,37 @@ func applyErrSkipsPeerSync(err error) bool {
 // (applyAndSyncCommitted, #4034) and the commit-confirmed rollback re-sync
 // (resyncRolledBackConfigToPeer, #3868) so both route through one observable
 // point. Caller holds d.applySem and has already promoted the active config.
-func (d *Daemon) pushCommittedConfigToPeer() {
+func (d *Daemon) pushCommittedConfigToPeer(
+	peerSnapshotAuth *peerSnapshotProtocolAuthorization,
+) error {
+	var activeCfg *config.Config
+	var configText string
+	if d.store != nil {
+		activeCfg = d.store.ActiveConfig()
+		configText = d.store.ShowActive()
+	}
+	if peerSnapshotAuth == nil {
+		var err error
+		peerSnapshotAuth, err = d.peerSnapshotProtocolAuthorizationForConfig(activeCfg)
+		if err != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+			return err
+		}
+	}
+	if peerSnapshotAuth != nil {
+		allowed, err := d.revalidatePeerSnapshotAuthorization(peerSnapshotAuth, configText)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return nil
+		}
+	}
 	if d.syncPeerForTest != nil {
 		d.syncPeerForTest()
-		return
+		return nil
 	}
-	d.syncConfigToPeer()
+	return d.syncConfigToPeerWithAuthorization(peerSnapshotAuth)
 }
 
 // syncAndApply is the cluster-sync-recv analogue of commitAndApply.
@@ -790,6 +827,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// candidate into the promotion after the pre-flight cleared the examined one.
 	// The rollback target (active) is stable across the transaction: it changes
 	// only under d.applySem, held here from pre-flight through the commit.
+	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
 		func(cand *config.Config) error {
 			// #5840: same standalone<->cluster topology guard as commitAndApply,
@@ -831,9 +869,11 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// representability gate as a plain commit. Otherwise the candidate
 			// is promoted and pushed to a pre-v4 peer that lenient-compiles a
 			// multi-zone scope to first-zone-only.
-			if perr := d.peerSnapshotProtocolCommitPreflight(cand); perr != nil {
+			auth, perr := d.peerSnapshotProtocolCommitPreflight(cand)
+			if perr != nil {
 				return perr
 			}
+			peerSnapshotAuth = auth
 			// #6707: the rollback target must be APPLIABLE, not merely
 			// device-map safe. The timeout path applies it unconditionally
 			// (OQ-15.2, see the rollback callback), so a target the dataplane
@@ -857,7 +897,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	if err != nil {
 		return nil, err
 	}
-	return d.applyAndSyncCommitted(oldActive, compiled, syncPeer)
+	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
 }
 
 // commitAndApplyOperator is the peer-sync-aware entry point for an
@@ -1063,10 +1103,9 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 // pushCommittedConfigToPeer so the confirm-timeout rollback path is unit-testable
 // without a live cluster transport: rollback_resync_test.go injects
 // d.syncPeerForTest to observe the call; production leaves it nil and the real
-// syncConfigToPeer runs. MUST be called with d.applySem held and AFTER
-// PromoteRollback so d.store.ShowActive() (read inside syncConfigToPeer ->
-// pushConfigToPeer) reflects the rolled-back config, not the abandoned
-// unconfirmed one.
+// syncConfigToPeerWithAuthorization re-reads the active rollback target and
+// obtains a fresh peer-snapshot authorization before the guarded queue write.
+// rather than the abandoned unconfirmed candidate.
 func (d *Daemon) resyncRolledBackConfigToPeer() {
-	d.pushCommittedConfigToPeer()
+	_ = d.pushCommittedConfigToPeer(nil)
 }

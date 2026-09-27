@@ -52,12 +52,17 @@ func (d *Daemon) armSyncReadyTimer() {
 }
 
 func (d *Daemon) onSessionSyncPeerConnected() {
+	d.configSyncMu.Lock()
 	d.syncPeerConnected.Store(true)
 	// #5863: a fresh connection is a new epoch. The config-sync reconciler
 	// keys its "already pushed" marker on this epoch, so bumping it here forces
 	// a re-push to the reconnected peer even if the prior connection had
 	// already been satisfied.
 	d.syncPeerConnEpoch.Add(1)
+	d.configSyncHasPushed = false
+	d.configSyncPushedEpoch = 0
+	d.configSyncPushedGen = 0
+	d.configSyncMu.Unlock()
 	d.hbSuppressStart.Store(0) // fresh connection → reset suppression cap
 
 	// Determine whether this is a true cold start or a routine reconnect.
@@ -128,7 +133,9 @@ func (d *Daemon) onSessionSyncBulkAckReceived() {
 }
 
 func (d *Daemon) onSessionSyncPeerDisconnected() {
+	d.configSyncMu.Lock()
 	d.syncPeerConnected.Store(false)
+	d.configSyncMu.Unlock()
 	gen := d.syncPrimeRetryGen.Add(1)
 
 	// On disconnect after a completed bulk exchange, preserve primed state
@@ -413,34 +420,26 @@ func (p peerSyncPolicy) wantsPush(cl *cluster.Manager) bool {
 // syncConfigToPeer sends the active config to the cluster peer if this node is
 // the RG0 config-sync authority and config sync is enabled.
 func (d *Daemon) syncConfigToPeer() {
+	_ = d.syncConfigToPeerWithAuthorization(nil)
+}
+
+func (d *Daemon) syncConfigToPeerWithAuthorization(
+	auth *peerSnapshotProtocolAuthorization,
+) error {
 	if d.getSessionSync() == nil {
-		return
+		return nil
 	}
 	// Only sync if this node is the RG0 (config ownership group) primary — the
 	// same rule the operator commit entry points use to decide whether to
 	// attempt a push (#5054).
 	if !rg0ConfigSyncAuthority(d.cluster) {
-		return
+		return nil
 	}
-	d.pushConfigToPeer()
+	return d.pushConfigToPeerWithAuthorization(auth)
 }
 
-// pushConfigToPeer sends the active config to the cluster peer. The FUNCTION
-// itself does not check primary/secondary status — the gate lives at the call
-// site.
-//
-// Its only production caller is syncConfigToPeer, which gates on
-// rg0ConfigSyncAuthority. The peer-reconnect path no longer arrives here: since
-// #5863 it runs through reconcileConfigSyncToPeer, which is RG0-primary-gated
-// too (so a reconnecting SECONDARY never overwrites the authoritative primary's
-// config — #2239/#4385) and calls QueueConfig directly. Those two are the ONLY
-// production QueueConfig sites, which is why configGenCounter advances only on
-// the RG0 config-sync authority — the property the #5274 config-epoch guard and
-// the #6419 disposition both rest on. (Only, not atomically: both sites sample
-// authority and then queue several statements later, so a demotion landing in
-// that gap can still let one already-authorized increment through. It is a
-// steady-state property, not a mutual-exclusion guarantee.) Adding an ungated
-// push here would break it outright.
+// activeConfigSnapshotForPeer samples the active tree and its rename lineage
+// under pendingRenameMu, without consuming a wire generation.
 func (d *Daemon) activeConfigSnapshotForPeer() (*config.Config, string, []configstore.RenameDescriptor) {
 	if d == nil || d.store == nil {
 		return nil, "", nil
@@ -487,41 +486,119 @@ func (d *Daemon) activeConfigSnapshotAndReserveForPeer(
 	return cfg, configText, ancestry, ss.ReserveConfigGen()
 }
 
-func (d *Daemon) pushConfigToPeer() {
+// pushConfigToPeerWithAuthorization applies the commit's captured peer token,
+// or captures a fresh token for rollback/reconcile callers, before queueing.
+
+func (d *Daemon) pushConfigToPeerWithAuthorization(
+	auth *peerSnapshotProtocolAuthorization,
+) error {
 	ss := d.getSessionSync()
 	if ss == nil {
-		return
+		return nil
 	}
-	// The snapshot and generation reservation share pendingRenameMu; release
-	// it before queueing because QueueConfig may await a key and perform I/O.
+	var cfg *config.Config
+	var configText string
+	var ancestry []configstore.RenameDescriptor
+	var reservedGen uint64
 	if d.configSyncPushForTest != nil {
-		_, configText, _ := d.activeConfigSnapshotForPeer()
-		if configText == "" {
-			return
+		cfg, configText, ancestry = d.activeConfigSnapshotForPeer()
+	} else {
+		cfg, configText, ancestry, reservedGen =
+			d.activeConfigSnapshotAndReserveForPeer(ss, 0)
+	}
+	if cfg == nil || configText == "" {
+		return nil
+	}
+	if auth == nil {
+		var err error
+		auth, err = d.peerSnapshotProtocolAuthorizationForConfig(cfg)
+		if err != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+			return err
 		}
+	}
+	if auth != nil {
+		allowed, err := d.revalidatePeerSnapshotAuthorization(auth, configText)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return nil
+		}
+	}
+	epoch := d.syncPeerConnEpoch.Load()
+	if auth != nil {
+		epoch = auth.peerConnEpoch
+	}
+	if d.configSyncPushForTest != nil {
 		d.configSyncPushForTest()
-		d.noteConfigSharedWithPeer(configText) // #9530
-		if d.syncPeerConnected.Load() {
-			d.markConfigSyncPushed(configText)
+		if auth != nil {
+			allowed, err := d.revalidatePeerSnapshotAuthorization(auth, configText)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return nil
+			}
 		}
-		return
+		if !d.noteConfigSharedWithPeerAtEpoch(configText, epoch) {
+			return nil
+		}
+		if d.syncPeerConnected.Load() && !d.markConfigSyncPushedAtEpoch(configText, epoch) {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+				"peer connection changed while recording a config push; reconciliation will retry")
+			return ErrPeerSnapshotProtocolAuthorizationStale
+		}
+		d.clearPeerSnapshotConfigSyncDeferred(configText)
+		return nil
 	}
-	cfg, configText, ancestry, reservedGen := d.activeConfigSnapshotAndReserveForPeer(ss, 0)
-	if cfg == nil || reservedGen == 0 {
-		return
+	if reservedGen == 0 {
+		return nil
 	}
-	if !ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen) {
-		return
+	var queued bool
+	if auth != nil {
+		queued = ss.QueueConfigWithPeerSnapshotProtocolAtGeneration(
+			configText, ancestry, reservedGen, auth.state,
+			userspace.MinProtocolMultiZoneScopedPolicy, auth.peerConnEpoch,
+			func() uint64 { return d.syncPeerConnEpoch.Load() })
+	} else {
+		queued = ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen)
 	}
-	d.noteConfigSharedWithPeer(configText) // #9530
-	// #5863: record the reconcile marker so the level-triggered reconciler
-	// treats this generation as already pushed on the current connection
-	// epoch and does not redundantly re-push it. Only mark when a peer
-	// connection is actually up — QueueConfig no-ops with no active conn, and
-	// a later (re)connect bumps the epoch so the reconciler pushes fresh.
-	if d.syncPeerConnected.Load() {
-		d.markConfigSyncPushed(configText)
+	if !queued {
+		if auth != nil {
+			_, err := d.revalidatePeerSnapshotAuthorization(auth, configText)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	}
+	if auth != nil {
+		allowed, err := d.revalidatePeerSnapshotAuthorization(auth, configText)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return nil
+		}
+	}
+	if !d.noteConfigSharedWithPeerAtEpoch(configText, epoch) {
+		if auth != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+				"peer connection changed after the config write; reconciliation will retry")
+		}
+		return nil
+	}
+	if d.syncPeerConnected.Load() && !d.markConfigSyncPushedAtEpoch(configText, epoch) {
+		if auth != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+				"peer connection changed while recording a config push; reconciliation will retry")
+			return ErrPeerSnapshotProtocolAuthorizationStale
+		}
+		return nil
+	}
+	d.clearPeerSnapshotConfigSyncDeferred(configText)
+	return nil
 }
 
 // configGenerationHash reduces the active config text to a compact generation
@@ -545,18 +622,29 @@ func (d *Daemon) configSyncStableAfter() time.Duration {
 	return 30 * time.Second
 }
 
-// markConfigSyncPushed records that configText's generation has been pushed to
-// the peer on the current connection epoch (#5863). Any push path (commit sync
-// or the reconciler) records through here so the marker always reflects the
-// latest generation pushed on the live connection, and a redundant reconcile is
-// a no-op.
-func (d *Daemon) markConfigSyncPushed(configText string) {
+// markConfigSyncPushedAtEpoch records a queued generation only while the daemon
+// still names the connection epoch that received it.
+
+func (d *Daemon) markConfigSyncPushedAtEpoch(configText string, epoch uint64) bool {
 	gen := configGenerationHash(configText)
-	epoch := d.syncPeerConnEpoch.Load()
 	d.configSyncMu.Lock()
+	defer d.configSyncMu.Unlock()
+	if d.syncPeerConnEpoch.Load() != epoch || !d.syncPeerConnected.Load() {
+		return false
+	}
 	d.configSyncHasPushed = true
 	d.configSyncPushedEpoch = epoch
 	d.configSyncPushedGen = gen
+	return true
+}
+
+func (d *Daemon) clearConfigSyncPushedAtEpoch(epoch, gen uint64) {
+	d.configSyncMu.Lock()
+	if d.configSyncPushedEpoch == epoch && d.configSyncPushedGen == gen {
+		d.configSyncHasPushed = false
+		d.configSyncPushedEpoch = 0
+		d.configSyncPushedGen = 0
+	}
 	d.configSyncMu.Unlock()
 }
 
@@ -613,8 +701,6 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	if ss == nil && d.configSyncPushForTest == nil {
 		return
 	}
-	// Desired-state gates, re-read fresh on every call (persistent state, not
-	// a captured edge).
 	if !d.syncPeerConnected.Load() {
 		slog.Debug("cluster: config-sync reconcile skip (no peer connection)", "reason", reason)
 		return
@@ -623,12 +709,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		slog.Debug("cluster: config-sync reconcile skip (not RG0 primary)", "reason", reason)
 		return
 	}
-	if time.Since(d.startTime) < d.configSyncStableAfter() {
-		slog.Debug("cluster: config-sync reconcile skip (uptime below stability threshold)", "reason", reason)
-		return
-	}
 	cfg, configText, ancestry := d.activeConfigSnapshotForPeer()
-	var reservedGen uint64
 	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.ConfigSync {
 		slog.Debug("cluster: config-sync reconcile skip (config sync disabled)", "reason", reason)
 		return
@@ -637,14 +718,54 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		return
 	}
 	gen := configGenerationHash(configText)
+	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(cfg)
+	if err != nil {
+		d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+		return
+	}
+	if time.Since(d.startTime) < d.configSyncStableAfter() {
+		slog.Debug("cluster: config-sync reconcile skip (uptime below stability threshold)", "reason", reason)
+		return
+	}
+	var reservedGen uint64
+	if d.configSyncPushForTest == nil {
+		latestCfg, latestText, latestAncestry, latestReservedGen :=
+			d.activeConfigSnapshotAndReserveForPeer(ss, gen)
+		if latestCfg == nil {
+			return
+		}
+		cfg, configText, ancestry, reservedGen =
+			latestCfg, latestText, latestAncestry, latestReservedGen
+		gen = configGenerationHash(configText)
+		auth, err = d.peerSnapshotProtocolAuthorizationForConfig(cfg)
+		if err != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(), err.Error())
+			return
+		}
+	}
 	epoch := d.syncPeerConnEpoch.Load()
+	if auth != nil {
+		epoch = auth.peerConnEpoch
+		allowed, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
+		if authErr != nil {
+			return
+		}
+		if !allowed {
+			return
+		}
+	}
 
-	// Check-and-claim the (epoch × generation) marker under one lock so two
-	// concurrent triggers (e.g. a promotion racing the safety-net tick) push
-	// at most once. Claim the marker BEFORE the push: a failed/dropped send
-	// disconnects, and the next (re)connect bumps the epoch so the reconciler
-	// re-pushes on the fresh connection.
+	// Claim only after the live peer passed the snapshot-protocol gate. Queue
+	// failure or a boundary revalidation failure clears this claim immediately.
 	d.configSyncMu.Lock()
+	if d.syncPeerConnEpoch.Load() != epoch || !d.syncPeerConnected.Load() {
+		d.configSyncMu.Unlock()
+		if auth != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+				"peer connection changed before config queueing; reconciliation will retry")
+		}
+		return
+	}
 	if d.configSyncHasPushed && d.configSyncPushedEpoch == epoch && d.configSyncPushedGen == gen {
 		d.configSyncMu.Unlock()
 		slog.Debug("cluster: config-sync reconcile no-op (already pushed for epoch/generation)",
@@ -655,42 +776,48 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	d.configSyncPushedEpoch = epoch
 	d.configSyncPushedGen = gen
 	d.configSyncMu.Unlock()
-	if d.configSyncPushForTest == nil {
-		latestCfg, latestText, latestAncestry, latestReservedGen :=
-			d.activeConfigSnapshotAndReserveForPeer(ss, gen)
-		if latestCfg == nil {
-			// The active tree changed while the marker was being claimed.
-			// Leave the marker clear; the next level-triggered pass samples
-			// and reserves the new tree in the correct order.
-			d.configSyncMu.Lock()
-			if d.configSyncPushedEpoch == epoch && d.configSyncPushedGen == gen {
-				d.configSyncHasPushed = false
-			}
-			d.configSyncMu.Unlock()
-			return
-		}
-		configText, ancestry, reservedGen = latestText, latestAncestry, latestReservedGen
-	}
 
 	slog.Info("cluster: config-sync reconcile pushing config to peer",
 		"reason", reason, "epoch", epoch, "generation", gen, "size", len(configText))
 	if d.configSyncPushForTest != nil {
 		d.configSyncPushForTest()
-		d.noteConfigSharedWithPeer(configText)
-		return
-	}
-	if !ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen) {
-		// The capability-gated sidecar may still be waiting for peer
-		// discovery, or the write may have failed. Let the capability callback
-		// or the next reconcile attempt claim this generation again.
-		d.configSyncMu.Lock()
-		if d.configSyncPushedEpoch == epoch && d.configSyncPushedGen == gen {
-			d.configSyncHasPushed = false
+	} else {
+		var queued bool
+		if auth != nil {
+			queued = ss.QueueConfigWithPeerSnapshotProtocolAtGeneration(
+				configText, ancestry, reservedGen, auth.state,
+				userspace.MinProtocolMultiZoneScopedPolicy, auth.peerConnEpoch,
+				func() uint64 { return d.syncPeerConnEpoch.Load() })
+		} else {
+			queued = ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen)
 		}
-		d.configSyncMu.Unlock()
+		if !queued {
+			d.clearConfigSyncPushedAtEpoch(epoch, gen)
+			if auth != nil {
+				_, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
+				if authErr != nil {
+					return
+				}
+			}
+			return
+		}
+	}
+	if auth != nil {
+		allowed, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
+		if authErr != nil || !allowed {
+			d.clearConfigSyncPushedAtEpoch(epoch, gen)
+			return
+		}
+	}
+	if !d.noteConfigSharedWithPeerAtEpoch(configText, epoch) {
+		d.clearConfigSyncPushedAtEpoch(epoch, gen)
+		if auth != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, d.syncPeerConnEpoch.Load(),
+				"peer connection changed after config queueing; reconciliation will retry")
+		}
 		return
 	}
-	d.noteConfigSharedWithPeer(configText) // #9530
+	d.clearPeerSnapshotConfigSyncDeferred(configText)
 }
 
 // configSyncReconcileLoop is the low-frequency level-triggered safety net for

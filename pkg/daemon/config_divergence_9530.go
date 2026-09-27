@@ -52,6 +52,21 @@ func (d *Daemon) noteConfigSharedWithPeer(pushedText string) {
 	}
 }
 
+// noteConfigSharedWithPeerAtEpoch prevents an old connection's successful
+// write from clearing the unshared marker after a reconnect has begun.
+func (d *Daemon) noteConfigSharedWithPeerAtEpoch(pushedText string, epoch uint64) bool {
+	if d == nil {
+		return false
+	}
+	d.configSyncMu.Lock()
+	defer d.configSyncMu.Unlock()
+	if d.syncPeerConnEpoch.Load() != epoch || !d.syncPeerConnected.Load() {
+		return false
+	}
+	d.noteConfigSharedWithPeer(pushedText)
+	return true
+}
+
 // reportConfigSyncDivergence raises the divergence as a cluster event once, after
 // a peer config sync applied. The store has already logged it at Error.
 func (d *Daemon) reportConfigSyncDivergence() {
@@ -76,4 +91,69 @@ func (d *Daemon) reportConfigSyncDivergence() {
 	if d.cluster != nil {
 		d.cluster.RecordEvent(cluster.EventConfigSync, 0, msg)
 	}
+}
+
+// reportPeerSnapshotConfigSyncDeferred raises one operator-visible alarm for a
+// config generation and peer epoch. The alarm is cleared only after that
+// generation is successfully sent to a compatible peer.
+func (d *Daemon) reportPeerSnapshotConfigSyncDeferred(configText string, epoch uint64, reason string) {
+	if d == nil {
+		return
+	}
+	gen := configGenerationHash(configText)
+	msg := fmt.Sprintf("Config sync deferred: %s", reason)
+	d.configSyncMu.Lock()
+	if d.configSyncPeerSnapshotDeferred &&
+		d.configSyncPeerSnapshotDeferredGen == gen &&
+		d.configSyncPeerSnapshotDeferredEpoch == epoch &&
+		d.configSyncPeerSnapshotDeferredMessage == msg {
+		d.configSyncMu.Unlock()
+		return
+	}
+	d.configSyncPeerSnapshotDeferred = true
+	d.configSyncPeerSnapshotDeferredGen = gen
+	d.configSyncPeerSnapshotDeferredEpoch = epoch
+	d.configSyncPeerSnapshotDeferredMessage = msg
+	d.configSyncMu.Unlock()
+	slog.Error("cluster: "+msg, "generation", gen, "peer_epoch", epoch, "issue", "#10782")
+	if d.cluster != nil {
+		d.cluster.RecordEvent(cluster.EventConfigSync, -1, msg)
+	}
+}
+
+func (d *Daemon) clearPeerSnapshotConfigSyncDeferred(configText string) {
+	if d == nil {
+		return
+	}
+	gen := configGenerationHash(configText)
+	d.configSyncMu.Lock()
+	if !d.configSyncPeerSnapshotDeferred {
+		d.configSyncMu.Unlock()
+		return
+	}
+	d.configSyncPeerSnapshotDeferred = false
+	d.configSyncPeerSnapshotDeferredGen = 0
+	d.configSyncPeerSnapshotDeferredEpoch = 0
+	d.configSyncPeerSnapshotDeferredMessage = ""
+	d.configSyncMu.Unlock()
+	slog.Info("cluster: config sync resumed after peer snapshot-protocol deferral",
+		"generation", gen, "issue", "#10782")
+	if d.cluster != nil {
+		d.cluster.RecordEvent(cluster.EventConfigSync, -1,
+			"Config sync resumed after peer snapshot-protocol deferral")
+	}
+}
+
+// peerSnapshotProtocolDeferredAlarm supplies the persistent condition to both
+// local and remote `show system alarms` renderers.
+func (d *Daemon) peerSnapshotProtocolDeferredAlarm() string {
+	if d == nil {
+		return ""
+	}
+	d.configSyncMu.Lock()
+	defer d.configSyncMu.Unlock()
+	if !d.configSyncPeerSnapshotDeferred {
+		return ""
+	}
+	return d.configSyncPeerSnapshotDeferredMessage
 }

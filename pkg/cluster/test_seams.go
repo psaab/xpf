@@ -45,7 +45,14 @@ func (s *SessionSync) SetPeerSnapshotProtocolVersionForTesting(v uint16) {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peerSnapshotProtocolWriteMu.Lock()
+	if s.peerSnapshotProtocol.Load() != uint32(v) {
+		s.peerSnapshotProtocolGeneration++
+	}
 	s.peerSnapshotProtocol.Store(uint32(v))
+	s.peerSnapshotProtocolWriteMu.Unlock()
 }
 
 // DischargeColdPrimeForTesting discharges the currently owed cold-prime debt,
