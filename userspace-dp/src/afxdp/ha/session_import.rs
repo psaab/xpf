@@ -2823,6 +2823,35 @@ mod rejected_mirror_reservation_10790_tests {
         assert!(!stored.origin.is_peer_synced());
         assert_eq!(stored.generation, 5);
         assert!(worker_queue::lock_recover(&commands).is_empty());
+        assert_eq!(coordinator.mirror_restore_failed_total(), 0);
+
+        // A same-tuple replacement does not evict the incumbent, but still
+        // carries its reservation snapshot through strict refusal. Metadata
+        // restore must recognize the unchanged lease as a successful no-op.
+        let mut same_tuple_replacement = synced_entry(key.clone(), local_nat, 7, 512);
+        same_tuple_replacement.metadata.ingress_zone = 3;
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(same_tuple_replacement),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        assert_eq!(
+            source_allocator.holder_mask_for_flow(&local_flow),
+            Some(0b11)
+        );
+        assert_eq!(
+            source_allocator
+                .debug_persistent_lease_for_flow(&local_flow, permit)
+                .expect("same-tuple refusal leaves the incumbent lease intact"),
+            before_replay
+        );
+        assert_eq!(
+            coordinator.mirror_restore_failed_total(),
+            0,
+            "an unchanged same-tuple lease snapshot restores without failure"
+        );
+
 
         // Rolling back the re-adopted local flow after replay returns exactly
         // to the imported idle lifetime; neither holder-mask nor metadata

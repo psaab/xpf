@@ -5402,35 +5402,39 @@ impl SourceNatReservationSnapshot {
                 let Some(current) = live.persistent_by_source.get(&key).copied() else {
                     return false;
                 };
-                let completion_preserved_activation = current.activation_saw_completion
-                    && current.expires_at_ns == previous.expires_at_ns
-                    && current.activation_previous_expires_at_ns
-                        == previous.activation_previous_expires_at_ns
-                    && current.activation_had_previous_lease
-                        == previous.activation_had_previous_lease
-                    && current.activation_previous_timeout_ns
-                        == previous.activation_previous_timeout_ns;
-                // Displacing the last active flow refreshes the idle expiry;
-                // the replay reserve then re-arms the 0 -> 1 activation and
-                // clears `activation_saw_completion`. Recognize that exact
-                // completed-then-reactivated shape as well.
-                let reactivated_after_completion = !current.activation_saw_completion
-                    && current.activation_had_previous_lease
-                    && current.activation_previous_expires_at_ns == current.expires_at_ns
-                    && current.activation_previous_timeout_ns == previous.timeout_ns;
-                if previous.active_flows > 0
-                    && current.active_flows == previous.active_flows
-                    && current.completed_flows == previous.completed_flows.saturating_add(1)
-                    && current.translated == previous.translated
-                    && current.addr_index == previous.addr_index
-                    && current.timeout_ns == previous.timeout_ns
-                    && current.imported == previous.imported
-                    && current.address_only == previous.address_only
-                    && (completion_preserved_activation || reactivated_after_completion)
-                {
-                    Some((key, previous))
+                if current == previous {
+                    None
                 } else {
-                    return false;
+                    let completion_preserved_activation = current.activation_saw_completion
+                        && current.expires_at_ns == previous.expires_at_ns
+                        && current.activation_previous_expires_at_ns
+                            == previous.activation_previous_expires_at_ns
+                        && current.activation_had_previous_lease
+                            == previous.activation_had_previous_lease
+                        && current.activation_previous_timeout_ns
+                            == previous.activation_previous_timeout_ns;
+                    // Displacing the last active flow refreshes the idle expiry;
+                    // the replay reserve then re-arms the 0 -> 1 activation and
+                    // clears `activation_saw_completion`. Recognize that exact
+                    // completed-then-reactivated shape as well.
+                    let reactivated_after_completion = !current.activation_saw_completion
+                        && current.activation_had_previous_lease
+                        && current.activation_previous_expires_at_ns == current.expires_at_ns
+                        && current.activation_previous_timeout_ns == previous.timeout_ns;
+                    if previous.active_flows > 0
+                        && current.active_flows == previous.active_flows
+                        && current.completed_flows == previous.completed_flows.saturating_add(1)
+                        && current.translated == previous.translated
+                        && current.addr_index == previous.addr_index
+                        && current.timeout_ns == previous.timeout_ns
+                        && current.imported == previous.imported
+                        && current.address_only == previous.address_only
+                        && (completion_preserved_activation || reactivated_after_completion)
+                    {
+                        Some((key, previous))
+                    } else {
+                        return false;
+                    }
                 }
             }
             _ => return false,
@@ -5439,7 +5443,10 @@ impl SourceNatReservationSnapshot {
         if let Some((key, previous)) = restore_lease {
             // Both records are active here, so neither the displaced lease nor
             // its saved snapshot belongs in the idle-expiry index.
-            live.persistent_by_source.insert(key, previous);
+            let Some(lease) = live.persistent_by_source.get_mut(&key) else {
+                return false;
+            };
+            *lease = previous;
         }
         let Some(current) = live.live_by_flow.get_mut(&self.flow) else {
             return false;
