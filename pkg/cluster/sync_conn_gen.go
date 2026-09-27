@@ -364,6 +364,43 @@ func (g *fullSetSeqGuard) reset() {
 	g.seq = 0
 }
 
+// configEpochReverseTag (#11055) is the stamp-source tag bit carried in the
+// top bit of SessionValue.ConfigEpoch. Generations derive from MonotonicNanos
+// (initGenState), so the top bit is unused for centuries and reserving it is a
+// semantic tag inside the existing field, not a wire-layout change: no
+// ProtocolVersion bump, and session trailers stay length-gated as before.
+//
+// A legacy receiver reads a tagged value as a very large generation, which its
+// unsigned epoch < barrier comparison admits — fail-OPEN. A current authority
+// strips the tag and compares the raw generation against its own config send
+// counter.
+const configEpochReverseTag = uint64(1) << 63
+
+const configEpochGenMask = ^configEpochReverseTag
+
+// stampConfigEpoch returns the config epoch to stamp on an outbound synced
+// session (#11055). On the RG0 config-sync authority (IsPrimaryFn true) — and
+// on an unwired node (nil, i.e. standalone/tests) — it is today's value: the
+// local send counter, tag clear. On a converged non-authority it is the
+// APPLIED generation in the AUTHORITY's namespace, tagged: the peer applies
+// only authority-pushed configs, so lastAppliedConfigGen names a generation
+// the authority minted and its counter can judge. A non-authority that is not
+// converged (received and applied marks disagree, or applied is zero) stamps
+// 0, the documented disable value — today's fail-OPEN — instead of a stale
+// value a climbing authority threshold would refuse forever (#6419 reason 3:
+// a pinned apply-failure mark, a queue-full drop, or a bulk re-prime reset
+// must not convert into total reverse-direction loss).
+func (s *SessionSync) stampConfigEpoch() uint64 {
+	if s.IsPrimaryFn != nil && !s.IsPrimaryFn() {
+		applied := s.lastAppliedConfigGen.Load()
+		if applied == 0 || applied != s.lastRecvConfigGen.Load() {
+			return 0
+		}
+		return configEpochReverseTag | (applied & configEpochGenMask)
+	}
+	return s.configGenCounter.Load()
+}
+
 // stampInstallGenV4 assigns a fresh install generation to a v4 session being
 // sent and records it (keyed by wire key) so the matching delete can echo the
 // exact generation of the install it cancels (#2170 SMR fix #1). It mutates
@@ -378,38 +415,9 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	// encoding; table-truth bulk sends stamp at their source decision
 	// boundary, before BulkStart and any row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
-	// #5274: stamp the admitting config epoch = the config-sync generation
-	// (#3931) this node currently holds. A session still present in the local
-	// table when it is queued has survived this node's own config-apply
-	// clearSessionsForDeletedPolicies sweep, so it is admitted under the
-	// current config; the receiver refuses it only once IT applies a strictly
-	// newer config (lastAppliedConfigGen advances past this epoch).
-	//
-	// The namespace claim holds in ONE direction only. configGenCounter and the
-	// receiver's lastAppliedConfigGen are the same sender→receiver namespace
-	// when the SENDER is the RG0 config-sync authority — the authority mints the
-	// generation and the peer records the one it applied. In the reverse
-	// (non-authority → authority) direction, reachable only active/active, the
-	// stamp is a value this node's configGenCounter has not advanced since it
-	// last held the authority (its construction seed if it never has), while the
-	// authority's high-water never advances at all, so the guard is inert:
-	// fail-OPEN, no false reject. That residual is deliberate (#5274 scope-out)
-	// and regression-pinned by sync_config_epoch_active_active_6284_test.go.
-	//
-	// #6419 closed the reverse direction as not-cheaply-fixable. Note what the
-	// blocker is and is NOT. Each counter IS live in the role the obvious
-	// shortcut ("non-authority stamps lastAppliedConfigGen, authority thresholds
-	// on configGenCounter") wants to read it: configGenCounter advances on the
-	// authority, lastAppliedConfigGen advances off it. What that asymmetry
-	// establishes is only that the shortcut cannot be written role-free — each
-	// counter is frozen in the OTHER role, so both the stamp site and the
-	// threshold site must branch on IsLocalPrimary(0). The actual kill is that a
-	// role-branched stamp is unreadable across an RG0 handover: role is not
-	// learned atomically by both nodes, and telling the two namespaces apart
-	// needs an authority tag that ConfigEpoch, a bare uint64 on the wire, does
-	// not carry today. See docs/session-sync-architecture.md for the full
-	// argument and for the tagged-epoch variant that remains open.
-	val.ConfigEpoch = s.configGenCounter.Load()
+	// #5274/#11055: preserve the RG0 config-authority namespace and mark its
+	// source so a receiver can compare only when both nodes agree on the role.
+	val.ConfigEpoch = s.stampConfigEpoch()
 	s.genSentMu.Lock()
 	if s.genSentV4 == nil {
 		s.genSentV4 = make(map[dataplane.SessionKey]uint64)
@@ -476,8 +484,8 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	// encoding; table-truth bulk sends stamp at their source decision
 	// boundary, before BulkStart and any row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
-	// #5274: stamp the admitting config epoch (see stampInstallGenV4).
-	val.ConfigEpoch = s.configGenCounter.Load()
+	// #5274/#11055: v6 twin of the authority-relative v4 stamp.
+	val.ConfigEpoch = s.stampConfigEpoch()
 	s.genSentMu.Lock()
 	if s.genSentV6 == nil {
 		s.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
@@ -1265,35 +1273,36 @@ func (s *SessionSync) fullSetGuardsLocked() []*fullSetSeqGuard {
 // recvGenMu. The cost F3 named, serializing unrelated keys, is paid only while
 // two loops apply at once: in steady state one loop applies and the lock is
 // uncontended.
-// configEpochStale reports whether a synced session admitted under config
-// epoch `epoch` must be REFUSED because this node has since applied a STRICTLY
-// newer config (#5274). The peer stamps the session with the #3931 config-sync
-// generation it held when it queued the session (stampInstallGen*);
-// lastAppliedConfigGen is the highest config generation THIS node has applied
-// from that same peer, so the two are directly comparable in one
-// sender→receiver namespace. A newer config the peer committed AND this node
-// applied may DENY the session, and this node's clearSessionsForDeletedPolicies
-// sweep for that config already ran — so installing the delayed session would
-// revive a stale PERMIT the config invalidated. epoch==0 (a legacy/pre-#5274
-// peer, or a local-origin entry) disables the check, unconditionally admitting
-// as before (rolling-upgrade safe). The check is authoritative here in the Go
-// cluster layer: the #3931 namespace lives entirely in SessionSync, and the
-// receiver refuses BEFORE forwarding the install to the userspace helper.
+// configEpochStale reports whether a synced session was stamped under an older
+// config that may deny it (#5274/#11055). The top bit of ConfigEpoch marks the
+// non-authority's stamp: a converged non-authority uses its last-applied
+// authority generation with the tag set, and an authority compares that
+// generation against its own configGenCounter. The authority's own sessions
+// carry an untagged generation; a non-authority compares it against the
+// max(applyingConfigGen, lastAppliedConfigGen) receiver barrier as before.
 //
-// #6284 item 2: the refusal threshold is max(applyingConfigGen, lastApplied-
-// ConfigGen), not the high-water alone. configApplyLoop raises the fence
-// (applyingConfigGen) to the generation it is applying BEFORE running the
-// clearSessionsForDeletedPolicies sweep and lowers it only AFTER the high-water
-// advances (success) or the apply fails, so during that whole window an install
-// stamped with an older epoch is refused against the applying generation
-// instead of admitted against the not-yet-advanced high-water. The fence is
-// read FIRST and folded with a max: on the success-release ordering (high-water
-// stored, THEN fence cleared) this guarantees a reader that observes fence==0
-// has already observed the advanced high-water, so the effective threshold
-// never dips — closing the sub-µs sweep-vs-advance stale-permit race.
+// RG0 ownership is not learned atomically. If the stamp's source tag does not
+// match this node's current role, the two roles disagree about who is
+// authoritative (including the handover/dual-active window), so the namespace
+// is not comparable and the guard fails open. A non-authority also stamps 0
+// until its received and applied marks converge, preserving the existing
+// fail-open behavior during reset and failed config apply rather than creating
+// permanent reverse-direction refusal.
 func (s *SessionSync) configEpochStale(epoch uint64) bool {
 	if epoch == 0 {
 		return false
+	}
+	if s.IsPrimaryFn != nil {
+		if s.IsPrimaryFn() {
+			if epoch&configEpochReverseTag == 0 {
+				return false
+			}
+			epoch &= configEpochGenMask
+			return epoch < s.configGenCounter.Load()
+		}
+		if epoch&configEpochReverseTag != 0 {
+			return false
+		}
 	}
 	barrier := s.applyingConfigGen.Load()
 	if applied := s.lastAppliedConfigGen.Load(); applied > barrier {

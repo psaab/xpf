@@ -3909,15 +3909,15 @@ outside the monitor loop:
   every session install carries a `ConfigEpoch` — the #3931 config-sync
   generation (`configGenCounter`) the sender held when it queued the session
   (`stampInstallGen*`), as a length-gated trailing `uint64` on the session wire
-  (`sync_protocol.go`). The receiver (`installClusterSynced*`) refuses an install
-  whose epoch is **strictly older** than its `lastAppliedConfigGen`
-  (`SessionsStaleConfigIgnored`), because the peer has since committed — and this
-  node has applied — a newer config that may DENY the session. This closes the
-  immediate-policy-invalidation gap: a session admitted under config A that lands
-  after config B's `clearSessionsForDeletedPolicies` sweep is a stale permit the
-  standby would otherwise forward under after failover. Both the stamp
-  (`configGenCounter`) and the compare (`lastAppliedConfigGen`) are in the SAME
-  sender→receiver #3931 namespace, so the comparison is meaningful across nodes.
+  (`sync_protocol.go`). `configEpochStale` interprets that value by the
+  receiver's current RG0 role: a non-authority compares an untagged authority
+  generation against `max(applyingConfigGen, lastAppliedConfigGen)`, while an
+  authority strips the reverse-source tag and compares the non-authority's
+  applied generation against its own `configGenCounter` (#11055). The
+  non-authority stamps `tag | lastAppliedConfigGen` only when its received and
+  applied marks are equal and nonzero; otherwise it stamps 0. A tag/role
+  mismatch during RG0 handover disables comparison rather than comparing
+  independent generations and falsely rejecting a session.
   `epoch == 0` (legacy peer / local-origin) disables the check (rolling-upgrade
   safe); the reconnect `resetRecvGen` zeroes `lastAppliedConfigGen` so a
   rebooted-peer bulk re-prime is never falsely rejected. **That zeroing is
@@ -3981,19 +3981,18 @@ outside the monitor loop:
   *local* commit counter (`Manager.bumpGeneration`) that is not cross-node
   comparable, so the receiver rejects the stale install BEFORE forwarding it to
   the helper, and no config-epoch field or guard is added on the Rust side.
-  **Apply-in-progress fence (#6284, item 2):** the bare `epoch <
-  lastAppliedConfigGen` compare closes the gap only once the high-water has
-  advanced, but the high-water advances AFTER `OnConfigReceived` returns while
-  the `clearSessionsForDeletedPolicies` sweep runs INSIDE it — leaving a sub-µs
-  window where a racing install is admitted against the stale high-water.
-  `configApplyLoop` raises `applyingConfigGen` to the generation it is applying
+  **Apply-in-progress fence (#6284, item 2):** on the authority → peer path,
+  the comparison against `lastAppliedConfigGen` closes the gap only once the
+  high-water has advanced, but it advances AFTER `OnConfigReceived` returns
+  while `clearSessionsForDeletedPolicies` runs INSIDE it — leaving a sub-µs
+  window where a racing install could be admitted against the stale high-water.
+  `configApplyLoop` raises `applyingConfigGen` to the generation being applied
   BEFORE the apply and lowers it only AFTER the high-water advances (success) or
-  the apply fails; `configEpochStale` refuses against `max(applyingConfigGen,
-  lastAppliedConfigGen)` (fence read first), so an older-epoch install racing the
-  window is refused against the applying generation instead of admitted. The
-  guard still covers only the config-authority → peer direction; the reverse
-  active/active direction stays a documented fail-OPEN residual on #6284 (item 1,
-  needs a bidirectional config-gen namespace #5274 scoped out).
+  the apply fails; `configEpochStale` compares against
+  `max(applyingConfigGen, lastAppliedConfigGen)` (fence read first), so an
+  older-epoch install racing the window is refused against the applying
+  generation instead of admitted. The reverse active/active path uses the
+  authority's local generation and source tag as described above.
 - **Receiver-side per-hit policy re-judgment (#8356, closes the #7323 residual):**
   distinct from both guards above, a synced session import lands UNVALIDATED
   (`policy_revalidated_gen: 0`, `userspace-dp/src/session/install.rs:551`).
