@@ -52,5 +52,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Seed fragment-association sharding, scope admission quotas to
     session identity, and drop associations when their admitting
     session closes (#11058).
+  * Return accurate consumed-input counts from sanitizing writers on emit
+    errors, permitting retries without duplicating already-emitted lines
+    (#10900).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
