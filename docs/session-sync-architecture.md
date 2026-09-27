@@ -983,29 +983,34 @@ helper.** The #3931 config-sync-generation namespace lives entirely in
 `SessionSync`; the helper's own `config_generation` is a *local* commit counter
 (`Manager.bumpGeneration`) whose value is independent per node and therefore not
 cross-node comparable. The receiver rejects a stale-epoch install BEFORE it ever
-reaches the helper, so the helper needs no config-epoch field or guard. This
-guard covers the config-authority → peer direction (the issue's scenario, where
-the primary that admits the session is also the RG0 config-sync authority); a
-non-authority's sessions carry the authority-independent seed epoch and the
-guard is inert for them (no false reject), which is acceptable because config
-changes originate on the authority.
+reaches the helper, so the helper needs no config-epoch field or guard. The
+guard protects both config-authority → peer and non-authority → authority
+installs in active/active deployments (#11055): the authority stamps its local
+config generation untagged, while a converged non-authority stamps the
+generation it successfully applied from that authority with the reverse-source
+tag. The receiver compares in the namespace named by the tag and its current
+RG0 role; a role/tag mismatch during handover fails open rather than comparing
+unrelated generations and falsely rejecting sessions. Until received and
+applied config marks converge, a non-authority stamps 0.
 
 #### Apply-in-progress fence — sweep-vs-advance window (#6284, item 2)
 
-The bare epoch compare above (`ConfigEpoch < lastAppliedConfigGen`) closes the
-gap only once `lastAppliedConfigGen` has advanced — but the high-water advances
-**after** `OnConfigReceived` returns, while the deleted-policy sweep
-(`clearSessionsForDeletedPolicies`) runs **inside** it. That leaves a residual
-sub-µs window on the receiver: the moment between the sweep completing and the
-high-water advancing. A session install racing on the `receiveLoop` in that
-window is compared against the STALE high-water and wrongly admitted — reviving
-exactly the permit the just-run sweep invalidated.
+The untagged authority-to-peer epoch compare (`ConfigEpoch <
+lastAppliedConfigGen`) closes the gap only once `lastAppliedConfigGen` has
+advanced — but the high-water advances **after** `OnConfigReceived` returns,
+while the deleted-policy sweep (`clearSessionsForDeletedPolicies`) runs
+**inside** it. That leaves a residual sub-µs window on the non-authority
+receiver: the moment between the sweep completing and the high-water advancing.
+A session install racing on the `receiveLoop` in that window is compared
+against the STALE high-water and wrongly admitted — reviving exactly the permit
+the just-run sweep invalidated.
 
-The apply-in-progress fence (`applyingConfigGen`) closes it. The single-consumer
-`configApplyLoop` raises the fence to the generation it is about to apply
-**before** calling `OnConfigReceived` (so it covers the whole apply, including
-the sweep) and lowers it to 0 only **after** the high-water advances on success
-(or immediately on an apply failure). `configEpochStale` refuses against
+The apply-in-progress fence (`applyingConfigGen`) closes it on this
+authority-to-peer path. The single-consumer `configApplyLoop` raises the fence to
+the generation it is about to apply **before** calling `OnConfigReceived` (so
+it covers the whole apply, including the sweep) and lowers it to 0 only
+**after** the high-water advances on success (or immediately on an apply
+failure). `configEpochStale` refuses against
 `max(applyingConfigGen, lastAppliedConfigGen)`, reading the fence **first** so
 that on the success release order (high-water stored, then fence cleared) a
 reader observing `fence == 0` has necessarily already observed the advanced
@@ -1165,165 +1170,52 @@ session still forwards on.
 An older helper does not know the field and would apply a marked delete
 too, which is why the field bumps the protocol.
 
-**Item 1 (accepted residual — #6419 closed).** The guard covers only the
-config-authority → peer direction (the primary that admits the session is also
-the RG0 config-sync authority). A non-authority's sessions carry the
-authority-independent seed epoch, so the guard is inert for the reverse
-direction in an active/active deployment (fail-OPEN). #6284's residual-COVERAGE
-gap is closed (item 2 by #6366, item 1 by #6418).
+**Bidirectional active/active guard (#11055; closes the #6419 residual).** The
+original #5274 comparison is meaningful only from the RG0 config authority to
+its peer: `configGenCounter` is the authority's outgoing namespace, and the
+non-authority's `lastAppliedConfigGen` records it. The reverse direction now
+uses that same namespace rather than comparing independent node-local seeds.
 
-Closing the reverse direction itself requires a bidirectional
-config-generation namespace that #5274 deliberately scoped out. #6419 evaluated
-the one shortcut that appeared to avoid building a second namespace — "the
-authority A's generations are already a name both nodes can say, so let the
-non-authority B stamp `B.lastAppliedConfigGen` (the A-generation B is running)
-and let A threshold on its own `configGenCounter`" — and closed it as
-unworkable. Recorded here because it has been re-derived more than once; the
-three reasons are structural, not implementation detail:
+`ConfigEpoch` reserves its high bit as the stamp-source tag; the remaining
+63-bit range is ample for generations derived from `MonotonicNanos()`. The
+authority stamps its untagged outgoing generation. A non-authority stamps
+`tag | lastAppliedConfigGen` only when `lastAppliedConfigGen` is nonzero and
+equals `lastRecvConfigGen`; otherwise it stamps 0, preserving the existing
+fail-open behavior while behind, after a failed apply, or during reconnect
+reset. On receipt, an authority strips the tag and compares against its own
+`configGenCounter`; a non-authority accepts only untagged epochs and compares
+against `max(applyingConfigGen, lastAppliedConfigGen)`. A tag/role mismatch
+means the peers have not observed the same RG0 handover, so the generations are
+incomparable and the guard admits rather than falsely rejecting during
+dual-active or delayed-frame windows.
 
-- **The two counters are never simultaneously live on one node, so the shortcut
-  cannot be expressed role-free.** `configGenCounter` advances only through
-  `nextConfigGen` ← `QueueConfig`, whose only production callers
-  (`syncConfigToPeer`, `reconcileConfigSyncToPeer`) are gated on
-  `rg0ConfigSyncAuthority` = `IsLocalPrimary(0)`. `lastAppliedConfigGen`
-  advances only through `recordAppliedConfigGen` on a nil `OnConfigReceived`,
-  and `handleConfigSync` returns `errConfigSyncRejectedPrimary` whenever
-  `IsLocalPrimary(0)`. So a node's send counter is frozen for its whole
-  non-authority tenure and its applied mark for its whole authority tenure, and
-  the shortcut must therefore branch on `IsLocalPrimary(0)` at BOTH the stamp
-  site and the threshold site. A role-FREE formulation is not available as a way
-  out: coalescing with `max(configGenCounter, lastAppliedConfigGen)` chooses
-  between two independent `MonotonicNanos()` boot seeds (`initGenState`), so
-  which side wins is a function of relative node uptime rather than of config
-  order.
+The tag is semantic encoding inside the existing length-gated `uint64` session
+trailer, not a layout change, so it requires no `ProtocolVersion` bump. A legacy
+receiver interprets a tagged value as a very large unsigned epoch and admits it
+against ordinary generation barriers: rolling upgrade remains fail-open, as
+before, until both peers run the tagged implementation.
 
-  To be precise about what this does *not* claim: the role-branched mismatch
-  that follows an RG0 handover is **not permanent by construction**.
-  `reconcileConfigSyncToPeer` runs on the `"rg0-promotion"` trigger, so once the
-  new authority has pushed and the new non-authority has applied, both counters
-  are back in one namespace. Nor, however, is it bounded by the handover itself:
-  the promotion reconciler claims its `(epoch × generation)` dedupe marker
-  **before** sending, so if the demoted node still believed it was primary when
-  the push landed it returns `errConfigSyncRejectedPrimary`, `configApplyLoop`
-  drops that attempt without advancing the applied mark, and every later
-  reconcile tick is deduped by the marker it already claimed. Convergence then
-  waits for a new commit (new generation) or a reconnect (new epoch). So the
-  window is *not* self-limiting to the transition — which makes the next point,
-  not this one, the load-bearing objection.
-- **The handover window needs the wire field the shortcut avoids.** RG0 role is
-  not learned atomically by both nodes: each side updates on its own
-  heartbeat/VRRP timing, so there is necessarily a skew window in which the old
-  authority still believes it is the authority while the new one already does.
-  Dual-active is not theoretical either — the election code has an explicit
-  DUAL-ACTIVE branch (`pkg/cluster/election.go`) that detects both nodes primary
-  for one RG and resolves it by effective priority then node ID, which takes a
-  heartbeat round to converge. Throughout that window BOTH nodes stamp and
-  threshold on `configGenCounter`, i.e. on two independent `MonotonicNanos()`
-  boot seeds compared directly, so whether the guard is inert or refuses *every*
-  inbound synced session is decided by relative uptime. The issue's own proposed
-  remedy — treat the epoch as 0 (the documented disable value) for a session
-  stamped under a different authority incarnation than the receiver's current
-  one — is what would close this, and it requires the receiver to know a stamp's
-  authority incarnation. `SessionValue.ConfigEpoch` is a bare `uint64`
-  (`pkg/dataplane/types.go`) written as eight raw LE bytes with no companion tag
-  (`encodeSessionV4Payload` / `encodeSessionV6Payload`), and nothing else on the
-  session wire identifies the minting authority — so the remedy is exactly the
-  wire field the shortcut set out to avoid.
-- **It converts a self-healing failure into total reverse-direction loss.** A
-  config apply that does not take effect on the non-authority (compile/promote
-  failure, or the RG0-primary rejection above — counted by
-  `ConfigsApplyFailed`) deliberately leaves `lastAppliedConfigGen` pinned so the
-  authority's re-push re-converges (M-2/#4151). With the applied mark as the
-  stamp source, that same condition pins the non-authority's stamp while the
-  authority's threshold keeps climbing on every push, so the authority refuses
-  EVERY reverse-direction session for as long as the apply keeps failing.
-  `resetRecvGen` compounds it: it stores `lastAppliedConfigGen = 0` on each peer
-  bulk re-prime, so the stamp would be 0 — the disable value — through cold
-  prime, which is exactly when bulk sessions flow.
+The promoted-authority case (#7323) is handled by role-specific comparison. A
+promoted node may retain a `lastAppliedConfigGen` from its earlier non-authority
+tenure, but as current authority it compares tagged reverse epochs against its
+own send counter, not that old receive mark. Once the peer has applied the
+promoted authority's pushed config, its tagged stamps and the authority's
+counter are again in one namespace. The role/tag mismatch admits queued frames
+from the handover itself without comparing independent monotonic seeds.
 
-**What remains open: the tagged-epoch variant.** The three reasons above kill
-the *untagged* shortcut, but they do not establish that a new wire field or a
-`ProtocolVersion` bump is structurally required, and an earlier revision of this
-section wrongly said they did. A hostile review of #6419 constructed a variant
-that answers all three without either, and it is recorded here as the concrete
-starting point rather than left to be re-derived:
+The sender's convergence precondition also avoids converting a failed apply or
+queue-full drop into permanent reverse-direction loss: while received and
+applied generations differ, sessions carry epoch 0. This is intentionally
+fail-open until the peer successfully applies a current config, consistent with
+the existing config-sync recovery contract (#4151/#5563).
 
-Reserve the top bit of `ConfigEpoch` as a **stamp-source tag**. The authority
-sends its raw `configGenCounter` (tag clear); a *converged* non-authority sends
-`tag | lastAppliedConfigGen`; anything not converged sends 0. A receiver then
-accepts only the encoding its own role expects — a non-authority expects an
-untagged authority generation and compares it against `lastAppliedConfigGen`
-(exactly today's behaviour), an authority expects a tagged reverse generation,
-strips the tag and compares against `configGenCounter`. Any mismatch between the
-tag and the receiver's role means the sender's role assumption disagrees with
-the receiver's, so the epoch is treated as 0 and the guard disables.
-
-That disagreement case is what dissolves reason 2: during a dual-primary window
-both nodes send untagged and both expect tagged, so both disable rather than
-compare two unrelated boot seeds; during a both-secondary window the symmetric
-thing happens; and a message delayed across a role change fails open on the same
-rule. Reason 3 is answered by the convergence precondition — stamp the tagged
-form only when the received and applied marks agree and are nonzero, so a pinned
-or reset applied mark stamps 0 (today's fail-OPEN) instead of a stale value that
-would refuse everything.
-
-The bit is available in practice: generations derive from `MonotonicNanos()`, so
-the top bit is unused for centuries, and reserving it explicitly is a
-compile-time invariant rather than a wire-layout change. Nor does a semantic tag
-inside an existing field need a `ProtocolVersion` bump — the project bumps for
-incompatible layout changes, session trailers are length-gated, and the
-config-generation trailer itself deliberately avoided a bump. A legacy receiver
-reads a tagged value as a very large generation, which its unsigned `epoch <
-barrier` comparison admits — fail-OPEN, i.e. exactly today's behaviour.
-
-This is a design sketch, not code, and it has not itself been hostile-reviewed
-end to end; the RG0-role plumbing it needs at the stamp and threshold sites does
-already exist. Anyone picking it up owes the usual HA gate — it is session-sync
-coupled and owes a `test-failover` smoke.
-
-Both halves of this directional correctness are regression-pinned by
-`sync_config_epoch_active_active_6284_test.go`: the SAME frozen non-authority
-epoch is REFUSED at a receiver that applied a newer config (the protected
-config-authority → peer direction) and ADMITTED at the config authority (whose
-receive high-water never advances — the inert fail-OPEN reverse direction), and
-
-**#7323 — "the authority's receive high-water never advances" is true only of an
-authority that has NEVER been a secondary.** `lastAppliedConfigGen` is written
-by `recordAppliedConfigGen` and cleared by exactly two things: `initGenState`
-(construction) and `resetRecvGen` (the peer's bulk re-prime). **Nothing clears
-it on a role transition.** So a node that was the secondary, applied the
-authority's config, and was then promoted to RG0 carries that high-water into
-its authority life, and its guard is **LIVE** until the next bulk re-prime.
-
-Measured, same receiver, opposite verdicts decided only by the top bit:
-
-| receiver | barrier | untagged epoch 3 | top-bit-tagged epoch 3 |
-|---|---|---|---|
-| never-applied authority | 0 | admitted (inert) | admitted |
-| **promoted** authority | 10 | **REFUSED** | **admitted** |
-
-That is what #7323's rolling-upgrade argument turns on. Its claim that a legacy
-receiver reading a tagged value is *"fail-OPEN, i.e. exactly today's behaviour"*
-holds only where the barrier is 0. Against a live barrier today's behaviour is
-REFUSE, so the tag does not preserve the status quo — it converts a working
-fail-CLOSED guard into fail-OPEN on a receiver that cannot report it happened.
-A rolling upgrade necessarily involves a failover, so the promoted-authority
-state is the normal path through one rather than an exotic case.
-
-The exposure is bounded — the window is promotion until the peer's next bulk
-re-prime, not forever — and the sender cannot scope around it, because the
-non-authority doing the stamping has no way to know whether the receiver's
-barrier is live. That is what makes this a negotiation problem rather than an
-encoding one.
-
-Pinned by `config_epoch_promoted_authority_7323_test.go`, which asserts CURRENT
-behaviour (it does not implement the tag) so the premise cannot rot again the
-way this paragraph's wording did. The existing `sync_config_epoch_active_active_6284_test.go`
-is not wrong: its INERT arm constructs a never-applied authority, which is a
-real state — just not the only one.
-the sender-side root cause is pinned too (`recordAppliedConfigGen` advances the
-receive high-water but never the send-stamp `configGenCounter`, so a
-non-authority stamps its synced-out sessions with the frozen boot-seed epoch).
+`sync_config_epoch_11055_test.go` exercises actual v4/v6 stamp and install
+paths: a newer authority config rejects tagged stale sessions, a converged
+equal-generation reverse session is accepted, divergent sender marks stamp 0,
+and mismatched epochs survive role-handover cases without false rejection.
+`config_epoch_promoted_authority_7323_test.go` verifies that a promoted
+authority uses its own config generation rather than the retained applied
+high-water.
 
 ### RT_FLOW Session Id (#5212)
 
