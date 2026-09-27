@@ -165,44 +165,44 @@ of the most recent file drift, not a claim that intervening changes are absent.
 
 | Planned P-MECH path | Drift (count; latest) | P-MECH impact / current finding |
 |---|---|---|
-| `pkg/nfqueue/pipeline.go` | 4; `18c7ac658` fragment expiry/accounting | D11 acceptance remains deny-only; re-ground authority, fragment, and permit behavior. |
-| `pkg/nfqueue/nfqueue.go` | 2; `1e40f3542` linuxsock | Re-ground nonblocking bounded send and lock lifecycle. |
-| `pkg/daemon/ipsec_capture_pipeline_9506.go` | 2; `5312ec41d` D11 re-attestation | Existing witness path is selector-armed, not production permit. |
-| `pkg/daemon/ipsec_capture_wiring_9506.go` | 7; `19eb3e436` F1 | F1 done; accepted-vs-capture authorities and hold lifecycle are current. |
-| `pkg/nfqueue/reinject_socket.go` | 0; unchanged | Existing descriptor/submission surface still needs P2 generations/join. |
-| `pkg/routing/routes.go` | 1; `fbb21f67a` bounded routing responses | Re-ground route lookup and main-table ownership; no P-MECH-specific fix inferred from this unrelated API bound. |
-| `pkg/routing/routing.go` | 2; `b4170c6d5` startup probe cleanup | Routing lifecycle changed; prove D_usp1 and route-domain behavior at P2. |
-| `pkg/daemon/ipsec_reinject_supervisor.go` | 0; unchanged | The D11 supervisor has no P-MECH permit committer yet. |
-| `pkg/daemon/ipsec_topology_owner_9506.go` | 0; unchanged | No P-MECH flip authorizer/owner commit protocol yet. |
-| `pkg/daemon/ipsec_host_fence_reconcile_9506.go` | 2; `19eb3e436` F1 | Shared OPEN predicate now includes F1 fence hold; re-use it, do not add another opener. |
-| `pkg/daemon/ipsec_supervisor_loop_9506.go` | 0; unchanged | Caller remains stable; P-MECH generation guard is not implemented here. |
-| `pkg/api/metrics_ipsec_capture_10478.go` | 1; `5312ec41d` D11 re-attestation | Witness fields advanced; full P-MECH stage/flip counters still need join. |
-| `pkg/config/xfrmi.go` | 0; unchanged | `BindInterfaceOwnsRef` remains the ownership SSOT. |
-| `pkg/ipsec/policy.go` | 8; `4029db268` refresh changed tunnels | Tunnel refresh/SA state changed materially; re-ground selector provenance and generation staging. |
-| `pkg/logging/ringbuf.go` | 2; `cf39f563a` stale POLICY_DENY attribution | Event attribution semantics changed; G4 must validate current deny event owner/zone. |
-| `pkg/nftables/ipsec_divert.go` | 1; `fec7d18a3` loopback quarantine exemption | Include loopback behavior in quarantine and fence proofs. |
-| `pkg/dataplane/userspace/protocol.go` | 8; `216c99be8` v35 | Current Go wire version is 35. |
-| `userspace-dp/src/protocol/control.rs` | 11; `216c99be8` v35 | Current Rust wire version is 35; exact Go/Rust agreement observed. |
-| `userspace-dp/src/protocol/snapshot.rs` | 4; `0722b51f7` SYN-admission selectors | Snapshot fields/semantics changed; P1's version bump and row contract must include current selectors. |
-| `userspace-dp/src/afxdp/ipsec_inner.rs` | 1; `1838aaf59` counter export | D13/D14 entry has counters; worker verdict still deny-only. |
-| `userspace-dp/src/afxdp/ipsec_inner_queue.rs` | 0; unchanged | Bounded D11 queue/slab substrate remains; cross-thread cost still unresolved. |
-| `userspace-dp/src/afxdp/poll_descriptor/mod.rs` | 60; `ec59234a1` fragment lifetime hardening | Major stage/fragment churn; re-derive G3 order and fragment refusal at P2, do not rely on Sep-20 line numbers. |
-| `userspace-dp/src/afxdp/logical_ingress.rs` | 0; unchanged | Reuse `build_logical_ingress_packet`; no behavior change needed if all params stay explicit. |
-| `userspace-dp/src/slowpath_reinject_9506.rs` | 1; `5312ec41d` attestation | Completion bridge is a bounded witness path, not ordinary permit join. |
-| `userspace-dp/src/slowpath.rs` | 2; `b157b8e23` test gating | Preserve single writer/lease hold; add verdict-to-q0 only as P2, re-ground stage-11. |
-| `userspace-dp/src/session/discriminator.rs` | 0; unchanged | Still no `Ipsec(if_id)` discriminator. |
-| `userspace-dp/src/session/key.rs` | 1; `b20fab7f2` fragment sentinel | Reverse-NAT identity changed; P1 alias-key interaction needs a current regression. |
-| `userspace-dp/src/session/lookup.rs` | 10; `1db98f3c8` SYN-ACK-first bounds | Session lookup/lifetime behavior changed; alias-index uniqueness/eviction must compose with current bounds. |
-| `userspace-dp/src/session/mod.rs` | 14; `0ce15ecb5` source quota/RSS | Session scaling/quota surface evolved; P1 memory/eviction bounds need re-grounding. |
-| `userspace-dp/src/afxdp/worker/loop_body/mod.rs` | 12; `0ce15ecb5` source quota/RSS | Poll/tick integration changed; confirm D11 fairness and immutable-view binding. |
-| `userspace-dp/src/afxdp/worker_queue.rs` | 1; `1ec741810` PPTP teardown | Worker-command teardown now has PPTP lifecycle constraints; P-MECH queue ownership must not regress it. |
-| `userspace-dp/src/policy.rs` | 10; `f82216100` fragment-deny guard | Policy fragment semantics changed; G3 fragment/deny ordering must use current behavior. |
-| `userspace-dp/src/afxdp/event_emit.rs` | 1; `cf39f563a` deny attribution | Deny emission ownership changed; G4 counters/events need the current attribution path. |
-| `userspace-dp/src/event_stream/codec/rt_flow.rs` | 1; `cf39f563a` deny attribution | Flow-event wire attribution changed; update reason mapping with producer. |
-| `userspace-dp/src/event_stream/codec/decode.rs` | 1; `cf39f563a` deny attribution | Decoder attribution changed; Go/Rust event reason round-trip required. |
-
+| `pkg/nfqueue/pipeline.go` | 4; `18c7ac658` fragment expiry/accounting | `submitEligible` records `V1PermitSuppressed` and calls `finishFrame(..., VerdictDrop)` for `ZonePass` (`:665,743-745`); `resolveCompletion` terminal-DROPs the held original after normal, uncertain, and WouldPermit outcomes (`:975,1081-1093`). P2 must preserve this single q0 forwarding path. |
+| `pkg/nfqueue/nfqueue.go` | 2; `1e40f3542` linuxsock | `VerdictAccept` means NF_ACCEPT (`:45-47`); `Queue.VerdictBatch` can release held originals (`:519`). Do not combine that with a q0 write for the same frame. |
+| `pkg/daemon/ipsec_capture_pipeline_9506.go` | 2; `5312ec41d` D11 re-attestation | `IpsecCapturePipelineStatus.DeliveredAvailable/Delivered` is a witness (`:59-70`); `MintLeaseForAttest` is explicitly `attest-`-scoped (`:500`). Neither is a production policy-permit join. |
+| `pkg/daemon/ipsec_capture_wiring_9506.go` | 7; `19eb3e436` F1 | `buildPMechZoneSnapshot` and `samePMechTunnelZones` establish the immutable tunnel-zone view (`:229,336`); `tunnelRowsSnapshot` publishes the current rows (`:419`). Reuse the accepted/capture-generation and F1 hold lifecycle. |
+| `pkg/nfqueue/reinject_socket.go` | 0; unchanged | `SubmitAdjudicated`, `DrainReinjectCompletions`, and `AnnounceReinject` are the existing submit/result/authority surface (`:115,149,245`); P2 must extend the terminal permit join, not invent a second transport. |
+| `pkg/routing/routes.go` | 1; `fbb21f67a` bounded routing responses | `RouteEntry`/`NextHop` retain ECMP legs (`:35,45`); `GetAllTableRoutes` and `multiPathNextHops` expose routed tables/legs (`:253,350`). This is an inventory input, not a q0 egress-domain proof. |
+| `pkg/routing/routing.go` | 2; `b4170c6d5` startup probe cleanup | `Manager.GetAllTableRoutes` and `ApplyNextTableRules` are the current table/rule entry points (`:184,223`); no `xpf-usp1` exclusion exists in `pkg/routing` (negative grep). P2 must prove RPDB non-steering or refuse the conflicting configuration. |
+| `pkg/daemon/ipsec_reinject_supervisor.go` | 0; unchanged | `tryOpenPermit` and `commitValidatedVerdict` own the S4 permit and terminal verdict transaction (`:342,606`); there is no P-MECH q0 `InputPermitCommitter` here. Extend the owner, not a parallel opener. |
+| `pkg/daemon/ipsec_topology_owner_9506.go` | 0; unchanged | `noteIpsecTopologyLinkTransition` and `pollIpsecTopology` track F1 link/permit transitions (`:131,152`); no P-MECH flip authorizer exists. P2 must bind its transition to the same owner/epoch. |
+| `pkg/daemon/ipsec_host_fence_reconcile_9506.go` | 2; `19eb3e436` F1 | `ipsecHostInputFenceOverlayForPermit` and `tryOpenIpsecPermitAfterFenceAck` implement the F1 fence-aware OPEN path (`:25,109`). Reuse this predicate; it is not a P-MECH q0 commit proof. |
+| `pkg/daemon/ipsec_supervisor_loop_9506.go` | 0; unchanged | `startIpsecSupervisorLoop` starts the S4 supervisor and topology watch (`:15-30`); there is no separate P-MECH generation guard in the loop. |
+| `pkg/api/metrics_ipsec_capture_10478.go` | 1; `5312ec41d` D11 re-attestation | `collectIpsecCaptureWitness` exports capture/D11 actor and delivered-witness fields (`:14,42-64`); it does not witness production policy permits or q0 egress. |
+| `pkg/config/xfrmi.go` | 0; unchanged | `BindInterfaceOwnsRef` is the bind/interface ownership predicate (`:296-297`); preserve its exact ownership semantics when deriving tunnel rows. |
+| `pkg/ipsec/policy.go` | 8; `4029db268` refresh changed tunnels | `effectiveTrafficSelectors` and exported `EffectiveTrafficSelectors` define selector provenance (`:600,737-738`). Re-ground refresh/generation handling before using selectors as source admission. |
+| `pkg/logging/ringbuf.go` | 2; `cf39f563a` stale POLICY_DENY attribution | `eventTypePolicyDeny` and `policyDenyConfigGeneration` define the current reason/generation decode path (`:141,154-162`); existing reason constants end at host-inbound. G4 must add/round-trip any P-MECH reason through this path, not assume an event family. |
+| `pkg/nftables/ipsec_divert.go` | 1; `fec7d18a3` loopback quarantine exemption | `IpsecQuarantineTableName`, priority, and closed `IpsecQuarantineReason` set describe the D1b staged guard (`:19-61`). Preserve loopback exemption behavior and prove the guard’s transition/ACK before relying on it. |
+| `pkg/dataplane/userspace/protocol.go` | 8; `216c99be8` v35 | `ProtocolVersion=35` (`:359`) mirrors Rust; `IpsecTunnelRowSnapshot` and `IpsecTunnelRows` carry `{stn, if_id, logical_ifindex}` (`:664-691`). There is no `MinProtocolPMech` floor; P1 must add the per-feature exact-equality contract for its new wire tag. |
+| `userspace-dp/src/protocol/control.rs` | 11; `216c99be8` v35 | `CONFIG_SNAPSHOT_PROTOCOL_VERSION=35` (`:215`) mirrors Go; `S5ReinjectStatus` mirrors Go reinject status (`:489,544`). No P-MECH session-discriminator floor is present. |
+| `userspace-dp/src/protocol/snapshot.rs` | 4; `0722b51f7` SYN-admission selectors | `IpsecTunnelRowSnapshot` and `ipsec_tunnel_rows` carry current row identity (`:501,541`), alongside generation-bound snapshot semantics. P1’s protocol change must keep both serialized row shape and Go/Rust equality in lockstep. |
+| `userspace-dp/src/afxdp/ipsec_inner.rs` | 1; `1838aaf59` counter export | The module contract says the final V1 join is deny-only with no q0 enqueue or NF_ACCEPT (`:3-7`); `adjudicate_descriptor` is the worker decision entry (`:394`). P2 needs a new explicit permit outcome and join. |
+| `userspace-dp/src/afxdp/ipsec_inner_queue.rs` | 0; unchanged | `IpsecInnerDescriptor` and `IpsecInnerVerdict` define the bounded request/result types (`:145,183`); `try_enqueue`/`close_and_drain` enforce bounded admission and retirement (`:488,512`). No production Permit variant exists. |
+| `userspace-dp/src/afxdp/poll_descriptor/mod.rs` | 60; `ec59234a1` fragment lifetime hardening | The ordinary packet path calls `evaluate_policy_result_with_icmp` (`:3992`); its fragment/policy order changed materially. Re-derive G3 consult order at P2; do not transplant the D11 worker entry into this path blindly. |
+| `userspace-dp/src/afxdp/logical_ingress.rs` | 0; unchanged | `build_logical_ingress_packet` is the shared logical-frame synthesis/reparse helper (`:79`), already called by `ipsec_inner.rs:289`; keep one canonical path with explicit inputs. |
+| `userspace-dp/src/slowpath_reinject_9506.rs` | 1; `5312ec41d` attestation | `ADMIT_INPUT_HOOK=6` and `ADMIT_TUNNEL_ROW_MISSING=12` remain closed (`:51,54`); `resolve_ipsec_inner_verdict` maps success only to `WouldPermit`, explicitly never q0/NF_ACCEPT (`:1103-1118`). P2 needs a distinct q0-written terminal join. |
+| `userspace-dp/src/slowpath.rs` | 2; `b157b8e23` test gating | `submit_ipsec_inner_v1` sends an admitted descriptor to the bounded D11 transport (`:1283-1333`); `submit_adjudicated_frame` selects it (`:1337-1344`). The existing `tx_delegated` writer is separate; join worker Permit to that single writer without NF_ACCEPTing the held original. |
+| `userspace-dp/src/session/discriminator.rs` | 0; unchanged | `TunnelDiscriminator` has `None`, `Unkeyed`, `Keyed`, `Pptp`, and `Unparseable` variants (`:27-80`); no `Ipsec(if_id)` variant exists. |
+| `userspace-dp/src/session/key.rs` | 1; `b20fab7f2` fragment sentinel | `reverse_direction_discriminator` handles the current classes (`:42-62`), and `SessionKey.discriminator` is part of the key (`:81`); no IPsec identity or cross-class reverse alias is represented. |
+| `userspace-dp/src/session/lookup.rs` | 10; `1db98f3c8` SYN-ACK-first bounds | `resolve_lookup_handle` checks the exact primary key then the reverse-translated alias path (`:70-97`); no P-MECH cross-discriminator alias index exists. P1 must preserve current alias multiplicity, validation, and eviction rules. |
+| `userspace-dp/src/session/mod.rs` | 14; `0ce15ecb5` source quota/RSS | `SeededReverseIndex`, `SeededForwardWireIndex`, and `SeededReverseTranslatedIndex` are the current alias indexes (`:47-51`); `SessionTable.key_to_handle` is primary (`:1191`) with bounded session/owner accounting. P1 must add its alias under these invariants, not a side map. |
+| `userspace-dp/src/afxdp/worker/loop_body/mod.rs` | 12; `0ce15ecb5` source quota/RSS | The worker loads one coherent `RuntimeView`, drains `ipsec_inner_transport` (`:1196-1207`), calls `adjudicate_descriptor` (`:1234`), and drains bounded completions (`:1249-1253`). Preserve this one-view/fairness contract in P2. |
+| `userspace-dp/src/afxdp/worker_queue.rs` | 1; `1ec741810` PPTP teardown | `push_bounded` and `WorkerCommand::EnqueueShapedLocal` are bounded worker-control paths (`:528,556`); no IPsec-inner packet command exists. Do not route worker verdicts through an unbounded or second-writer command. |
+| `userspace-dp/src/policy.rs` | 10; `f82216100` fragment-deny guard | `evaluate_policy_result_with_icmp` is the production policy evaluator (`:3036`); fragment refusal/order changed after the baseline. P2 should call the existing evaluator and prove current G3 order rather than fork policy semantics. |
+| `userspace-dp/src/afxdp/event_emit.rs` | 1; `cf39f563a` deny attribution | Transit and host-inbound denies use `DataplaneEventKind::PolicyDeny` with distinct reason bytes (`:15-21,160-195,217-220`). Add P-MECH deny reasons through this producer if required; no parallel event kind is implied. |
+| `userspace-dp/src/event_stream/codec/rt_flow.rs` | 1; `cf39f563a` deny attribution | `DataplaneEventKind::PolicyDeny` maps to the current RT_FLOW wire type (`:14-15,33,43`); reason is emitted at byte 134 (`:541`). Keep any added reason byte compatible with this producer’s layout. |
+| `userspace-dp/src/event_stream/codec/decode.rs` | 1; `cf39f563a` deny attribution | `policy_deny_config_generation` is marker-gated (`:29-33`); decoder restores policy ID and reason (`:65-71`). Add a round-trip check for any P-MECH reason/generation extension. |
 This is 35/35 design paths; the 33-file code-commit census above is separately
-closed. Exact absent/present symbol states and the core permit gap follow.
+closed. Each path now records its current master symbols (or explicit absence),
+not just a generic drift consequence. Core permit gaps follow.
 
 ### 4.3 Symbol-level drift (design §5.2 / Sep-25 coverage map vs master)
 
@@ -299,26 +299,35 @@ all 35 design paths exist, as checked in §4.2.
 
 ### P2 — S9.5 FORWARD permit join (closes the original defect)
 
-- Files: `pkg/nfqueue/pipeline.go` (enforcing ACCEPT arm — the
-  `V1PermitSuppressed`-to-permit flip, least-privilege diff);
-  `pkg/nfqueue/reinject_socket.go` (submit generations/descriptor identity);
-  `userspace-dp/src/slowpath.rs` (`submit_adjudicated_frame` verdict→
-  `tx_delegated` split; single-writer + lease-hold unchanged);
-  `userspace-dp/src/slowpath_reinject_9506.rs` (completion join + §4.3
-  counters); worker stage order (`afxdp/poll_descriptor/`, G3 consult order);
+- Files: `pkg/nfqueue/pipeline.go` (replace the `V1PermitSuppressed` deny
+  with a policy-permit-to-q0 join; the held NFQUEUE original remains terminal
+  `VerdictDrop` after completion, including written and uncertain outcomes);
+  `pkg/nfqueue/reinject_socket.go` (existing submit/completion authority);
+  `userspace-dp/src/slowpath.rs` and
+  `userspace-dp/src/slowpath_reinject_9506.rs` (join worker policy Permit to
+  the single `tx_delegated` q0 writer and report its terminal outcome);
+  worker stage order (`afxdp/poll_descriptor/`, G3 consult order);
   `pkg/routing/{routes,routing}.go` (D_usp1/main-254 inventory, ECMP
   ownership, frozen `ingress_prefixes`); `pkg/daemon/ipsec_reinject_supervisor.go`
-  (committer + q0 rollback); `pkg/ipsec/policy.go` (selector provenance for
+  (owner/lease commit); `pkg/ipsec/policy.go` (selector provenance for
   M3); metrics/witness join.
+- Verdict contract: a policy permit is **not** `nfqueue.VerdictAccept`.
+  P2’s permitted forwarding path is a successful q0 write; the original held
+  NFQUEUE skb is terminally DROPed so the same frame cannot also continue
+  through the kernel path. Definitive q0 refusal rolls back state exactly
+  once; ambiguous/timeout completion is possibly-emitted, is never retried,
+  and still terminally DROPs the held original. Any alternate design using
+  NF_ACCEPT must first replace the q0 path and prove there is exactly one
+  forwarding path for every result.
 - Work: FORWARD session/NAT state provisional until the q0 write linearizes
-  commit; definitive refusal rolls back exactly once; ACK timeout stays
-  possibly-emitted/no-retry without rollback. Re-ground G3 order against
-  #10679 and outer-claim against #10516 at slice time (do not copy Sep-20
-  assumptions).
+  commit. Re-ground G3 order against #10679 and outer-claim against #10516 at
+  slice time (do not copy Sep-20 assumptions).
 - Acceptance: the issue's bar — denied AND permitted IPv4/IPv6
-  decrypted-ingress flows with policy/session/counter evidence, HA + MTU
-  behaviour, pricing gate (same-thread ~111ns or batched B>=3), M1–M4
-  must-proves or authorized scope cuts, fail-closed at every intermediate.
+  decrypted-ingress flows with policy/session/counter evidence, and an
+  observed single-path outcome (one q0 write plus original DROP, never both
+  q0 write and NF_ACCEPT); HA + MTU behaviour, pricing gate (same-thread
+  ~111ns or batched B>=3), M1–M4 must-proves or authorized scope cuts,
+  fail-closed at every intermediate.
 
 ### M1–M4 must-proves (kill-conditioned, owned by P2/G5)
 
