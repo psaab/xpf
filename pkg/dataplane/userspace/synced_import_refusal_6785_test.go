@@ -105,6 +105,19 @@ func newScriptedSessionManager10788(
 	return m, requests
 }
 
+func primeTakeoverReady10788(t *testing.T, m *Manager) {
+	t.Helper()
+	m.lastStatus = ProcessStatus{
+		Enabled:         true,
+		ForwardingArmed: true,
+		Capabilities:    UserspaceCapabilities{ForwardingSupported: true},
+	}
+	m.mode = ModeUserspaceCompat
+	m.xskLivenessProven = true
+	m.eventStream = boundEventStream(t)
+}
+
+
 // TestSyncedImportRefusalRollsBackWithoutGatingTakeover6785 is the #6785
 // contract on the Go side, and it is a PAIRED test: the same call site, two
 // helper answers, opposite health outcomes.
@@ -280,7 +293,7 @@ func TestHelperErrorClassification6785(t *testing.T) {
 		{"refusal-stale", syncedImportRefusedPrefix + "stale-generation", true, false},
 		{"refusal-reserve", syncedImportRefusedPrefix + "reserve", true, false},
 		{"retryable-gate-busy", syncedImportRefusedPrefix + "gate-busy", false, true},
-		{"token-not-at-the-start", "write failed while handling " + syncedImportRefusedPrefix + "capacity", false, false},
+		{"bare-mirror-write-failed", "mirror-write-failed", false, false},
 		{"plain-helper-error", "session table write failed", false, false},
 		{"unknown-operation", "unknown session sync operation frobnicate", false, false},
 	}
@@ -607,5 +620,151 @@ func TestSyncedMirrorFailureAccountingIsSingleSourced6785(t *testing.T) {
 			"from manager_sessions.go, want 0 — the cluster install paths must "+
 			"go through noteSyncedMirrorFailureLocked so the refusal "+
 			"classification cannot be bypassed", n)
+	}
+}
+func TestMirrorWriteFailedLatchesAndHealsTakeover10788(t *testing.T) {
+	tests := []struct {
+		name string
+		send func(*Manager) error
+	}{
+		{
+			name: "v4",
+			send: func(m *Manager) error {
+				return m.SetClusterSyncedSessionV4(
+					rollbackKeyV4(),
+					dataplane.SessionValue{IsReverse: 0, IngressZone: 1, EgressZone: 2},
+				)
+			},
+		},
+		{
+			name: "v6",
+			send: func(m *Manager) error {
+				return m.SetClusterSyncedSessionV6(
+					rollbackKeyV6(),
+					dataplane.SessionValueV6{IsReverse: 0, IngressZone: 1, EgressZone: 2},
+				)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, requests := newScriptedSessionManager10788(t, []ControlResponse{
+				{Error: "mirror-write-failed"},
+				{OK: true},
+			})
+			primeTakeoverReady10788(t, m)
+			if ready, reasons := m.TakeoverReady(); !ready {
+				t.Fatalf("fixture is not takeover-ready before mirror failure: %v", reasons)
+			}
+
+			err := tc.send(m)
+			if err == nil {
+				t.Fatal("bare mirror-write-failed response returned nil")
+			}
+			if errors.Is(err, dataplane.ErrSyncedImportRefused) || errors.Is(err, errSyncedImportGateBusy) {
+				t.Fatalf("bare mirror-write-failed was misclassified as semantic refusal or gate-busy: %v", err)
+			}
+			if !m.sessionMirrorFailed {
+				t.Fatal("bare mirror-write-failed did not latch session mirror health")
+			}
+			if ready, reasons := m.TakeoverReady(); ready {
+				t.Fatal("takeover remained ready after bare mirror-write-failed")
+			} else if !strings.Contains(strings.Join(reasons, "\n"), "userspace session mirror unhealthy") {
+				t.Fatalf("takeover denial omitted the mirror-health reason: %v", reasons)
+			}
+
+			if err := tc.send(m); err != nil {
+				t.Fatalf("successful subsequent mirror did not heal readiness: %v", err)
+			}
+			if m.sessionMirrorFailed || m.sessionMirrorErr != "" {
+				t.Fatalf("successful mirror left failure latched: failed=%v error=%q",
+					m.sessionMirrorFailed, m.sessionMirrorErr)
+			}
+			if ready, reasons := m.TakeoverReady(); !ready {
+				t.Fatalf("successful mirror did not restore takeover readiness: %v", reasons)
+			}
+			for i := range 2 {
+				select {
+				case <-requests:
+				case <-time.After(time.Second):
+					t.Fatalf("helper received only %d of 2 mirror requests", i)
+				}
+			}
+		})
+	}
+}
+
+func TestExhaustedGateBusyKeepsTakeoverLatched10788(t *testing.T) {
+	const wantAttempts = 5
+	responses := make([]ControlResponse, wantAttempts)
+	for i := range responses {
+		responses[i] = ControlResponse{Error: syncedImportRefusedPrefix + "gate-busy"}
+	}
+	m, requests := newScriptedSessionManager10788(t, responses)
+	primeTakeoverReady10788(t, m)
+
+	err := m.SetClusterSyncedSessionV4(
+		rollbackKeyV4(),
+		dataplane.SessionValue{IsReverse: 0, IngressZone: 1, EgressZone: 2},
+	)
+	if !errors.Is(err, errSyncedImportGateBusy) {
+		t.Fatalf("exhausted gate-busy error = %v, want retryable gate-busy", err)
+	}
+	if errors.Is(err, dataplane.ErrSyncedImportRefused) {
+		t.Fatalf("exhausted gate-busy was reclassified as a terminal refusal: %v", err)
+	}
+	if !m.sessionMirrorFailed {
+		t.Fatal("exhausted gate-busy did not latch the current mirror-health policy")
+	}
+	if ready, reasons := m.TakeoverReady(); ready {
+		t.Fatal("takeover remained ready after gate-busy retries were exhausted")
+	} else if !strings.Contains(strings.Join(reasons, "\n"), "userspace session mirror unhealthy") {
+		t.Fatalf("takeover denial omitted the mirror-health reason: %v", reasons)
+	}
+	for i := range wantAttempts {
+		select {
+		case <-requests:
+		case <-time.After(time.Second):
+			t.Fatalf("helper received only %d of %d gate-busy attempts", i, wantAttempts)
+		}
+	}
+	if len(requests) != 0 {
+		t.Fatalf("helper received %d requests beyond the bounded retry count", len(requests))
+	}
+}
+
+func TestMirrorWriteFailedWireAgreement10788(t *testing.T) {
+	stripLineComments := func(source string) string {
+		var stripped strings.Builder
+		for _, line := range strings.Split(source, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				stripped.WriteByte('\n')
+				continue
+			}
+			stripped.WriteString(line)
+			stripped.WriteByte('\n')
+		}
+		return stripped.String()
+	}
+	rustImport, err := os.ReadFile("../../../userspace-dp/src/afxdp/ha/session_import.rs")
+	if err != nil {
+		t.Fatalf("read Rust refusal outcome source: %v", err)
+	}
+	outcome := regexp.MustCompile(
+		`(?m)SyncedImportOutcome::RejectedMirrorPublish\s*=>\s*Some\("([^"]+)"\)`,
+	).FindStringSubmatch(stripLineComments(string(rustImport)))
+	if len(outcome) != 2 || outcome[1] != "mirror-write-failed" {
+		t.Fatalf("Rust refusal outcome = %v, want bare mirror-write-failed", outcome)
+	}
+
+	rustHandler, err := os.ReadFile("../../../userspace-dp/src/server/handlers/sync_session.rs")
+	if err != nil {
+		t.Fatalf("read Rust refusal response handler: %v", err)
+	}
+	bareResponse := regexp.MustCompile(
+		`response\.error\s*=\s*if\s+reason\s*==\s*"mirror-write-failed"\s*\{\s*reason\.to_string\(\)\s*\}\s*else\s*\{\s*format!\("\{SYNCED_IMPORT_REFUSED_PREFIX\}\{reason\}"\)\s*\}`,
+	)
+	if !bareResponse.MatchString(stripLineComments(string(rustHandler))) {
+		t.Fatal("Rust sync handler no longer sends mirror-write-failed bare while prefixing semantic refusals")
 	}
 }

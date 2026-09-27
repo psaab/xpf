@@ -756,8 +756,10 @@ fn refresh_cluster_synced_flags(flags: u16, origin: Option<SessionOrigin>) -> u1
 /// from a publish of the WRONG row, and the three pre-existing call sites all
 /// publish rows this fixture must not be satisfied by.
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ConntrackPublishRecord {
+    pub(super) key: SessionKey,
+    pub(super) nat: NatDecision,
     pub(super) is_reverse: bool,
     pub(super) ingress_ifindex: u32,
     pub(super) ingress_vlan_id: u16,
@@ -766,6 +768,7 @@ pub(super) struct ConntrackPublishRecord {
     pub(super) app_id: u16,
     pub(super) session_id: u64,
     pub(super) cluster_synced: bool,
+    pub(super) result: Option<ConntrackPublishResult>,
 }
 
 // #8105: the recorder is THREAD-LOCAL, not process-global.
@@ -796,6 +799,13 @@ pub(super) struct ConntrackPublishRecord {
 thread_local! {
     static CONNTRACK_PUBLISHES: std::cell::RefCell<Vec<ConntrackPublishRecord>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONNTRACK_PUBLISH_OVERRIDES:
+        std::cell::RefCell<std::collections::VecDeque<ConntrackPublishResult>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
 /// #6965/#8105: clear this thread's recorder so a sampling test starts from a
@@ -830,6 +840,29 @@ pub(crate) enum ConntrackPublishResult {
     GateBusy,
     KernelError,
     NoMap,
+}
+
+/// #10788-F1: override conntrack publish outcomes on this test thread. This
+/// drives the strict import's forward-success / reverse-failure compensation
+/// branch without requiring a privileged live BPF map.
+#[cfg(test)]
+pub(crate) struct ConntrackPublishOverrideGuard;
+
+#[cfg(test)]
+impl Drop for ConntrackPublishOverrideGuard {
+    fn drop(&mut self) {
+        CONNTRACK_PUBLISH_OVERRIDES.with(|results| results.borrow_mut().clear());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_conntrack_publish_results_for_test(
+    results: &[ConntrackPublishResult],
+) -> ConntrackPublishOverrideGuard {
+    CONNTRACK_PUBLISH_OVERRIDES.with(|slot| {
+        *slot.borrow_mut() = results.iter().copied().collect();
+    });
+    ConntrackPublishOverrideGuard
 }
 
 pub(crate) fn publish_bpf_conntrack_entry(
@@ -900,6 +933,8 @@ fn publish_bpf_conntrack_entry_raw(
     {
         CONNTRACK_PUBLISHES.with(|records| {
             records.borrow_mut().push(ConntrackPublishRecord {
+                key: key.clone(),
+                nat: decision.nat,
                 is_reverse: metadata.is_reverse,
                 ingress_ifindex: metadata.ingress_ifindex,
                 ingress_vlan_id: metadata.ingress_vlan_id,
@@ -908,6 +943,7 @@ fn publish_bpf_conntrack_entry_raw(
                 app_id,
                 session_id,
                 cluster_synced: origin.is_cluster_synced_origin(),
+                result: None,
             });
         });
     }
@@ -926,7 +962,7 @@ fn publish_bpf_conntrack_entry_raw(
     }
     flags = cluster_synced_flags(flags, origin.is_cluster_synced_origin());
 
-    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
+    let result = match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
         (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
             publish_conntrack::publish_v4_session(
                 conntrack_v4_fd,
@@ -966,7 +1002,18 @@ fn publish_bpf_conntrack_entry_raw(
         (libc::AF_INET, IpAddr::V4(..), IpAddr::V4(..)) => ConntrackPublishResult::NoMap,
         (libc::AF_INET6, IpAddr::V6(..), IpAddr::V6(..)) => ConntrackPublishResult::NoMap,
         _ => ConntrackPublishResult::IntentionallySkipped,
-    }
+    };
+    #[cfg(test)]
+    let result = CONNTRACK_PUBLISH_OVERRIDES
+        .with(|results| results.borrow_mut().pop_front())
+        .unwrap_or(result);
+    #[cfg(test)]
+    CONNTRACK_PUBLISHES.with(|records| {
+        if let Some(record) = records.borrow_mut().last_mut() {
+            record.result = Some(result);
+        }
+    });
+    result
 }
 
 /// Publish while the caller owns the tuple admission lease.

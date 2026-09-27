@@ -695,6 +695,23 @@ pub(crate) struct ProcessStatus {
     /// Additive / defaulted for backward compatibility.
     #[serde(rename = "synced_import_reserve_refused", default)]
     pub synced_import_reserve_refused: u64,
+    /// #10788-F1: peer-synced imports refused because the strict conntrack
+    /// mirror could not be written. The bare `mirror-write-failed` reason is a
+    /// helper-health failure, distinct from semantic import admission refusal.
+    #[serde(default)]
+    pub synced_import_mirror_refused: u64,
+    /// #10788-F1: forward conntrack mirror survivor rows successfully restored
+    /// by republishing after a reverse strict-mirror failure.
+    #[serde(default)]
+    pub mirror_restore_republished: u64,
+    /// #10788-F1: overwritten forward conntrack mirror rows successfully
+    /// deleted when no previous authoritative survivor existed.
+    #[serde(default)]
+    pub mirror_restore_deleted: u64,
+    /// #10788-F1: individual best-effort allocator or conntrack mirror
+    /// restoration actions that failed.
+    #[serde(default)]
+    pub mirror_restore_failed: u64,
     /// #7160 (#2387): peer-synced imports refused because this node runs
     /// routing instances and the request named no ingress identity to resolve
     /// the session's routing DOMAIN from. Importing under domain 0 would file
