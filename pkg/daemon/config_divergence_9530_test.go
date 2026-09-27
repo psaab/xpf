@@ -152,3 +152,26 @@ func TestConfigPeerReachableNeedsALivePeer_9530(t *testing.T) {
 		t.Errorf("a daemon with no cluster manager reported a reachable peer")
 	}
 }
+func TestDeferredSnapshotAlarmClearMatchesActiveGeneration10782(t *testing.T) {
+	d := &Daemon{}
+	configA := "set system host-name deferred-a\n"
+	configB := "set system host-name deferred-b\n"
+	d.reportPeerSnapshotConfigSyncDeferred(configA, 1, "peer lacks v4 for A")
+	d.reportPeerSnapshotConfigSyncDeferred(configB, 2, "peer lacks v4 for B")
+
+	d.clearPeerSnapshotConfigSyncDeferred(configA)
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "peer lacks v4 for B") {
+		t.Fatalf("success for stale generation A cleared or replaced B's deferral: %q", alarm)
+	}
+	d.configSyncMu.Lock()
+	gotGen := d.configSyncPeerSnapshotDeferredGen
+	d.configSyncMu.Unlock()
+	if want := configGenerationHash(configB); gotGen != want {
+		t.Fatalf("deferred generation after stale clear = %d, want B generation %d", gotGen, want)
+	}
+
+	d.clearPeerSnapshotConfigSyncDeferred(configB)
+	if alarm := d.peerSnapshotProtocolDeferredAlarm(); alarm != "" {
+		t.Fatalf("success for current generation B did not clear its deferral: %q", alarm)
+	}
+}

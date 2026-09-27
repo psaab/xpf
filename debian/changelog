@@ -55,5 +55,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
+  * Fence multi-zone config sync against peer snapshot protocol and
+    peer-incarnation changes; preserve local convergence after peer-only
+    push failures (#10782).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

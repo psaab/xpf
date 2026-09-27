@@ -43,7 +43,7 @@ func (d *Daemon) peerSnapshotProtocolAuthorizationForConfig(
 	if d == nil || cand == nil {
 		return nil, nil
 	}
-	clustered := cand.Chassis.Cluster != nil && cand.Chassis.Cluster.ConfigSync
+	clustered := d.cluster != nil && cand.Chassis.Cluster != nil && cand.Chassis.Cluster.ConfigSync
 	if !clustered || !userspace.ConfigHasMultiZoneScopedPolicy(cand) {
 		return nil, nil
 	}

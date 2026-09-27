@@ -23,6 +23,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -186,5 +187,25 @@ func TestCrossChassisGateSharesTheLocalArmingPredicate6650(t *testing.T) {
 				"wrapper has drifted from the predicate that arms the local #5488 gate",
 				tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestSnapshotProtocolGateRequiresClusterRuntime6650(t *testing.T) {
+	ss := cluster.NewSessionSync(":0", ":0", nil)
+	ss.SetConnectedForTesting(true)
+	ss.SetPeerSnapshotProtocolVersionForTesting(3)
+	d := &Daemon{sessionSync: ss}
+	cand := &config.Config{}
+	cand.Chassis.Cluster = &config.ClusterConfig{ConfigSync: true}
+	cand.Security.GlobalPolicies = []*config.Policy{{
+		Match: config.PolicyMatch{
+			FromZones: []string{"dmz", "trust"},
+			ToZones:   []string{"untrust"},
+		},
+	}}
+
+	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(cand)
+	if err != nil || auth != nil {
+		t.Fatalf("snapshot authorization ran without a cluster runtime: auth=%#v err=%v", auth, err)
 	}
 }

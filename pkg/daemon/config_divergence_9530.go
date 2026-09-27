@@ -127,7 +127,8 @@ func (d *Daemon) clearPeerSnapshotConfigSyncDeferred(configText string) {
 	}
 	gen := configGenerationHash(configText)
 	d.configSyncMu.Lock()
-	if !d.configSyncPeerSnapshotDeferred {
+	if !d.configSyncPeerSnapshotDeferred ||
+		d.configSyncPeerSnapshotDeferredGen != gen {
 		d.configSyncMu.Unlock()
 		return
 	}
