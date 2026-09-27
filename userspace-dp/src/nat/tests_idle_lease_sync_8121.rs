@@ -376,21 +376,12 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     // BORN ON THE ACTIVE. Reaches a standby by one of the two routes below,
     // depending on whether it still has live flows when the sync happens.
     ("allocate_translation_locked", "local PAT mint"),
-    (
-        "reserve_address_only_persistent",
-        "local address-only mint (#6041)",
-    ),
+    ("reserve_address_only_persistent", "local address-only mint (#6041)"),
     // REBUILT ON THE STANDBY from a synced SESSION — the population with live
     // flows. Two arms because the port-bearing and address-only reserves are
     // different functions, which is why they needed separate fixes.
-    (
-        "reserve_flow_maybe_persistent",
-        "#7360, from synced sessions",
-    ),
-    (
-        "reserve_address_only_maybe_persistent",
-        "#8132, from synced sessions",
-    ),
+    ("reserve_flow_maybe_persistent", "#7360, from synced sessions"),
+    ("reserve_address_only_maybe_persistent", "#8132, from synced sessions"),
     // INSTALLED ON THE STANDBY from an exported lease — the IDLE population,
     // which has no session to be rebuilt from and is exactly why #8121 exists.
     ("import_idle_lease", "#8121, from the idle-lease sync"),
@@ -707,6 +698,7 @@ fn clearing_live_lease_drains_without_reuse_or_port_leak_10784() {
         "the first new mapping after drain must be minted afresh"
     );
 }
+
 /// Address-only leases share the same clear/tombstone contract as PAT leases,
 /// despite owning no translated-port bit (#10784).
 #[test]

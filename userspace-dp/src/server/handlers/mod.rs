@@ -20,6 +20,7 @@
 // parameter substitution. See
 // `docs/pr/1345-server-handlers-split/plan.md` for the full design.
 
+mod session_counters;
 mod binding;
 mod export;
 mod forwarding;
@@ -27,20 +28,19 @@ mod ha;
 mod idle_leases;
 mod inject_packet;
 mod neighbors;
-mod policy_list;
 mod queue;
 mod rebind;
-mod session_counters;
 mod session_deltas;
 mod snapshot;
 mod stop_workers;
 mod sync_session;
+mod policy_list;
 
+use crate::afxdp::{HaRefreshOutcome, SessionDomain, HA_REFRESH_NEEDS_CONTROL_SOCKET};
 use super::super::*;
 use super::helpers::{
     lock_server_state_recover, refresh_status, wait_for_binding_settle, write_state,
 };
-use crate::afxdp::{HA_REFRESH_NEEDS_CONTROL_SOCKET, HaRefreshOutcome, SessionDomain};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -220,7 +220,11 @@ pub(crate) fn handle_stream(
     if request.request_type == "sync_session" {
         sync_session::handle(&session_domain, request.session_sync, &mut response);
     } else if request.request_type == "list_sessions_by_policy" {
-        policy_list::handle(&session_domain, request.session_policy_list, &mut response);
+        policy_list::handle(
+            &session_domain,
+            request.session_policy_list,
+            &mut response,
+        );
     }
 
     // #9629: session-socket HA fast path — lease-only refresh, never `ServerState`.
@@ -271,9 +275,7 @@ pub(crate) fn handle_stream(
         // fast paths above stay servable: they provably never touch `ServerState`.
         if guard.quarantined_after_panic {
             running.store(false, Ordering::SeqCst);
-            return Err(
-                "server state quarantined after a handler panic; restart required".to_string(),
-            );
+            return Err("server state quarantined after a handler panic; restart required".to_string());
         }
         match request.request_type.as_str() {
             "ping" => {}
@@ -412,13 +414,15 @@ pub(crate) fn handle_stream(
                 refresh_status(&mut guard);
                 persist_state = true;
             }
-            "set_queue_state" => queue::set(
-                &mut guard,
-                request.queue,
-                &mut response,
-                &mut persist_state,
-                &mut settle_wait,
-            ),
+            "set_queue_state" => {
+                queue::set(
+                    &mut guard,
+                    request.queue,
+                    &mut response,
+                    &mut persist_state,
+                    &mut settle_wait,
+                )
+            }
             "set_binding_state" => binding::set(
                 &mut guard,
                 request.binding,
@@ -434,13 +438,16 @@ pub(crate) fn handle_stream(
             ),
             // #8121 part 2: the idle persistent-NAT lease channel. Both verbs
             // take the clock from the coordinator, never from the request.
-            "clear_persistent_nat_leases" => idle_leases::clear(&mut guard, &mut response),
             "export_idle_leases" => idle_leases::export(&mut guard, &mut response),
             // #8615: the DISPLAY read. Separate verb, separate response field,
             // separate record type — the SHOW table needs `active_flows`, which
             // the sync record is forbidden to carry.
             "export_persistent_lease_display" => {
                 idle_leases::export_display(&mut guard, &mut response)
+            }
+            // #10784: revoke leases in the helper allocator, not only the Go display mirror.
+            "clear_persistent_nat_leases" => {
+                idle_leases::clear(&mut guard, &mut response)
             }
             "import_idle_leases" => {
                 idle_leases::import(&mut guard, &request.idle_leases, &mut response)
@@ -489,10 +496,7 @@ pub(crate) fn handle_stream(
         // computed after the lock-free ack-wait / push below so it reflects the
         // drained state (and is not produced while holding the lock across a
         // wait or a blocking push).
-        if export_wait.is_none()
-            && all_export.is_none()
-            && settle_wait.is_none()
-            && !suppress_status
+        if export_wait.is_none() && all_export.is_none() && settle_wait.is_none() && !suppress_status
         {
             refresh_status(&mut guard);
             response.status = Some(guard.status.clone());

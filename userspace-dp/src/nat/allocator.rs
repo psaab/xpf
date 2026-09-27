@@ -95,11 +95,11 @@ use std::hash::Hasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 // #4800: both are now used unconditionally by `PortAllocator::lock_live`
 // (previously `MutexGuard` was test-only, for `debug_live`).
+use std::sync::{MutexGuard, TryLockError};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::{MutexGuard, TryLockError};
 
 pub(super) const NS_PER_SEC: u64 = 1_000_000_000;
 const MAX_SOURCE_NAT_POOL_TRACKED_FLOWS: usize = 262_144;
@@ -500,6 +500,7 @@ impl PatReverseKey {
     }
 }
 
+
 /// #4559: IPv4 deterministic CGNAT (mode 1) block-allocation parameters,
 /// precomputed by the Go compiler and carried on the source-NAT rule. The
 /// mapping is `subscriber internal IPv4 -> fixed (external pool IP, port
@@ -799,11 +800,9 @@ pub(super) struct PortAllocatorLiveState {
     pub(super) persistent_by_source: FxHashMap<PersistentSourceKey, PersistentLease>,
     pub(super) lease_expirations: BTreeSet<(u64, PersistentSourceKey)>,
     pub(super) lease_expirations_by_addr: Vec<BTreeSet<(u64, PersistentSourceKey)>>,
-    // #10784: block a cleared idle lease from being re-imported by an
-    // in-flight HA lease sync. A later local allocation for the same source
-    // removes the tombstone only when it successfully mints a replacement.
-    // Active cleared leases stay in persistent_by_source as draining records
-    // until their holders release, preserving occupancy cleanup.
+    // #10784: fence a cleared idle lease from a pre-clear HA export. A later
+    // local allocation removes this tombstone only when it mints a replacement.
+    // Active cleared leases remain as draining records until their holders release.
     pub(super) revoked_persistent: BTreeSet<PersistentSourceKey>,
     // #5269: address-only occupancy tokens — the translated reverse identity of a
     // `port no-translation` / port-less flow mapped to its owning FORWARD flow.
@@ -874,11 +873,16 @@ impl PortAllocatorLiveState {
     /// #10190: O(1) lookup for a PAT owner of the exact reverse wire
     /// identity an address-only flow would preserve. The destination endpoint
     /// remains part of the key, so another remote is admissible.
-    fn pat_owns_wire_identity(&self, flow: &SourceNatFlowKey, translated: TranslatedTuple) -> bool {
+    fn pat_owns_wire_identity(
+        &self,
+        flow: &SourceNatFlowKey,
+        translated: TranslatedTuple,
+    ) -> bool {
         self.pat_owners
             .contains_key(&PatReverseKey::for_flow(flow, translated))
     }
 }
+
 
 /// #7174 (M13): the FIFO recycle ring plus a per-offset "already queued" bitset,
 /// held together under ONE mutex so a port can hold AT MOST ONE token.
@@ -1559,6 +1563,7 @@ pub(super) fn reset_port_allocator_build_count() {
 pub(super) fn port_allocator_build_count() -> usize {
     PORT_ALLOCATOR_BUILDS.with(|c| c.get())
 }
+
 
 /// #9536: the three outcomes of offering a flow an existing persistent lease on
 /// the PORT-BEARING path (`reuse_existing_lease_locked`).
@@ -2316,7 +2321,7 @@ impl PortAllocator {
         self.gc_expired_locked(&mut live, now_ns, ALLOCATION_GC_BUDGET);
 
         if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-            // #9145: record this worker as a HOLDER on the idempotent-reuse
+// #9145: record this worker as a HOLDER on the idempotent-reuse
             // return. `reserve_flow_maybe_persistent` and
             // `reserve_address_only_maybe_persistent` already do it here
             // and say why (#6211 F2): this early return is where workers
@@ -2428,10 +2433,8 @@ impl PortAllocator {
                 if let Some(key) = persistent_key {
                     let expires_at_ns =
                         now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
-                    // Successful local reallocation supersedes the clear
-                    // tombstone. The allocator lock prevents an HA import
-                    // from installing the old binding between this removal
-                    // and publishing the replacement below.
+                    // A successful replacement supersedes the clear tombstone;
+                    // keep it through failed allocation attempts.
                     live.revoked_persistent.remove(&key);
                     live.persistent_by_source.insert(
                         key,
@@ -4454,7 +4457,7 @@ impl PortAllocator {
         // Idempotent re-entry: a second packet of the same flow (racing session
         // install) reuses its first decision rather than re-keying.
         if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-            // #9145: record this worker as a HOLDER on the idempotent-reuse
+// #9145: record this worker as a HOLDER on the idempotent-reuse
             // return. `reserve_flow_maybe_persistent` and
             // `reserve_address_only_maybe_persistent` already do it here
             // and say why (#6211 F2): this early return is where workers
@@ -4610,7 +4613,7 @@ impl PortAllocator {
         // Idempotent re-entry: a second packet of the same flow reuses its first
         // decision rather than re-keying / double-counting the lease refcount.
         if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-            // #9145: record this worker as a HOLDER on the idempotent-reuse
+// #9145: record this worker as a HOLDER on the idempotent-reuse
             // return. `reserve_flow_maybe_persistent` and
             // `reserve_address_only_maybe_persistent` already do it here
             // and say why (#6211 F2): this early return is where workers
@@ -4770,7 +4773,7 @@ impl PortAllocator {
                 };
                 (!live.address_only_owners.contains_key(&rkey)
                     && !live.pat_owns_wire_identity(&flow, translated))
-                .then_some((ip, idx, rkey))
+                    .then_some((ip, idx, rkey))
             }
             None => {
                 let abs =
@@ -4790,7 +4793,7 @@ impl PortAllocator {
                         };
                         (!live.address_only_owners.contains_key(&rkey)
                             && !live.pat_owns_wire_identity(&flow, translated))
-                        .then_some((ip, family_offset + rel, rkey))
+                            .then_some((ip, family_offset + rel, rkey))
                     })
             }
         };
@@ -4856,9 +4859,8 @@ impl PortAllocator {
             // `allocations_total` is deliberately NOT bumped: it counts LEASES
             // minted, and this path mints none.
         } else {
-            // A successful new lease supersedes the clear tombstone. Keep it
-            // through failed allocation attempts so stale HA imports remain
-            // fenced until an authoritative replacement exists.
+            // A new address-only lease supersedes the clear tombstone only
+            // after allocation succeeds.
             live.revoked_persistent.remove(&key);
             live.persistent_by_source.insert(
                 key,
