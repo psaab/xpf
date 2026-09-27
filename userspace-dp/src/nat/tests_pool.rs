@@ -6673,6 +6673,7 @@ fn install_expired_idle_leases(
                     activation_previous_expires_at_ns: 0,
                     activation_had_previous_lease: false,
                     address_only: false,
+                    imported: false,
                 },
             );
             live.lease_expirations.insert((expires_at_ns, key));
@@ -6773,6 +6774,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
                 address_only: false,
+                imported: false,
             },
         );
         // Idle but not-yet-expired lease (expiry 10_000, past now=1000).
@@ -6792,6 +6794,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
                 address_only: false,
+                imported: false,
             },
         );
         live.lease_expirations.insert((10_000, future_key));

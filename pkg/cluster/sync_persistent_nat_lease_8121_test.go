@@ -32,7 +32,7 @@ func sampleIdleLease() userspace.IdleLeaseWire {
 		Protocol:       6,
 		SrcIP:          "10.0.61.50",
 		SrcPort:        40000,
-		RoutingScope: persistentNatLeaseScope(7),
+		RoutingScope:   persistentNatLeaseScope(7),
 		RemoteIP:       "8.8.8.8",
 		RemotePort:     443,
 		TranslatedIP:   "203.0.113.1",
@@ -113,9 +113,9 @@ func TestPersistentNatLeaseEncode_OversizedFieldDropsOnlyThatRecord(t *testing.T
 	}
 }
 
-// #7175 discipline: a full-set push REPLACES the peer's set, so a truncated
-// payload must report INCOMPLETE. Returning a prefix as if it were the whole
-// set would silently delete every lease past the truncation point.
+// A malformed advertisement batch is rejected as incomplete. No prefix is
+// delivered to the receiver, while records omitted from later valid batches
+// remain governed by the additive import path rather than replacement.
 func TestPersistentNatLeasePayload_TruncationReportsIncomplete(t *testing.T) {
 	full := encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{
 		sampleIdleLease(), sampleIdleLease(),
@@ -182,8 +182,8 @@ func TestPersistentNatLeaseMalformedSetDoesNotAdvanceSequence10018(t *testing.T)
 	sets := 0
 	ss.OnPersistentNatLeasesReceived = func([]userspace.IdleLeaseWire) { sets++ }
 
-	// A high-sequence malformed full set must be retained as no-op, not become
-	// the high-water mark that blocks a later valid lower-sequence set.
+	// A high-sequence malformed lease batch must be a no-op, not become the
+	// high-water mark that blocks a later valid lower-sequence advertisement.
 	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
 		appendFullSetSeq([]byte{1, 2, 3}, 9000, 99))
 	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,

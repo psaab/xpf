@@ -48,17 +48,6 @@
 //!    free a bit belonging to that other flow. So the import claims the bit and
 //!    REFUSES the lease if it cannot.
 
-// PART 1 OF #8121. This is the helper core — the two operations and every
-// invariant that makes them safe. Nothing calls it yet: the cluster transport
-// that drives it (a `syncMsgPersistentNatLease` record type in `pkg/cluster`,
-// plus the control-socket commands that reach these two methods) is part 2, and
-// #8121 stays OPEN until it lands.
-//
-// The split is deliberate rather than convenient. Every hazard in this feature
-// lives HERE — the local refcount, the two node-local quantities that must not
-// be carried, and the occupancy bit — and each one is now pinned by a
-// mutation-bound test. A transport built on an unsettled core would have to be
-// re-reviewed when the core moved.
 #![allow(dead_code)]
 
 use super::allocator::{PersistentLease, PersistentSourceKey, PortAllocator, TranslatedTuple};
@@ -138,15 +127,22 @@ pub(crate) enum IdleLeaseImport {
 }
 
 impl PortAllocator {
-    /// Every lease that is idle AND still inside its persistence timeout — the
-    /// population #7360 cannot reach. A lease with live flows is deliberately
-    /// NOT exported: the peer rebuilds it from the sessions themselves, and
-    /// sending both would race two mechanisms onto one key.
+    /// Every locally-originated lease that is idle AND still inside its
+    /// persistence timeout — the population #7360 cannot reach. Imported idle
+    /// leases stay local: re-exporting them would echo the same reservation
+    /// between peers indefinitely, refreshing its receiver-clock lifetime and
+    /// allowing it to resurrect after its originator retires it. The local
+    /// 0 -> 1 join clears the origin bit; until then this node has only a
+    /// peer-owned reservation. A lease with live flows is not exported either:
+    /// the peer rebuilds it from sessions, and sending both would race two
+    /// mechanisms onto one key.
     pub(crate) fn export_idle_leases(&self, now_ns: u64) -> Vec<IdleLeaseRecord> {
         let live = self.lock_live();
         live.persistent_by_source
             .iter()
-            .filter(|(_, lease)| lease.active_flows == 0 && lease.expires_at_ns > now_ns)
+            .filter(|(_, lease)| {
+                lease.active_flows == 0 && lease.expires_at_ns > now_ns && !lease.imported
+            })
             .map(|(key, lease)| IdleLeaseRecord {
                 protocol: key.protocol,
                 src_ip: key.src_ip,
@@ -263,6 +259,9 @@ impl PortAllocator {
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
                 address_only: rec.address_only,
+                // Imported state stays out of the sync export until a local
+                // flow adopts it (the local 0 -> 1 join clears this bit).
+                imported: true,
             },
         );
         // Without this the lease is invisible to GC and outlives what the

@@ -690,11 +690,10 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// delimiter, so this is a no-op for it.
 		names, malformed := decodeIPsecSAPayload(stripIPsecFullSetDelim(base))
 		if malformed {
-			// #9061: same refusal the persistent-NAT and DHCP full-set arms
-			// make, for the same reason -- a full set REPLACES, so installing a
-			// truncated one is worse than installing nothing. The standby keeps
-			// the set it has until a good frame arrives, rather than
-			// reinitiating a SUBSET on takeover and appearing to succeed.
+			// #9061: refuse a malformed IPsec SA full set. Unlike the additive
+			// persistent-NAT lease channel, IPsec replaces the held set, so a
+			// truncated prefix must not overwrite it; the standby keeps its prior
+			// state until a complete frame arrives.
 			slog.Warn("cluster sync: refusing a malformed IPsec SA full set",
 				"payload_bytes", len(payload), "incarnation", incarnation, "seq", seq)
 			return
@@ -715,16 +714,15 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		slog.Warn("cluster sync: ignoring legacy unscoped persistent-NAT lease set",
 			"bytes", len(payload))
 	case syncMsgPersistentNatLeaseScoped:
-		// #8121/#10018: a full IDLE persistent-NAT lease set whose records all
-		// carry routing_scope. Same two refusals the DHCP full-set arms make,
-		// and for the same reason: a full set REPLACES, so installing a stale
-		// or truncated one is worse than installing nothing. The standby
-		// simply keeps rebuilding leases from sessions (#7360) until a good
-		// scoped set arrives.
+		// #8121/#10018: one scoped batch of IDLE persistent-NAT lease
+		// advertisements. Imports are additive: a record's absence does not
+		// delete it on the receiver. Decode the whole batch before callback so a
+		// truncated payload cannot install only a prefix, and retain sequence
+		// ordering so an older reordered advertisement cannot be applied later.
 		base, incarnation, seq := stripFullSetSeq(payload)
 		// Check the high-water mark before decode, but advance it only after a
-		// complete set is accepted. A malformed high-sequence frame must not
-		// wedge the standby against a later valid lower-sequence push.
+		// complete batch is accepted. A malformed high-sequence frame must not
+		// wedge the standby against a later valid lower-sequence advertisement.
 		s.recvSeqMu.Lock()
 		admit := s.persistentNatLeaseRecvSeq.newer(incarnation, seq)
 		commitEpoch := s.recvEpoch
