@@ -6684,25 +6684,137 @@ fn session_limit_count_increments_on_forward_install_src_and_dst() {
     }
 
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         limit,
         "src count must equal the number of forward installs"
     );
     assert_eq!(
-        table.session_limit_dst_count(dst),
+        table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst),
         limit,
         "dst count must equal the number of forward installs"
     );
     // The (limit+1)-th new flow's enforcement predicate must fire.
     assert!(
-        table.session_limit_src_count(src) >= limit,
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src) >= limit,
         "over-limit src predicate must hold (enforcement would drop)"
     );
     assert!(
-        table.session_limit_dst_count(dst) >= limit,
+        table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst) >= limit,
         "over-limit dst predicate must hold"
     );
 }
+#[test]
+fn session_limit_count_moves_with_ingress_zone_updates_10985() {
+    let mut table = SessionTable::new();
+    table.set_session_limit_active(true);
+    let now = 1_000_000_000u64;
+    let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+    let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+    let key = limit_key(8, 10, 40000);
+    let mut trust_metadata = metadata();
+    trust_metadata.ingress_zone = TEST_TRUST_ZONE_ID;
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        trust_metadata,
+        SessionOrigin::ForwardFlow,
+        now,
+        PROTO_TCP,
+        0x10,
+    ));
+    assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 1);
+    assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 1);
+
+    let mut dmz_metadata = metadata();
+    dmz_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: dmz_metadata,
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: now + 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+        },
+        false,
+    ));
+    assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
+    assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 1);
+    assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 0);
+    assert_eq!(table.session_limit_dst_count(TEST_DMZ_ZONE_ID, dst), 1);
+
+    let mut trust_metadata = metadata();
+    trust_metadata.ingress_zone = TEST_TRUST_ZONE_ID;
+    assert!(table.refresh_for_ha_transition(
+        &key,
+        decision(),
+        trust_metadata,
+        now + 2_000_000,
+    ));
+    assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 1);
+    assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 0);
+    table.delete(&key);
+    assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
+    assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 0);
+}
+
+#[test]
+fn session_limit_count_moves_with_policy_rebind_before_delete_10985() {
+    let mut table = SessionTable::new();
+    table.set_session_limit_active(true);
+    let now = 1_000_000_000u64;
+    let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 12));
+    let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 12));
+    let key = limit_key(12, 12, 40000);
+    let mut forward_metadata = metadata();
+    forward_metadata.ingress_zone = TEST_TRUST_ZONE_ID;
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        forward_metadata,
+        SessionOrigin::ForwardFlow,
+        now,
+        PROTO_TCP,
+        0x10,
+    ));
+    let reverse_key = reverse_key_of(&key);
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = TEST_TRUST_ZONE_ID;
+    assert!(table.install_with_protocol_with_origin(
+        reverse_key,
+        decision(),
+        reverse_metadata,
+        SessionOrigin::ReverseFlow,
+        now,
+        PROTO_TCP,
+        0x10,
+    ));
+    assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 1);
+    assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 1);
+
+    assert!(table.rebind_policy_pair(
+        &key,
+        12,
+        3,
+        std::sync::Arc::new(crate::policy::PolicyRuleCounter::default()),
+        TEST_DMZ_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+    ));
+    assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
+    assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 0);
+    assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 1);
+    assert_eq!(table.session_limit_dst_count(TEST_DMZ_ZONE_ID, dst), 1);
+
+    table.delete(&key);
+    assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 0);
+    assert_eq!(table.session_limit_dst_count(TEST_DMZ_ZONE_ID, dst), 0);
+    assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
+    assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 0);
+}
+
 
 /// §5.2 established-flow regression (the r2 BLOCKER): the per-packet
 /// session HIT path (`lookup` / `touch`) must NOT change the per-IP
@@ -6736,7 +6848,7 @@ fn session_limit_count_unchanged_by_established_flow_packets() {
         ));
         keys.push(key);
     }
-    assert_eq!(table.session_limit_src_count(src), n);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), n);
 
     // Drive many established-flow data packets (session HIT + keepalive).
     for tick in 1..200u64 {
@@ -6746,7 +6858,7 @@ fn session_limit_count_unchanged_by_established_flow_packets() {
         }
     }
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         n,
         "established-flow packets must NOT change the count (r2 BLOCKER)"
     );
@@ -6774,14 +6886,14 @@ fn session_limit_decrements_and_evicts_on_expire() {
         PROTO_TCP,
         0x10,
     ));
-    assert_eq!(table.session_limit_src_count(src), 1);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 1);
     assert_eq!(table.session_limit_src_map_len(), 1);
 
     table.last_gc_ns = then + 301_000_000_000;
     let expired = table.expire_stale_entries(then + 302_000_000_000);
     assert_eq!(expired.len(), 1);
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         0,
         "count must decrement on expire"
     );
@@ -6807,7 +6919,7 @@ fn session_limit_decrements_and_evicts_on_expire() {
         PROTO_TCP,
         0x10,
     ));
-    assert_eq!(table.session_limit_src_count(src), 1);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 1);
 }
 
 /// §5.4 decrement across the explicit `delete` path (clear / RST
@@ -6831,9 +6943,9 @@ fn session_limit_decrements_on_explicit_delete() {
         PROTO_TCP,
         0x10,
     ));
-    assert_eq!(table.session_limit_src_count(src), 1);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 1);
     table.delete(&key);
-    assert_eq!(table.session_limit_src_count(src), 0);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 0);
     assert_eq!(table.session_limit_src_map_len(), 0);
 }
 
@@ -6878,7 +6990,7 @@ fn session_limit_ha_import_promote_demote_count() {
         false,
     ));
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
         "#3122: peer-synced import MUST count toward the per-IP limit"
     );
@@ -6896,7 +7008,7 @@ fn session_limit_ha_import_promote_demote_count() {
         tcp_flags: 0x10,
     }));
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
         "promote synced->local must NOT double-count (stays 1, not 2)"
     );
@@ -6905,7 +7017,7 @@ fn session_limit_ha_import_promote_demote_count() {
     // is still present in the table, so its slot stays charged.
     assert_eq!(table.demote_owner_rg(1).len(), 1);
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
         "demote local->synced must NOT decrement (session still present)"
     );
@@ -6913,7 +7025,7 @@ fn session_limit_ha_import_promote_demote_count() {
     // Only the actual removal decrements, draining to 0 and evicting.
     table.delete(&key);
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         0,
         "removal (the sole sink) decrements the imported session's slot"
     );
@@ -6955,7 +7067,7 @@ fn session_limit_worker_replica_excluded_then_promote_backcounts_10310() {
         false,
     ));
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         0,
         "a local worker replica must not charge a second logical session"
     );
@@ -6972,7 +7084,7 @@ fn session_limit_worker_replica_excluded_then_promote_backcounts_10310() {
         tcp_flags: 0x10,
     }));
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
         "promoting a replica to local ownership must back-count once"
     );
@@ -6980,9 +7092,9 @@ fn session_limit_worker_replica_excluded_then_promote_backcounts_10310() {
     // Demoting the still-present logical session remains count-neutral, and
     // the sole removal sink releases the one charged slot.
     assert_eq!(table.demote_owner_rg(1).len(), 1);
-    assert_eq!(table.session_limit_src_count(src), 1);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 1);
     table.delete(&key);
-    assert_eq!(table.session_limit_src_count(src), 0);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 0);
 }
 
 /// §5.6b (#3122) the FAILOVER LIMIT-BYPASS scenario, end to end: a client
@@ -7030,16 +7142,16 @@ fn session_limit_synced_sessions_enforced_after_failover() {
     // After failover the new active's enforcement predicate must fire for
     // the (limit+1)-th new flow — the synced sessions are visible to it.
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         limit,
         "#3122: synced sessions must be counted on the standby-turned-active"
     );
     assert!(
-        table.session_limit_src_count(src) >= limit,
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src) >= limit,
         "#3122: over-limit predicate must fire post-failover (no bypass)"
     );
     assert!(
-        table.session_limit_dst_count(dst) >= limit,
+        table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst) >= limit,
         "#3122: dst over-limit predicate must fire post-failover"
     );
 }
@@ -7076,7 +7188,7 @@ fn session_limit_synced_reimport_nets_to_one() {
         ));
     }
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
         "re-import of the same synced key must net to 1, not 2"
     );
@@ -7113,7 +7225,7 @@ fn session_limit_synced_reverse_import_excluded() {
         false,
     ));
     assert_eq!(
-        table.session_limit_src_count(rev_src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, rev_src),
         0,
         "#3122: reverse-direction synced import must not count"
     );
@@ -7144,7 +7256,7 @@ fn session_limit_excludes_reverse_and_seed_installs() {
         0x10,
     ));
     assert_eq!(
-        table.session_limit_src_count(rev_src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, rev_src),
         0,
         "reverse-flow install must not count"
     );
@@ -7164,7 +7276,7 @@ fn session_limit_excludes_reverse_and_seed_installs() {
         0x10,
     ));
     assert_eq!(
-        table.session_limit_src_count(seed_src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, seed_src),
         0,
         "missing-neighbor seed install must not count"
     );
@@ -7195,7 +7307,7 @@ fn session_limit_idempotent_reinstall_nets_to_one() {
         ));
     }
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         1,
         "re-install of the same key must net to 1, not 2"
     );
@@ -7304,34 +7416,36 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
     assert!(table.refresh_for_ha_transition(&refresh_target, decision(), metadata(), now + 2_000_000));
 
     let check_invariant = |table: &SessionTable, label: &str| {
-        let mut src_live: std::collections::HashMap<IpAddr, u32> = std::collections::HashMap::new();
-        let mut dst_live: std::collections::HashMap<IpAddr, u32> = std::collections::HashMap::new();
+        let mut src_live: std::collections::HashMap<(u16, IpAddr), u32> =
+            std::collections::HashMap::new();
+        let mut dst_live: std::collections::HashMap<(u16, IpAddr), u32> =
+            std::collections::HashMap::new();
         table.iter_with_origin(|key, _decision, md, origin| {
             // #3122/#10310: use the production counted-class predicate:
             // peer-synced imports count, WorkerLocalImport replicas do not,
             // and reverse/transient-seed entries are excluded.
             if !md.is_reverse && super::install::session_limit_origin_counted(origin) {
-                *src_live.entry(key.src_ip).or_insert(0) += 1;
-                *dst_live.entry(key.dst_ip).or_insert(0) += 1;
+                *src_live.entry((md.ingress_zone, key.src_ip)).or_insert(0) += 1;
+                *dst_live.entry((md.ingress_zone, key.dst_ip)).or_insert(0) += 1;
             }
         });
-        // Per-IP count must equal the number of live counted entries for
-        // that IP, for every IP that has at least one live counted entry.
-        for (ip, cnt) in &src_live {
+        // Each zone/IP count must equal the number of live counted entries
+        // for that pair, including when multiple zones share the same IP.
+        for ((zone, ip), cnt) in &src_live {
             assert_eq!(
-                table.session_limit_src_count(*ip),
+                table.session_limit_src_count(*zone, *ip),
                 *cnt,
-                "{label}: src count for {ip:?} must match live counted entries"
+                "{label}: src count for zone {zone} IP {ip:?} must match live counted entries"
             );
         }
-        for (ip, cnt) in &dst_live {
+        for ((zone, ip), cnt) in &dst_live {
             assert_eq!(
-                table.session_limit_dst_count(*ip),
+                table.session_limit_dst_count(*zone, *ip),
                 *cnt,
-                "{label}: dst count for {ip:?} must match live counted entries"
+                "{label}: dst count for zone {zone} IP {ip:?} must match live counted entries"
             );
         }
-        // Map sizes must exactly equal distinct live counted IP sets
+        // Map sizes must exactly equal distinct live counted zone/IP pairs
         // (no leaked / orphaned entries — #2128).
         assert_eq!(
             table.session_limit_src_map_len(),
@@ -7385,7 +7499,7 @@ fn session_limit_clear_on_disable() {
             0x10,
         ));
     }
-    assert_eq!(table.session_limit_src_count(src), 3);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 3);
 
     // Disable: both maps must clear.
     table.set_session_limit_active(false);
@@ -7399,7 +7513,7 @@ fn session_limit_clear_on_disable() {
     // would double-count to 6, so this still guards clear-on-disable.
     table.set_session_limit_active(true);
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         3,
         "re-enable must back-count the 3 live sessions, not restart from 0"
     );
@@ -7421,7 +7535,7 @@ fn session_limit_clear_on_disable() {
         0x10,
     ));
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         4,
         "new install must add to the back-counted 3, not to a stale 0"
     );
@@ -7494,7 +7608,7 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
         false,
     );
     // Gate OFF: nothing counted yet (the maps are empty).
-    assert_eq!(table.session_limit_src_count(src), 0, "OFF: no count maintained");
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 0, "OFF: no count maintained");
     assert_eq!(table.session_limit_src_map_len(), 0);
 
     // OFF->ON edge: back-count. src has N local + 1 synced = N+1 live
@@ -7502,17 +7616,17 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
     // #3122 synced session MUST be included (origin-agnostic predicate).
     table.set_session_limit_active(true);
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         n + 1,
         "OFF->ON must back-count all live counted sessions incl. the #3122 synced import"
     );
     assert_eq!(
-        table.session_limit_dst_count(dst),
+        table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst),
         n,
         "dst back-count must equal the N forward sessions to that dst"
     );
     assert_eq!(
-        table.session_limit_dst_count(synced_dst),
+        table.session_limit_dst_count(TEST_LAN_ZONE_ID, synced_dst),
         1,
         "the #3122 synced session's dst must be back-counted too"
     );
@@ -7535,7 +7649,7 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
         0x10,
     ));
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         n + 2,
         "new install adds to the back-counted total"
     );
@@ -7549,14 +7663,14 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
         table.delete(key);
         expected -= 1;
         assert_eq!(
-            table.session_limit_src_count(src),
+            table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
             expected,
             "teardown of a pre-existing session must decrement a real increment"
         );
     }
     // After draining the N pre-existing forward sessions, src still has
     // the 1 synced + 1 new-install = 2 live counted sessions.
-    assert_eq!(table.session_limit_src_count(src), 2);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 2);
 
     // The invariant the whole fix defends: the per-IP count equals the
     // number of live counted entries for that IP — never below it.
@@ -7570,7 +7684,7 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
         }
     });
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         live_src,
         "count must equal live counted entries — never dropped below (the #4377 bypass)"
     );
@@ -7602,7 +7716,7 @@ fn session_limit_off_gate_skips_all_maintenance() {
         table.delete(&key);
     }
     assert_eq!(
-        table.session_limit_src_count(src),
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         0,
         "OFF-gate: no count maintained"
     );

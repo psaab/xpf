@@ -1,15 +1,15 @@
 use super::*;
 
-/// #2134: unit tests for the new-flow session-limit enforcement decision.
-/// These drive `new_flow_session_limit_drop` directly against a real
-/// `SessionTable` count, so they FAIL if the check is reverted to a
-/// never-drop no-op (the #2134 bug) — the under/at/over-limit boundary
-/// and the unconfigured-zone short-circuit are all pinned.
+/// #2134/#10985: tests for the new-flow session-limit enforcement decision.
+/// These drive `new_flow_session_limit_drop` against real `SessionTable`
+/// counts, pinning the threshold boundary, per-zone accounting, and the
+/// unconfigured-zone short-circuit.
 #[cfg(test)]
 mod new_flow_session_limit_tests {
     use super::*;
     use crate::screen::ScreenProfile;
     use crate::session::{SessionMetadata, SessionOrigin};
+    use crate::test_zone_ids::{TEST_DMZ_ZONE_ID, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn forwarding_with_limit(zone: &str, src_limit: u32, dst_limit: u32) -> ForwardingState {
@@ -34,9 +34,9 @@ mod new_flow_session_limit_tests {
         }
     }
 
-    fn meta() -> SessionMetadata {
+    fn meta(ingress_zone: u16) -> SessionMetadata {
         SessionMetadata {
-            ingress_zone: 1,
+            ingress_zone,
             egress_zone: 2,
             ingress_zone_check: 0,
             egress_zone_check: 0,
@@ -73,12 +73,19 @@ mod new_flow_session_limit_tests {
     /// the same (src, dst). `port_base` lets callers add MORE without
     /// re-installing already-present keys (which would net via the
     /// idempotent pre-clear).
-    fn install_n(table: &mut SessionTable, src: IpAddr, dst: IpAddr, port_base: u16, n: u32) {
+    fn install_n(
+        table: &mut SessionTable,
+        ingress_zone: u16,
+        src: IpAddr,
+        dst: IpAddr,
+        port_base: u16,
+        n: u32,
+    ) {
         for i in 0..n {
             assert!(table.install_with_protocol_with_origin(
                 counted_key(src, dst, port_base + i as u16),
                 decision(),
-                meta(),
+                meta(ingress_zone),
                 SessionOrigin::ForwardFlow,
                 1_000_000_000,
                 crate::ip_proto::PROTO_TCP,
@@ -97,21 +104,21 @@ mod new_flow_session_limit_tests {
 
         // 0 sessions: under limit -> pass (None).
         assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "untrust", src, dst),
+            new_flow_session_limit_drop(&fw, &table, "untrust", TEST_LAN_ZONE_ID, src, dst),
             None
         );
         // 2 sessions (under 3): still pass.
-        install_n(&mut table, src, dst, 40000, 2);
-        assert_eq!(table.session_limit_src_count(src), 2);
+        install_n(&mut table, TEST_LAN_ZONE_ID, src, dst, 40000, 2);
+        assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 2);
         assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "untrust", src, dst),
+            new_flow_session_limit_drop(&fw, &table, "untrust", TEST_LAN_ZONE_ID, src, dst),
             None
         );
         // 3 sessions (== limit): the next new flow MUST drop.
-        install_n(&mut table, src, dst, 40002, 1); // distinct port -> count 3
-        assert_eq!(table.session_limit_src_count(src), 3);
+        install_n(&mut table, TEST_LAN_ZONE_ID, src, dst, 40002, 1); // distinct port -> count 3
+        assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 3);
         assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "untrust", src, dst),
+            new_flow_session_limit_drop(&fw, &table, "untrust", TEST_LAN_ZONE_ID, src, dst),
             Some("session-limit-src"),
             "at/over the limit, a new flow must be dropped"
         );
@@ -124,10 +131,10 @@ mod new_flow_session_limit_tests {
         table.set_session_limit_active(true);
         let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 51));
         let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2));
-        install_n(&mut table, src, dst, 40000, 2);
-        assert_eq!(table.session_limit_dst_count(dst), 2);
+        install_n(&mut table, TEST_LAN_ZONE_ID, src, dst, 40000, 2);
+        assert_eq!(table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst), 2);
         assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "untrust", src, dst),
+            new_flow_session_limit_drop(&fw, &table, "untrust", TEST_LAN_ZONE_ID, src, dst),
             Some("session-limit-dst")
         );
     }
@@ -140,15 +147,15 @@ mod new_flow_session_limit_tests {
         table.set_session_limit_active(true);
         let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 52));
         let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
-        install_n(&mut table, src, dst, 40000, 50);
+        install_n(&mut table, TEST_LAN_ZONE_ID, src, dst, 40000, 50);
         assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "untrust", src, dst),
+            new_flow_session_limit_drop(&fw, &table, "untrust", TEST_LAN_ZONE_ID, src, dst),
             None,
             "no limit configured -> never drop"
         );
         // Unknown zone name -> short-circuit None.
         assert_eq!(
-            new_flow_session_limit_drop(&fw, &table, "nonexistent", src, dst),
+            new_flow_session_limit_drop(&fw, &table, "nonexistent", TEST_LAN_ZONE_ID, src, dst),
             None
         );
     }
@@ -163,12 +170,52 @@ mod new_flow_session_limit_tests {
         let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
         for _ in 0..1000 {
             assert_eq!(
-                new_flow_session_limit_drop(&fw, &table, "untrust", src, dst),
+                new_flow_session_limit_drop(&fw, &table, "untrust", TEST_LAN_ZONE_ID, src, dst),
                 None
             );
         }
         assert_eq!(table.session_limit_src_map_len(), 0);
         assert_eq!(table.session_limit_dst_map_len(), 0);
+    }
+    #[test]
+    fn session_limit_counts_and_thresholds_are_isolated_per_zone_10985() {
+        let fw = forwarding_with_limit("dmz", 2, 0);
+        let mut table = SessionTable::new();
+        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 54));
+        let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5));
+
+        // Rebuilding after enabling must keep the ten trust sessions out of
+        // dmz's two-slot count.
+        install_n(&mut table, TEST_TRUST_ZONE_ID, src, dst, 41000, 10);
+        assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
+        table.set_session_limit_active(true);
+        assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 10);
+        assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 0);
+        assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 10);
+        assert_eq!(table.session_limit_dst_count(TEST_DMZ_ZONE_ID, dst), 0);
+        assert_eq!(
+            new_flow_session_limit_drop(&fw, &table, "dmz", TEST_DMZ_ZONE_ID, src, dst),
+            None,
+            "trust sessions do not consume dmz's session allowance"
+        );
+
+        // A dmz session consumes only dmz's own allowance; the next flow is
+        // admitted while below the threshold, and the one at the threshold drops.
+        install_n(&mut table, TEST_DMZ_ZONE_ID, src, dst, 42000, 1);
+        assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 1);
+        assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 10);
+        assert_eq!(table.session_limit_dst_count(TEST_DMZ_ZONE_ID, dst), 1);
+        assert_eq!(
+            new_flow_session_limit_drop(&fw, &table, "dmz", TEST_DMZ_ZONE_ID, src, dst),
+            None
+        );
+        install_n(&mut table, TEST_DMZ_ZONE_ID, src, dst, 42001, 1);
+        assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 2);
+        assert_eq!(table.session_limit_dst_count(TEST_DMZ_ZONE_ID, dst), 2);
+        assert_eq!(
+            new_flow_session_limit_drop(&fw, &table, "dmz", TEST_DMZ_ZONE_ID, src, dst),
+            Some("session-limit-src")
+        );
     }
 }
 

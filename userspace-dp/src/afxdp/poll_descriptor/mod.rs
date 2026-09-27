@@ -3276,6 +3276,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx.forwarding,
                                     sessions,
                                     from_zone,
+                                    from_zone_id,
                                     flow.src_ip,
                                     flow.dst_ip,
                                 )

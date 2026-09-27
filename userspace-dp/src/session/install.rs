@@ -268,6 +268,7 @@ impl SessionTable {
             self.create_drops = self.create_drops.saturating_add(1);
             return false;
         }
+        let session_limit_zone = metadata.ingress_zone;
         // remove_entry's three debug_assert!s catch invariant
         // violations in tests:
         //   - stale-handle guard (entries.get returned None for a
@@ -417,7 +418,7 @@ impl SessionTable {
             // function returned `false` early at `len() >= max_sessions`
             // before any state change, so this only runs on a real
             // install.
-            self.session_limit_inc(key.src_ip, key.dst_ip);
+            self.session_limit_inc(session_limit_zone, key.src_ip, key.dst_ip);
         }
         // #10038 item 5: TUN-origin never Opens (node-local provenance — the
         // peer must never hold TUN-derived state, so it is neither bulk- nor
@@ -546,6 +547,7 @@ impl SessionTable {
             session_id: wire_session_id,
             tcp_close_class: wire_close_class,
         } = req;
+        let session_limit_zone = metadata.ingress_zone;
         // #9412: the close class the owning node stated. `None` (0, or a class
         // this build does not know) imports exactly as before.
         let wire_close = if matches!(protocol, PROTO_TCP) {
@@ -766,7 +768,7 @@ impl SessionTable {
         // counted logical session, not a new limit-session unit. A true HA
         // peer import remains counted so failover cannot bypass #3122.
         if !metadata.is_reverse && session_limit_origin_counted(origin) {
-            self.session_limit_inc(index_key.src_ip, index_key.dst_ip);
+            self.session_limit_inc(session_limit_zone, index_key.src_ip, index_key.dst_ip);
         }
         true
     }
@@ -964,6 +966,7 @@ impl SessionTable {
             // node-local, and their origins remain excluded from HA export.
             let old_origin = entry.origin;
             let is_reverse = entry.metadata.is_reverse;
+            let ingress_zone = entry.metadata.ingress_zone;
             // #10366: WorkerLocalImport is a local replica, but demotion must
             // make every ordinary live row agree on one peer-origin stamp.
             // Leaving this origin unchanged made the demote RMW and the
@@ -984,7 +987,7 @@ impl SessionTable {
             let new_counted =
                 will_flip && !is_reverse && session_limit_origin_counted(SessionOrigin::SyncImport);
             if new_counted && !old_counted {
-                self.session_limit_inc(key.src_ip, key.dst_ip);
+                self.session_limit_inc(ingress_zone, key.src_ip, key.dst_ip);
             }
             demoted_keys.push(key);
         }
