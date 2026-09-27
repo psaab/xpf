@@ -62,6 +62,7 @@ fn test_meta() -> UserspaceDpMeta {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         pkt_len: 60,
+        config_generation: 41,
         ..UserspaceDpMeta::default()
     }
 }
@@ -111,6 +112,7 @@ fn policy_deny_event_emit_builds_rt_flow_payload() {
     assert_eq!(event.egress_zone_id, 9);
     assert_eq!(event.ingress_ifindex, 42);
     assert_eq!(event.policy_id, 101);
+    assert_eq!(event.config_generation, 41);
     assert_eq!(event.rule_id, 101);
     assert_eq!(event.owner_rg_id, 3);
     assert_eq!(event.src_port, 49152);
@@ -265,6 +267,7 @@ fn host_inbound_deny_event_carries_host_inbound_reason() {
     );
     // No admitting/denying security policy on a host-inbound deny.
     assert_eq!(event.policy_id, 0);
+    assert_eq!(event.config_generation, 41);
     // Egress "zone" is the firewall host itself (#3110 sentinel 0).
     assert_eq!(event.egress_zone_id, 0);
     assert_eq!(event.ingress_zone_id, 7);

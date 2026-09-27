@@ -113,13 +113,26 @@ fn test_dataplane_event_v4(kind: DataplaneEventKind) -> DataplaneEventPayload {
         egress_zone_id: 9,
         ingress_ifindex: 42,
         policy_id: 101,
-        rule_id: 202,
-        term_id: 505,
+        rule_id: if kind == DataplaneEventKind::PolicyDeny {
+            101
+        } else {
+            202
+        },
+        term_id: if kind == DataplaneEventKind::PolicyDeny {
+            0
+        } else {
+            505
+        },
         reason: 5,
         owner_rg_id: 2,
         application_id: 303,
         filter_id: 404,
         screen_id: 606,
+        config_generation: if kind == DataplaneEventKind::PolicyDeny {
+            41
+        } else {
+            0
+        },
         timestamp_ns: 123_456_789,
     }
 }
@@ -147,12 +160,21 @@ fn test_dataplane_event_v6(kind: DataplaneEventKind) -> DataplaneEventPayload {
         ingress_ifindex: 77,
         policy_id: 0,
         rule_id: 0,
-        term_id: 3030,
+        term_id: if kind == DataplaneEventKind::PolicyDeny {
+            0
+        } else {
+            3030
+        },
         reason: 4,
         owner_rg_id: 1,
         application_id: 0,
         filter_id: 909,
         screen_id: 1102,
+        config_generation: if kind == DataplaneEventKind::PolicyDeny {
+            42
+        } else {
+            0
+        },
         timestamp_ns: 987_654_321,
     }
 }
@@ -193,14 +215,25 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
     );
     assert_eq!(payload[52], event.kind.rt_flow_event_type());
     assert_eq!(payload[54], event.action);
-    assert_eq!(
-        u32::from_le_bytes(payload[56..60].try_into().unwrap()),
-        event.rule_id
-    );
-    assert_eq!(
-        u32::from_le_bytes(payload[60..64].try_into().unwrap()),
-        event.term_id
-    );
+    if event.kind == DataplaneEventKind::PolicyDeny {
+        assert_eq!(
+            u64::from_le_bytes(payload[56..64].try_into().unwrap()),
+            event.config_generation
+        );
+        assert_eq!(
+            u32::from_le_bytes(payload[140..144].try_into().unwrap()),
+            POLICY_DENY_GENERATION_MARKER
+        );
+    } else {
+        assert_eq!(
+            u32::from_le_bytes(payload[56..60].try_into().unwrap()),
+            event.rule_id
+        );
+        assert_eq!(
+            u32::from_le_bytes(payload[60..64].try_into().unwrap()),
+            event.term_id
+        );
+    }
     assert_eq!(
         i16::from_le_bytes(payload[64..66].try_into().unwrap()),
         event.owner_rg_id
@@ -228,6 +261,7 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
     assert_eq!(decoded.owner_rg_id, event.owner_rg_id);
     assert_eq!(decoded.application_id, event.application_id);
     assert_eq!(decoded.timestamp_ns, event.timestamp_ns);
+    assert_eq!(decoded.config_generation, event.config_generation);
     match event.kind {
         DataplaneEventKind::PolicyDeny => assert_eq!(decoded.policy_id, event.policy_id),
         DataplaneEventKind::ScreenDrop => assert_eq!(decoded.screen_id, event.screen_id),

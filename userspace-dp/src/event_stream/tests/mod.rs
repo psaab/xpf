@@ -46,13 +46,26 @@ fn test_dataplane_event(kind: DataplaneEventKind, ingress_zone_id: u16) -> Datap
         egress_zone_id: 9,
         ingress_ifindex: 42,
         policy_id: 101,
-        rule_id: 202,
-        term_id: 303,
+        rule_id: if kind == DataplaneEventKind::PolicyDeny {
+            101
+        } else {
+            202
+        },
+        term_id: if kind == DataplaneEventKind::PolicyDeny {
+            0
+        } else {
+            303
+        },
         reason: 5,
         owner_rg_id: 1,
         application_id: 404,
         filter_id: 505,
         screen_id: 606,
+        config_generation: if kind == DataplaneEventKind::PolicyDeny {
+            41
+        } else {
+            0
+        },
         timestamp_ns: 123_456_789,
     }
 }

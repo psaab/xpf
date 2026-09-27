@@ -2655,3 +2655,124 @@ func TestDecodeSessionCloseEventCarriesThePurgeRetirementMarkerV610068(t *testin
 		t.Fatal("legacy v6 close decoded PurgeRetirement=true")
 	}
 }
+
+func TestEventStreamPolicyDenyGenerationAcrossBacklogAndReplay10978(t *testing.T) {
+	const (
+		policyID       = uint32(77)
+		generationA    = uint64(41)
+		generationB    = uint64(42)
+		generationMark = uint32(0x314E4547) // "GEN1" in little-endian wire order.
+	)
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8}, 40000, 1, 2, 5, policyID,
+		1700000000000000000,
+	)
+	binary.LittleEndian.PutUint64(payload[56:64], generationA)
+	binary.LittleEndian.PutUint32(payload[140:144], generationMark)
+
+	for _, scenario := range []string{"reader_backlog", "reconnect_replay"} {
+		t.Run(scenario, func(t *testing.T) {
+			buffer := logging.NewEventBuffer(8)
+			reader := logging.NewEventReader(nil, buffer)
+			reader.SetPolicyNamesForGeneration(generationA, map[uint32]string{policyID: "policy-A"})
+			es := NewEventStream(filepath.Join(t.TempDir(), "policy-events.sock"))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := es.Start(ctx); err != nil {
+				t.Fatalf("start event stream: %v", err)
+			}
+			defer es.Close()
+
+			dial := func() net.Conn {
+				t.Helper()
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					conn, err := net.Dial("unix", es.socketPath)
+					if err == nil {
+						for !es.IsConnected() && time.Now().Before(deadline) {
+							time.Sleep(time.Millisecond)
+						}
+						if es.IsConnected() {
+							return conn
+						}
+						_ = conn.Close()
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				t.Fatal("event stream did not accept helper connection")
+				return nil
+			}
+			waitPending := func(want int) {
+				t.Helper()
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					es.pendingMu.Lock()
+					got := len(es.pendingCallbackFrames)
+					es.pendingMu.Unlock()
+					if got == want {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+				t.Fatalf("pending callback frames did not reach %d", want)
+			}
+			assertUnattributed := func() {
+				t.Helper()
+				records := buffer.Latest(1)
+				if len(records) != 1 {
+					t.Fatalf("buffered records = %d, want 1", len(records))
+				}
+				if got := records[0].PolicyName; got != dataplane.UnattributedPolicyName {
+					t.Fatalf("queued/replayed deny attributed to %q, want %q; an event from generation %d must not name generation %d's occupant",
+						got, dataplane.UnattributedPolicyName, generationA, generationB)
+				}
+			}
+
+			first := dial()
+			if err := writeFrame(first, EventFrameTypePolicyDeny, 1, payload); err != nil {
+				t.Fatalf("write initial deny: %v", err)
+			}
+			waitPending(1)
+			if scenario == "reader_backlog" {
+				reader.SetPolicyNamesForGeneration(generationB, map[uint32]string{policyID: "policy-B"})
+				es.SetOnRawDataplaneEvent(func(_ uint64, raw []byte) {
+					reader.ProcessRawEvent(raw)
+				})
+				es.flushPendingCallbackFrames()
+				assertUnattributed()
+				return
+			}
+
+			// The queued copy is discarded when the connection is replaced;
+			// the helper's unacknowledged replay retains and resends these bytes.
+			_ = first.Close()
+			deadline := time.Now().Add(2 * time.Second)
+			for es.IsConnected() && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if es.IsConnected() {
+				t.Fatal("event stream stayed connected after helper disconnect")
+			}
+			reader.SetPolicyNamesForGeneration(generationB, map[uint32]string{policyID: "policy-B"})
+			delivered := make(chan struct{}, 1)
+			es.SetOnRawDataplaneEvent(func(_ uint64, raw []byte) {
+				reader.ProcessRawEvent(raw)
+				delivered <- struct{}{}
+			})
+			replay := dial()
+			defer replay.Close()
+			waitPending(0)
+			if err := writeFrame(replay, EventFrameTypePolicyDeny, 1, payload); err != nil {
+				t.Fatalf("write replayed deny: %v", err)
+			}
+			select {
+			case <-delivered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("replayed deny was not delivered")
+			}
+			assertUnattributed()
+		})
+	}
+}
