@@ -53,7 +53,9 @@ This is the package that drives chassis-cluster failover.
   An over-capacity desired set is rejected while a same-key instance keeps
   its previous valid set; the RG remains unready until the desired set is
   corrected. New addresses are announced with GARP/NA; untouched VIPs are
-  neither removed nor re-announced. A newly introduced address family must
+  normally neither removed nor re-announced, except that a still-current VIP
+  whose initial frame was interrupted by an epoch change stays pending until
+  the next announcement pass. A newly introduced address family must
   have its send socket opened before the set is published. Socket-open
   failure keeps the old VIP set but still applies independent scalar/track
   updates. Partial netlink failure stores the addresses that actually remain
@@ -373,12 +375,13 @@ the baseline with an ordinary advert.
   network-free helper `garpSendAllowed`, which is unit-tested directly.
   `updateVIPs` advances the epoch before starting any VIP withdrawal; additions
   advance it when their membership is published. A deletion callback is
-  therefore invalid while later removals are still pending, and additions
-  announce only their new VIPs in the new membership epoch. `sendGARPFor`
-  validates each VIP under `vipMu` and holds the lock only through that VIP's
-  synchronous first frame and optional gateway probe, then revalidates before
-  proceeding. This bounds demotion/update serialization to one VIP at a time
-  while ensuring an old snapshot cannot suppress a new-membership announcement.
+  therefore invalid while later removals are still pending. `sendGARPFor`
+  tracks VIPs until their synchronous first frame succeeds; if an epoch change
+  interrupts a full-set send, the update carries only still-current pending
+  VIPs into its announcement pass, alongside newly added addresses. Thus a
+  pure-add with no interrupted burst remains added-only and an unsent survivor
+  cannot be stranded by an old-snapshot abort. Per-VIP `vipMu` sections bound
+  synchronous frame/probe locking, and later VIPs revalidate before proceeding.
 - Supplementary gateway ARP probe: after each IPv4 GARP burst, `sendGARP`
   also sends a directed ARP Request — VIP as the ARP sender (#2152) — to the
   subnet's first usable host (network address + 1, the most common gateway),

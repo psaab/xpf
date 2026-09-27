@@ -16,7 +16,7 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-func demotionWaitingOnVIPMu(vi *vrrpInstance, stack []byte) bool {
+func goroutineWaitingOnVIPMu(vi *vrrpInstance, caller string, stack []byte) bool {
 	n := runtime.Stack(stack, true)
 	lockFrame := fmt.Sprintf("lockSlow(%p)", &vi.vipMu)
 	for _, goroutine := range strings.Split(string(stack[:n]), "\n\n") {
@@ -24,7 +24,7 @@ func demotionWaitingOnVIPMu(vi *vrrpInstance, stack []byte) bool {
 		if lineEnd < 0 || !strings.Contains(goroutine[:lineEnd], "sync.Mutex.Lock") {
 			continue
 		}
-		if strings.Contains(goroutine, "becomeBackup") &&
+		if strings.Contains(goroutine, caller) &&
 			strings.Contains(goroutine, lockFrame) &&
 			strings.Contains(goroutine, "sync.(*Mutex).Lock") {
 			return true
@@ -852,6 +852,175 @@ func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testi
 	}
 }
 
+func TestVIPMembershipRemovalPreservesUnsentSurvivorAnnouncement(t *testing.T) {
+	for _, isIPv6 := range []bool{false, true} {
+		family := "ipv4"
+		vips := []string{
+			"198.18.107.80/32", "198.18.107.81/32",
+			"198.18.107.82/32", "198.18.107.83/32",
+		}
+		if isIPv6 {
+			family = "ipv6"
+			vips = []string{
+				"2001:db8:1078::1/64", "2001:db8:1078::2/64",
+				"2001:db8:1078::3/64", "2001:db8:1078::4/64",
+			}
+		}
+		t.Run(family, func(t *testing.T) {
+			eventCh := make(chan VRRPEvent, 8)
+			vi := newInstance(Instance{
+				Interface: "reth10780-survivor", GroupID: 101, Priority: 200,
+				VirtualAddresses: vips,
+			}, &net.Interface{Name: "reth10780-survivor", Index: 10785}, eventCh, nil)
+			vi.setState(StateMaster)
+			installFakeVIPNetlink(vi)
+			vi.addrsFn = func() ([]net.Addr, error) { return nil, nil }
+
+			oldSend, oldGARP, oldNA, oldProbe := sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn
+			t.Cleanup(func() {
+				sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn = oldSend, oldGARP, oldNA, oldProbe
+			})
+			sendPacketFn = func(*vrrpInstance, *VRRPPacket, bool) error { return nil }
+
+			var sentMu sync.Mutex
+			var sent []string
+			var burstCalls atomic.Int32
+			firstFrame, releaseFrame := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseFrame) }) }
+			sendDone := make(chan struct{})
+			updateDone := make(chan error, 1)
+			updateStarted, sendFinished, updateFinished := false, false, false
+			defer func() {
+				release()
+				if !sendFinished {
+					select {
+					case <-sendDone:
+					case <-time.After(time.Second):
+						t.Error("initial full-set sender did not stop during cleanup")
+					}
+				}
+				if updateStarted && !updateFinished {
+					select {
+					case <-updateDone:
+					case <-time.After(time.Second):
+						t.Error("removal update did not stop during cleanup")
+					}
+				}
+			}()
+			burst := func(_ string, ip net.IP, _ int, _ cluster.BurstStillValid) error {
+				call := burstCalls.Add(1)
+				sentMu.Lock()
+				sent = append(sent, ip.String())
+				sentMu.Unlock()
+				if call == 1 {
+					close(firstFrame)
+					<-releaseFrame
+				} else {
+					time.Sleep(5 * time.Millisecond)
+				}
+				return nil
+			}
+			garpBurstFn, naBurstFn = burst, burst
+			arpProbeFn = func(string, net.IP, net.IP) error { return nil }
+
+			deleteStarted := make(chan struct{})
+			var firstDelete sync.Once
+			var sentAtDelete []string
+			vi.addrDelFn = func(netlink.Link, *netlink.Addr) error {
+				firstDelete.Do(func() {
+					sentMu.Lock()
+					sentAtDelete = append([]string(nil), sent...)
+					sentMu.Unlock()
+					close(deleteStarted)
+				})
+				return nil
+			}
+
+			go func() {
+				vi.sendGARP(false)
+				close(sendDone)
+			}()
+			select {
+			case <-firstFrame:
+			case <-time.After(time.Second):
+				t.Fatal("initial full-set burst did not send VIP A")
+			}
+			updateStarted = true
+			go func() { updateDone <- vi.updateVIPs([]string{vips[0], vips[3]}) }()
+
+			stack := make([]byte, 1<<20)
+			parkDeadline := time.Now().Add(time.Second)
+			for !goroutineWaitingOnVIPMu(vi, "updateVIPs", stack) &&
+				time.Now().Before(parkDeadline) {
+				runtime.Gosched()
+			}
+			if !goroutineWaitingOnVIPMu(vi, "updateVIPs", stack) {
+				release()
+				t.Fatalf("removal update did not park on vipMu while VIP A's frame was blocked:\n%s",
+					stack[:runtime.Stack(stack, true)])
+			}
+			time.Sleep(10 * time.Millisecond)
+			if !goroutineWaitingOnVIPMu(vi, "updateVIPs", stack) {
+				release()
+				t.Fatal("removal update stopped waiting on vipMu before the first frame was released")
+			}
+			release()
+
+			select {
+			case <-deleteStarted:
+			case <-time.After(time.Second):
+				t.Fatal("removal update did not reach its first deletion")
+			}
+			sentMu.Lock()
+			beforeDelete := append([]string(nil), sentAtDelete...)
+			sentMu.Unlock()
+			lastIP, _, _ := net.ParseCIDR(vips[3])
+			for _, ip := range beforeDelete {
+				if ip == lastIP.String() {
+					t.Fatalf("surviving VIP D was announced before the membership update: %v", beforeDelete)
+				}
+			}
+			if len(beforeDelete) >= len(vips) {
+				t.Fatalf("full old burst completed before removal began: %v", beforeDelete)
+			}
+
+			updateErr := <-updateDone
+			updateFinished = true
+			if updateErr != nil {
+				t.Fatalf("removal-only update: %v", updateErr)
+			}
+			select {
+			case <-sendDone:
+				sendFinished = true
+			case <-time.After(time.Second):
+				t.Fatal("old full-set sender did not stop after the membership epoch changed")
+			}
+			gotVIPs, wantVIPs := vi.vipsSnapshot(), []string{vips[0], vips[3]}
+			if !vipsEqual(gotVIPs, wantVIPs) {
+				t.Fatalf("post-update VIP set = %v, want %v", gotVIPs, wantVIPs)
+			}
+			sentMu.Lock()
+			gotSent := append([]string(nil), sent...)
+			sentMu.Unlock()
+			counts := make(map[string]int, len(gotSent))
+			for _, ip := range gotSent {
+				counts[ip]++
+				if counts[ip] > 1 {
+					t.Fatalf("duplicate GARP/NA for %s: sent=%v", ip, gotSent)
+				}
+			}
+			if counts[lastIP.String()] != 1 {
+				t.Fatalf("surviving VIP D sends = %d, want exactly one; sent=%v",
+					counts[lastIP.String()], gotSent)
+			}
+			if len(gotSent) > len(vips) {
+				t.Fatalf("membership update caused an unbounded duplicate burst: sent=%v", gotSent)
+			}
+		})
+	}
+}
+
 // sync.Mutex permits barging in normal mode, so this proves a mid-burst
 // starvation-mode handoff rather than requiring an exact one-VIP handoff. The
 // parked demoter and paced 16-VIP burst keep contention active beyond Go's
@@ -928,16 +1097,16 @@ func TestGARPPerVIPLockBoundsDemotionWait(t *testing.T) {
 			}()
 			stack := make([]byte, 1<<20)
 			parkDeadline := time.Now().Add(time.Second)
-			for !demotionWaitingOnVIPMu(vi, stack) && time.Now().Before(parkDeadline) {
+			for !goroutineWaitingOnVIPMu(vi, "becomeBackup", stack) && time.Now().Before(parkDeadline) {
 				runtime.Gosched()
 			}
-			if !demotionWaitingOnVIPMu(vi, stack) {
+			if !goroutineWaitingOnVIPMu(vi, "becomeBackup", stack) {
 				release()
 				t.Fatalf("becomeBackup did not park on vipMu while the first frame was blocked:\n%s",
 					stack[:runtime.Stack(stack, true)])
 			}
 			time.Sleep(10 * time.Millisecond)
-			if !demotionWaitingOnVIPMu(vi, stack) {
+			if !goroutineWaitingOnVIPMu(vi, "becomeBackup", stack) {
 				release()
 				t.Fatal("becomeBackup stopped waiting on vipMu before the frame was released")
 			}

@@ -79,10 +79,13 @@ func vipSetDelta(old, want []string) (added, removed []string) {
 //     If the old+added union exceeds advert capacity, remove first and defer
 //     additions until every removal succeeds; a failed delete therefore leaves
 //     the old legal set rather than an unadvertisable union. Then announce the
-//     stored set and GARP/NA only newly added VIPs. Membership changes advance
-//     the burst epoch, invalidating callbacks for withdrawn addresses — and the
-//     epoch is fenced BEFORE the first netlink delete, so a detached follow-up
-//     cannot observe the old epoch and re-announce a VIP mid-withdrawal.
+//     stored set; GARP/NA is normally limited to newly added VIPs, but any
+//     still-current VIP whose synchronous first frame was interrupted by an
+//     older epoch is carried forward. A pure-add with no pending send remains
+//     added-only. Membership changes advance the burst epoch, invalidating
+//     callbacks for withdrawn addresses — and the epoch is fenced BEFORE the
+//     first netlink delete, so a detached follow-up cannot re-announce a VIP
+//     mid-withdrawal.
 //   - BACKUP (or INIT): added VIPs need no actuation (promotion adds the stored
 //     set); removed VIPs are swept best-effort in case a stale address lingers.
 //     If a failed removal would make the stored union over-capacity, defer the
@@ -224,8 +227,8 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	}
 	// When withdrawalFenced, the pre-delete bump already names the new VIP
 	// membership (one bump total, no second post-publish bump), so the
-	// added-only sendGARPFor below validates against the fenced epoch. If
-	// every removal failed the stored set equals the old set yet the epoch
+	// pending-survivor/new-addition send below validates against the fenced epoch.
+	// If every removal failed the stored set equals the old set yet the epoch
 	// still advanced — intentional: withdrawal was attempted, so prior
 	// callbacks must not continue announcing through the retry window.
 	actuationIncomplete := len(addRes.failed) > 0 || addRes.linkErr != nil || removeErr != nil
@@ -265,6 +268,7 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 		}
 		announce = false
 	}
+	announcementVIPs := vi.pendingGARPForSetLocked(newSet, addedOK, announce)
 	vi.vipMu.Unlock()
 
 	if capErr != nil {
@@ -290,11 +294,11 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	// demotion's own resignation).
 	if announce && vi.getState() == StateMaster {
 		vi.sendAdvert(vi.getPriority())
-		if len(addedOK) > 0 && !vi.suppressGARP.Load() {
-			// updateGarpEpoch names the published VIP membership. sendGARPFor
-			// validates it under vipMu so an older full-set snapshot cannot
-			// satisfy the added-only announcement's epoch.
-			vi.sendGARPFor(addedOK, updateGarpEpoch, gen, true)
+		if len(announcementVIPs) > 0 && !vi.suppressGARP.Load() {
+			// Carry only still-current VIPs whose prior synchronous first
+			// frame was interrupted by the membership epoch change, plus
+			// new additions. Already-announced survivors stay quiet.
+			vi.sendGARPFor(announcementVIPs, updateGarpEpoch, gen, true)
 		}
 	}
 	vi.emitEvent()

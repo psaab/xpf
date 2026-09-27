@@ -159,25 +159,97 @@ func (vi *vrrpInstance) sendGARP(force bool) {
 	vips := vi.vipsSnapshot()
 	epoch := vi.garpEpoch.Load()
 	ownerGen := vi.ownerGen.Load()
+	count, ok := vi.reserveGARPBurstLocked(vips, epoch, ownerGen, force)
 	vi.vipMu.Unlock()
-	vi.sendGARPFor(vips, epoch, ownerGen, force)
+	if ok {
+		vi.sendGARPReserved(vips, epoch, ownerGen, count)
+	}
+}
+
+// addPendingGARPVIPsLocked records VIPs whose synchronous initial frame has not
+// yet been confirmed. The caller holds vipMu.
+func (vi *vrrpInstance) addPendingGARPVIPsLocked(vips []string) {
+	if len(vips) == 0 {
+		return
+	}
+	if vi.pendingGARPVIPs == nil {
+		vi.pendingGARPVIPs = make(map[string]struct{}, len(vips))
+	}
+	for _, vip := range vips {
+		vi.pendingGARPVIPs[vip] = struct{}{}
+	}
+}
+
+// markGARPAnnouncedLocked clears one VIP after its synchronous first frame
+// succeeds while its captured ownership and membership token is still current.
+// The caller holds vipMu.
+func (vi *vrrpInstance) markGARPAnnouncedLocked(vip string) {
+	delete(vi.pendingGARPVIPs, vip)
+	if len(vi.pendingGARPVIPs) == 0 {
+		vi.pendingGARPVIPs = nil
+	}
+}
+
+// pendingGARPForSetLocked drops no-longer-current VIPs, retains current
+// unannounced VIPs, and optionally adds successful new VIPs. The result follows
+// current-set order for the next bounded send pass. The caller holds vipMu.
+func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, includeAdded bool) []string {
+	if len(vi.pendingGARPVIPs) == 0 && (!includeAdded || len(added) == 0) {
+		vi.pendingGARPVIPs = nil
+		return nil
+	}
+	next := make(map[string]struct{}, len(vi.pendingGARPVIPs)+len(added))
+	for _, vip := range current {
+		if _, pending := vi.pendingGARPVIPs[vip]; pending {
+			next[vip] = struct{}{}
+		}
+	}
+	if includeAdded {
+		for _, vip := range added {
+			next[vip] = struct{}{}
+		}
+	}
+	if len(next) == 0 {
+		vi.pendingGARPVIPs = nil
+		return nil
+	}
+	vi.pendingGARPVIPs = next
+	announcements := make([]string, 0, len(next))
+	for _, vip := range current {
+		if _, pending := next[vip]; pending {
+			announcements = append(announcements, vip)
+		}
+	}
+	return announcements
 }
 
 // sendGARPFor emits a burst for a stable VIP snapshot and its captured epochs.
 // It validates each VIP under vipMu and holds the lock only through that VIP's
 // synchronous first frame and optional gateway probe. A concurrent withdrawal
 // can therefore fence the remaining snapshot after one VIP instead of waiting
-// for a potentially large whole-set burst.
-// The in-place commit path passes only newly-added VIPs so it does not flap
-// neighbor entries for addresses that remained owned throughout.
+// for a potentially large whole-set burst. Unsent current VIPs are tracked
+// under vipMu so an update can carry surviving work into the new epoch.
+// Pure-add commits without an interrupted send still announce only new VIPs.
 func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force bool) {
 	vi.vipMu.Lock()
+	count, ok := vi.reserveGARPBurstLocked(vips, epoch, ownerGen, force)
+	vi.vipMu.Unlock()
+	if !ok {
+		return
+	}
+	vi.sendGARPReserved(vips, epoch, ownerGen, count)
+}
+
+// reserveGARPBurstLocked validates and reserves one burst before callers drop
+// vipMu. The caller holds vipMu, including the full-set snapshot path, so a
+// membership update cannot invalidate a snapshot before its pending VIPs are
+// recorded.
+func (vi *vrrpInstance) reserveGARPBurstLocked(vips []string, epoch, ownerGen uint64, force bool) (int, bool) {
 	if vi.getState() != StateMaster ||
 		vi.ownerGen.Load() != ownerGen ||
 		vi.garpEpoch.Load() != epoch ||
 		!vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen) {
-		vi.vipMu.Unlock()
-		return
+		return 0, false
 	}
 	// #8597 (muse-004 K20): under vi.mu — updateConfig writes this field on the
 	// manager goroutine while sendGARP runs on the run loop, on detached
@@ -201,12 +273,14 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force
 	}
 	// Reserve this epoch before releasing vipMu. Per-VIP lock handoffs would
 	// otherwise let a duplicate same-epoch send begin before this burst stores
-	// lastGARPEpoch at completion. A membership update bumps garpEpoch before
-	// withdrawal actuation, so this reservation cannot suppress its new epoch.
+	// lastGARPEpoch at completion.
 	vi.lastGARPOwnerGen.Store(ownerGen)
 	vi.lastGARPEpoch.Store(epoch)
-	vi.vipMu.Unlock()
+	vi.addPendingGARPVIPsLocked(vips)
+	return count, true
+}
 
+func (vi *vrrpInstance) sendGARPReserved(vips []string, epoch, ownerGen uint64, count int) {
 	stillMaster := func() bool {
 		return vi.getState() == StateMaster &&
 			vi.ownerGen.Load() == ownerGen &&
@@ -225,9 +299,12 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force
 			vi.vipMu.Unlock()
 			continue
 		}
+		announced := false
 		if ip.To4() != nil {
 			if err := garpBurstFn(vi.cfg.Interface, ip, count, stillMaster); err != nil {
 				slog.Warn("vrrp: GARP failed", "key", vi.key(), "vip", ip, "err", err)
+			} else {
+				announced = true
 			}
 			// Probe the first usable host (network address + 1) of the
 			// VIP subnet — this is the most common gateway address. The
@@ -250,7 +327,12 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force
 		} else {
 			if err := naBurstFn(vi.cfg.Interface, ip, count, stillMaster); err != nil {
 				slog.Warn("vrrp: NA failed", "key", vi.key(), "vip", ip, "err", err)
+			} else {
+				announced = true
 			}
+		}
+		if announced && stillMaster() {
+			vi.markGARPAnnouncedLocked(vip)
 		}
 		vi.vipMu.Unlock()
 		// Give a waiting membership update or demotion a chance to acquire
