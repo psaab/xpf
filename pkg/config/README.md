@@ -220,10 +220,12 @@ distinction).
   collision gate ignores inactive tunnel definitions, and a deactivated leaf
   with a deliberately-invalid value commits clean (Junos parks WIP). The
   ~15 compiler files and the schema gate never observe an inactive node, so
-  none of them changed. All five display serializers (text, inheritance,
-  set, JSON, XML) plus the `show | compare` diff re-emit the marker from the
-  flag via the shared `inactivePrefix` / `xmlInactiveAttr` helpers; set form
-  emits a `deactivate <path>` line (Junos `display set` convention) and
+  none of them changed. All five display serializers (text, inheritance, set,
+  JSON, XML) plus the `show | compare` diff re-emit the marker from the flag via
+  the shared `inactivePrefix` / `xmlInactiveAttr` helpers; XML keeps values such
+  as interface names containing `/` in text and nests zone-pair `to-zone`
+  separately so both endpoints remain recoverable. Set form emits a
+  `deactivate <path>` line (Junos `display set` convention) and
   `nodesEqual` treats a flipped `Inactive` as a difference so a pure
   activate/deactivate shows in `show | compare`. The flag round-trips
   through the persisted DB automatically — `Node.Inactive` is JSON-tagged
