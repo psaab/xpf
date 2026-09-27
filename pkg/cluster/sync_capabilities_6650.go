@@ -87,7 +87,24 @@ func (s *SessionSync) SnapshotPeerSnapshotProtocol() PeerSnapshotState {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.peerSnapshotStateLocked()
+}
+
+// peerSnapshotStateLocked binds the session-global advertisement to the
+// SELECTED connection's own proof. A replacement installed into the empty
+// alternate slot can become the preferred active socket while the other fabric
+// survives, without tripping the supersession or epoch-reboot classifiers.
+// Production connections are authConn wrappers; direct unwrapped connections
+// are test fixtures and retain the injected session-level observation. Caller
+// holds s.mu.
+func (s *SessionSync) peerSnapshotStateLocked() PeerSnapshotState {
 	version := uint16(s.peerSnapshotProtocol.Load())
+	selected := s.activeConnLocked()
+	if selected != nil && !s.connIsCurrentIncarnationLocked(selected) {
+		version = 0
+	} else if ac, ok := selected.(*authConn); ok && ac.peerSnapshotVersion < version {
+		version = ac.peerSnapshotVersion
+	}
 	return PeerSnapshotState{
 		Version:    version,
 		Learned:    version != 0,

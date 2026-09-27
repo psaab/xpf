@@ -318,13 +318,7 @@ func (s *SessionSync) writeConfigWithPeerSnapshotGuard(
 ) (bool, error) {
 	s.mu.Lock()
 	s.peerSnapshotProtocolWriteMu.Lock()
-	version := uint16(s.peerSnapshotProtocol.Load())
-	current := PeerSnapshotState{
-		Version:    version,
-		Learned:    version != 0,
-		Generation: s.peerSnapshotProtocolGeneration,
-		Connected:  s.stats.Connected.Load(),
-	}
+	current := s.peerSnapshotStateLocked()
 	valid := current.Connected && current.Version >= guard.minProtocol &&
 		current == guard.expected && s.activeConnLocked() == conn &&
 		(guard.currentPeerConnEpoch == nil ||
@@ -362,13 +356,7 @@ func (s *SessionSync) QueueConfigWithPeerSnapshotProtocolAtGeneration(
 		return false
 	}
 	s.mu.Lock()
-	version := uint16(s.peerSnapshotProtocol.Load())
-	current := PeerSnapshotState{
-		Version:    version,
-		Learned:    version != 0,
-		Generation: s.peerSnapshotProtocolGeneration,
-		Connected:  s.stats.Connected.Load(),
-	}
+	current := s.peerSnapshotStateLocked()
 	if !current.Connected || current.Version < minProtocol || current != expected ||
 		(currentPeerConnEpoch != nil && currentPeerConnEpoch() != expectedPeerConnEpoch) {
 		s.mu.Unlock()
