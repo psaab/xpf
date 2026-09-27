@@ -39,6 +39,15 @@ func (s *SessionSync) SetConnectedForTesting(connected bool) {
 	s.stats.Connected.Store(connected)
 }
 
+// SetPeerSnapshotProtocolVersionForTesting injects the peer's advertised
+// config-snapshot version without a capability-frame exchange.
+func (s *SessionSync) SetPeerSnapshotProtocolVersionForTesting(v uint16) {
+	if s == nil {
+		return
+	}
+	s.peerSnapshotProtocol.Store(uint32(v))
+}
+
 // DischargeColdPrimeForTesting discharges the currently owed cold-prime debt,
 // if any, through the production BulkAck discharge path. It is a no-op with
 // nothing owed.

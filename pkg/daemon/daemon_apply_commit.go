@@ -827,6 +827,13 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			if serr := clusterSyncEndpointCommitPreflight(d.activeTransport(), cand); serr != nil {
 				return serr
 			}
+			// #10782: commit-confirmed must enforce the same #6650 peer
+			// representability gate as a plain commit. Otherwise the candidate
+			// is promoted and pushed to a pre-v4 peer that lenient-compiles a
+			// multi-zone scope to first-zone-only.
+			if perr := d.peerSnapshotProtocolCommitPreflight(cand); perr != nil {
+				return perr
+			}
 			// #6707: the rollback target must be APPLIABLE, not merely
 			// device-map safe. The timeout path applies it unconditionally
 			// (OQ-15.2, see the rollback callback), so a target the dataplane
