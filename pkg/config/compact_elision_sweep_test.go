@@ -323,8 +323,8 @@ func TestGateColumnArmsAreReachable8859(t *testing.T) {
 			"security { alg { h323; } }", "security alg h323;", "SILENT"},
 		// Negatives: without these the cell passes on a gate stuck at WARNS.
 		{"silent-proposal",
-			"security { ike { proposal P { description hi; } } }",
-			"security ike proposal P { description hi; }", "SILENT"},
+			"security { ike { proposal P { description hi; encryption-algorithm aes-256-gcm; } } }",
+			"security ike proposal P { description hi; encryption-algorithm aes-256-gcm; }", "SILENT"},
 		{"silent-empty", "", "", "SILENT"},
 	} {
 		t.Run(c.name, func(t *testing.T) {

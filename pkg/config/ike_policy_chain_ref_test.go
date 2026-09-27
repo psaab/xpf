@@ -175,6 +175,7 @@ func TestIKEOrphanGatewayDanglingPolicyAccepted(t *testing.T) {
 		// Healthy referenced tunnel.
 		"set security ike proposal ike-aes256 authentication-method pre-shared-keys",
 		"set security ike proposal ike-aes256 encryption-algorithm aes-256-cbc",
+		"set security ike proposal ike-aes256 authentication-algorithm sha-256",
 		"set security ike policy ike-pol proposals ike-aes256",
 		"set security ike gateway gw-good address 192.0.2.1",
 		"set security ike gateway gw-good ike-policy ike-pol",

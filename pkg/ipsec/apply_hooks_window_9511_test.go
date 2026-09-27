@@ -50,7 +50,7 @@ func TestApplyHooksOnPerVPNAuthSkip9511(t *testing.T) {
 	m := NewWithConfigDir(t.TempDir())
 	m.swanctl = func(args ...string) ([]byte, error) { return nil, nil }
 	cfg := vpnCfg("healthy", "bad")
-	cfg.IKEProposals = map[string]*config.IKEProposal{"prop-bad": {Name: "prop-bad", AuthMethod: "bogus"}}
+	cfg.IKEProposals = map[string]*config.IKEProposal{"prop-bad": {Name: "prop-bad", AuthMethod: "bogus", EncryptionAlg: "aes-256-cbc", AuthAlg: "sha-256"}}
 	cfg.IKEPolicies = map[string]*config.IKEPolicy{"pol-bad": {Proposals: []string{"prop-bad"}}}
 	cfg.Gateways = map[string]*config.IPsecGateway{"gw-bad": {Address: "172.16.9.9", IKEPolicy: "pol-bad"}}
 	cfg.VPNs["bad"].Gateway = "gw-bad"

@@ -1656,6 +1656,7 @@ func TestIPsecGatewaySetSyntax(t *testing.T) {
 	// ike-policy chain resolves (#2270 commit-time gate); the assertions
 	// below only exercise the parser's gateway-field storage.
 	setCommands := []string{`set security ike proposal ike-prop authentication-method pre-shared-keys`, `set security ike proposal ike-prop encryption-algorithm aes-256-cbc`, `set security ike policy ike-strong proposals ike-prop`, `set security ipsec gateway remote-gw address 203.0.113.1`, `set security ipsec gateway remote-gw local-address 198.51.100.1`, `set security ipsec gateway remote-gw ike-policy ike-strong`, `set security ipsec gateway remote-gw external-interface untrust0`, `set security ipsec vpn site-a gateway remote-gw`, `set security ipsec vpn site-a bind-interface st0.0`}
+	setCommands = append(setCommands, `set security ike proposal ike-prop authentication-algorithm sha-256`)
 	tree := &ConfigTree{}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
@@ -2063,6 +2064,7 @@ func TestIKEDeadPeerDetectionForms(t *testing.T) {
 
 func TestIKEAdvancedSetSyntax(t *testing.T) {
 	setCommands := []string{`set security ike proposal ike-p1 authentication-method pre-shared-keys`, `set security ike proposal ike-p1 dh-group group14`, `set security ike proposal ike-p1 encryption-algorithm aes-256-cbc`, `set security ike policy pol1 mode main`, `set security ike policy pol1 proposals ike-p1`, `set security ike policy pol1 pre-shared-key ascii-text mysecret`, `set security ike gateway gw1 ike-policy pol1`, `set security ike gateway gw1 address 10.0.0.1`, `set security ike gateway gw1 version v2-only`, `set security ike gateway gw1 no-nat-traversal`, `set security ike gateway gw1 dead-peer-detection always-send`, `set security ike gateway gw1 local-identity hostname vpn.test.com`, `set security ike gateway gw1 remote-identity inet 10.0.0.1`, `set security ipsec proposal esp-p2 protocol esp`, `set security ipsec proposal esp-p2 encryption-algorithm aes-256-cbc`, `set security ipsec proposal esp-p2 authentication-algorithm hmac-sha-256-128`, `set security ipsec policy ipsec-pol perfect-forward-secrecy keys group5`, `set security ipsec policy ipsec-pol proposals esp-p2`, `set security ipsec vpn tun1 bind-interface st0.0`, `set security ipsec vpn tun1 df-bit copy`, `set security ipsec vpn tun1 establish-tunnels immediately`, `set security ipsec vpn tun1 ike gateway gw1`, `set security ipsec vpn tun1 ike ipsec-policy ipsec-pol`}
+	setCommands = append(setCommands, `set security ike proposal ike-p1 authentication-algorithm sha-256`)
 	tree := &ConfigTree{}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
