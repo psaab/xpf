@@ -2899,4 +2899,272 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(coordinator.mirror_restore_failed_total(), 1);
     }
 
+    fn strict_refusal_with_gap_action(
+        coordinator: &Coordinator,
+        current: SyncedSessionEntry,
+        gap_action: impl FnOnce() + Send,
+    ) -> SyncedImportOutcome {
+        let gap_worker = crate::nat::gap_barrier_11478::install();
+        let outcome = std::thread::scope(|scope| {
+            let worker = scope.spawn(move || gap_worker.run_at_gap(gap_action));
+            let outcome = coordinator
+                .session_domain
+                .upsert_synced_session_mirror(current);
+            worker.join().expect("the capture-gap worker must complete");
+            outcome
+        });
+        assert!(
+            crate::nat::gap_barrier_11478::fired(),
+            "the strict import must reach the holder-capture seam"
+        );
+        crate::nat::gap_barrier_11478::uninstall();
+        outcome
+    }
+
+    #[test]
+    fn snat_capture_replace_captures_worker_release_in_gap_11478() {
+        let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = v4_key();
+        let previous_nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2))),
+            rewrite_src_port: Some(51_020),
+            ..NatDecision::default()
+        };
+        let current_nat = NatDecision {
+            rewrite_src: previous_nat.rewrite_src,
+            rewrite_src_port: Some(51_021),
+            ..NatDecision::default()
+        };
+        let previous = synced_entry(key.clone(), previous_nat, 5, 5_020);
+        let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        for worker_id in [0, 1] {
+            assert!(crate::nat::reserve_synced_source_nat_allocation_for_worker(
+                &coordinator.forwarding.iface_nat_allocators,
+                &coordinator.forwarding.source_nat_rules,
+                &previous.key,
+                previous_nat,
+                false,
+                None,
+                1_000,
+                worker_id,
+            ));
+        }
+        publish_seeded_shared_entry(&coordinator, &previous);
+        let current = synced_entry(key, current_nat, 6, 5_021);
+
+        assert_eq!(
+            strict_refusal_with_gap_action(&coordinator, current, || {
+                crate::nat::release_source_nat_allocation_for_worker(
+                    &coordinator.forwarding.iface_nat_allocators,
+                    &coordinator.forwarding.source_nat_rules,
+                    &previous.key,
+                    previous_nat,
+                    false,
+                    2_000,
+                    0,
+                );
+            }),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        assert!(allocator.debug_is_port_occupied(0, 51_020));
+        assert!(!allocator.debug_is_port_occupied(0, 51_021));
+
+        crate::nat::release_source_nat_allocation_for_worker(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &previous.key,
+            previous_nat,
+            false,
+            3_000,
+            1,
+        );
+        assert!(
+            !allocator.debug_is_port_occupied(0, 51_020),
+            "the captured mask must exclude worker 0 after its gap release"
+        );
+    }
+
+    #[test]
+    fn nat64_capture_replace_captures_worker_release_in_gap_11478() {
+        let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = nat64_key();
+        let previous_nat = translated_nat64(51_030);
+        let current_nat = translated_nat64(51_031);
+        let previous = synced_entry(key.clone(), previous_nat, 5, 5_030);
+        let allocator = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+        for worker_id in [0, 1] {
+            assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+                &coordinator.forwarding.nat64,
+                &previous.key,
+                previous_nat,
+                false,
+                1_000,
+                worker_id,
+            ));
+        }
+        publish_seeded_shared_entry(&coordinator, &previous);
+        let current = synced_entry(key, current_nat, 6, 5_031);
+
+        assert_eq!(
+            strict_refusal_with_gap_action(&coordinator, current, || {
+                crate::nat64::release_nat64_allocation_for_worker(
+                    &coordinator.forwarding.nat64,
+                    &previous.key,
+                    previous_nat,
+                    false,
+                    2_000,
+                    0,
+                );
+            }),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        assert!(allocator.debug_is_port_occupied(0, 51_030));
+        assert!(!allocator.debug_is_port_occupied(0, 51_031));
+
+        crate::nat64::release_nat64_allocation_for_worker(
+            &coordinator.forwarding.nat64,
+            &previous.key,
+            previous_nat,
+            false,
+            3_000,
+            1,
+        );
+        assert!(
+            !allocator.debug_is_port_occupied(0, 51_030),
+            "the captured mask must exclude worker 0 after its gap release"
+        );
+    }
+
+    #[test]
+    fn gap_upsert_or_is_included_in_replayed_snat_mask_11478() {
+        let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = v4_key();
+        let previous_nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2))),
+            rewrite_src_port: Some(51_040),
+            ..NatDecision::default()
+        };
+        let current_nat = NatDecision {
+            rewrite_src: previous_nat.rewrite_src,
+            rewrite_src_port: Some(51_041),
+            ..NatDecision::default()
+        };
+        let previous = synced_entry(key.clone(), previous_nat, 5, 5_040);
+        let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        for worker_id in [0, 1] {
+            assert!(crate::nat::reserve_synced_source_nat_allocation_for_worker(
+                &coordinator.forwarding.iface_nat_allocators,
+                &coordinator.forwarding.source_nat_rules,
+                &previous.key,
+                previous_nat,
+                false,
+                None,
+                1_000,
+                worker_id,
+            ));
+        }
+        publish_seeded_shared_entry(&coordinator, &previous);
+        let current = synced_entry(key, current_nat, 6, 5_041);
+
+        assert_eq!(
+            strict_refusal_with_gap_action(&coordinator, current, || {
+                assert!(crate::nat::reserve_synced_source_nat_allocation_for_worker(
+                    &coordinator.forwarding.iface_nat_allocators,
+                    &coordinator.forwarding.source_nat_rules,
+                    &previous.key,
+                    previous_nat,
+                    false,
+                    None,
+                    2_000,
+                    2,
+                ));
+            }),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        for (worker_id, now_ns) in [(0, 3_000), (1, 4_000)] {
+            crate::nat::release_source_nat_allocation_for_worker(
+                &coordinator.forwarding.iface_nat_allocators,
+                &coordinator.forwarding.source_nat_rules,
+                &previous.key,
+                previous_nat,
+                false,
+                now_ns,
+                worker_id,
+            );
+            assert!(
+                allocator.debug_is_port_occupied(0, 51_040),
+                "the gap upsert's holder bit must survive earlier worker releases"
+            );
+        }
+        crate::nat::release_source_nat_allocation_for_worker(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &previous.key,
+            previous_nat,
+            false,
+            5_000,
+            2,
+        );
+        assert!(!allocator.debug_is_port_occupied(0, 51_040));
+    }
+
+    #[test]
+    fn gap_upsert_or_is_included_in_replayed_nat64_mask_11478() {
+        let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        let key = nat64_key();
+        let previous_nat = translated_nat64(51_050);
+        let current_nat = translated_nat64(51_051);
+        let previous = synced_entry(key.clone(), previous_nat, 5, 5_050);
+        let allocator = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+        for worker_id in [0, 1] {
+            assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+                &coordinator.forwarding.nat64,
+                &previous.key,
+                previous_nat,
+                false,
+                1_000,
+                worker_id,
+            ));
+        }
+        publish_seeded_shared_entry(&coordinator, &previous);
+        let current = synced_entry(key, current_nat, 6, 5_051);
+
+        assert_eq!(
+            strict_refusal_with_gap_action(&coordinator, current, || {
+                assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+                    &coordinator.forwarding.nat64,
+                    &previous.key,
+                    previous_nat,
+                    false,
+                    2_000,
+                    2,
+                ));
+            }),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        for (worker_id, now_ns) in [(0, 3_000), (1, 4_000)] {
+            crate::nat64::release_nat64_allocation_for_worker(
+                &coordinator.forwarding.nat64,
+                &previous.key,
+                previous_nat,
+                false,
+                now_ns,
+                worker_id,
+            );
+            assert!(
+                allocator.debug_is_port_occupied(0, 51_050),
+                "the gap upsert's holder bit must survive earlier worker releases"
+            );
+        }
+        crate::nat64::release_nat64_allocation_for_worker(
+            &coordinator.forwarding.nat64,
+            &previous.key,
+            previous_nat,
+            false,
+            5_000,
+            2,
+        );
+        assert!(!allocator.debug_is_port_occupied(0, 51_050));
+    }
+
 }

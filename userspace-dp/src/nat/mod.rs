@@ -39,6 +39,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod allocator;
+#[cfg(test)]
+pub(crate) mod gap_barrier_11478;
 mod destination;
 // #8121: idle persistent-NAT lease export/import — the population session
 // sync provably cannot reach (a lease with zero flows has no session).
@@ -229,7 +231,8 @@ pub(crate) use source::{
     match_source_nat_result_for_tuple, parse_source_nat_rules,
     parse_source_nat_rules_with_previous, release_nat64_pool_port,
     release_source_nat_allocation_for_worker, release_synced_source_nat_allocation_untracked,
-    reserve_nat64_pool_port, reserve_synced_source_nat_allocation_for_worker,
+    reserve_nat64_pool_port, reserve_nat64_pool_port_capture_and_replace,
+    reserve_synced_source_nat_allocation_for_worker,
     // #6600: the coordinator's pre-publish reservation and its rollback. NOT
     // test-only, unlike the untracked entry points below — these are the
     // production import path.
