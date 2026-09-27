@@ -3462,15 +3462,13 @@ impl SessionTable {
         let old_owner_rg = record.entry.metadata.owner_rg_id;
         let old_origin = record.entry.origin;
         let old_ingress_zone = record.entry.metadata.ingress_zone;
-        let old_counted =
-            !old_is_reverse && install::session_limit_origin_counted(old_origin);
+        let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
         // Capture the new index parts before `metadata` is moved into the record.
         let new_nat = decision.nat;
         let new_is_reverse = metadata.is_reverse;
         let new_owner_rg = metadata.owner_rg_id;
         let new_ingress_zone = metadata.ingress_zone;
-        let new_counted =
-            !new_is_reverse && install::session_limit_origin_counted(old_origin);
+        let new_counted = !new_is_reverse && install::session_limit_origin_counted(old_origin);
 
         let reindex =
             old_nat != new_nat || old_is_reverse != new_is_reverse || old_owner_rg != new_owner_rg;
