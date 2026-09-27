@@ -266,12 +266,11 @@ impl PortAllocator {
                 activation_saw_completion: false,
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
-                activation_previous_imported: false,
                 activation_previous_timeout_ns: 0,
                 address_only: rec.address_only,
-                // Imported state stays out of sync export until local traffic
-                // adopts it: 0 -> 1 promotion is rollback-safe, while a local
-                // N -> N+1 join promotes only after `release_flow` completes.
+                // Imported state remains non-exportable until a local flow
+                // successfully completes its marked release; reserve and
+                // rollback alone never transfer peer ownership.
                 imported: true,
             },
         );

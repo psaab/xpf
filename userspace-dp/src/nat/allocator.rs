@@ -434,10 +434,9 @@ struct LiveAllocation {
     //
     // `u128` keeps `LiveAllocation` `Copy` (both read paths use `.copied()`), so
     // no `Vec`/`HashSet` allocation enters the per-flow record.
-    // A local flow joining an already-active imported lease does not promote
-    // on tentative reserve: later admission may roll it back. Its per-flow
-    // marker carries the local timeout; `release_flow` promotes only when that
-    // admitted local flow completes. `None` for synced joins and all others.
+    // A local flow adopting an imported idle lease or joining an imported
+    // active lease is tentative until admitted. Carry its local timeout on the
+    // per-flow record; only ordinary `release_flow` completion promotes.
     promotion_timeout_ns: Option<u64>,
     holders: u128,
 }
@@ -796,21 +795,10 @@ pub(super) struct PersistentLease {
     pub(super) activation_saw_completion: bool,
     pub(super) activation_previous_expires_at_ns: u64,
     pub(super) activation_had_previous_lease: bool,
-    // #10789-F4/F1: the origin bit as it was BEFORE this activation's 0 -> 1
-    // edge snapshotted it. `rollback_flow` restores this alongside the previous
-    // expiry when it returns the lease to idle: without it a tentative local
-    // reserve that a later admission stage rejects (peer-overlap, install
-    // refusal) would leave a peer-owned lease marked exportable, and the next
-    // push would echo it. Snapshotted on every 0 -> 1 edge that arms rollback
-    // bookkeeping — local AND synced joins (the synced arms snapshot without
-    // clearing, so their restore is a no-op, but the field must be current or
-    // a later rollback restores stale data).
-    pub(super) activation_previous_imported: bool,
-    // #10789-F4/B2: same snapshot for the re-arm interval. Both local 0 -> 1
-    // promotions overwrite `timeout_ns` with the local configured value (a
-    // peer-supplied MAX must not survive becoming locally owned); rollback of
-    // a never-admitted activation restores the prior value so the lease
-    // returns to its exact pre-activation idle state.
+    // #10789-F4/B2: the timeout snapshot restores the pre-activation idle
+    // state if no flow completed. Locally-owned 0 -> 1 reuse applies the
+    // current local timeout immediately; imported leases defer timeout changes
+    // until a local completion consumes their per-flow promotion marker.
     pub(super) activation_previous_timeout_ns: u64,
     // #6041: an ADDRESS-ONLY persistent lease (`persistent-nat` + `port
     // no-translation` / a port-less protocol). It pins a public ADDRESS across
@@ -838,14 +826,12 @@ pub(super) struct PersistentLease {
     // NEVER serialized: this struct has no `Serialize` derive and neither
     // `IdleLeaseRecord` nor `DisplayLeaseRecord` carries the bit (wire
     // unchanged, no new record type), so a receiver always marks what it
-    // installs rather than trusting a carried value. A LOCAL 0 -> 1 adoption
-    // clears this transactionally; `rollback_flow` restores the snapshot if
-    // later admission rejects it. A LOCAL N -> N+1 join on an imported active
-    // lease keeps this set and carries a per-flow marker: `release_flow`
-    // promotes only after successful completion. Rollback drops that marker,
-    // and SYNCED joins never promote. This prevents both tentative-reserve echo
-    // and the synced-live failover/failback sequence from silently claiming
-    // peer-owned state.
+    // installs rather than trusting a carried value. Local reserves for
+    // imported idle (0 -> 1) or active (N -> N+1) leases keep this bit set and
+    // carry a per-flow marker. Only successful final-holder `release_flow`
+    // completion promotes the lease; `rollback_flow`, synced joins, worker
+    // retirement, and stale-tuple eviction do not. This prevents tentative
+    // reserves from echoing peer-owned state.
     //
     // Rolling upgrade (accepted window): a peer on an older helper has no
     // filter and echoes our pushes back until it upgrades. The echo heals on
@@ -2462,7 +2448,6 @@ impl PortAllocator {
                             activation_saw_completion: false,
                             activation_previous_expires_at_ns: 0,
                             activation_had_previous_lease: false,
-                            activation_previous_imported: false,
                             activation_previous_timeout_ns: 0,
                             address_only: false,
                             // #10789-F4: minted by a local lookup — exportable.
@@ -2583,11 +2568,20 @@ impl PortAllocator {
                     remove_expiry = Some((addr_index, lease.expires_at_ns));
                     lease.activation_saw_completion = false;
                     lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                    lease.activation_previous_imported = lease.imported;
                     lease.activation_previous_timeout_ns = lease.timeout_ns;
                     lease.activation_had_previous_lease = true;
-                    lease.imported = false;
-                    lease.timeout_ns = local_timeout_ns;
+                    if lease.imported {
+                        // #10789-F4 round 2 (F1): an imported idle adoption is
+                        // tentative until a local flow completes — same as N->N+1.
+                        // Clearing here leaks through a concurrent synced join:
+                        // rollback at 2->1 skips the 1->0 restore, and a synced
+                        // completion sets activation_saw_completion so the later
+                        // local rollback re-arms instead of restoring. Carry a
+                        // per-flow marker; release_flow promotes.
+                        promotion_timeout_ns = Some(local_timeout_ns);
+                    } else {
+                        lease.timeout_ns = local_timeout_ns;
+                    }
                 } else if lease.imported {
                     // Q2: a local N -> N+1 join is not yet proof that this
                     // packet survived downstream admission. Carry a marker to
@@ -3035,7 +3029,6 @@ impl PortAllocator {
                         insert_expiry = Some((lease.addr_index, expires_at_ns));
                     } else if lease.activation_had_previous_lease {
                         lease.expires_at_ns = lease.activation_previous_expires_at_ns;
-                        lease.imported = lease.activation_previous_imported;
                         lease.timeout_ns = lease.activation_previous_timeout_ns;
                         insert_expiry = Some((lease.addr_index, lease.expires_at_ns));
                     } else {
@@ -3797,7 +3790,6 @@ impl PortAllocator {
                     if was_idle {
                         lease.activation_saw_completion = false;
                         lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                        lease.activation_previous_imported = lease.imported;
                         lease.activation_previous_timeout_ns = lease.timeout_ns;
                         lease.activation_had_previous_lease = true;
                         // #10789-F4: synced joins preserve peer origin. A local
@@ -3884,7 +3876,6 @@ impl PortAllocator {
                     activation_saw_completion: false,
                     activation_previous_expires_at_ns: 0,
                     activation_had_previous_lease: false,
-                    activation_previous_imported: false,
                     activation_previous_timeout_ns: 0,
                     address_only: false,
                     // #10789-F4: rebuilt from a synced session — never re-exported.
@@ -4132,7 +4123,6 @@ impl PortAllocator {
                     if idle_lease_to_deindex.is_some() {
                         lease.activation_saw_completion = false;
                         lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                        lease.activation_previous_imported = lease.imported;
                         lease.activation_previous_timeout_ns = lease.timeout_ns;
                         lease.activation_had_previous_lease = true;
                         // Synced joins preserve peer origin; only a successful
@@ -4153,7 +4143,6 @@ impl PortAllocator {
                             activation_saw_completion: false,
                             activation_previous_expires_at_ns: 0,
                             activation_had_previous_lease: false,
-                            activation_previous_imported: false,
                             activation_previous_timeout_ns: 0,
                             // The lease pins an ADDRESS and holds no port bit.
                             // Its teardown must not free one, and
@@ -4895,11 +4884,16 @@ impl PortAllocator {
                     remove_expiry = Some((lease.addr_index, lease.expires_at_ns));
                     lease.activation_saw_completion = false;
                     lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                    lease.activation_previous_imported = lease.imported;
                     lease.activation_previous_timeout_ns = lease.timeout_ns;
                     lease.activation_had_previous_lease = true;
-                    lease.imported = false;
-                    lease.timeout_ns = timeout_ns;
+                    if lease.imported {
+                        // As in PAT, defer imported-idle ownership transfer
+                        // until this local flow completes; rollback simply
+                        // removes the marker, even if synced flows joined.
+                        promotion_timeout_ns = Some(timeout_ns);
+                    } else {
+                        lease.timeout_ns = timeout_ns;
+                    }
                 } else if lease.imported {
                     // As in PAT, reserve is tentative until the local flow
                     // completes; rollback drops this marker without promotion.
@@ -4935,7 +4929,6 @@ impl PortAllocator {
                     activation_saw_completion: false,
                     activation_previous_expires_at_ns: 0,
                     activation_had_previous_lease: false,
-                    activation_previous_imported: false,
                     activation_previous_timeout_ns: 0,
                     address_only: true,
                     // #10789-F4: minted by a local lookup — exportable.

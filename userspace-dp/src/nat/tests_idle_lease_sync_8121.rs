@@ -1082,10 +1082,10 @@ fn an_imported_lifetime_is_clamped_to_the_local_timeout_10789_f4() {
 }
 
 /// A local reserve is tentative until the production admission path accepts it.
-/// Rolling it back must restore peer origin, expiry and re-arm timeout in both
-/// allocator modes, so the imported record remains suppressed from export.
+/// For both allocator modes, the imported origin, expiry, and re-arm timeout
+/// remain peer-owned until a successful release completes.
 #[test]
-fn rollback_restores_imported_origin_and_timeout_for_both_modes_10789_f4() {
+fn rollback_preserves_imported_origin_and_timeout_for_both_modes_10789_f4() {
     let addrs = pool();
     let local_pool = ipv4_pool(&addrs);
     let local_timeout_ns = TIMEOUT_NS;
@@ -1120,9 +1120,12 @@ fn rollback_restores_imported_origin_and_timeout_for_both_modes_10789_f4() {
             NatHolder::Untracked,
         )
         .expect("the local flow must tentatively adopt the imported PAT lease");
-    assert_eq!(pat.debug_live().persistent_by_source[&pat_flow
-        .persistent_source_key(PersistentNatPermit::TargetHostPort)]
-        .timeout_ns, local_timeout_ns);
+    assert_eq!(
+        pat.debug_live().persistent_by_source[&pat_flow
+            .persistent_source_key(PersistentNatPermit::TargetHostPort)]
+            .timeout_ns,
+        imported_timeout_ns
+    );
     assert!(pat.rollback_flow(pat_flow, pat_tuple, 3_000, NatHolder::Untracked));
     let pat_lease = pat.debug_live().persistent_by_source
         [&pat_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)];
@@ -1167,7 +1170,7 @@ fn rollback_restores_imported_origin_and_timeout_for_both_modes_10789_f4() {
         address_only.debug_live().persistent_by_source[&address_flow
             .persistent_source_key(PersistentNatPermit::TargetHostPort)]
             .timeout_ns,
-        local_timeout_ns
+        imported_timeout_ns
     );
     assert!(address_only.rollback_flow(
         address_flow,
@@ -1181,4 +1184,177 @@ fn rollback_restores_imported_origin_and_timeout_for_both_modes_10789_f4() {
     assert_eq!(address_lease.timeout_ns, imported_timeout_ns);
     assert_eq!(address_lease.expires_at_ns, 1_000 + remaining_ns);
     assert!(address_only.export_idle_leases(4_000).is_empty());
+}
+
+fn assert_pat_rollback_with_concurrent_synced_flow(synced_completes_first: bool) {
+    let addrs = pool();
+    let local_pool = ipv4_pool(&addrs);
+    let source = flow("10.0.61.60", 40060);
+    let local = SourceNatFlowKey {
+        dst_ip: "1.1.1.1".parse().unwrap(),
+        dst_port: 443,
+        ..source
+    };
+    let synced = SourceNatFlowKey {
+        dst_ip: "9.9.9.9".parse().unwrap(),
+        dst_port: 443,
+        ..source
+    };
+    let peer_timeout_ns = 60 * 1_000_000_000;
+    let rec = {
+        let mut rec = idle_record_for(source, IpAddr::V4(addrs[0]), 2048, false, None);
+        rec.remaining_ns = 45 * 1_000_000_000;
+        rec.timeout_ns = peer_timeout_ns;
+        rec
+    };
+    let alloc = PortAllocator::new(1, 1024, 65535);
+    assert_eq!(
+        alloc.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let key = source.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let local_tuple = alloc
+        .allocate_translation(
+            local,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            2_000,
+            NatHolder::Untracked,
+        )
+        .expect("local 0 -> 1 reserve adopts imported PAT identity");
+    let tentative = alloc.debug_live().persistent_by_source[&key];
+    assert!(tentative.imported);
+    assert_eq!(tentative.timeout_ns, peer_timeout_ns);
+
+    let peer_tuple = TranslatedTuple {
+        ip: rec.translated_ip,
+        port: rec.translated_port,
+    };
+    assert!(alloc.reserve_flow_maybe_persistent(
+        synced,
+        peer_tuple,
+        0,
+        false,
+        3_000,
+        NatHolder::Untracked,
+        Some((key, TIMEOUT_NS)),
+    ));
+    assert_eq!(alloc.debug_live().persistent_by_source[&key].active_flows, 2);
+    if synced_completes_first {
+        assert!(alloc.release_flow(synced, peer_tuple, 4_000, NatHolder::Untracked));
+        let between = alloc.debug_live().persistent_by_source[&key];
+        assert!(between.imported, "synced completion must not promote PAT");
+        assert_eq!(between.active_flows, 1);
+        assert_eq!(between.timeout_ns, peer_timeout_ns);
+        assert!(alloc.rollback_flow(local, local_tuple, 5_000, NatHolder::Untracked));
+    } else {
+        assert!(alloc.rollback_flow(local, local_tuple, 4_000, NatHolder::Untracked));
+        let between = alloc.debug_live().persistent_by_source[&key];
+        assert!(between.imported, "rollback with a peer flow active must preserve origin");
+        assert_eq!(between.active_flows, 1);
+        assert_eq!(between.timeout_ns, peer_timeout_ns);
+        assert!(alloc.release_flow(synced, peer_tuple, 5_000, NatHolder::Untracked));
+    }
+    let idle = alloc.debug_live().persistent_by_source[&key];
+    assert!(idle.imported);
+    assert_eq!(idle.active_flows, 0);
+    assert_eq!(idle.timeout_ns, peer_timeout_ns);
+    assert_eq!(idle.expires_at_ns, 5_000 + peer_timeout_ns);
+    assert!(alloc.export_idle_leases(5_001).is_empty());
+    assert_eq!(alloc.export_display_leases(5_001).len(), 1);
+}
+
+fn assert_address_only_rollback_with_concurrent_synced_flow(synced_completes_first: bool) {
+    let addrs = pool();
+    let local_pool = ipv4_pool(&addrs);
+    let source = flow("10.0.61.61", 40061);
+    let local = SourceNatFlowKey {
+        dst_ip: "1.1.1.1".parse().unwrap(),
+        dst_port: 443,
+        ..source
+    };
+    let synced = SourceNatFlowKey {
+        dst_ip: "9.9.9.9".parse().unwrap(),
+        dst_port: 443,
+        ..source
+    };
+    let peer_timeout_ns = 60 * 1_000_000_000;
+    let rec = {
+        let mut rec = idle_record_for(source, IpAddr::V4(addrs[0]), source.src_port, true, None);
+        rec.remaining_ns = 45 * 1_000_000_000;
+        rec.timeout_ns = peer_timeout_ns;
+        rec
+    };
+    let alloc = PortAllocator::new(1, 1024, 65535);
+    assert_eq!(
+        alloc.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let key = source.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let local_tuple = alloc
+        .reserve_address_only_persistent(
+            local,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::AnyRemoteHost,
+            TIMEOUT_NS,
+            2_000,
+            NatHolder::Untracked,
+        )
+        .expect("local 0 -> 1 reserve adopts imported address-only identity");
+    let tentative = alloc.debug_live().persistent_by_source[&key];
+    assert!(tentative.imported);
+    assert_eq!(tentative.timeout_ns, peer_timeout_ns);
+
+    let peer_tuple = TranslatedTuple {
+        ip: rec.translated_ip,
+        port: rec.translated_port,
+    };
+    let synced_tuple = alloc
+        .reserve_address_only_maybe_persistent(
+            synced,
+            rec.translated_ip,
+            0,
+            3_000,
+            NatHolder::Untracked,
+            Some((key, TIMEOUT_NS)),
+        )
+        .expect("synced flow joins imported address-only lease");
+    assert_eq!(synced_tuple, peer_tuple);
+    assert_eq!(alloc.debug_live().persistent_by_source[&key].active_flows, 2);
+    if synced_completes_first {
+        assert!(alloc.release_flow(synced, synced_tuple, 4_000, NatHolder::Untracked));
+        let between = alloc.debug_live().persistent_by_source[&key];
+        assert!(between.imported, "synced completion must not promote address-only");
+        assert_eq!(between.active_flows, 1);
+        assert_eq!(between.timeout_ns, peer_timeout_ns);
+        assert!(alloc.rollback_flow(local, local_tuple, 5_000, NatHolder::Untracked));
+    } else {
+        assert!(alloc.rollback_flow(local, local_tuple, 4_000, NatHolder::Untracked));
+        let between = alloc.debug_live().persistent_by_source[&key];
+        assert!(between.imported, "rollback with a peer flow active must preserve origin");
+        assert_eq!(between.active_flows, 1);
+        assert_eq!(between.timeout_ns, peer_timeout_ns);
+        assert!(alloc.release_flow(synced, synced_tuple, 5_000, NatHolder::Untracked));
+    }
+    let idle = alloc.debug_live().persistent_by_source[&key];
+    assert!(idle.imported);
+    assert_eq!(idle.active_flows, 0);
+    assert_eq!(idle.timeout_ns, peer_timeout_ns);
+    assert_eq!(idle.expires_at_ns, 5_000 + peer_timeout_ns);
+    assert!(alloc.export_idle_leases(5_001).is_empty());
+    assert_eq!(alloc.export_display_leases(5_001).len(), 1);
+}
+
+#[test]
+fn imported_zero_to_one_rollback_preserves_origin_across_synced_completion_10789_f4() {
+    for synced_completes_first in [false, true] {
+        assert_pat_rollback_with_concurrent_synced_flow(synced_completes_first);
+        assert_address_only_rollback_with_concurrent_synced_flow(synced_completes_first);
+    }
 }
