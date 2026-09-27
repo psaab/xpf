@@ -840,10 +840,24 @@ func nodesToJSON(nodes []*Node) map[string]interface{} {
 				// Named instance: e.g. "interface trust0" → {"interface": {"trust0": {...}}}
 				if existing, ok := result[name]; ok {
 					if m, ok := existing.(map[string]interface{}); ok {
-						m[qualifier] = children
+						if previous, ok := m[qualifier]; ok {
+							if previous, ok := previous.(map[string]interface{}); ok {
+								mergeJSONObjects(previous, children)
+							} else {
+								m[qualifier] = children
+							}
+						} else {
+							m[qualifier] = children
+						}
 					}
 				} else {
 					result[name] = map[string]interface{}{qualifier: children}
+				}
+			} else if existing, ok := result[name]; ok {
+				if previous, ok := existing.(map[string]interface{}); ok {
+					mergeJSONObjects(previous, children)
+				} else {
+					result[name] = children
 				}
 			} else {
 				result[name] = children
@@ -851,4 +865,49 @@ func nodesToJSON(nodes []*Node) map[string]interface{} {
 		}
 	}
 	return result
+}
+
+// mergeJSONObjects combines repeated containers using Junos' merge semantics.
+// Nested containers merge recursively; duplicate leaves accumulate in document
+// order just like the repeated-leaf projection above. Container objects take
+// precedence over leaf values on malformed mixed shapes, matching nodesToJSON's
+// existing leaf/container collision behavior.
+func mergeJSONObjects(dst, src map[string]interface{}) {
+	for key, incoming := range src {
+		existing, ok := dst[key]
+		if !ok {
+			dst[key] = incoming
+			continue
+		}
+		dst[key] = mergeJSONValues(existing, incoming)
+	}
+}
+
+func mergeJSONValues(existing, incoming interface{}) interface{} {
+	existingObject, existingIsObject := existing.(map[string]interface{})
+	incomingObject, incomingIsObject := incoming.(map[string]interface{})
+	if existingIsObject {
+		if incomingIsObject {
+			mergeJSONObjects(existingObject, incomingObject)
+		}
+		return existingObject
+	}
+	if incomingIsObject {
+		return incomingObject
+	}
+
+	existingArray, existingIsArray := existing.([]interface{})
+	incomingArray, incomingIsArray := incoming.([]interface{})
+	switch {
+	case existingIsArray && incomingIsArray:
+		return append(existingArray, incomingArray...)
+	case existingIsArray:
+		return append(existingArray, incoming)
+	case incomingIsArray:
+		merged := make([]interface{}, 1, len(incomingArray)+1)
+		merged[0] = existing
+		return append(merged, incomingArray...)
+	default:
+		return []interface{}{existing, incoming}
+	}
 }
