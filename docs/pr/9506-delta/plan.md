@@ -1,16 +1,15 @@
 # 9506 delta plan: ship P-MECH permits on the current master (research/9506-delta)
 
-- Review state: **v5 revision; parent re-dispatch pending; this worker assigns
-  no final PLAN-READY/PLAN-KILL verdict.** Round four at `5f97823bb` returned
-  3-of-3 NEEDS-MAJOR, converging (finality rule, coordinated CAS, ack
-  structure credited) with no further slice-time deferrals accepted. This
-  revision closes every residual with implementable mechanisms: typed
-  `IoRelease` correlation + durable obligation store; chosen reaper owner,
-  deadlines, lag bound, ceiling constants, and quarantine preinstall; the
-  enforced receive-mode downstream invariant; FRR render-gate authority +
-  semantic refused set; drain-then-effective M3 revocation with a named
-  rendezvous; periodic RPDB audit + synchronous FIB fence; allocated reason
-  bytes; chosen ack wire; and corrected scope symbols. The parent will
+- Review state: **v6 revision; parent re-dispatch pending; this worker assigns
+  no final PLAN-READY/PLAN-KILL verdict.** Round five at `046aaef88` returned
+  NEEDS-MAJOR 2-of-3 (Sec READY, held; Host + Opus blocking) with eight
+  mechanism residuals and no slice-time deferrals. This revision closes all
+  eight without touching the credited Sec design: pre-park durable record +
+  purge interlock; fair cursor traversal + honest lateness contract; complete
+  RFS-excluding receive predicate + kernel allowlist + suspect-window freeze;
+  FRR R/A/K effective guard + full lifecycle authority + cumulative ancestor
+  rule; periodic FIB re-read; named inventory owner + revoke seam + event
+  synthesis + zebra detector + close-direction codec. The parent will
   re-dispatch the blinded gate against this committed revision.
 - Date: 2026-09-27. Worktree `/var/tmp/worktrees/9506-research`, branch `research/9506-delta`.
 - Pins: `origin/master = 028c4e4e2` (assessed); Sep-20 code tip `b71c52d60`
@@ -288,11 +287,17 @@ ABSENT (still owed — the mechanism; each verified by negative grep this run):
   (`ruleListFn`, `routes.go:19,414-418`, fail-closed #3772 M9), and every
   production caller is event-driven (commit/ipmon/route-event paths) —
   no periodic RPDB audit exists, so a quiet-box external rule write has
-  an unbounded detection window. No FRR render gate exists (xpfd renders
-  `frr.conf` managed sections but owns no zebra hook), and
-  `actuateLearnedRouteRefresh` republishes kernel/FRR route events
-  WITHOUT `BumpFIBGeneration` behind a 1s/3s coalesce
-  (`daemon_route_listener.go:232`, `coalesce.go:41-43`).
+  an unbounded detection window; no periodic FIB re-read exists either
+  (ENOBUFS overflow and resubscribe gaps are mark-only,
+  `daemon_route_listener.go:169,155`). No FRR render gate exists (xpfd
+  renders `frr.conf` managed sections but owns no zebra hook; `ApplyFull`
+  never calls the `Get*` readbacks), and `actuateLearnedRouteRefresh`
+  republishes kernel/FRR route events WITHOUT `BumpFIBGeneration`
+  behind a 1s/3s coalesce (`daemon_route_listener.go:232`,
+  `coalesce.go:41-43`). `purge_ids` is currently callerless but removes
+  `WriteStarted` unconditionally (`:1310-1340`); `drain_timed_out` is
+  test-only with a prefix-revisit starvation shape (`:1476-1512`,
+  budget 64 of depth 128, front-requeue); no reaper thread exists.
 - M2: no post-write egress-domain oracle. `delivered` is the
   `xpf_transit_q0_delivered` fence-match witness (`transit_barrier.go:17-22,
   276-280`), not proof of the table selected for q0 egress.
@@ -537,10 +542,24 @@ all 35 design paths exist, as checked in §4.2.
   `(request_id, journal_token, permit_epoch, ring_id, op_id)` AT the
   `defer` park site (`:855-870`) — only unresolved ops get rows
   (`Done`/`NothingWritten`/`Transferred` hand the buffer back with no
-  obligation; the submit→park window owes nothing because no core
-  change has happened yet); record release at the `release_matching`
-  funnel (`:462-471`, covering `reap_ready`, `reap_matching`, and
-  `drain_for_teardown`). The obligation lives in a NEW
+  obligation); record release at the `release_matching` funnel (`:462-471`,
+  covering `reap_ready`, `reap_matching`, and `drain_for_teardown`).
+  The SUBMIT→PARK window is covered by a SURVIVING RECORD, not a second
+  registration: `pre_write_check` installs `WriteStarted` (`:1060-1062`)
+  BEFORE the writer call, so the core `Entry` already spans
+  submit→park→resolve under the fence's lock — and its ONLY remover is
+  `purge_ids` (currently callerless; `cancel`/`shutdown` never remove it,
+  `resolve` is same-thread synchronous). PURGE INTERLOCK (lands BEFORE
+  any purge caller is wired): `purge_ids` (`:1310-1340`) gains a
+  `WriteStarted` arm = SKIP — retain entry, flow-order position, and
+  reservation, with a new skip counter; `Queued`/`Terminal` arms
+  unchanged; `sweep_orphans` TTL (`:1297-1308`) likewise skips
+  `WriteStarted`. Effect: resolve-after-purge is impossible; every
+  `Proceed` reaches `Terminal` via `resolve_write`; a stuck
+  `WriteStarted` on worker death stays pending until the (e) reaper
+  transfer — never silently discarded. `WriteStarted`→`Uncertain`
+  happens ONLY via `resolve_write` + `Deferred` verdict (single path,
+  `:1079-1101` + `:2184-2197`). The obligation lives in a NEW
   `Arc<Mutex<BTreeMap<(ring_id,op_id), ObligationRow>>>` owned by
   `SlowPathReinjector` (sibling of `reinject_core`, `slowpath.rs:655-658`,
   cloned into the worker like `delegated_core`) — OUTSIDE the core
@@ -550,12 +569,17 @@ all 35 design paths exist, as checked in §4.2.
   each survivor as a per-op `Leaked` row there (replacing aggregate-only
   counting for fenced epochs; `RetainedCounters` stays as telemetry).
   Payload reclamation and the M1 Rust ack require `IoRelease.proved`;
-  the downstream-skb gate stays INDEPENDENT after I/O finality. LATER
-  FIXTURE (four cases): ack `Uncertain`, destroy the core entry, then
-  (i) target-CQE release clears the obligation; (ii) failed teardown
-  leaves `Leaked` rows → fence ack FAILS; (iii) writer exit leaves rows
-  in the reinjector-owned store → fence ack FAILS; (iv) park→resolve
-  crash window stays registry+obligation covered.
+  the downstream-skb gate stays INDEPENDENT after I/O finality. The
+  fence examines BOTH the core `entries` (pre-park `WriteStarted`,
+  same lock as `pre_write`) AND the obligation store (post-park
+  unreleased I/O). LATER FIXTURE (six cases): ack `Uncertain`, destroy
+  the core entry, then (i) target-CQE release clears the obligation;
+  (ii) failed teardown leaves `Leaked` rows → fence ack FAILS; (iii)
+  writer exit leaves rows → fence ack FAILS; (iv) park→resolve window
+  covered; (v) pause after submission before defer + `purge_connection`
+  before close → obligation RETAINED, mutation prohibited; (vi) expire
+  the completion deadline in the same pause → same retention. Success
+  clears exactly once in all cases.
   (c) ONE coordinated terminal/ownership decision across `ReinjectCore`
   + `ProvisionalJournal` (today disjoint: no `request_id↔token` map, and
   `resolve_write` checks only core state, `:1083-1105`): the S9.5 join
@@ -601,37 +625,70 @@ all 35 design paths exist, as checked in §4.2.
   `Finalized` (NEW: owner-observable terminal + `IoRelease` consumed +
   counters/events emitted exactly once): ABSORBING; every late event
   is rejected.
-  (e) Reclaim owner, deadlines, lag bound, ceiling, quarantine (ALL CHOSEN,
-  no slice-time invention): owner is a NEW dedicated `d11-reaper` thread,
-  period `D11_REAPER_PERIOD_NS = 1_000_000` (1ms, new const) — independent
-  of worker poll (covers idle workers) and writer threads (covers dead
-  writers) — servicing `drain_timed_out` (`:1476-1512`, wired here; test-only
-  today), journal reap, and the obligation-store sweep every tick. Ack
-  deadline is `IPSEC_INNER_ACK_DEADLINE_NS = 5_000_000` (5ms, new const,
-  matching the Go NFQUEUE `AckDeadline` default, `pipeline.go:181,318`).
-  Max sweep lag is `D11_MAX_SWEEP_LAG_NS = 2 × D11_REAPER_PERIOD_NS`
-  (2ms), asserted STRUCTURALLY by tick-counted service proof (every record
-  serviced at least once per period; bounded drain budgets per tick), never
-  by wall-clock flakes. Fence-expiry predicate:
-  `fence_expired(gen) := worker_set_retired(gen) AND now - retire_time(gen)
-  > IPSEC_INNER_ACK_DEADLINE_NS + D11_MAX_SWEEP_LAG_NS`, with a new
-  `retire_time` recorded at `retire_worker`. Quarantine ceiling instantiates
-  the EXACT existing constants: `min(STALE_SYNCED_CEILING_MULT ×
-  expires_after_ns, STALE_SYNCED_CEILING_ABS_NS)` (mult 3, abs 7d,
-  `session/mod.rs:162,171`), measured from a new per-record `first_held_ns`
-  with a `ReapStaleSynced`-analogous decision (`expire.rs:674`
-  precedent) — PLUS a provisional cap `PROVISIONAL_HOLD_CEILING_NS =
-  60_000_000_000` (60s, new const): provisional D11 records never hold
-  pinned bytes longer than 60s. Outcomes are SEPARATED: (i) logical
-  reservation retirement → tombstone `ACCOUNTED` + counters + `Finalized`
-  bookkeeping; (ii) physical buffer → freed/reused iff `IoRelease` proved,
-  else deliberately leaked (`mem::forget` + per-op `Leaked` row +
-  `RetainedCounters`); (iii) unresolved-I/O obligation → NEVER reaped by
-  any ceiling: `Leaked` rows persist in the obligation store (bounded by
-  `LEAKED_OBLIGATION_MAX = 16384`, the `terminal_tombstone` precedent)
-  and PERMANENTLY fence their epoch (no clean ack for that epoch ever;
-  reopen only under a NEW epoch); store overflow sets a poison flag →
-  ALL fence acks fail (deny-only) + alarm until operator reset.
+  (e) Reclaim owner, deadlines, traversal, lateness, ceiling, quarantine (ALL
+  CHOSEN, no slice-time invention): owner is a NEW dedicated `d11-reaper`
+  thread, period `D11_REAPER_PERIOD_NS = 1_000_000` (1ms, new const) —
+  independent of worker poll (covers idle workers) and writer threads
+  (covers dead writers). Ack deadline is `IPSEC_INNER_ACK_DEADLINE_NS =
+  5_000_000` (5ms, new const, matching the Go NFQUEUE `AckDeadline`
+  default, `pipeline.go:181,318`). TRAVERSAL (fair, budgeted, cursor —
+  the current `drain_timed_out` prefix + front-requeue STARVES tail
+  [64,128), so it is REPLACED, not wired as-is): queues B=64/tick/queue
+  + reaper-owned positional cursor per queue, rotate-and-restore-at-BACK
+  (`push_back` in order, NOT `push_front` rev), advance pos by B mod len,
+  ALL live queues served every tick, K=2 (128/64) — every entry examined
+  within K ticks regardless of refill; journal migrates
+  `HashMap`→`BTreeMap` token-ordered, B=256/tick, K=2 (512/256), token
+  cursor `AtomicU64` range-from-cursor wrap-0; obligations B=512/tick
+  composite-key cursor hygiene sweep (full 16k K=32 = 32ms, explicitly
+  NOT lag-bounded) PLUS a per-epoch bounded fence check O(epoch rows),
+  no cursor, on the fence path; tombstone/active Vecs scan unbounded
+  ONLY on rare cold death-join + `debug_assert` len ≤ 512 + gauge, off
+  the 1ms tick. Cursor state is reaper-owned (`queue_rr AtomicUsize`,
+  per-queue pos map, journal token, oblig key — precedents: fair
+  `session_delta` drain, `worker_manager` cursor, `bpf_map` slice
+  outcome). LOCKS: single short holds per mutex per tick; producers
+  keep try_lock-or-count (never block on the reaper); sole nesting stays
+  (c) core.inner→journal.records try_lock-second + refusal; poison split
+  preserved (queue/journal `into_inner`, slab fail-closed); const assert
+  B < CAP per budget (`worker_queue.rs:591` pattern). LATENESS (honest:
+  tick count NEVER proves wall time for a delayable thread): the 1ms /
+  5ms / 2ms contract is structural per-store service proof (K-tick
+  coverage with the cursors above) PLUS fail-CLOSED on observed lateness
+  — `now - last_full_service > bound`, tick overrun, or overflow poison
+  → deny-only + alarm (mirroring slab/E23/E24/overflow precedents).
+  Regression polarity pinned fail-closed on the ack path: `now` <
+  enqueue/`first_held` = unprovable age → not-yet-expired for reaping
+  but NEVER freshness proof for a fence ack. Fence-expiry predicate
+  keeps the revised-bound form: `fence_expired(gen) :=
+  worker_set_retired(gen) AND now - retire_time(gen) >
+  IPSEC_INNER_ACK_DEADLINE_NS + D11_MAX_SWEEP_LAG_NS`, with a new
+  `retire_time` recorded at `retire_worker`. Quarantine ceiling
+  instantiates the EXACT existing constants:
+  `min(STALE_SYNCED_CEILING_MULT × expires_after_ns,
+  STALE_SYNCED_CEILING_ABS_NS)` (mult 3, abs 7d, `session/mod.rs:162,171`),
+  measured from a new per-record `first_held_ns` with a
+  `ReapStaleSynced`-analogous decision (`expire.rs:674` precedent) — PLUS
+  a provisional cap `PROVISIONAL_HOLD_CEILING_NS = 60_000_000_000` (60s,
+  new const): provisional D11 records never hold pinned bytes longer
+  than 60s. Outcomes are SEPARATED: (i) logical reservation retirement
+  → tombstone `ACCOUNTED` + counters + `Finalized` bookkeeping; (ii)
+  physical buffer → freed/reused iff `IoRelease` proved, else deliberately
+  leaked (`mem::forget` + per-op `Leaked` row + `RetainedCounters`);
+  (iii) unresolved-I/O obligation → NEVER reaped by any ceiling: `Leaked`
+  rows persist in the obligation store (bounded by `LEAKED_OBLIGATION_MAX
+  = 16384`, the `terminal_tombstone` precedent) and PERMANENTLY fence
+  their epoch (no clean ack for that epoch ever; reopen only under a NEW
+  epoch); an unresolved ANCESTOR obligation continues to prohibit routing
+  mutation/reopening wherever its late emission could matter — a new epoch
+  NEVER silently discards that requirement (cumulative with the
+  all-old-I/O-final reopen rule); store overflow sets a poison flag →
+  ALL fence acks fail (deny-only) + alarm until operator reset. Crash
+  cleanliness: graceful shutdown completes the fence + writes a CLEAN
+  marker (new `/var/lib/xpf/pmech-clean-shutdown`, beside the
+  kernel-promoted state); startup WITHOUT the marker assumes pre-existing
+  kernel obligations → permutation-freeze-until-reboot + alarm (same rule
+  as receive-mode drift).
   Quarantine is a RESERVED `NatHolder::Quarantine` bit (127; `MAX==128`
   asserts updated) plus a session HOLD-gate extension, INSTALLED AT
   RESERVE — NOT at death/transfer: `ProvisionalJournal::register` plus
@@ -710,37 +767,94 @@ all 35 design paths exist, as checked in §4.2.
   ALGORITHM: every xpfd install records `(band, priority, full
   selector, table, owner)` in the install inventory; a live rule is
   OWNED iff it tuple-matches an inventory entry exactly, else UNOWNED.
-  (4) Detection + LATENCY BOUND: SYNC `ruleListFn` poll both families at
-  every publish (`routes.go:19,414-418`, fail-closed #3772 M9) plus the
-  commit-tail reconcile — AND a PERIODIC RPDB AUDIT closing the quiet-box
-  gap (every `ruleListFn` caller today is event-driven): owner is
+  (4) Detection + LATENCY BOUND (rules AND routes): SYNC `ruleListFn` poll
+  both families at every publish (`routes.go:19,414-418`, fail-closed #3772
+  M9) plus the commit-tail reconcile — AND a PERIODIC AUDIT closing the
+  quiet-box gap (every `ruleListFn` caller today is event-driven): owner is
   `(*Manager).statusLoop` at `statusLoopInterval` = 1s
   (`process_status.go:289-291`, always-on while the helper lives, already
-  the retry-debt consumer); each tick runs `ruleListFn` both families +
-  inventory tuple-match + SYNCHRONOUS `revokeTransitPermitNonblocking`
-  on any mismatch, in-tick. Detection-to-deny ≤ 1s + poll + revoke,
-  asserted by inject-unowned-rule and audit-liveness cells. The async
-  `routeListener` (1s/3s coalesce) is FIB-convergence ONLY, never the
-  RPDB safety detector — no `RuleSubscribe` exists (RPDB is poll-only),
-  so safety rests on refusal-enforcement + sync poll + periodic audit,
-  not async detection. (5) FRR/zebra KERNEL-FIB AUTHORITY (pre-install,
-  not ingestion-refusal — refusing the import or bumping a generation
-  AFTER install cannot un-install a kernel route receiving q0): xpfd
-  owns no zebra hook, so authority is PREVENTION AT CONFIG ADMISSION:
-  (i) a NEW table-allowlist render gate in `buildManagedSection`/
-  `ApplyFull` REFUSES any FRR config covering admitted q0-path tables;
-  (ii) xpfd-owned DENY route-maps for q0-path tables (`policy_render.go`)
-  applied to ALL zebra protocols constrain runtime-learned (BGP/OSPF)
-  installs; (iii) deployments where zebra is NOT xpfd-config-managed
-  are REFUSED admission (same doctrine as RPDB). Defense in depth:
-  q0-path-table route EVENTS drive SYNCHRONOUS S4 revoke +
+  the retry-debt consumer); each tick runs (a) RPDB: `ruleListFn` both
+  families + inventory tuple-match, and (b) FIB: kernel-FIB re-read via
+  `learnedRouteListFn` (`fibimport.go:109`) over `LearnedRouteTableIDs`
+  (`:408`) + `importableRouteScoped` (`:248`) post-predicate `LearnedRoute`
+  compare — the route-only detector closing the dropped-edge hole (ENOBUFS
+  overflow and resubscribe gaps are mark-only, `:169`/`:155`). P-MECH
+  admission REQUIRES `EnableLearnedRouteImport` (`routes.go:1076`) on
+  (nil converged-no-op is not acceptable). Mismatch on EITHER leg →
+  SYNCHRONOUS deny in-tick. Detection-to-deny ≤ 1s + poll + revoke for
+  BOTH rules and routes: the sync hook covers delivered events, the
+  periodic re-read covers dropped edges — no single leg claims to catch
+  the rest alone. INSTALL INVENTORY wiring: owner TYPE is a new
+  `InstallInventory` in pkg/dataplane/userspace, owned by `*Manager`
+  (`manager.go:90`) under `m.mu`, value-copy reader `AuditDigest()`
+  (`ForwardingSupported` `:756` / `LastApplyResult` `:762` precedent);
+  writer record points are the ruleOps impls
+  (`pbr_applied_7422.go:70-71`, `rule_dscp_linux.go:58`,
+  `rule_l3mdev_linux.go:20`) + next-table (`:335`/`:358`/`:483`) +
+  rib-group (`:684`/`:783`) + return (`rib_group_return_9819.go:77`) +
+  PBR (`:986`) + probe_pin (`:216`/`:241`/`:281`) + vrf-term (`:62/73`)
+  + daemon mgmt-999/flow + commit tail — record post-normalization
+  disposition (`isRuleAlreadyGone` `:512` / `isRuleAlreadyPresent`
+  `:523`); revoke seam is an injected callback in the Manager config
+  (`D11AttestationConfig` `AuthorityCurrent`/`OriginValid` precedent,
+  `:798-810`, nil-safe daemon closure over `ipsecS4`, injected at wiring
+  like `:1222-1247`); audit-mismatch event synthesis uses tuple namespace
+  `Kind=fib-audit`/`Owner=audit` (never `kernel`), `Ready=UNKNOWN`, seq
+  via `allocCloseEventSeqAfter` or Seq0 delegation (host-fence precedent,
+  `:173-176`), bound to the current watch generation. The async
+  `routeListener` (1s/3s coalesce) is FIB-convergence ONLY for republish,
+  never a safety detector — safety rests on refusal-enforcement + sync
+  hook + periodic rules+FIB audit, not async detection.
+  (5) FRR/zebra KERNEL-FIB AUTHORITY (pre-install, not ingestion-refusal
+  — refusing the import or bumping a generation AFTER install cannot
+  un-install a kernel route receiving q0): xpfd owns no zebra hook, so
+  authority is PREVENTION AT CONFIG ADMISSION: (i) a NEW table-allowlist
+  render gate in `buildManagedSection`/`ApplyFull` REFUSES any FRR config
+  covering admitted q0-path tables; (ii) xpfd-owned DENY route-maps for
+  q0-path tables (`policy_render.go`) applied to ALL zebra protocols
+  constrain runtime-learned (BGP/OSPF) installs; (iii) deployments where
+  zebra is NOT xpfd-config-managed are REFUSED admission, detected by
+  managed-section provenance on read-back (markers
+  `frr/manager.go:60-61` parse) + running-config diff of managed stanzas
+  via `GetRouteMapList` + an attestation nonce comment (`! xpf-guard
+  <confGen> <nonce>` written in the managed section, round-tripped
+  through the running-config query; mismatch/absent → unmanaged → refuse)
+  — runs at admission + every FRR lifecycle event + 30s slow cadence
+  (`routingReconcileReassertLoop`). EFFECTIVE GUARD (rendered ≠ applied ≠
+  kernel-effective; OPEN needs all three): guard = reserved managed DENY
+  route-map pair for q0-path tables; attachments are the 4 BGP neighbor
+  emit sites (`protocols_render.go:600-606,619-625,650-655,662-667`) + the
+  5 redistribute nodes (`-xpf-redist` alias form); precedence guard-alias
+  above narrowed above emptied above quarantine above composed above
+  standalone, neighbor-own over global (no ALL token); unmanaged
+  exclusion is a 6th `ApplyFull` belt scanning the `stripManagedSection`
+  remainder for guard-name/`-xpf-`-namespace route-map lines, fail closed.
+  WITNESS: R = managed section contains guard def + attachments (read back
+  after the atomic rename); A = `GetRouteMapList` shows the guard with
+  explicit deny; K = `GetRouteDetailJSON` canary Selected+Installed+FIB in
+  BOTH families + kernel-FIB sweep proves no q0-path routes outside the
+  inventory — K sampled AFTER RIB convergence (poll until stable across
+  6s-separated samples, covering the documented 5s RIB delay). OPEN
+  requires R+A+K. LIFETIME: `guardEpoch` created on first confGen-matched
+  full convergence, rotated ONLY by a later R+A+K-proven generation
+  (rendered as guard-confGen, old deny kept until handoff);
+  degraded/hard NEVER rotate; `Clear`/removal paths are gated on the
+  fence (no removal while old q0 I/O can route);
+  `DisableDegradedRetry` one-shots transfer the epoch to the next daemon
+  first `ApplyFull`; cold start with no converged epoch REFUSES open.
+  Queued/installed: already-installed q0-path kernel routes are withdrawn
+  via guard deny + convergence + re-read proving absence BEFORE open;
+  degraded keeps DENY (refuse OPEN while `ReloadDegraded`); hard keeps
+  previous state + withholds the snapshot (actuator arm). Defense in
+  depth: q0-path-table route EVENTS drive SYNCHRONOUS S4 revoke +
   `BumpFIBGeneration` in the subscribe callback (new caller, BEFORE the
-  coalescer — detection latency is callback latency, not 1s/3s), and
-  the (4) audit catches the rest; any q0-path kernel route outside the
-  inventory → revoke + deny until re-admission. Bounded residual: the
-  in-flight set at detection completes under the new kernel env
-  (quantified by the in-flight cap, asserted by cell); prevention (i)–
-  (iii) is the authority, sync detect+fence bounds the drift.
+  coalescer — detection latency is callback latency, not 1s/3s), and the
+  (4) periodic FIB re-read covers dropped edges; any q0-path kernel route
+  outside the inventory → revoke + deny until re-admission. Bounded
+  residual: the in-flight set at detection completes under the new kernel
+  env (quantified by the in-flight cap, asserted by cell); prevention
+  (i)–(iii) + the R/A/K guard is the authority, sync detect+fence bounds
+  the drift.
   Networkd/DHCP/HA-4242/kernel-autoconf/operator writes that appear as
   unowned live rules VOID admission → deny-only until a fresh predicate
   PASS. A watcher is a deny TRIGGER, never a safety gate; unowned rules
@@ -758,7 +872,16 @@ all 35 design paths exist, as checked in §4.2.
   → CLOSING + `permitEpoch`++ (`ipsec_reinject_supervisor.go:260-302`)
   PLUS a `FenceAuthorityClose{run_id, generation, permit_epoch,
   fence_seq}` request on the submit socket: `MSG_FENCE_CLOSE = 4`
-  (1,2,3,11,12 taken, `slowpath_reinject_9506.rs:36-40`). THE
+  (1,2,3,11,12 taken, `slowpath_reinject_9506.rs:36-40`); Go encoder
+  `encodeFenceClose` (beside `encodeCancel` `:394` / `encodeAnnounce`
+  `:309`), Rust decoder `decode_fence_close` (beside `decode_cancel` /
+  `decode_announce`), Go send-site `SendFenceClose` on
+  `SocketReinjectSubmitter` (encode outside, hold `submitMu` across
+  ensure+send — `CancelReinject` `:200-216` shape; same discipline as
+  `SubmitAdjudicated` across `roundTripLocked`), driven by a new S4
+  `fenceAuthority` method (`ipsec_reinject_supervisor.go`) via the
+  `ipsecCaptureRuntime.submitter` handle (`wiring:1205-1206`, runtime
+  `:362-367`), which sends Close and awaits the ack. THE
   NO-NEW-PROCEED BOUNDARY IS THE ACKNOWLEDGED RUST CLOSE, not the Go
   CAS: Rust authorizes from its separately-published `AuthorityState`
   (`:445-473`, updated on `Announce`, `:688-723`), so work authorized
@@ -797,20 +920,53 @@ all 35 design paths exist, as checked in §4.2.
   post-mutation environment. The CLOSED interval is covered because the
   invariant binds I/O finality (which precedes mutation), not OPEN
   state. ENFORCED RECEIVE MODE on usp0/usp1 (new enforcement): no
-  `IFF_NAPI` (already true); RPS cpus EMPTY on all q0 queues; GRO OFF;
-  NO XDP program attached; TC classifier pinned (existing mark); kernel
-  version PINNED to an allowlist with reviewed tun.c/RPS/GRO semantics
-  (extends the V1/V2 kernel identity). SOURCE-BACKED SEMANTICS
-  (documented at each pinned kernel): `tun_get_user → netif_receive_skb
-  →` (RPS empty → inline, no backlog) `→ ip_rcv → ip_forward` route
+  `IFF_NAPI` (already true — zero `IFF_NAPI`/`TUNSETNAPI` hits); RPS cpus
+  EMPTY on all q0 queues AND RFS EXCLUDED — per-queue `rps_flow_cnt==0`
+  with no flow table (RPS-empty alone does NOT disable RFS: the
+  `rps_flow_table`/socket-flow branch in `get_rps_cpu` can select a
+  backlog CPU with a NULL RPS map, and `rps_sock_flow_entries=32768` is
+  already set globally by `compiler.go:1841`); GRO OFF; NO XDP program
+  attached; TC classifier pinned (existing mark); kernel version PINNED
+  to the allowlist below. READBACKS (every field, every tick): glob
+  `/sys/class/net/xpf-usp{0,1}/queues/rx-*/{rps_cpus,rps_flow_cnt}`
+  (`compiler.go:1842` glob pattern; empty dir set or any nonzero → refuse)
+  via `os.ReadFile` (`process.go:465-490` pattern); ethtool GRO line
+  (`compiler_rxvlan_classify_9946.go:58-65` parse); XDP via netlink
+  `Info().XDP()` (`armproof.go:849-860`, modes `:786-802`); TC via `tc
+  filter show` / netlink TC dump (clsact prio `0x7fff`); `uname -r` +
+  manifest `guest_kernel` + allowlist match. KERNEL ALLOWLIST
+  (INSTANTIATED, not deferred): new required manifest key
+  `kernel-allowlist` beside `guest_kernel` (`bake.py:1177` pattern);
+  membership is EXACT `uname -r` strings, each paired with its Ubuntu
+  source package version + a completed tun.c/RFS/GRO review record
+  citing file+line (`dev.c` `get_rps_cpu`, `net-sysfs.c` `rps_flow_cnt`,
+  `tun.c` write path); admission + boot enforce exact match
+  (`validate.py` pattern) on top of the existing floor (>=6.18,
+  `-generic` flavor, single-kernel invariant); any other kernel → deny
+  until reviewed and listed. SOURCE-BACKED SEMANTICS (per allowlist
+  member, BOTH families): v4 `tun_get_user → netif_receive_skb →`
+  (RPS map NULL AND no RFS table → inline, no backlog) `→ ip_rcv →
+  ip_forward`, v6 likewise via `ip6_rcv → ip6_forward` — the
+  RPS/RFS/NAPI/GRO reasoning is L2 (family-independent), the TC mark
+  program is family-blind (mark/queue_mapping only, `slowpath.rs:188-263`),
+  and TUN `IFF_NO_PI` parses family by nibble (`gre.rs:710-714`); route
   lookup completes synchronously within the `write()` syscall, so
   target-CQE/write-return proves the routing decision already happened
-  under the then-current env. ENFORCEMENT: admission verifies /sys
-  `rps_cpus` + ethtool GRO + XDP attachment + kernel version; the (4)
-  periodic audit re-verifies every tick (mode drift → synchronous
-  revoke); change attempts while OPEN are refused; a kernel change
-  means deny until the new kernel's tun.c/net-core semantics are
-  reviewed. While permits are OPEN the refused-change set is (6): any
+  under the then-current env. HOLD (not sampled-at-OPEN): in-process
+  mode changes on usp* are refused while old q0 I/O can route (tuner
+  already phys-only + explicit usp exclusion); the (4) audit re-verifies
+  the FULL predicate every tick. DRIFT IS NEVER INSTANTLY SAFE: mode
+  drift → synchronous revoke + fence; epochs finalized after the last
+  GOOD readback are marked ASYNC-SUSPECT; step-6 mutation is then
+  prohibited by a PERMUTATION-FREEZE until reboot (persisted flag, new
+  `/var/lib/xpf/pmech-permutation-freeze` beside the kernel-promoted
+  state, cleared only at boot — reboot is the designated retirement
+  boundary for untrackable downstream skbs); same-env reopen is allowed
+  after full re-admission (fresh predicate PASS incl. mode) + zero
+  old-epoch I/O outstanding, but routing-env mutation stays refused.
+  ENFORCEMENT: admission verifies every predicate field; change attempts
+  while OPEN are refused; a kernel change means deny until reviewed and
+  listed. While permits are OPEN the refused-change set is (6): any
   intersecting RPDB rule add/del, any FIB change to admitted q0-path
   tables, any usp0/usp1 receive-mode change. Enforcement points:
   ruleOps choke + facade refuse + apply-boundary refuse + FIB-ingest
@@ -820,7 +976,12 @@ all 35 design paths exist, as checked in §4.2.
   permits via this full linearization first. Reopen is authorized ONLY
   by fresh predicate PASS + mode re-verified + new
   `AuthorityAnnouncement` (run/generation/epoch) + `allows()` +
-  worker-set barrier + ledger finality. NEVER counts as downstream
+  worker-set barrier + ledger finality + NO unresolved ancestor
+  obligation outstanding (cumulative: a new epoch NEVER silently
+  discards an ancestor's unreleased-I/O or suspect-downstream
+  requirement — Leaked rows and ASYNC-SUSPECT epochs keep fencing
+  mutation under every descendant epoch until reboot retires them).
+  NEVER counts as downstream
   quiescence: TUN return length, consumed completion, closed ring, or
   `delivered` counters. (RPS-on-q0 was NOT FOUND today —
   `compiler.go:1840-1857` tunes XDP physical NICs only — v5 ADDS the
@@ -831,11 +992,15 @@ all 35 design paths exist, as checked in §4.2.
   → mutation MUST NOT become effective; DEFERRED-I/O CHECK — op held
   unresolved in the ring after terminal-`Uncertain` is acked → the M1
   ack MUST fail; DOWNSTREAM-LIFETIME CHECK — mode cells
-  (RPS-empty/GRO-off/no-XDP/kernel-pinned enforced + drift→revoke)
-  PLUS mutation attempted with unreleased I/O → prohibited (a
-  terminal-CQE-complete skb pending downstream is IMPOSSIBLE under the
-  enforced mode because its routing already decided — asserted by mode
-  proof, not counters).
+  (RPS-empty/RFS-excluded/GRO-off/no-XDP/TC-pinned/kernel-allowlisted
+  enforced + drift→revoke+fence+freeze) PLUS mutation attempted with
+  unreleased I/O → prohibited (a terminal-CQE-complete skb pending
+  downstream is IMPOSSIBLE under the enforced mode because its routing
+  already decided — asserted by mode proof, not counters); RFS FIXTURE
+  — all listed mode fields safe + `rps_flow_cnt!=0`/table present →
+  admission MUST refuse; DRIFT FIXTURE — inject mode drift → revoke +
+  fence + permutation-freeze (mutation refused even after fence,
+  same-env reopen allowed, flag persists across helper restart).
 - M2 egress oracle: before the first Permit is coded, approve a design that
   correlates each q0 submission to the actual selected egress table/domain and
   observes post-write disposition. The nft `delivered` witness is only a
@@ -1032,16 +1197,18 @@ all 35 design paths exist, as checked in §4.2.
 - R9 — Rotation/finality/downstream bypass: an unfenced prefix rotation
   (pass-check → withdraw → still-write-q0), a `Terminal`-as-release
   confusion (reclaim or M1-ack while a `Deferred` op still owns its
-  buffer), an old skb routed after step-6 mutation, or a zebra-installed
-  q0-path route reopens the exact spoof/misrouting M3/M1 exist to
-  prevent. Mitigation: prefix mutation runs the 6-step fence with
-  fresh-view `revalidate_permit_commit` (drain-then-effective);
+  buffer), a purged pre-park obligation, an unserviced reaper backlog, an
+  old skb routed after step-6 mutation, a zebra-installed q0-path route,
+  or a dropped-edge FIB change reopens the exact spoof/misrouting M3/M1
+  exist to prevent. Mitigation: prefix mutation runs the 6-step fence
+  with fresh-view `revalidate_permit_commit` (drain-then-effective);
   `IoRelease` (never `Terminal`+ack, closed ring, or `delivered`) gates
-  reclamation and the M1 ack; the enforced receive mode proves routing
-  precedes I/O finality; the FRR render gate + deny route-maps + sync
-  revoke/bump fence zebra. Kill polarity: any lane that cannot prove
-  the fence, the release fact, the mode, or the render gate keeps P2
-  deny-only.
+  reclamation and the M1 ack, with the pre-park record + purge interlock;
+  the cursor reaper + lateness fail-closed bounds service; the enforced
+  receive mode proves routing precedes I/O finality; the FRR R/A/K guard
+  + full-lifecycle authority + periodic rules+FIB audit fence zebra and
+  drift. Kill polarity: any lane that cannot prove the fence, the release
+  fact, the traversal, the mode, the guard, or the audit keeps P2 deny-only.
 
 ## 7. Test plan
 
@@ -1066,19 +1233,28 @@ slice commit's Validation section):
   receive-mode refusal cells for every q0-intersecting change incl the
   Dst-only rib-group rule; owned-vs-unowned tuple-match cell; per-image
   kernel-default inventory cell; PERIODIC AUDIT cells: inject unowned
-  rule → deny within 1s + poll + revoke, plus audit-liveness cell;
-  FRR render-gate refusal cell + deny-route-map cell + unmanaged-zebra
-  admission-refusal cell; q0-path route-event → synchronous revoke+bump
-  cell (callback latency, skipping coalesce) with bounded in-flight
-  exposure quantified); M1 in-flight fence sequence (revoke → Rust
-  acknowledged close → cancel queued → account started + unreleased I/O
-  → `FenceAuthorityAck` → immutable-routing + receive-mode gate →
-  mutate → reopen) including the FIRST CHECK (writer paused after
-  `pre_write_check`), the DEFERRED-I/O CHECK, and the DOWNSTREAM-LIFETIME
-  CHECK (mode enforcement + unreleased-I/O-prohibits-mutation); ack WIRE
-  cells (`MSG_FENCE_CLOSE=4`/`MSG_FENCE_ACK=13`, Rust match arm, Go
-  accepted-set + `decodeFenceAck`); packet-correlated M2 table-254 egress
-  proof; M3 landing (v36 bump + `MinProtocolIngressPrefixes=36` + MAX=64
+  rule → deny within 1s + poll + revoke, inject route-only change →
+  same bound via the FIB re-read, plus audit-liveness cell;
+  install-inventory writer/record/reader cells + injected-callback
+  revoke-seam cell + fib-audit event-synthesis cell; FRR render-gate
+  refusal cell + deny-route-map cell + unmanaged-zebra detector cell
+  (marker/diff/nonce, admission + lifecycle + 30s) + R/A/K guard cells
+  (rendered/applied/kernel-effective distinguished, convergence
+  sampling, cold-start-refuses-OPEN, degraded/hard/Clear/restart
+  lifetime, queued/installed withdrawal); q0-path route-event →
+  synchronous revoke+bump cell (callback latency, skipping coalesce)
+  with bounded in-flight exposure quantified); M1 in-flight fence
+  sequence (revoke → Rust acknowledged close → cancel queued → account
+  started + unreleased I/O → `FenceAuthorityAck` → immutable-routing +
+  receive-mode gate → mutate → reopen) including the FIRST CHECK (writer
+  paused after `pre_write_check`), the DEFERRED-I/O CHECK, and the
+  DOWNSTREAM-LIFETIME CHECK (mode enforcement + unreleased-I/O-prohibits-
+  mutation + RFS fixture + drift-freeze fixture); ack WIRE cells
+  (`MSG_FENCE_CLOSE=4`/`MSG_FENCE_ACK=13`, `encodeFenceClose`/
+  `decode_fence_close`, `SendFenceClose` + submitMu discipline, S4
+  `fenceAuthority` handle, Rust match arm, Go accepted-set +
+  `decodeFenceAck`); packet-correlated M2 table-254 egress proof; M3
+  landing (v36 bump + `MinProtocolIngressPrefixes=36` + MAX=64
   + fixtures, commit-time overlap-reject, prefix-refresh rotation,
   row-retirement deny, lenient/HA overlap+empty deny) with rotation fenced
   by the 6-step protocol, fresh-view `revalidate_permit_commit`,
@@ -1127,16 +1303,23 @@ slice commit's Validation section):
   writer death / restart) incl live-owner-lost-completion converging to
   reaper transfer (never self-`Written`); coordinated decision
   (journal-finalized → `resolve_write` rejects; every cross-pair late path
-  false); obligation fixture, FOUR cases (ack `Uncertain`, destroy the
+  false); obligation fixture, SIX cases (ack `Uncertain`, destroy the
   core entry, then target-CQE clears / failed teardown leaves `Leaked` →
   fence ack FAILS / writer exit leaves rows → fence ack FAILS /
-  park→resolve window covered); deadlines (`d11-reaper` 1ms owner,
-  5ms ack deadline, 2ms max lag by tick-counted service proof,
-  STALE_SYNCED ceiling constants + 60s provisional cap, separated
-  logical/physical/permanent-fencing outcomes, leak-store poison);
-  quarantine PREINSTALL fixture (start with a provisional reservation
-  NOT yet uncertain, run `retire_all` before join → SURVIVES; ordinary
-  expiry HOLDs; ceiling reap bounded + counted); `Uncertain` is
+  park→resolve window covered / pause-after-submit-before-defer +
+  pre-close purge → RETAINED + mutation prohibited / deadline-expiry in
+  the same pause → same retention; success clears exactly once);
+  deadlines (`d11-reaper` 1ms owner, 5ms ack deadline, cursor traversal
+  per store with stated budgets, lateness fail-closed + regression
+  polarity, STALE_SYNCED ceiling constants + 60s provisional cap,
+  separated logical/physical/permanent-fencing outcomes incl cumulative
+  ancestor rule, leak-store poison, clean-shutdown marker); fake-clock
+  traversal fixture (full-capacity unexpired-prefix + beyond-budget
+  entries, rotation coverage, journal wrap, epoch-Leaked fence FAIL,
+  lock-contention try_lock refusal); quarantine PREINSTALL fixture
+  (start with a provisional reservation NOT yet uncertain, run
+  `retire_all` before join → SURVIVES; ordinary expiry HOLDs; ceiling
+  reap bounded + counted); `Uncertain` is
   committed-but-inaccessible (no lookup visibility, no reuse, no
   rollback); restart resurrects no authority. Exercise partial NFQUEUE
   batches (disposed prefix vs uncertain suffix) without retry-forward;
@@ -1228,9 +1411,11 @@ slice commit's Validation section):
    if the admitted-RPDB predicate cannot be enforced within the sole-writer
    trust boundary, the in-flight fence + receive-mode downstream invariant
    cannot be proved, FRR/zebra q0-path installs cannot be prevented at
-   render time, or M2 cannot distinguish table 254, all policy Permits
-   remain deny-only and K2 re-plan triggers. Assessment: all are blocking
-   P2-entry gates; no permit implementation is authorized until they pass.
+   render time AND proven effective (R/A/K guard + lifecycle authority),
+   the rules+FIB audit cannot bound drift detection, or M2 cannot
+   distinguish table 254, all policy Permits remain deny-only and K2
+   re-plan triggers. Assessment: all are blocking P2-entry gates; no permit
+   implementation is authorized until they pass.
 4. **Is the D11 attestation path close enough to a production permit that P2
    should extend it rather than build the §2.5 committer?** The attestation arm
    already proves a bounded transport/verdict/reinject join with
