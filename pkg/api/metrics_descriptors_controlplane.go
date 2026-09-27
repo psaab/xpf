@@ -383,13 +383,20 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 	)
 	c.schedulerRepublishFailClosed = prometheus.NewDesc(
 		"xpf_scheduler_republish_fail_closed",
-		"1 while the scheduler-republish failure streak has persisted past "+
-			"the bounded age and the scheduler has escalated to FAIL-CLOSED "+
-			"(#5669): scheduled policies are forced inactive (deny) so a "+
-			"scheduled permit stops forwarding past its window close instead "+
-			"of relying on an eventual republish recovery. 0 when healthy or "+
-			"still inside the bounded retry window (xpf_scheduler_republish_"+
-			"failed=1, xpf_scheduler_republish_stale_seconds climbing).",
+		"DEPRECATED alias of xpf_scheduler_republish_fail_open_stale; kept "+
+			"for existing alert expressions. The bounded-age republish latch "+
+			"forces the scheduler's authoritative state inactive, but a "+
+			"wedged dataplane may still enforce the last-known schedule "+
+			"(including a permit).",
+		nil, nil,
+	)
+	c.schedulerRepublishFailOpenStale = prometheus.NewDesc(
+		"xpf_scheduler_republish_fail_open_stale",
+		"1 when scheduler republish has remained failed past the bounded "+
+			"age (#5669); scheduler state is forced inactive, but the helper "+
+			"may still enforce the last-known schedule until republish "+
+			"recovers (including a permit that may continue forwarding). "+
+			"0 when this aged stale-enforcement risk is not latched.",
 		nil, nil,
 	)
 	c.configPersistDegraded = prometheus.NewDesc(

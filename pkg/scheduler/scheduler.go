@@ -62,19 +62,33 @@ type Scheduler struct {
 	republishFailures  uint64
 	lastRepublishErr   error
 
-	// #5669: bounded-age fail-closed. The #3780 self-heal retries a failed
+	// #5669: bounded-age FAIL-OPEN-STALE escalation (#10906 honest naming: the
+	// latch cannot expire the already-published schedule, so "fail-closed"
+	// overclaims the packet-path effect). The #3780 self-heal retries a failed
 	// republish every tick, but a PERSISTENTLY failing republish (a wedged
 	// control socket, an incompatible helper) leaves the stale window
 	// fail-OPEN — a scheduled permit still forwarding past its close — for as
 	// long as the retry keeps failing, silently. Once the failure streak
 	// exceeds republishFailClosedAge the streak can no longer be a single
 	// transient stall, so the scheduler latches republishFailClosed: it emits
-	// a one-time alert AND forces every scheduled policy to the INACTIVE
-	// (deny) disposition in the published + authoritative active map, refusing
-	// to keep or open any scheduled permit while enforcement is known-wedged.
+	// a one-time alarm AND forces every scheduled policy to the INACTIVE
+	// (deny) disposition in the authoritative active map. It also attempts to
+	// send that all-inactive snapshot, but the attempt can fail; see the owned
+	// risk below.
 	// This is safe because it engages ONLY while the republish is failing
 	// (enforcement already broken — never a converged, genuinely-active
 	// window) and clears on the next successful republish. Guarded by mu.
+	//
+	// Honest scope (#10906 owned risk): the forced-inactive snapshot travels
+	// the SAME failing updateFn channel whose failures define the streak, so
+	// in a persistently-wedged dataplane it never lands and the last-known
+	// (possibly permit) schedule keeps enforcing. True fail-closed would
+	// require dataplane-side expiry of the published schedule independent of
+	// the republish channel; no such helper path exists, so the latch bounds
+	// the SILENT window (loud alarm + authoritative deny + deny-lands-first
+	// on recovery) but cannot revoke a live permit while wedged. Recorded
+	// here and in README rather than fixed: dataplane-side expiry is future
+	// work owned by the dataplane/helper surface, not this latch.
 	republishFailClosed bool
 }
 
@@ -84,14 +98,13 @@ const (
 
 	// RepublishFailClosedAge bounds how long a scheduler-driven republish may
 	// keep failing before the scheduler escalates from the #3780 silent retry
-	// to a loud fail-closed posture (see the republishFailClosed field). Five
+	// to the FAIL-OPEN-STALE latch (see republishFailClosed and #10906). Five
 	// minutes is roughly five 60 s evaluate ticks: long enough to absorb a
 	// burst of control-socket contention (status poll + HA sync + session
 	// installs + snapshot sync share the socket, see CLAUDE.md) without a false
-	// alarm, short enough that a genuinely stuck republish is surfaced and
-	// failed closed promptly. Exported so the daemon's
-	// xpf_scheduler_republish_fail_closed alarm shares this single bound
-	// (#5669).
+	// alarm, short enough that a genuinely stuck republish is surfaced
+	// promptly. This is the bound behind the
+	// xpf_scheduler_republish_fail_open_stale gauge (#5669).
 	RepublishFailClosedAge = 5 * time.Minute
 )
 
@@ -287,17 +300,15 @@ func (s *Scheduler) recordRepublishResultLocked(err error, now time.Time) {
 		s.republishPending = true
 		s.republishFailures++
 		s.lastRepublishErr = err
-		// #5669: bounded-age fail-closed escalation. Once the failure streak
-		// exceeds RepublishFailClosedAge the stale enforcement window has
-		// persisted well beyond a single 60 s retry, so escalate ONCE from the
-		// silent #3780 retry to a loud fail-closed alarm. The latch makes the
-		// next evaluate publish an all-inactive (deny) map, so a scheduled
-		// permit stops forwarding past its close instead of relying on an
-		// eventual republish recovery that may never come.
+		// #5669: bounded-age FAIL-OPEN-STALE escalation (#10906). Once the
+		// failure streak passes the bound, alert once and keep the scheduler's
+		// authoritative state inactive while republish remains wedged. The
+		// helper may still enforce the last-known schedule (including a permit)
+		// because this inactive snapshot uses the same failed update channel.
 		if !s.republishFailClosed && !s.republishFirstFail.IsZero() &&
 			now.Sub(s.republishFirstFail) >= RepublishFailClosedAge {
 			s.republishFailClosed = true
-			slog.Warn("scheduler: republish FAIL-CLOSED — enforcement has been stale past the bounded age; forcing scheduled policies inactive (deny) and refusing to reopen them until republish recovers (a scheduled permit may still be forwarding past its window close in a wedged dataplane — investigate the helper/control socket)",
+			slog.Warn("scheduler: republish FAIL-OPEN-STALE — enforcement has been stale past the bounded age; forcing scheduled policies inactive in the control-plane state and refusing to reopen them until republish recovers (the last-known schedule may still permit traffic in a wedged dataplane — investigate the helper/control socket)",
 				"stale_for", now.Sub(s.republishFirstFail),
 				"bound", RepublishFailClosedAge,
 				"failures", s.republishFailures,
@@ -334,13 +345,13 @@ func (s *Scheduler) RepublishFailureStatus() (pending bool, failures uint64, sin
 	return s.republishPending, s.republishFailures, s.republishFirstFail
 }
 
-// RepublishFailClosed reports whether a scheduler-driven republish has been
-// failing continuously for longer than RepublishFailClosedAge, i.e. the stale
-// enforcement window has persisted past the bounded age and the scheduler has
-// escalated to fail-closed: it forces every scheduled policy to the inactive
-// (deny) disposition and has emitted the fail-closed alarm. Latched at the
-// bound, cleared on the next successful republish. Feeds the
-// xpf_scheduler_republish_fail_closed alarm (#5669).
+// RepublishFailClosed reports whether the scheduler's bounded-age republish
+// failure latch is set. The scheduler keeps its authoritative scheduled-policy
+// state inactive while the republish remains failed, but the last-known
+// schedule in a wedged dataplane may still permit traffic because this latch
+// cannot expire a published schedule independently. It clears after a
+// successful republish. The daemon exposes this latch as the
+// xpf_scheduler_republish_fail_open_stale gauge (#5669, #10906).
 func (s *Scheduler) RepublishFailClosed() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -12,25 +12,16 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// TestScheduler_RepublishFailClosedAfterBoundedAge is the #5669 fail-on-revert
-// pin. The #3780 self-heal retries a failed republish every tick, but a
-// PERSISTENTLY failing republish (a wedged control socket, an incompatible
-// helper) leaves the stale window fail-OPEN — a scheduled PERMIT still
-// forwarding past its close — for as long as the retry keeps failing, silently.
+// TestScheduler_RepublishFailClosedAfterBoundedAge pins the #5669 bounded-age
+// latch and the #10906 honesty correction. Persistent republish failure forces
+// scheduled policies inactive in the authoritative control-plane state and
+// emits one alarm, but cannot expire the already-published schedule in a
+// wedged dataplane; a last-known permit may still be forwarding. The name of
+// the scheduler latch remains for compatibility, while its alarm and gauge
+// communicate FAIL-OPEN-STALE.
 //
-// Once the failure streak exceeds RepublishFailClosedAge the scheduler must
-// escalate to fail-closed: emit the one-time alarm AND force every scheduled
-// policy to the INACTIVE (deny) disposition in the authoritative + published
-// state, refusing to reopen it even when its window legitimately reopens, until
-// a republish succeeds again. (This bounds the SILENT fail-open window with a
-// loud alarm + authoritative deny; it does not itself stop packets in a
-// persistently-wedged dataplane — see the scope note below and the README.)
-//
-// RED-on-revert: removing the bounded-age latch in
-// recordRepublishResultLocked makes RepublishFailClosed() never true — the
-// scheduler keeps publishing the stale-window-driven state forever with no
-// alarm, and the "must latch past the bound" assertion below fails.
-// Target-count: this single test.
+// The test also verifies the latch holds the inactive scheduler state until
+// republish succeeds, then permits a legitimately open window to recover.
 func TestScheduler_RepublishFailClosedAfterBoundedAge(t *testing.T) {
 	// Capture WARN+ so the one-time fail-closed alarm is observable; the
 	// per-name "state changed" logs are INFO and stay suppressed.
@@ -93,13 +84,16 @@ func TestScheduler_RepublishFailClosedAfterBoundedAge(t *testing.T) {
 	}
 
 	// The streak has now reached the bounded age: the scheduler MUST have
-	// latched fail-closed and emitted exactly one alarm.
+	// latched fail-open-stale and emitted exactly one alarm.
 	if !s.RepublishFailClosed() {
-		t.Fatalf("republish failing for %s (>= bound %s) must latch fail-closed",
+		t.Fatalf("republish failing for %s (>= bound %s) must latch fail-open-stale",
 			tick.Sub(closeT), RepublishFailClosedAge)
 	}
-	if got := strings.Count(logBuf.String(), "FAIL-CLOSED"); got != 1 {
-		t.Fatalf("fail-closed must emit exactly one alarm, got %d\nlog:\n%s", got, logBuf.String())
+	if got := strings.Count(logBuf.String(), "FAIL-OPEN-STALE"); got != 1 {
+		t.Fatalf("fail-open-stale must emit exactly one alarm, got %d\nlog:\n%s", got, logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "last-known schedule may still permit traffic") {
+		t.Fatalf("alarm must explain that the last-known schedule may still permit traffic, log:\n%s", logBuf.String())
 	}
 
 	// The permit's window LEGITIMATELY reopens the next day (09:00-17:00),
@@ -146,18 +140,15 @@ func TestScheduler_RepublishFailClosedAfterBoundedAge(t *testing.T) {
 	}
 }
 
-// Note on gauge coverage (#6137 finding 3): the value the daemon's
-// xpf_scheduler_republish_fail_closed gauge reads is the scheduler's own
-// RepublishFailClosed() latch (the SSOT the daemon accessor delegates to after
-// finding 2). Its 0→1 transition at the bound and 1→0 clear on recovery are
-// already pinned by TestScheduler_RepublishFailClosedAfterBoundedAge above (it
-// asserts RepublishFailClosed() directly). Deliberately NOT re-asserting
-// "reads 1 at the bound" in a second test here keeps the latch-block
-// fail-on-revert target-count at exactly one. The genuinely-new gauge coverage
-// — that the DAEMON accessor reads this latch (SSOT) rather than a second
-// daemon-side age timer — lives in pkg/daemon's
-// TestSchedulerRepublishFailClosedGaugeReadsSSOTLatch_5669, which does not
-// depend on the latch reaching true and so stays green on the revert.
+// Note on gauge coverage (#6137 finding 3, #10906): the honest
+// xpf_scheduler_republish_fail_open_stale gauge and its deprecated
+// xpf_scheduler_republish_fail_closed alias read the scheduler's own
+// RepublishFailClosed() latch (the SSOT the daemon accessor delegates to).
+// Its 0→1 transition at the bound and 1→0 clear on recovery are pinned above.
+// The daemon accessor's latch-source contract is covered by
+// pkg/daemon's TestSchedulerRepublishFailClosedGaugeReadsSSOTLatch_5669; the
+// API metric names, values, alias equality, and help text are covered by
+// pkg/api's TestSchedulerFailOpenStaleMetricNamesTheDataplaneRisk10906.
 
 // TestScheduler_WithinBoundTransientNeverFailsClosed is the control: a normal
 // successful window transition and a transient failure that recovers INSIDE the

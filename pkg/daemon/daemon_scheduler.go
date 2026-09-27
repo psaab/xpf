@@ -389,22 +389,19 @@ func (d *Daemon) SchedulerRepublishStaleSeconds() float64 {
 	return time.Duration(age).Seconds()
 }
 
-// SchedulerRepublishFailClosed reports whether the scheduler has escalated from
-// the #3780 silent retry to FAIL-CLOSED: once a scheduler-republish failure
-// streak persists past scheduler.RepublishFailClosedAge the scheduler forces
-// scheduled policies to the inactive (deny) disposition and emits a one-time
-// alarm so a scheduled permit stops (re)opening while the dataplane cannot
-// enforce the schedule (#5669).
+// SchedulerRepublishFailClosed reports whether the scheduler's bounded-age
+// republish failure latch is set. The scheduler keeps its authoritative
+// scheduled-policy state inactive while republish remains failed, but the
+// last-known schedule in a wedged dataplane may still permit traffic because
+// this latch cannot expire a published schedule independently (#10906).
 //
-// This reads the scheduler's OWN latch (RepublishFailClosed) rather than
-// recomputing the age daemon-side, so the xpf_scheduler_republish_fail_closed
-// gauge is the single source of truth with the scheduler's force-inactive/alarm
-// decision — no second continuous-time timer that could read 1 up to one 60 s
-// tick before the scheduler actually latches. Lock-free at the daemon level:
-// d.scheduler is an atomic.Pointer, and RepublishFailClosed takes only the
-// scheduler's own RLock (never applySem), so the metrics collector never blocks
-// behind a long apply or a wedged republish. Returns false when no scheduler is
-// installed (nil pointer).
+// This reads the scheduler's OWN latch (RepublishFailClosed), not a separately
+// recomputed daemon-side age, so the
+// xpf_scheduler_republish_fail_open_stale gauge reports the same latch as the
+// scheduler's alarm. Lock-free at the daemon level: d.scheduler is an
+// atomic.Pointer, and RepublishFailClosed takes only the scheduler's RLock
+// (never applySem), so the metrics collector never blocks behind a long apply
+// or wedged republish. Returns false when no scheduler is installed.
 func (d *Daemon) SchedulerRepublishFailClosed() bool {
 	sched := d.scheduler.Load()
 	if sched == nil {
