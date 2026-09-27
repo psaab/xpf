@@ -377,14 +377,50 @@ mod flowless_local_delivery_tests {
             }],
             &zone_name_to_id,
         );
+        // The flowless service port is zero. If the zone id is accidentally
+        // passed in its place, the wrong app is observable.
+        fw.app_catalog = crate::policy::AppCatalog::from_snapshot(&[crate::AppCatalogEntry {
+            app_id: 42,
+            protocol: PROTO_TCP,
+            dst_port_low: TEST_TRUST_ZONE_ID,
+            dst_port_high: TEST_TRUST_ZONE_ID,
+            ..Default::default()
+        }]);
+        let (handle, rx) = crate::event_stream::test_worker_handle(
+            8,
+            crate::event_stream::DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+            },
+        );
+        let flow = flowless_flow(PROTO_TCP);
+        let meta = flowless_meta(PROTO_TCP);
         assert_eq!(
-            verdict(
+            flowless_local_delivery_verdict(
                 &fw,
-                &flowless_flow(PROTO_TCP),
-                flowless_meta(PROTO_TCP),
+                Some(&handle),
+                flowless_extra(),
+                &flow,
+                meta,
+                meta.ingress_ifindex as i32,
                 TEST_TRUST_ZONE_ID,
+                Some(TEST_TRUST_ZONE_ID),
+                64,
+                1_000,
             ),
             FlowlessLocalVerdict::Filtered,
+        );
+
+        let event = rx
+            .try_recv()
+            .expect("flowless junos-host deny emits a policy event")
+            .decode_dataplane_event()
+            .expect("flowless junos-host deny payload");
+        assert_eq!(event.reason, 5);
+        assert_eq!(event.ingress_zone_id, TEST_TRUST_ZONE_ID);
+        assert_eq!(
+            event.application_id, 0,
+            "flowless traffic has no L4 service port"
         );
     }
 

@@ -167,8 +167,8 @@ pub(super) fn flowless_local_delivery_verdict(
                 event_stream,
                 flow,
                 meta,
-                from_zone_id,
                 flow.forward_key.dst_port,
+                from_zone_id,
                 result.policy_id,
                 result.action,
                 // Flowless: no reply is ever synthesized.
