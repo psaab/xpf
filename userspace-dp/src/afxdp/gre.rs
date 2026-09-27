@@ -368,12 +368,11 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
     // A refusal is only a refusal if the frame was OFFERED to a GRE tunnel
     // endpoint. Ordinary transit GRE/PPTP crossing the firewall reaches
     // this same `return None`, and counting it would make the metric a
-    // traffic gauge instead of a fault signal. The kind test mirrors
-    // `match_tunnel_endpoint` (#2327): only a GRE-mode row would ever have
-    // decapped, at any version. #10653: the same mirroring for the
-    // transport domain — a cross-VRF outer refused on domain grounds is
-    // not a version refusal either.
-    let ingress_routing_instance = gre_ingress_routing_instance(forwarding, meta);
+    // traffic gauge instead of a fault signal. Mirror the kind, transport
+    // domain, and #11054 ingress host-inbound gates used by the decap matcher.
+    let ingress_logical_ifindex = gre_ingress_logical_ifindex(forwarding, meta);
+    let ingress_routing_instance =
+        gre_ingress_routing_instance(forwarding, ingress_logical_ifindex);
     let offered_to_gre_endpoint = forwarding
         .gre_decap_index
         .get(&key)
@@ -384,19 +383,24 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
                         && transport_instance_of_table(&endpoint.transport_table)
                             == ingress_routing_instance
                 })
-            })
+            }) && gre_outer_host_inbound_admits(
+                forwarding,
+                ingress_logical_ifindex,
+                meta.addr_family as i32,
+            )
         });
     if !offered_to_gre_endpoint {
         return;
     }
-    forwarding.gre_decap_counters.note_unsupported_version_refusal();
+    forwarding
+        .gre_decap_counters
+        .note_unsupported_version_refusal();
 }
 
-/// Cold-path bookkeeping for the PT/nibble refusal above.
-///
 /// Only reached when the GRE Protocol Type disagrees with the inner version
 /// nibble. Count only a frame offered to a configured GRE endpoint with the
-/// matching key and transport domain; ordinary transit GRE is not counted.
+/// matching key, transport domain, and ingress host-inbound admission;
+/// ordinary transit or host-inbound-denied GRE is not counted.
 #[cold]
 #[inline(never)]
 fn note_gre_pt_nibble_mismatch(
@@ -421,18 +425,7 @@ fn note_gre_pt_nibble_mismatch(
     let Some((outer_src, outer_dst)) = parse_outer_addresses(frame, meta) else {
         return;
     };
-    let ingress_routing_instance = gre_ingress_routing_instance(forwarding, meta);
-    if match_tunnel_endpoint(
-        forwarding,
-        meta.addr_family as i32,
-        outer_src,
-        outer_dst,
-        key,
-        key_present,
-        ingress_routing_instance,
-    )
-    .is_none()
-    {
+    if match_tunnel_endpoint(forwarding, outer_src, outer_dst, key, key_present, meta).is_none() {
         return;
     }
     forwarding
@@ -729,36 +722,57 @@ fn gre_inner_nibble_matches(inner_packet: &[u8], inner_family: u8) -> bool {
     matches!(inner_packet.first(), Some(b) if b >> 4 == expected)
 }
 
-/// #10653: the routing-instance name of the LOGICAL ingress unit that
-/// received `meta` — the ingress side of the GRE decap
-/// transport-domain match.
-///
-/// Resolves the logical (VLAN unit) ifindex first, exactly like the
-/// zone / filter / NAT ingress identity (#3021/#5802/#9956): a trunk
-/// whose units sit in different routing instances must resolve the
-/// unit that actually received the frame, not the physical parent. An
-/// untagged port resolves logical == physical. `""` is the default VRF
-/// (unscoped interface or absent map entry).
-///
-/// Deliberately NOT gated on `has_routing_domains` (unlike
-/// `ingress_routing_domain`): when no interface carries a domain but an
-/// endpoint names a VRF transport, the comparison below fails CLOSED
-/// (`""` vs the instance) instead of skipping the check.
-fn gre_ingress_routing_instance<'a>(
-    forwarding: &'a ForwardingState,
-    meta: UserspaceDpMeta,
-) -> &'a str {
-    let logical = resolve_ingress_logical_ifindex(
+/// #10653: resolve received `meta` to the LOGICAL ingress unit. Tagged trunk
+/// frames use their VLAN unit, not the physical parent, matching the zone /
+/// filter / NAT identity (#3021/#5802/#9956); untagged frames use the parent.
+fn gre_ingress_logical_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) -> i32 {
+    resolve_ingress_logical_ifindex(
         forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
     )
-    .unwrap_or(meta.ingress_ifindex as i32);
+    .unwrap_or(meta.ingress_ifindex as i32)
+}
+
+/// #10653: routing-instance name of the already-resolved LOGICAL ingress unit.
+/// `""` is the default VRF (unscoped interface or absent map entry).
+///
+/// Deliberately not gated on `has_routing_domains`: an endpoint naming a VRF
+/// must fail closed against an ingress with no routing-instance mapping.
+fn gre_ingress_routing_instance<'a>(
+    forwarding: &'a ForwardingState,
+    logical_ifindex: i32,
+) -> &'a str {
     forwarding
         .ifindex_to_routing_instance
-        .get(&logical)
+        .get(&logical_ifindex)
         .map(String::as_str)
         .unwrap_or("")
+}
+
+/// #11054: require the outer GRE datagram to be admitted by host-inbound on its
+/// actual logical ingress interface/zone before it can be reattributed as the
+/// tunnel's logical ingress zone. This mirrors local-delivery admission:
+/// per-interface overrides win, otherwise the ingress zone's set applies.
+fn gre_outer_host_inbound_admits(
+    forwarding: &ForwardingState,
+    logical_ifindex: i32,
+    outer_family: i32,
+) -> bool {
+    let zone = forwarding
+        .ifindex_to_zone_id
+        .get(&logical_ifindex)
+        .copied()
+        .unwrap_or(0);
+    crate::afxdp::forwarding::host_inbound_admits_iface(
+        forwarding,
+        logical_ifindex,
+        zone,
+        PROTO_GRE,
+        0,
+        outer_family == libc::AF_INET6,
+        0,
+    )
 }
 
 /// Match a received GRE (proto-47) outer tuple to a GRE-mode tunnel
@@ -803,18 +817,24 @@ fn gre_ingress_routing_instance<'a>(
 /// tunnel's addresses and key arriving in ANY routing domain decapped
 /// and its inner was judged as the tunnel's zone — cross-VRF zone
 /// confusion. The endpoint names its domain by its canonical
-/// `transport_table` (`transport_instance_of_table`); the caller passes
-/// the ingress logical unit's routing instance
-/// (`gre_ingress_routing_instance`).
+/// `transport_table` (`transport_instance_of_table`); the matcher resolves
+/// the ingress logical unit's routing instance from `meta`.
+/// #11054: the candidate must also pass GRE host-inbound admission on the
+/// received outer's logical ingress interface/zone. Otherwise a matching
+/// tuple, key, and VRF arriving on a denied ingress would be reattributed to
+/// the tunnel's zone before outer host-inbound ran.
 fn match_tunnel_endpoint<'a>(
     forwarding: &'a ForwardingState,
-    outer_family: i32,
     outer_src: IpAddr,
     outer_dst: IpAddr,
     key: u32,
     key_present: bool,
-    ingress_routing_instance: &str,
+    meta: UserspaceDpMeta,
 ) -> Option<&'a TunnelEndpoint> {
+    let outer_family = meta.addr_family as i32;
+    let ingress_logical_ifindex = gre_ingress_logical_ifindex(forwarding, meta);
+    let ingress_routing_instance =
+        gre_ingress_routing_instance(forwarding, ingress_logical_ifindex);
     let candidates = forwarding
         .gre_decap_index
         .get(&(outer_family, outer_dst, outer_src))?;
@@ -838,7 +858,10 @@ fn match_tunnel_endpoint<'a>(
             key_present && endpoint.key == key
         };
         if key_ok {
-            return Some(endpoint);
+            if gre_outer_host_inbound_admits(forwarding, ingress_logical_ifindex, outer_family) {
+                return Some(endpoint);
+            }
+            return None;
         }
     }
     None
@@ -1079,16 +1102,7 @@ pub(super) fn try_native_gre_decap_from_frame(
     let inner_packet = &inner_packet[..inner_len];
 
     let (outer_src, outer_dst) = parse_outer_addresses(frame, meta)?;
-    let ingress_routing_instance = gre_ingress_routing_instance(forwarding, meta);
-    let endpoint = match_tunnel_endpoint(
-        forwarding,
-        meta.addr_family as i32,
-        outer_src,
-        outer_dst,
-        key,
-        key_present,
-        ingress_routing_instance,
-    )?;
+    let endpoint = match_tunnel_endpoint(forwarding, outer_src, outer_dst, key, key_present, meta)?;
     let (protocol, rel_l4_offset, payload_offset) =
         parse_inner_protocol_and_offsets(inner_packet, inner_family)?;
 
