@@ -627,11 +627,13 @@ Properties:
   structured SSOT as the chain (`config.HostInboundServiceMatch` /
   `HostInboundProtocolMatch`). No prior-config snapshot is persisted; a
   still-permitted tuple is not flushed or dropped.
-- **Lifeline-safe.** Only addresses in the covered default-deny set are
-  eligible for the ordinary reconcile/guard. Management / cluster-control
-  lifelines (fxp0 / em0 / fab<N>) remain excluded from the host-inbound views.
-  Addressed-but-unzoned addresses (#4420 HI-2) are covered with an empty admit
-  set.
+- **Lifeline exclusion is interface-based, not address-based.** Lifeline
+  interfaces (fxp0 / em0 / fab<N>) are excluded from host-inbound views, so an
+  address reachable only there is not reconciled. Reusing that address on a
+  non-lifeline default-deny attachment does not retain a blanket exemption:
+  when its effective host-inbound views admit no service, the covered-address
+  flush can remove an existing management SSH conntrack entry. A view that
+  admits SSH preserves that tuple; see the #7284 shared-address limitation.
 - **Global exemptions preserved.** ESP/AH (proto 50/51), ICMP ND/PMTUD/error,
   and configured WireGuard listen ports (#5582) are never flushed by the
   ordinary matcher. ICMP echo conntrack is short-lived and left to age out.
