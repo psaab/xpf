@@ -75,13 +75,14 @@ func vipSetDelta(old, want []string) (added, removed []string) {
 // state: a MASTER stays MASTER throughout, so no priority-0 resignation and
 // no takeover window.
 //
-// Actuation rules:
 //   - MASTER: normally add the added VIPs first, then remove the removed VIPs.
 //     If the old+added union exceeds advert capacity, remove first and defer
 //     additions until every removal succeeds; a failed delete therefore leaves
 //     the old legal set rather than an unadvertisable union. Then announce the
 //     stored set and GARP/NA only newly added VIPs. Membership changes advance
-//     the burst epoch, invalidating callbacks for withdrawn addresses.
+//     the burst epoch, invalidating callbacks for withdrawn addresses — and the
+//     epoch is fenced BEFORE the first netlink delete, so a detached follow-up
+//     cannot observe the old epoch and re-announce a VIP mid-withdrawal.
 //   - BACKUP (or INIT): added VIPs need no actuation (promotion adds the stored
 //     set); removed VIPs are swept best-effort in case a stale address lingers.
 //     If a failed removal would make the stored union over-capacity, defer the
@@ -134,10 +135,29 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	var addRes vipActuationResult
 	var removeErr error
 	var removedFailed map[string]struct{}
+	// F1 residual fence: detached burst callbacks validate StateMaster,
+	// ownerGen, and garpEpoch WITHOUT vipMu (sendGARPFor), while this update
+	// holds vipMu across all netlink deletes. Advancing the epoch only after
+	// the deletes (post-publish) leaves a window where a deleted VIP's
+	// callback still sees the old epoch and emits follow-ups while later
+	// deletes are pending. Fence before the first delete instead: under the
+	// already-held vipMu, so no in-flight callback can announce a VIP once
+	// its withdrawal has begun. Gated on MASTER with pending removals —
+	// BACKUP callbacks are already invalid via the state check, and add-only
+	// updates keep their single post-publish bump. Single bump total: when
+	// fenced, post-publish reuses this epoch instead of bumping again.
+	withdrawalFenced := false
+	fenceWithdrawals := func() {
+		if !withdrawalFenced && state == StateMaster && len(removed) > 0 {
+			vi.garpEpoch.Add(1)
+			withdrawalFenced = true
+		}
+	}
 	remove := func() {
 		if len(removed) == 0 {
 			return
 		}
+		fenceWithdrawals()
 		failed, err := vi.removeVIPsResultLocked(removed)
 		removeErr = err
 		if len(failed) > 0 {
@@ -199,9 +219,15 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	vi.advertCapacityErr = capErr
 	addedSet, removedSet := vipSetDelta(old, newSet)
 	updateGarpEpoch := vi.garpEpoch.Load()
-	if len(addedSet) > 0 || len(removedSet) > 0 {
+	if !withdrawalFenced && (len(addedSet) > 0 || len(removedSet) > 0) {
 		updateGarpEpoch = vi.garpEpoch.Add(1)
 	}
+	// When withdrawalFenced, the pre-delete bump already names the new VIP
+	// membership (one bump total, no second post-publish bump), so the
+	// added-only sendGARPFor below validates against the fenced epoch. If
+	// every removal failed the stored set equals the old set yet the epoch
+	// still advanced — intentional: withdrawal was attempted, so prior
+	// callbacks must not continue announcing through the retry window.
 	actuationIncomplete := len(addRes.failed) > 0 || addRes.linkErr != nil || removeErr != nil
 	if actuationIncomplete || capErr != nil {
 		vi.vipUpdateFailures.Add(1)

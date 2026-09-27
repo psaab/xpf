@@ -271,9 +271,9 @@ type vrrpInstance struct {
 	// GARP suppression for strict-vip-ownership mode.
 	suppressGARP     atomic.Bool   // when true, becomeMaster() skips GARP/NA
 	garpEpoch        atomic.Uint64 // ownership tenure, MAC reconcile, or VIP membership generation
-	lastGARPEpoch    atomic.Uint64 // epoch of last completed sendGARP()
-	lastGARPTime     atomic.Int64  // Unix nanos of last GARP send
-	lastGARPOwnerGen atomic.Uint64 // owner generation in which the last GARP completed
+	lastGARPEpoch    atomic.Uint64 // epoch reserved by the most recent sendGARPFor
+	lastGARPTime     atomic.Int64  // Unix nanos of the most recent synchronous burst
+	lastGARPOwnerGen atomic.Uint64 // owner generation of the last reserved burst
 	// lastMasterReaffirmTime independently rate-limits winner-side refreshes
 	// triggered by repeated peer MASTER advertisements.
 	lastMasterReaffirmTime atomic.Int64 // Unix nanos of the last winner-side neighbor refresh.

@@ -55,5 +55,7 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
+  * Update same-key MASTER VIP changes in place; fence GARP/NA follow-ups before
+    withdrawal and bound send-lock scope to one VIP at a time (#10780).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

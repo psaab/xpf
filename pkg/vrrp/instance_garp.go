@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -163,17 +164,19 @@ func (vi *vrrpInstance) sendGARP(force bool) {
 }
 
 // sendGARPFor emits a burst for a stable VIP snapshot and its captured epochs.
-// The synchronous first frame is serialized with VIP actuation; later
-// follow-ups validate the same epochs and stop when an update supersedes them.
+// It validates each VIP under vipMu and holds the lock only through that VIP's
+// synchronous first frame and optional gateway probe. A concurrent withdrawal
+// can therefore fence the remaining snapshot after one VIP instead of waiting
+// for a potentially large whole-set burst.
 // The in-place commit path passes only newly-added VIPs so it does not flap
 // neighbor entries for addresses that remained owned throughout.
 func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force bool) {
 	vi.vipMu.Lock()
-	defer vi.vipMu.Unlock()
 	if vi.getState() != StateMaster ||
 		vi.ownerGen.Load() != ownerGen ||
 		vi.garpEpoch.Load() != epoch ||
 		!vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen) {
+		vi.vipMu.Unlock()
 		return
 	}
 	// #8597 (muse-004 K20): under vi.mu — updateConfig writes this field on the
@@ -196,17 +199,30 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force
 		}
 		count = clamped
 	}
-	// Abdication gate for detached burst follow-ups (#2867). The immediate
-	// frame was serialized with VIP actuation above; every later frame is
-	// valid only while this ownership and VIP snapshot remains current.
+	// Reserve this epoch before releasing vipMu. Per-VIP lock handoffs would
+	// otherwise let a duplicate same-epoch send begin before this burst stores
+	// lastGARPEpoch at completion. A membership update bumps garpEpoch before
+	// withdrawal actuation, so this reservation cannot suppress its new epoch.
+	vi.lastGARPOwnerGen.Store(ownerGen)
+	vi.lastGARPEpoch.Store(epoch)
+	vi.vipMu.Unlock()
+
 	stillMaster := func() bool {
 		return vi.getState() == StateMaster &&
 			vi.ownerGen.Load() == ownerGen &&
 			vi.garpEpoch.Load() == epoch
 	}
 	for _, vip := range vips {
+		vi.vipMu.Lock()
+		if vi.getState() != StateMaster ||
+			vi.ownerGen.Load() != ownerGen ||
+			vi.garpEpoch.Load() != epoch {
+			vi.vipMu.Unlock()
+			return
+		}
 		ip, ipNet, err := net.ParseCIDR(vip)
 		if err != nil {
+			vi.vipMu.Unlock()
 			continue
 		}
 		if ip.To4() != nil {
@@ -216,14 +232,13 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force
 			// Probe the first usable host (network address + 1) of the
 			// VIP subnet — this is the most common gateway address. The
 			// ARP Request's source IP/MAC forces the gateway to update its
-			// ARP cache for our VIP. GatewayProbeTarget returns ok=false on
+			// ARP cache for the VIP. GatewayProbeTarget returns ok=false on
 			// /31 and /32, where no in-subnet gateway host exists; the
 			// broadcast GARP burst above still fires (#2377).
 			gwIP, ok := GatewayProbeTarget(ipNet)
 			if ok && !gwIP.Equal(ip.To4()) {
 				// Send the probe with the VIP as the ARP sender so the
-				// gateway re-binds VIP -> our (new) MAC, not the primary
-				// IP -> MAC (#2152).
+				// gateway re-binds VIP to our (new) MAC, not the primary IP (#2152).
 				if err := arpProbeFn(vi.cfg.Interface, ip.To4(), gwIP); err != nil {
 					slog.Warn("vrrp: gateway ARP probe failed",
 						"key", vi.key(), "gw", gwIP, "err", err)
@@ -237,8 +252,10 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force
 				slog.Warn("vrrp: NA failed", "key", vi.key(), "vip", ip, "err", err)
 			}
 		}
+		vi.vipMu.Unlock()
+		// Give a waiting membership update or demotion a chance to acquire
+		// vipMu before this sender starts the next VIP.
+		runtime.Gosched()
 	}
-	vi.lastGARPOwnerGen.Store(ownerGen)
-	vi.lastGARPEpoch.Store(epoch)
 	vi.lastGARPTime.Store(time.Now().UnixNano())
 }

@@ -371,11 +371,14 @@ the baseline with an ordinary advert.
   MAC just changed and the correction GARP must not be swallowed by a routine
   burst that fired in the prior 500 ms (#2081). The decision lives in the
   network-free helper `garpSendAllowed`, which is unit-tested directly.
-  `updateVIPs` advances the epoch when the actuated VIP membership changes;
-  removals invalidate detached callbacks and additions announce only their new
-  VIPs in that membership epoch. A full-set send holds `vipMu` through its
-  synchronous first frame, so an old snapshot cannot satisfy or suppress the
-  new-membership announcement.
+  `updateVIPs` advances the epoch before starting any VIP withdrawal; additions
+  advance it when their membership is published. A deletion callback is
+  therefore invalid while later removals are still pending, and additions
+  announce only their new VIPs in the new membership epoch. `sendGARPFor`
+  validates each VIP under `vipMu` and holds the lock only through that VIP's
+  synchronous first frame and optional gateway probe, then revalidates before
+  proceeding. This bounds demotion/update serialization to one VIP at a time
+  while ensuring an old snapshot cannot suppress a new-membership announcement.
 - Supplementary gateway ARP probe: after each IPv4 GARP burst, `sendGARP`
   also sends a directed ARP Request — VIP as the ARP sender (#2152) — to the
   subnet's first usable host (network address + 1, the most common gateway),

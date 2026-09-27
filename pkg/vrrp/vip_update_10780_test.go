@@ -114,16 +114,9 @@ func TestUpdateInstances_VIPSetChangeKeepsMasterWithoutResignation(t *testing.T)
 	actuations = nil // exclude the startup stale-VIP sweep
 	actMu.Unlock()
 	vi.setState(StateMaster)
-	// Wake the run loop's BACKUP select so it observes MASTER before the
-	// manager update; this advert is lower priority and cannot preempt us.
-	vi.rxCh <- &VRRPPacket{Priority: 1, MaxAdvertInt: 10, SrcIP: net.ParseIP("192.0.2.2")}
-	deadline := time.Now().Add(time.Second)
-	for vi.getState() != StateMaster && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if vi.getState() != StateMaster {
-		t.Fatal("fixture failed to put the live run loop in MASTER")
-	}
+	// Exercise the manager's MASTER update arm directly. A queued low-priority
+	// peer advert could launch a separate winner-reaffirm GARP and contaminate
+	// this test's capture of the membership-delta announcement.
 	vi.suppressGARP.Store(false)
 
 	if err := m.UpdateInstances([]*Instance{{
@@ -342,7 +335,7 @@ func TestEnsureVIPFamilySocketsOpensNewIPv6Family(t *testing.T) {
 		&net.Interface{Name: "reth10780", Index: 17}, nil, nil)
 	vi.afPacketFD = 99 // existing AF_PACKET receiver avoids raw fallback startup
 	opened := 0
-	err := vi.ensureVIPFamilySocketsWith([]string{"2001:db8:10780::1/64"},
+	err := vi.ensureVIPFamilySocketsWith([]string{"2001:db8:1780::1/64"},
 		func(string, *net.Interface, bool) (*ipv4.RawConn, net.PacketConn, error) {
 			t.Fatal("IPv4 socket opener called for IPv6-only desired set")
 			return nil, nil, nil
@@ -694,9 +687,9 @@ func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testi
 			family = "ipv6"
 		}
 		t.Run(family, func(t *testing.T) {
-			oldVIP, newVIP := "198.18.107.80/32", "198.18.107.81/32"
+			oldVIP, newVIP, keepVIP := "198.18.107.80/32", "198.18.107.81/32", "198.18.107.82/32"
 			if isIPv6 {
-				oldVIP, newVIP = "2001:db8:1078::1/64", "2001:db8:1078::2/64"
+				oldVIP, newVIP, keepVIP = "2001:db8:1078::1/64", "2001:db8:1078::2/64", "2001:db8:1078::3/64"
 			}
 			vi := newInstance(Instance{
 				Interface: "reth10780-epoch", GroupID: 101, Priority: 200,
@@ -737,7 +730,11 @@ func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testi
 				vi.sendGARP(false)
 				close(fullBurstDone)
 			}()
-			<-entered
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("initial GARP/NA frame did not reach its seam")
+			}
 			updateDone := make(chan error, 1)
 			updateStarted := make(chan struct{})
 			go func() {
@@ -767,14 +764,17 @@ func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testi
 
 			callbackVI := newInstance(Instance{
 				Interface: "reth10780-remove", GroupID: 101, Priority: 200,
-				VirtualAddresses: []string{oldVIP},
+				VirtualAddresses: []string{oldVIP, newVIP, keepVIP},
 			}, &net.Interface{Name: "reth10780-remove", Index: 10783}, nil, nil)
 			callbackVI.setState(StateMaster)
 			installFakeVIPNetlink(callbackVI)
 			callbackVI.addrsFn = func() ([]net.Addr, error) { return nil, nil }
-			var stillCurrent func() bool
-			capture := func(_ string, _ net.IP, _ int, valid cluster.BurstStillValid) error {
-				stillCurrent = valid
+			removeAIP, _, _ := net.ParseCIDR(oldVIP)
+			var stillCurrent cluster.BurstStillValid
+			capture := func(_ string, ip net.IP, _ int, valid cluster.BurstStillValid) error {
+				if ip.Equal(removeAIP) {
+					stillCurrent = valid
+				}
 				return nil
 			}
 			garpBurstFn, naBurstFn = capture, capture
@@ -782,11 +782,142 @@ func TestVIPMembershipEpochSerializesGARPAndInvalidatesRemovedCallbacks(t *testi
 			if stillCurrent == nil || !stillCurrent() {
 				t.Fatal("captured callback is not valid before membership removal")
 			}
-			if err := callbackVI.updateVIPs(nil); err != nil {
-				t.Fatalf("updateVIPs removing last VIP: %v", err)
+
+			deletingB, releaseDeleteB := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			finishDeleteB := func() { releaseOnce.Do(func() { close(releaseDeleteB) }) }
+			defer finishDeleteB()
+			delCalls := 0
+			callbackVI.addrDelFn = func(_ netlink.Link, addr *netlink.Addr) error {
+				delCalls++
+				switch delCalls {
+				case 1:
+					if addr.IPNet.String() != oldVIP {
+						t.Errorf("first delete = %s, want captured VIP %s", addr.IPNet, oldVIP)
+					}
+					return nil // A is now removed; next delete remains pending.
+				case 2:
+					if addr.IPNet.String() != newVIP {
+						t.Errorf("second delete = %s, want %s", addr.IPNet, newVIP)
+					}
+					if stillCurrent() {
+						t.Error("captured A callback remained valid after A deletion while B deletion was pending")
+					}
+					close(deletingB)
+					<-releaseDeleteB
+					return nil
+				default:
+					t.Errorf("unexpected delete %d for %s", delCalls, addr.IPNet)
+					return nil
+				}
+			}
+			removalDone := make(chan error, 1)
+			go func() { removalDone <- callbackVI.updateVIPs([]string{keepVIP}) }()
+			select {
+			case <-deletingB:
+			case <-time.After(time.Second):
+				t.Fatal("removal update did not reach the pending second delete")
 			}
 			if stillCurrent() {
-				t.Fatal("callback from removed VIP epoch remained valid")
+				t.Fatal("captured callback was valid during an in-flight non-empty removal update")
+			}
+			finishDeleteB()
+			if err := <-removalDone; err != nil {
+				t.Fatalf("non-empty removal update: %v", err)
+			}
+			if got := callbackVI.vipsSnapshot(); !vipsEqual(got, []string{keepVIP}) {
+				t.Fatalf("VIP set after removal-only update = %v, want [%s]", got, keepVIP)
+			}
+		})
+	}
+}
+
+func TestGARPPerVIPLockBoundsDemotionWait(t *testing.T) {
+	for _, isIPv6 := range []bool{false, true} {
+		family := "ipv4"
+		vips := []string{"198.18.107.80/32", "198.18.107.81/32", "198.18.107.82/32"}
+		if isIPv6 {
+			family = "ipv6"
+			vips = []string{"2001:db8:1078::1/64", "2001:db8:1078::2/64", "2001:db8:1078::3/64"}
+		}
+		t.Run(family, func(t *testing.T) {
+			vi := newInstance(Instance{
+				Interface: "reth10780-demote", GroupID: 101, Priority: 200,
+				VirtualAddresses: vips,
+			}, &net.Interface{Name: "reth10780-demote", Index: 10784}, nil, nil)
+			vi.setState(StateMaster)
+			installFakeVIPNetlink(vi)
+
+			oldGARP, oldNA, oldProbe := garpBurstFn, naBurstFn, arpProbeFn
+			t.Cleanup(func() { garpBurstFn, naBurstFn, arpProbeFn = oldGARP, oldNA, oldProbe })
+			var burstCalls atomic.Int32
+			firstFrame, releaseFrame := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseFrame) }) }
+			defer release()
+			burst := func(string, net.IP, int, cluster.BurstStillValid) error {
+				if burstCalls.Add(1) == 1 {
+					close(firstFrame)
+					<-releaseFrame
+				}
+				return nil
+			}
+			garpBurstFn, naBurstFn = burst, burst
+			arpProbeFn = func(string, net.IP, net.IP) error { return nil }
+
+			sendDone := make(chan struct{})
+			go func() {
+				vi.sendGARP(false)
+				close(sendDone)
+			}()
+			select {
+			case <-firstFrame:
+			case <-time.After(time.Second):
+				t.Fatal("first per-VIP frame did not reach its seam")
+			}
+
+			masterDownTimer, advertTimer := time.NewTimer(time.Hour), time.NewTimer(time.Hour)
+			t.Cleanup(func() {
+				masterDownTimer.Stop()
+				advertTimer.Stop()
+			})
+			demoteDone := make(chan error, 1)
+			demoteStarted := make(chan struct{})
+			go func() {
+				close(demoteStarted)
+				demoteDone <- vi.becomeBackup(masterDownTimer, advertTimer)
+			}()
+			<-demoteStarted
+			select {
+			case err := <-demoteDone:
+				release()
+				t.Fatalf("demotion completed while the current VIP first frame was blocked: %v", err)
+			case <-time.After(10 * time.Millisecond):
+			}
+
+			releaseAt := time.Now()
+			release()
+			select {
+			case err := <-demoteDone:
+				if err != nil {
+					t.Fatalf("becomeBackup: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("demotion did not resume after the current per-VIP frame returned")
+			}
+			if elapsed := time.Since(releaseAt); elapsed > 250*time.Millisecond {
+				t.Fatalf("demotion waited %s after releasing one VIP frame; want <250ms", elapsed)
+			}
+			select {
+			case <-sendDone:
+			case <-time.After(time.Second):
+				t.Fatal("GARP sender did not stop after demotion")
+			}
+			if got := burstCalls.Load(); got != 1 {
+				t.Fatalf("bursts sent before demotion completed = %d, want only current VIP's frame", got)
+			}
+			if vi.getState() != StateBackup {
+				t.Fatalf("state after demotion = %s, want BACKUP", vi.getState())
 			}
 		})
 	}
