@@ -141,6 +141,11 @@ periodic ACK from the daemon.
   deny with NO translation passes a default `NatDecision` (all-None) and a
   `policy_dst_port` equal to the original dst port, so its record stays
   byte-identical to the pre-#3058 wire — only NAT'd denies change.
+  (#10981) The secondary NoRoute and host-bound deny sites follow the same
+  evaluated-service rule: flow-backed NoRoute uses its L4 destination port,
+  while junos-host and host-inbound use the post-translation service port.
+  Their RT_FLOW 5-tuple remains the original wire tuple; flowless NoRoute
+  records still have no resolvable application.
   (#2615) the SESSION_CREATE and SESSION_CLOSE frames ALSO populate the
   ingress ifindex slot (offset 128, little-endian u32) from the admitting
   binding's `ident.ifindex`, so the Go decoder resolves

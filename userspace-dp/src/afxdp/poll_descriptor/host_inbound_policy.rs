@@ -123,12 +123,14 @@ pub(super) enum JunosHostLocalPolicy {
 /// `enqueue_deny_reply` result. Kept emit-only (evaluation is
 /// `junos_host_policy_eval`) so the enqueue can run BEFORE the emit on the
 /// flow-backed path.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_junos_host_deny(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     from_zone_id: u16,
+    policy_dst_port: u16,
     policy_id: u32,
     action: PolicyAction,
     reject_reply_enqueued: bool,
@@ -152,7 +154,9 @@ pub(super) fn emit_junos_host_deny(
         0,
         policy_id,
         action,
-        resolve_policy_deny_app_id(&forwarding.app_catalog, flow, flow.forward_key.dst_port),
+        // #10981: match the evaluated post-translation service, but keep the
+        // event's 5-tuple on the wire tuple (#9529).
+        resolve_policy_deny_app_id(&forwarding.app_catalog, flow, policy_dst_port),
         reject_reply_enqueued,
         now_ns,
     );
@@ -160,9 +164,8 @@ pub(super) fn emit_junos_host_deny(
 
 /// #3610: emit the tuple-rich host-inbound-traffic deny event for a host-bound
 /// packet rejected by the ingress zone's `host-inbound-traffic` admission gate.
-/// Resolves the application from the flow's destination (service) port with the
-/// same `resolve_policy_deny_app_id` the transit / junos-host deny path uses,
-/// then delegates to [`emit_host_inbound_deny_event`] (which reuses the #3615
+/// Resolve the application from the service destination port the gate evaluated,
+/// then delegate to [`emit_host_inbound_deny_event`] (which reuses the #3615
 /// policy-deny event machinery with a distinct host-inbound reason). Shared by
 /// all three host-inbound deny arms: session-hit, session-miss, and the #3292
 /// flowless LocalDelivery arm — so every host-inbound drop emits an identical,
@@ -173,6 +176,7 @@ pub(super) fn emit_host_inbound_deny(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     from_zone_id: u16,
+    service_dst_port: u16,
     now_ns: u64,
 ) {
     emit_host_inbound_deny_event(
@@ -180,7 +184,7 @@ pub(super) fn emit_host_inbound_deny(
         flow,
         meta,
         from_zone_id,
-        resolve_policy_deny_app_id(&forwarding.app_catalog, flow, flow.forward_key.dst_port),
+        resolve_policy_deny_app_id(&forwarding.app_catalog, flow, service_dst_port),
         now_ns,
     );
 }
@@ -260,9 +264,9 @@ pub(super) fn junos_host_local_policy(
     counters: &mut BatchCounters,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    // #9529: evaluated post-translation. The reject reply and the deny record
-    // below still use `flow` — the client is talking to the pre-translation
-    // address, and the reply must come back from it.
+    // #9529: the 5-tuple in the deny record stays on `flow` so the client sees
+    // the pre-translation address; application identification follows the
+    // post-translation service that the policy evaluated.
     policy_dst: (IpAddr, u16),
     from_zone_id: u16,
     packet_len: u64,
@@ -307,6 +311,7 @@ pub(super) fn junos_host_local_policy(
                 flow,
                 meta,
                 from_zone_id,
+                policy_dst.1,
                 result.policy_id,
                 action,
                 reject_reply_enqueued,

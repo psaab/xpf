@@ -115,7 +115,15 @@ pub(super) fn flowless_local_delivery_verdict(
             // flowless flow (a non-first fragment / no-L4 packet) the zone
             // host-inbound gate dropped. Reuses the policy-deny event machinery
             // via the shared helper, identical to the flow-backed arms.
-            emit_host_inbound_deny(forwarding, event_stream, flow, meta, from_zone_id, now_ns);
+            emit_host_inbound_deny(
+                forwarding,
+                event_stream,
+                flow,
+                meta,
+                from_zone_id,
+                flow.forward_key.dst_port,
+                now_ns,
+            );
             return FlowlessLocalVerdict::HostInboundDeny;
         }
         Some((action, lo0_log)) => {
@@ -160,6 +168,7 @@ pub(super) fn flowless_local_delivery_verdict(
                 flow,
                 meta,
                 from_zone_id,
+                flow.forward_key.dst_port,
                 result.policy_id,
                 result.action,
                 // Flowless: no reply is ever synthesized.

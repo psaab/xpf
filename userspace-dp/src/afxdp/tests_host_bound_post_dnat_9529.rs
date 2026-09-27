@@ -137,6 +137,33 @@ fn from_wan(
     dbg
 }
 
+fn from_wan_capturing_events(
+    fw: &ForwardingState,
+    sessions: &mut SessionTable,
+    dst: Ipv4Addr,
+    dport: u16,
+    flags: u8,
+) -> (
+    DebugPollCounters,
+    std::sync::mpsc::Receiver<crate::event_stream::codec::EventFrame>,
+) {
+    let frame = build_txn_tcp_syn_frame_v4(
+        CLIENT,
+        dst,
+        CLIENT_PORT,
+        dport,
+        flags,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
+    let meta = txn_meta_v4(WAN_IFINDEX as u32, flags, frame.len() as u16);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let ha_state = txn_ha_state();
+    let (_batch, dbg, _event_handle, event_rx) =
+        txn_run_descriptor_capturing_events(&mut binding, sessions, fw, &ha_state, &frame, meta);
+    (dbg, event_rx)
+}
+
 fn delivered(d: &DebugPollCounters) -> bool {
     d.local == 1 && d.policy_deny == 0 && d.host_inbound_deny == 0
 }
@@ -328,5 +355,121 @@ fn an_established_dnat_to_self_session_meets_the_service_gate_on_the_translated_
         "the established flow reaches sshd on tcp/22, which wan admits. A deny here means the \
          session-hit gate judged the WIRE port 2222 and tore down a flow its own SYN was \
          admitted for (#9529)"
+    );
+}
+
+fn app_catalog_for_tcp_dst_port(port: u16, app_id: u16) -> crate::policy::AppCatalog {
+    crate::policy::AppCatalog::from_snapshot(&[crate::AppCatalogEntry {
+        app_id,
+        protocol: PROTO_TCP,
+        dst_port_low: port,
+        dst_port_high: port,
+        src_port_low: 0,
+        src_port_high: 0,
+    }])
+}
+
+/// #10981: a host-bound DNAT deny keeps the wire tuple but names the
+/// post-translation service that junos-host policy evaluated.
+#[test]
+fn dnat_junos_host_deny_logs_the_evaluated_service_10981() {
+    let mut fw = forwarding(Fixture {
+        dnat: Some((2222, 22)),
+        wan_services: None,
+        junos_host: vec![junos_host_deny(
+            "deny-translated-ssh",
+            "any",
+            "any",
+            Some(("ssh-10981", "22")),
+        )],
+        permit_wan_to_local: false,
+    });
+    fw.app_catalog = app_catalog_for_tcp_dst_port(22, 17);
+    let mut sessions = SessionTable::new();
+    let (dbg, event_rx) = from_wan_capturing_events(&fw, &mut sessions, VIP, 2222, TCP_FLAG_SYN);
+
+    assert_eq!(dbg.policy_deny, 1, "the junos-host service deny must fire");
+    let event = event_rx
+        .try_recv()
+        .expect("junos-host deny event")
+        .decode_dataplane_event()
+        .expect("junos-host deny payload");
+    assert_eq!(event.dst_ip, IpAddr::V4(VIP));
+    assert_eq!(event.dst_port, 2222, "retain the wire destination tuple");
+    assert_eq!(
+        event.nat_dst_ip, None,
+        "junos-host deny keeps its wire record shape"
+    );
+    assert_eq!(event.nat_dst_port, 0);
+    assert_eq!(
+        event.application_id, 17,
+        "the app catalog maps translated TCP/22 to the evaluated SSH service"
+    );
+}
+
+/// #10981: flow-backed NoRoute policy denies carry the application evaluated
+/// against TCP/443 instead of UNKNOWN, while retaining the original tuple.
+#[test]
+fn noroute_tcp_443_deny_logs_the_evaluated_service_10981() {
+    let mut snapshot = nat_snapshot();
+    snapshot.routes.clear();
+    snapshot.app_catalog = vec![crate::AppCatalogEntry {
+        app_id: 43,
+        protocol: PROTO_TCP,
+        dst_port_low: 443,
+        dst_port_high: 443,
+        src_port_low: 0,
+        src_port_high: 0,
+    }];
+    snapshot.policies.clear();
+    let fw = build_forwarding_state(&snapshot);
+    let mut sessions = SessionTable::new();
+    let dst = Ipv4Addr::new(198, 51, 100, 99);
+    let (dbg, event_rx) = from_wan_capturing_events(&fw, &mut sessions, dst, 443, TCP_FLAG_SYN);
+
+    assert_eq!(dbg.no_route, 1, "fixture must take the NoRoute arm");
+    assert_eq!(dbg.policy_deny, 1, "default deny must adjudicate NoRoute");
+    let event = event_rx
+        .try_recv()
+        .expect("NoRoute policy-deny event")
+        .decode_dataplane_event()
+        .expect("NoRoute policy-deny payload");
+    assert_eq!(event.dst_ip, IpAddr::V4(dst));
+    assert_eq!(event.dst_port, 443, "retain the wire destination tuple");
+    assert_eq!(
+        event.application_id, 43,
+        "the app catalog maps TCP/443 to the evaluated HTTPS service"
+    );
+}
+
+/// #10981: a host-inbound deny after DNAT logs the translated service while
+/// preserving the public tuple in the event.
+#[test]
+fn dnat_host_inbound_deny_logs_the_evaluated_service_10981() {
+    let mut fw = forwarding(Fixture {
+        dnat: Some((2223, 8080)),
+        wan_services: Some(&["ssh"]),
+        junos_host: Vec::new(),
+        permit_wan_to_local: false,
+    });
+    fw.app_catalog = app_catalog_for_tcp_dst_port(8080, 23);
+    let mut sessions = SessionTable::new();
+    let (dbg, event_rx) = from_wan_capturing_events(&fw, &mut sessions, VIP, 2223, TCP_FLAG_SYN);
+
+    assert_eq!(
+        dbg.host_inbound_deny, 1,
+        "the SSH-only gate must deny TCP/8080"
+    );
+    let event = event_rx
+        .try_recv()
+        .expect("host-inbound deny event")
+        .decode_dataplane_event()
+        .expect("host-inbound deny payload");
+    assert_eq!(event.reason, 6);
+    assert_eq!(event.dst_ip, IpAddr::V4(VIP));
+    assert_eq!(event.dst_port, 2223, "retain the wire destination tuple");
+    assert_eq!(
+        event.application_id, 23,
+        "the app catalog maps translated TCP/8080 to the evaluated service"
     );
 }

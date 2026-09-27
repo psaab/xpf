@@ -1194,6 +1194,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow,
                                 meta,
                                 from_zone_id,
+                                flow.forward_key.dst_port,
                                 now_ns,
                             );
                         }
@@ -2273,6 +2274,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow,
                                         meta,
                                         authority_zone,
+                                        session_host_bound_policy_dst(
+                                            flow,
+                                            resolved.key.dst_port,
+                                            resolved.decision,
+                                        )
+                                        .1,
                                         now_ns,
                                     );
                                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -3526,6 +3533,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow,
                                         meta,
                                         from_zone_id,
+                                        policy_dst_port,
                                         now_ns,
                                     );
                                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -7150,7 +7158,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         owner_rg_id,
                                         policy_result.policy_id,
                                         policy_result.action,
-                                        0,
+                                        if l4_present {
+                                            resolve_policy_deny_app_id(
+                                                &worker_ctx.forwarding.app_catalog,
+                                                adj_flow,
+                                                adj_flow.forward_key.dst_port,
+                                            )
+                                        } else {
+                                            0
+                                        },
                                         // SILENT drop. There is no route to the
                                         // destination, so a `reject` term cannot be
                                         // honoured by sending anything onward; #3615's

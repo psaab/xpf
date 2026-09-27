@@ -49,5 +49,7 @@ xpf (0.0.0) unstable; urgency=medium
     overlap checks use the encoded zone's routing domain (#10917).
   * Stamp POLICY_DENY records with their evaluating config generation and
     leave stale queued or replayed policy IDs unattributed (#10978).
+  * Resolve AppIDs for NoRoute, junos-host, and host-inbound denies from the
+    evaluated service while retaining the original wire tuple (#10981).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
