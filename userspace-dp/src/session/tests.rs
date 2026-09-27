@@ -7473,19 +7473,19 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
     assert_eq!(table.session_limit_dst_map_len(), 0);
 }
 
-/// §5.10 runtime disable clears the maps (reviewer B MAJOR): turning the
-/// OFF-gate off must clear both count maps so a later re-enable starts
-/// from 0 and cannot spuriously block an under-limit IP. FAILS if
-/// clear-on-disable is omitted.
+/// Disabling optional destination accounting clears that map while the
+/// always-on source count remains accurate across re-enable.
 #[test]
 fn session_limit_clear_on_disable() {
     let mut table = SessionTable::new();
     table.set_session_limit_active(true);
     let now = 1_000_000_000u64;
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 25));
+    let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
     for i in 0..3u32 {
         let key = SessionKey {
             src_ip: src,
+            dst_ip: dst,
             src_port: 52000 + i as u16,
             ..limit_key(25, 9, 0)
         };
@@ -7500,28 +7500,26 @@ fn session_limit_clear_on_disable() {
         ));
     }
     assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 3);
+    assert_eq!(table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst), 3);
 
-    // Disable: both maps must clear.
     table.set_session_limit_active(false);
-    assert_eq!(table.session_limit_src_map_len(), 0, "src map must clear on disable");
+    assert_eq!(table.session_limit_src_map_len(), 1);
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 3);
     assert_eq!(table.session_limit_dst_map_len(), 0, "dst map must clear on disable");
 
-    // #4377 back-count-on-enable: the 3 sessions are STILL live, so
-    // re-enabling must REBUILD the maps from them — count == 3, NOT the
-    // old (buggy) "restart from 0". Clear-on-disable + back-count-on-enable
-    // is idempotent: if clear-on-disable were omitted, the re-enable walk
-    // would double-count to 6, so this still guards clear-on-disable.
+    // Re-enable back-counts only the optional destination map.
     table.set_session_limit_active(true);
     assert_eq!(
         table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         3,
-        "re-enable must back-count the 3 live sessions, not restart from 0"
+        "source counts must not be double-counted on re-enable"
     );
-
+    assert_eq!(table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst), 3);
     // A fresh flow from the same IP adds to the back-counted total — the
     // cap now sees the true live count instead of a fresh empty allotment.
     let key = SessionKey {
         src_ip: src,
+        dst_ip: dst,
         src_port: 52999,
         ..limit_key(25, 9, 0)
     };
@@ -7541,24 +7539,13 @@ fn session_limit_clear_on_disable() {
     );
 }
 
-/// #4377 FAIL-ON-REVERT: the per-IP session-limit maps must be REBUILT
-/// on the OFF->ON enable edge from the live slab, so a session installed
-/// while the gate was INACTIVE is counted the moment the gate turns on —
-/// its later teardown decrements a real increment instead of driving the
-/// count below the live counted-session count (the #4377 cap bypass).
-///
-/// REVERT SIGNATURE: without the back-count, re-enable restarts the count
-/// at 0; the pre-existing sessions' teardown then saturating_sub's below
-/// 0 (hidden as 0) while sessions are still live, and the IP is handed a
-/// fresh full allotment — a cap bypass. This test drives that exact path
-/// and asserts the corrected counts at every step. It FAILS (the first
-/// count assertion sees 0, not N) if `set_session_limit_active`'s
-/// OFF->ON back-count is reverted.
+/// #4377: enabling optional destination accounting rebuilds that map from the
+/// live slab. Source counts already include every session, so the default
+/// source quota remains enforced while destination accounting is off.
 #[test]
-fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
+fn session_limit_destination_backcount_on_enable_covers_preexisting_sessions() {
     let mut table = SessionTable::new();
-    // Gate starts OFF (default). Install N forward sessions from one IP
-    // while INACTIVE — none are counted (the OFF-gate skips the increment).
+    // Destination accounting starts OFF; source counts are maintained.
     let n = 4u32;
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 40));
     let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 40));
@@ -7607,18 +7594,17 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
         },
         false,
     );
-    // Gate OFF: nothing counted yet (the maps are empty).
-    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 0, "OFF: no count maintained");
-    assert_eq!(table.session_limit_src_map_len(), 0);
-
-    // OFF->ON edge: back-count. src has N local + 1 synced = N+1 live
-    // counted sessions; both dst IPs get their own counted entries. The
-    // #3122 synced session MUST be included (origin-agnostic predicate).
+    // Source accounting is always on; the optional destination map remains
+    // empty until enabled.
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), n + 1);
+    assert_eq!(table.session_limit_src_map_len(), 1);
+    assert_eq!(table.session_limit_dst_map_len(), 0);
+    // Enabling back-counts the two destination IPs for the optional mirror.
     table.set_session_limit_active(true);
     assert_eq!(
         table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
         n + 1,
-        "OFF->ON must back-count all live counted sessions incl. the #3122 synced import"
+        "enabling destination counts must not double-count the source map"
     );
     assert_eq!(
         table.session_limit_dst_count(TEST_LAN_ZONE_ID, dst),
@@ -7631,8 +7617,7 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
         "the #3122 synced session's dst must be back-counted too"
     );
 
-    // Enforcement is now correct: a new flow from src sees the true live
-    // count (N+1), not a fresh 0 allotment.
+    // Source quota already sees the true live count (N+1), not a fresh 0.
     let over_key = SessionKey {
         src_ip: src,
         dst_ip: dst,
@@ -7654,10 +7639,9 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
         "new install adds to the back-counted total"
     );
 
-    // Teardown of a PRE-EXISTING (installed-while-off) session decrements
-    // from the back-counted total — it never drives the count below the
-    // live counted-session count. Delete all N pre-existing forward
-    // sessions one at a time and watch the count step down correctly.
+    // Deleting sessions installed while destination accounting was disabled
+    // decrements both the always-on source count and the enabled mirror.
+    // The count must step down with each pre-existing forward session.
     let mut expected = n + 2; // (N back-counted forward) + 1 synced + 1 new install
     for key in &keys {
         table.delete(key);
@@ -7690,14 +7674,14 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
     );
 }
 
-/// OFF-gate zero-cost: when the feature is OFF, install/remove perform NO
-/// counter maintenance (the maps stay empty regardless of traffic).
+/// With no profile, the destination gate stays off but source quotas still
+/// require accurate counts for every live session.
 #[test]
-fn session_limit_off_gate_skips_all_maintenance() {
+fn session_limit_off_gate_keeps_source_counting() {
     let mut table = SessionTable::new();
-    // OFF (default).
     let now = 1_000_000_000u64;
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 27));
+    let mut keys = Vec::new();
     for i in 0..5u32 {
         let key = SessionKey {
             src_ip: src,
@@ -7713,13 +7697,16 @@ fn session_limit_off_gate_skips_all_maintenance() {
             PROTO_TCP,
             0x10,
         ));
-        table.delete(&key);
+        keys.push(key);
     }
-    assert_eq!(
-        table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
-        0,
-        "OFF-gate: no count maintained"
-    );
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 5);
+    assert_eq!(table.session_limit_src_map_len(), 1);
+    assert_eq!(table.session_limit_dst_map_len(), 0);
+
+    for key in &keys {
+        table.delete(key);
+    }
+    assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 0);
     assert_eq!(table.session_limit_src_map_len(), 0);
     assert_eq!(table.session_limit_dst_map_len(), 0);
 }

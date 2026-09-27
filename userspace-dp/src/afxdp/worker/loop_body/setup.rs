@@ -159,10 +159,10 @@ pub(super) fn worker_loop_setup(
     // overrides next to `set_timeouts`. Empty in the common case (no zone
     // configures a syn-flood timeout).
     sessions.set_opening_overrides(forwarding.session_opening_overrides.clone());
-    // #2134: drive the per-IP session-limit OFF-gate from the applied
-    // screen profiles. Off when no zone configures `limit-session`, so
-    // install/remove counter maintenance is skipped for the ~99% case.
-    sessions.set_session_limit_active(screen_state.any_session_limit_configured());
+    // #2134/#11057: enable optional destination-IP accounting only when a
+    // screen profile configures a destination session limit. Source-IP counts
+    // remain always maintained for the default per-source quota.
+    sessions.set_session_limit_active(screen_state.any_session_limit_dst_configured());
     let mut bindings = Vec::with_capacity(binding_plans.len());
     // #6245: accumulate EXPLICIT per-slot terminal failures and recovered
     // shared-group fallbacks so the WorkerStartupReport can carry the causal

@@ -1313,13 +1313,13 @@ pub(crate) fn worker_loop(
             // full replace, so a zone whose `syn-flood timeout` was removed
             // drops out and reverts to the global default on the next install.
             sessions.set_opening_overrides(new_forwarding.session_opening_overrides.clone());
-            // #2134: re-derive the per-IP session-limit OFF-gate on every
-            // runtime forwarding-snapshot rotation. A runtime ON->OFF
-            // transition (operator removes `limit-session`) clears the
-            // stale count maps via set_session_limit_active so a later
-            // re-enable starts clean and cannot spuriously block an
-            // under-limit IP.
-            sessions.set_session_limit_active(screen_state.any_session_limit_configured());
+            // #2134/#11057: re-derive optional destination accounting on every
+            // runtime forwarding-snapshot rotation. An ON->OFF transition
+            // clears only the destination map; source counts remain current
+            // for the always-enforced default per-source quota.
+            sessions.set_session_limit_active(
+                screen_state.any_session_limit_dst_configured(),
+            );
 
             // #1635 (plan §2.4): a config apply may have reassigned
             // cold-path histogram slots to new zone-pairs. Zero those

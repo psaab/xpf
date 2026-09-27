@@ -7,22 +7,24 @@
 
 use super::*;
 
-/// #2134/#10985: per-zone session-limit enforcement at the NEW-FLOW decision.
+/// #2134/#10985/#11057: per-zone session-limit enforcement at the NEW-FLOW decision.
 ///
 /// Junos `limit-session source-ip-based <n>` / `destination-ip-based <n>`
-/// caps the concurrent locally-admitted sessions a single source /
-/// destination IP may hold. The decision MUST fire exactly once per new
-/// flow, before that flow's own session exists — NOT in the per-packet
-/// screen stage, which runs on every data packet of every flow and would
-/// re-check an established flow's own counted session and self-drop it at
-/// the limit boundary (#2134 r2 BLOCKER).
+/// caps concurrent sessions from one source / to one destination IP. When
+/// `source-ip-based` is unset or zero, a default per-source quota applies;
+/// a positive configured value overrides it. Destination limits remain
+/// opt-in. The decision MUST fire exactly once per new flow, before that
+/// flow's own session exists — NOT in the per-packet screen stage, which runs
+/// on every data packet and would re-check an established flow's own counted
+/// session and self-drop it at the limit boundary (#2134 r2 BLOCKER).
 ///
 /// This is a read-only query on the per-worker `SessionTable` count keyed by
 /// `(ingress_zone_id, IP)` (maintained at the install/remove sinks + HA
 /// promote/demote), so sessions admitted in another zone cannot consume this
-/// zone's allowance. It preserves the #2128 leak-fix by construction: an IP
-/// that never installs a session never gets a map entry. Returns the screen-drop
-/// reason if the new flow must be rejected, or `None` to proceed to install.
+/// zone's allowance. The source default is independently enforced in each
+/// ingress zone and worker. It preserves the #2128 leak-fix by construction:
+/// an IP that never installs a session never gets a map entry. Returns the
+/// screen-drop reason if the new flow must be rejected, or `None` to proceed.
 #[inline]
 pub(super) fn new_flow_session_limit_drop(
     forwarding: &ForwardingState,
@@ -32,18 +34,20 @@ pub(super) fn new_flow_session_limit_drop(
     src_ip: IpAddr,
     dst_ip: IpAddr,
 ) -> Option<&'static str> {
-    // `screen_profiles` is keyed by zone NAME. An empty/absent zone or a
-    // zone with no `limit-session` configured short-circuits with no cost
-    // beyond the map probe.
-    let profile = forwarding.screen_profiles.get(from_zone)?;
-    if profile.session_limit_src > 0
-        && sessions.session_limit_src_count(from_zone_id, src_ip) >= profile.session_limit_src
-    {
+    // Profiles carry explicit overrides; absent profiles and zero source
+    // thresholds use the safe default.
+    let profile = forwarding.screen_profiles.get(from_zone);
+    let src_limit = profile
+        .map(|p| p.session_limit_src)
+        .filter(|limit| *limit > 0)
+        .unwrap_or(crate::session::DEFAULT_MAX_SESSIONS_PER_SOURCE);
+    if sessions.session_limit_src_count(from_zone_id, src_ip) >= src_limit {
         return Some("session-limit-src");
     }
-    if profile.session_limit_dst > 0
-        && sessions.session_limit_dst_count(from_zone_id, dst_ip) >= profile.session_limit_dst
-    {
+    if profile.is_some_and(|p| {
+        p.session_limit_dst > 0
+            && sessions.session_limit_dst_count(from_zone_id, dst_ip) >= p.session_limit_dst
+    }) {
         return Some("session-limit-dst");
     }
     None
