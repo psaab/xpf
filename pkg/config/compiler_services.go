@@ -898,16 +898,17 @@ func compileServices(node *Node, svc *ServicesConfig, warnings *[]string) error 
 		svc.ApplicationIdentification = true
 	}
 	if warnings != nil {
-		*warnings = append(*warnings, servicesIdentityWarnings(node)...)
+		*warnings = append(*warnings, servicesAcceptedOnlyWarnings(node)...)
 	}
 	return nil
 }
 
-// servicesIdentityWarnings keeps Junos identity stanzas visible without
-// implying that xpf implements them. The raw config tree remains the source
-// for display and persistence; the typed service config has no identity runtime.
-func servicesIdentityWarnings(node *Node) []string {
+// servicesAcceptedOnlyWarnings keeps unimplemented Junos service stanzas visible
+// without implying that xpf applies them. The raw config tree remains the
+// source for display and persistence; these stanzas have no runtime effect.
+func servicesAcceptedOnlyWarnings(node *Node) []string {
 	var warnings []string
+	seenSSLProxyProfiles := make(map[string]struct{})
 	for _, child := range node.Children {
 		switch child.Name() {
 		case "user-identification":
@@ -944,8 +945,44 @@ func servicesIdentityWarnings(node *Node) []string {
 			warnings = append(warnings, fmt.Sprintf(
 				"services %s configured but accepted-only — xpf does not implement identity-based policy mapping, so this stanza has no runtime effect (#10947)",
 				child.Name()))
+		case "ssl":
+			warnings = append(warnings, servicesSSLProxyWarnings(child, seenSSLProxyProfiles)...)
 		}
 	}
+	return warnings
+}
+
+// servicesSSLProxyWarnings reports named SSL proxy profiles that remain in
+// the displayed configuration but have no implementation in xpf.
+func servicesSSLProxyWarnings(node *Node, seen map[string]struct{}) []string {
+	var path []string
+	var warnings []string
+	var visit func(*Node)
+	visit = func(current *Node) {
+		if current == nil {
+			return
+		}
+		pathLen := len(path)
+		path = append(path, current.Keys...)
+		for i := 0; i+3 < len(path); i++ {
+			if path[i] != "ssl" || path[i+1] != "proxy" || path[i+2] != "profile" {
+				continue
+			}
+			name := path[i+3]
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			warnings = append(warnings, fmt.Sprintf(
+				"services ssl proxy profile %q configured but accepted-only — xpf does not implement SSL proxy processing, so this profile has no runtime effect (#10984)",
+				name))
+		}
+		for _, child := range current.Children {
+			visit(child)
+		}
+		path = path[:pathLen]
+	}
+	visit(node)
 	return warnings
 }
 
