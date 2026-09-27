@@ -20,14 +20,18 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
+use crate::nat::NatDecision;
+use crate::session::{
+    SessionDecision, SessionDeltaKind, SessionKey, SessionMetadata, SessionOrigin,
+    reverse_session_key,
+};
 use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
-use crate::session::{reverse_session_key, SessionDeltaKind};
 use crate::test_zone_ids::*;
 use crate::{
     FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
-    PolicyRuleSnapshot, ZoneSnapshot,
+    PolicyApplicationSnapshot, PolicyRuleSnapshot, ZoneSnapshot,
 };
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 const WAN_IFINDEX: i32 = 12;
 const LAN_IFINDEX: i32 = 24;
@@ -559,6 +563,335 @@ fn rule_hits(fw: &ForwardingState, name: &str) -> u64 {
         .find(|r| r.rule_id.contains(name))
         .map(|r| r.hit_counter.test_packet_count())
         .unwrap_or(u64::MAX)
+}
+
+fn icmp_type8_rule(name: &str, from_zone: &str, to_zone: &str, action: &str) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: name.into(),
+        from_zone: from_zone.into(),
+        to_zone: to_zone.into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["junos-ping".into()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: "junos-ping".into(),
+            protocol: "icmp".into(),
+            icmp_type: Some(8),
+            ..Default::default()
+        }],
+        action: action.into(),
+        ..Default::default()
+    }
+}
+
+fn icmp_hit_forwarding() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.policies = vec![
+        icmp_type8_rule("lan-icmp-permit", "lan", "wan", "permit"),
+        icmp_type8_rule("dmz-icmp-deny", "dmz", "wan", "deny"),
+        icmp_type8_rule("wan-icmp-deny", "wan", "lan", "deny"),
+    ];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: "dmz".into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ_IFINDEX,
+        hardware_addr: "02:bf:72:02:00:01".into(),
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
+fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
+    let forward_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_ICMP,
+        src_ip: IpAddr::V4(REAL),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 0x1234,
+        dst_port: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let nat = NatDecision::default();
+    let key = if is_reverse {
+        reverse_session_key(&forward_key, nat)
+    } else {
+        forward_key
+    };
+    let (ingress_zone, egress_zone, ingress_ifindex, egress_ifindex, mac, vlan) = if is_reverse {
+        (
+            TEST_WAN_ZONE_ID,
+            TEST_LAN_ZONE_ID,
+            WAN_IFINDEX,
+            LAN_IFINDEX,
+            TEST_LAN_MAC,
+            0,
+        )
+    } else {
+        (
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            LAN_IFINDEX,
+            WAN_IFINDEX,
+            TEST_WAN_MAC,
+            80,
+        )
+    };
+    let decision = SessionDecision {
+        resolution: crate::afxdp::ForwardingResolution {
+            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex,
+            tx_ifindex: egress_ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(key.dst_ip),
+            neighbor_mac: Some(mac),
+            src_mac: Some(mac),
+            tx_vlan_id: vlan,
+        },
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone,
+        egress_zone,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: ingress_ifindex as u32,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata,
+        SessionOrigin::ForwardFlow,
+        crate::afxdp::neighbor::monotonic_nanos(),
+        crate::ip_proto::PROTO_ICMP,
+        0,
+    ));
+    (key, sessions)
+}
+
+fn drive_icmp_hit_with_events(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    ingress_ifindex: i32,
+    icmp_type: u8,
+) -> (
+    BatchCounters,
+    DebugPollCounters,
+    crate::event_stream::EventStreamWorkerHandle,
+    std::sync::mpsc::Receiver<crate::event_stream::codec::EventFrame>,
+) {
+    let (src, dst, dst_mac) = match ingress_ifindex {
+        LAN_IFINDEX => (REAL, Ipv4Addr::new(172, 16, 80, 200), TEST_LAN_MAC),
+        DMZ_IFINDEX => (REAL, Ipv4Addr::new(172, 16, 80, 200), AUTHORITY_DMZ_MAC),
+        WAN_IFINDEX => (Ipv4Addr::new(172, 16, 80, 200), REAL, TEST_WAN_MAC),
+        other => panic!("unexpected ICMP test ingress {other}"),
+    };
+    let mut frame = build_icmp_echo_frame_v4(src, dst, 64, dst_mac);
+    if icmp_type != 8 {
+        rewrite_outer_icmpv4_type(&mut frame, 34, icmp_type);
+    }
+    let mut meta = txn_meta_v4(ingress_ifindex as u32, 0, frame.len() as u16);
+    meta.protocol = crate::ip_proto::PROTO_ICMP;
+    meta.payload_offset = 42;
+    let mut b = binding(ingress_ifindex);
+    let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
+        &mut b,
+        sessions,
+        forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+    );
+    (batch, dbg, event_handle, event_rx)
+}
+
+#[test]
+fn established_foreign_and_owner_icmp_denies_emit_policy_events_without_session_mutation_10980() {
+    let fw = icmp_hit_forwarding();
+    let policy_id = |name: &str| {
+        fw.policy
+            .rules
+            .iter()
+            .find(|rule| rule.rule_id.contains(name))
+            .expect("ICMP deny policy")
+            .policy_id
+    };
+    let cases = [
+        (
+            "foreign",
+            DMZ_IFINDEX,
+            8,
+            policy_id("dmz-icmp-deny"),
+            TEST_DMZ_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            false,
+            true,
+        ),
+        (
+            "owner-forward",
+            LAN_IFINDEX,
+            13,
+            crate::policy::DEFAULT_POLICY_SENTINEL_ID,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            false,
+            false,
+        ),
+        (
+            "owner-reverse",
+            WAN_IFINDEX,
+            8,
+            policy_id("wan-icmp-deny"),
+            TEST_WAN_ZONE_ID,
+            TEST_LAN_ZONE_ID,
+            true,
+            false,
+        ),
+    ];
+    for (
+        name,
+        ingress_ifindex,
+        icmp_type,
+        expected_policy_id,
+        expected_from_zone,
+        expected_to_zone,
+        is_reverse,
+        foreign,
+    ) in cases
+    {
+        let (key, mut sessions) = established_icmp_hit(is_reverse);
+        let (before_decision, before_metadata, before_origin) = sessions
+            .entry_with_origin(&key)
+            .expect("installed ICMP session");
+        let before_session_id = sessions.session_id_for(&key);
+        let before_permit_hits = rule_hits(&fw, "lan-icmp-permit");
+        let before_foreign_deny_hits = rule_hits(&fw, "dmz-icmp-deny");
+        let before_reverse_deny_hits = rule_hits(&fw, "wan-icmp-deny");
+        let before_default_hits = fw.policy.default_counter.test_packet_count();
+
+        let (batch, dbg, event_handle, event_rx) =
+            drive_icmp_hit_with_events(&fw, &mut sessions, ingress_ifindex, icmp_type);
+        assert_eq!(batch.validated_packets, 1, "{name}: descriptor validation");
+        assert_eq!(
+            dbg.session_hit, 1,
+            "{name}: must exercise an established hit"
+        );
+        assert_eq!(dbg.tx, 0, "{name}: denied packet must not transmit");
+        assert_eq!(
+            dbg.foreign_authority_drops,
+            if foreign { 1 } else { 0 },
+            "{name}: foreign drop accounting"
+        );
+        assert_eq!(
+            session_count(&sessions),
+            1,
+            "{name}: session remains installed"
+        );
+        assert_eq!(
+            sessions.session_id_for(&key),
+            before_session_id,
+            "{name}: session identity"
+        );
+        let (after_decision, after_metadata, after_origin) = sessions
+            .entry_with_origin(&key)
+            .expect("denied hit preserves session");
+        assert_eq!(
+            after_decision, before_decision,
+            "{name}: forwarding decision"
+        );
+        assert_eq!(after_origin, before_origin, "{name}: session origin");
+        assert_eq!(
+            after_metadata.ingress_zone, before_metadata.ingress_zone,
+            "{name}: ingress zone"
+        );
+        assert_eq!(
+            after_metadata.egress_zone, before_metadata.egress_zone,
+            "{name}: egress zone"
+        );
+        assert_eq!(
+            rule_hits(&fw, "lan-icmp-permit"),
+            before_permit_hits,
+            "{name}: permit hit counter"
+        );
+        assert_eq!(
+            rule_hits(&fw, "dmz-icmp-deny"),
+            before_foreign_deny_hits,
+            "{name}: foreign deny hit counter"
+        );
+        assert_eq!(
+            rule_hits(&fw, "wan-icmp-deny"),
+            before_reverse_deny_hits,
+            "{name}: reverse deny hit counter"
+        );
+        assert_eq!(
+            fw.policy.default_counter.test_packet_count(),
+            before_default_hits,
+            "{name}: default-policy hit counter"
+        );
+
+        let event = event_rx
+            .try_recv()
+            .expect("established ICMP denial emits POLICY_DENY")
+            .decode_dataplane_event()
+            .expect("POLICY_DENY payload");
+        assert_eq!(
+            event.kind,
+            crate::event_stream::codec::DataplaneEventKind::PolicyDeny,
+            "{name}: event kind"
+        );
+        assert_eq!(event.action, 0, "{name}: silent deny action");
+        assert_eq!(event.reason, 5, "{name}: transit policy denial reason");
+        assert_eq!(
+            event.policy_id, expected_policy_id,
+            "{name}: policy attribution"
+        );
+        assert_eq!(
+            event.ingress_zone_id, expected_from_zone,
+            "{name}: arrival zone"
+        );
+        assert_eq!(
+            event.egress_zone_id, expected_to_zone,
+            "{name}: egress zone"
+        );
+        let (expected_src, expected_dst) = if is_reverse {
+            (
+                IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+                IpAddr::V4(REAL),
+            )
+        } else {
+            (
+                IpAddr::V4(REAL),
+                IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            )
+        };
+        assert_eq!(event.src_ip, expected_src, "{name}: source");
+        assert_eq!(event.dst_ip, expected_dst, "{name}: destination");
+        assert_eq!(
+            event_handle.dataplane_event_stats().policy_deny.sent,
+            1,
+            "{name}: limiter path"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "{name}: exactly one denial event per packet"
+        );
+    }
 }
 
 #[test]

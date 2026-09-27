@@ -540,9 +540,12 @@ logging rules, not these specific hot-path constants.
     is judged by the policy of the zone it ARRIVED in — the post-DNAT
     destination for a forward entry, the wire destination for a reply, the
     arrival zone's host-inbound set for a host-bound session — forwarded on
-    a permit and dropped on a deny (`foreign_authority_drops`). Either way it
-    may not revoke, re-stamp, tear down or cache the entry. The one
-    exception is #9384's own case: a foreign packet on the session's
+    a permit and dropped on a deny (`foreign_authority_drops`). Dropped
+    foreign verdicts and owner ICMP type-specific denials that do not trigger
+    revocation emit a limiter-bounded `POLICY_DENY` event and leave the
+    session untouched; established-hit evaluation does not increment policy
+    hit counters.
+    The one exception is #9384's own case: a foreign packet on the session's
     ADMITTING interface (the install-time `(ingress_ifindex, vlan)`, trusted
     only for locally-stamped origins) still revokes, because only a commit
     can move that interface between zones.

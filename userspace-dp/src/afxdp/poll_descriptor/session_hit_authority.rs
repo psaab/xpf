@@ -110,7 +110,8 @@
 //!   can keep an idle session alive; it cannot change what the session does.
 //! * A permitted foreign packet whose entry is HA-inactive here rides the fabric
 //!   redirect computed inside the lookup, which carries the entry's zone stamp.
-//! * A deny drops silently: no reject reply, no RT_FLOW deny record.
+//! * A deny drops without a reject reply, emits a limiter-bounded `POLICY_DENY`
+//!   record, and leaves the session untouched.
 //! * A session whose admitting interface is moved into another zone that still
 //!   PERMITS it is adjudicated per packet, uncached, until it ends.
 //! * A packet from a second interface in the owner's OWN zone is an owner, so
@@ -119,8 +120,16 @@
 
 use super::policy_revalidation::PolicyRevocation;
 use super::*;
-use crate::policy::evaluate_policy_result_without_counting;
+use crate::policy::{PolicyEvaluationResult, evaluate_policy_result_without_counting};
 use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
+
+/// Attribution for an established-hit denial. Evaluation intentionally skips
+/// hit counters; retain the result for its POLICY_DENY record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct HitPolicyDeny {
+    pub(super) result: PolicyEvaluationResult,
+    pub(super) policy_dst_port: u16,
+}
 
 /// Whether THIS packet may act for the session it hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,8 +225,9 @@ fn arrived_on_the_admitting_interface(
 pub(super) enum ForeignHitVerdict {
     /// Forward on the entry, acting on nothing.
     Forward,
-    /// Drop THIS packet; the session is untouched.
-    Drop,
+    /// Drop THIS packet; the session is untouched. Retain the verdict for the
+    /// bounded POLICY_DENY event emitted by the descriptor path.
+    Drop(HitPolicyDeny),
     /// The session's own admitting interface now sits in a zone that denies the
     /// flow (#9384): revoke it, through the same teardown #8356 uses.
     Revoke(PolicyRevocation),
@@ -237,7 +247,7 @@ pub(super) enum ForeignHitVerdict {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OwnerHitIcmpVerdict {
     Forward,
-    Drop,
+    Drop(HitPolicyDeny),
 }
 
 #[cold]
@@ -293,11 +303,16 @@ pub(super) fn owner_hit_icmp_verdict(
             flow.forward_key.dst_port,
             packet_icmp,
         );
-        return Some(if matches!(result.action, crate::policy::PolicyAction::Permit) {
-            OwnerHitIcmpVerdict::Forward
-        } else {
-            OwnerHitIcmpVerdict::Drop
-        });
+        return Some(
+            if matches!(result.action, crate::policy::PolicyAction::Permit) {
+                OwnerHitIcmpVerdict::Forward
+            } else {
+                OwnerHitIcmpVerdict::Drop(HitPolicyDeny {
+                    result,
+                    policy_dst_port: flow.forward_key.dst_port,
+                })
+            },
+        );
     }
     let dst_ip = decision.nat.rewrite_dst.unwrap_or(flow.dst_ip);
     let dst_port = decision
@@ -315,11 +330,16 @@ pub(super) fn owner_hit_icmp_verdict(
         dst_port,
         packet_icmp,
     );
-    Some(if matches!(result.action, crate::policy::PolicyAction::Permit) {
-        OwnerHitIcmpVerdict::Forward
-    } else {
-        OwnerHitIcmpVerdict::Drop
-    })
+    Some(
+        if matches!(result.action, crate::policy::PolicyAction::Permit) {
+            OwnerHitIcmpVerdict::Forward
+        } else {
+            OwnerHitIcmpVerdict::Drop(HitPolicyDeny {
+                result,
+                policy_dst_port: dst_port,
+            })
+        },
+    )
 }
 
 #[cold]
@@ -365,16 +385,20 @@ pub(super) fn foreign_hit_verdict(
     if matches!(result.action, crate::policy::PolicyAction::Permit) {
         return ForeignHitVerdict::Forward;
     }
+    let deny = HitPolicyDeny {
+        result,
+        policy_dst_port: dst_port,
+    };
     if !on_admitting_interface
         || metadata.is_reverse
         || forwarding
             .policy
             .icmp_verdict_may_depend_on_type(meta.protocol)
     {
-        return ForeignHitVerdict::Drop;
+        return ForeignHitVerdict::Drop(deny);
     }
     let Some(canonical_key) = sessions.revalidation_canonical_key(session_key) else {
-        return ForeignHitVerdict::Drop;
+        return ForeignHitVerdict::Drop(deny);
     };
     // The revocation carries the judged entry's own triple (see
     // `PolicyRevocation`): reload it from the canonical key rather than
@@ -382,15 +406,13 @@ pub(super) fn foreign_hit_verdict(
     // name a different tuple. A miss means the entry vanished — nothing left
     // to tear down.
     match sessions.entry_with_origin(&canonical_key) {
-        Some((decision, metadata, origin)) => {
-            ForeignHitVerdict::Revoke(PolicyRevocation {
-                canonical_key: Some(canonical_key),
-                decision,
-                metadata,
-                origin,
-            })
-        }
-        None => ForeignHitVerdict::Drop,
+        Some((decision, metadata, origin)) => ForeignHitVerdict::Revoke(PolicyRevocation {
+            canonical_key: Some(canonical_key),
+            decision,
+            metadata,
+            origin,
+        }),
+        None => ForeignHitVerdict::Drop(deny),
     }
 }
 
