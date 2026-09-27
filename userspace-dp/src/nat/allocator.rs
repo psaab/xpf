@@ -1499,6 +1499,38 @@ pub(crate) struct PortAllocator {
     pub(crate) port_low: u16,
     pub(crate) port_high: u16,
 }
+/// A live-state guard that can atomically snapshot one flow's holder mask
+/// before a replacement reserve mutates that record.
+///
+/// `PortAllocator::capture_and_replace` acquires `lock_live`, captures the
+/// incumbent mask, and returns this guard still holding the mutex. The caller
+/// performs eviction and installation through the same guard, so a worker
+/// release/upsert cannot land in a capture-to-reserve gap.
+struct CapturedLiveGuard<'a> {
+    live: MutexGuard<'a, PortAllocatorLiveState>,
+    previous_holders: Option<u128>,
+}
+
+impl CapturedLiveGuard<'_> {
+    fn previous_holders(&self) -> Option<u128> {
+        self.previous_holders
+    }
+}
+
+impl std::ops::Deref for CapturedLiveGuard<'_> {
+    type Target = PortAllocatorLiveState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.live
+    }
+}
+
+impl std::ops::DerefMut for CapturedLiveGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.live
+    }
+}
+
 
 impl Default for PortAllocator {
     fn default() -> Self {
@@ -1657,6 +1689,31 @@ impl PortAllocator {
             .fetch_add(1, Ordering::Relaxed);
         self.shared.live.lock().unwrap_or_else(|e| e.into_inner())
     }
+    /// Atomically capture a flow's incumbent holder mask and retain the live
+    /// guard for the caller's replacement operation.
+    ///
+    /// The caller must perform eviction and installation through the returned
+    /// guard; releasing it and reserving separately recreates the worker
+    /// upsert/release gap this operation closes. `capture_holders` keeps the
+    /// ordinary worker reserve path from doing an unused map read.
+    fn capture_and_replace(
+        &self,
+        flow: &SourceNatFlowKey,
+        capture_holders: bool,
+    ) -> CapturedLiveGuard<'_> {
+        let live = self.lock_live();
+        let previous_holders = capture_holders
+            .then(|| live.live_by_flow.get(flow).map(|allocation| allocation.holders))
+            .flatten();
+
+
+        CapturedLiveGuard {
+            live,
+            previous_holders,
+        }
+    }
+
+
 
     /// #6751: live ownership records held by this allocator.
     ///
@@ -2776,12 +2833,6 @@ impl PortAllocator {
         }
     }
 
-    /// Snapshot the current worker-holder mask before a coordinator
-    /// same-flow reservation can retire the incumbent translated tuple.
-    pub(crate) fn holder_mask_for_flow(&self, flow: &SourceNatFlowKey) -> Option<u128> {
-        let live = self.lock_live();
-        live.live_by_flow.get(flow).map(|allocation| allocation.holders)
-    }
 
     pub(super) fn release_flow(
         &self,
@@ -3575,6 +3626,7 @@ impl PortAllocator {
         now_ns: u64,
         holder: NatHolder,
     ) -> bool {
+        let mut previous_holders = None;
         self.reserve_flow_maybe_persistent(
             flow,
             translated,
@@ -3583,36 +3635,31 @@ impl PortAllocator {
             now_ns,
             holder,
             None,
+            false,
+            &mut previous_holders,
         )
     }
 
-    /// #7360: reserve a synced flow, JOINING its source's persistent lease when
-    /// the matched rule runs `persistent-nat` (creating the lease on the first
-    /// session for that source).
+    /// Reserve a synced flow, joining its source's persistent lease when
+    /// configured. When `capture_previous_holders` is true, the incumbent mask
+    /// is captured by `capture_and_replace` while the same live-state guard
+    /// remains held through eviction and installation.
     pub(super) fn reserve_flow_maybe_persistent(
         &self,
         flow: SourceNatFlowKey,
         translated: TranslatedTuple,
         addr_index: usize,
         deterministic: bool,
-        // #6528: the stale-tuple eviction below retires the incumbent record
-        // with RELEASE semantics, and a persistent lease that falls to zero
-        // active flows needs a real clock to re-arm its idle expiry. Threaded
-        // from `handle_upsert_synced`, the same `now_ns` the synced install
-        // already uses.
         now_ns: u64,
         holder: NatHolder,
-        // #7360: `Some((key, timeout_ns))` when the rule this reservation
-        // matched runs `persistent-nat`. The standby cannot learn a lease any
-        // other way — session sync carries sessions, and a lease is a property
-        // of the SOURCE — so it is reconstructed here, from imports that
-        // actually succeeded.
         persistent: Option<(PersistentSourceKey, u64)>,
+        capture_previous_holders: bool,
+        previous_holders: &mut Option<u128>,
     ) -> bool {
         if addr_index >= self.shared.occupancy.len() {
             return false;
         }
-        let mut live = self.lock_live();
+        let mut live = self.capture_and_replace(&flow, capture_previous_holders);
         // A refresh of the same synced flow: if it already holds this exact
         // translated tuple, it is reserved — nothing to do. If the tuple
         // changed (should not happen on a stable sync), retire the stale
@@ -3632,6 +3679,8 @@ impl PortAllocator {
                 if let Some(slot) = live.live_by_flow.get_mut(&flow) {
                     slot.holders |= holder.bit();
                 }
+                *previous_holders = live.previous_holders();
+
                 return true;
             }
             // #6528: retire the incumbent through the SAME mode-correct
@@ -3739,6 +3788,8 @@ impl PortAllocator {
                     },
                 );
                 live.record_pat_owner(&flow, translated);
+                *previous_holders = live.previous_holders();
+
                 return true;
             }
         }
@@ -3805,6 +3856,7 @@ impl PortAllocator {
             },
         );
         live.record_pat_owner(&flow, translated);
+        *previous_holders = live.previous_holders();
         true
     }
 
@@ -3837,7 +3889,18 @@ impl PortAllocator {
         translated_ip: IpAddr,
         holder: NatHolder,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
-        self.reserve_address_only_maybe_persistent(flow, translated_ip, 0, 0, holder, None)
+        let mut previous_holders = None;
+        self.reserve_address_only_maybe_persistent(
+            flow,
+            translated_ip,
+            0,
+            0,
+            holder,
+            None,
+            false,
+            &mut previous_holders,
+        )
+
     }
 
     /// #8132: the ADDRESS-ONLY twin of [`reserve_flow_maybe_persistent`] — mint
@@ -3863,22 +3926,12 @@ impl PortAllocator {
         &self,
         flow: SourceNatFlowKey,
         translated_ip: IpAddr,
-        // The absolute pool index of `translated_ip`, folded v4-then-v6 the way
-        // `address_index` folds it. Consulted ONLY for a persistent lease,
-        // whose idle expiry is indexed per pool address. An address-only record
-        // claims no port bit (`unlink_live_allocation_locked` skips the free on
-        // `address_only`), so it is inert for the non-persistent form, which is
-        // why the plain `reserve_address_only` above can pass 0 as it always
-        // has.
         addr_index: usize,
         now_ns: u64,
         holder: NatHolder,
-        // #8132: `Some((key, timeout_ns))` when the rule this reservation
-        // matched runs `persistent-nat`, mirroring #7360's parameter on the
-        // port-bearing arm. The standby cannot learn a lease any other way — a
-        // lease is a property of the SOURCE and session sync carries sessions —
-        // so it is reconstructed here, from imports that actually succeeded.
         persistent: Option<(PersistentSourceKey, u64)>,
+        capture_previous_holders: bool,
+        previous_holders: &mut Option<u128>,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let translated = TranslatedTuple {
             ip: translated_ip,
@@ -3895,7 +3948,7 @@ impl PortAllocator {
             dst_ip: flow.dst_ip,
             dst_port: flow.dst_port,
         };
-        let mut live = self.lock_live();
+        let mut live = self.capture_and_replace(&flow, capture_previous_holders);
         // Idempotent re-entry: a second packet of the same flow (racing session
         // install) reuses its first decision rather than re-keying.
         //
@@ -3909,6 +3962,7 @@ impl PortAllocator {
                     slot.holders |= holder.bit();
                 }
                 self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                *previous_holders = live.previous_holders();
                 return Ok(existing.translated);
             }
             // #8597 K63: the incumbent record names a DIFFERENT reverse identity
@@ -4076,6 +4130,7 @@ impl PortAllocator {
         self.shared
             .allocations_total
             .fetch_add(1, Ordering::Relaxed);
+        *previous_holders = live.previous_holders();
         Ok(translated)
     }
 
@@ -4233,9 +4288,11 @@ impl PortAllocator {
         translated_port: u16,
         now_ns: u64,
         holder: NatHolder,
+        capture_previous_holders: bool,
+        previous_holders: &mut Option<u128>,
     ) -> InterfaceDomainReserve {
         let rkey = AddressOnlyReverseKey::for_flow(&flow, translated_ip, translated_port);
-        let mut live = self.lock_live();
+        let mut live = self.capture_and_replace(&flow, capture_previous_holders);
         if let Some(existing) = live.live_by_flow.get(&flow).copied() {
             if existing.translated.ip == translated_ip
                 && existing.translated.port == translated_port
@@ -4244,6 +4301,7 @@ impl PortAllocator {
                     slot.holders |= holder.bit();
                 }
                 self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                *previous_holders = live.previous_holders();
                 return InterfaceDomainReserve::Owned;
             }
             // A different flow may already own the NEW identity; refuse before
@@ -4274,6 +4332,7 @@ impl PortAllocator {
             translated_port,
             holder,
         );
+        *previous_holders = live.previous_holders();
         InterfaceDomainReserve::Owned
     }
 

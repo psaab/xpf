@@ -410,6 +410,12 @@ same-key replacement it best-effort restores the previous entry's reservations
 and captured worker-holder bits, so the first worker release cannot free a
 reservation another worker still forwards through.
 
+The previous holder mask is captured in the same allocator live-state critical
+section as stale-record eviction and replacement installation. Worker upserts
+and releases therefore serialize either before that capture or after the
+replacement; they cannot OR or clear a bit in an uncaptured gap. Rollback keeps
+the captured-mask replay semantics above.
+
 Immediately before the forward conntrack write, under the import's tuple lease,
 the coordinator snapshots the actual bare-key BPF row value. If reverse
 publication then fails, it restores those exact bytes; if the snapshot was
