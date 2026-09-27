@@ -1,23 +1,34 @@
 # 9506 delta plan: ship P-MECH permits on the current master (research/9506-delta)
 
-- Review state: **v9 revision; parent re-dispatch pending; this worker assigns
-  no final PLAN-READY/PLAN-KILL verdict.** Round eight at `95209096b` returned
-  NEEDS-MAJOR 3-of-3 (P4O-01 FIXED; audit/zebra-A/30s CLOSED; R7 witness
-  FIXED; eight residuals across Opus/Sec/Hostile) with no slice-time
-  deferrals. This revision closes all eight authoritatively: complete
-  writer-handle + obligation-store lifecycle (construct fail, shutdown
-  order, replacement, last-Arc) with three-lock handoff atomicity;
-  split K bounds (repeat-2/first-4) with admission-cap proof + new
-  JOURNAL_FULL byte; pinned-tuple member enforcement at every kernel
-  boundary + honest evidence record; boot-bound fresh-init decision
-  table with reboot-as-reset + NIL-INVALIDATED tombstone across
-  Store(nil) (authority never unlinked; absent+absent reserved for
-  genuine first install); capped K convergence with split 30s
-  sampling. All credited designs held and extended compatibly. The
-  parent will re-dispatch the blinded gate against this committed
-  revision.
+ - Review state: **v10 revision; parent re-dispatch pending; this worker assigns
+  no verdict.** Round nine at `2a72b2f86` returned NEEDS-MAJOR 3-of-3
+  (P2O-01 FIXED; K-poll + journal-cap CLOSED and HELD) with twelve
+  residuals across Opus/Sec/Hostile, plus a blocker advisory on TUN
+  batching. This revision closes all twelve + the advisory, no
+  slice-time deferrals: instantiated member tuple (archive-pinned
+  source `linux 7.0.0-30.30`, tag `Ubuntu-7.0.0-30.30` @ `d974a4063`,
+  SHA-verified debs, captured config) with member-tree-text branch
+  review (B1–B8 incl. `more`/batching/enqueue-shape audit) and
+  per-boundary MEMBERSHIP recipes with executed gap-vs-verdict probes;
+  non-erasing authority (tombstone across ALL nil sites `:17`/`:24`/
+  `:287`/`:1519`/`:1689`, INVALID reason enum, persist orders, async
+  epoch triple-refresh with skip-if-stale); strict read semantics
+  (IsNotExist-absent, error/torn freeze, tamper recovery, strict
+  boot_id); boot-bound self-clearing permutation freeze; preserved-
+  incarnation discipline (Option A: live writers + generation fence,
+  bundle ownership, no destructive shutdown in `stop_inner`);
+  shared pending-slot arbitration (winner-retained proof, retry-
+  terminalize, named cv + heartbeat-steal); three-lock fence scan as
+  the SOLE scope (M1/M3 rewritten, precedence pinned) with
+  barrier-deterministic handoff fixtures; helper-incarnation handoff
+  (durable clean/unclean verdicts, replay gating, generation fencing);
+  rx_batched==0 readback + structural `!more` proof + adversarial
+  cells (ENOTSOCK executed). All credited designs held. The parent
+  will re-dispatch the blinded gate against this committed revision.
 - Date: 2026-09-27. Worktree `/var/tmp/worktrees/9506-research`, branch `research/9506-delta`.
-- Pins: `origin/master = 028c4e4e2` (assessed); Sep-20 code tip `b71c52d60`
+ - Pins: `origin/master = fd32d2df5` (v10; verified at `3be469bc3` +
+  NAT-only delta `fd32d2df5` audited: touches no cited file; §4 drift
+  base stays `028c4e4e2`); Sep-20 code tip `b71c52d60`
   ("pmech: land deny-only D11 bridge (#9506) (#10483)"); Sep-20 design tip
   `ebcec7ad4` (`research/9506-pmech-design`, `docs/pr/9506-xfrm-capture/pmech-design.md`,
   2264 lines); r6 plan `b4f1d3035` (`research/9506-reground`).
@@ -560,64 +571,134 @@ all 35 design paths exist, as checked in §4.2.
   `pre_write_check` via a new explicit `writer` parameter — the delegated
   worker is the sole producer today, and the parameter (not a hardcoded
   outlet) keeps that attribution exact under any future second producer).
-  LIFECYCLE (every path owns its handles — no silent discard): success
-  installs both handles before publish; second-spawn failure (trusted
-  live, delegated `Err`, `:830-843`) drops the trusted sender, joins the
-  trusted handle, THEN returns `Err`; handshake-Fail (`:875-885`) drops
-  BOTH senders, takes+joins BOTH handles outside locks, runs the death
-  scan (no ops can exist pre-publish — scan asserts empty), then returns
-  `Err`; normal shutdown runs explicit idempotent `shutdown()` —
-  disable enqueue → take/drop BOTH senders (`Option<SyncSender>` fields,
-  CHOSEN: `Drop` cannot join with non-`Option` fields because field drops
-  run after `drop()`, so senders stay alive, `recv` never errors, and the
-  join wedges on the Arc-last-drop thread) → take handles → join outside
-  all locks → death decisions — slotted in `stop_inner` between D11 join
-  (`:1052`) and status snapshot (`:1088`); replacement shuts the old
-  incarnation down FULLY (writers joined, obligations terminalized, epoch
-  fenced) BEFORE the new one publishes (preserved-Arc path keeps the old
-  object alive instead of replacing); last-Arc-drop without `shutdown()`
-  is FORBIDDEN and detected (`Drop` checks slots-taken + bumps a
-  `shutdown_skipped_drop` alarm counter, never joins — fail-loud, since
-  joining there could wedge). Take-arbitration: `Mutex<Option>.take()`
-  grants each handle to exactly one of stop-path vs reaper-path, with
-  ASYMMETRIC loser behavior (a symmetric loser-skips would let stop
-  close while the winner is mid-join with the thread live): the slot
-  carries a `joined_done: AtomicBool`; the winner joins + runs death
-  decisions + sets done. A stop-path loser WAITS on done (teardown is
-  synchronous anyway — prompt by construction below, never proceeds to
-  snapshot/close before it). A reaper-path loser never waits (the reaper
-  must never block): it defers to next tick, fail-closed (no terminalize,
-  no ack). REAPER-TAKES-ONLY-FINISHED: the reaper takes a handle ONLY
-  after its `is_finished` probe reads true — so a reaper-winner's join
-  is prompt (the thread already exited; the probe's only race is a false
-  negative, which merely defers), and the reaper thread can never wedge
-  in a blocking join; if the probe reads false the handle stays for
-  stop. Stop-path takes unconditionally and joins blocking (`:175-176`
-  precedent): a live-but-wedged writer wedges teardown — fail-closed
-  (nothing publishes; teardown never completes half-armed), consistent
-  with the in-tree supervision precedent, and the lateness watchdog
-  (`now - last_full_service > bound` → deny-only + alarm) bounds the
-  blast radius if the reaper itself ever stalls. Death check order:
-  `is_finished` gates the reaper scan ONLY (probe, never proof —
-  `tunnel_supervision.rs:165-166` precedent); proof is `JoinHandle::join`,
-  executed OUTSIDE all mutexes (join-under-`core.inner`
-  deadlocks against live `pre_write`/`resolve`), after sender-drop
-  (`rx.recv` `Err` exits the loop, `:1605`) or thread exit; the reaper
-  takes `core.inner` only after quiescence, then terminalizes a stuck
-  pre-park `WriteStarted` to `Uncertain` reason 58 `WORKER_ORPHAN_HA`
-  (CHOSEN over a new outcome value — wire-stable) AND creates a per-op
-  `Leaked` row in the obligation store (the kernel may own a buffer
-  submitted before death; the registry died with the worker), which
-  permanently fences the epoch per (e)(iii). Late-resolve contract,
-  death-race restated: a transferred `WriteStarted` reaches `Terminal`
-  via reaper-coordinated resolve while its writer lives, or via the
-  death-to-`Leaked` path after its OWN writer's join proves death —
-  never via AF_XDP join alone, never rejection-with-emission, never an
-  unproven terminal. Deadline expiry in a pre-park pause therefore BLOCKS the
-  fence (no ack), raises deny-all + `STUCK_WRITER_CLOSED` counter + alarm
-  (new counter; screen `event_emit.rs:338-355` NOTICE precedent), and
-  reaches CLOSED via `finalizePermitClose` once the transferred entry
-  resolves or is death-proved to `Leaked` — never silent effectiveness.
+  LIFECYCLE (every path owns its handles — no silent discard; all names
+  below are REAL interfaces — `FallbackWhenNone` exists nowhere and is
+  RETIRED as vocabulary). OWNERSHIP BUNDLE (CHOSEN): the writer senders
+  (`tx`/`tx_delegated`, new `Option<SyncSender>` fields), the writer
+  `JoinHandle`s (new retained fields — today DISCARDED at
+  `slowpath.rs:811-823` trusted + `:834-846` delegated, threads
+  detached), the d11-reaper handle + heartbeat, and the op→writer
+  bindings are ALL owned by the `SlowPathReinjector` incarnation.
+  PRESERVED-INCARNATION DISCIPLINE — Option A SELECTED (P3O-01a;
+  forced, not preferred): `stop_inner(false)` NEVER destructively
+  shuts the bundle down — the preserved-Arc path
+  (`teardown.rs:81-93` clone + `snapshot.rs:641-658` republish) keeps
+  serving on a LIVE object, and inserting destructive shutdown at the
+  common point would republish an object with no senders + joined
+  writers. Option B (stop-and-reconstruct-never-republish) is REJECTED:
+  always-reconstruct reintroduces the fixed-name TUN recreate race
+  the preserved path exists to avoid (`teardown.rs:81-85`). Reconcile
+  generation change = GENERATION FENCE (retire old D11 generation →
+  STALE→DROP at admit + epoch fence via the M1 sequence scoped to the
+  old generation; preserved writers keep serving new-gen work while
+  in-flight old-gen `WriteStarted` drain under the still-effective old
+  authority per M3 drain-then-effective). Destructive `shutdown()`
+  runs ONLY on: full `Coordinator::stop`/disarm, process exit, and
+  else-arm replacement (`old.shutdown()` BEFORE new publish);
+  `stop_inner`'s slot (between D11 join `:1052` and status snapshot
+  `:1088`) runs the GENERATION FENCE, never the destructive path.
+  CONSTRUCTION (`SlowPathReinjector::new`, `slowpath.rs:805`): spawn
+  trusted → spawn delegated → spawn d11-reaper (new) → handshake
+  (`:866-888`) — all three spawns via new `spawn_named_worker()`
+  (`cfg(test)` failpoint seam). Failure teardown per site, all
+  join-before-return: second-spawn `Err` (`:846`) → drop trusted
+  sender, join trusted handle (prompt: `recv`-`Err` exit), THEN `Err`;
+  handshake `Fail` (`:875-885`) → drop BOTH senders, take+join BOTH
+  handles outside locks, death scan asserts empty (pre-publish —
+  NOTHING submitted yet), THEN `Err`; reaper-spawn `Err` → drop both
+  senders, join both handles, THEN `Err`. (`RingWriter::new`
+  `io::Result` failure is NOT construction failure: the sync arm
+  takes over per `classify_io_uring_write`, existing behavior.)
+  Caller fallback on `new`-`Err` is the REAL `snapshot.rs:669-680`
+  None-arm: `last_error` into `last_slow_path_status`, `slow_path =
+  None`, NO authority publish (`:686` skipped) = q0 deny — this exact
+  arm is what the construction-failure cells pin. `shutdown()` (new,
+  idempotent, on `SlowPathReinjector`): disable enqueue → take/drop
+  senders → take handles → join outside all locks → death decisions.
+  DOUBLE-STOP (PINNED): slots `Done` → `Ok` no-op; slots
+  `Pending` → wait-on-`joined_done`-then-`Ok` (loser semantics
+  below). Last-Arc-drop without `shutdown()` is FORBIDDEN and
+  detected (`Drop` checks shutdown-called + slots `Done`, bumps
+  `shutdown_skipped_drop` alarm, never joins — fail-loud, since
+  joining there could wedge; `Drop` cannot join with non-`Option`
+  sender fields because field drops run after `drop()`).
+  SHARED PENDING SLOT (P3O-01b/R9-SEC-12 — the post-join retry owner):
+  per-handle `Mutex<HandleSlot>`, `HandleSlot ∈ {Empty,
+  Live(JoinHandle), Pending{owner: Stop|Reaper, proof:
+  Option<DeathProof>, probe_finished: bool}, Done}` + `joined_done:
+  AtomicBool` + `done_cv: Condvar` (the named wait primitive).
+  `take`: `Live`→`Pending{owner, none, probe}` (exactly-once
+  winner); `Empty`/`Done`→no-op; `Pending`→loser path. The winner
+  joins (stop: blocking `:175-176` precedent; reaper:
+  ONLY-if-`is_finished` — prompt, never wedges) and writes the
+  `DeathProof` INTO the slot, then COMMITS (coordinated
+  terminalize + `Leaked` insert under the (c) trio, `try_lock`):
+  success → `Done` + done + `notify`; contention → RETAIN (proof
+  stays in the SHARED slot, never winner-local) and retry
+  TERMINALIZE (re-read proof, NOT re-take): stop-winner spins
+  bounded (yield, ≤10ms) then ESCALATES to blocking ordered
+  acquisition (deadlock-free per the global (c) order —
+  guaranteed completion, no hang); reaper-winner retries next
+  tick. `joined_done` is set ONLY after the commit (terminalize
+  + row insert atomic) — never after join alone. LOSERS:
+  stop-loser (`Pending{Reaper}`) waits `done_cv` in 5ms
+  (`IPSEC_INNER_ACK_DEADLINE_NS`) rounds with heartbeat patience
+  (reaper `last_full_service` advancing → wait on; teardown never
+  proceeds to snapshot/close before done); heartbeat-stalled →
+  STEAL: stop takes ownership and commits from the slot proof
+  with blocking escalation (no re-join — join already done);
+  proof-absent + `probe_finished` + owner dead → commit on
+  probe-evidence + `STOLEN_COMMIT_ZOMBIE` gauge (the handle died
+  with its owner; the thread DID exit — `is_finished` has no
+  false-positive for exit — reclamation is skipped, resources
+  freed at process exit). TOTAL BOUND (no infinite patience —
+  heartbeat-advancing ≠ commit-progressing under a wedged lock
+  holder): `STOP_LOSER_WAIT_MAX_NS = 1_000_000_000` (1s, new
+  const); exceed with slot still `Pending` → `TEARDOWN_COMMIT_
+  STALL` alarm + process ABORT (fail-stop — NEVER proceed
+  without death decisions); recovery is the (g) helper-handoff
+  unclean path (restart → fenced generations → re-admit).
+  Stop-WINNER spins ≤10ms (fast path) then escalates to blocking
+  ordered acquisition (deadlock-free per the global order —
+  guaranteed unless a holder is truly wedged; wedged holder wedges
+  teardown = fail-closed + abort via the watchdog path). REAPER
+  SELF-MONITOR: pending-age per slot (`Instant` at take);
+  pending > 1s with no teardown in progress → `REAPER_COMMIT_
+  STALL` alarm + deny-all (fence already BLOCKS on the stuck
+  entry; operator recovery = helper restart → unclean
+  handoff). Reaper-loser (`Pending{Stop}`) defers (stop
+  completes promptly via escalation). REAPER LIVENESS:
+  `catch_unwind` around the tick loop (panic → log + continue —
+  the reaper never dies from logic panics) + heartbeat; the
+  lateness watchdog (`now - last_full_service > bound` →
+  deny-only + alarm) covers process-level stall. Stop-path takes
+  unconditionally; a live-but-wedged writer wedges teardown —
+  fail-closed (nothing publishes; teardown never completes
+  half-armed), consistent with the in-tree supervision
+  precedent. Death check order: `is_finished` gates the reaper
+  scan ONLY (probe, never proof — `tunnel_supervision.rs:165-166`
+  precedent); proof is `JoinHandle::join`, executed OUTSIDE all
+  mutexes (join-under-`core.inner` deadlocks against live
+  `pre_write`/`resolve`), after sender-drop (`rx.recv` `Err`
+  exits the loop, `:1605`) or thread exit; the reaper takes
+  `core.inner` only after quiescence, then terminalizes a stuck
+  pre-park `WriteStarted` to `Uncertain` reason 58
+  `WORKER_ORPHAN_HA` (CHOSEN over a new outcome value —
+  wire-stable) AND creates a per-op `Leaked` row in the
+  obligation store (the kernel may own a buffer submitted before
+  death; the registry died with the worker), which permanently
+  fences the epoch per (e)(iii). Late-resolve contract,
+  death-race restated: a transferred `WriteStarted` reaches
+  `Terminal` via reaper-coordinated resolve while its writer
+  lives, or via the death-to-`Leaked` path after its OWN
+  writer's join proves death — never via AF_XDP join alone,
+  never rejection-with-emission, never an unproven terminal.
+  Deadline expiry in a pre-park pause therefore BLOCKS the
+  fence (no ack), raises deny-all + `STUCK_WRITER_CLOSED` counter
+  + alarm (new counter; screen `event_emit.rs:338-355` NOTICE
+  precedent), and reaches CLOSED via `finalizePermitClose` once
+  the transferred entry resolves or is death-proved to `Leaked`
+  — never silent effectiveness.
   (b) I/O-release witness `IoRelease` (P3O-01: protocol terminality is NOT
   physical finality): a `Terminal` completion plus consumed `drain_ready`
   ack is EXPLICITLY NOT a writer-drop proof — a `Deferred` ring write is
@@ -703,12 +784,22 @@ all 35 design paths exist, as checked in §4.2.
   release between `WriteStarted`-terminalize and row insert — otherwise
   a fence scan lands in the gap with neither record visible and acks
   spuriously); the fence scan likewise holds all three simultaneously
-  (no release between the core scan and the obligation scan). Worker
-  park/release/`Drop` paths take the obligation lock ALONE (verified:
-  none nests it under core/journal today), so no worker-side inversion
-  exists; `try_lock` failure on either path aborts that attempt
-  fail-closed (no terminalize, no ack) for retry next tick. Tombstone
-  `ACCOUNTED` is the exactly-once linearizer for counters/events;
+  (no release between the core scan and the obligation scan).
+  PRECEDENCE (R9-SEC-01): THIS paragraph is the sole authoritative lock
+  scope for handoff commit and fence scan; M1 (4) and M3 SERIALIZATION
+  implement it verbatim (an implementer following either lands here).
+  Worker park/release/`Drop` paths take the obligation lock ALONE
+  (verified: none nests it under core/journal today), so no
+  worker-side inversion exists; `try_lock` failure on either path
+  aborts that attempt fail-closed (no terminalize, no ack) — retry
+  discipline per the LIFECYCLE pending slot (stop-winner escalates
+  to blocking ordered acquisition, reaper-winner retries next tick
+  from the shared proof; never re-take). TEST SEAM (R9-SEC-02 —
+  deterministic, sleeps never proof): `cfg(test)`-only rendezvous
+  gates at handoff pre-commit and scan pre-second-lock plus a
+  `std::sync::Barrier` two-thread harness; production compiles zero
+  hooks. Tombstone `ACCOUNTED` is the exactly-once linearizer for
+  counters/events;
   `resolve_write` rejects after journal finalization (checks token state
   too) — EXCEPT the ownership-transferred arm: `lease` + `WriteStarted`
   match with `entry.transferred` terminalizes through the coordinated pair
@@ -850,22 +941,64 @@ all 35 design paths exist, as checked in §4.2.
   vacuous, and a fresh supervisor's zero identity would freeze every
   clean restart): source is a NEW durable
   `/var/lib/xpf/ipsec-fence-authority` (`MkdirAllDurable` +
-  `WriteFileDurable` 0600; content = canonical overlay fields + boot_id
-  + HA epoch + install sequence), updated ATOMICALLY (write-temp + fsync
-  + rename + dir-fsync under the same flock) on EVERY fence completion —
-  each `ipsecOverlayAcked.Store(desired|fallback)` site (`reconcile`
-  `:237`/`:332`/`:361`/`:366`, wiring `:1519`/`:1689`) — and every epoch
-  change. `Store(nil)` (`:287` retire nil, `:1519`/`:1689` ambiguous nil)
-  NEVER unlinks the file: it atomically rewrites it to a NIL-INVALIDATED
-  tombstone (same envelope: boot_id + HA epoch + install sequence +
-  status=nil-invalidated + retired generation + retire-vs-ambiguous
-  reason), created if absent (a pre-first-fence defensive nil still
-  proves the supervisor has acted — fail-closed thereafter). The
-  authority file, once created, is NEVER unlinked — only atomically
-  rewritten (VALID on fence completion, TOMBSTONE on nil, fresh VALID
-  on reboot-init) — so its mere EXISTENCE is the durable
-  ever-initialized signal; a crash mid-rewrite leaves either the old or
-  the new version, both present, both freezing without a marker.
+  `WriteFileDurable` 0600; content = status + canonical overlay fields
+  + boot_id + HA epoch + install sequence + triple), updated
+  ATOMICALLY (write-temp + fsync + rename + dir-fsync under the same
+  flock; fsync error → abort WITHOUT rename; `*.tmp` ignored at
+  read). Status ∈ {VALID, INVALID}; INVALID records are tombstones
+  carrying a reason (below). WRITE SITES (EXACT census — no others):
+  VALID on fence completion ONLY at the four reconcile ack sites
+  (`ipsec_host_fence_reconcile_9506.go:237` hold install+readback,
+  `:332` empty-authority ack, `:361` fallback ack, `:366`
+  install+readback) — `wiring :1519`/`:1689` are PINNED TO INVALIDATE
+  (both are `Store(nil)` on ambiguous-removal/quarantine-fallback at
+  master; listing them as updates would establish authority where NO
+  fence completed). INVALID (tombstone) on EVERY nil transition:
+  `host_input_fence_9506.go:17` (bound INSIDE
+  `setHostInputFenceOverlay` — covers ALL candidate-publish callers
+  incl. restore-fallback), `:24` (bound INSIDE
+  `clearHostInputFenceOverlayAfterAck` — covers the ORDINARY OPEN
+  retire path), reconcile `:287`, wiring `:1519`, `:1689`.
+  INVALID reasons: `nil-candidate-publish`, `nil-postack-clear`,
+  `nil-restore`, `nil-ambiguous-removal`, `nil-shutdown-ambiguous`,
+  `epoch-advanced`. The authority file, once created (first fence
+  completion OR first nil — whichever proves the supervisor acted),
+  is NEVER unlinked — only atomically rewritten — so its mere
+  EXISTENCE is the durable ever-initialized signal; absence of a
+  current ACK NEVER erases this boot's prior admission (FRESH-01).
+  EPOCH-CHANGE TRIPLE FRESHNESS (R9: the four permit-record CAS
+  sites — `revokeTransitPermitNonblocking` `:298`,
+  `finalizePermitClose` `:340`, `tryOpenPermit` `:365`,
+  `publishWatchSnapshot` `:435`): each successful CAS SIGNALS
+  (nonblocking, cap-1 coalescing chan — revoke is CAS-only
+  nonblocking for topology callbacks and must NEVER fsync) a
+  dedicated `fenceAuthorityFlusher` goroutine, which rewrites
+  same-status + CURRENT triple. The flusher NEVER creates the file
+  (skips when absent — creation sites are fence/nil writes ONLY,
+  keeping case-(1)'s "first fence OR first nil" exact; a pre-first-
+  fence epoch CAS leaves absence intact and first-install admit
+  stays sound — no fence ⟹ no submissions ⟹ no obligations).
+  REQUIRED skip-if-stale: the flusher re-reads the file triple and
+  skips when file ≥ current (`permitEpoch`, `watchGeneration`,
+  `closeRequestSeq` lexicographic — all monotonic); without the
+  skip a stale flush landing after the shutdown fence would desync
+  the marker match. Soundness note: freshness is UNOBSERVABLE to
+  decisions (the shutdown fence always re-establishes VALID+current
+  pre-marker); misses fail safe as spurious marker-mismatch freeze
+  — the lane must still bind all four sites, not invent fewer. PERSIST
+  ORDERS (asymmetric, each justified): VALID writes are
+  persist-THEN-publish (file first, then in-memory `Store`;
+  persist fails → NO `Store` + `markRetry` + alarm — the fence
+  simply doesn't complete). Nil writes are `Store`-THEN-persist
+  (in-memory nil FIRST — safety-critical: ambiguous-removal must
+  clear the ack even if the disk is dying; persist fails →
+  LIVE-freeze-until-reboot: revoke if OPEN + bar OPEN + alarm;
+  the stale-VALID file is harmless via no-marker-freeze).
+  Flusher persist failure → alarm + backoff retry (decisions
+  never depend on the flusher). Fresh-init rewrite failure →
+  freeze + alarm, never silent admit. A crash mid-rewrite leaves
+  either the old or the new version, both present, both freezing
+  without a marker.
   Graceful shutdown completes the fence
   + writes the CLEAN marker (new `/var/lib/xpf/pmech-clean-shutdown`)
   at the end of `shutdownIpsecCapture` (`:1660`, after divert removal +
@@ -889,39 +1022,71 @@ all 35 design paths exist, as checked in §4.2.
   goroutine spawns — no tick can open first — via new
   `resolveStartupAuthority()`, enforced again at
   `tryOpenIpsecPermitAfterFenceAck` which refuses unless startup
-  resolved admissible): (1) authority file ABSENT + marker ABSENT →
+  resolved admissible): READ SEMANTICS (R9 P2-read — PINNED, no
+  misread admits): ABSENT := `os.IsNotExist` on the path; any OTHER
+  read error (EACCES/EIO/EPERM/…) on EITHER file → freeze + alarm
+  (case-4-style until reboot; reboot retries the read — transient
+  errors recover, persistent deny). `boot_id` source is
+  `/proc/sys/kernel/random/boot_id` (reuse the `bootIDPath` const +
+  parse from `pkg/cluster/sync_boot_incarnation.go:123-162`, NEVER
+  the zero-on-error `localBootIncarnation` — a zero substitute would
+  alias distinct boots): new strict `readBootIDStrict` (error or
+  parse failure → error); resolve retries 3× with backoff, then
+  freeze + alarm until reboot; every authority/marker/freeze write
+  embeds write-time boot (write-time failure → persist-failure
+  handling). TORN authority (unparseable, unknown status enum, or
+  unknown version — newer versions freeze, never downgrade-admit)
+  → TAMPER-equivalent freeze + alarm: crash-UNTORN is argued
+  (rename atomicity + `*.tmp` ignored + fsync-abort-no-rename ⇒ a
+  crash cannot tear the target; bitrot ≡ tamper, out of model —
+  same trust as binary integrity), so torn means media/tamper, NOT
+  crash. NAMED RECOVERY (the ONLY operator path, and it cannot
+  clear a legitimate freeze): `xpfd reset-torn-fence-authority`
+  REFUSES unless the authority file fails to parse (valid or
+  INVALID records are never touched), deletes ONLY the torn file,
+  and writes a `RESET-PENDING-REBOOT` sentinel recording the
+  CURRENT boot; `resolve()` freezes while a sentinel names the
+  current boot, and on boot change removes the sentinel and
+  proceeds (absent+absent post-reboot → first-install admit —
+  sound because the reboot retired all kernel obligations). Torn
+  marker → mismatch-freeze (never consumed; reboot unlinks stale
+  markers). Cases: (1) authority file ABSENT + marker ABSENT →
   FIRST INSTALL — and ONLY genuine first install reaches here: the
-  authority file is created on the first fence completion OR the first
-  nil-invalidation (whichever proves the supervisor has acted) and is
-  NEVER unlinked thereafter, so absence means no fence ever completed
-  AND no nil was ever recorded, hence no kernel obligations can exist
-  (OPEN requires fence completion) → initialize fresh authority +
-  admit normally. (2) authority.boot_id ≠ current boot (VALID or
-  TOMBSTONE — a tombstone from a prior boot retires with the reboot
-  like any other state, regardless of marker state) → REBOOT happened:
-  kernel state is fresh, the retirement boundary has passed → FRESH
-  INIT: unlink any stale marker, atomically rewrite fresh VALID
-  authority (never unlink), establish fresh run identity via normal
-  fence/census, admit normally — reboot NEVER re-freezes. (3)
-  authority VALID + authority.boot == current boot + marker present +
-  boot match + triple match vs the authority file → CLEAN RESTART:
-  consume (read + unlink + dir-fsync via new `fsatomic.RemoveDurable`,
-  absent-still-syncs `#5835` precedent, under flock), establish NEW
-  run identity independently (fresh generation/epoch via fence/census
-  — marker values validated then discarded, so nonzero prior identity
-  reopens), admit. Marker+tombstone is INCONSISTENT (a fence
-  completion rewrites VALID before any marker write, so no clean path
-  produces it) → freeze as (4). (4) authority present (VALID or
-  TOMBSTONE) + authority.boot == current boot + marker
-  absent/torn/mismatched → CRASH (or crash-between-unlink-and-OPEN,
-  or crash-after-nil-invalidation without a later fence+clean-marker,
-  all observationally identical) → refuse OPEN (stay CLOSING) +
-  permutation-freeze-until-reboot + alarm. There is NO operator command
-  clearing a freeze in place —
-  reboot is the ONLY reset (post-reboot fresh init reopens
-  automatically); any manual state deletion outside reboot voids safety
-  (operator-managed persistent state, same trust as binary/config
-  integrity — equivalent to tampering, out of threat model).
+  authority file is created on the first fence completion OR the
+  first nil-invalidation (whichever proves the supervisor has
+  acted) and is NEVER unlinked thereafter, so absence means no
+  fence ever completed AND no nil was ever recorded, hence no
+  kernel obligations can exist (OPEN requires fence completion)
+  → initialize fresh authority + admit normally. (2)
+  authority.boot_id ≠ current boot (VALID or INVALID — a
+  tombstone from a prior boot retires with the reboot like any
+  other state, regardless of marker state) → REBOOT happened:
+  kernel state is fresh, the retirement boundary has passed →
+  FRESH INIT: unlink any stale marker, atomically rewrite fresh
+  VALID authority (never unlink), establish fresh run identity
+  via normal fence/census, admit normally — reboot NEVER
+  re-freezes. (3) authority VALID + authority.boot == current
+  boot + marker present + boot match + triple match vs the
+  authority file → CLEAN RESTART: consume (read + unlink +
+  dir-fsync via new `fsatomic.RemoveDurable`, absent-still-syncs
+  `#5835` precedent, under flock), establish NEW run identity
+  independently (fresh generation/epoch via fence/census —
+  marker values validated then discarded, so nonzero prior
+  identity reopens), admit. Marker+INVALID is INCONSISTENT (a
+  fence completion rewrites VALID before any marker write, so no
+  clean path produces it) → freeze as (4). (4) authority present
+  (VALID or INVALID) + authority.boot == current boot + marker
+  absent/torn/mismatched → CRASH (or crash-between-unlink-and-
+  OPEN, or crash-after-nil-invalidation without a later
+  fence+clean-marker, all observationally identical) → refuse
+  OPEN (stay CLOSING) + write the boot-bound permutation-freeze
+  flag (reason `crash-unclean`, current boot — R9 P1-freeze,
+  self-clears on boot change) + alarm. There is NO operator
+  command clearing a freeze in place — reboot is the ONLY reset
+  (post-reboot fresh init reopens automatically); any manual
+  state deletion outside reboot voids safety (operator-managed
+  persistent state, same trust as binary/config integrity —
+  equivalent to tampering, out of threat model).
   Fixtures: clean-stop→restart→crash→restart AND
   crash-without-prior-clean-stop AND clean same-boot restart with
   nonzero prior identity (must OPEN) AND crash→reboot→re-admission
@@ -933,12 +1098,34 @@ all 35 design paths exist, as checked in §4.2.
   crash-after-nil-invalidation (retire nil AND ambiguous nil, each: nil
   → tombstone present → crash, no later fence, no marker → must freeze;
   authority file EXISTS — absent+absent is unreachable here) AND
+  normal-overlay-retire/crash/restart (OPEN → `:24` postack-clear →
+  crash → same-boot restart → must REFUSE fresh admission) AND
+  ambiguous-removal/crash/restart (`:1519` nil → crash → same-boot
+  restart → must REFUSE) AND candidate-publish/crash/restart (`:17`
+  nil → crash → same-boot restart → must REFUSE) AND
   nil-then-fence-then-clean (nil → later fence rewrites VALID → clean
   marker → must OPEN — tombstone cleared by proof) AND
-  marker+tombstone-inconsistent (forged/coerced pair → must freeze) AND
+  marker+INVALID-inconsistent (forged/coerced pair → must freeze) AND
   crash-mid-tombstone-rewrite (kill -9 during Store(nil) persist →
-  either version present → must freeze) — no path reuses
-  a consumed marker, and a genuinely clean restart reopens.
+  either version present → must freeze) AND read-error freezes
+  (EACCES/EIO on authority OR marker → freeze + alarm; reboot
+  retries) AND torn-authority (unparseable/unknown-status/newer-
+  version → tamper freeze + alarm; reboot does NOT clear; ONLY
+  `reset-torn-fence-authority` + reboot recovers; the command
+  REFUSES valid/INVALID files) AND torn-marker (→ mismatch-freeze,
+  never consumed) AND boot_id-unreadable (3× retry → freeze +
+  alarm) AND persist-failure outcomes (VALID-persist fail → no
+  Store + retry; nil-persist fail → live-freeze-until-reboot +
+  alarm; fresh-init-write fail → freeze) AND epoch-flusher cells
+  (all four CAS sites signal; skip-if-stale suppresses a stale
+  flush after a newer write; revoke path never blocks on fsync —
+  measured, not asserted) AND freeze-flag cells (case-4 writes
+  boot-bound flag; post-reboot mutation allowed again; stale-
+  unlink-failure → refuse + alarm) AND crash-during-fresh-init
+  (crash after case-2 rewrite, before OPEN → case-4 freeze;
+  NEXT reboot re-enters case-2 and admits — recovery, not loop)
+  — no path reuses a consumed marker, and a genuinely clean
+  restart reopens.
   Quarantine is a RESERVED `NatHolder::Quarantine` bit (127; `MAX==128`
   asserts updated) plus a session HOLD-gate extension, INSTALLED AT
   RESERVE — NOT at death/transfer: `ProvisionalJournal::register` plus
@@ -959,7 +1146,74 @@ all 35 design paths exist, as checked in §4.2.
   `(worker,generation,token)` authority may resurrect (owner-epoch
   monotonicity; tombstones cleared on run change, announce baseline
   reset); a startup sweep reclaims provisional resources, and HA import
-  is the only post-restart state source. Canonical mapping: ADOPT
+  is the only post-restart state source. HELPER-INCARNATION HANDOFF
+  (R9O-01 — the helper has an INDEPENDENT crash/restart lifecycle:
+  `Manager` restarts it without restarting xpfd
+  (`process_supervisor.go:303-407`, `process.go:304-322`, SIGKILL
+  escalation `:601-611`), the socket client REPLAYS cached
+  `announcePayload` on reconnect (`reinject_socket.go:93-112`),
+  and `permitOpen` derives from the CONTINUING supervisor
+  (`ipsec_capture_wiring_9506.go:646`) — a fresh helper's empty
+  store would otherwise admit q0 under old authority and attest
+  vacuous-clean fences for a generation whose I/O it never saw;
+  XDP disarm + generation fencing + epoch rules do NOT cover
+  this boundary). INCARNATION (bound at every handoff): `(boot_id,
+  daemon_pid, procGen, helper_pid)` — `procGen` bumps on spawn
+  (`process_supervisor.go:258`) and stop (`process.go:543`);
+  `daemon_pid` confines verdicts to one daemon run. DURABLE
+  STATE (two files): (i) `pmech-helper-handoff` (per-exit,
+  overwritten each exit): `{boot, daemon_pid, old{gen,pid},
+  verdict: clean{proof} | unclean{reason}}` — consulted on
+  helper spawn WITHIN the same daemon run only; (ii) the
+  boot-bound permutation-freeze flag gains `helper-unclean`
+  entries `{gen, epoch, reason, at}` — cumulative per
+  generation, honored across daemon restarts, cleared ONLY by
+  boot change (the (e)(iii) ancestor rule: a prior unclean
+  generation is never removed by a later clean verdict — only
+  reboot retires it). EXIT HOOKS (all three): crash →
+  `handleUnexpectedHelperExitLocked` (`:303`) writes
+  `unclean{reason: crash}` + freeze entry + revokes the S4
+  permit to CLOSING (new `noteHelperExitLocked` hook —
+  re-open only post-handoff under a NEW generation);
+  intentional stop/replacement → fence-FIRST (before the `:590`
+  shutdown request, while the old helper is fully alive: full M1
+  fence + `IoRelease` drain proven) then `clean{proof}` verdict,
+  else `unclean{reason: fence-failed/timeout}`; SIGKILL escalation
+  (`process.go:609`) → `unclean{reason: killed-during-teardown}`
+  (kill precludes any verdict). REPLAY GATING: `Manager`
+  UNBINDS the submitter on every helper exit; new
+  `BindHelperIncarnation` re-binds ONLY after the handoff file
+  resolves (clean: matching old incarnation + same
+  daemon_pid + boot — replay + inherit; unclean/absent/
+  cross-daemon: NO replay — `ensureSubmitLocked` returns a
+  handoff-pending error pre-dial, fail-closed); a stale conn
+  to a LIVE helper keeps its binding (incarnation unchanged).
+  GATE WIRING (no dangling hook): new `PmechHandoffGate`
+  interface (`NoteHelperExit`, `BindHelperIncarnation`)
+  implemented by the daemon capture wiring, injected into
+  `Manager` (nil-safe: nil gate = legacy/D11-only behavior,
+  replay ungated — BUT P-MECH admission requires a non-nil
+  gate + bound incarnation before OPEN, so no P-MECH permit
+  ever opens ungated). BELT: the pipeline ALSO refuses
+  P-MECH submits unless handoff-bound (explicit local error
+  vs the helper's empty-authority refusal — redundant by
+  design). AVAILABILITY BOUND: replay is refused only in
+  the exit→handoff window (handoff completes in ms post-
+  spawn; unclean needs no reboot for REPLAY — reboot gates
+  MUTATION only), and submits already fail while the helper
+  is down today (no listener) — no new availability hole.
+  RUST SIDE: the new helper IMPORTS the daemon-announced
+  fenced-generation set at announce (old unclean generations
+  fence-FAIL forever in the new store); new work proceeds
+  under the new generation. DAEMON RESTART ignores the
+  handoff file (total owner death per (g): sweep + HA import
+  only) but HONORS freeze entries (re-admit allowed,
+  mutation barred). Clean-restart exceptions bind old+new
+  helper identities (file `old{gen,pid}` + current procGen),
+  NEVER the Go run alone. (The task-exit-finality alternative
+  — proving dead-helper kernel I/O final without durable
+  state — is NOT taken: no such proof exists read-only.)
+  Canonical mapping: ADOPT
   `ebcec7ad4:pmech-design.md:766-790` + `queue.rs:1460-1462`
   (`Prepared→RolledBack` exactly once; `WriteStarted`/`Committed`
   conservatively committed, NEVER blindly rolled back) with
@@ -1253,13 +1507,29 @@ all 35 design paths exist, as checked in §4.2.
   via `resolve_write` (`:1079-1101`) or cancel-then-resolve. (4) RUST ACK
   `FenceAuthorityAck{same tuple, queued_fenced, started_resolved,
   residual_old_epoch, io_unreleased}`: attests NO `Queued`/`WriteStarted`
-  AND NO unreleased I/O (`IoRelease`) under the old epoch, computed
-  under the SAME core `inner` lock as `pre_write` (`:1041-1072`) and
-  `announce` (`:688-723`) — no new lock. TWO-PHASE: scan → resolve
-  Proceed-before-scan entries → rescan → ack (a `Proceed` winning the
-  race before the scan must resolve before the ack completes; a
-  `Proceed` after sees closed authority and `Fenced`). Purges are
-  forbidden in the fence window (they surface no completion) or counted
+  AND NO unreleased I/O (`IoRelease`) AND NO `Leaked` row under the old
+  epoch. LOCK SCOPE (SOLE AUTHORITY — R9-SEC-01: the (c)/(e) three-lock
+  hold is the ONE fence-scan scope; any single-lock reading of this
+  paragraph is SUPERSEDED): scan AND rescan each hold
+  `core.inner → journal.records → obligation-store` SIMULTANEOUSLY
+  (the (c) order, `try_lock` on 2nd+3rd, contention → abort phase →
+  NO ack, fail-closed) — a scan under `core.inner` alone would land
+  between another path's core-terminalize and its obligation insert
+  and ack spuriously; under the shared hold the scan sees every
+  handoff commit atomically (pre-commit `WriteStarted` BLOCKS the
+  ack; post-commit `Terminal`+`Leaked` FAILS it — never a false
+  ack). TWO-PHASE (authority-close FIRST — step (2) — so no new
+  `Proceed` can start; the resolve leg runs BETWEEN the holds
+  because `resolve_write` needs the locks and cannot run under
+  them): hold → scan → release → fence-drive `resolve_write` for
+  `Proceed`-before-scan entries (bounded by the 5ms ack deadline,
+  timeout → no ack + alarm) → hold → rescan → ack. A `Proceed`
+  winning the race before the scan must resolve before the ack
+  completes; a `Proceed` after sees closed authority and `Fenced`;
+  a handoff commit landing between the holds is ATOMIC, so the
+  rescan sees it whole (`Terminal`+`Leaked` → ack still FAILS,
+  epoch permanently fenced — §7 cell (ii)). Purges are forbidden
+  in the fence window (they surface no completion) or counted
   in the ack. WIRE (CHOSEN — new response type, not Admit reuse):
   `MSG_FENCE_ACK = 13` reply on the submit socket; Rust `match` arm in
   `serve_submit_conn` (`server/reinject_9506.rs:164`) + new
@@ -1286,87 +1556,134 @@ all 35 design paths exist, as checked in §4.2.
   `rps_flow_table`/socket-flow branch in `get_rps_cpu` can select a
   backlog CPU with a NULL RPS map, and `rps_sock_flow_entries=32768` is
   already set globally by `compiler.go:1841`); GRO OFF; NO XDP program
-  attached; TC classifier pinned (existing mark); kernel version PINNED
-  to the allowlist below. READBACKS (every field, every tick): glob
+  attached; TC classifier pinned (existing mark); `rx_batched == 0`
+  (see B8 below — member `tun_rx_batched` holds skbs iff
+  `rx_batched>0 AND more`; belt over the structural `!more` proof);
+  kernel version PINNED to the allowlist below. STRUCTURAL `!more`
+  PROOF (B8, member-text + repo-shape): xpf USP TUNs are created
+  `IFF_TUN|IFF_NO_PI` without `IFF_NAPI`/`IFF_VNET_HDR`
+  (`slowpath.rs:2220,2240`); ALL USP writes are char-fd `write`
+  (`slowpath.rs:1750`) or uring `OP_Write`
+  (`io_uring_write.rs:583`) → member `tun_chr_write_iter`
+  (hardcodes `more=false`, `tun.c:1985-2000`); the ONLY `more=true`
+  source is `tun_sendmsg` via `MSG_MORE` (`tun.c:2512-2561`),
+  unreachable — `sendmsg` on the USP char fd fails `ENOTSOCK`
+  (errno 88, EXECUTED probe, record §7), so a sendmsg mutant
+  fails LOUDLY, never holds silently. Queue-empty induction:
+  entries enter the batch queue ONLY via the more-path
+  (`:1496-1498`) or the NAPI path (`:1936`, napi off) — under
+  all-`!more` writes from a fresh TUN the queue is always empty,
+  so `(!more && empty)` dispatches inline on EVERY write
+  regardless of `rx_batched`. READBACKS (every field, every
+  tick): glob
   `/sys/class/net/xpf-usp{0,1}/queues/rx-*/{rps_cpus,rps_flow_cnt}`
   (`compiler.go:1842` glob pattern; empty dir set or any nonzero → refuse)
   via `os.ReadFile` (`process.go:465-490` pattern); ethtool GRO line
-  (`compiler_rxvlan_classify_9946.go:58-65` parse); XDP via netlink
+  (`compiler_rxvlan_classify_9946.go:58-65` parse) + ethtool
+  coalesce `rx_max_coalesced_frames == 0` (same channel/cadence;
+  nonzero → refuse + drift path); XDP via netlink
   `Info().XDP()` (`armproof.go:849-860`, modes `:786-802`); TC via `tc
   filter show` / netlink TC dump (clsact prio `0x7fff`); `uname -r` +
   manifest `guest_kernel` + allowlist match. KERNEL ALLOWLIST
   (PINNED TUPLE, not self-consistent metadata): the member is the tuple
-  (uname, base digest, kernel package rows, Kconfig predicates), pinned
-  in repo — Python pins beside `PINNED_BASE_*` in `bake.py`, Go pins in
-  a const block beside the LANE-1/validate call sites, plus an agreement
-  test asserting both sides pin the identical tuple
-  (`mixed_version_matrix` precedent) — updated ONLY by reviewed commit
-  alongside a new review record. INITIAL MEMBER: exactly
-  `7.0.0-30-generic` (`docs/image-validation.md:537`, Tier-2 recorded
-  pass — highest non-test authority in-tree); base digest `9dc7c536…`
-  (`bake.py:433`); Kconfig `CONFIG_BRIDGE` + `CONFIG_NF_TABLES_BRIDGE`
-  set + `CONFIG_4KSTACKS` NOT set (third predicate, both snippets);
-  kernel package rows `linux-image-7.0.0-30-generic=<version>` (+
-  modules/headers) whose versions are recorded at the P2-evidence bake
-  by `dpkg-query -W -f='${Package}=${Version}\n'` into the new required
-  manifest key `kernel-source-revision` (beside `:708-721`; sibling to
-  the new required `kernel-allowlist` member-list key beside
-  `guest_kernel`, `bake.py:1177` pattern), then pinned
-  verbatim — the FIRST recording is fixture F0 (P2-entry evidence),
-  every later bake must match byte-for-byte. This defeats
-  coherent-unreviewed-B: B passes only by matching the PINNED tuple on
-  every field at every boundary (at which point B IS the member —
-  identical uname, base, package rows, Kconfig); manifest↔inventory
-  agreement remains as tamper-evidence, never as membership. REVIEW
-  RECORD (SUPPLIED): `docs/pr/9506-delta/kernel-allowlist-7.0.0-30.md`
-  — member identity (exact strings), source binding, per-branch table
-  (RPS-map, RFS-table, TUN dispatch, 4KSTACKS, GRO, XDP, v4/v6 symmetry)
-  each marked ESTABLISHED (repo code) / CITED (reviewer-verified stable
-  read with transcript ref) / ENFORCED (machine gate named herein),
-  Kconfig asserts, boundary table, F-statuses (SPECIFIED vs EXECUTED),
-  and explicit limits — including the honest statement that no Ubuntu
-  tree exists in-repo, so per-build behavior is established by
-  runtime-verified predicates + Kconfig asserts + exact-version pinning,
-  not by any single human tree read. BINDING (member-match at EVERY
-  boundary): bake asserts `ls /lib/modules` equals exactly the member
-  (new virt-customize run-command beside `:645-646`/`:670-671`/`:676`,
-  else FATAL — drifted bake emits nothing signable) + records package
-  rows; `sign.py` `assert_bake_set` refuses member mismatch (extends
-  `:438-442`); `publish.py` `gate_provenance` requires the key + member
-  package rows in `.pkgs` with pinned-agreeing versions; `validate.py`
-  scenario A asserts `uname -r` equals the member exactly (before the
-  hold assert) + Kconfig third predicate; LANE-1 Arm refuses non-member
-  candidates after `ValidateKernelSegment`, Gate 2 (`kernel_run.go:551-558`)
-  exact-match already member-exact, proven via `promotionMarkerPath` +
-  `lastRollPath` + `ReadChannelStatus`; the `xpf-kernel-promote` outer
-  gate refuses no-infer; ordinary-boot admission asserts member match
-  before OPEN (same gate as the mode predicate — a booted non-member
-  runs the system but never opens permits); rollback to a non-member
-  known-good proceeds as a system function but P-MECH admission refuses
-  OPEN until a member kernel runs again. Floor unchanged (>=6.18,
-  `-generic` flavor, single-kernel invariant, mlx5 set); any kernel not
-  on the list → deny until reviewed and listed via reviewed commit (same
-  shape as `PINNED_BASE_RELEASE` bumps). SOURCE-BACKED
-  SEMANTICS (per allowlist member, BOTH families): v4 `tun_get_user → netif_receive_skb →`
-  (RPS map NULL AND no RFS table → inline, no backlog) `→ ip_rcv →
-  ip_forward`, v6 likewise via `ip6_rcv → ip6_forward` — the
-  RPS/RFS/NAPI/GRO reasoning is L2 (family-independent), the TC mark
-  program is family-blind (mark/queue_mapping only, `slowpath.rs:188-263`),
-  and TUN `IFF_NO_PI` parses family by nibble (`gre.rs:710-714`); route
+  (§0 of the record): uname `7.0.0-30-generic` + base digest
+  `9dc7c536…e21be05` + package rows (`linux-{image,modules,headers}-`
+  `7.0.0-30-generic == 7.0.0-30.30`, SHAs §1) + source `linux
+  7.0.0-30.30` (tag `Ubuntu-7.0.0-30.30` @ `d974a4063`) + Kconfig
+  (`CONFIG_4KSTACKS` absent-or-`n`, `CONFIG_BRIDGE` +
+  `CONFIG_NF_TABLES_BRIDGE` set) — pinned in repo (Python beside
+  `PINNED_BASE_*` in `bake.py`, Go consts beside the LANE-1/validate
+  call sites, agreement test asserting the identical tuple,
+  `mixed_version_matrix` precedent) — updated ONLY by reviewed
+  commit alongside a new review record. The F0 recording is
+  CONFIRMATION (bake rows must EQUAL these pins), never blank
+  enrollment. REVIEW RECORD (COMPLETED v10):
+  `docs/pr/9506-delta/kernel-allowlist-7.0.0-30.md` — instantiated
+  tuple + source/tree identity + SHA-verified deb capture + member
+  config capture + per-branch MEMBER-TEXT review (B1–B8 at the
+  pinned tag, file:line quoted) + per-boundary MEMBERSHIP recipes
+  + executed-evidence transcript (§7) + honest limits. BINDING
+  (MEMBERSHIP at EVERY boundary — each leg checks every tuple
+  field it can see, at least uname+revision; current-code gaps
+  DEMONSTRATED executed, record §7): bake asserts
+  `ls /lib/modules` equals exactly the member AND installed
+  `linux-{image,modules,headers}-7.0.0-30-generic` dpkg rows
+  equal `7.0.0-30.30` (new run-commands beside `:645-646` /
+  `:670-671` / `:676` + hold-verify `:708-721` shape — current:
+  installs newest `linux-generic`, `:641`); `sign.py`
+  `assert_bake_set` (extends `:438-442`) requires the
+  `kernel-allowlist` + `kernel-source-revision` keys AND tuple
+  membership (current: nonempty `guest_kernel` only — SIGNS
+  `-31`, demonstrated); `publish.py` `gate_provenance` requires
+  keys + member rows in `.pkgs` equal to the PIN (current:
+  manifest↔inventory agreement only — PUBLISHES coherent `-31`,
+  demonstrated; agreement remains as tamper-evidence);
+  `validate.py` scenario A (`:1185-1230`) asserts `uname -r`
+  equals the member + guest `dpkg-query` row equality + Kconfig
+  third predicate live (current: floor only — PASSES `-31`,
+  demonstrated); LANE-1 Arm refuses non-member candidates after
+  `ValidateKernelSegment` (new check — the function itself is
+  charset/path validation, `version.go:124`); Gate 2
+  (`kernel_run.go:551-558`) extends `running==CandidateVersion`
+  with `running ∈ reviewed tuple` (current: candidate-equality
+  only — promotes unreviewed `-31` by code read);
+  `xpf-kernel-promote` outer gate refuses no-infer (current:
+  authenticates the xpfd binary path,
+  `kernel_arm_record.go:39` — gap by code read) AND non-member;
+  `promotionMarkerPath`/`lastRollPath`/`ReadChannelStatus`
+  (`kernel_status.go:84` — REPORTING, not enforcement) become
+  EVIDENCE INPUTS to the membership check; ordinary-boot
+  admission asserts full tuple match before OPEN (booted
+  non-member runs the system but never opens permits); rollback
+  to a non-member known-good proceeds as a system function but
+  P-MECH admission refuses OPEN until a member kernel runs
+  again. Floor unchanged (>=6.18, `-generic` flavor,
+  single-kernel invariant, mlx5 set); any kernel not on the
+  list → deny until reviewed and listed via reviewed commit
+  (same shape as `PINNED_BASE_RELEASE` bumps).
+  MEMBER-BACKED SEMANTICS (tag `Ubuntu-7.0.0-30.30`, record §4 B7):
+  v4 `tun_get_user → netif_receive_skb →` (RPS map NULL AND no flow
+  table → `get_rps_cpu` -1, `dev.c:5131` → `__netif_receive_skb`
+  inline, `:6372-6394`) `→ ip_rcv → ip_forward`
+  (`ip_input.c:564 → :439 → ip_forward.c:83`); v6 `ipv6_rcv
+  → ip6_forward` (`ip6_input.c:304 → :69 → ip6_output.c:497`,
+  same inline shape — NOTE the 7.x `ipv6_rcv` rename, NOT
+  `ip6_rcv`). RPS/RFS/NAPI/GRO reasoning is L2
+  (family-independent), the TC mark program is family-blind
+  (mark/`queue_mapping` only, `slowpath.rs:188-263`), and TUN
+  `IFF_NO_PI` parses family by nibble (`gre.rs:710-714`); route
   lookup completes synchronously within the `write()` syscall, so
-  target-CQE/write-return proves the routing decision already happened
-  under the then-current env. HOLD (not sampled-at-OPEN): in-process
+  target-CQE/write-return proves the routing decision already
+  happened under the then-current env (modulo the B8 kprobe
+  timing bar at P2 entry). HOLD (not sampled-at-OPEN): in-process
   mode changes on usp* are refused while old q0 I/O can route (tuner
   already phys-only + explicit usp exclusion); the (4) audit re-verifies
-  the FULL predicate every tick. DRIFT IS NEVER INSTANTLY SAFE: mode
+  FULL predicate every tick. DRIFT IS NEVER INSTANTLY SAFE: mode
   drift → synchronous revoke + fence; epochs finalized after the last
   GOOD readback are marked ASYNC-SUSPECT; step-6 mutation is then
   prohibited by a PERMUTATION-FREEZE until reboot (persisted flag, new
   `/var/lib/xpf/pmech-permutation-freeze` beside the kernel-promoted
-  state, cleared only at boot — reboot is the designated retirement
-  boundary for untrackable downstream skbs); same-env reopen is allowed
-  after full re-admission (fresh predicate PASS incl. mode) + zero
-  old-epoch I/O outstanding, but routing-env mutation stays refused.
+  state — reboot is the designated retirement boundary for
+  untrackable downstream skbs). FLAG DISCIPLINE (R9 P1-freeze —
+  BOOT-BOUND SELF-CLEARING, the named agent is the supervisor
+  itself on read — no external clearer exists or is needed):
+  content = `{boot_id, entries[{kind, gen/epoch?, reason, at}]}`;
+  kinds: `crash-unclean` (written by case-(4) crash),
+  `mode-drift` (written by drift fence), `helper-unclean`
+  (written by helper-handoff, (g)). Every read compares
+  `flag.boot` vs current boot FIRST: stale boot → best-effort
+  unlink + treat as CLEAR (post-reboot mutation allowed again
+  after fresh-init + re-admission — no re-freeze, no forever-
+  refused mutation); current boot + non-empty entries → mutation
+  REFUSED. Stale-unlink failure → refuse + alarm (disk broken ⇒
+  deny, consistent with authority persist failures). Non-ENOENT
+  read error → treat as SET (fail-closed) + alarm. Case-(2)
+  fresh-init ALSO unlinks the flag as hygiene (belt; the
+  self-clear is the normative mechanism, order-independent).
+  Same-env reopen is allowed after full re-admission (fresh
+  predicate PASS incl. mode) + zero old-epoch I/O outstanding,
+  but routing-env mutation stays refused while boot-current
+  entries exist.
   ENFORCEMENT: admission verifies every predicate field; change attempts
   while OPEN are refused; a kernel change means deny until reviewed and
   listed. While permits are OPEN the refused-change set is (6): any
@@ -1399,24 +1716,36 @@ all 35 design paths exist, as checked in §4.2.
   resolve or death-proof to `Leaked`; DEFERRED-I/O CHECK — op held
   unresolved in the ring after terminal-`Uncertain` is acked → the M1
   ack MUST fail; DOWNSTREAM-LIFETIME CHECK — mode cells
-  (RPS-empty/RFS-excluded/GRO-off/no-XDP/TC-pinned/kernel-allowlisted
-  enforced + drift→revoke+fence+freeze) PLUS mutation attempted with
-  unreleased I/O → prohibited (a terminal-CQE-complete skb pending
-  downstream is IMPOSSIBLE under the enforced mode because its routing
-  already decided — asserted by mode proof, not counters); RFS FIXTURE
-  — all listed mode fields safe + `rps_flow_cnt!=0`/table present →
-  admission MUST refuse; MISSING-QUEUE FIXTURE — empty rx-* dir set →
-  refuse; ALLOWLIST-EVIDENCE FIXTURES — review record present with
-  exact member strings + reject-mismatched-identity at EVERY boundary
-  (bake/sign/publish/validate/LANE-1/arm + ordinary-boot + rollback,
-  F0–F9 incl F0 first-recording pins, F5b booted-non-member,
-  F5c rollback-non-member) + per-boundary PINNED-TUPLE match (each
-  boundary compares against the repo pin on all four fields, never
-  manifest↔inventory agreement alone) + per-branch family column
-  (B1–B6 L2, B7 v4+v6) + F-statuses (all SPECIFIED until P2 executes);
-  DRIFT FIXTURE — inject mode drift → revoke +
-  fence + permutation-freeze (mutation refused even after fence,
-  same-env reopen allowed, flag persists across helper restart).
+  (RPS-empty/RFS-excluded/GRO-off/no-XDP/TC-pinned/rx_batched-zero/
+  kernel-allowlisted enforced + drift→revoke+fence+freeze) PLUS
+  mutation attempted with unreleased I/O → prohibited (a
+  terminal-CQE-complete skb pending downstream is IMPOSSIBLE under
+  the enforced mode because its routing already decided — asserted
+  by member-text mode proof (record §4) + the B8 kprobe timing bar,
+  not counters); RFS FIXTURE — all listed mode fields safe +
+  `rps_flow_cnt!=0`/table present → admission MUST refuse;
+  RX_BATCHED FIXTURE — ethtool-set `rx_max_coalesced_frames=64`
+  while OPEN → revoke+fence+freeze (drift path — the structural
+  `!more` proof makes this belt, tested anyway); SENDMSG-MUTANT —
+  route USP writes through sendmsg → must fail loud `ENOTSOCK`,
+  never silent success (red-team; base probe EXECUTED, record
+  §7); KPROBE SYNC-PROOF (P2 on the member kernel — the timing
+  bar no code read can give): `ip_forward`/`ip6_forward`
+  entry+exit strictly inside the `tun_chr_write_iter` window for
+  xpf-shape writes, both families; MISSING-QUEUE FIXTURE — empty
+  rx-* dir set → refuse; ALLOWLIST-EVIDENCE FIXTURES — completed
+  v10 record + tuple-MEMBERSHIP reject at EVERY boundary
+  (bake/sign/publish/validate/LANE-1/arm + ordinary-boot +
+  rollback, F0–F9 incl F0 pin-confirmation, F5b booted-non-member,
+  F5c rollback-non-member; coherent-B `-31` + revision-skew
+  REJECTED at each — recipes EXECUTED as probes, record §7,
+  LANDED gates at P2 entry) + per-branch member-text table
+  (B1–B8 with file:line@tag) + honest F-statuses
+  (RECIPE-EXECUTED, never LANDED pre-P2); DRIFT FIXTURE — inject
+  mode drift → revoke + fence + boot-bound permutation-freeze
+  (mutation refused even after fence, same-env reopen allowed,
+  flag persists across helper restart AND self-clears on boot
+  change — post-reboot mutation-allowed-again cell REQUIRED).
 - M2 egress oracle: before the first Permit is coded, approve a design that
   correlates each q0 submission to the actual selected egress table/domain and
   observes post-write disposition. The nft `delivered` witness is only a
@@ -1501,13 +1830,19 @@ all 35 design paths exist, as checked in §4.2.
   resolve/death — never silent effectiveness). SECURITY PROPERTY: NO
   emission under an EFFECTIVE-revoked prefix. SERIALIZATION is the
   acknowledged-close RENDEZVOUS (not a shared mutex — coordinator
-  publish is lock-free Arc-swap, core `inner` a different domain):
-  publish MUST obtain `FenceAuthorityAck` (old prefix gen) BEFORE the
-  Arc-swap install; the ack scan under core `inner` linearizes against
-  `pre_write`/`resolve_write`/`terminalize`; the writer holds old-gen
-  `WriteStarted` across revalidate→TUN→resolve, so it is visible to
-  the scan and BLOCKS the ack (two-phase rescan closes the
-  pre_write-after-scan race). `revalidate_permit_commit(stamped,
+  publish is lock-free Arc-swap; the RUST side linearizes under the
+  SOLE (c)/(e) three-lock hold, R9-SEC-01 — this paragraph implements
+  it, superseding any single-lock reading): publish MUST obtain
+  `FenceAuthorityAck` (old prefix gen) BEFORE the Arc-swap install;
+  the ack scan holds `core.inner → journal.records →
+  obligation-store` simultaneously and linearizes against
+  `pre_write`/`resolve_write`/`terminalize` AND against handoff
+  commit (same order both sides — no interleave observes a
+  half-committed death); the writer holds old-gen `WriteStarted`
+  across revalidate→TUN→resolve, so it is visible to the scan and
+  BLOCKS the ack (two-phase rescan per M1 (4) closes the
+  pre_write-after-scan race; resolve leg between the holds).
+  `revalidate_permit_commit(stamped,
   current)` (called from `slow_path_worker` after `pre_write` `Proceed`,
   before the TUN write; `stamped` = frame's generations + prefix-hash +
   zone/policy hash; `current` = CURRENT installed RuntimeView at commit,
@@ -1630,6 +1965,20 @@ all 35 design paths exist, as checked in §4.2.
   polarity: any lane that cannot prove the fence, the release fact, the
   traversal, the mode, the guard, the audit, or the marker keeps P2
   deny-only.
+ - R10 — Helper-incarnation confusion: a helper-only crash/restart (xpfd
+  running) replays cached authority into a fresh store and attests
+  vacuous-clean fences for a generation whose I/O it never saw; a
+  forced SIGKILL during writer teardown leaves kernel I/O unprovable.
+  Mitigation: (g) helper-incarnation handoff — durable per-exit
+  clean/unclean verdicts bound to (boot, daemon_pid, procGen,
+  helper_pid), replay gating (`BindHelperIncarnation`, unbound
+  refuses), S4 revoke-to-CLOSING on every helper exit, fenced-
+  generation import in the new helper, cumulative boot-bound
+  `helper-unclean` freeze entries (reboot-only retirement). Kill
+  polarity: any handoff cell failing (replay pre-handoff, missing
+  verdict, generation reuse, cross-daemon inherit) keeps P2
+  deny-only; the task-exit-finality alternative needs its own
+  evidence before it can replace durable state.
 
 ## 7. Test plan
 
@@ -1695,7 +2044,22 @@ slice commit's Validation section):
   `SendFenceClose` full-round-trip submitMu + 5ms bound, interface
   method + S4 field/setter + live runtime selection, S4
   `fenceAuthority`, Rust match arm, Go accepted-set + `decodeFenceAck`,
-  interleave-rejection cell); packet-correlated M2 table-254 egress
+  interleave-rejection cell); helper-handoff cells (R9O-01 — xpfd
+  RUNNING throughout): helper-only crash (kill -9 helper → unclean
+  record + freeze entry + S4 CLOSING; new helper spawns; replay
+  REFUSED pre-handoff (`ensureSubmitLocked` handoff-pending error,
+  no announce on wire); old generation fence-FAILS in the new
+  store; new generation admits; routing-env mutation refused until
+  reboot); forced-kill-during-writer-teardown (SIGKILL escalation
+  → `killed-during-teardown` unclean, same gates); clean helper
+  replacement (fence-first → clean verdict bound to old+new
+  incarnations → replay + inherit, no new unclean entry, prior
+  entries persist; mutation allowed only with EMPTY boot-current
+  freeze set); cached-replay-must-not-restore (reconnect attempt
+  pre-handoff → refused; stale-conn-to-live-helper still replays);
+  daemon-restart-ignores-handoff (handoff file from a prior daemon
+  run → unclean path; freeze entries honored); packet-correlated
+  M2 table-254 egress
   proof; M3 landing (v36 bump + `MinProtocolIngressPrefixes=36` + MAX=64
   + fixtures, commit-time overlap-reject, prefix-refresh rotation,
   row-retirement deny, lenient/HA overlap+empty deny) with rotation fenced
@@ -1775,22 +2139,47 @@ slice commit's Validation section):
   K=2 ticks (positional rotation, refill beyond captured boundary),
   fill-to-513 refused with E40, retired-generation submit → STALE
   (admission refused into retired generations), epoch-Leaked fence
-  FAIL, lock-contention try_lock refusal); cross-restart marker fixtures
+  FAIL, lock-contention try_lock refusal); fence-vs-handoff barrier
+  cells (R9-SEC-02 — `cfg(test)` rendezvous + `Barrier`, no sleeps):
+  (i) fence scan pinned inside the handoff commit window → no ack
+  unless `WriteStarted`-visible OR `Leaked`-present (revocation
+  never EFFECTIVE with pre-death buffer unwitnessed); (ii) handoff
+  commit pinned inside the fence two-phase window (scan→rescan) →
+  rescan sees `Terminal`+`Leaked`, ack still FAILS (epoch
+  permanently fenced); mutants (each must flip its cell RED):
+  single-lock scan (drop journal/obligation from the scan hold →
+  (i) false-acks), split commit (release between terminalize and
+  row insert → (ii) false-acks); cross-restart marker fixtures
   (clean-stop→restart
   →crash→restart AND crash-without-prior-clean-stop AND clean same-boot
-  restart with nonzero prior identity reopens AND boot-change-mismatch
-  → CLOSING/freeze AND crash-between-unlink-and-OPEN freezes AND
-  failed/partial shutdown (verdict-not-ok → no marker) freezes AND
-  first-install (absent+absent → fresh init + OPEN) AND crash→reboot→
-  re-admit (fresh admissible) AND clean-shutdown→reboot (stale marker
-  discarded + OPEN) AND crash-after-nil-invalidation (retire-nil and
-  ambiguous-nil variants: tombstone present, no later fence, no marker
-  → must freeze; proves absent+absent unreachable post-nil) AND
-  nil-then-fence-then-clean (must OPEN) AND marker+tombstone pair
-  (must freeze as inconsistent) AND crash-mid-tombstone-rewrite (kill
-  -9 during persist → either version → must freeze); no
-  consumed-marker reuse; `resolveStartupAuthority`
-  runs before any tick; `tryOpen` refuses unless startup admissible);
+  restart with nonzero prior identity reopens AND boot-ID mismatch
+  WITH CURRENT-BOOT authority (stale-marker-under-same-boot case 4
+  — the (e) qualified form; cross-boot mismatch → fresh-init OPEN
+  per the crash→reboot cell, NEVER freeze) → CLOSING/freeze AND
+  crash-between-unlink-and-OPEN freezes AND failed/partial shutdown
+  (verdict-not-ok → no marker) freezes AND first-install
+  (absent+absent → fresh init + OPEN) AND crash→reboot→re-admit
+  (fresh admissible) AND clean-shutdown→reboot (stale marker
+  discarded + OPEN) AND crash-after-nil-invalidation (retire-nil,
+  ambiguous-nil, candidate-publish, postack-clear — each: INVALID
+  present, no later fence, no marker → must freeze; proves
+  absent+absent unreachable post-nil) AND nil-then-fence-then-clean
+  (must OPEN) AND marker+INVALID pair (must freeze as
+  inconsistent) AND crash-mid-tombstone-rewrite (kill -9 during
+  persist → either version → must freeze) AND read-error freezes
+  (EACCES/EIO either file → freeze+alarm; reboot retries) AND
+  torn-authority (freeze+tamper alarm; reboot does NOT clear;
+  `reset-torn-fence-authority` REFUSES valid files, deletes ONLY
+  torn + sentinel, reboot then admits) AND torn-marker (freeze,
+  never consumed) AND boot_id-unreadable (freeze+alarm) AND
+  persist-failure outcomes (VALID-no-Store+retry; nil-live-freeze;
+  fresh-init-freeze) AND epoch-flusher (four CAS sites signal;
+  skip-if-stale; revoke never blocks) AND freeze-flag
+  (case-4 writes boot-bound flag; post-reboot mutation allowed
+  again; stale-unlink-failure refuses) AND crash-during-fresh-init
+  (freeze; next reboot admits); no consumed-marker reuse;
+  `resolveStartupAuthority` runs before any tick; `tryOpen`
+  refuses unless startup admissible);
   quarantine
   PREINSTALL fixture (start with a provisional reservation NOT yet uncertain,
   run `retire_all` before join → SURVIVES; ordinary expiry HOLDs; ceiling
@@ -1799,15 +2188,35 @@ slice commit's Validation section):
   authority. Exercise partial NFQUEUE
   batches (disposed prefix vs uncertain suffix) without retry-forward;
   bound/remove verdict requeue and prove exactly-one `tx_delegated`
-  writer + limiter behavior before a Permit arm; lifecycle cells:
-  construction-failure (journal/queue constructor fails →
-  `FallbackWhenNone::handle-not-live` + full supervision teardown, no
-  half-armed D11), shutdown-order (`stop()` before `close()` on both
-  handles, wrong order fails closed), no-swap replacement (no live
-  handle substitution — close+reopen only, old object kept alive via
-  preserved Arc until its fence acks), last-Arc (`shutdown_skipped_drop`
-  alarm on undriven Drop + no join; every D11 span prove-joined in the
-  common close path + writer quiescence before join).
+  writer + limiter behavior before a Permit arm; lifecycle cells (ALL
+  in LIFECYCLE vocabulary — `SlowPathReinjector::new`,
+  `tx`/`tx_delegated`, retained `JoinHandle`s, `spawn_named_worker`,
+  `shutdown()`, `snapshot.rs` None-arm; `FallbackWhenNone`,
+  `stop()`/`close()`, `D11-span` RETIRED): second-spawn failure
+  (fail delegated `spawn_named_worker` → trusted sender dropped +
+  trusted handle joined pre-`Err` (thread reaped, join proves it) +
+  `snapshot.rs:669-680` None-arm pins `last_error` + no authority);
+  handshake-`Fail` (`:875-885` → BOTH senders dropped + BOTH handles
+  taken+joined outside locks + death scan asserts empty pre-`Err`);
+  reaper-construction failure (fail reaper spawn → both senders
+  dropped + both handles joined + `Err`, same discipline);
+  double-stop (second `shutdown()` with slots `Done` → `Ok`
+  no-op; with slots `Pending` → wait-on-`joined_done`-then-`Ok`);
+  reaper-vs-stop arbitration (deterministic race harness driving
+  BOTH winner orders + exactly-once take + exactly-once death
+  decision; stop-loser waits `done_cv`, reaper-loser defers;
+  contention → winner-retained proof + retry-terminalize, never
+  re-take; steal path with `STOLEN_COMMIT_ZOMBIE` gauge; 1s total
+  bound → `TEARDOWN_COMMIT_STALL` alarm + fail-stop abort (never
+  proceed); reaper pending-age → `REAPER_COMMIT_STALL` + deny-all);
+  normal-vs-unhealthy replacement (healthy → preserved Arc stays
+  LIVE, generation fence retires old D11 gen, NO destructive
+  shutdown in `stop_inner`; unhealthy → else-arm `old.shutdown()`
+  before new publish, never republish-after-shutdown);
+  last-Arc (`shutdown_skipped_drop` alarm on undriven `Drop` + no
+  join; every `SlowPathReinjector` incarnation's writer handles +
+  reaper handle prove-joined in `shutdown()` + writer quiescence
+  before join).
 - E-row taxonomy cells: the closed table is `reason_for_erow` (E1–37 →
   reason byte, `ipsec_inner_queue.rs:94-129`), validity {5,6}∪[32,60]
   (`:88-90`, `reason_map_is_closed` test), Go mirror
@@ -1935,6 +2344,18 @@ slice commit's Validation section):
    KILL POLARITY: if the owner now requires multi-VRF P-MECH in V1, the D5c/M3
    single-domain design is insufficient — kill §1.5-as-Y, re-plan item #6.
    Assessment: no evidence of changed ownership; confirm at P2 kickoff.
+ 8. **Does the helper-incarnation handoff actually retire every way a fresh
+  store can speak for a dead generation — or does a quieter path (stale
+  Unix conn surviving the exit, BPF-map rows outliving both helpers,
+  or a second crash inside the handoff window) bypass it?** The design
+  gates replay, revokes S4, fences generations, and persists verdicts —
+  but each mechanism has a seam (conn liveness vs incarnation binding,
+  map ownership vs store ownership, verdict write vs crash). KILL
+  POLARITY: a demonstrated bypass kills (g)-as-designed — re-plan on
+  conn-bound incarnation tokens and/or map-generation fencing.
+  Assessment: no bypass demonstrated; the handoff cells (crash, kill,
+  clean, replay-refused, cross-daemon) are the tripwires — any cell
+  that cannot be built deterministically reopens this question.
 
 ## 9. Evidence appendix (commands run this assessment; cwd `/var/tmp/worktrees/9506-research`)
 
@@ -1958,10 +2379,42 @@ grep -rn 'InputPermitCommitter\|CompletionInputReady' pkg/ userspace-dp/src/
 grep -rn 'xpf-usp1' pkg/routing/*.go                # no hits → M1 absent
 sed -n '405,470p' pkg/daemon/daemon_transit_gate.go # InstallArmedTransitFence (fence inversion)
 docs/log/9506-observe.md tail                       # 30/30 VOID (G2 consumer unavailable)
-```
+ ```
 
-Prior-review note: the Sep-25 delta assessment comment (issue #9506) and its
-D11-clarification comment were used as the starting inventory and every load-bearing
-claim in them was re-verified against `028c4e4e2` above; agreements are cited by
-file:line, and the two corrections versus Sep-25 are (a) F1 is now landed
-(#11107) and (b) protocol is v35, not v30.
+ ```text
+ # v10 additions (2026-09-27; origin/master = 3be469bc3, re-verified)
+ grep -rn 'ipsecOverlayAcked' pkg/daemon/*.go  # ack :237/:332/:361/:366
+                                               # (reconcile); nil :17/:24 (fence),
+                                               # :287 (reconcile), :1519/:1689 (wiring)
+ sed -n '270,446p' pkg/daemon/ipsec_reinject_supervisor.go  # 4 permit CAS sites
+                                                             # :298/:340/:365/:435
+ sed -n '121,162p' pkg/cluster/sync_boot_incarnation.go  # bootIDPath + parse
+                                                          # (zero-fallback NOT reused)
+ sed -n '60,120p;630,683p' userspace-dp/src/afxdp/coordinator/reconcile/{teardown,snapshot}.rs
+                                               # preserved-Arc clone + republish arms
+                                               # + None-arm fallback (:669-680)
+ sed -n '799,907p' userspace-dp/src/slowpath.rs  # new(): spawns :811/:834,
+                                                  # handshake :866-888; JoinHandles discarded
+ sed -n '272,407p' pkg/dataplane/userspace/process_supervisor.go  # crash→disarm→restart
+ sed -n '518,617p' pkg/dataplane/userspace/process.go  # stopLocked + SIGKILL :609
+ sed -n '57,113p' pkg/nfqueue/reinject_socket.go  # announcePayload replay on reconnect
+ sed -n '551,558p' pkg/upgrade/kernel_run.go  # Gate 2 running==candidate only
+ sed -n '84,130p' pkg/upgrade/kernel_status.go  # ReadChannelStatus = reporting
+ sed -n '376,445p' scripts/dist/sign.py  # nonempty guest_kernel only (gap, executed)
+ sed -n '700,760p' scripts/dist/publish.py  # manifest↔inventory agreement only (gap)
+ sed -n '1185,1230p' scripts/image/validate.py  # scenario A floor (gap)
+ curl …/dists/resolute-security/…/Packages.gz  # member rows 7.0.0-30.30 + SHAs
+ git ls-remote …/+git/resolute Ubuntu-7.0.0-30.30  # tag → 399867a7
+ git clone --depth 1 --branch Ubuntu-7.0.0-30.30 …  # commit d974a4063
+ sha256sum linux-image/buildinfo debs  # MATCHES Packages (6f01659e/24af1791)
+ grep CONFIG_ buildinfo config  # 4KSTACKS absent; BRIDGE=m; NF_TABLES_BRIDGE=m
+ grep/sed member tun.c/dev.c/ip_input.c/ip6_input.c  # B1-B8 branch lines (record §7)
+ python3 ENOTSOCK probe  # sendmsg on TUN char fd → errno 88 (non-socket)
+ python3 sign/publish/floor/member probes  # gaps SIGN/PUBLISH/PASS -31; predicate REJECTs
+ ```
+
+ Prior-review note: the Sep-25 delta assessment comment (issue #9506) and its
+ D11-clarification comment were used as the starting inventory and every load-bearing
+ claim in them was re-verified; v10 re-verified all load-bearing cites at
+ `3be469bc3` above (nil/epoch sites, helper lifecycle, spawn sites, image gates);
+ the two corrections versus Sep-25 stand: (a) F1 landed (#11107), (b) v35.
