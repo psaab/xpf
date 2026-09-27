@@ -674,6 +674,10 @@ mod tests_session_hit_authority_window_10591;
 #[cfg(test)]
 #[path = "tests_host_bound_post_dnat_9529.rs"]
 mod tests_host_bound_post_dnat_9529;
+// #10981: secondary policy-deny sites preserve evaluated application attribution.
+#[cfg(test)]
+#[path = "tests_policy_deny_app_10981.rs"]
+mod tests_policy_deny_app_10981;
 // #9563: the #8356 re-derivation declines host-bound (LocalDelivery) sessions.
 #[cfg(test)]
 #[path = "tests_host_bound_revalidation_9563.rs"]

@@ -1194,6 +1194,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow,
                                 meta,
                                 from_zone_id,
+                                flow.forward_key.dst_port,
                                 now_ns,
                             );
                         }
@@ -2164,6 +2165,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // match below (None is unreachable when exempt —
                             // lo0 always answers — so the deny arm cannot fire
                             // for it, and the accept arm runs unchanged).
+                            let host_bound_dst = session_host_bound_policy_dst(
+                                flow,
+                                resolved.key.dst_port,
+                                resolved.decision,
+                            );
                             let gated = if solicited_exempt {
                                 // The owner-only TUN-origin reverse exemption
                                 // is an explicit host-inbound proof: the forward
@@ -2190,12 +2196,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     authority_zone,
                                     // #9529: the service port after destination
                                     // translation; lo0 below stays on the wire frame.
-                                    session_host_bound_policy_dst(
-                                        flow,
-                                        resolved.key.dst_port,
-                                        resolved.decision,
-                                    )
-                                    .1,
+                                    host_bound_dst.1,
                                     matches!(flow.dst_ip, IpAddr::V6(_)),
                                     // #3171: first L4 byte = ICMP/ICMPv6 type, so an
                                     // error/PMTUD control message stays admitted on a
@@ -2273,6 +2274,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow,
                                         meta,
                                         authority_zone,
+                                        host_bound_dst.1,
                                         now_ns,
                                     );
                                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -3526,6 +3528,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow,
                                         meta,
                                         from_zone_id,
+                                        policy_dst_port,
                                         now_ns,
                                     );
                                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -7136,6 +7139,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         desc.len as u64,
                                     )
                                 {
+                                    let app_id = ports
+                                        .map(|(_, policy_dst_port)| {
+                                            resolve_policy_deny_app_id(
+                                                &worker_ctx.forwarding.app_catalog,
+                                                adj_flow,
+                                                policy_dst_port,
+                                            )
+                                        })
+                                        .unwrap_or(0);
                                     let owner_rg_id = owner_rg_for_resolution(
                                         worker_ctx.forwarding,
                                         decision.resolution,
@@ -7150,7 +7162,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         owner_rg_id,
                                         policy_result.policy_id,
                                         policy_result.action,
-                                        0,
+                                        app_id,
                                         // SILENT drop. There is no route to the
                                         // destination, so a `reject` term cannot be
                                         // honoured by sending anything onward; #3615's
