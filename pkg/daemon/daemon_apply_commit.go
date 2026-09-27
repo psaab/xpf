@@ -389,18 +389,18 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	if syncPeer.wantsPush(d.cluster) {
 		peerPushErr = d.pushCommittedConfigToPeer(peerSnapshotAuth)
 	}
-	joined := errors.Join(applyErr, clearErr, peerPushErr)
+	localErr := errors.Join(applyErr, clearErr)
+	joined := errors.Join(localErr, peerPushErr)
 	// The store-side candidate lineage was already retired at bind time in
 	// commitWithGenBinding, which transferred ownership to the daemon-side
 	// descriptor copy keyed by activeGen. That copy is retained here in every
 	// outcome for peer retry/reconnect and pruned by the next commit's bind.
-	// #4957: a fully-successful commit apply (no fatal apply error, no partial
-	// session-invalidation) means the committed active config has converged on
-	// the dataplane. Stamp it applied so that if THIS node later becomes secondary and
-	// the new primary syncs this same config back, handleConfigSync's converged
-	// shortcut recognizes it without a redundant re-apply. A non-nil joined error
-	// leaves the prior digest — the config did not fully converge.
-	if joined == nil && d.store != nil {
+	// #4957: a fully-successful local commit apply (no fatal apply error,
+	// partial session-invalidation, or apply error) means the committed active
+	// config has converged on the dataplane. A peer push failure is independent:
+	// it must not erase the local applied proof, though it remains in the return
+	// error for reconnect/reconciliation.
+	if localErr == nil && d.store != nil {
 		d.store.MarkActiveApplied()
 	}
 	resp := compiled
@@ -484,8 +484,7 @@ func (d *Daemon) pushCommittedConfigToPeer(
 	var activeCfg *config.Config
 	var configText string
 	if d.store != nil {
-		activeCfg = d.store.ActiveConfig()
-		configText = d.store.ShowActive()
+		activeCfg, configText, _ = d.activeConfigSnapshotForPeer()
 	}
 	if peerSnapshotAuth == nil {
 		var err error
@@ -549,10 +548,11 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// sessions on THIS node too; the standby is not primary, so its own clear
 	// deletes locally without re-propagating (belt-and-suspenders alongside the
 	// primary's delete-sync).
+	d.pendingRenameMu.Lock()
 	oldActive := d.store.ActiveConfig()
-
 	var syncErr error
 	compiled, syncErr = d.store.SyncApply(configText, chassisPreserve)
+	d.pendingRenameMu.Unlock()
 	if syncErr != nil {
 		return nil, syncErr
 	}
@@ -974,7 +974,9 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		return
 	}
 
+	d.pendingRenameMu.Lock()
 	prevCfg, ok := d.store.PromoteRollback(gen)
+	d.pendingRenameMu.Unlock()
 	if !ok {
 		// Superseded (nested CommitConfirmed / ConfirmCommit) or no
 		// pending rollback target — nothing happened, nothing to apply.

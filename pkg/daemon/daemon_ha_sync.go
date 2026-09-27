@@ -446,12 +446,10 @@ func (d *Daemon) activeConfigSnapshotForPeer() (*config.Config, string, []config
 	}
 	d.pendingRenameMu.Lock()
 	defer d.pendingRenameMu.Unlock()
-	cfg := d.store.ActiveConfig()
+	cfg, configText, activeGen := d.store.ActiveConfigAndText()
 	if cfg == nil {
 		return nil, "", nil
 	}
-	configText := d.store.ShowActive()
-	activeGen, _ := d.store.ActiveSnapshot()
 	pending := d.pendingRenameApplies[activeGen]
 	ancestry := append([]configstore.RenameDescriptor(nil), pending.descriptors...)
 	return cfg, configText, ancestry
@@ -472,15 +470,11 @@ func (d *Daemon) activeConfigSnapshotAndReserveForPeer(
 	}
 	d.pendingRenameMu.Lock()
 	defer d.pendingRenameMu.Unlock()
-	cfg := d.store.ActiveConfig()
-	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.ConfigSync {
+	cfg, configText, activeGen := d.store.ActiveConfigAndText()
+	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.ConfigSync ||
+		configText == "" || (expectedHash != 0 && configGenerationHash(configText) != expectedHash) {
 		return nil, "", nil, 0
 	}
-	configText := d.store.ShowActive()
-	if configText == "" || (expectedHash != 0 && configGenerationHash(configText) != expectedHash) {
-		return nil, "", nil, 0
-	}
-	activeGen, _ := d.store.ActiveSnapshot()
 	pending := d.pendingRenameApplies[activeGen]
 	ancestry := append([]configstore.RenameDescriptor(nil), pending.descriptors...)
 	return cfg, configText, ancestry, ss.ReserveConfigGen()

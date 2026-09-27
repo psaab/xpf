@@ -195,6 +195,9 @@ func TestCommitConfirmedPeerProtocolRevalidatedAfterApply10782(t *testing.T) {
 	if got := len(store.ActiveConfig().Security.GlobalPolicies); got != 1 {
 		t.Fatalf("commit-confirmed did not retain its local promotion after the queue deferral; policies=%d", got)
 	}
+	if !store.ActiveApplied() {
+		t.Fatal("successful local apply lost its applied marker because the peer authorization became stale")
+	}
 	if *pushes != 0 {
 		t.Fatalf("stale preflight authorization pushed %d configs to the new peer; want none", *pushes)
 	}
