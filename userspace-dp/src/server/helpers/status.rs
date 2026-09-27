@@ -282,6 +282,11 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.tunnel_purge_reservations_released_total();
     state.status.synced_import_reserve_refused =
         state.afxdp.synced_import_reserve_refused_total();
+    state.status.synced_import_mirror_refused =
+        state.afxdp.synced_import_mirror_refused_total();
+    state.status.mirror_restore_republished = state.afxdp.mirror_restore_republished_total();
+    state.status.mirror_restore_deleted = state.afxdp.mirror_restore_deleted_total();
+    state.status.mirror_restore_failed = state.afxdp.mirror_restore_failed_total();
     // #7160 (#2387): imports refused for an unresolvable routing domain. Wired
     // here rather than parked in UNSURFACED because that allowlist is
     // deliberately EMPTY (#7398 emptied it), and because this counter is the

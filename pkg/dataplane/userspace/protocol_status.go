@@ -673,6 +673,23 @@ type ProcessStatus struct {
 	// BEFORE the failover rather than after.
 	SyncedImportReserveRefused uint64 `json:"synced_import_reserve_refused,omitempty"`
 
+	// SyncedImportMirrorRefused counts strict-mirror imports rejected because
+	// the helper could not write the conntrack mirror (the bare
+	// mirror-write-failed health failure).
+	SyncedImportMirrorRefused uint64 `json:"synced_import_mirror_refused,omitempty"`
+
+	// MirrorRestoreRepublished counts overwritten forward-mirror rows restored
+	// by republishing their authoritative survivor.
+	MirrorRestoreRepublished uint64 `json:"mirror_restore_republished,omitempty"`
+
+	// MirrorRestoreDeleted counts overwritten forward-mirror rows deleted when
+	// no previous authoritative survivor existed.
+	MirrorRestoreDeleted uint64 `json:"mirror_restore_deleted,omitempty"`
+
+	// MirrorRestoreFailed counts individual best-effort allocator or conntrack
+	// mirror restoration actions that failed.
+	MirrorRestoreFailed uint64 `json:"mirror_restore_failed,omitempty"`
+
 	// SyncedImportUnknownRoutingDomain is
 	// xpf_userspace_synced_import_unknown_routing_domain_total (#7160/#2387):
 	// peer-synced imports refused because the helper runs routing instances and
