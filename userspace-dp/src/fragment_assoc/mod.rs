@@ -48,16 +48,18 @@
 //!     load-bearing DoS property: an attacker cannot grow the table with cheap
 //!     headerless fragments.
 //!   * BOUNDED: a fixed shard count x a fixed per-shard cap, with no growth.
-//!     Shards are selected by source address, and each source has a smaller
-//!     32-entry quota, so one source cannot occupy even its whole shard. At its
-//!     quota, a source replaces its own oldest association; if its shard is full
-//!     before it reaches quota, the new association is refused rather than
-//!     evicting another source's live entry.
-//!   * PRUNE-BEFORE-EVICT (#5447): before an install evicts for the per-source
-//!     quota or refuses an install at a full shard, it reclaims EXPIRED entries
-//!     FIRST (same monotonic clock `lookup` prunes with). A source at quota only
-//!     evicts its own oldest LIVE association; another source is never the
-//!     victim of a source-limit eviction.
+//!     Shards are selected by the seeded source hash, and one admitting session
+//!     (tuple plus incarnation) has a smaller 32-entry quota within each shard.
+//!     Quotas do not trust claimed source addresses, so a spoofing session cannot
+//!     spend another session's quota. Reaching a quota refuses new keys rather
+//!     than evicting a live association; the shard cap bounds aggregate memory.
+//!   * PRUNE-BEFORE-REFUSE (#5447): before refusing an install at the per-session
+//!     shard quota or a full shard, it reclaims EXPIRED entries FIRST (same
+//!     monotonic clock `lookup` prunes with). Expired slots are reclaimed
+//!     before capacity checks, so they cannot alone cause a refusal.
+//!   * SESSION-BOUND: each entry carries the admitting session key and unique
+//!     incarnation id. Consult removes the entry as soon as that exact session
+//!     is no longer live, including a same-tuple replacement session.
 //!   * CROSS-WORKER visible for free: the cache rides `Nat64State`, which is
 //!     shared across all workers behind `Arc<ForwardingState>` (ArcSwap) and
 //!     threaded across config reloads by `from_snapshots_with_previous` — the
@@ -104,8 +106,9 @@
 //! config reloads inside `Nat64State::from_snapshots_with_previous` so in-flight
 //! datagrams keep translating. Deliberately left for a separate change.
 
+use crate::hot_hash_seed::hot_path_hash_seed;
 use crate::nat64::{Nat64ReverseInfo, ipv6_fragment_header};
-use crate::session::SessionDecision;
+use crate::session::{SessionDecision, SessionKey};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -167,10 +170,11 @@ pub(crate) const FRAG_SHARDS: usize = 16;
 /// a few hundred bytes, so a few hundred KB fixed ceiling. No payload bytes are
 /// stored (no amplification by datagram size).
 pub(crate) const FRAG_CAP_PER_SHARD: usize = 64;
-/// Maximum associations charged to one source address across the cache. Source-
-/// based shard selection makes the count local; keeping it below the shard cap
-/// reserves room for other sources even when their addresses share a shard.
-pub(crate) const FRAG_CAP_PER_SOURCE: usize = FRAG_CAP_PER_SHARD / 2;
+/// Maximum associations charged to one admitted session in a shard. Session
+/// identity includes its tuple and incarnation; packet source addresses are
+/// untrusted claims and must not let a spoofing sender spend another session's
+/// quota.
+pub(crate) const FRAG_CAP_PER_SESSION_PER_SHARD: usize = FRAG_CAP_PER_SHARD / 2;
 /// reassembly timeout): we associate a first fragment's decision with its
 /// non-first fragments, which arrive on the fast path within
 /// microseconds-milliseconds. Refreshed on every hit.
@@ -351,12 +355,15 @@ pub(crate) struct FragKey {
     pub(crate) authority: FragAuthority,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FragEntry {
     key: FragKey,
     decision: SessionDecision,
     reverse: Option<Nat64ReverseInfo>,
     deadline_ns: u64,
+    /// Key and unique incarnation of the session that admitted this fragment.
+    admitting_session: SessionKey,
+    admitting_session_id: u64,
     /// #9901 (F-010): install instant (`now_ns` at `install`), NEVER refreshed
     /// by a consult. The absolute lifetime is measured from here: an entry
     /// older than `FRAG_MAX_LIFETIME_NS` is reclaimed even when idle-fresh. A
@@ -421,17 +428,11 @@ fn ip_octets(ip: IpAddr, out: &mut [u8; 16]) -> usize {
     }
 }
 
-/// FNV-1a over the source address -> shard index. Deterministic so every
-/// association for one source maps to one bucket on every worker; this lets
-/// `install` enforce the network-wide per-source cap using its existing shard
-/// lock, with no cross-shard scan or global lock.
-///
-/// The rest of the fragment key is deliberately excluded. In particular,
-/// same-source candidates with different destinations, identifiers, protocols,
-/// or ingress authorities stay co-located for the full-key miss and alias
-/// diagnostics in `lookup`. Membership is still decided by full-key equality.
-pub(crate) fn frag_shard_index(key: &FragKey) -> usize {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+/// Seeded FNV-1a over the source address -> shard index. Stable within a process
+/// so every association for one source maps to one bucket on every worker, but
+/// randomized at boot to prevent offline collision precomputation.
+pub(crate) fn frag_shard_index_seeded(key: &FragKey, seed: u64) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ seed;
     let mut mix = |b: u8| {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -441,7 +442,11 @@ pub(crate) fn frag_shard_index(key: &FragKey) -> usize {
     for &b in &buf[..n] {
         mix(b);
     }
-    (h as usize) & (FRAG_SHARDS - 1)
+    (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (u64::BITS - FRAG_SHARDS.trailing_zeros())) as usize
+}
+
+pub(crate) fn frag_shard_index(key: &FragKey) -> usize {
+    frag_shard_index_seeded(key, hot_path_hash_seed())
 }
 
 /// #9901 (F-010): absolute-lifetime-aware liveness — the ONE predicate both
@@ -476,35 +481,23 @@ impl FragAssoc {
         }
     }
 
-    /// Install (or refresh) the association a FIRST fragment established. Only a
-    /// first fragment reaches this (the caller gates on offset 0 / MF=1 + an
-    /// admitted, resolved decision), so non-first fragments can never grow the
-    /// table. A full shard prunes EXPIRED entries first, then an at-quota source
-    /// replaces its own oldest LIVE entry. If the shard remains full but this
-    /// source is below quota, the install is refused instead of evicting a
-    /// foreign source's association (#10714). A repeat install of the same key
-    /// refreshes the deadline and moves the entry to the back (most-recently-used).
-    ///
-    /// #5624: `generation` is the current config-snapshot generation the first
-    /// fragment was admitted + resolved under. It is stamped on the entry (and
-    /// re-stamped on a same-key re-install) so `lookup` can reject an
-    /// association left over from a prior config after a commit changed
-    /// deny/NAT64 rules.
-    pub(crate) fn install(
+    /// Install (or refresh) an association for a committed FIRST fragment.
+    /// Within a shard, the cap is charged to the admitting session tuple and
+    /// incarnation, not the untrusted packet source claim. A new key at quota
+    /// is refused rather than replacing any live entry.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn install_with_session(
         &self,
         key: FragKey,
         decision: SessionDecision,
         reverse: Option<Nat64ReverseInfo>,
+        admitting_session: SessionKey,
+        admitting_session_id: u64,
         now_ns: u64,
         generation: u64,
-        // #6857: owner RG of the resolution this fragment was admitted under;
-        // 0 when no RG-bound interface owns it.
         owner_rg: i32,
     ) -> bool {
         let deadline_ns = now_ns.saturating_add(FRAG_TTL_NS);
-        // #7054: did this install sacrifice a LIVE association? Reported to the
-        // caller so the condition is observable; see the note above the eviction.
-        let mut evicted_live = false;
         let idx = frag_shard_index(&key);
         let mut shard = self.shards[idx]
             .lock()
@@ -518,6 +511,8 @@ impl FragAssoc {
             // config owns this association now, so it adopts the current
             // generation. A stale-generation refresh would otherwise resurrect
             // a prior-config verdict.
+            e.admitting_session = admitting_session;
+            e.admitting_session_id = admitting_session_id;
             e.generation = generation;
             // #6857: refresh the owner RG too. A refresh happens when a LATER
             // first fragment of the same datagram re-admits under current
@@ -532,21 +527,24 @@ impl FragAssoc {
             shard.push(e);
             return false;
         }
-        if shard.len() >= FRAG_CAP_PER_SOURCE {
-            // Prune expired slots before enforcing either limit. When source
-            // pressure reaches its quota, only its own oldest LIVE association
-            // is eligible for replacement; when the shard is full of foreign
-            // live entries, refusing this install protects those associations.
+        let session_len = shard
+            .iter()
+            .filter(|e| {
+                e.admitting_session == admitting_session
+                    && e.admitting_session_id == admitting_session_id
+            })
+            .count();
+        if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD || shard.len() >= FRAG_CAP_PER_SHARD {
+            // Prune before refusing a live session quota or a full shard.
             shard.retain(|e| frag_entry_live(e, now_ns));
-            let source_len = shard.iter().filter(|e| e.key.src == key.src).count();
-            if source_len >= FRAG_CAP_PER_SOURCE {
-                if let Some(pos) = shard.iter().position(|e| e.key.src == key.src) {
-                    shard.remove(pos);
-                    evicted_live = true;
-                } else {
-                    return false;
-                }
-            } else if shard.len() >= FRAG_CAP_PER_SHARD {
+            let session_len = shard
+                .iter()
+                .filter(|e| {
+                    e.admitting_session == admitting_session
+                        && e.admitting_session_id == admitting_session_id
+                })
+                .count();
+            if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD || shard.len() >= FRAG_CAP_PER_SHARD {
                 return false;
             }
         }
@@ -555,11 +553,45 @@ impl FragAssoc {
             decision,
             reverse,
             deadline_ns,
+            admitting_session,
+            admitting_session_id,
             created_ns: now_ns,
             generation,
             owner_rg,
         });
-        evicted_live
+        false
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install(
+        &self,
+        key: FragKey,
+        decision: SessionDecision,
+        reverse: Option<Nat64ReverseInfo>,
+        now_ns: u64,
+        generation: u64,
+        owner_rg: i32,
+    ) -> bool {
+        let admitting_session = SessionKey {
+            addr_family: key.addr_family,
+            protocol: key.protocol,
+            src_ip: key.src,
+            dst_ip: key.dst,
+            src_port: 12345,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        self.install_with_session(
+            key,
+            decision,
+            reverse,
+            admitting_session,
+            1,
+            now_ns,
+            generation,
+            owner_rg,
+        )
     }
 
     /// Consult the association for a NON-first fragment. Prunes expired entries
@@ -575,19 +607,12 @@ impl FragAssoc {
     /// to the #4617 fail-closed drop, and only a NEW first fragment re-admitted
     /// under the current config can re-establish the association. Mirrors the
     /// flow-cache `config_generation` guard (afxdp/flow_cache.rs).
-    pub(crate) fn lookup(
+    pub(crate) fn lookup_with_session(
         &self,
         key: &FragKey,
         now_ns: u64,
         generation: u64,
-        // #6857: "is this owner RG forwarding-active locally right now?".
-        //
-        // A predicate rather than the HA map, for two reasons. The RG to ask
-        // about is not known until the entry is found, so the caller cannot
-        // pre-compute a bool; and passing the map would drag
-        // `afxdp::HAGroupRuntime` (which is `pub(in crate::afxdp)`) into this
-        // module, widening a type's visibility to serve a fence. The closure
-        // keeps the HA vocabulary on the afxdp side of the boundary.
+        session_is_live: impl Fn(&SessionKey, u64) -> bool,
         owner_rg_forwarding_active: impl Fn(i32) -> bool,
     ) -> Option<(SessionDecision, Option<Nat64ReverseInfo>)> {
         let idx = frag_shard_index(key);
@@ -637,6 +662,15 @@ impl FragAssoc {
         // generation is evicted and reported as a miss, so a commit that
         // changed deny/NAT64 rules invalidates the association instead of
         // letting stale fragments keep inheriting the old verdict.
+        // Session key alone is insufficient: a later flow can reuse the same
+        // tuple after close. The stable session id fences that replacement.
+        if !session_is_live(
+            &shard[pos].admitting_session,
+            shard[pos].admitting_session_id,
+        ) {
+            shard.remove(pos);
+            return None;
+        }
         if shard[pos].generation != generation {
             shard.remove(pos);
             return None;
@@ -664,6 +698,22 @@ impl FragAssoc {
         let value = (e.decision, e.reverse);
         shard.push(e);
         Some(value)
+    }
+    #[cfg(test)]
+    pub(crate) fn lookup(
+        &self,
+        key: &FragKey,
+        now_ns: u64,
+        generation: u64,
+        owner_rg_forwarding_active: impl Fn(i32) -> bool,
+    ) -> Option<(SessionDecision, Option<Nat64ReverseInfo>)> {
+        self.lookup_with_session(
+            key,
+            now_ns,
+            generation,
+            |_, _| true,
+            owner_rg_forwarding_active,
+        )
     }
 
     /// Total live entry count across all shards (test-only; backs the bound /

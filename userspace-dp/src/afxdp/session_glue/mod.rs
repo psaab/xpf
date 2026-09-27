@@ -2923,6 +2923,9 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 ))
             });
         let shared_was_present = hit.shared_entry.is_some();
+        // Preserve the shared session incarnation before materialization takes
+        // its entry out of `hit`; local-only hits read it from the table below.
+        let shared_session_id = hit.shared_entry.as_ref().map(|entry| entry.session_id);
         let keep_transient = poison_key.is_some_and(|(key, decision, metadata, origin)| {
             should_keep_synced_hit_transient(ha_state, now_secs, key, decision, metadata, origin)
         });
@@ -2946,6 +2949,9 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags)
         };
         let resolved_key = hit.key.as_ref(&flow.forward_key);
+        let session_id = shared_session_id
+            .filter(|session_id| *session_id != 0)
+            .unwrap_or_else(|| sessions.session_id_for(resolved_key));
         let mut decision = resolved.decision;
         let resolution_target = resolution_target_for_session(flow, decision);
         let leak_incarnation = sessions.leak_incarnation(&resolved_key);
@@ -3032,6 +3038,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         };
         return Some(ResolvedFlowSessionDecision {
             key: resolved_key.clone(),
+            session_id,
             decision,
             metadata,
             origin: hit_origin,
@@ -3170,6 +3177,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     );
     Some(ResolvedFlowSessionDecision {
         key: flow.forward_key.clone(),
+        session_id: sessions.session_id_for(&flow.forward_key),
         decision,
         metadata,
         origin: SessionOrigin::ReverseFlow,

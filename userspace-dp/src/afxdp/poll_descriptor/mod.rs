@@ -2591,43 +2591,51 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // ForwardCandidate + neighbor, and store the hit decision (which for a
                         // reply is already the reverse via NatDecision::reverse). NAT64 gated
                         // on v6 (v4 installs carry the reverse info for #10132).
-                        if foreign_arrival_zone.is_none() && overlap_pre_9950.is_some() {
-                            if let Some(l3_packet) = packet_frame.get(
+                        if resolved.session_id != 0
+                            && !resolved.install_failed
+                            && foreign_arrival_zone.is_none()
+                            && overlap_pre_9950.is_some()
+                            && let Some(l3_packet) = packet_frame.get(
                                 verified_l3_or_stamp(
                                     packet_frame,
                                     meta.l3_offset,
                                     meta.addr_family,
                                 )..,
                             ) {
-                                // Raw stage-9 override (mirrors the commit-site capture —
-                                // arm-scoped shadows below do not reach this tail).
-                                let frag_authority_zone_override = ingress_zone_override;
-                                let frag_authority = frag_ingress_authority(
-                                    worker_ctx.forwarding,
-                                    meta,
-                                    frag_authority_zone_override,
-                                );
-                                if nat64_install_forward_fragment_assoc(
-                                    worker_ctx.forwarding,
-                                    l3_packet,
-                                    meta.addr_family as i32,
-                                    frag_authority,
-                                    &resolved.decision,
-                                    now_ns,
-                                    session_nat64_reverse,
-                                ) {
-                                    telemetry.counters.record_nat64_frag_assoc_evicted();
-                                }
-                                if nat_install_forward_fragment_assoc(
-                                    worker_ctx.forwarding,
-                                    l3_packet,
-                                    meta.addr_family as i32,
-                                    frag_authority,
-                                    &resolved.decision,
-                                    now_ns,
-                                ) {
-                                    telemetry.counters.record_nat64_frag_assoc_evicted();
-                                }
+                            // Raw stage-9 override (mirrors the commit-site capture —
+                            // arm-scoped shadows below do not reach this tail).
+                            let frag_authority_zone_override = ingress_zone_override;
+                            let frag_authority = frag_ingress_authority(
+                                worker_ctx.forwarding,
+                                meta,
+                                frag_authority_zone_override,
+                            );
+                            let frag_session_key = &resolved.key;
+                            let frag_session_id = resolved.session_id;
+                            if nat64_install_forward_fragment_assoc(
+                                worker_ctx.forwarding,
+                                l3_packet,
+                                meta.addr_family as i32,
+                                frag_authority,
+                                &resolved.decision,
+                                frag_session_key,
+                                frag_session_id,
+                                now_ns,
+                                session_nat64_reverse,
+                            ) {
+                                telemetry.counters.record_nat64_frag_assoc_evicted();
+                            }
+                            if nat_install_forward_fragment_assoc(
+                                worker_ctx.forwarding,
+                                l3_packet,
+                                meta.addr_family as i32,
+                                frag_authority,
+                                &resolved.decision,
+                                frag_session_key,
+                                frag_session_id,
+                                now_ns,
+                            ) {
+                                telemetry.counters.record_nat64_frag_assoc_evicted();
                             }
                         }
                         resolved.decision
@@ -4799,30 +4807,38 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta,
                                                 frag_authority_zone_override,
                                             );
-                                            if nat64_install_forward_fragment_assoc(
-                                                worker_ctx.forwarding,
-                                                l3_packet,
-                                                meta.addr_family as i32,
-                                                frag_authority,
-                                                &decision,
-                                                now_ns,
-                                                None,
-                                            ) {
-                                                telemetry
-                                                    .counters
-                                                    .record_nat64_frag_assoc_evicted();
-                                            }
-                                            if nat_install_forward_fragment_assoc(
-                                                worker_ctx.forwarding,
-                                                l3_packet,
-                                                meta.addr_family as i32,
-                                                frag_authority,
-                                                &decision,
-                                                now_ns,
-                                            ) {
-                                                telemetry
-                                                    .counters
-                                                    .record_nat64_frag_assoc_evicted();
+                                            let frag_session_id =
+                                                sessions.session_id_for(&flow.forward_key);
+                                            if frag_session_id != 0 {
+                                                if nat64_install_forward_fragment_assoc(
+                                                    worker_ctx.forwarding,
+                                                    l3_packet,
+                                                    meta.addr_family as i32,
+                                                    frag_authority,
+                                                    &decision,
+                                                    &flow.forward_key,
+                                                    frag_session_id,
+                                                    now_ns,
+                                                    None,
+                                                ) {
+                                                    telemetry
+                                                        .counters
+                                                        .record_nat64_frag_assoc_evicted();
+                                                }
+                                                if nat_install_forward_fragment_assoc(
+                                                    worker_ctx.forwarding,
+                                                    l3_packet,
+                                                    meta.addr_family as i32,
+                                                    frag_authority,
+                                                    &decision,
+                                                    &flow.forward_key,
+                                                    frag_session_id,
+                                                    now_ns,
+                                                ) {
+                                                    telemetry
+                                                        .counters
+                                                        .record_nat64_frag_assoc_evicted();
+                                                }
                                             }
                                         }
                                         let forward_entry = SyncedSessionEntry {
@@ -5480,6 +5496,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             meta.addr_family as i32,
                             frag_authority,
                             now_ns,
+                            |session_key, session_id| {
+                                (sessions.session_id_for(session_key) == session_id
+                                    && sessions.has_session_hit_at(session_key, now_ns))
+                                    || crate::afxdp::shared_ops::lock_shared_recover(
+                                        worker_ctx.shared_sessions,
+                                    )
+                                    .get(session_key)
+                                    .is_some_and(|entry| entry.session_id == session_id)
+                            },
                             worker_ctx.ha_state,
                             now_secs,
                         )
@@ -5502,6 +5527,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta.addr_family as i32,
                                 frag_authority,
                                 now_ns,
+                                |session_key, session_id| {
+                                    (sessions.session_id_for(session_key) == session_id
+                                        && sessions.has_session_hit_at(session_key, now_ns))
+                                        || crate::afxdp::shared_ops::lock_shared_recover(
+                                            worker_ctx.shared_sessions,
+                                        )
+                                        .get(session_key)
+                                        .is_some_and(|entry| entry.session_id == session_id)
+                                },
                                 worker_ctx.ha_state,
                                 now_secs,
                             )

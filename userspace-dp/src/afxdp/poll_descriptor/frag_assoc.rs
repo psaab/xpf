@@ -94,12 +94,15 @@ pub(in crate::afxdp) fn frag_ingress_authority(
 /// v6-side installs on AF_INET6 and carries `Nat64ReverseInfo` for AF_INET reply
 /// associations, which the flowless reverse consult returns to the NAT64 builder.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn nat64_install_forward_fragment_assoc(
     forwarding: &ForwardingState,
     l3_packet: &[u8],
     addr_family: i32,
     authority: crate::fragment_assoc::FragAuthority,
     decision: &SessionDecision,
+    admitting_session: &crate::session::SessionKey,
+    admitting_session_id: u64,
     now_ns: u64,
     nat64_reverse: Option<Nat64ReverseInfo>,
 ) -> bool {
@@ -114,21 +117,22 @@ pub(super) fn nat64_install_forward_fragment_assoc(
     {
         return false;
     }
-    if let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority) {
+    if let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority)
+    {
         // #5624: stamp the association with the generation of the forwarding
         // state that admitted this first fragment. `build_generation` advances
         // on every config reload, so an association installed here is rejected
         // once a later commit changes deny/NAT64 rules.
-        return forwarding.nat64.frag_assoc.install(
+        return forwarding.nat64.frag_assoc.install_with_session(
             key,
             *decision,
-            (addr_family == libc::AF_INET).then_some(nat64_reverse).flatten(),
+            (addr_family == libc::AF_INET)
+                .then_some(nat64_reverse)
+                .flatten(),
+            admitting_session.clone(),
+            admitting_session_id,
             now_ns,
             forwarding.nat64.build_generation,
-            // #6857: stamp the runtime entitlement this admission rested on, so
-            // a later fragment can be refused once the RG stops forwarding
-            // locally. The config generation beside it cannot see an RG
-            // transition: that changes no config and bumps no snapshot.
             crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, decision.resolution),
         );
     }
@@ -150,6 +154,7 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     addr_family: i32,
     authority: crate::fragment_assoc::FragAuthority,
     now_ns: u64,
+    session_is_live: impl Fn(&crate::session::SessionKey, u64) -> bool,
     // #6857: the runtime-ownership fence needs to ask whether the association's
     // stamped owner RG is STILL forwarding-active locally.
     ha_state: &std::collections::BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
@@ -161,10 +166,11 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     // changed deny/NAT64 rules) is treated as a miss + evicted here, so the
     // non-first fragment falls through to the #4617 fail-closed drop instead of
     // inheriting a stale verdict.
-    let (decision, reverse) = forwarding.nat64.frag_assoc.lookup(
+    let (decision, reverse) = forwarding.nat64.frag_assoc.lookup_with_session(
         &key,
         now_ns,
         forwarding.nat64.build_generation,
+        session_is_live,
         |rg| {
             ha_state
                 .get(&rg)
@@ -202,12 +208,15 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
 /// with no address rewrite, or one that will not forward is never cached, so an
 /// unassociated non-first fragment still falls to the flowless default policy.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn nat_install_forward_fragment_assoc(
     forwarding: &ForwardingState,
     l3_packet: &[u8],
     addr_family: i32,
     authority: crate::fragment_assoc::FragAuthority,
     decision: &SessionDecision,
+    admitting_session: &crate::session::SessionKey,
+    admitting_session_id: u64,
     now_ns: u64,
 ) -> bool {
     // Cross-family NAT64 has its own install; here we cache only an ordinary
@@ -227,17 +236,16 @@ pub(super) fn nat_install_forward_fragment_assoc(
     {
         return false;
     }
-    if let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority) {
-        return forwarding.nat64.frag_assoc.install(
+    if let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority)
+    {
+        return forwarding.nat64.frag_assoc.install_with_session(
             key,
             *decision,
             None,
+            admitting_session.clone(),
+            admitting_session_id,
             now_ns,
             forwarding.nat64.build_generation,
-            // #6857: stamp the runtime entitlement this admission rested on, so
-            // a later fragment can be refused once the RG stops forwarding
-            // locally. The config generation beside it cannot see an RG
-            // transition: that changes no config and bumps no snapshot.
             crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, decision.resolution),
         );
     }
@@ -283,16 +291,18 @@ pub(super) fn nat_consult_forward_fragment_assoc(
     addr_family: i32,
     authority: crate::fragment_assoc::FragAuthority,
     now_ns: u64,
+    session_is_live: impl Fn(&crate::session::SessionKey, u64) -> bool,
     // #6857: the runtime-ownership fence needs to ask whether the association's
     // stamped owner RG is STILL forwarding-active locally.
     ha_state: &std::collections::BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
     now_secs: u64,
 ) -> Option<SessionDecision> {
     let key = crate::fragment_assoc::nonfirst_fragment_key(l3_packet, addr_family, authority)?;
-    let (decision, _reverse) = forwarding.nat64.frag_assoc.lookup(
+    let (decision, _reverse) = forwarding.nat64.frag_assoc.lookup_with_session(
         &key,
         now_ns,
         forwarding.nat64.build_generation,
+        session_is_live,
         |rg| {
             ha_state
                 .get(&rg)

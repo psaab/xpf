@@ -1590,6 +1590,70 @@ fn nat64_committed_first_fragment_publishes_frag_assoc_and_nonfirst_inherits_514
         "#5146: the inherited non-first fragment must be NAT64-translated (the #2562 feature)"
     );
 }
+#[test]
+fn nat64_nonfirst_fragment_drops_after_admitting_session_close_11058() {
+    let forwarding = build_forwarding_state(&nat64_frag_snapshot());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+
+    let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
+    let first = nat64_v6_frag_frame(0x0001, 0x1105_8001, src, dst, 12345, 443);
+    let (first_batch, first_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        nat64_v6_frag_meta(first.len(), src, dst),
+        true,
+    );
+    assert_eq!(first_dbg.tx, 1, "the admitted first fragment must forward");
+    assert_eq!(first_batch.nat64_translations, 1);
+
+    let admitting_session = crate::session::SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: std::net::IpAddr::V6(src),
+        dst_ip: std::net::IpAddr::V6(dst),
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    assert_ne!(sessions.session_id_for(&admitting_session), 0);
+    sessions.delete(&admitting_session);
+    assert_eq!(
+        sessions.session_id_for(&admitting_session),
+        0,
+        "precondition: the admitting session must be closed"
+    );
+
+    let non_first = nat64_v6_frag_frame(0x0018, 0x1105_8001, src, dst, 0, 0);
+    let (tail_batch, tail_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &non_first,
+        nat64_v6_frag_meta(non_first.len(), src, dst),
+        true,
+    );
+    assert_eq!(
+        tail_dbg.tx, 0,
+        "a non-first fragment must not forward after its admitting session closes"
+    );
+    assert_eq!(tail_batch.nat64_translations, 0);
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        0,
+        "consult must evict the association bound to the closed session"
+    );
+}
+
 
 // #10132: a NAT64 first fragment on an ESTABLISHED v6 forward session is a
 // session hit, not a new-flow commit. The hit record-site must publish the
@@ -1934,8 +1998,6 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
         let ha_state = txn_ha_state();
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
         binding.interface = Arc::<str>::from("reth1.0");
-        let mut sessions = SessionTable::new();
-        sessions.set_max_sessions_for_test(16);
 
         let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
         let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
@@ -1957,7 +2019,7 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
         // then read back out of that state's cache. Hand-rolling a decision here
         // could accidentally build one that is not actually forwardable, which
         // would make the filtered case pass for the wrong reason.
-        let decision = {
+        let (decision, mut sessions) = {
             let seed_fwd = build_forwarding_state(&nat64_frag_snapshot());
             let seed_ha = txn_ha_state();
             let mut seed_binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
@@ -1973,7 +2035,10 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
                 nat64_v6_frag_meta(first.len(), src, dst),
                 true,
             );
-            assert_eq!(seed_dbg.tx, 1, "the seed first fragment must translate + forward");
+            assert_eq!(
+                seed_dbg.tx, 1,
+                "the seed first fragment must translate + forward"
+            );
             let seed_authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
                 &seed_fwd,
                 nat64_v6_frag_meta(first.len(), src, dst),
@@ -1985,12 +2050,13 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
                 seed_authority,
             )
             .expect("seed key");
-            seed_fwd
+            let decision = seed_fwd
                 .nat64
                 .frag_assoc
                 .lookup(&seed_key, 0, seed_fwd.nat64.build_generation, |_| true)
                 .expect("the seed first fragment must have published an association")
-                .0
+                .0;
+            (decision, seed_sessions)
         };
 
         let authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
@@ -2001,13 +2067,29 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
         let key =
             crate::fragment_assoc::first_fragment_key(&first[14..], libc::AF_INET6, authority)
                 .expect("seeded first-fragment key");
-        // Install on the SAME clock the poll path reads (CLOCK_MONOTONIC), or the
-        // entry is already past its 2s TTL by the time the consult runs and the
-        // control below would fail for a timing reason rather than a filter one.
-        forwarding.nat64.frag_assoc.install(
+        let session_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: std::net::IpAddr::V6(src),
+            dst_ip: std::net::IpAddr::V6(dst),
+            src_port: 12345,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let session_id = sessions.session_id_for(&session_key);
+        assert_ne!(
+            session_id, 0,
+            "the genuine first fragment must leave a live session"
+        );
+        // Install the same admitted session's association on the filtered twin
+        // state, using the poll path's clock so the entry is fresh at consult.
+        forwarding.nat64.frag_assoc.install_with_session(
             key,
             decision,
             None,
+            session_key,
+            session_id,
             crate::afxdp::neighbor::monotonic_nanos(),
             forwarding.nat64.build_generation,
             0,
