@@ -145,15 +145,18 @@ const (
 	policyDenyGenerationMarker    = uint32(0x314E4547) // "GEN1" in little endian
 	policyDenyGenerationMarkerOff = 140
 )
+
 const (
 	addrFamilyInet  = 2
 	addrFamilyInet6 = 10
 )
 
 func policyDenyConfigGeneration(data []byte) (uint64, bool) {
-	if len(data) < rawEventWireSize ||
-		data[52] != eventTypePolicyDeny ||
-		binary.LittleEndian.Uint32(data[policyDenyGenerationMarkerOff:policyDenyGenerationMarkerOff+4]) != policyDenyGenerationMarker {
+	if len(data) < rawEventWireSize || data[52] != eventTypePolicyDeny {
+		return 0, false
+	}
+	marker := binary.LittleEndian.Uint32(data[policyDenyGenerationMarkerOff : policyDenyGenerationMarkerOff+4])
+	if marker != policyDenyGenerationMarker {
 		return 0, false
 	}
 	return binary.LittleEndian.Uint64(data[56:64]), true

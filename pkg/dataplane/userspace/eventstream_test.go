@@ -2655,6 +2655,7 @@ func TestDecodeSessionCloseEventCarriesThePurgeRetirementMarkerV610068(t *testin
 		t.Fatal("legacy v6 close decoded PurgeRetirement=true")
 	}
 }
+
 func TestEventStreamPolicyDenyGenerationAcrossBacklogAndReplay10978(t *testing.T) {
 	const (
 		policyID       = uint32(77)
