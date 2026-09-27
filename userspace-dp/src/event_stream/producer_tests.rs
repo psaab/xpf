@@ -130,6 +130,13 @@ fn dataplane_event_rate_limit_is_per_kind_and_ingress_zone() {
     assert_eq!(stats.policy_deny.dropped, 1);
     assert_eq!(stats.screen_drop.sent, 1);
     assert_eq!(stats.screen_drop.dropped, 0);
+    let mut status = crate::ProcessStatus::default();
+    crate::server::helpers::project_event_stream_producer_stats(&mut status, stats);
+    assert_eq!(status.event_stream_policy_deny_sent, 3);
+    assert_eq!(status.event_stream_policy_deny_dropped, 1);
+    assert_eq!(status.event_stream_policy_deny_rate_limited, 1);
+    assert_eq!(status.event_stream_policy_deny_queue_full, 0);
+    assert_eq!(status.event_stream_policy_deny_disconnected, 0);
 }
 
 #[test]

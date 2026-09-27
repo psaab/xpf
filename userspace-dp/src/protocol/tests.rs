@@ -2794,6 +2794,79 @@ fn process_status_event_stream_fields_wire_keys_1642() {
 }
 
 #[test]
+fn process_status_event_stream_producer_counters_wire_keys_10979() {
+    let status = ProcessStatus {
+        event_stream_policy_deny_sent: 101,
+        event_stream_policy_deny_dropped: 102,
+        event_stream_policy_deny_rate_limited: 103,
+        event_stream_policy_deny_queue_full: 104,
+        event_stream_policy_deny_disconnected: 105,
+        event_stream_screen_drop_sent: 106,
+        event_stream_screen_drop_dropped: 107,
+        event_stream_screen_drop_rate_limited: 108,
+        event_stream_screen_drop_queue_full: 109,
+        event_stream_screen_drop_disconnected: 110,
+        event_stream_filter_log_sent: 111,
+        event_stream_filter_log_dropped: 112,
+        event_stream_filter_log_rate_limited: 113,
+        event_stream_filter_log_queue_full: 114,
+        event_stream_filter_log_disconnected: 115,
+        event_stream_session_close_sent: 116,
+        event_stream_session_close_dropped: 117,
+        event_stream_session_close_rate_limited: 118,
+        event_stream_session_close_queue_full: 119,
+        event_stream_session_close_disconnected: 120,
+        event_stream_session_create_sent: 121,
+        event_stream_session_create_dropped: 122,
+        event_stream_session_create_rate_limited: 123,
+        event_stream_session_create_queue_full: 124,
+        event_stream_session_create_disconnected: 125,
+        ..Default::default()
+    };
+    let mut wire = serde_json::to_value(&status).expect("serialize ProcessStatus");
+    for (key, want) in [
+        ("event_stream_policy_deny_sent", 101),
+        ("event_stream_policy_deny_dropped", 102),
+        ("event_stream_policy_deny_rate_limited", 103),
+        ("event_stream_policy_deny_queue_full", 104),
+        ("event_stream_policy_deny_disconnected", 105),
+        ("event_stream_screen_drop_sent", 106),
+        ("event_stream_screen_drop_dropped", 107),
+        ("event_stream_screen_drop_rate_limited", 108),
+        ("event_stream_screen_drop_queue_full", 109),
+        ("event_stream_screen_drop_disconnected", 110),
+        ("event_stream_filter_log_sent", 111),
+        ("event_stream_filter_log_dropped", 112),
+        ("event_stream_filter_log_rate_limited", 113),
+        ("event_stream_filter_log_queue_full", 114),
+        ("event_stream_filter_log_disconnected", 115),
+        ("event_stream_session_close_sent", 116),
+        ("event_stream_session_close_dropped", 117),
+        ("event_stream_session_close_rate_limited", 118),
+        ("event_stream_session_close_queue_full", 119),
+        ("event_stream_session_close_disconnected", 120),
+        ("event_stream_session_create_sent", 121),
+        ("event_stream_session_create_dropped", 122),
+        ("event_stream_session_create_rate_limited", 123),
+        ("event_stream_session_create_queue_full", 124),
+        ("event_stream_session_create_disconnected", 125),
+    ] {
+        assert_eq!(
+            wire.get(key).and_then(serde_json::Value::as_u64),
+            Some(want),
+            "ProcessStatus must export {key}"
+        );
+    }
+
+    wire.as_object_mut()
+        .expect("status object")
+        .remove("event_stream_policy_deny_dropped");
+    let legacy: ProcessStatus =
+        serde_json::from_value(wire).expect("legacy helper status remains decodable");
+    assert_eq!(legacy.event_stream_policy_deny_dropped, 0);
+}
+
+#[test]
 fn process_status_replay_evictions_wire_key_2382() {
     let status = ProcessStatus {
         event_stream_replay_evictions: 9,

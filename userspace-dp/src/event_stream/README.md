@@ -640,3 +640,10 @@ cluster-scoped.
   `xpf_userspace_event_stream_*` Prometheus metrics from
   `ProcessStatus.EventStream`. Helper-side send/drop counters remain in
   the helper status fields.
+- Producer outcome counters are exported for all five telemetry kinds
+  (`policy_deny`, `screen_drop`, `filter_log`, `session_close`,
+  `session_create`) as `event_stream_<kind>_<outcome>` status fields and
+  `xpf_userspace_event_stream_producer_frames_total{outcome="<kind>_<outcome>"}`
+  Prometheus series. Outcomes are `sent`, `dropped`, `rate_limited`,
+  `queue_full`, and `disconnected`; `dropped` is the sum of the three
+  reason-specific drop counters.

@@ -1172,24 +1172,58 @@ pub(crate) struct ProcessStatus {
     pub event_stream_producer_seq_lock_acquisitions_total: u64,
     #[serde(rename = "event_stream_producer_seq_lock_contended_total", default)]
     pub event_stream_producer_seq_lock_contended_total: u64,
-    /// #2512: per-kind producer-side accounting for the RT_FLOW SESSION_CLOSE
-    /// (type 14) and SESSION_CREATE (type 15) frames. Before #2512 these used
-    /// a bare `try_send` that did not pass through the per-kind rate limiter,
-    /// queue budget, or sent/dropped counters, so a dropped close/create was
-    /// invisible. `_sent` is frames accepted onto the event channel; `_dropped`
-    /// sums rate-limited + queue-full + disconnected drops for that kind. A
-    /// dropped SESSION_CLOSE loses only one flow-export/syslog record — the
-    /// type-2 HA session-sync close delta rides a separate frame and is never
-    /// rate-limited (`push_delta`), so the consumer session state self-heals
-    /// via the 1s session sweep.
+    /// #10979: producer-side accounting per dataplane event kind. `dropped`
+    /// is the sum of rate-limited, queue-full, and disconnected attempts.
+    #[serde(rename = "event_stream_policy_deny_sent", default)]
+    pub event_stream_policy_deny_sent: u64,
+    #[serde(rename = "event_stream_policy_deny_dropped", default)]
+    pub event_stream_policy_deny_dropped: u64,
+    #[serde(rename = "event_stream_policy_deny_rate_limited", default)]
+    pub event_stream_policy_deny_rate_limited: u64,
+    #[serde(rename = "event_stream_policy_deny_queue_full", default)]
+    pub event_stream_policy_deny_queue_full: u64,
+    #[serde(rename = "event_stream_policy_deny_disconnected", default)]
+    pub event_stream_policy_deny_disconnected: u64,
+    #[serde(rename = "event_stream_screen_drop_sent", default)]
+    pub event_stream_screen_drop_sent: u64,
+    #[serde(rename = "event_stream_screen_drop_dropped", default)]
+    pub event_stream_screen_drop_dropped: u64,
+    #[serde(rename = "event_stream_screen_drop_rate_limited", default)]
+    pub event_stream_screen_drop_rate_limited: u64,
+    #[serde(rename = "event_stream_screen_drop_queue_full", default)]
+    pub event_stream_screen_drop_queue_full: u64,
+    #[serde(rename = "event_stream_screen_drop_disconnected", default)]
+    pub event_stream_screen_drop_disconnected: u64,
+    #[serde(rename = "event_stream_filter_log_sent", default)]
+    pub event_stream_filter_log_sent: u64,
+    #[serde(rename = "event_stream_filter_log_dropped", default)]
+    pub event_stream_filter_log_dropped: u64,
+    #[serde(rename = "event_stream_filter_log_rate_limited", default)]
+    pub event_stream_filter_log_rate_limited: u64,
+    #[serde(rename = "event_stream_filter_log_queue_full", default)]
+    pub event_stream_filter_log_queue_full: u64,
+    #[serde(rename = "event_stream_filter_log_disconnected", default)]
+    pub event_stream_filter_log_disconnected: u64,
     #[serde(rename = "event_stream_session_close_sent", default)]
     pub event_stream_session_close_sent: u64,
     #[serde(rename = "event_stream_session_close_dropped", default)]
     pub event_stream_session_close_dropped: u64,
+    #[serde(rename = "event_stream_session_close_rate_limited", default)]
+    pub event_stream_session_close_rate_limited: u64,
+    #[serde(rename = "event_stream_session_close_queue_full", default)]
+    pub event_stream_session_close_queue_full: u64,
+    #[serde(rename = "event_stream_session_close_disconnected", default)]
+    pub event_stream_session_close_disconnected: u64,
     #[serde(rename = "event_stream_session_create_sent", default)]
     pub event_stream_session_create_sent: u64,
     #[serde(rename = "event_stream_session_create_dropped", default)]
     pub event_stream_session_create_dropped: u64,
+    #[serde(rename = "event_stream_session_create_rate_limited", default)]
+    pub event_stream_session_create_rate_limited: u64,
+    #[serde(rename = "event_stream_session_create_queue_full", default)]
+    pub event_stream_session_create_queue_full: u64,
+    #[serde(rename = "event_stream_session_create_disconnected", default)]
+    pub event_stream_session_create_disconnected: u64,
     /// Monotonic timestamp (secs) of the last HA flow cache flush (#312).
     #[serde(rename = "last_cache_flush_at", default)]
     pub last_cache_flush_at: u64,
