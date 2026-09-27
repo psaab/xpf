@@ -1672,6 +1672,7 @@ pub(crate) fn reserve_synced_nat64_allocation(
     is_reverse: bool,
     now_ns: u64,
 ) -> bool {
+    let mut previous_holders = None;
     reserve_synced_nat64_allocation_with_holder(
         nat64,
         key,
@@ -1679,7 +1680,31 @@ pub(crate) fn reserve_synced_nat64_allocation(
         is_reverse,
         now_ns,
         crate::nat::NatHolder::Untracked,
+        false,
+        &mut previous_holders,
     )
+}
+/// Coordinator twin that captures the incumbent worker-holder mask before a
+/// same-flow translated-tuple replacement can retire it.
+pub(crate) fn reserve_synced_nat64_allocation_untracked_with_holder_snapshot(
+    nat64: &Nat64State,
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> (bool, Option<u128>) {
+    let mut previous_holders = None;
+    let reserved = reserve_synced_nat64_allocation_with_holder(
+        nat64,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        crate::nat::NatHolder::Untracked,
+        true,
+        &mut previous_holders,
+    );
+    (reserved, previous_holders)
 }
 
 /// #6211 F2: reserve a synced NAT64 translation and record `worker_id` as a
@@ -1697,6 +1722,7 @@ pub(crate) fn reserve_synced_nat64_allocation_for_worker(
     now_ns: u64,
     worker_id: u32,
 ) -> bool {
+    let mut previous_holders = None;
     reserve_synced_nat64_allocation_with_holder(
         nat64,
         key,
@@ -1704,6 +1730,8 @@ pub(crate) fn reserve_synced_nat64_allocation_for_worker(
         is_reverse,
         now_ns,
         crate::nat::NatHolder::Worker(worker_id),
+        false,
+        &mut previous_holders,
     )
 }
 
@@ -1748,7 +1776,12 @@ fn reserve_synced_nat64_port_unless_peer_owns(
     addr_index: usize,
     now_ns: u64,
     holder: crate::nat::NatHolder,
+    capture_previous_holders: bool,
+    previous_holders: &mut Option<u128>,
 ) -> bool {
+    *previous_holders = capture_previous_holders
+        .then(|| prefix.port_allocator.holder_mask_for_flow(&flow))
+        .flatten();
     if !reserve_nat64_pool_port(
         &prefix.port_allocator,
         flow,
@@ -1779,6 +1812,8 @@ fn reserve_synced_nat64_allocation_with_holder(
     is_reverse: bool,
     now_ns: u64,
     holder: crate::nat::NatHolder,
+    capture_previous_holders: bool,
+    previous_holders: &mut Option<u128>,
 ) -> bool {
     // #6600: returns whether the translation is RESERVED — true when a prefix
     // took it, and true when there was nothing to reserve. `false` means every
@@ -1835,7 +1870,15 @@ fn reserve_synced_nat64_allocation_with_holder(
         if let Some(addr_index) = prefix.pool_v4.iter().position(|a| *a == snat_v4) {
             // #9021: peer-ownership refusal applies here too.
             return reserve_synced_nat64_port_unless_peer_owns(
-                prefix, flow, snat_v4, port, addr_index, now_ns, holder,
+                prefix,
+                flow,
+                snat_v4,
+                port,
+                addr_index,
+                now_ns,
+                holder,
+                capture_previous_holders,
+                previous_holders,
             );
         }
     }
@@ -1858,7 +1901,15 @@ fn reserve_synced_nat64_allocation_with_holder(
         // shape on a path whose whole purpose is to keep working when the
         // narrowed pick cannot.
         if reserve_synced_nat64_port_unless_peer_owns(
-            prefix, flow, snat_v4, port, addr_index, now_ns, holder,
+            prefix,
+            flow,
+            snat_v4,
+            port,
+            addr_index,
+            now_ns,
+            holder,
+            capture_previous_holders,
+            previous_holders,
         ) {
             return true;
         }

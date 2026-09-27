@@ -217,6 +217,11 @@ fn strict_mirror_publish_failed(result: crate::afxdp::bpf_map::ConntrackPublishR
 // `RuntimeView` — the same state the packet workers hold. See
 // `session_domain.rs` for why that is the more correct source rather than a
 // concession, and why the two cannot diverge in production.
+#[derive(Clone, Copy, Default)]
+struct AllocatorHolderSnapshot {
+    source_nat: Option<u128>,
+    nat64: Option<u128>,
+}
 impl crate::afxdp::ha::SessionDomain {
     /// Install a one-shot #9960 test hook at the clone-to-removal seam.
     ///
@@ -330,7 +335,11 @@ impl crate::afxdp::ha::SessionDomain {
     /// other. Leaving a half-taken reservation behind would be a leak no worker
     /// ever releases, because no session gets published to reap.
 
-    fn reserve_synced_translation(&self, entry: &SyncedSessionEntry) -> bool {
+    fn reserve_synced_translation(
+        &self,
+        entry: &SyncedSessionEntry,
+        capture_holder_snapshot: bool,
+    ) -> Result<AllocatorHolderSnapshot, ()> {
         let now_ns = monotonic_nanos();
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
@@ -363,24 +372,54 @@ impl crate::afxdp::ha::SessionDomain {
                 .synced_import_zone_unresolved
                 .fetch_add(1, Ordering::Relaxed);
         }
-        if !crate::nat::reserve_synced_source_nat_allocation_untracked(
-            &forwarding.iface_nat_allocators,
-            &forwarding.source_nat_rules,
-            &entry.key,
-            entry.decision.nat,
-            entry.metadata.is_reverse,
-            zones,
-            now_ns,
-        ) {
-            return false;
+        let (source_nat_reserved, source_nat_holders) = if capture_holder_snapshot {
+            crate::nat::reserve_synced_source_nat_allocation_untracked_with_holder_snapshot(
+                &forwarding.iface_nat_allocators,
+                &forwarding.source_nat_rules,
+                &entry.key,
+                entry.decision.nat,
+                entry.metadata.is_reverse,
+                zones,
+                now_ns,
+            )
+        } else {
+            (
+                crate::nat::reserve_synced_source_nat_allocation_untracked(
+                    &forwarding.iface_nat_allocators,
+                    &forwarding.source_nat_rules,
+                    &entry.key,
+                    entry.decision.nat,
+                    entry.metadata.is_reverse,
+                    zones,
+                    now_ns,
+                ),
+                None,
+            )
+        };
+        if !source_nat_reserved {
+            return Err(());
         }
-        if !crate::nat64::reserve_synced_nat64_allocation(
-            &forwarding.nat64,
-            &entry.key,
-            entry.decision.nat,
-            entry.metadata.is_reverse,
-            now_ns,
-        ) {
+        let (nat64_reserved, nat64_holders) = if capture_holder_snapshot {
+            crate::nat64::reserve_synced_nat64_allocation_untracked_with_holder_snapshot(
+                &forwarding.nat64,
+                &entry.key,
+                entry.decision.nat,
+                entry.metadata.is_reverse,
+                now_ns,
+            )
+        } else {
+            (
+                crate::nat64::reserve_synced_nat64_allocation(
+                    &forwarding.nat64,
+                    &entry.key,
+                    entry.decision.nat,
+                    entry.metadata.is_reverse,
+                    now_ns,
+                ),
+                None,
+            )
+        };
+        if !nat64_reserved {
             crate::nat::release_synced_source_nat_allocation_untracked(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
@@ -389,9 +428,12 @@ impl crate::afxdp::ha::SessionDomain {
                 entry.metadata.is_reverse,
                 now_ns,
             );
-            return false;
+            return Err(());
         }
-        true
+        Ok(AllocatorHolderSnapshot {
+            source_nat: source_nat_holders,
+            nat64: nat64_holders,
+        })
     }
 
     fn rollback_rejected_mirror_import(
@@ -400,6 +442,7 @@ impl crate::afxdp::ha::SessionDomain {
         entry: &SyncedSessionEntry,
         previous_entry: Option<&SyncedSessionEntry>,
         translation_reserved: bool,
+        holder_snapshot: AllocatorHolderSnapshot,
     ) {
         self.sessions
             .synced_import_mirror_refused
@@ -445,7 +488,7 @@ impl crate::afxdp::ha::SessionDomain {
                 forwarding,
                 &previous.metadata,
             );
-            let snat_restored = crate::nat::reserve_synced_source_nat_allocation_untracked(
+            let mut snat_restored = crate::nat::reserve_synced_source_nat_allocation_untracked(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &previous.key,
@@ -454,13 +497,51 @@ impl crate::afxdp::ha::SessionDomain {
                 zones,
                 now_ns,
             );
-            let nat64_restored = crate::nat64::reserve_synced_nat64_allocation(
+            if snat_restored {
+                if let Some(mask) = holder_snapshot.source_nat {
+                    for worker_id in 0u32..128 {
+                        if mask & (1u128 << worker_id) != 0
+                            && !crate::nat::reserve_synced_source_nat_allocation_for_worker(
+                                &forwarding.iface_nat_allocators,
+                                &forwarding.source_nat_rules,
+                                &previous.key,
+                                previous.decision.nat,
+                                false,
+                                zones,
+                                now_ns,
+                                worker_id,
+                            )
+                        {
+                            snat_restored = false;
+                        }
+                    }
+                }
+            }
+            let mut nat64_restored = crate::nat64::reserve_synced_nat64_allocation(
                 &forwarding.nat64,
                 &previous.key,
                 previous.decision.nat,
                 false,
                 now_ns,
             );
+            if nat64_restored {
+                if let Some(mask) = holder_snapshot.nat64 {
+                    for worker_id in 0u32..128 {
+                        if mask & (1u128 << worker_id) != 0
+                            && !crate::nat64::reserve_synced_nat64_allocation_for_worker(
+                                &forwarding.nat64,
+                                &previous.key,
+                                previous.decision.nat,
+                                false,
+                                now_ns,
+                                worker_id,
+                            )
+                        {
+                            nat64_restored = false;
+                        }
+                    }
+                }
+            }
             previous_snat_restored = Some(snat_restored);
             previous_nat64_restored = Some(nat64_restored);
             if !snat_restored {
@@ -489,56 +570,33 @@ impl crate::afxdp::ha::SessionDomain {
 
     fn restore_rejected_forward_mirror(
         &self,
-        forwarding: &ForwardingState,
+        maps: &crate::afxdp::coordinator::BpfMaps,
         entry: &SyncedSessionEntry,
-        previous_entry: Option<&SyncedSessionEntry>,
+        snapshot: Option<&crate::afxdp::bpf_map::ConntrackEntrySnapshot>,
     ) {
-        // Q3: BPF conntrack keys are bare 5-tuples (publish_conntrack.rs and
-        // bpf_session_key_v4/v6), so this scoped shared-authority scan is a
-        // valid lookup for the clobbered BPF row. Prefer the exact previous
-        // authority first; only use a bare-tuple survivor when the exact key
-        // did not exist.
-        let mut target_bare = entry.key.clone();
-        target_bare.routing_domain = 0;
-        target_bare.discriminator = Default::default();
-        let survivor = previous_entry.cloned().or_else(|| {
-            lock_shared_recover(&self.sessions.synced)
-                .values()
-                .find(|candidate| {
-                    candidate.key != entry.key && {
-                        let mut candidate_bare = candidate.key.clone();
-                        candidate_bare.routing_domain = 0;
-                        candidate_bare.discriminator = Default::default();
-                        candidate_bare == target_bare
-                    }
-                })
-                .cloned()
-        });
-        if let Some(survivor) = survivor {
-            let result = self.publish_mirror_only(forwarding, &survivor);
-            if result == crate::afxdp::bpf_map::ConntrackPublishResult::Written {
+        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+        if let Some(snapshot) = snapshot {
+            if crate::afxdp::bpf_map::restore_bpf_conntrack_entry_under_gate(
+                v4_fd, v6_fd, snapshot,
+            ) {
                 self.sessions
                     .mirror_restore_republished
                     .fetch_add(1, Ordering::Relaxed);
                 debug_log!(
-                    "xpf-ha: restored forward mirror key={:?} outcome=republished",
+                    "xpf-ha: restored forward mirror key={:?} outcome=snapshot-restored",
                     entry.key
                 );
-            } else {
-                self.sessions
-                    .mirror_restore_failed
-                    .fetch_add(1, Ordering::Relaxed);
-                debug_log!(
-                    "xpf-ha: restored forward mirror key={:?} outcome=republish-failed result={:?}",
-                    entry.key,
-                    result
-                );
+                return;
             }
-            return;
+            self.sessions
+                .mirror_restore_failed
+                .fetch_add(1, Ordering::Relaxed);
+            debug_log!(
+                "xpf-ha: restored forward mirror key={:?} outcome=snapshot-restore-failed",
+                entry.key
+            );
         }
-        let maps = self.bpf_maps.load();
-        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
-        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
         let deleted =
             crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(v4_fd, v6_fd, &entry.key);
         if deleted {
@@ -613,12 +671,46 @@ impl crate::afxdp::ha::SessionDomain {
     /// The counter remains worth having because the absent-fd publish skip is
     /// still reachable on its own (a standby taking bulk sync before its first
     /// apply), and it makes those benign occurrences visible rather than
+
     pub(crate) fn publish_mirror_only(
         &self,
         forwarding: &ForwardingState,
         entry: &SyncedSessionEntry,
     ) -> crate::afxdp::bpf_map::ConntrackPublishResult {
         let maps = self.bpf_maps.load();
+        self.publish_mirror_only_with_maps(forwarding, entry, &maps)
+    }
+
+    fn publish_mirror_only_with_snapshot(
+        &self,
+        forwarding: &ForwardingState,
+        entry: &SyncedSessionEntry,
+    ) -> Result<
+        (
+            crate::afxdp::bpf_map::ConntrackPublishResult,
+            Option<crate::afxdp::bpf_map::ConntrackEntrySnapshot>,
+            Arc<crate::afxdp::coordinator::BpfMaps>,
+        ),
+        (),
+    > {
+        let maps = self.bpf_maps.load();
+        let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
+        let snapshot = crate::afxdp::bpf_map::snapshot_bpf_conntrack_entry_under_gate(
+            v4_fd,
+            v6_fd,
+            &entry.key,
+        )?;
+        let result = self.publish_mirror_only_with_maps(forwarding, entry, &maps);
+        Ok((result, snapshot, Arc::clone(&*maps)))
+    }
+
+    fn publish_mirror_only_with_maps(
+        &self,
+        forwarding: &ForwardingState,
+        entry: &SyncedSessionEntry,
+        maps: &crate::afxdp::coordinator::BpfMaps,
+    ) -> crate::afxdp::bpf_map::ConntrackPublishResult {
         let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
         let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
         crate::afxdp::bpf_map::publish_bpf_conntrack_entry_under_gate(
@@ -981,35 +1073,57 @@ impl crate::afxdp::ha::SessionDomain {
         let translation_reserved = entry.origin.is_peer_synced()
             && !entry.metadata.is_reverse
             && !worker_records.is_empty();
-        if translation_reserved && !self.reserve_synced_translation(&entry) {
-            self.sessions
-                .import_reserve_refused
-                .fetch_add(1, Ordering::Relaxed);
-            return SyncedImportOutcome::RejectedReserve;
-        }
+        let holder_snapshot = if translation_reserved {
+            match self.reserve_synced_translation(&entry, strict_mirror) {
+                Ok(snapshot) => snapshot,
+                Err(()) => {
+                    self.sessions
+                        .import_reserve_refused
+                        .fetch_add(1, Ordering::Relaxed);
+                    return SyncedImportOutcome::RejectedReserve;
+                }
+            }
+        } else {
+            AllocatorHolderSnapshot::default()
+        };
         // Strict mirror imports commit the conntrack mirror before publishing
         // shared authority or steering rows. A refusal can then roll back the
         // coordinator's untracked NAT reservation without leaving an import
         // that was reported as rejected visible to workers or lookups.
         if strict_mirror {
-            let forward_mirror = self.publish_mirror_only(forwarding, &entry);
+            let (forward_mirror, forward_snapshot, forward_maps) =
+                match self.publish_mirror_only_with_snapshot(forwarding, &entry) {
+                    Ok(published) => published,
+                    Err(()) => {
+                        self.rollback_rejected_mirror_import(
+                            forwarding,
+                            &entry,
+                            previous_entry.as_ref(),
+                            translation_reserved,
+                            holder_snapshot,
+                        );
+                        return SyncedImportOutcome::RejectedMirrorPublish;
+                    }
+                };
             if strict_mirror_publish_failed(forward_mirror) {
                 self.rollback_rejected_mirror_import(
                     forwarding,
                     &entry,
                     previous_entry.as_ref(),
                     translation_reserved,
+                    holder_snapshot,
                 );
                 return SyncedImportOutcome::RejectedMirrorPublish;
             }
             if let Some(reverse) = reverse_entry.as_ref() {
-                let reverse_mirror = self.publish_mirror_only(forwarding, reverse);
+                let reverse_mirror =
+                    self.publish_mirror_only_with_maps(forwarding, reverse, &forward_maps);
                 if strict_mirror_publish_failed(reverse_mirror) {
                     if forward_mirror == crate::afxdp::bpf_map::ConntrackPublishResult::Written {
                         self.restore_rejected_forward_mirror(
-                            forwarding,
+                            &forward_maps,
                             &entry,
-                            previous_entry.as_ref(),
+                            forward_snapshot.as_ref(),
                         );
                     }
                     self.rollback_rejected_mirror_import(
@@ -1017,6 +1131,7 @@ impl crate::afxdp::ha::SessionDomain {
                         &entry,
                         previous_entry.as_ref(),
                         translation_reserved,
+                        holder_snapshot,
                     );
                     return SyncedImportOutcome::RejectedMirrorPublish;
                 }
@@ -2058,6 +2173,25 @@ mod rejected_mirror_reservation_10790_tests {
         (coordinator, commands)
     }
 
+    fn install_test_conntrack_map(coordinator: &Coordinator) {
+        use crate::afxdp::bpf_map::{
+            CONNTRACK_TEST_MAP_FD, OwnedFd, clear_conntrack_rows_for_test,
+        };
+
+        clear_conntrack_rows_for_test();
+        coordinator.bpf_maps.store(Arc::new(
+            crate::afxdp::coordinator::BpfMaps {
+                conntrack_v4_fd: Some(OwnedFd {
+                    fd: CONNTRACK_TEST_MAP_FD,
+                }),
+                conntrack_v6_fd: Some(OwnedFd {
+                    fd: CONNTRACK_TEST_MAP_FD,
+                }),
+                ..Default::default()
+            },
+        ));
+    }
+
     fn nat64_key() -> SessionKey {
         SessionKey {
             addr_family: libc::AF_INET6 as u8,
@@ -2336,7 +2470,18 @@ mod rejected_mirror_reservation_10790_tests {
         let (coordinator, commands) = worker_registered_coordinator(nat64_forwarding());
         let key = nat64_key();
         let previous = synced_entry(key.clone(), translated_nat64(51_001), 5, 505);
-        reserve_nat64_translation(&coordinator, &previous);
+        let nat64_allocator = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+        for worker_id in [0, 1] {
+            assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+                &coordinator.forwarding.nat64,
+                &previous.key,
+                previous.decision.nat,
+                false,
+                1_000,
+                worker_id,
+            ));
+        }
+        assert!(nat64_allocator.debug_is_port_occupied(0, 51_001));
         publish_seeded_shared_entry(&coordinator, &previous);
         let current = synced_entry(key.clone(), translated_nat64(51_002), 6, 606);
 
@@ -2346,7 +2491,6 @@ mod rejected_mirror_reservation_10790_tests {
                 .upsert_synced_session_mirror(current),
             SyncedImportOutcome::RejectedMirrorPublish
         );
-        let nat64_allocator = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
         assert!(nat64_allocator.debug_is_port_occupied(0, 51_001));
         assert!(!nat64_allocator.debug_is_port_occupied(0, 51_002));
         let stored = lock_shared_recover(&coordinator.session_domain.sessions.synced)
@@ -2356,6 +2500,31 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(stored.generation, 5);
         assert_eq!(stored.decision.nat, previous.decision.nat);
         assert!(worker_queue::lock_recover(&commands).is_empty());
+
+        crate::nat64::release_nat64_allocation_for_worker(
+            &coordinator.forwarding.nat64,
+            &previous.key,
+            previous.decision.nat,
+            false,
+            2_000,
+            0,
+        );
+        assert!(
+            nat64_allocator.debug_is_port_occupied(0, 51_001),
+            "worker 0 release must preserve worker 1's restored reservation"
+        );
+        crate::nat64::release_nat64_allocation_for_worker(
+            &coordinator.forwarding.nat64,
+            &previous.key,
+            previous.decision.nat,
+            false,
+            2_000,
+            1,
+        );
+        assert!(
+            !nat64_allocator.debug_is_port_occupied(0, 51_001),
+            "the last worker release must free the restored reservation"
+        );
     }
 
     #[test]
@@ -2373,8 +2542,19 @@ mod rejected_mirror_reservation_10790_tests {
             ..NatDecision::default()
         };
         let previous = synced_entry(key.clone(), previous_nat, 5, 510);
-        reserve_nat64_translation(&coordinator, &previous);
         let source_allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        for worker_id in [0, 1] {
+            assert!(crate::nat::reserve_synced_source_nat_allocation_for_worker(
+                &coordinator.forwarding.iface_nat_allocators,
+                &coordinator.forwarding.source_nat_rules,
+                &previous.key,
+                previous_nat,
+                false,
+                None,
+                1_000,
+                worker_id,
+            ));
+        }
         assert!(source_allocator.debug_is_port_occupied(0, 51_010));
         publish_seeded_shared_entry(&coordinator, &previous);
 
@@ -2397,26 +2577,59 @@ mod rejected_mirror_reservation_10790_tests {
             .expect("the pre-existing authority must survive refusal");
         assert_eq!(stored.decision.nat, previous_nat);
         assert!(worker_queue::lock_recover(&commands).is_empty());
+
+        crate::nat::release_source_nat_allocation_for_worker(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &previous.key,
+            previous_nat,
+            false,
+            2_000,
+            0,
+        );
+        assert!(
+            source_allocator.debug_is_port_occupied(0, 51_010),
+            "worker 0 release must preserve worker 1's restored reservation"
+        );
+        crate::nat::release_source_nat_allocation_for_worker(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &previous.key,
+            previous_nat,
+            false,
+            2_000,
+            1,
+        );
+        assert!(
+            !source_allocator.debug_is_port_occupied(0, 51_010),
+            "the last worker release must free the restored reservation"
+        );
     }
 
     #[test]
-    fn reverse_mirror_refusal_republishes_exact_previous_forward_row_10788() {
+    fn reverse_mirror_refusal_restores_exact_previous_bpf_snapshot_10788() {
         use crate::afxdp::bpf_map::{
-            ConntrackPublishResult, conntrack_publishes, override_conntrack_publish_results_for_test,
-            take_conntrack_publish_guard,
+            ConntrackPublishResult, conntrack_publishes, conntrack_row_for_test,
+            override_conntrack_publish_results_for_test, take_conntrack_publish_guard,
         };
 
         let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        install_test_conntrack_map(&coordinator);
         let key = nat64_key();
         let previous = synced_entry(key.clone(), translated_nat64(51_003), 5, 505);
         reserve_nat64_translation(&coordinator, &previous);
         publish_seeded_shared_entry(&coordinator, &previous);
+        assert_eq!(
+            coordinator
+                .session_domain
+                .publish_mirror_only(&coordinator.forwarding, &previous),
+            ConntrackPublishResult::Written
+        );
         let current = synced_entry(key, translated_nat64(51_004), 6, 606);
         let _record_guard = take_conntrack_publish_guard();
         let _override_guard = override_conntrack_publish_results_for_test(&[
             ConntrackPublishResult::Written,
             ConntrackPublishResult::KernelError,
-            ConntrackPublishResult::Written,
         ]);
 
         assert_eq!(
@@ -2426,16 +2639,15 @@ mod rejected_mirror_reservation_10790_tests {
             SyncedImportOutcome::RejectedMirrorPublish
         );
         let records = conntrack_publishes();
-        assert_eq!(records.len(), 3, "forward, reverse refusal, then restoration");
+        assert_eq!(records.len(), 2, "forward and reverse refusal only");
         assert_eq!(
             records.iter().map(|record| record.result).collect::<Vec<_>>(),
             vec![
                 Some(ConntrackPublishResult::Written),
                 Some(ConntrackPublishResult::KernelError),
-                Some(ConntrackPublishResult::Written),
             ]
         );
-        let restored = &records[2];
+        let restored = conntrack_row_for_test(&previous.key).expect("snapshot row restored");
         assert_eq!(restored.key, previous.key);
         assert_eq!(restored.nat, previous.decision.nat);
         assert!(!restored.is_reverse);
@@ -2447,6 +2659,63 @@ mod rejected_mirror_reservation_10790_tests {
         assert!(restored.cluster_synced);
         assert_eq!(coordinator.mirror_restore_republished_total(), 1);
         assert_eq!(coordinator.mirror_restore_failed_total(), 0);
+    }
+
+    #[test]
+    fn reverse_mirror_refusal_restores_actual_last_writer_for_bare_tuple_10788() {
+        use crate::afxdp::bpf_map::{
+            ConntrackPublishResult, conntrack_publishes, conntrack_row_for_test,
+            override_conntrack_publish_results_for_test, take_conntrack_publish_guard,
+        };
+
+        let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        install_test_conntrack_map(&coordinator);
+        let mut key_a = nat64_key();
+        key_a.routing_domain = 1;
+        let mut key_b = nat64_key();
+        key_b.routing_domain = 2;
+        let mut key_c = nat64_key();
+        key_c.routing_domain = 3;
+        let entry_a = synced_entry(key_a, translated_nat64(51_007), 1, 707);
+        let entry_b = synced_entry(key_b, translated_nat64(51_008), 1, 808);
+        publish_seeded_shared_entry(&coordinator, &entry_a);
+        publish_seeded_shared_entry(&coordinator, &entry_b);
+        assert_eq!(
+            coordinator
+                .session_domain
+                .publish_mirror_only(&coordinator.forwarding, &entry_a),
+            ConntrackPublishResult::Written
+        );
+        assert_eq!(
+            coordinator
+                .session_domain
+                .publish_mirror_only(&coordinator.forwarding, &entry_b),
+            ConntrackPublishResult::Written
+        );
+        let current = synced_entry(key_c.clone(), translated_nat64(51_009), 1, 909);
+        let _record_guard = take_conntrack_publish_guard();
+        let _override_guard = override_conntrack_publish_results_for_test(&[
+            ConntrackPublishResult::Written,
+            ConntrackPublishResult::KernelError,
+        ]);
+
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(current),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        assert_eq!(conntrack_publishes().len(), 2);
+        let restored = conntrack_row_for_test(&key_c).expect("the bare-tuple row remains");
+        assert_eq!(restored.key, entry_b.key);
+        assert_eq!(restored.nat, entry_b.decision.nat);
+        assert_eq!(restored.session_id, entry_b.session_id);
+        assert_eq!(coordinator.mirror_restore_republished_total(), 1);
+        assert_eq!(coordinator.mirror_restore_failed_total(), 0);
+        assert!(
+            !lock_shared_recover(&coordinator.session_domain.sessions.synced).contains_key(&key_c),
+            "strict refusal must not publish C as shared authority"
+        );
     }
 
     #[test]
@@ -2522,7 +2791,7 @@ mod rejected_mirror_reservation_10790_tests {
     }
 
     #[test]
-    fn reverse_mirror_refusal_without_survivor_deletes_forward_row_10788() {
+    fn reverse_mirror_refusal_delete_fails_when_conntrack_map_is_absent_10788() {
         use crate::afxdp::bpf_map::{
             ConntrackPublishResult, conntrack_publishes, override_conntrack_publish_results_for_test,
             take_conntrack_publish_guard,
@@ -2544,6 +2813,89 @@ mod rejected_mirror_reservation_10790_tests {
         );
         assert_eq!(conntrack_publishes().len(), 2);
         assert_eq!(coordinator.mirror_restore_deleted_total(), 0);
+        assert_eq!(coordinator.mirror_restore_failed_total(), 1);
+    }
+
+    #[test]
+    fn reverse_mirror_refusal_deletes_only_forward_row_when_no_snapshot_exists_10788() {
+        use crate::afxdp::bpf_map::{
+            ConntrackPublishResult, conntrack_row_for_test,
+            override_conntrack_publish_results_for_test, take_conntrack_publish_guard,
+        };
+
+        let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        install_test_conntrack_map(&coordinator);
+        let key = nat64_key();
+        let mut unrelated_key = key.clone();
+        unrelated_key.src_port += 1;
+        let unrelated = synced_entry(unrelated_key, translated_nat64(51_005), 1, 105);
+        assert_eq!(
+            coordinator
+                .session_domain
+                .publish_mirror_only(&coordinator.forwarding, &unrelated),
+            ConntrackPublishResult::Written
+        );
+        let entry = synced_entry(key.clone(), translated_nat64(51_006), 1, 106);
+        let _record_guard = take_conntrack_publish_guard();
+        let _override_guard = override_conntrack_publish_results_for_test(&[
+            ConntrackPublishResult::Written,
+            ConntrackPublishResult::KernelError,
+        ]);
+
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(entry),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        assert!(
+            conntrack_row_for_test(&key).is_none(),
+            "the failed import's forward row must be deleted"
+        );
+        assert!(
+            conntrack_row_for_test(&unrelated.key).is_some(),
+            "rollback must preserve an unrelated bare tuple"
+        );
+        assert_eq!(coordinator.mirror_restore_deleted_total(), 1);
+        assert_eq!(coordinator.mirror_restore_failed_total(), 0);
+    }
+
+    #[test]
+    fn reverse_mirror_refusal_delete_fallback_runs_after_snapshot_restore_failure_10788() {
+        use crate::afxdp::bpf_map::{
+            ConntrackPublishResult, conntrack_row_for_test,
+            force_conntrack_restore_failure_for_test,
+            override_conntrack_publish_results_for_test, take_conntrack_publish_guard,
+        };
+
+        let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
+        install_test_conntrack_map(&coordinator);
+        let key = nat64_key();
+        let previous = synced_entry(key.clone(), translated_nat64(51_003), 5, 505);
+        reserve_nat64_translation(&coordinator, &previous);
+        publish_seeded_shared_entry(&coordinator, &previous);
+        assert_eq!(
+            coordinator
+                .session_domain
+                .publish_mirror_only(&coordinator.forwarding, &previous),
+            ConntrackPublishResult::Written
+        );
+        let current = synced_entry(key.clone(), translated_nat64(51_004), 6, 606);
+        let _record_guard = take_conntrack_publish_guard();
+        let _restore_fail_guard = force_conntrack_restore_failure_for_test();
+        let _override_guard = override_conntrack_publish_results_for_test(&[
+            ConntrackPublishResult::Written,
+            ConntrackPublishResult::KernelError,
+        ]);
+
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(current),
+            SyncedImportOutcome::RejectedMirrorPublish
+        );
+        assert!(conntrack_row_for_test(&key).is_none());
+        assert_eq!(coordinator.mirror_restore_deleted_total(), 1);
         assert_eq!(coordinator.mirror_restore_failed_total(), 1);
     }
 

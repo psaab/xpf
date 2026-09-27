@@ -293,6 +293,7 @@ func TestHelperErrorClassification6785(t *testing.T) {
 		{"refusal-stale", syncedImportRefusedPrefix + "stale-generation", true, false},
 		{"refusal-reserve", syncedImportRefusedPrefix + "reserve", true, false},
 		{"retryable-gate-busy", syncedImportRefusedPrefix + "gate-busy", false, true},
+		{"token-not-at-the-start", "write failed while handling " + syncedImportRefusedPrefix + "capacity", false, false},
 		{"bare-mirror-write-failed", "mirror-write-failed", false, false},
 		{"plain-helper-error", "session table write failed", false, false},
 		{"unknown-operation", "unknown session sync operation frobnicate", false, false},

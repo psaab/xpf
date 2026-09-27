@@ -406,11 +406,18 @@ untracked NAT reservations and, when the forward mirror was written before a
 reverse-write failure, that forward conntrack row.
 
 The coordinator releases NAT64 then SNAT (reverse reservation order). For a
-same-key replacement it best-effort restores the previous entry's reservations.
-If reverse publication fails after the forward row was written, it republishes
-the exact previous entry first; the shared-map bare-tuple survivor scan is safe
-because the conntrack BPF key is itself a bare 5-tuple, without routing-domain
-or GRE-discriminator scope. With no survivor it deletes the forward row.
+same-key replacement it best-effort restores the previous entry's reservations
+and captured worker-holder bits, so the first worker release cannot free a
+reservation another worker still forwards through.
+
+Immediately before the forward conntrack write, under the import's tuple lease,
+the coordinator snapshots the actual bare-key BPF row value. If reverse
+publication then fails, it restores those exact bytes; if the snapshot was
+absent, it deletes only the newly written forward row. A failed exact restore
+also falls back to deleting that row. The rollback does not infer which alias
+last wrote the row from the shared `SessionKey` map: conntrack keys intentionally
+drop routing-domain and GRE-discriminator scope, and map iteration order is not
+write order.
 
 `synced_import_mirror_refused` counts strict mirror refusals. The
 `mirror_restore_republished`, `mirror_restore_deleted`, and
