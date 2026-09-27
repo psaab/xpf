@@ -61,9 +61,9 @@ mod session_admission;
 mod session_hit_authority;
 
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
-use embedded_icmp::enforce_queued_embedded_icmp_policy;
 pub(in crate::afxdp) use embedded_icmp::{
-    EmbeddedIcmpReversal, related_forward_zones, try_reverse_embedded_icmp_error,
+    enforce_queued_embedded_icmp_policy, EmbeddedIcmpReversal, related_forward_zones,
+    try_reverse_embedded_icmp_error,
 };
 use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
 use flow_cache_seed::stage_flow_cache_seed;
@@ -154,6 +154,42 @@ fn record_untranslated_pref64_drop(
     }
     true
 }
+pub(in crate::afxdp) fn record_queued_embedded_icmp_refusal(
+    resolution: Option<ForwardingResolution>,
+    packet_length: u32,
+    meta: UserspaceDpMeta,
+    worker_ctx: &WorkerContext,
+    telemetry: &mut TelemetryContext<'_>,
+) {
+    telemetry.counters.touched = true;
+    let Some(resolution) = resolution else {
+        return;
+    };
+    match resolution.disposition {
+        ForwardingDisposition::LocalDelivery => telemetry.dbg.local += 1,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::PolicyDenied => {
+            telemetry.dbg.policy_deny += 1;
+        }
+        ForwardingDisposition::HAInactive => telemetry.dbg.ha_inactive += 1,
+        ForwardingDisposition::NoRoute => telemetry.dbg.no_route += 1,
+        ForwardingDisposition::MissingNeighbor => telemetry.dbg.missing_neigh += 1,
+        _ => telemetry.dbg.disposition_other += 1,
+    }
+    if resolution.disposition != ForwardingDisposition::ForwardCandidate {
+        record_forwarding_disposition(
+            worker_ctx.ident,
+            DispositionCounters::Hot(telemetry.counters),
+            resolution,
+            packet_length,
+            Some(meta),
+            None,
+            worker_ctx.recent_exceptions,
+            worker_ctx.last_resolution,
+            worker_ctx.forwarding,
+        );
+    }
+}
+
 #[inline]
 fn stage11_declared_frame(packet_frame: &[u8], meta: UserspaceDpMeta) -> &[u8] {
     let Some(declared_end) =
@@ -5691,17 +5727,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     })
                                     .unwrap_or(false);
                                 if !policy_allowed {
-                                    // The queue helper has transferred ownership
-                                    // to this last prebuilt; remove it before
-                                    // recycling the original descriptor.
-                                    // #10667: refund the matcher's pre-policy
-                                    // budget charge — a policy-refused error is
-                                    // never delivered and must not starve the
-                                    // session's permitted errors.
+                                    let refused_resolution = binding
+                                        .scratch
+                                        .scratch_forwards
+                                        .last()
+                                        .map(|forward| forward.decision.resolution);
+                                    // The queue helper transferred ownership to
+                                    // this prebuilt; remove it before recycling
+                                    // the original descriptor.
+                                    // #10667: the matcher's token is refunded
+                                    // for every post-match non-delivery.
                                     sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                                     binding.scratch.scratch_forwards.pop();
-                                    telemetry.counters.touched = true;
-                                    telemetry.dbg.policy_deny += 1;
+                                    record_queued_embedded_icmp_refusal(
+                                        refused_resolution,
+                                        desc.len as u32,
+                                        meta,
+                                        worker_ctx,
+                                        telemetry,
+                                    );
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
@@ -5783,14 +5827,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     })
                                     .unwrap_or(false);
                                 if !policy_allowed {
-                                    // #10667: refund the matcher's pre-policy
-                                    // budget charge — a policy-refused error is
-                                    // never delivered and must not starve the
-                                    // session's permitted errors.
+                                    let refused_resolution = binding
+                                        .scratch
+                                        .scratch_forwards
+                                        .last()
+                                        .map(|forward| forward.decision.resolution);
+                                    // The queue helper transferred ownership to
+                                    // this prebuilt; remove it before recycling
+                                    // the original descriptor.
+                                    // #10667: the matcher's token is refunded
+                                    // for every post-match non-delivery.
                                     sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                                     binding.scratch.scratch_forwards.pop();
-                                    telemetry.counters.touched = true;
-                                    telemetry.dbg.policy_deny += 1;
+                                    record_queued_embedded_icmp_refusal(
+                                        refused_resolution,
+                                        desc.len as u32,
+                                        meta,
+                                        worker_ctx,
+                                        telemetry,
+                                    );
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
