@@ -12,7 +12,9 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -53,6 +55,39 @@ func (s *SessionSync) SetPeerSnapshotProtocolVersionForTesting(v uint16) {
 	}
 	s.peerSnapshotProtocol.Store(uint32(v))
 	s.peerSnapshotProtocolWriteMu.Unlock()
+}
+
+// PrimePeerSnapshotIncarnationForTesting installs a production authConn,
+// delivers its real capability and BulkStart handler messages, and allows a
+// test to pause between them. The prior boot id models an already-known peer;
+// the new id drives the same switch classifier as receiveLoop.
+func (s *SessionSync) PrimePeerSnapshotIncarnationForTesting(
+	conn net.Conn,
+	peerVersion uint16,
+	priorBoot, newBoot [bootIncarnationLen]byte,
+	afterCapabilities func(),
+) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.peerBootIncarnation = bootIncarnation(priorBoot)
+	s.mu.Unlock()
+	ac := &authConn{Conn: conn}
+	s.installConn(0, ac)
+	s.stats.Connected.Store(true)
+	s.markPeerCapabilitiesInFlight(ac)
+
+	capabilities := make([]byte, 2)
+	binary.LittleEndian.PutUint16(capabilities, peerVersion)
+	s.handleMessage(ac, syncMsgPeerCapabilities, capabilities)
+	if afterCapabilities != nil {
+		afterCapabilities()
+	}
+	bulkStart := make([]byte, 8+bootIncarnationLen)
+	binary.LittleEndian.PutUint64(bulkStart, 1)
+	copy(bulkStart[8:], newBoot[:])
+	s.handleMessage(ac, syncMsgBulkStart, bulkStart)
 }
 
 // DischargeColdPrimeForTesting discharges the currently owed cold-prime debt,

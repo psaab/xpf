@@ -265,7 +265,22 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	// outgoing queue that already passed its final authorization check.
 	s.peerSnapshotProtocolWriteMu.Lock()
 	s.peerIncarnation++
-	s.peerSnapshotProtocol.Store(0)
+	// The priming connection's capability frame belongs to the same peer
+	// process as its changed-boot BulkStart. Restore only that connection's
+	// learned version; never carry forward the retired global observation.
+	var snapshotProtocol uint32
+	var primingConn net.Conn
+	switch keepIdx {
+	case 0:
+		primingConn = s.conn0
+	case 1:
+		primingConn = s.conn1
+	}
+	if ac, ok := primingConn.(*authConn); ok &&
+		ac.bootIncarnation.known() && ac.bootIncarnation == s.peerBootIncarnation {
+		snapshotProtocol = uint32(ac.peerSnapshotVersion)
+	}
+	s.peerSnapshotProtocol.Store(snapshotProtocol)
 	s.peerSnapshotProtocolGeneration++
 	s.peerSnapshotProtocolWriteMu.Unlock()
 	retiredIdentity := s.peerIdentity
