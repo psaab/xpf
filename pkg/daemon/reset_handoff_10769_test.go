@@ -293,3 +293,26 @@ func TestFactoryResetMarksHandoffDirtyOnSweepFailure10769(t *testing.T) {
 		t.Fatal("helper stop precedes the sweep and must still have run")
 	}
 }
+
+// RED on revert: routing the reset sweep through the legacy-blind matcher
+// reports success while the pre-#2957 orphan survives beside the erased
+// destination.
+func TestSweepHelperStateVerifiedRemovesLegacyTemps10769(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "userspace-dp.json")
+	if err := os.WriteFile(dest, []byte(`{"flows":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(dir, "userspace-dp.json.4250000000.1.tmp")
+	if err := os.WriteFile(legacy, []byte(`{"flows":["prior"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepHelperStateVerified(dest); err != nil {
+		t.Fatalf("verified sweep: %v", err)
+	}
+	for _, path := range []string{dest, legacy} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("%s survived the verified sweep: %v", path, err)
+		}
+	}
+}

@@ -14,10 +14,12 @@ import (
 )
 
 // sweepHelperStateVerified removes the helper state file at path plus
-// dead-writer temp siblings, syncs the parent, and verifies absence. Live
-// writers' temps, removal/durability failures, or anything still present
-// afterwards is an error: the caller marks the reset handoff dirty rather
-// than reporting clean.
+// dead-writer temp siblings (including exact pre-#2957 legacy orphans:
+// this runs post-stop/pre-start with no live writer, so they are verified
+// orphans), syncs the parent, and verifies absence. Live writers' temps,
+// removal/durability failures, or anything still present afterwards is an
+// error: the caller marks the reset handoff dirty rather than reporting
+// clean.
 func sweepHelperStateVerified(path string) error {
 	// A missing state directory means no helper state was ever written
 	// here: nothing to remove, verify, or sync.
@@ -28,7 +30,7 @@ func sweepHelperStateVerified(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("remove helper state file %s: %w", path, err))
 	}
-	live, serr := dpuserspace.SweepStaleStateTemps(path)
+	live, serr := dpuserspace.SweepStaleStateTempsIncludingLegacy(path)
 	if serr != nil {
 		errs = append(errs, serr)
 	}
@@ -43,7 +45,7 @@ func sweepHelperStateVerified(path string) error {
 	} else if !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("inspect helper state %s: %w", path, err))
 	}
-	if dead, live, verr := dpuserspace.ListStaleStateTemps(path); verr != nil {
+	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
 		errs = append(errs, verr)
 	} else if len(dead) != 0 || len(live) != 0 {
 		errs = append(errs, fmt.Errorf("helper state temps remain for %s: dead=%v live=%v", path, dead, live))

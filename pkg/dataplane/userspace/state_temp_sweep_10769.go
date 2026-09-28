@@ -57,6 +57,20 @@ func isAllDigits(s string) bool {
 	return true
 }
 
+// isLegacyStateTempMiddle reports whether middle is the exact pre-#2957 temp
+// shape "<pid>.<seq>" with both components all digits and non-empty. The
+// steady-state sweeps (Rust and Go) deliberately reject this form — without
+// a start time a bare pid cannot be PID-reuse disambiguated against a live
+// writer — so only the reset/boot repair paths below, which run with no
+// live writer by construction, treat it as a verified orphan.
+func isLegacyStateTempMiddle(middle string) bool {
+	pidStr, seq, ok := strings.Cut(middle, ".")
+	if !ok || pidStr == "" || seq == "" || strings.Contains(seq, ".") {
+		return false
+	}
+	return isAllDigits(pidStr) && isAllDigits(seq)
+}
+
 // procStartTime reads a process's start time (field 22 of /proc/<pid>/stat),
 // mirroring real_proc_start_time. ok is false when the process is gone or
 // /proc cannot be read.
@@ -104,6 +118,23 @@ func tempInstanceAlive(inst tempWriterInstance) bool {
 // writers' in-flight files. Backs both the sweep and post-sweep
 // verification so the match rule has one definition.
 func ListStaleStateTemps(dest string) (dead, live []string, err error) {
+	return listStaleStateTemps(dest, false)
+}
+
+// ListStaleStateTempsIncludingLegacy censuses like ListStaleStateTemps but
+// additionally classifies exact pre-#2957 "<dest>.<pid>.<seq>.tmp" siblings
+// as dead. RESET/BOOT CONTEXTS ONLY: the steady-state Rust sweep rejects
+// this shape because a bare pid cannot be disambiguated against a live
+// writer, but the reset sweep runs after the helper is synchronously
+// stopped and the boot repair runs before any helper starts, so no live
+// writer exists and every exact-legacy sibling is a verified orphan from
+// an upgrade-carried crash. An upgrade-carried crash orphan left under a
+// custom persistent StateFile would otherwise survive the reset.
+func ListStaleStateTempsIncludingLegacy(dest string) (dead, live []string, err error) {
+	return listStaleStateTemps(dest, true)
+}
+
+func listStaleStateTemps(dest string, legacy bool) (dead, live []string, err error) {
 	dir := filepath.Dir(dest)
 	base := filepath.Base(dest)
 	if base == "" || base == "." || base == string(filepath.Separator) {
@@ -122,14 +153,17 @@ func ListStaleStateTemps(dest string) (dead, live []string, err error) {
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
 			continue
 		}
-		inst, ok := parseStateTempInstance(strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".tmp"))
-		if !ok {
+		middle := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".tmp")
+		full := filepath.Join(dir, name)
+		if inst, ok := parseStateTempInstance(middle); ok {
+			if tempInstanceAlive(inst) {
+				live = append(live, full)
+			} else {
+				dead = append(dead, full)
+			}
 			continue
 		}
-		full := filepath.Join(dir, name)
-		if tempInstanceAlive(inst) {
-			live = append(live, full)
-		} else {
+		if legacy && isLegacyStateTempMiddle(middle) {
 			dead = append(dead, full)
 		}
 	}
@@ -146,6 +180,22 @@ func SweepStaleStateTemps(dest string) (live []string, err error) {
 	if err != nil {
 		return nil, err
 	}
+	return live, removeStateTempDead(dead)
+}
+
+// SweepStaleStateTempsIncludingLegacy sweeps like SweepStaleStateTemps but
+// also removes exact pre-#2957 legacy siblings. RESET/BOOT CONTEXTS ONLY
+// (see ListStaleStateTempsIncludingLegacy): the reset and boot-repair
+// sweeps run with no live writer, so legacy siblings are verified orphans.
+func SweepStaleStateTempsIncludingLegacy(dest string) (live []string, err error) {
+	dead, live, err := ListStaleStateTempsIncludingLegacy(dest)
+	if err != nil {
+		return nil, err
+	}
+	return live, removeStateTempDead(dead)
+}
+
+func removeStateTempDead(dead []string) error {
 	var errs []error
 	for _, full := range dead {
 		if rerr := os.Remove(full); rerr != nil && !os.IsNotExist(rerr) {
@@ -154,5 +204,5 @@ func SweepStaleStateTemps(dest string) (live []string, err error) {
 		}
 		slog.Info("swept stale orphan helper state temp (dead writer instance)", "temp", full)
 	}
-	return live, errors.Join(errs...)
+	return errors.Join(errs...)
 }

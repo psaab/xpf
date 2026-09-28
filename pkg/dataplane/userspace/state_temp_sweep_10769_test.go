@@ -100,3 +100,79 @@ func TestTempSweepMatchesRustWriter(t *testing.T) {
 		}
 	}
 }
+
+// RED on revert: dropping legacy coverage from the reset-context sweep
+// leaves upgrade-carried pre-#2957 crash orphans under a custom persistent
+// StateFile across the reset. The steady-state matcher must keep ignoring
+// the legacy shape (Rust parity: no start time, no disambiguation); only
+// the no-live-writer reset/boot sweep treats it as a verified orphan —
+// even when the bare pid happens to be alive.
+func TestSweepStaleStateTempsIncludingLegacy(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "state.json")
+	self := uint32(os.Getpid())
+	selfStart, ok := procStartTime(self)
+	if !ok {
+		t.Skip("no /proc in test environment")
+	}
+	legacyDeadPid := "state.json.4250000000.1.tmp"
+	legacyLivePid := fmt.Sprintf("state.json.%d.2.tmp", self)
+	newDead := fmt.Sprintf("state.json.%d_%d.1.tmp", self, selfStart+1000000)
+	newLive := fmt.Sprintf("state.json.%d_%d.2.tmp", self, selfStart)
+	nonTemps := []string{
+		"state.json.bak",
+		"state.json.1.tmp",     // single component: not an exact legacy shape
+		"state.json.1.2.3.tmp", // three components: not an exact legacy shape
+		"state.json.abc.1.tmp", // non-numeric pid
+		"state.json.1_2.tmp",   // neither shape
+		"other.json.1.1.tmp",   // wrong destination
+	}
+	for _, name := range append([]string{legacyDeadPid, legacyLivePid, newDead, newLive}, nonTemps...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("temp"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The steady-state census must keep ignoring legacy siblings.
+	dead, live, err := ListStaleStateTemps(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{legacyDeadPid, legacyLivePid} {
+		for _, got := range append(dead, live...) {
+			if filepath.Base(got) == name {
+				t.Fatalf("steady-state census must ignore legacy %s", name)
+			}
+		}
+	}
+	// The reset-context sweep removes legacy (even with a live bare pid)
+	// plus new-form dead, and reports the new-form live temp.
+	live, err = SweepStaleStateTempsIncludingLegacy(dest)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	for _, name := range []string{legacyDeadPid, legacyLivePid, newDead} {
+		if _, serr := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(serr) {
+			t.Errorf("orphan %s survived the reset-context sweep: %v", name, serr)
+		}
+	}
+	if len(live) != 1 || filepath.Base(live[0]) != newLive {
+		t.Fatalf("live skipped = %v, want exactly [%s]", live, newLive)
+	}
+	for _, name := range append([]string{newLive}, nonTemps...) {
+		if _, serr := os.Lstat(filepath.Join(dir, name)); serr != nil {
+			t.Errorf("%s must survive: %v", name, serr)
+		}
+	}
+	// Post-sweep verification agrees: nothing dead or live remains except
+	// the reported live temp.
+	dead, live, err = ListStaleStateTempsIncludingLegacy(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dead) != 0 {
+		t.Errorf("dead remain after sweep: %v", dead)
+	}
+	if len(live) != 1 || filepath.Base(live[0]) != newLive {
+		t.Errorf("live after sweep = %v, want exactly [%s]", live, newLive)
+	}
+}
