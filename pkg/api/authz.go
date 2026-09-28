@@ -793,7 +793,9 @@ func credentialPrincipalIdentity(cfg AuthConfig, r *http.Request) (identity, cla
 		user, _, _ := strings.Cut(string(payload), ":")
 		return user, resolvedCredentialClass(cfg.UserClasses[user]), true
 	} else if strings.HasPrefix(auth, "Bearer ") {
-		return matchAPIKeyIdentity(cfg, strings.TrimPrefix(auth, "Bearer "))
+		if identity, class, matched := matchAPIKeyIdentity(cfg, strings.TrimPrefix(auth, "Bearer ")); matched {
+			return identity, class, true
+		}
 	}
 
 apiKey:

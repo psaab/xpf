@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/upgrade"
@@ -67,7 +68,9 @@ func parseExportConfigArgs(args []string) (exportConfigFlags, error) {
 }
 
 // exportActiveConfig writes the CURRENT active configuration from the config
-// DB at configDBDir to outPath as hierarchical day-0-format text.
+// DB at configDBDir to outPath as hierarchical day-0-format text. Legacy
+// cleartext api-auth credential leaves are hashed in the in-memory read tree
+// before export; the live DB is never rewritten by this offline operation.
 //
 // Fail-closed: a missing/non-directory DB dir errors (it is stat'ed first so
 // this read-only verb never CREATES store state via NewDB's MkdirAll), an
@@ -78,6 +81,7 @@ func parseExportConfigArgs(args []string) (exportConfigFlags, error) {
 // torn file and a symlinked outPath is REPLACED, never followed) and 0600 —
 // the active config may carry credential material.
 func exportActiveConfig(configDBDir, outPath string) error {
+
 	if outPath == "" {
 		return fmt.Errorf("empty output path")
 	}
@@ -103,6 +107,13 @@ func exportActiveConfig(configDBDir, outPath string) error {
 	}
 	if tree == nil {
 		return fmt.Errorf("no active configuration in %s (nothing to export)", configDBDir)
+	}
+	if config.HasMalformedAPIAuthSecretTag(tree) {
+		return fmt.Errorf("offline export refused: migrate api-auth credentials in %s only after repairing malformed reserved tags",
+			configDBDir)
+	}
+	if _, err := config.HashAPIAuthSecrets(tree); err != nil {
+		return fmt.Errorf("offline export refused: migrate api-auth credentials in %s before export: %w", configDBDir, err)
 	}
 	text := tree.Format()
 	if text == "" {

@@ -76,5 +76,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Redact named API-key `secret` values in REST config output and diagnostics,
     and hash API credentials received via peer config sync before persistence
     (#10826).
+  * Throttle Basic and API-key verification, migrate credentials across active,
+    rollback, rescue, and exported configs, and purge affected snapshots only
+    from the xpf-owned local archive (#10825).
+  * Include named API keys in local and remote `show system services` counts
+    (#10826).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

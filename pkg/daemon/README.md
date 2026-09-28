@@ -164,8 +164,9 @@ the primary compile/apply gate.
 ## Entry points
 
 - `Daemon` — `daemon.go`.
-- `Options` — `daemon.go`. `ConfigPath`, `NoDataplane`, `APIAddr`,
-  `GRPCAddr`, `Version`.
+- `Options` — `daemon.go`. `ConfigFile`, `APIAuthArchiveMigrationDir`,
+  `NoDataplane`, `APIAddr`, `GRPCAddr`, `Version`. `cmd/xpfd` supplies the
+  archive migration directory only for the production `/etc/xpf/xpf.conf` root.
 - `New(opts Options) (*Daemon, error)` — `daemon.go`. Fails when the
   config store cannot be constructed (#1893 fail-closed: unusable
   `.configdb` means no boot, not a delayed nil-deref panic).

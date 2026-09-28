@@ -42,7 +42,7 @@ func TestGetD11AttestationLedgerAuthorization10484(t *testing.T) {
 		},
 		{
 			name:      "api credential is not a local uid",
-			principal: authz.CredentialPrincipal("operator"),
+			principal: authz.CredentialPrincipal("operator", "read-only"),
 			wantCode:  codes.PermissionDenied,
 		},
 	}
@@ -94,7 +94,7 @@ func TestD11ArmSystemActionAuthorization10484(t *testing.T) {
 		},
 		{
 			name:      "api credential denied",
-			principal: authz.CredentialPrincipal("super-user"),
+			principal: authz.CredentialPrincipal("super-user", "super-user"),
 			wantCode:  codes.PermissionDenied,
 		},
 	}

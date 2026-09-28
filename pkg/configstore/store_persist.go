@@ -124,6 +124,15 @@ func (s *Store) Load() error {
 		if s.absentActiveHasRecoveryMarkers() {
 			s.everCommitted = true
 			s.persistMarkerCommitted = true
+			if err := s.migrateRescueAPIAuthSecrets(); err != nil {
+				return err
+			}
+			purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
+			if !s.apiAuthMigrationStagingConsistent() {
+				slog.Warn("cannot safely migrate staged api-auth rollback history without its matching active config; preserving recovery files",
+					"path", s.apiAuthMigrationStagingPath(), "issue", "#10826")
+				return ErrConfigAbsentWithHistory
+			}
 			s.loadRollbackHistory()
 			if err := s.migrateRollbackAPIAuthSecrets(); err != nil {
 				return err
@@ -132,6 +141,10 @@ func (s *Store) Load() error {
 		}
 		// No persisted marker: this is a never-booted store. everCommitted
 		// stays false and the daemon may bootstrap from xpf.conf.
+		if err := s.migrateRescueAPIAuthSecrets(); err != nil {
+			return err
+		}
+		purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
 		return nil
 	}
 	// #1922 step-0 marker: record whether the on-disk DB represents a
@@ -155,6 +168,8 @@ func (s *Store) Load() error {
 	// gets nil active config, and bootstraps blind. Rewriting the
 	// leaf to absent (defaults to userspace) lets the daemon come
 	// up so the operator can fix the config from CLI.
+	activeHashOnDisk := guardedConfigHash(tree)
+
 	rewriteRetiredDataplaneType(tree, LoadCaller)
 
 	// #1798 migration: a persisted free-text value carrying control
@@ -168,11 +183,46 @@ func (s *Store) Load() error {
 		slog.Warn("sanitized control characters in persisted config value",
 			"path", p, "issue", "#1798")
 	}
-	// #10826: migrate credentials and any pending rollback record as one
-	// recoverable generation transition before publishing this tree.
-	if err := s.migrateActiveAPIAuthSecrets(tree, committed); err != nil {
+	// #10826: read generation-bound history before changing active.json. The
+	// staged transition below preserves this snapshot through every durable
+	// boundary, including a restart after active replacement but before the
+	// rollback manifest is rebound.
+	s.active = tree
+	s.loadRollbackHistory()
+	if !s.apiAuthMigrationStagingConsistent() {
+		return fmt.Errorf("staged api-auth migration does not match active rollback generation: %w", ErrConfigDBUnreadable)
+	}
+
+	rollbackChanged, err := s.hashRollbackAPIAuthSecrets()
+	if err != nil {
 		return err
 	}
+	if err := s.migrateActiveAPIAuthSecrets(tree, committed, rollbackChanged, activeHashOnDisk); err != nil {
+		return err
+	}
+	if _, staged := s.readAPIAuthMigrationStaging(); rollbackChanged || staged {
+		// The rollback sidecar must bind the bytes actually on disk, not a tree
+		// that boot compatibility rewrites may have normalized in memory.
+		activeForLoad := s.active
+		diskActive, err := s.db.ReadActive()
+		if err != nil || diskActive == nil {
+			return fmt.Errorf("read active config while saving migrated rollback history: %w: %v",
+				ErrConfigDBUnreadable, err)
+		}
+		s.active = diskActive
+		s.saveRollbackFiles()
+		s.active = activeForLoad
+		if s.rollbackPersistDegraded {
+			return fmt.Errorf("persist hashed rollback api-auth credentials: %w", ErrConfigDBUnreadable)
+		}
+	}
+	if err := s.convergeAPIAuthMigrationStaging(); err != nil {
+		return fmt.Errorf("complete api-auth rollback migration: %w: %v", ErrConfigDBUnreadable, err)
+	}
+	if err := s.migrateRescueAPIAuthSecrets(); err != nil {
+		return err
+	}
+	purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
 	// Tolerant compile: an already-persisted config must boot through
 	// (see compileTreeLenient for the validator downgrades).
 	compiled, err := s.compileTreeLenient(tree)
@@ -204,14 +254,7 @@ func (s *Store) Load() error {
 		// rollbacks, with no in-band way to recover. s.active is always non-nil
 		// (New seeds an empty tree), so the (active non-nil, compiled nil) shape
 		// here is the same one a fresh boot already has — no new invariant.
-		s.active = tree
-		s.loadRollbackHistory()
-		if migrationErr := s.migrateRollbackAPIAuthSecrets(); migrationErr != nil {
-			return errors.Join(
-				fmt.Errorf("compile config: %w: %w", ErrConfigCompile, err),
-				migrationErr,
-			)
-		}
+		// History and managed credentials were migrated before compilation.
 		// #9884: a compile-failed Load must still resolve a pending
 		// commit-confirmed window — an expired record rolls back to the prev
 		// tree (persisted, record cleared), a live one re-arms its timer —
@@ -229,10 +272,6 @@ func (s *Store) Load() error {
 	s.active = tree
 	s.compiled = compiled
 	s.publishActiveLocked() // #9905: publish the new active snapshot
-	s.loadRollbackHistory()
-	if err := s.migrateRollbackAPIAuthSecrets(); err != nil {
-		return err
-	}
 	// #6538: the recovery can leave the store with a nil compiled config (its
 	// rollback target failed even the lenient compile). Load MUST NOT report
 	// success in that state — see recoverPendingConfirmLocked.
@@ -241,9 +280,10 @@ func (s *Store) Load() error {
 }
 
 // migrateActiveAPIAuthSecrets hashes active credentials while preserving a
-// pending confirm record across the active.json rewrite. The temporary previous
-// hash lets recovery recognize either durable side if power is lost mid-write.
-func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed bool) error {
+// pending confirm record and staging the exact rollback outputs before any
+// active-generation change. The staging record makes each durable boundary
+// restartable without relaxing the ordinary generation checks.
+func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed, rollbackChanged bool, activeHashOnDisk string) error {
 	hashed := tree.Clone()
 	activeChanged, err := config.HashAPIAuthSecrets(hashed)
 	if err != nil {
@@ -254,13 +294,9 @@ func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed b
 	if s.db != nil {
 		rec, err = s.db.ReadConfirm()
 		if err != nil {
-			if activeChanged {
-				return fmt.Errorf("read confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
-			}
-			// Preserve the existing non-fatal confirm-recovery path when no
-			// active-tree hash transition is needed. Load will report the
-			// unreadable record through recoverPendingConfirmLocked as before.
-			return nil
+			// #8566: retain the unreadable record and let the tail of Load
+			// report degraded recovery; do not make legacy credentials fatal.
+			rec = nil
 		}
 	}
 	prevChanged := false
@@ -271,18 +307,9 @@ func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed b
 		}
 	}
 
-	if !activeChanged {
-		if prevChanged {
-			if err := s.writeConfirmState(rec); err != nil {
-				return fmt.Errorf("persist hashed confirm rollback credentials: %w: %v", ErrConfigDBUnreadable, err)
-			}
-		}
-		return nil
-	}
-
-	oldHash := guardedConfigHash(tree)
+	oldHash := activeHashOnDisk
 	newHash := guardedConfigHash(hashed)
-	liveRecord := rec != nil && !rec.Resolved &&
+	liveRecord := activeChanged && rec != nil && !rec.Resolved &&
 		(rec.GuardedHash == "" || rec.GuardedHash == oldHash || rec.PreviousHash == oldHash)
 	if liveRecord {
 		deadline := rec.Deadline
@@ -300,11 +327,44 @@ func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed b
 		}
 	}
 
+	staging, stagingExists := s.readAPIAuthMigrationStaging()
+	if activeChanged || rollbackChanged || stagingExists {
+		stageOldHash := activeHashOnDisk
+		stageOldIdentity, _ := rollbackSlotIdentityForPath(s.rollbackActivePath())
+		stageNewHash := activeHashOnDisk
+		if activeChanged {
+			stageNewHash = newHash
+		}
+		originalGeneration, _, _, originalEntries := s.readRollbackMetadataSnapshot()
+		if !stagingExists && originalGeneration == 0 {
+			originalEntries = s.snapshotLegacyRollbackMigrationMetadata(originalEntries)
+		}
+		if stagingExists {
+			stageOldHash = staging.OldHash
+			stageOldIdentity = rollbackSlotIdentity{
+				Device: staging.OldDevice, Inode: staging.OldInode, ModTime: staging.OldModTime,
+			}
+			originalGeneration = staging.OriginalGeneration
+			originalEntries = staging.OriginalSlotMetadata
+			if !activeChanged {
+				stageNewHash = staging.NewHash
+			}
+		}
+		slotHashes, slotTombstones := s.rollbackMigrationSlotHashes()
+		if err := s.writeAPIAuthMigrationStaging(
+			stageOldHash, stageOldIdentity, stageNewHash,
+			originalGeneration, originalEntries, slotHashes, slotTombstones); err != nil {
+			return fmt.Errorf("stage api-auth credential migration: %w: %v", ErrConfigDBUnreadable, err)
+		}
+	}
+
+	if !activeChanged {
+		return nil
+	}
 	tree.Children = hashed.Children
 	if err := s.writeActiveMarker(tree, committed); err != nil {
 		return fmt.Errorf("persist hashed api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
 	}
-
 	if liveRecord {
 		rec.PreviousHash = ""
 		rec.PreviousDeadline = time.Time{}
@@ -315,9 +375,57 @@ func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed b
 	return nil
 }
 
-// migrateRollbackAPIAuthSecrets upgrades legacy rollback text before it can be
-// exposed through rollback operations or left in a database dump.
-func (s *Store) migrateRollbackAPIAuthSecrets() error {
+func (s *Store) rollbackMigrationSlotHashes() ([]string, []bool) {
+	entries := s.history.List()
+	hashes := make([]string, len(entries))
+	tombstones := make([]bool, len(entries))
+	for i, entry := range entries {
+		text := rollbackTombstoneMarker
+		tombstones[i] = entry == nil || entry.Config == nil
+		if entry != nil && entry.Config != nil {
+			text = entry.Config.Format()
+		}
+		hashes[i] = rollbackSlotHash([]byte(text))
+	}
+	return hashes, tombstones
+}
+
+// snapshotLegacyRollbackMigrationMetadata records the exact pre-migration slot
+// bytes and their loaded timestamp/comment for legacy histories without a
+// generation manifest. This lets a restart recognize untouched slots and
+// retain their original presentation metadata if only some slots were rewritten.
+func (s *Store) snapshotLegacyRollbackMigrationMetadata(existing []rollbackSlotMetadataEntry) []rollbackSlotMetadataEntry {
+	history := s.history.List()
+	snapshot := make([]rollbackSlotMetadataEntry, len(history))
+	copy(snapshot, existing)
+	for i, entry := range history {
+		data, err := ReadBoundedFile(s.rollbackPath(i+1), MaxConfigSize)
+		identity, identityOK := rollbackSlotIdentityForPath(s.rollbackPath(i + 1))
+		if err != nil || !identityOK {
+			continue
+		}
+		timestamp := identity.ModTime
+		comment := ""
+		if entry != nil {
+			if !entry.Timestamp.IsZero() {
+				timestamp = entry.Timestamp
+			}
+			comment = entry.Comment
+		}
+		snapshot[i] = rollbackSlotMetadataEntry{
+			Hash:       rollbackSlotHash(data),
+			Generation: 0,
+			Timestamp:  timestamp,
+			Comment:    comment,
+			Device:     identity.Device,
+			Inode:      identity.Inode,
+			ModTime:    identity.ModTime,
+		}
+	}
+	return snapshot
+}
+
+func (s *Store) hashRollbackAPIAuthSecrets() (bool, error) {
 	changed := false
 	for _, entry := range s.history.List() {
 		if entry == nil || entry.Config == nil {
@@ -325,9 +433,19 @@ func (s *Store) migrateRollbackAPIAuthSecrets() error {
 		}
 		entryChanged, err := config.HashAPIAuthSecrets(entry.Config)
 		if err != nil {
-			return fmt.Errorf("hash rollback api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+			return false, fmt.Errorf("hash rollback api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
 		}
 		changed = changed || entryChanged
+	}
+	return changed, nil
+}
+
+// migrateRollbackAPIAuthSecrets upgrades legacy rollback text before it can be
+// exposed through rollback operations or left in a database dump.
+func (s *Store) migrateRollbackAPIAuthSecrets() error {
+	changed, err := s.hashRollbackAPIAuthSecrets()
+	if err != nil {
+		return err
 	}
 	if !changed {
 		return nil
@@ -337,6 +455,174 @@ func (s *Store) migrateRollbackAPIAuthSecrets() error {
 		return fmt.Errorf("persist hashed rollback api-auth credentials: %w", ErrConfigDBUnreadable)
 	}
 	return nil
+}
+
+// migrateRescueAPIAuthSecrets upgrades parseable local rescue configurations.
+// Unreadable, empty, or non-config files are intentionally left byte-for-byte
+// untouched; migration never turns an unknown file into an empty config.
+func (s *Store) migrateRescueAPIAuthSecrets() error {
+	path := s.rescuePath()
+	data, err := ReadBoundedFile(path, MaxConfigSize)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		slog.Warn("leaving unreadable rescue configuration unchanged during api-auth migration",
+			"path", path, "err", err, "issue", "#10825")
+		return nil
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
+	tree, parseErrs := config.NewParser(string(data)).Parse()
+	if len(parseErrs) != 0 || tree == nil || len(tree.Children) == 0 {
+		slog.Warn("leaving malformed rescue configuration unchanged during api-auth migration",
+			"path", path, "issue", "#10825")
+		return nil
+	}
+	if config.HasMalformedAPIAuthSecretTag(tree) {
+		slog.Warn("leaving rescue configuration unchanged because it contains malformed reserved api-auth tags; repair or rotate credentials before restoring it",
+			"path", path, "issue", "#10825")
+		return nil
+	}
+	changed, err := config.HashAPIAuthSecrets(tree)
+	if err != nil {
+		slog.Warn("leaving rescue configuration unchanged because api-auth credentials could not be safely migrated; rotate credentials before restoring it",
+			"path", path, "err", err, "issue", "#10825")
+		return nil
+	}
+	if !changed {
+		return nil
+	}
+	text := tree.Format()
+	if err := checkPersistSize(path, len(text)); err != nil {
+		slog.Warn("could not persist migrated rescue configuration; rescue bytes remain unchanged, rotate credentials before restoring it, and retry on a later Load",
+			"path", path, "err", err, "issue", "#10825")
+		return nil
+	}
+	if err := fsatomic.WriteFileDurable(path, []byte(text), 0600); err != nil {
+		slog.Warn("could not persist migrated rescue configuration; rescue bytes may still contain legacy api-auth credentials, rotate them before restoring and retry on a later Load",
+			"path", path, "err", err, "issue", "#10825")
+		return nil
+	}
+	return nil
+}
+
+// purgeAPIAuthArchives removes only regular, recognized xpf snapshots from the
+// explicitly opted-in xpf-owned local archive root when api-auth material is
+// cleartext or malformed. Unreadable destinations are warned and retried on a
+// later Load; custom destinations are never inferred from store archive config.
+func purgeAPIAuthArchives(dir string) {
+	if dir == "" {
+		return
+	}
+	if symlink, ok := SymlinkTarget(dir); ok {
+		slog.Warn("cannot safely inspect xpf api-auth archive directory symlink; rotate any api-auth credentials archived there",
+			"path", symlink.Path, "target", symlink.Target, "issue", "#10825")
+		return
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("cannot inspect xpf api-auth archive directory; cleanup will retry on a later Load, rotate credentials if archived copies remain",
+				"path", dir, "err", err, "issue", "#10825")
+		}
+		return
+	}
+	if !info.IsDir() {
+		slog.Warn("xpf api-auth archive cleanup path is not a directory; rotate credentials if archived copies remain",
+			"path", dir, "issue", "#10825")
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Warn("cannot read xpf api-auth archive directory; cleanup will retry on a later Load, rotate credentials if archived copies remain",
+			"path", dir, "err", err, "issue", "#10825")
+		return
+	}
+
+	removed := false
+	for _, entry := range entries {
+		if !isXPFConfigArchiveSnapshot(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		fileInfo, err := os.Lstat(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("cannot inspect xpf api-auth archive snapshot; cleanup will retry on a later Load, rotate credentials if archived copies remain",
+					"path", path, "err", err, "issue", "#10825")
+			}
+			continue
+		}
+		if !fileInfo.Mode().IsRegular() {
+			slog.Warn("preserving non-regular xpf archive entry; rotate credentials if its target contains api-auth material",
+				"path", path, "issue", "#10825")
+			continue
+		}
+		data, err := ReadBoundedFile(path, MaxConfigSize)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("cannot inspect bounded xpf api-auth archive snapshot; cleanup will retry on a later Load, rotate credentials if archived copies remain",
+					"path", path, "err", err, "issue", "#10825")
+			}
+			continue
+		}
+		tree, parseErrs := config.NewParser(string(data)).Parse()
+		if len(parseErrs) != 0 || tree == nil || len(tree.Children) == 0 {
+			slog.Warn("preserving malformed or non-config xpf archive snapshot; rotate credentials manually if it contains api-auth material",
+				"path", path, "issue", "#10825")
+			continue
+		}
+		changed, hashErr := config.HashAPIAuthSecrets(tree)
+		if hashErr == nil && !changed && !config.HasMalformedAPIAuthSecretTag(tree) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("failed to remove xpf archive with legacy or malformed api-auth credentials; cleanup will retry on a later Load, rotate affected credentials because archived copies may remain",
+					"path", path, "err", err, "issue", "#10825")
+			}
+			continue
+		}
+		removed = true
+		slog.Warn("removed xpf archive containing legacy or malformed api-auth credentials; rotate affected credentials because archived copies may already exist",
+			"path", path, "issue", "#10825")
+	}
+	if removed {
+		if err := rbSyncDir(dir); err != nil {
+			slog.Warn("xpf api-auth archive purge directory sync failed; cleanup will retry on a later Load, rotate affected credentials if archived copies remain",
+				"path", dir, "err", err, "issue", "#10825")
+		}
+	}
+}
+
+// isXPFConfigArchiveSnapshot recognizes both the current sequenced filename
+// and the legacy pre-sequence timestamp filename; foreign config-*.conf names
+// are left untouched.
+func isXPFConfigArchiveSnapshot(name string) bool {
+	if !strings.HasPrefix(name, "config-") || !strings.HasSuffix(name, ".conf") {
+		return false
+	}
+	core := strings.TrimSuffix(name, ".conf")
+	stampAndSequence := core[len("config-"):]
+	if _, err := time.Parse("20060102-150405.000000000", stampAndSequence); err == nil {
+		return true
+	}
+	sequenceDot := strings.LastIndexByte(stampAndSequence, '.')
+	if sequenceDot < 0 || len(stampAndSequence[sequenceDot+1:]) != 20 {
+		return false
+	}
+	if _, err := time.Parse("20060102-150405.000000000", stampAndSequence[:sequenceDot]); err != nil {
+		return false
+	}
+	for _, digit := range stampAndSequence[sequenceDot+1:] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(stampAndSequence[sequenceDot+1:], 10, 64)
+	return err == nil
 }
 
 // absentActiveHasRecoveryMarkers reports whether an absent active.json is
@@ -363,9 +649,8 @@ func (s *Store) absentActiveHasRecoveryMarkers() bool {
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
-		case strings.HasPrefix(name, "rollback.") && strings.HasSuffix(name, ".json"):
-			return true
-		case name == "confirm.json":
+		case (strings.HasPrefix(name, "rollback.") && strings.HasSuffix(name, ".json")) ||
+			name == "confirm.json" || name == apiAuthMigrationStagingFilename:
 			return true
 		}
 	}
@@ -1087,6 +1372,15 @@ func (s *Store) ArchiveDir() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.archiveDir
+}
+
+// SetAPIAuthArchiveMigrationDir opts an explicitly xpf-owned local archive
+// directory into legacy api-auth cleanup during Load. Callers must not pass a
+// custom, remote, or compliance-retention destination.
+func (s *Store) SetAPIAuthArchiveMigrationDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.apiAuthArchiveMigrationDir = dir
 }
 
 func (s *Store) SetArchiveConfig(dir string, max int) {

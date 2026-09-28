@@ -1613,13 +1613,19 @@ func (s *Store) loadRollbackHistory() {
 	}
 
 	var entries []*HistoryEntry
+
 	generation, metadataActiveHash, metadataActiveIdentity, metadata := s.readRollbackMetadataSnapshot()
 	currentActiveHash, currentActiveIdentity, currentActiveOK := s.rollbackActiveBindingFromDisk()
+
+	migrationStage, migrationStageOK := s.readAPIAuthMigrationStaging()
+	migrationAlias := currentActiveOK && apiAuthMigrationAliasMatches(
+		migrationStage, migrationStageOK, metadataActiveHash, metadataActiveIdentity,
+		currentActiveHash, currentActiveIdentity)
 	generationMismatch := generation != 0 && metadataActiveIdentity.Inode != 0 && currentActiveOK &&
 		(metadataActiveHash != currentActiveHash ||
 			metadataActiveIdentity.Device != currentActiveIdentity.Device ||
 			metadataActiveIdentity.Inode != currentActiveIdentity.Inode ||
-			!metadataActiveIdentity.ModTime.Equal(currentActiveIdentity.ModTime))
+			!metadataActiveIdentity.ModTime.Equal(currentActiveIdentity.ModTime)) && !migrationAlias
 	for i := 1; i <= s.history.MaxSize(); i++ {
 		path := s.rollbackPath(i)
 		// #8597 (muse-004 K70): bounded, like every other authoritative read in
@@ -1640,28 +1646,40 @@ func (s *Store) loadRollbackHistory() {
 		slotComment := ""
 		identity, identityOK := rollbackSlotIdentityForPath(path)
 		metadataValid := false
-		if ts, comment, ok := rollbackMetadataForSlot(metadata, i-1, data, identity, identityOK); ok {
-			metadataValid = generation == 0 ||
-				(i-1 < len(metadata) && metadata[i-1].Generation == generation)
-			if metadataValid {
+		slotGenerationValid := generation == 0 ||
+			(i-1 < len(metadata) && metadata[i-1].Generation == generation)
+		if ts, comment, ok := rollbackMetadataForSlot(metadata, i-1, data, identity, identityOK); ok &&
+			slotGenerationValid {
+			metadataValid = true
+			slotTimestamp = ts
+			slotComment = comment
+		}
+		migrationSlotValid := migrationAlias && slotGenerationValid &&
+			apiAuthMigrationSlotMatches(migrationStage, i-1, data, identity, identityOK)
+		if !metadataValid && migrationSlotValid {
+			// Prefer the staged pre-migration metadata, which remains authoritative
+			// even if a partial slot rewrite made the current manifest stale.
+			if ts, comment, ok := rollbackMetadataTimestampForSlot(migrationStage.OriginalSlotMetadata, i-1); ok {
+				slotTimestamp = ts
+				slotComment = comment
+			} else if ts, comment, ok := rollbackMetadataTimestampForSlot(metadata, i-1); ok {
 				slotTimestamp = ts
 				slotComment = comment
 			}
 		}
 		// A changed active hash or file identity means the sidecar predates the
-		// active generation, so every old numbered slot may now occupy the wrong index.
-		// Otherwise verify each slot independently: an unreadable or corrupt slot
-		// must not hide later entries whose metadata still matches their files.
-		if generationMismatch || (generation != 0 && !metadataValid) {
+		// active generation, so every old numbered slot may now occupy the wrong
+		// index. A staged api-auth migration is the sole exception: it changes
+		// credentials without shifting slots, and only exact staged slot bytes
+		// may bypass the old per-slot hash while that transition converges.
+		if generationMismatch || (generation != 0 && !metadataValid && !migrationSlotValid) {
 			slog.Warn("rollback slot does not match its saved generation; refusing this slot",
 				"path", path, "slot", i, "generation", generation)
 			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
-		if generation == 0 {
-			if !metadataValid && identityOK {
-				slotTimestamp = identity.ModTime
-			}
+		if generation == 0 && !metadataValid && identityOK {
+			slotTimestamp = identity.ModTime
 		}
 
 		// #5557: bound a rollback slot the same way every other parse entry

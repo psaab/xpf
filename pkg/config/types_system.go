@@ -547,6 +547,14 @@ type APIAuthConfig struct {
 	DefaultExpiresAt time.Time
 }
 
+// APIKeyCount returns the total number of legacy and named API-key credentials.
+func (c *APIAuthConfig) APIKeyCount() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.APIKeys) + len(c.Keys)
+}
+
 // APIAuthUser defines a scoped, expiring Basic-auth user for the REST API.
 type APIAuthUser struct {
 	Username  string

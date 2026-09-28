@@ -391,9 +391,12 @@ type Store struct {
 	editPath []string
 
 	// Archival settings
-	archiveDir string // local archive directory (empty = disabled)
+	archiveDir string // configured archive directory (empty = disabled)
 	archiveMax int    // max archives to keep
-
+	// apiAuthArchiveMigrationDir is an explicit xpf-owned local archive root
+	// opted into api-auth legacy cleanup during Load. Custom/remote destinations
+	// are never inferred from archiveDir and remain outside the migration.
+	apiAuthArchiveMigrationDir string
 	// archiveSeedDir is the archive dir for which the archiveSeq reseed scan
 	// last SUCCEEDED (#6396 Codex MINOR 4). ensureArchiveSeededLocked scans a
 	// dir only when it differs from this. #6404: the reseed retry is driven not

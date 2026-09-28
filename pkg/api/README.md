@@ -1274,8 +1274,11 @@ the drop fails loudly instead of going quietly vacuous.
   the same bcrypt cost through a dummy verifier before the existence result is
   applied. A SHA-256 prehash prevents bcrypt's 72-byte truncation behavior.
   The #10825 failure budget runs before verification to bound attacker-driven
-  bcrypt CPU. See `auth_consttime_4157_test.go` and
-  `auth_throttle_10825_test.go`.
+  bcrypt CPU. Bcrypt-backed HTTP authentication is exercised by
+  `api_auth_https_10826_test.go`; usable verifier compilation is pinned by
+  `compiler_system_multivalue_6692_test.go` and `set_repeated_leaf_3984_test.go`.
+  `auth_consttime_4157_test.go` covers the legacy plaintext embedding fallback,
+  and `auth_throttle_10825_test.go` covers admission budgets.
 - **Day-2 listener + auth reconcile (#5866).** The management server used to be
   constructed ONCE at daemon startup and never reconciled, so a committed
   web-management change (bind address / port / TLS on/off / api-auth) reported

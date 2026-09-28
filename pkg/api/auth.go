@@ -243,19 +243,24 @@ func authMiddleware(cfg AuthConfig, metricsRequireAuth bool, next http.Handler) 
 // budgets before invoking the credential verifier. An active lockout skips
 // verification entirely, which is important once Basic checks use bcrypt.
 func throttledAuthCheck(throttle *authFailureTracker, cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (authorized bool, retryAfter time.Duration) {
+	return throttledAuthCheckWithCheck(throttle, cfg, metricsRequireAuth, r, authCheckCredential)
+}
+
+// throttledAuthCheckWithCheck admits a request atomically before invoking the
+// verifier. The checker is injectable only to let bounded tests hold verifier
+// work behind a barrier and observe the admission limit.
+func throttledAuthCheckWithCheck(throttle *authFailureTracker, cfg AuthConfig, metricsRequireAuth bool, r *http.Request, check func(AuthConfig, bool, *http.Request) (bool, string)) (authorized bool, retryAfter time.Duration) {
 	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !metricsRequireAuth) {
 		return true, 0
 	}
-	source, account := throttleIdentity(r)
-	if locked, wait := throttle.locked(source, account); locked {
-		return false, wait
+	source, claimed := throttleIdentity(r)
+	reservation, retryAfter := throttle.reserve(source, claimed)
+	if retryAfter > 0 {
+		return false, retryAfter
 	}
-	if authCheck(cfg, metricsRequireAuth, r) {
-		throttle.recordSuccess(source, account)
-		return true, 0
-	}
-	throttle.recordFailure(source, account)
-	return false, 0
+	authorized, verified := check(cfg, metricsRequireAuth, r)
+	throttle.complete(&reservation, authorized, verified)
+	return authorized, 0
 }
 
 // logRESTAPIAuthFailure records each failed REST credential check while
@@ -279,18 +284,26 @@ func logRESTAPIAuthFailure(r *http.Request) {
 // /health + loopback-/metrics exemptions and the #4157/#5636 constant-time,
 // empty-secret-rejecting credential checks.
 func authCheck(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) bool {
-	// /health is always exempt; /metrics is exempt only when this listener has a
-	// literal loopback bind.
+	authorized, _ := authCheckCredential(cfg, metricsRequireAuth, r)
+	return authorized
+}
+
+// authCheckCredential reports the verified account bucket along with the
+// authorization decision so throttling clears both a Basic username claimed
+// before verification and the identity that actually supplied the credential.
+func authCheckCredential(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (bool, string) {
 	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !metricsRequireAuth) {
-		return true
+		return true, ""
 	}
-	if auth := r.Header.Get("Authorization"); auth != "" && checkAuthorization(auth, cfg) {
-		return true
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		if account, ok := checkAuthorizationIdentity(auth, cfg); ok {
+			return true, account
+		}
 	}
 	if key := r.Header.Get("X-API-Key"); key != "" && constantTimeAPIKeyMatch(cfg, key) {
-		return true
+		return true, authThrottleAPIKeyAccount
 	}
-	return false
+	return false, ""
 }
 
 // writeAuthChallenge emits the 401 + WWW-Authenticate response for an
@@ -305,19 +318,27 @@ func writeAuthChallenge(w http.ResponseWriter) {
 
 // checkAuthorization validates an Authorization header value.
 func checkAuthorization(auth string, cfg AuthConfig) bool {
+	_, matched := checkAuthorizationIdentity(auth, cfg)
+	return matched
+}
+
+func checkAuthorizationIdentity(auth string, cfg AuthConfig) (verified string, matched bool) {
 	if strings.HasPrefix(auth, "Bearer ") {
-		return constantTimeAPIKeyMatch(cfg, strings.TrimPrefix(auth, "Bearer "))
+		if constantTimeAPIKeyMatch(cfg, strings.TrimPrefix(auth, "Bearer ")) {
+			return authThrottleAPIKeyAccount, true
+		}
+		return "", false
 	}
 	if !strings.HasPrefix(auth, "Basic ") {
-		return false
+		return "", false
 	}
 	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 	if err != nil {
-		return false
+		return "", false
 	}
 	user, pass, ok := strings.Cut(string(payload), ":")
 	if !ok {
-		return false
+		return "", false
 	}
 	expected, exists := cfg.Users[user]
 	verifier := expected
@@ -327,12 +348,21 @@ func checkAuthorization(auth string, cfg AuthConfig) bool {
 		verifier = dummyAPIAuthVerifier
 	}
 	passMatch := verifyAuthSecret(verifier, pass)
-	return exists && expected != "" && credentialExpiryActive(cfg.UserExpires[user]) && passMatch
+	if !exists || expected == "" || !credentialExpiryActive(cfg.UserExpires[user]) || !passMatch {
+		return "", false
+	}
+	return authThrottleBasicAccountPrefix + user, true
 }
 
 func verifyAuthSecret(encoded, presented string) bool {
 	if config.IsAPIAuthSecretHash(encoded) {
 		return config.VerifyAPIAuthSecret(encoded, presented)
+	}
+	if strings.HasPrefix(encoded, "$xpf-bcrypt$") || strings.HasPrefix(encoded, "$xpf-invalid$") {
+		// Reserved-tag corruption is a hard denial, but still pays the normal
+		// verifier cost so it does not create an account-existence timing signal.
+		_ = config.VerifyAPIAuthSecret(dummyAPIAuthVerifier, presented)
+		return false
 	}
 	// AuthConfig is also an embedding API used by tests and external callers.
 	// The daemon only populates it from compiled tagged verifiers.

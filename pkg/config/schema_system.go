@@ -596,24 +596,24 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			}},
 			"api-auth": {desc: "API authentication", children: map[string]*schemaNode{
 				"class":   {desc: "Default API credential login class", args: 1, placeholder: "<class-name>", treeValidator: validateLoginClassRef, children: nil},
-				"expires": {desc: "Default API credential expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", validator: ValidateAPIAuthExpiry, children: nil},
-				"user": {desc: "User name", wildcard: &schemaNode{desc: "Basic-auth user name for the REST API", placeholder: "<username>", children: map[string]*schemaNode{
-					"password": {desc: "Password", args: 1, placeholder: "<password>", validator: ValidateAPIAuthBasicPassword, children: nil},
+				"expires": {desc: "Default API credential expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", valueType: ValueDate, validator: ValidateAPIAuthExpiry, children: nil},
+				"user": {desc: "Basic-auth user name for the REST API", args: 1, placeholder: "<username>", children: map[string]*schemaNode{
+					"password": {desc: "Password", args: 1, placeholder: "<password>", valueType: ValueString, validator: ValidateAPIAuthBasicPassword, children: nil},
 					"class":    {desc: "Login class for this Basic identity", args: 1, placeholder: "<class-name>", treeValidator: validateLoginClassRef, children: nil},
-					"expires":  {desc: "This Basic identity's expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", validator: ValidateAPIAuthExpiry, children: nil},
-				}}},
+					"expires":  {desc: "This Basic identity's expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", valueType: ValueDate, validator: ValidateAPIAuthExpiry, children: nil},
+				}},
 				// #3984: repeated keyed-list leaf — the compiler accumulates
 				// every `api-key` sibling into APIAuth.APIKeys via
 				// FindChildren (compiler_system.go). `multi: true` keeps each
 				// `set ... api-key <key>` a distinct sibling instead of
 				// replacing the previous one. These identities inherit class
 				// and expiry from api-auth; named keys below can override both.
-				"api-key": {desc: "API key", args: 1, multi: true, placeholder: "<key>", validator: ValidateAPIAuthKey, children: nil},
-				"key": {desc: "Named API key identity", wildcard: &schemaNode{desc: "Named Bearer/X-API-Key identity", placeholder: "<key-name>", children: map[string]*schemaNode{
-					"secret":  {desc: "API key secret", args: 1, placeholder: "<key>", validator: ValidateAPIAuthKey, children: nil},
+				"api-key": {desc: "API key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAPIAuthKey, children: nil},
+				"key": {desc: "Named API key identity", args: 1, placeholder: "<key-name>", children: map[string]*schemaNode{
+					"secret":  {desc: "API key secret", args: 1, placeholder: "<key>", valueType: ValueString, validator: ValidateAPIAuthKey, children: nil},
 					"class":   {desc: "Login class for this API key", args: 1, placeholder: "<class-name>", treeValidator: validateLoginClassRef, children: nil},
-					"expires": {desc: "This API key's expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", validator: ValidateAPIAuthExpiry, children: nil},
-				}}},
+					"expires": {desc: "This API key's expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", valueType: ValueDate, validator: ValidateAPIAuthExpiry, children: nil},
+				}},
 			}},
 		}},
 		"dns": {desc: "DNS service", children: nil},

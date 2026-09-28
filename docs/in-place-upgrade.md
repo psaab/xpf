@@ -562,6 +562,34 @@ Cuts the LOCAL clustered node with a controlled drain so the cluster
 keeps forwarding. Run on each node in turn (the deploy driver sequences
 both); exactly one node is primary throughout.
 
+Upgrade the standby (secondary) first, let it converge with the old primary,
+fail over, and then upgrade the former primary. Configurations persist
+`api-auth` credentials as tagged bcrypt verifiers; an old standby cannot consume
+a new-primary hashed config, so upgrading the primary first can strand the
+standby on a config it cannot apply.
+
+After an upgraded daemon loads its store, it migrates active, rollback, and
+pending-confirm credentials to tagged bcrypt verifiers; it also attempts a
+best-effort migration of the rescue config. If rescue migration cannot safely
+complete, it leaves the file in place and warns—rotate the affected credentials
+before restoring it.
+
+The daemon removes only recognized, regular xpf config snapshots in the
+xpf-owned local `/var/lib/xpf/archive` when they contain legacy cleartext
+`api-auth` secrets or malformed reserved verifier tags. It does not rewrite
+those snapshots. Cleanup is best effort; unreadable, malformed non-config, or
+non-regular entries are retained and warned about. This behavior does not
+extend to a custom `system archival archive-dir`, remote/compliance archives,
+exports, or off-box backups. Find and securely remove legacy copies, or rotate
+any credentials they contain; a successful boot does not prove external backups
+are clean.
+
+`xpfd export-config` emits the current active config to an explicitly named
+0600 file and hashes legacy `api-auth` secrets in its in-memory tree without
+rewriting the live database. It refuses malformed reserved verifier tags.
+Exports contain password verifiers and other configuration material; protect
+them as secrets.
+
 The rolling path is selected ONLY by the `--rolling` flag. `xpfd upgrade`
 now REJECTS any stray positional argument (#4869): `flag.Parse` stops at
 the first non-flag token, so `xpfd upgrade rolling` (missing the two

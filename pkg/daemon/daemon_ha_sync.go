@@ -906,6 +906,34 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 			// high-water advance so a duplicate re-push is correctly skipped.
 			return nil
 		}
+		// #10825: an old (pre-migration) primary pushes api-auth credentials
+		// in cleartext, while SyncApply (#10826) persists this node's active
+		// with salted $xpf-bcrypt$ verifiers — so the raw text comparison
+		// above NEVER matches a duplicate re-push and every delivery rehashes
+		// with a fresh salt and re-applies. Compare schema-scoped credential
+		// equivalence instead: identical non-credential content with each
+		// incoming cleartext verifying against the active verifier means the
+		// live config already enforces the pushed intent, and the re-push is
+		// correctly skipped. Still gated on ActiveApplied() (the #4957
+		// invariant): a promoted-but-unapplied config must fall through and
+		// retry, never skip. A parse failure or a non-equivalent tree falls
+		// through to the normal sync apply path below; the matcher hashes
+		// nothing and mutates neither tree.
+		// Avoid speculative parsing when SyncApply's size gate will reject it.
+		if d.store.ActiveApplied() && len(configText) <= configstore.MaxConfigSize {
+			if activeTree := d.store.ActiveTree(); activeTree != nil {
+				if incomingTree, errs := config.NewParser(configText).Parse(); len(errs) == 0 && incomingTree != nil {
+					if config.ConfigTreesEquivalentForSync(activeTree, incomingTree) {
+						slog.Info("cluster: skipping config sync apply (config equivalent to applied active; credential verifiers match)",
+							"size", len(configText))
+						// Semantically converged — a nil return lets the
+						// high-water advance exactly as the text-equal
+						// shortcut above does.
+						return nil
+					}
+				}
+			}
+		}
 	}
 	slog.Info("cluster: accepting config sync from peer", "size", len(configText))
 

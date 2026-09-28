@@ -422,8 +422,11 @@ func (c *CLI) showSystemServices() error {
 	// Web management / API auth
 	if cfg.System.Services != nil && cfg.System.Services.WebManagement != nil {
 		wm := cfg.System.Services.WebManagement
-		if wm.APIAuth != nil && (len(wm.APIAuth.Users) > 0 || len(wm.APIAuth.APIKeys) > 0) {
-			fmt.Printf("  API auth:       %d user(s), %d API key(s)\n", len(wm.APIAuth.Users), len(wm.APIAuth.APIKeys))
+		if wm.APIAuth != nil {
+			apiKeyCount := wm.APIAuth.APIKeyCount()
+			if len(wm.APIAuth.Users) > 0 || apiKeyCount > 0 {
+				fmt.Printf("  API auth:       %d user(s), %d API key(s)\n", len(wm.APIAuth.Users), apiKeyCount)
+			}
 		}
 	}
 
