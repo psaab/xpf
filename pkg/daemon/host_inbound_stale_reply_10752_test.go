@@ -434,9 +434,11 @@ func TestHostInboundAdmittedTCPAcceptsAreFlagless10752(t *testing.T) {
 func TestHostInboundInstallPrecedesConntrackFlush10752(t *testing.T) {
 	// Race bound: the Install→flush window is closed for catalogued tuples
 	// because the guard installs atomically WITH the table, before the
-	// conntrack sweep runs. Non-catalog tuples have no guard (HIGH residual);
-	// the peer-oriented mismatched-iifname single-packet bypass closes on the
-	// next packet after flush deletes the entry.
+	// conntrack sweep runs. This test pins install-before-flush ORDER only —
+	// not a packet count. Peer-oriented uncovered arrivals ride the residual
+	// accept for the Install→flush code duration (rate×duration packets under
+	// flood; sweep misses extend it with no retry debt), and non-catalog
+	// box-oriented tuples have no guard at all (HIGH residuals in the matrix).
 	var order []string
 	origInstaller, origDelete := nftInstaller, conntrackDeleteFilters
 	defer func() { nftInstaller, conntrackDeleteFilters = origInstaller, origDelete }()

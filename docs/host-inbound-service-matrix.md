@@ -692,14 +692,23 @@ Properties:
   lingering entry survives until close/timeout. Matcher pins: peer-oriented
   2222 flushes, box-oriented 2222 and TCP/179 are kept; neither appears in any
   guard DROP.
-- **Race bound: guard-first closes the catalogued Install→flush window.**
+- **Race bound: guard-first closes the catalogued Install→flush window; the
+  peer-oriented uncovered window is bounded by sweep duration, not packets.**
   The guard installs atomically with the table, before the conntrack sweep, so
   a packet arriving between install and flush still meets the guard for
-  catalogued tuples. The per-family dump+delete sweep is not atomic, but the
-  guard (not sweep atomicity) is the enforcement for catalogued flows.
-  Non-catalog tuples have no guard (HIGH residual above). Peer-oriented stale
-  on a mismatched iifname rides the residual accept only until flush deletes
-  the entry — a single-packet microsecond window; the next packet drops.
+  catalogued tuples — that half needs no timing bound. The per-family
+  dump+delete sweep is not atomic, and peer-oriented original-direction
+  has no reply-direction guard: an uncovered/mismatched-iifname arrival rides
+  the residual accept until flush deletes the entry. That window is the
+  Install→flush code duration (one netlink batch plus a dump+delete sweep over
+  the small host-only table, sequential per family) — NOT single-packet: a
+  high-rate sender gets rate×duration packets through, and sweep misses
+  (created-after-dump, per-family interleave) extend it further with no #6802
+  retry debt (a miss returns success, unlike a failure). Catalogued misses
+  still drop via the guard; peer-oriented uncovered is an accepted bounded
+  flood window, and non-catalog box-oriented has no guard at all (HIGH
+  residuals above). The order test pins install-before-flush only, not a
+  packet count.
 - **Availability: admitted services survive conntrack loss flaglessly;
   ephemeral clients must re-establish.** Admitted TCP service accepts carry no
   `tcp flags` predicate, so SYN-less mid-stream to an admitted dport still
