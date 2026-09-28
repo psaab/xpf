@@ -131,9 +131,10 @@ cleanup_transit_state() {
     # Keep the removal commands before unlinking /usr/local/sbin/xpfd: the
     # versioned runtime remains available until the purge tree cleanup below.
     # Only invoke a package-owned link; an operator-repointed xpfd is not ours.
-    # Attempt both independent tables even if the transit deletion fails. Do
-    # not restore forwarding sysctls unless the transit table is gone, and do
-    # not let package removal skip early-input cleanup on that failure.
+    # Attempt both independent tables no matter which deletion fails. Each
+    # outcome gates only its own posture: forwarding sysctls are restored
+    # iff the transit table is gone; a failed input-table deletion keeps
+    # host input closed (warned) without suppressing forwarding restore.
     if ! link_is_owned "$SBIN/xpfd" || [ ! -x "$SBIN/xpfd" ]; then
         echo "xpf: cannot remove the transit and input barriers; package xpfd is unavailable" >&2
         return 0
@@ -145,7 +146,6 @@ cleanup_transit_state() {
     fi
     if ! "$SBIN/xpfd" input-barrier remove; then
         echo "xpf: early input barrier removal failed; leaving host input closed" >&2
-        return 0
     fi
     [ "$transit_removed" = yes ] || return 0
     # Restore the normal forwarding posture after deleting the xpf fence.

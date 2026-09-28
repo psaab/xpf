@@ -75,7 +75,8 @@ run_scenario() {
     INPUT_BARRIER_LOG="$ROOT/input-barrier.log"
     TRANSIT_BARRIER_LOG="$ROOT/transit-barrier.log"
     TRANSIT_BARRIER_FAIL=no
-    export INPUT_BARRIER_LOG TRANSIT_BARRIER_LOG TRANSIT_BARRIER_FAIL
+    INPUT_BARRIER_FAIL=no
+    export INPUT_BARRIER_LOG TRANSIT_BARRIER_LOG TRANSIT_BARRIER_FAIL INPUT_BARRIER_FAIL
     BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
     patched_postrm
     "scenario_$name"
@@ -104,6 +105,9 @@ if [ "$1" = transit-barrier ] && [ "$2" = remove ]; then
 fi
 if [ "$1" = input-barrier ] && [ "$2" = remove ]; then
     echo remove >> "$INPUT_BARRIER_LOG"
+    if [ "$INPUT_BARRIER_FAIL" = yes ]; then
+        echo "input barrier removal failed"; exit 1
+    fi
     echo "input barrier removed"; exit 0
 fi
 [ "$1" = version ] && { echo "xpfd VER (commit x, built y)"; exit 0; }
@@ -180,6 +184,20 @@ scenario_transit_failure_still_removes_input_barrier() {
     [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input removal skipped after transit failure"; exit 1; }
     [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 0 ] || { echo "FAIL: IPv4 forwarding opened after transit removal failure"; exit 1; }
     [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 0 ] || { echo "FAIL: IPv6 forwarding opened after transit removal failure"; exit 1; }
+}
+
+# Symmetric case: an input-removal failure is reported and keeps host input
+# closed, but must not suppress forwarding restoration after the transit
+# table was removed.
+scenario_input_failure_still_restores_forwarding() {
+    build_hardened "1.0.0"
+    INPUT_BARRIER_FAIL=yes
+    export INPUT_BARRIER_FAIL
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_BARRIER_LOG")" = remove ] || { echo "FAIL: transit removal was not attempted"; exit 1; }
+    [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input removal was not attempted"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 1 ] || { echo "FAIL: IPv4 forwarding not restored after successful transit removal"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 1 ] || { echo "FAIL: IPv6 forwarding not restored after successful transit removal"; exit 1; }
 }
 
 # purge removes the through-current sbin links, the runtime drop-in (#1967),
@@ -558,6 +576,7 @@ scenario_oldbug_leaves_orphan_proves_nontautology() {
 run_scenario remove_keeps_versions
 run_scenario remove_barrier_failure_keeps_sysctls_closed
 run_scenario transit_failure_still_removes_input_barrier
+run_scenario input_failure_still_restores_forwarding
 run_scenario purge_removes_versions
 run_scenario remove_keeps_foreign_dropin
 run_scenario remove_no_dropin_ok
