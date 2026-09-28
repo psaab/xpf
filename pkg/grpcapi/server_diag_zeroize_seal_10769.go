@@ -370,8 +370,12 @@ func zeroizeClearTmpDir(dir string) error {
 		if preserved {
 			continue
 		}
+		full := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			zeroizeWarnEscapingInteriorLinks(full)
+		}
 		// os.RemoveAll on a symlink removes the link, never the target.
-		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+		if err := os.RemoveAll(full); err != nil {
 			errs = append(errs, fmt.Errorf("zeroize: remove tmp entry %s: %w", filepath.Join(dir, entry.Name()), err))
 			continue
 		}
@@ -573,9 +577,13 @@ func zeroizeClearRunXPFDir(dir string) error {
 		if entry.Name() == zeroizeRunXPFPreserved {
 			continue
 		}
+		full := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			zeroizeWarnEscapingInteriorLinks(full)
+		}
 		// Names only: RemoveAll on a symlink removes the link, and live
 		// socket fds survive their name's unlink.
-		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+		if err := os.RemoveAll(full); err != nil {
 			errs = append(errs, fmt.Errorf("zeroize: remove run entry %s: %w", filepath.Join(dir, entry.Name()), err))
 			continue
 		}
@@ -695,7 +703,8 @@ func zeroizeClearDir(dir string) error {
 // surfaced fail-closed so the reset is never reported clean on unpersisted
 // unlinks.
 func zeroizeRemovePath(path string) error {
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
 		// Retry durability: the unlink may have landed on an attempt whose
 		// barrier failed. Syncing the existing parent retires that debt; a
 		// missing parent carries none (no entry can reappear without it).
@@ -709,8 +718,14 @@ func zeroizeRemovePath(path string) error {
 		}
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("zeroize: inspect %s: %w", path, err)
+	}
 	if sk, isLink := configstore.SymlinkTarget(path); isLink {
 		return fmt.Errorf("zeroize: refusing to erase symlink %s -> %s", sk.Path, sk.Target)
+	}
+	if info.IsDir() {
+		zeroizeWarnEscapingInteriorLinks(path)
 	}
 	hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
 	if herr != nil {
@@ -727,6 +742,40 @@ func zeroizeRemovePath(path string) error {
 		errs = append(errs, fmt.Errorf("zeroize: sync parent of %s: %w", path, err))
 	}
 	return errors.Join(errs...)
+}
+
+// zeroizeWarnEscapingInteriorLinks censuses symlinks inside a directory the
+// wipe is about to remove wholesale. RemoveAll unlinks those links without
+// following them, so a target outside the tree survives by design —
+// following links out of the owned tree would itself violate ownership
+// boundaries. Each escape is logged with link and target so a successful
+// wipe never silently implies out-of-tree bytes were removed.
+func zeroizeWarnEscapingInteriorLinks(root string) {
+	interior, err := configstore.CollectInteriorSymlinks(root, "")
+	if err != nil {
+		slog.Warn("zeroize: interior symlink census incomplete", "dir", root, "err", err)
+	}
+	for _, sk := range interior {
+		if zeroizeLinkTargetEscapes(root, sk.Path, sk.Target) {
+			slog.Warn("zeroize: interior symlink target outside the erased tree survives (out of erase scope)",
+				"link", sk.Path, "target", sk.Target)
+		}
+	}
+}
+
+// zeroizeLinkTargetEscapes reports whether a symlink's target resolves
+// outside root. Lexical only (consistent with the pathname-walk census);
+// an unresolvable target counts as escaping so it is logged, not missed.
+func zeroizeLinkTargetEscapes(root, linkPath, target string) bool {
+	abs := target
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(filepath.Dir(linkPath), target)
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(abs))
+	if err != nil {
+		return true
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 // zeroizeEraseKnownHosts removes the system-wide SSH known-hosts file whether

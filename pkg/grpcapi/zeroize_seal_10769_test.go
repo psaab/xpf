@@ -1,8 +1,10 @@
 package grpcapi
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -931,5 +933,43 @@ func TestZeroizeLeavesLiveHostnameOnSealFailure10769(t *testing.T) {
 	}
 	if body, err := os.ReadFile(zeroizeHostnamePath); err != nil || string(body) != "prior-tenant.example\n" {
 		t.Fatalf("hostname file must stay untouched on seal failure: body=%q err=%v", body, err)
+	}
+}
+
+func TestPerformZeroizeWarnsOnEscapingInteriorSymlink10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	// An interior link inside an owned directory that escapes it: the wipe
+	// removes the link (inside the erased tree) but must neither follow it
+	// nor silently imply the outside target was removed.
+	target := filepath.Join(root, "elsewhere", "secret.txt")
+	mustWriteFile(t, target, []byte("outside the erased tree"))
+	link := filepath.Join(zeroizeRootSSHUserDir, "keys-link")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("interior link %s survived: %v", link, err)
+	}
+	if _, err := os.Lstat(target); err != nil {
+		t.Fatalf("out-of-tree link target must be preserved, never followed: %v", err)
+	}
+	if !strings.Contains(logs.String(), "outside the erased tree") {
+		t.Fatalf("wipe must log the escaping target; logs:\n%s", logs.String())
 	}
 }
