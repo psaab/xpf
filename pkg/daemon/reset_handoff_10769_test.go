@@ -1403,8 +1403,8 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	}
 	if _, err := store.Commit(); err == nil {
 		t.Fatal("direct commit against the wiped DB must fail, got nil")
-	} else if !strings.Contains(err.Error(), "persist") {
-		t.Fatalf("direct commit must fail at persistence (ENOENT), got %v", err)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("direct commit must fail with the ENOENT cause (temp create in the missing .configdb), got %v", err)
 	}
 	if got := store.ActiveConfig().System.UserspaceDataplane.StateFile; got != reserved {
 		t.Fatalf("failed fix attempts must promote nothing, active = %q", got)
