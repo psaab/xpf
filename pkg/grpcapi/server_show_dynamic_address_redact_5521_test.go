@@ -72,7 +72,7 @@ func TestShowDynamicAddressReportsShrinkRefusal(t *testing.T) {
 					ShrinkCandidateOldCount: 100, ShrinkCandidateNewCount: 49,
 					ShrinkAckPending: true, ShrinkAckActor: "operator=alice",
 					ShrinkAckHash: "candidatehash", ShrinkAckBaselineHash: "installedhash",
-					ShrinkAckReason: "provider confirmed",
+					ShrinkAckReason:        "provider confirmed",
 					ShrinkGuardMinOldCount: 32, ShrinkGuardMinRetainPercent: 50,
 					ShrinkGuardMinDrop: 16,
 				},
