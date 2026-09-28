@@ -1007,6 +1007,35 @@ func TestEraseKeaLeasesForResetRefusesHardlinkedLease10769(t *testing.T) {
 	}
 }
 
+// The Kea re-erase must refuse a symlink like the primary seal leg:
+// unlinking the link would pass verification while the target rows
+// survive for the next tenant's Kea.
+func TestEraseKeaLeasesForResetRefusesSymlinkedLease10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	lease := resetKeaLeaseCurrents[0]
+	if err := os.MkdirAll(filepath.Dir(lease), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(filepath.Dir(lease), "real-leases.csv")
+	if err := os.WriteFile(target, []byte("address,hwaddr\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := eraseKeaLeasesForReset(); err == nil {
+		t.Fatal("symlinked Kea lease must fail the re-erase, got nil")
+	} else if !strings.Contains(err.Error(), "symlinked Kea lease") {
+		t.Fatalf("re-erase error must name the symlinked lease, got %v", err)
+	}
+	for _, path := range []string{lease, target} {
+		if _, serr := os.Lstat(path); serr != nil {
+			t.Fatalf("refusal must remove nothing, %s stat err=%v", path, serr)
+		}
+	}
+}
+
 // Pathless flags come only from the concurrent-shutdown race (a
 // shutdown-branch mark landing before completion records PENDING) or
 // from hand-crafted/corrupt input: every normal-path writer records a

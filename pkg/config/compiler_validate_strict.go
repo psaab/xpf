@@ -486,7 +486,11 @@ func validateVRRPVirtualAddressSubnet(cfg *Config, lenient bool) ([]string, erro
 // Strict on commit / commit-check; the call site downgrades to a warning
 // on the tolerant load / peer-sync path so an already-persisted config
 // still boots (#1960 no-brick) — the runtime sweep guard refuses
-// reserved targets regardless.
+// reserved targets regardless. SCOPE (accepted residuals): the event
+// socket is not covered (a post-stop unlink of the event socket is
+// harmless: no listener survives the helper stop), and the equality is
+// Clean-lexical, so a symlinked-parent alias (Clean-different, same
+// file) needs filesystem write, not config-only, to plant.
 func validateHelperStateFileStrict(cfg *Config) error {
 	if cfg == nil || cfg.System.UserspaceDataplane == nil {
 		return nil

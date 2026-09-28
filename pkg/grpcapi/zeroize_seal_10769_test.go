@@ -1954,3 +1954,38 @@ func TestPerformZeroizeRemovesSymlinkedDBusMachineID10769(t *testing.T) {
 		t.Fatalf("machine-id must rotate despite the alias shape, got %q", body)
 	}
 }
+
+// The identity-file legs must report hardlink hits with the established
+// inode-scan error (errors.As), not %v: operators lose the dev/ino/find
+// remediation otherwise. Refusal precedes any replacement.
+func TestIdentityLegsReportHardlinkError10769(t *testing.T) {
+	legs := []struct {
+		name  string
+		erase func(string) error
+		body  string
+	}{
+		{"hostname", zeroizeResetHostname, "prior-tenant\n"},
+		{"resolver", zeroizeResetResolvConf, "nameserver 10.0.0.1\n"},
+		{"hosts", zeroizeResetHosts, "127.0.0.1 localhost\n"},
+	}
+	for _, leg := range legs {
+		t.Run(leg.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "identity")
+			mustWriteFile(t, path, []byte(leg.body))
+			sibling := filepath.Join(dir, "sibling")
+			if err := os.Link(path, sibling); err != nil {
+				t.Fatalf("hardlink plant: %v", err)
+			}
+			var linkErr *configstore.FactoryResetHardlinkError
+			if err := leg.erase(path); !errors.As(err, &linkErr) {
+				t.Fatalf("expected FactoryResetHardlinkError, got %v", err)
+			}
+			for _, p := range []string{path, sibling} {
+				if body, serr := os.ReadFile(p); serr != nil || string(body) != leg.body {
+					t.Fatalf("refusal must leave original bytes intact, %s body=%q err=%v", p, body, serr)
+				}
+			}
+		})
+	}
+}

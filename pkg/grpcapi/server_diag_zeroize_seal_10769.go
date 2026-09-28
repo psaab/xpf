@@ -884,7 +884,9 @@ func zeroizeRotateMachineID(path string) error {
 	}
 	// Durable rename replaces the inode: a preexisting hardlink would
 	// keep the OLD identity bytes alive at a sibling. Refuse like the
-	// seal remover (uniform F2 policy) rather than rotate around it.
+	// new #10769 seal removers (fail-before-unlink covers these sites
+	// plus this rotation only; the master-owned archive/config-DB
+	// collectors intentionally retain unlink-then-report).
 	hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
 	if herr != nil {
 		return fmt.Errorf("zeroize: inspect hard links for %s: %w", path, herr)
@@ -1133,7 +1135,7 @@ func zeroizeResetHostname(path string) error {
 		return fmt.Errorf("zeroize: inspect hostname hard links %s: %w", path, err)
 	}
 	if len(links) != 0 {
-		return fmt.Errorf("zeroize: hostname %s has hard-linked copies: %v", path, links)
+		return fmt.Errorf("zeroize: refusing to reset hard-linked hostname %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: links})
 	}
 	if err := fsatomic.WriteFileDurable(path, []byte("xpf\n"), 0o644); err != nil {
 		return fmt.Errorf("zeroize: reset hostname %s: %w", path, err)
@@ -1221,7 +1223,7 @@ func zeroizeResetResolvConf(path string) error {
 	if links, err := configstore.CollectHardlinkedFiles(path, ""); err != nil {
 		return fmt.Errorf("zeroize: inspect resolver hard links %s: %w", path, err)
 	} else if len(links) != 0 {
-		return fmt.Errorf("zeroize: resolver %s has hard-linked copies: %v", path, links)
+		return fmt.Errorf("zeroize: refusing to reset hard-linked resolver %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: links})
 	}
 	if err := zeroizeWriteFileDurableOrInPlace(path, []byte(zeroizeManagedResolvConfHeader), 0o644); err != nil {
 		return fmt.Errorf("zeroize: reset resolver %s: %w", path, err)
@@ -1252,7 +1254,7 @@ func zeroizeResetHosts(path string) error {
 	if links, err := configstore.CollectHardlinkedFiles(path, ""); err != nil {
 		return fmt.Errorf("zeroize: inspect hosts hard links %s: %w", path, err)
 	} else if len(links) != 0 {
-		return fmt.Errorf("zeroize: hosts %s has hard-linked copies: %v", path, links)
+		return fmt.Errorf("zeroize: refusing to reset hard-linked hosts %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: links})
 	}
 	if err := zeroizeWriteFileDurableOrInPlace(path, []byte(zeroizeDefaultHosts), 0o644); err != nil {
 		return fmt.Errorf("zeroize: reset hosts %s: %w", path, err)

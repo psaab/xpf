@@ -464,6 +464,9 @@ func FactoryResetArchiveDir(archiveDir string) error {
 			fail(cerr)
 		}
 	}
+	// NOTE (#10769 d05-F6 scope): this collector intentionally retains
+	// unlink-then-report (erase, then report survivors): fail-before-unlink
+	// covers only the new #10769 seal sites plus machine-id rotation.
 	found, herr := CollectHardlinkedFiles(archiveDir, "")
 	hardlinks = append(hardlinks, found...)
 	fail(herr)
@@ -797,6 +800,9 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 			"dir", sk.Path, "target", sk.Target)
 		skipped = append(skipped, sk)
 	} else {
+		// NOTE (#10769 d05-F6 scope): unlink-then-report is intentional
+		// here (see the archive collector above); fail-before-unlink
+		// covers only the new #10769 seal sites plus machine-id rotation.
 		found, herr := CollectHardlinkedFiles(dbDir, "")
 		hardlinks = append(hardlinks, found...)
 		fail(herr)
@@ -835,6 +841,8 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 			// leaving the real file — the live config, the rescue config, the
 			// audit journal and the numbered rollback slots each carry the full
 			// config text with cleartext secret leaves. Record and skip.
+			// NOTE (#10769 d05-F6 scope): unlink-then-report is intentional
+			// here too (erase, then report survivors below).
 			found, herr := CollectHardlinkedFiles(full, "")
 			hardlinks = append(hardlinks, found...)
 			fail(herr)

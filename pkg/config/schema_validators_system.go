@@ -785,7 +785,11 @@ func IsReservedHelperStatePath(path string) bool {
 // value can hide behind a symlinked parent (e.g. /var/lib/xpf -> /etc).
 // Unresolvable parents (usually: missing directory) fall back to the
 // lexical check. TOCTOU-accepted like every path-based guard: a link
-// swapped between this check and the unlink is the #9013 class.
+// swapped between this check and the unlink is the #9013 class. Bind
+// mounts are an accepted residual: EvalSymlinks does not resolve them,
+// so a bind-mounted alias needs mount-namespace control (not
+// config-only) to plant, consistent with the repo's path-based-guard
+// exclusions.
 func HelperStatePathTouchesReserved(path string) bool {
 	if IsReservedHelperStatePath(path) {
 		return true
