@@ -16,7 +16,9 @@ func (vi *vrrpInstance) emitEvent() {
 		Family:    vi.cfg.Family,
 		GroupID:   vi.cfg.GroupID,
 		State:     vi.getState(),
-		VIPs:      vi.cfg.VirtualAddresses,
+		VIPs:              vi.vipsSnapshot(),
+		VIPDiverged:       vi.vipDiverged.Load() || vi.vipUpdateDiverged.Load(),
+		VIPUpdateFailures: vi.vipUpdateFailures.Load(),
 	}
 	select {
 	case vi.eventCh <- evt:
@@ -34,12 +36,16 @@ func (vi *vrrpInstance) emitEvent() {
 	}
 }
 
-// sendAdvert sends a VRRPv3 advertisement with the given priority.
 func (vi *vrrpInstance) sendAdvert(priority int) {
-	// Shared with checkAdvertCapacity (advert_capacity.go) so the guard that
-	// decides an advert CAN be built counts exactly the addresses this builder
-	// puts in it (#6779).
+	// Serialize wire emission with VIP delta actuation (#10780). updateVIPs
+	// holds vipMu until removed addresses and the configured set agree, so a
+	// routine advert cannot name an address after it has left the interface.
+	vi.vipMu.Lock()
+	defer vi.vipMu.Unlock()
+	// Snapshot once so both family adverts describe the same VIP set.
+	vi.mu.RLock()
 	v4Addrs, v6Addrs := splitVIPsByFamily(vi.cfg.VirtualAddresses)
+	vi.mu.RUnlock()
 
 	// #8597 (muse-004 K20): snapshot the mu-guarded advertise interval ONCE,
 	// under the lock, before either arm reads it.
@@ -113,7 +119,10 @@ func (vi *vrrpInstance) sendPacket(pkt *VRRPPacket, isIPv6 bool) error {
 	if isIPv6 {
 		return vi.sendPacketIPv6(pkt)
 	}
-	if vi.rawConn == nil {
+	vi.socketMu.RLock()
+	rawConn := vi.rawConn
+	vi.socketMu.RUnlock()
+	if rawConn == nil {
 		return nil
 	}
 
@@ -150,7 +159,7 @@ func (vi *vrrpInstance) sendPacket(pkt *VRRPPacket, isIPv6 bool) error {
 		Dst:      dstIP,
 	}
 
-	if err := vi.rawConn.SetMulticastInterface(vi.iface); err != nil {
+	if err := rawConn.SetMulticastInterface(vi.iface); err != nil {
 		return fmt.Errorf("set multicast interface: %w", err)
 	}
 
@@ -158,7 +167,7 @@ func (vi *vrrpInstance) sendPacket(pkt *VRRPPacket, isIPv6 bool) error {
 		IfIndex: vi.iface.Index,
 	}
 
-	if err := vi.rawConn.WriteTo(hdr, data, cm); err != nil {
+	if err := rawConn.WriteTo(hdr, data, cm); err != nil {
 		return fmt.Errorf("writeto: %w", err)
 	}
 
@@ -168,7 +177,10 @@ func (vi *vrrpInstance) sendPacket(pkt *VRRPPacket, isIPv6 bool) error {
 // sendPacketIPv6 sends a VRRPv3 IPv6 advertisement.
 // Source: link-local address, Destination: ff02::12, Hop Limit: 255.
 func (vi *vrrpInstance) sendPacketIPv6(pkt *VRRPPacket) error {
-	if vi.ipv6Conn == nil {
+	vi.socketMu.RLock()
+	conn, send := vi.ipv6Conn, vi.ipv6Send
+	vi.socketMu.RUnlock()
+	if conn == nil {
 		return nil
 	}
 
@@ -236,16 +248,16 @@ func (vi *vrrpInstance) sendPacketIPv6(pkt *VRRPPacket) error {
 		Src:     srcIP,
 		IfIndex: vi.iface.Index,
 	}
-	if vi.ipv6Send == nil {
+	if send == nil {
 		// Defensive: a wired ipv6Conn without a send seam should not
 		// happen (openSocket sets both together), but fall back to the
 		// raw conn rather than panic.
-		if _, err := vi.ipv6Conn.WriteTo(data, dst); err != nil {
+		if _, err := conn.WriteTo(data, dst); err != nil {
 			return fmt.Errorf("ipv6 writeto: %w", err)
 		}
 		return nil
 	}
-	if err := vi.ipv6Send(data, cm, dst); err != nil {
+	if err := send(data, cm, dst); err != nil {
 		return fmt.Errorf("ipv6 writeto: %w", err)
 	}
 
