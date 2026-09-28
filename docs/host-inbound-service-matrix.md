@@ -691,27 +691,40 @@ Properties:
   peer-oriented 2222 flushes, box-oriented 2222 and TCP/179 are kept; neither
   appears in any guard DROP. Warning surfaces, each with exact scope. The
   any-service breadth advisory names this consequence while the stanza is
-  open. The tightening commit itself carries a commit-output warning naming
-  the narrowed scopes (full-admit loss or unguarded-token removal, zone-level
-  only where no replacing override applies) whenever this attempt's sweep
-  observed stranded customs, exempt, or bare flows on an address in a
-  narrowed zone — cross-zone-only evidence stays silent, as do commits with
-  no transition or no observed flows. The daemon additionally warns in the
-  journal on any apply (commit or background) that keeps denied non-catalog
-  customs below the ephemeral floor, plus TCP customs inside the range when
-  backed by a local LISTEN socket. Deliberately journal-silent: exempt and
-  bare flows (steady-state control-plane traffic would warn on every apply;
-  they surface only through the transition-gated commit warning), ephemeral
-  egress and ranges (indistinguishable from ordinary clients AND
-  policy-invariant authorized — no chain can drop a non-catalog reply tuple,
-  proven by the catalog-boundedness test), WireGuard (globally admitted), and
-  ingress-permitted catalogued tuples (correctly kept: the per-ingress guard
-  judges each reply packet, so keeping them is enforcement, not residual).
-  Sweep misses (created-after-dump, per-family interleave) and post-sweep
-  reconnects surface on the NEXT apply's sweep instead — catalogued misses
-  still drop via the guard meanwhile; unguarded misses linger until observed.
-  A flap (tighten→loosen→tighten) re-evaluates transition plus evidence at
-  each commit independently.
+  open. A narrowed scope is a full-admit loss or an unguarded-token
+  removal, computed with the canonical physical+unit override union
+  (zone-level only where no replacing override applies). When this
+  attempt's sweep observed stranded customs, exempt, or bare flows on an
+  address the OLD config covered in a narrowed effective scope, the
+  tightening commit carries evidence lines (customs, exempt/bare) naming
+  ONLY those scopes — zone:<name> or zone:<name>|iface:<unit> — with
+  counts and samples drawn ONLY from the intersecting addresses, plus a
+  silent-class pointer sentence. Otherwise — zero kept flows, or
+  evidence only outside every narrowed scope — the commit carries a
+  transition-only advisory naming the narrowed scopes with honest
+  zero-observed wording and a manual-procedure pointer, so silent-class
+  narrowings (in-range UDP customs, ranges, post-sweep reconnects,
+  sweep misses) never pass commit-silent; the advisory is suppressed
+  only when the narrowed scopes own no address in either generation.
+  Commits with no transition stay silent, as do narrowings no address
+  can strand. The daemon additionally warns in the journal on any apply
+  (commit or background) that keeps denied non-catalog customs below
+  the ephemeral floor, plus TCP customs inside the range when backed by
+  a local LISTEN socket. Deliberately journal-silent: exempt and bare
+  flows (steady-state control-plane traffic would warn on every apply;
+  they surface through the commit warning), ephemeral egress and ranges
+  (indistinguishable from ordinary clients AND policy-invariant
+  authorized — no chain can drop a non-catalog reply tuple, proven by
+  the catalog-boundedness test; covered by the advisory's pointer on
+  transition commits, not by observation), WireGuard (globally
+  admitted), and ingress-permitted catalogued tuples (correctly kept:
+  the per-ingress guard judges each reply packet, so keeping them is
+  enforcement, not residual). Sweep misses (created-after-dump,
+  per-family interleave) and post-sweep reconnects are covered by the
+  advisory's silent-class pointer on the transition commit itself — no
+  future apply is needed for the warning — while catalogued misses
+  still drop via the guard meanwhile. A flap (tighten→loosen→tighten)
+  re-evaluates transition plus evidence at each commit independently.
 - **Race bound: guard-first closes the catalogued Install→flush window; the
   peer-oriented uncovered window is bounded by sweep duration, not packets.**
   The guard installs atomically with the table, before the conntrack sweep, so
@@ -856,16 +869,21 @@ explicit-bind clients, rsh clients binding 512–514, and any process `ss -tnp`
 shows sourcing the port. For those, stop/disable the outbound origination
 through commit (same disjunction as UDP/bare: stop it or keep the
 host-inbound), then delete + verify + re-verify after one app interval. The
-any-service breadth advisory names this consequence while the stanza is open;
-the tightening commit itself carries a commit-output warning — narrowed
-scopes (full-admit loss or unguarded-token removal, zone-level only where no
-replacing override applies) intersected with zones containing observed
-stranded customs/exempt/bare flows — and the daemon warns in the journal on
-applies that keep denied non-catalog customs below the ephemeral floor (TCP
-also when listener-backed). Ephemeral egress and ranges stay silent in both
-channels (indistinguishable from ordinary clients; proven policy-invariant
-authorized by the catalog-boundedness test), as do admitted tuples; sweep
-misses and post-sweep reconnects surface on the next apply's sweep instead.
+any-service breadth advisory names this consequence while the stanza is
+open; the tightening commit itself warns — evidence lines naming the
+narrowed effective scopes with intersecting stranded flows (counts and
+samples from those scopes' addresses only), or a transition-only
+advisory naming the narrowed scopes when the sweep observed nothing
+in them — and the daemon warns in the journal on applies that keep
+denied non-catalog customs below the ephemeral floor (TCP also when
+listener-backed). Ephemeral egress and ranges are never observed as
+evidence (indistinguishable from ordinary clients; proven
+policy-invariant authorized by the catalog-boundedness test), but
+transition commits covering them still carry the advisory with its
+silent-class pointer; admitted tuples stay silent everywhere, as do
+commits with no transition. Sweep misses and post-sweep reconnects
+are covered by that same advisory pointer on the transition commit
+itself rather than surfacing on a later apply's sweep.
 
 
 ### Revocation failure is retried, counted, and published (#6802)
