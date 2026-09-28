@@ -574,6 +574,15 @@ best-effort migration of the rescue config. If rescue migration cannot safely
 complete, it leaves the file in place and warns—rotate the affected credentials
 before restoring it.
 
+Credential migration hashes values but does not make ineligible credentials
+usable. Before relying on remote REST access, ensure each API-auth identity has
+an effective recognized login class (the default is `read-only`), a future UTC
+`expires YYYY-MM-DD` date, and a Basic password of at least 12 characters or an
+API key of at least 16. Short, expired, or missing-expiry credentials are
+denied; if no credential remains usable, the daemon clamps a non-loopback
+web-management bind back to loopback. Rotate or reconfigure credentials and
+verify the HTTPS listener after upgrade.
+
 The daemon removes only recognized, regular xpf config snapshots in the
 xpf-owned local `/var/lib/xpf/archive` when they contain legacy cleartext
 `api-auth` secrets or malformed reserved verifier tags. It does not rewrite

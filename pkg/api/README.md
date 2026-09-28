@@ -583,6 +583,12 @@ A bad `Authorization` header remains a charged failed attempt even when a valid
 `X-API-Key` fallback authorizes the request. The account lock follows the
 claimed identity; a clean key-only request remains available while the
 source-level budget is below its cap.
+
+When no credential authorizes a request, REST responds with HTTP 401; a
+throttle refusal is HTTP 429 with a `Retry-After` header. Throttle state is
+in-memory and local to one REST middleware/`Server` instance: HA peers and a
+restarted process start with fresh independent budgets, so this is not a
+cluster-wide or restart-persistent attempt quota.
 Credentials are not accepted over clear HTTP: strict compile rejects explicit
 HTTP plus api-auth, and runtime disables the HTTP leg whenever an api-auth
 identity is active; use HTTPS for credentialed REST access.
