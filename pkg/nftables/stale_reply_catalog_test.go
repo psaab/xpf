@@ -10,6 +10,44 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+func TestHostInboundStaleReplyIsExemptMatchesTokens10752(t *testing.T) {
+	for _, tok := range []string{"dhcp", "bootp", "dhcpv6", "ntp"} {
+		for _, family := range []string{"ip", "ip6"} {
+			for _, m := range config.HostInboundServiceMatch(tok, family) {
+				for _, p := range m.Ports {
+					if p.Lo != p.Hi {
+						continue
+					}
+					if !HostInboundStaleReplyIsExempt(m.Proto, p.Lo) {
+						t.Errorf("exempt token %s port %d must be IsExempt", tok, p.Lo)
+					}
+				}
+			}
+		}
+	}
+	for _, tcp := range []uint16{20, 179, 512, 513, 514, 639, 646} {
+		if !HostInboundStaleReplyIsExempt(config.HostInboundProtoTCP, tcp) {
+			t.Errorf("TCP exempt port %d must be IsExempt", tcp)
+		}
+	}
+	if !HostInboundStaleReplyIsExempt(config.HostInboundProtoUDP, 646) {
+		t.Error("UDP 646 must be IsExempt")
+	}
+	for _, tc := range []struct {
+		proto uint8
+		port  uint16
+	}{
+		{config.HostInboundProtoTCP, 22},
+		{config.HostInboundProtoTCP, 2222},
+		{config.HostInboundProtoUDP, 161},
+		{config.HostInboundProtoUDP, 500},
+	} {
+		if HostInboundStaleReplyIsExempt(tc.proto, tc.port) {
+			t.Errorf("non-exempt %d/%d must not be IsExempt", tc.proto, tc.port)
+		}
+	}
+}
+
 func TestHostInboundStaleReplyCatalogCoversAuthoritativeDiscreteTuples10752(t *testing.T) {
 	exemptTCP := map[uint16]bool{20: true, 179: true, 512: true, 513: true, 514: true, 639: true, 646: true}
 	exemptUDP := map[uint16]bool{67: true, 68: true, 123: true, 546: true, 547: true, 646: true}

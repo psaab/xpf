@@ -421,7 +421,30 @@ var (
 		20: true, 179: true, 512: true, 513: true, 514: true, 639: true, 646: true,
 	}
 	staleReplyExemptUDPPorts = map[uint16]bool{646: true}
+	// staleReplyExemptUDPClientPorts are the UDP client-role ports excluded
+	// by token (staleReplyExemptUDPTokens: dhcp/bootp/dhcpv6/ntp), spelled
+	// as ports so consumers without token context can test membership.
+	staleReplyExemptUDPClientPorts = map[uint16]bool{
+		67: true, 68: true, 123: true, 546: true, 547: true,
+	}
 )
+
+// HostInboundStaleReplyIsExempt reports whether a box-side (proto, port)
+// tuple is deliberately outside the stale-reply catalog by client-role
+// exemption (both families unioned: the daemon flush WARN heuristic has no
+// family context beyond the flow addresses, and these ports are exempt
+// wherever they appear). Catalogued ports return false — even if currently
+// admitted — since exemption is about catalog membership, not admission.
+func HostInboundStaleReplyIsExempt(proto uint8, port uint16) bool {
+	switch proto {
+	case config.HostInboundProtoTCP:
+		return staleReplyExemptTCPPorts[port]
+	case config.HostInboundProtoUDP:
+		return staleReplyExemptUDPPorts[port] || staleReplyExemptUDPClientPorts[port]
+	default:
+		return false
+	}
+}
 
 // addDiscretePorts folds singleton ranges into the set, excluding known
 // client-role ports whose box-originated replies must remain permitted.

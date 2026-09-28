@@ -2,8 +2,15 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -125,6 +132,37 @@ type hostInboundConntrackFlushFilter struct {
 	ingressTCP       []config.PortRange
 	ingressUDP       []config.PortRange
 	ingressAllowsAll bool
+	ephemLo          uint16
+	ephemHi          uint16
+	// keptSuspicious counts box-oriented covered flows the sweep deliberately
+	// kept that look like tightening-with-service-running staleness: TCP/UDP,
+	// denied by owner+ingress, outside the ephemeral range and the
+	// client-role exempt sets, and outside the catalog (so also unguarded).
+	// keptSamples holds the first few tuple descriptions for the WARN.
+	// MatchConntrackFlow may run on the sweeper's goroutine(s), hence atomic
+	// + mutex rather than plain fields.
+	keptSuspicious atomic.Uint64
+	keptMu         sync.Mutex
+	keptSamples    []string
+}
+
+// readEphemeralPortRange returns the kernel's ephemeral source-port range for
+// the kept-suspicious heuristic, defaulting to the Linux 32768-60999 default
+// when the proc file is unreadable. A package var so tests pin boundaries
+// deterministically.
+var readEphemeralPortRange = func() (uint16, uint16) {
+	raw, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err == nil {
+		fields := strings.Fields(string(raw))
+		if len(fields) == 2 {
+			lo, errLo := strconv.ParseUint(fields[0], 10, 16)
+			hi, errHi := strconv.ParseUint(fields[1], 10, 16)
+			if errLo == nil && errHi == nil && lo <= hi {
+				return uint16(lo), uint16(hi)
+			}
+		}
+	}
+	return 32768, 60999
 }
 
 func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flow *netlink.ConntrackFlow) bool {
@@ -146,6 +184,7 @@ func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flo
 		return false
 	}
 	if _, ok := guard[port]; !ok {
+		f.noteKeptSuspicious(addr, flow)
 		return false
 	}
 	if f.flowAdmitted(a, flow.Forward.Protocol, port) {
@@ -170,6 +209,77 @@ func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flo
 		}
 	}
 	return true
+}
+
+// noteKeptSuspicious records a box-oriented covered flow the sweep kept on a
+// catalog miss that is NOT convincingly legitimate egress: TCP/UDP, denied by
+// owner+ingress, outside the ephemeral range and the client-role exempt sets
+// (custom/non-catalog service-like sports such as 2222). Ephemeral egress,
+// exempt control-plane/client ports, and WireGuard (filtered by the caller)
+// are never recorded. Bare-protocol and ranged flows are likewise excluded:
+// live-vs-stale is indistinguishable there too, so they stay matrix-only and
+// this WARN keeps a tight false-positive budget (explicit-bind low-sport
+// clients, verified with ss).
+func (f *hostInboundConntrackFlushFilter) noteKeptSuspicious(addr netip.Addr, flow *netlink.ConntrackFlow) {
+	port := flow.Forward.SrcPort
+	if port >= f.ephemLo && port <= f.ephemHi {
+		return
+	}
+	if xnft.HostInboundStaleReplyIsExempt(flow.Forward.Protocol, port) {
+		return
+	}
+	a := f.admit[addr.Unmap()]
+	if a == nil || f.flowAdmitted(a, flow.Forward.Protocol, port) {
+		return
+	}
+	if f.ingressAllowsAll {
+		return
+	}
+	switch flow.Forward.Protocol {
+	case config.HostInboundProtoTCP:
+		if portInRanges(port, f.ingressTCP) {
+			return
+		}
+	case config.HostInboundProtoUDP:
+		if portInRanges(port, f.ingressUDP) {
+			return
+		}
+	default:
+		return
+	}
+	f.keptSuspicious.Add(1)
+	f.keptMu.Lock()
+	defer f.keptMu.Unlock()
+	if len(f.keptSamples) < 5 {
+		f.keptSamples = append(f.keptSamples, fmt.Sprintf("%s %s:%d→%s:%d",
+			protoName10752(flow.Forward.Protocol), ipString10752(flow.Forward.SrcIP), port,
+			ipString10752(flow.Forward.DstIP), flow.Forward.DstPort))
+	}
+}
+
+// keptSuspiciousReport returns the recorded keep count and sample tuples.
+func (f *hostInboundConntrackFlushFilter) keptSuspiciousReport() (uint64, []string) {
+	f.keptMu.Lock()
+	defer f.keptMu.Unlock()
+	return f.keptSuspicious.Load(), append([]string(nil), f.keptSamples...)
+}
+
+func protoName10752(proto uint8) string {
+	switch proto {
+	case config.HostInboundProtoTCP:
+		return "tcp"
+	case config.HostInboundProtoUDP:
+		return "udp"
+	default:
+		return strconv.Itoa(int(proto))
+	}
+}
+
+func ipString10752(ip net.IP) string {
+	if ip == nil {
+		return "?"
+	}
+	return ip.String()
 }
 
 func (f *hostInboundConntrackFlushFilter) flowAdmitted(a *hostInboundAdmit, proto uint8, port uint16) bool {
@@ -356,9 +466,11 @@ func buildHostInboundConntrackFlushFilter(views []dpuserspace.ZoneHostInboundVie
 			}
 		}
 	}
+	ephemLo, ephemHi := readEphemeralPortRange()
 	return &hostInboundConntrackFlushFilter{
 		admit: admit, wgPorts: wgListenPorts, guardTCP: guardTCP, guardUDP: guardUDP,
 		ingressTCP: ingressTCP, ingressUDP: ingressUDP, ingressAllowsAll: ingressAllowsAll,
+		ephemLo: ephemLo, ephemHi: ephemHi,
 	}
 }
 
@@ -415,6 +527,17 @@ func (d *Daemon) flushDeniedHostInboundConntrack(views []dpuserspace.ZoneHostInb
 	if flushed > 0 {
 		slog.Info("host-inbound conntrack reconcile: flushed now-denied kernel conntrack entries so stale direct-kernel host connections are re-evaluated against the current host-inbound set",
 			"flushed", flushed)
+	}
+	// Evidence-based tightening visibility (#10752 HIGH residual): the sweep
+	// deliberately keeps box-oriented non-catalog flows (custom ports such as
+	// 2222 after an any-service→named tightening). Unlike the #6802 debt this
+	// is not a failure — nothing failed — so it must not join the commit
+	// error; but unlike a clean sweep it leaves authorization the new rules
+	// no longer grant, so it must not pass silently either. Journal WARN with
+	// count + samples + the procedure pointer, only when such flows exist.
+	if kept, samples := filter.keptSuspiciousReport(); kept > 0 {
+		slog.Warn("host-inbound conntrack reconcile kept box-oriented non-catalog flows to covered addresses; with active traffic they ride the broad reply accept indefinitely — delete per the non-catalog TCP HIGH-residual procedure in docs/host-inbound-service-matrix.md, or verify with ss that each is a legitimate explicit-bind client",
+			"kept", kept, "samples", samples)
 	}
 	return ok
 }

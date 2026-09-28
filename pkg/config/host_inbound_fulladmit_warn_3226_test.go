@@ -20,6 +20,31 @@ func hostInboundFullAdmitWarnings(cfg *Config) []string {
 	return out
 }
 
+// TestAnyServiceAdvisoryNamesTighteningStaleness10752 pins the #10752 sentence
+// on the breadth advisory: an any-service stanza warns not only about current
+// breadth but about the later-tightening consequence (custom-port box-oriented
+// flows linger until close/timeout) with a pointer to the procedure. RED if
+// the sentence is dropped; the tightened (named-services) stanza stays quiet
+// since commit validation sees only the new config, never the transition.
+func TestAnyServiceAdvisoryNamesTighteningStaleness10752(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
+		"set security zones security-zone trust interfaces ge-0/0/0.0",
+		"set security zones security-zone trust host-inbound-traffic system-services any-service",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("any-service must compile (warn-not-reject): %v", err)
+	}
+	got := hostInboundFullAdmitWarnings(cfg)
+	if len(got) != 1 {
+		t.Fatalf("want exactly 1 breadth advisory, got %d: %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "Tightening this stanza later") || !strings.Contains(got[0], "non-catalog") {
+		t.Errorf("breadth advisory must name the tightening staleness consequence: %q", got[0])
+	}
+}
+
 // hostInboundAllScopingWarnings returns the #3226 commit-time UPGRADE advisories
 // emitted for a `system-services all` stanza on an enforcing (non-lifeline)
 // zone/interface. The advisory phrase is unique to this check.
