@@ -1359,6 +1359,34 @@ func TestEarlyInputGuardSwapFailedSignal10751(t *testing.T) {
 	}
 }
 
+// TestHandoffClearsSwapFailedLatch10751: a bootstrap swap failure latches
+// the signal (global barrier retained), but a LATER completed handoff —
+// the recovery path — must clear it. Otherwise a recovered box keeps
+// reporting swap-failed with the gauge and /health stuck on (#10751 R4-7).
+// RED on revert: drop the clear and the latch stays set after handoff.
+func TestHandoffClearsSwapFailedLatch10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	nftInstaller = &fakeNftInstaller{
+		earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("swap failed") },
+	}
+	d := &Daemon{}
+	d.ensureEarlyInputBootstrapGuard()
+	if !d.EarlyInputGuardSwapFailed() {
+		t.Fatal("failed swap must latch the signal")
+	}
+	nftInstaller = &fakeNftInstaller{} // heal: the handoff path succeeds
+	if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+		t.Fatalf("handoff apply: %v", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("apply must have handed off")
+	}
+	if d.EarlyInputGuardSwapFailed() {
+		t.Fatal("a completed handoff must clear a latched swap failure")
+	}
+}
+
 // --- #10751 R4-2: single-snapshot handoff (transition injection) ---
 //
 // The install inputs render from one sample; the handoff re-samples and

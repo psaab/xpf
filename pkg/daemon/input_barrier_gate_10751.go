@@ -309,9 +309,12 @@ var EarlyInputHandoffMarkerPath = "/run/xpf/early-input-handoff.done"
 // setEarlyInputHandoffDone records a completed first handoff in memory and
 // on disk (best-effort marker write; a write failure only weakens the CLI
 // guard, never the commit). All handoff-completion sites funnel through
-// here so the two records cannot diverge.
+// here so the two records cannot diverge. It also clears a latched
+// bootstrap swap failure: the barrier is gone and enforcement is live, so a
+// recovered box must not keep reporting swap-failed (#10751 R4-7).
 func (d *Daemon) setEarlyInputHandoffDone() {
 	d.earlyInputHandoffDone.Store(true)
+	d.earlyInputGuardSwapFailed.Store(false)
 	if err := os.MkdirAll(filepath.Dir(EarlyInputHandoffMarkerPath), 0755); err != nil {
 		slog.Warn("cannot record early-input handoff marker; CLI reload guard degraded", "err", err)
 		return
