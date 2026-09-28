@@ -110,12 +110,62 @@ func TestADisplayRefreshErrorKeepsThePreviousSnapshot8615(t *testing.T) {
 		t.Fatal("setup: the table must start non-empty or this proves nothing")
 	}
 
-	if applyPersistentNatShowRefreshDisplay(table, nil, errors.New("helper restarting"), time.Now()) {
+	if applyPersistentNatShowRefreshDisplay(table, nil, errors.New("helper restarting"), time.Now(), table.ClearGeneration()) {
 		t.Error("a failed refresh must report that it did NOT replace the table")
 	}
 	if got := len(table.All()); got != before {
 		t.Errorf("a failed refresh emptied the table (%d -> %d). That renders as "+
 			"\"No persistent NAT bindings\" — the exact false statement #8607 "+
 			"removed — for a helper that is merely restarting (#8615).", before, got)
+	}
+}
+
+func TestAStaleShowExportCannotResurrectClearedBindings10784(t *testing.T) {
+	apply := []struct {
+		name string
+		run  func(*dataplane.PersistentNATTable, uint64) bool
+	}{
+		{
+			name: "display export",
+			run: func(table *dataplane.PersistentNATTable, clearGen uint64) bool {
+				leases := []dpuserspace.DisplayLeaseWire{displayLease(1, showTimeout)}
+				return applyPersistentNatShowRefreshDisplay(table, leases, nil, time.Now(), clearGen)
+			},
+		},
+		{
+			name: "idle fallback export",
+			run: func(table *dataplane.PersistentNATTable, clearGen uint64) bool {
+				leases := []dpuserspace.IdleLeaseWire{
+					leaseWire8607("10.0.61.241", 39165, "172.16.80.7", 30000, time.Minute, time.Minute),
+				}
+				return applyPersistentNatShowRefresh(table, leases, nil, time.Now(), clearGen)
+			},
+		},
+	}
+
+	for _, tc := range apply {
+		t.Run(tc.name, func(t *testing.T) {
+			table := dataplane.NewPersistentNATTable()
+			table.ReplaceAll([]*dataplane.PersistentNATBinding{{
+				PoolName: "old", Timeout: showTimeout, LastSeen: time.Now(),
+			}})
+			staleGen := table.ClearGeneration()
+			table.Clear()
+
+			if tc.run(table, staleGen) {
+				t.Fatal("an export started before clear must not replace the cleared table")
+			}
+			if got := len(table.All()); got != 0 {
+				t.Fatalf("stale export resurrected %d SHOW bindings after clear", got)
+			}
+
+			currentGen := table.ClearGeneration()
+			if !tc.run(table, currentGen) {
+				t.Fatal("an export started after clear must still replace the SHOW table")
+			}
+			if got := len(table.All()); got != 1 {
+				t.Fatalf("current export installed %d SHOW bindings, want 1", got)
+			}
+		})
 	}
 }

@@ -196,3 +196,24 @@ func displayLeasesFromResponse(resp ControlResponse, err error) ([]DisplayLeaseW
 	}
 	return resp.DisplayLeases, nil
 }
+
+// ClearPersistentNatLeases revokes every lease in the authoritative helper
+// allocator (#10784). Unlike the show-table refresh, this is an operator
+// mutation: absence of a running helper or an unsupported verb is an error, not
+// a successful mirror-only clear.
+func (m *Manager) ClearPersistentNATLeases() (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.proc == nil {
+		return 0, errors.New("userspace dataplane helper not running")
+	}
+	resp, err := m.requestDetailedLocked(ControlRequest{
+		Type:           "clear_persistent_nat_leases",
+		SuppressStatus: true,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("clear authoritative persistent NAT leases: %w", err)
+	}
+	return resp.PersistentNatLeaseCount, nil
+}

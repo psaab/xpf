@@ -747,19 +747,39 @@ func (c *CLI) handleClearDHCP(args []string) error {
 }
 
 func (c *CLI) clearPersistentNAT() error {
-	// #2114/#6743-F2: one resolution, then operate on the local. Each
-	// GetPersistentNAT() is a separate cell load under the daemon's live
-	// indirection, so re-reading after the nil-check can hand back nil.
-	var table *dataplane.PersistentNATTable
-	if c.dp != nil {
-		table = c.dp.GetPersistentNAT()
+	backend := c.dpProbe()
+	tableProvider, ok := backend.(interface {
+		GetPersistentNAT() *dataplane.PersistentNATTable
+	})
+	if !ok {
+		fmt.Println("Persistent NAT table not available")
+		return nil
 	}
+	table := tableProvider.GetPersistentNAT()
 	if table == nil {
 		fmt.Println("Persistent NAT table not available")
 		return nil
 	}
-	count := table.Len()
-	table.Clear()
+	count := uint64(table.Len())
+	if clearer, ok := backend.(interface {
+		ClearPersistentNATLeases() (uint64, error)
+	}); ok {
+		var err error
+		count, err = clearer.ClearPersistentNATLeases()
+		if err != nil {
+			return fmt.Errorf("clear persistent NAT leases: %w", err)
+		}
+	} else {
+		// For non-userspace dataplanes this table is authoritative.
+		table.Clear()
+	}
 	fmt.Printf("Cleared %d persistent NAT bindings\n", count)
+	if c.cluster != nil {
+		if peerMessage, err := c.requestPeerSystemAction(context.Background(), "clear-persistent-nat"); err != nil {
+			fmt.Printf("WARNING: peer persistent NAT clear failed: %v\n", err)
+		} else if peerMessage != "" {
+			fmt.Printf("Peer: %s\n", peerMessage)
+		}
+	}
 	return nil
 }

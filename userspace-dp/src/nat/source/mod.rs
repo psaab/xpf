@@ -754,6 +754,11 @@ fn carry_renamed_pool_reservations(
             continue;
         }
         if prev.live_flow_count() == 0 {
+            // Clear fences protect delayed HA records independently of live
+            // tuple reservations. A clear can leave no live flows at all, so
+            // retain its batch/per-key fence even though there is no tuple to
+            // re-seed.
+            allocator.carry_persistent_nat_clear_fences_from(prev, now_ns);
             continue;
         }
         let map: FxHashMap<usize, usize> = (0..total).map(|i| (i, i)).collect();
