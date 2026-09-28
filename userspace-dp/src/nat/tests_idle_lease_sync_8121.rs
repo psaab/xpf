@@ -1781,6 +1781,149 @@ fn clear_fence_survives_expired_address_only_replacement_10784() {
     assert!(allocator.debug_live().persistent_by_source.is_empty());
 }
 
+/// A stale PAT session cannot reactivate an expired replacement that is still
+/// present in the map but has not yet been visited by GC (#10784 round 2).
+#[test]
+fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
+    let addrs = [pool()[0]];
+    let allocator = PortAllocator::new(1, 1024, 1024);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent_any_remote(&allocator, &addrs, client, 1_000_000_000);
+    let stale_flow = client;
+    let stale_tuple = original;
+    assert!(allocator.release_flow(client, original, 2_000_000_000, NatHolder::Untracked));
+    assert_eq!(allocator.clear_persistent_leases(3_000_000_000), 1);
+
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    let replacement = allocator
+        .allocate_translation(
+            client,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            min_timeout_ns,
+            3_100_000_000,
+            NatHolder::Untracked,
+        )
+        .expect("fresh same-key replacement must succeed");
+    assert_eq!(replacement, stale_tuple, "single-port pool fixes the stale tuple");
+    assert!(allocator.release_flow(
+        client,
+        replacement,
+        4_200_000_000,
+        NatHolder::Untracked
+    ));
+    let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let expiry = 5_200_000_000;
+    {
+        let live = allocator.debug_live();
+        let lease = live.persistent_by_source.get(&key).unwrap();
+        assert!(!lease.revoked);
+        assert_eq!(lease.active_flows, 0);
+        assert_eq!(lease.expires_at_ns, expiry);
+        assert!(live.lease_expirations.contains(&(expiry, key)));
+        assert!(live.lease_expirations_by_addr[0].contains(&(expiry, key)));
+    }
+
+    let mut previous_snapshot = None;
+    assert!(
+        !allocator.reserve_flow_maybe_persistent(
+            stale_flow,
+            stale_tuple,
+            0,
+            false,
+            5_300_000_000,
+            NatHolder::Untracked,
+            Some((key, TIMEOUT_NS)),
+            false,
+            &mut previous_snapshot,
+        ),
+        "the stale tuple is still occupied, so it must not attach to the expired lease"
+    );
+    let live = allocator.debug_live();
+    let lease = live.persistent_by_source.get(&key).unwrap();
+    assert_eq!(lease.active_flows, 0, "stale sync must not reactivate the lease");
+    assert_eq!(lease.expires_at_ns, expiry);
+    assert!(live.lease_expirations.contains(&(expiry, key)));
+    assert!(live.lease_expirations_by_addr[0].contains(&(expiry, key)));
+    assert!(allocator.debug_is_port_occupied(0, stale_tuple.port));
+}
+
+/// The address-only synced path has the same stale replacement race, although
+/// its wire tuple does not own a PAT occupancy bit (#10784 round 2).
+#[test]
+fn expired_address_only_replacement_is_not_reactivated_by_stale_synced_session_10784() {
+    let addrs = [pool()[0]];
+    let allocator = PortAllocator::new(1, 1024, 1024);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent_address_only_any_remote(
+        &allocator,
+        &addrs,
+        client,
+        1_000_000_000,
+    );
+    let stale_flow = client;
+    let stale_tuple = original;
+    assert!(allocator.release_flow(client, original, 2_000_000_000, NatHolder::Untracked));
+    assert_eq!(allocator.clear_persistent_leases(3_000_000_000), 1);
+
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    let replacement = allocator
+        .reserve_address_only_persistent(
+            client,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::AnyRemoteHost,
+            min_timeout_ns,
+            3_100_000_000,
+            NatHolder::Untracked,
+        )
+        .expect("fresh same-key address-only replacement must succeed");
+    assert_eq!(replacement, stale_tuple);
+    assert!(allocator.release_flow(
+        client,
+        replacement,
+        4_200_000_000,
+        NatHolder::Untracked
+    ));
+    let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let expiry = 5_200_000_000;
+    {
+        let live = allocator.debug_live();
+        let lease = live.persistent_by_source.get(&key).unwrap();
+        assert!(lease.address_only);
+        assert!(!lease.revoked);
+        assert_eq!(lease.active_flows, 0);
+        assert_eq!(lease.expires_at_ns, expiry);
+        assert!(live.lease_expirations.contains(&(expiry, key)));
+        assert!(live.lease_expirations_by_addr[0].contains(&(expiry, key)));
+    }
+
+    let mut previous_snapshot = None;
+    assert_eq!(
+        allocator.reserve_address_only_maybe_persistent(
+            stale_flow,
+            stale_tuple.ip,
+            0,
+            5_300_000_000,
+            NatHolder::Untracked,
+            Some((key, TIMEOUT_NS)),
+            false,
+            &mut previous_snapshot,
+        ),
+        Ok(stale_tuple)
+    );
+    let live = allocator.debug_live();
+    let lease = live.persistent_by_source.get(&key).unwrap();
+    assert_eq!(lease.active_flows, 0, "stale sync must not reactivate the lease");
+    assert_eq!(lease.expires_at_ns, expiry);
+    assert!(live.lease_expirations.contains(&(expiry, key)));
+    assert!(live.lease_expirations_by_addr[0].contains(&(expiry, key)));
+}
+
 /// A clear on an empty receiver still fences a pre-clear batch for an unknown
 /// key; per-key tombstones alone cannot cover import ordering (#10784).
 #[test]

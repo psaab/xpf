@@ -4052,7 +4052,14 @@ impl PortAllocator {
         // without persistence instead of recreating the cleared pin.
         let persistent = persistent.filter(|(key, _)| {
             match live.persistent_by_source.get(key) {
-                Some(lease) => !lease.revoked || lease.active_flows > 0,
+                // #10784 R2B1: a synced session may join a LIVE lease only. An
+                // expired idle replacement still awaiting GC must not be
+                // reactivated by a stale pre-clear session. The lease liveness
+                // test matches the local reuse predicate.
+                Some(lease) => {
+                    (!lease.revoked || lease.active_flows > 0)
+                        && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                }
                 None => !live.persistent_nat_import_is_clear_fenced(key, now_ns),
             }
         });
@@ -4366,7 +4373,13 @@ impl PortAllocator {
         // but a removed tombstoned lease must not be minted again by session sync.
         let persistent = persistent.filter(|(key, _)| {
             match live.persistent_by_source.get(key) {
-                Some(lease) => !lease.revoked || lease.active_flows > 0,
+                // #10784 R2B1: address-only twin of the PAT liveness gate above.
+                // An expired idle replacement still awaiting GC must not be
+                // reactivated by a stale pre-clear session.
+                Some(lease) => {
+                    (!lease.revoked || lease.active_flows > 0)
+                        && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                }
                 None => !live.persistent_nat_import_is_clear_fenced(key, now_ns),
             }
         });
