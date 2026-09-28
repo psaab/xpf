@@ -584,6 +584,18 @@ var iifnameSetRe = regexp.MustCompile(`iifname \{[^{}]*\}`)
 // fail-open/closed verdict change and must stay visible to the text diff.
 var iifnameNeSetRe = regexp.MustCompile(`iifname != \{[^{}]*\}`)
 
+// sdifnameSetRe canonicalizes a `meta sdifname { ... }` set away from the
+// text diff (both sides): same empty-element rendering caveat as iifname
+// sets. The actual slave scope is asserted per-rule via the extended
+// ruleIifnameScope below. Single-name `meta sdifname "x"` lines byte
+// compare directly (inline Cmp data renders intact).
+var sdifnameSetRe = regexp.MustCompile(`meta sdifname \{[^{}]*\}`)
+
+// testMetaKeySDIFNAME is NFT_META_SDIFNAME (slave device name, UAPI value
+// 34 — include/uapi/linux/netfilter/nf_tables.h), mirroring the
+// renderer's pinned constant for per-rule scope decoding.
+const testMetaKeySDIFNAME = expr.MetaKey(34)
+
 // normalizeNftDump canonicalizes an `nft list table` dump for comparison: it
 // strips rule handles, collapses whitespace, and SORTS the elements inside each
 // inline `{ a, b }` set (the kernel may reorder set elements) — but it NEVER
@@ -600,6 +612,7 @@ func normalizeNftDump(s string) string {
 		}
 		ln = iifnameNeSetRe.ReplaceAllString(ln, "iifname != { IFSET }")
 		ln = iifnameSetRe.ReplaceAllString(ln, "iifname { IFSET }")
+		ln = sdifnameSetRe.ReplaceAllString(ln, "meta sdifname { IFSET }")
 		ln = braceSetRe.ReplaceAllStringFunc(ln, sortBraceSet)
 		out = append(out, ln)
 	}
@@ -666,33 +679,54 @@ func iifnameScopeByRule(t *testing.T, table string) []string {
 // after a `meta iifname` load, whether a single Cmp or an anonymous set Lookup.
 // Negation is part of the scope: `iifname != ...` (CmpOpNeq or Lookup Invert)
 // returns "!"+names so a negation flip between oracle and netlink is a per-rule
-// diff, not a silent match.
+// diff, not a silent match. Slave scope (`meta sdifname`, Opus9 gap
+// exception) is decoded identically and appended as ";sdif:<names>" when
+// present; iif-only rules keep the historical bare format.
 func ruleIifnameScope(r *gnft.Rule, setNames map[string][]string) string {
-	var names []string
-	negated := false
-	pending := false
+	var names, sdifNames []string
+	negated, sdifNegated := false, false
+	pending, pendingSDIF := false, false
 	var reg uint32
 	for _, e := range r.Exprs {
 		switch x := e.(type) {
 		case *expr.Meta:
 			if x.Key == expr.MetaKeyIIFNAME {
-				pending, reg = true, x.Register
+				pending, pendingSDIF, reg = true, false, x.Register
+				continue
+			}
+			if x.Key == testMetaKeySDIFNAME {
+				pending, pendingSDIF, reg = true, true, x.Register
 				continue
 			}
 			pending = false
 		case *expr.Cmp:
 			if pending && x.Register == reg {
-				names = append(names, string(bytesTrimRightZero(x.Data)))
-				if x.Op == expr.CmpOpNeq {
-					negated = true
+				name := string(bytesTrimRightZero(x.Data))
+				if pendingSDIF {
+					sdifNames = append(sdifNames, name)
+					if x.Op == expr.CmpOpNeq {
+						sdifNegated = true
+					}
+				} else {
+					names = append(names, name)
+					if x.Op == expr.CmpOpNeq {
+						negated = true
+					}
 				}
 			}
 			pending = false
 		case *expr.Lookup:
 			if pending && x.SourceRegister == reg {
-				names = append(names, setNames[x.SetName]...)
-				if x.Invert {
-					negated = true
+				if pendingSDIF {
+					sdifNames = append(sdifNames, setNames[x.SetName]...)
+					if x.Invert {
+						sdifNegated = true
+					}
+				} else {
+					names = append(names, setNames[x.SetName]...)
+					if x.Invert {
+						negated = true
+					}
 				}
 			}
 			pending = false
@@ -701,11 +735,19 @@ func ruleIifnameScope(r *gnft.Rule, setNames map[string][]string) string {
 		}
 	}
 	sort.Strings(names)
+	sort.Strings(sdifNames)
 	scope := strings.Join(names, ",")
 	if negated && scope != "" {
 		scope = "!" + scope
 	}
-	return scope
+	if len(sdifNames) == 0 {
+		return scope
+	}
+	sdifScope := strings.Join(sdifNames, ",")
+	if sdifNegated && sdifScope != "" {
+		sdifScope = "!" + sdifScope
+	}
+	return scope + ";sdif:" + sdifScope
 }
 
 // iifScopesEqual compares two per-rule iifname-scope lists index-by-index (NOT

@@ -145,6 +145,121 @@ func udpExchangeRetry10751(t *testing.T, recv *net.UDPConn, send func() error, p
 	return false
 }
 
+// sendToScope10751 sends one v6 datagram with an explicit numeric scope
+// id, bypassing Go's process-global ipv6ZoneCache: the cache is keyed by
+// interface NAME with a 60s TTL, so recreating same-named veth pairs
+// across tests (or count>1 iterations) poisons later sends with stale
+// ifindices from dead namespaces (flaky ENETUNREACH/misdirection).
+// Resolve the ifindex fresh per test via netlink and pass it here.
+// Returns the sendto error (DAD-transients included) for the caller to
+// retry or fail on; control-plane failures are fatal.
+func sendToScope10751(t *testing.T, conn *net.UDPConn, payload []byte, ip net.IP, port, ifindex int) error {
+	t.Helper()
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+	var ip16 [16]byte
+	copy(ip16[:], ip.To16())
+	sa := &syscall.SockaddrInet6{Port: port, ZoneId: uint32(ifindex), Addr: ip16}
+	var opErr error
+	if err := raw.Control(func(fd uintptr) {
+		opErr = syscall.Sendto(int(fd), payload, 0, sa)
+	}); err != nil {
+		t.Fatalf("SyscallConn.Control: %v", err)
+	}
+	return opErr
+}
+
+// linkIndex10751 resolves an interface index fresh from netlink (never
+// through Go's cached Zone path) for sendToScope10751.
+func linkIndex10751(t *testing.T, ifname string) int {
+	t.Helper()
+	link, err := netlink.LinkByName(ifname)
+	if err != nil {
+		t.Fatalf("LinkByName %s: %v", ifname, err)
+	}
+	return link.Attrs().Index
+}
+
+// udpExchangeWant10751 sends one datagram and reports whether a datagram
+// with exactly the wanted payload arrives before the deadline. Strays
+// (duplicates from an earlier retried positive on the same socket) are
+// discarded, never mistaken for the verdict — timing-independent, unlike
+// a quiet-period drain.
+func udpExchangeWant10751(t *testing.T, recv *net.UDPConn, send func() error, want []byte, timeout time.Duration) (received bool) {
+	t.Helper()
+	if err := send(); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	deadline := time.Now().Add(timeout)
+	buf := make([]byte, 1500)
+	for {
+		rest := time.Until(deadline)
+		if rest <= 0 {
+			return false
+		}
+		if err := recv.SetReadDeadline(time.Now().Add(rest)); err != nil {
+			t.Fatalf("SetReadDeadline: %v", err)
+		}
+		n, _, err := recv.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return false
+			}
+			t.Fatalf("recv: %v", err)
+		}
+		if string(buf[:n]) == string(want) {
+			return true
+		}
+	}
+}
+
+// udpExchangeRetryWant10751 repeats a send/recv round until a datagram
+// with exactly the wanted payload arrives or the deadline passes: the
+// DAD-tolerant retry that also ignores strays from other phases sharing
+// the socket. Send errors and timeouts retry; anything else fails
+// immediately. Returns false only on a clean deadline with the wanted
+// payload never received.
+func udpExchangeRetryWant10751(t *testing.T, recv *net.UDPConn, send func() error, want []byte, perTry, total time.Duration) (received bool) {
+	t.Helper()
+	deadline := time.Now().Add(total)
+	var lastErr error
+	buf := make([]byte, 1500)
+	for time.Now().Before(deadline) {
+		if err := send(); err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		rest := time.Until(deadline)
+		if rest <= 0 {
+			break
+		}
+		if rest < perTry {
+			perTry = rest
+		}
+		if err := recv.SetReadDeadline(time.Now().Add(perTry)); err != nil {
+			t.Fatalf("SetReadDeadline: %v", err)
+		}
+		n, _, err := recv.ReadFromUDP(buf)
+		if err == nil {
+			if string(buf[:n]) == string(want) {
+				return true
+			}
+			lastErr = err
+			continue
+		} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			lastErr = err
+			continue
+		} else {
+			t.Fatalf("recv: %v", err)
+		}
+	}
+	t.Logf("last exchange error before deadline: %v", lastErr)
+	return false
+}
+
 func tableHasIIFNAME10751(t *testing.T, table string) bool {
 	t.Helper()
 	c, err := nftables.New()
@@ -196,17 +311,14 @@ func TestUnleasedDHCPAcquisitionThroughBackstop10751(t *testing.T) {
 	}
 	defer server.Close()
 
-	advertise := &net.UDPAddr{IP: testLL, Port: 546, Zone: "vpeer0"}
+	oif := linkIndex10751(t, "vpeer0")
 	if !udpExchangeRetry10751(t, client, func() error {
-		_, err := server.WriteToUDP([]byte("advertise"), advertise)
-		return err
+		return sendToScope10751(t, server, []byte("advertise"), testLL, 546, oif)
 	}, 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("ADVERTISE-shaped datagram to [ll]:546 was dropped: the backstop deadlocks DHCPv6 acquisition (F8-A admit missing or shadowed)")
 	}
-	other := &net.UDPAddr{IP: testLL, Port: 9999, Zone: "vpeer0"}
 	if udpExchange10751(t, junk, func() error {
-		_, err := server.WriteToUDP([]byte("junk"), other)
-		return err
+		return sendToScope10751(t, server, []byte("junk"), testLL, 9999, oif)
 	}, time.Second) {
 		t.Fatal("datagram to [ll]:9999 arrived: the interface DROP is not denying non-DHCP traffic")
 	}
@@ -297,22 +409,21 @@ func TestUnleasedBackstopAtomicReplace10751(t *testing.T) {
 	}
 	// Baseline acquisition retries (DAD); later probes are single-shot on
 	// the proven path, each from a fresh tuple so no conntrack entry can
-	// color the verdict.
+	// color the verdict. Every phase uses a distinct payload so retried
+	// strays can never fake a later verdict.
 	s := dialServer(t)
-	dst := &net.UDPAddr{IP: testLL, Port: 546, Zone: "vpeer0"}
-	if !udpExchangeRetry10751(t, client, func() error {
-		_, err := s.WriteToUDP([]byte("advertise"), dst)
-		return err
-	}, 300*time.Millisecond, 10*time.Second) {
+	oif := linkIndex10751(t, "vpeer0")
+	if !udpExchangeRetryWant10751(t, client, func() error {
+		return sendToScope10751(t, s, []byte("base"), testLL, 546, oif)
+	}, []byte("base"), 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("baseline acquisition: nothing received")
 	}
-	probe := func(t *testing.T, want bool, what string) {
+	probe := func(t *testing.T, payload string, want bool, what string) {
 		t.Helper()
 		s := dialServer(t)
-		if got := udpExchange10751(t, client, func() error {
-			_, err := s.WriteToUDP([]byte("advertise"), dst)
-			return err
-		}, 3*time.Second); got != want {
+		if got := udpExchangeWant10751(t, client, func() error {
+			return sendToScope10751(t, s, []byte(payload), testLL, 546, oif)
+		}, []byte(payload), 3*time.Second); got != want {
 			t.Fatalf("%s: received=%v, want %v", what, got, want)
 		}
 	}
@@ -323,7 +434,7 @@ func TestUnleasedBackstopAtomicReplace10751(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "15-byte") {
 		t.Fatalf("invalid-netdev install err = %v, want the fail-closed iifname error", err)
 	}
-	probe(t, true, "acquisition after failed replacement")
+	probe(t, "healed", true, "acquisition after failed replacement")
 
 	// Lease re-render: destinations replace the backstop. The same :546
 	// datagram is now denied by the unzoned LL DROP (the admit is gone —
@@ -332,7 +443,7 @@ func TestUnleasedBackstopAtomicReplace10751(t *testing.T) {
 	if err := in.InstallHostInbound(lease); err != nil {
 		t.Fatalf("leased re-render: %v", err)
 	}
-	probe(t, false, "dhcp-shaped traffic after lease (destination DROP owns :546)")
+	probe(t, "leased", false, "dhcp-shaped traffic after lease (destination DROP owns :546)")
 	if tableHasIIFNAME10751(t, HostInboundTableName) {
 		t.Fatal("leased table still carries an iifname rule: the backstop did not fully swap for destinations")
 	}
@@ -435,8 +546,9 @@ func TestUnleasedBackstopFamilyGuard10751(t *testing.T) {
 	// Absorb source DAD: repeat a throwaway v6 send until the source is
 	// usable. Dropped under the v6-only table, so nothing pollutes the
 	// control below.
+	oif := linkIndex10751(t, "vpeer0")
 	for i := 0; ; i++ {
-		_, serr := v6server.WriteToUDP([]byte("dad"), &net.UDPAddr{IP: testLL, Port: 9999, Zone: "vpeer0"})
+		serr := sendToScope10751(t, v6server, []byte("dad"), testLL, 9999, oif)
 		if serr == nil {
 			break
 		}
@@ -445,10 +557,8 @@ func TestUnleasedBackstopFamilyGuard10751(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	junk6 := &net.UDPAddr{IP: testLL, Port: 9999, Zone: "vpeer0"}
 	if udpExchange10751(t, v6drop, func() error {
-		_, err := v6server.WriteToUDP([]byte("junk"), junk6)
-		return err
+		return sendToScope10751(t, v6server, []byte("junk"), testLL, 9999, oif)
 	}, time.Second) {
 		t.Fatal("v6 non-DHCP arrived under a v6-only backstop: the DROP is missing")
 	}
@@ -458,10 +568,8 @@ func TestUnleasedBackstopFamilyGuard10751(t *testing.T) {
 	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV4: []string{unleasedTestNetdev10751}}); err != nil {
 		t.Fatalf("v4-only install: %v", err)
 	}
-	survive6 := &net.UDPAddr{IP: testLL, Port: 4445, Zone: "vpeer0"}
 	if !udpExchangeRetry10751(t, v6survive, func() error {
-		_, err := v6server.WriteToUDP([]byte("v6"), survive6)
-		return err
+		return sendToScope10751(t, v6server, []byte("v6"), testLL, 4445, oif)
 	}, 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("v6 unicast was dropped under a v4-only backstop: the DROP is not family-guarded (cross-family shadow)")
 	}

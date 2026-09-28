@@ -2,10 +2,13 @@ package nftables
 
 import (
 	"net"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // gap_lifeline_exception_10751_test.go proves #10751 M1 over REAL packets
@@ -80,6 +83,7 @@ func TestGapLifelineExceptionBothIngress10751(t *testing.T) {
 	mustAddrAdd10751(t, dataLink, wAddr+"/64")
 	mustAddrAdd10751(t, dataLink, xAddr+"/64")
 	mustAddrAdd10751(t, dataLink, yAddr+"/64")
+	waitAddrsValid10751(t, map[string][]string{wNetdev: {wAddr}, unleasedTestNetdev10751: {wAddr, xAddr, yAddr}})
 
 	in := NewNetlinkInstaller()
 	spec := GapFenceSpec{
@@ -107,63 +111,270 @@ func TestGapLifelineExceptionBothIngress10751(t *testing.T) {
 		t.Fatalf("lifeline sender bind: %v", err)
 	}
 	defer lifeSender.Close()
+	bindSockToDevice10751(t, lifeSender, "vpeer0")
 	dataSender, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 0})
 	if err != nil {
 		t.Fatalf("data sender bind: %v", err)
 	}
 	defer dataSender.Close()
+	bindSockToDevice10751(t, dataSender, "vpeer1")
 
-	// Zones pin each datagram's egress link (required for link-locals;
-	// also bypasses the local-table short-circuit, per F8-A).
-	toWLife := &net.UDPAddr{IP: net.ParseIP(wAddr), Port: 4000, Zone: "vpeer0"}
-	if !udpExchangeRetry10751(t, wSock, func() error {
-		_, err := lifeSender.WriteToUDP([]byte("mgmt"), toWLife)
-		return err
-	}, 300*time.Millisecond, 10*time.Second) {
+	// Egress is pinned by numeric scope id (resolved fresh via netlink),
+	// never Go Zones: the process-global Zone cache goes stale across
+	// netns recreations (same veth names, new ifindices) and flaps
+	// sends. Numeric scope also bypasses the local-table short-circuit.
+	oifLife := linkIndex10751(t, "vpeer0")
+	oifData := linkIndex10751(t, "vpeer1")
+	wIP, xIP, yIP := net.ParseIP(wAddr), net.ParseIP(xAddr), net.ParseIP(yAddr)
+	if !udpExchangeRetryWant10751(t, wSock, func() error {
+		return sendToScope10751(t, lifeSender, []byte("mgmt"), wIP, 4000, oifLife)
+	}, []byte("mgmt"), 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("W via lifeline ingress was dropped: the gap exception is missing or shadowed (management lockout)")
 	}
-	toY := &net.UDPAddr{IP: net.ParseIP(yAddr), Port: 4002, Zone: "vpeer1"}
-	if !udpExchange10751(t, ySock, func() error {
-		_, err := dataSender.WriteToUDP([]byte("other"), toY)
-		return err
-	}, 3*time.Second) {
+	if !udpExchangeRetryWant10751(t, ySock, func() error {
+		return sendToScope10751(t, dataSender, []byte("other"), yIP, 4002, oifData)
+	}, []byte("other"), 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("unlisted Y via data was dropped: the gap table is not accept-default")
 	}
-	// Drain retried-positive strays: the phase-1 retry may have left a
-	// duplicate "mgmt" datagram in flight that would otherwise read back
-	// here and fake a data-ingress arrival (flake).
-	drainUDP10751(t, wSock)
-	toWData := &net.UDPAddr{IP: net.ParseIP(wAddr), Port: 4000, Zone: "vpeer1"}
-	if udpExchange10751(t, wSock, func() error {
-		_, err := dataSender.WriteToUDP([]byte("probe"), toWData)
-		return err
-	}, time.Second) {
+	if udpExchangeWant10751(t, wSock, func() error {
+		return sendToScope10751(t, dataSender, []byte("probe-data"), wIP, 4000, oifData)
+	}, []byte("probe-data"), time.Second) {
 		t.Fatal("W via data ingress arrived: shared values are fail-open on data (day-2 hole)")
 	}
-	toX := &net.UDPAddr{IP: net.ParseIP(xAddr), Port: 4001, Zone: "vpeer1"}
 	if udpExchange10751(t, xSock, func() error {
-		_, err := dataSender.WriteToUDP([]byte("probe"), toX)
-		return err
+		return sendToScope10751(t, dataSender, []byte("probe"), xIP, 4001, oifData)
 	}, time.Second) {
 		t.Fatal("X via data ingress arrived: the gap bare DROP is not covering newcomers")
 	}
 }
 
-// drainUDP10751 reads until a short quiet period proves no strays remain:
-// a retried positive can leave a duplicate datagram in flight that would
-// otherwise pollute a later negative on the same socket.
-func drainUDP10751(t *testing.T, conn *net.UDPConn) {
+// TestGapExceptionDiscriminatesVRFMembers10751 is Opus9's exact shape
+// with a REAL VRF: fxp0 (true lifeline) and fxp1 (non-lifeline) enslaved
+// in vrf-mgmt, W shared across fxp0 and a data interface, X data-only.
+// The gap (Uncovered {W,X}, Shared {W}, lifelines {em0,fxp0} — NO
+// vrf-mgmt blanket) must admit W via fxp0 (sdifname recovers the slave
+// where iifname shows the master), deny W via fxp1, deny W via data,
+// and deny X. Listeners: vrf-bound for enslaved ingress (unbound
+// sockets cannot receive it — VRF socket isolation), unbound for data
+// ingress. fxp1's peer uses a static ND entry (W is not assigned there,
+// so dynamic resolution has nothing to answer).
+func TestGapExceptionDiscriminatesVRFMembers10751(t *testing.T) {
+	enterPrivateNetns(t)
+	const (
+		wAddr  = "fe80::5" // W: fxp0+data shared
+		xAddr  = "fe80::9" // X: data-only newcomer
+		y2Addr = "fe80::7" // Y2: fxp1-only unlisted (delivery control)
+	)
+	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-mgmt"}, Table: 1000}
+	if err := netlink.LinkAdd(vrf); err != nil {
+		t.Fatalf("VRF add: %v", err)
+	}
+	master, err := netlink.LinkByName("vrf-mgmt")
+	if err != nil {
+		t.Fatalf("LinkByName vrf-mgmt: %v", err)
+	}
+	if err := netlink.LinkSetUp(master); err != nil {
+		t.Fatalf("LinkSetUp vrf-mgmt: %v", err)
+	}
+	fxp0 := mkNamedVeth10751(t, "fxp0", "vunlease0", "vpeer0")
+	fxp1 := mkNamedVeth10751(t, "fxp1", "vunlease1", "vpeer1")
+	dataLink := mkNamedVeth10751(t, unleasedTestNetdev10751, "vunlease2", "vpeer2")
+	if err := netlink.LinkSetMaster(fxp0, master); err != nil {
+		t.Fatalf("enslave fxp0: %v", err)
+	}
+	if err := netlink.LinkSetMaster(fxp1, master); err != nil {
+		t.Fatalf("enslave fxp1: %v", err)
+	}
+	mustAddrAdd10751(t, fxp0, wAddr+"/64")
+	// W is also assigned to fxp1 PURELY for L3 deliverability: VRF
+	// slaves deliver only locally-assigned destinations (no weak-host
+	// here — verified: static ND plus off-link W timed out without any
+	// firewall). Lifeline status comes from the interface NAME (fxp1 is
+	// non-lifeline), and the verdict keys on ingress plus daddr VALUE,
+	// so the exception still must deny it. Y2 (unlisted) proves fxp1-link
+	// delivery independently, so the W-fxp1 negative below observes a
+	// firewall verdict rather than broken delivery.
+	mustAddrAdd10751(t, fxp1, wAddr+"/64")
+	mustAddrAdd10751(t, fxp1, y2Addr+"/64")
+	mustAddrAdd10751(t, dataLink, wAddr+"/64")
+	mustAddrAdd10751(t, dataLink, xAddr+"/64")
+	waitAddrsValid10751(t, map[string][]string{"fxp0": {wAddr}, "fxp1": {wAddr, y2Addr}, unleasedTestNetdev10751: {wAddr, xAddr}})
+
+	in := NewNetlinkInstaller()
+	spec := GapFenceSpec{
+		UncoveredV6:     []string{wAddr, xAddr},
+		SharedV6:        []string{wAddr},
+		LifelineNetdevs: []string{"em0", "fxp0"},
+	}
+	if err := in.InstallGapFence(spec); err != nil {
+		t.Fatalf("gap install: %v", err)
+	}
+
+	vrfSock, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 4000})
+	if err != nil {
+		t.Fatalf("listen [::]:4000: %v", err)
+	}
+	defer vrfSock.Close()
+	bindSockToDevice10751(t, vrfSock, "vrf-mgmt")
+	dataSock, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 4001})
+	if err != nil {
+		t.Fatalf("listen [::]:4001: %v", err)
+	}
+	defer dataSock.Close()
+	lifeSender, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 0})
+	if err != nil {
+		t.Fatalf("lifeline sender bind: %v", err)
+	}
+	defer lifeSender.Close()
+	bindSockToDevice10751(t, lifeSender, "vpeer0")
+	fxp1Sender, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 0})
+	if err != nil {
+		t.Fatalf("fxp1 sender bind: %v", err)
+	}
+	defer fxp1Sender.Close()
+	bindSockToDevice10751(t, fxp1Sender, "vpeer1")
+	dataSender, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 0})
+	if err != nil {
+		t.Fatalf("data sender bind: %v", err)
+	}
+	defer dataSender.Close()
+	bindSockToDevice10751(t, dataSender, "vpeer2")
+	// Numeric scope ids (never Go Zones: the process-global Zone cache
+	// goes stale across netns recreations).
+	oifLife := linkIndex10751(t, "vpeer0")
+	oifFxp1 := linkIndex10751(t, "vpeer1")
+	oifData := linkIndex10751(t, "vpeer2")
+	wIP, xIP := net.ParseIP(wAddr), net.ParseIP(xAddr)
+	if !udpExchangeRetryWant10751(t, vrfSock, func() error {
+		return sendToScope10751(t, lifeSender, []byte("mgmt"), wIP, 4000, oifLife)
+	}, []byte("mgmt"), 300*time.Millisecond, 10*time.Second) {
+		dumpNetState10751(t)
+		t.Fatal("W via enslaved fxp0 was dropped: the sdifname exception is missing or shadowed (management lockout)")
+	}
+	// Delivery control for fxp1's link: unlisted Y2 must arrive (policy
+	// accept), proving the W-fxp1 negative below observes a firewall
+	// verdict rather than broken delivery. Doubles as the vpeer1 source
+	// readiness wait.
+	y2IP := net.ParseIP(y2Addr)
+	if !udpExchangeRetryWant10751(t, vrfSock, func() error {
+		return sendToScope10751(t, fxp1Sender, []byte("y2"), y2IP, 4000, oifFxp1)
+	}, []byte("y2"), 300*time.Millisecond, 10*time.Second) {
+		t.Fatal("Y2 via fxp1 link was dropped: fxp1-link delivery broken (infra, not verdict)")
+	}
+	if udpExchangeWant10751(t, vrfSock, func() error {
+		return sendToScope10751(t, fxp1Sender, []byte("probe-fxp1"), wIP, 4000, oifFxp1)
+	}, []byte("probe-fxp1"), time.Second) {
+		t.Fatal("W via non-lifeline fxp1 member arrived: the exception over-admits the management VRF")
+	}
+	sendUntilReady10751(t, func() error {
+		return sendToScope10751(t, dataSender, []byte("warmup"), wIP, 4001, oifData)
+	})
+	if udpExchange10751(t, dataSock, func() error {
+		return sendToScope10751(t, dataSender, []byte("probe"), wIP, 4001, oifData)
+	}, time.Second) {
+		t.Fatal("W via data ingress arrived: shared values are fail-open on data (day-2 hole)")
+	}
+	if udpExchange10751(t, dataSock, func() error {
+		return sendToScope10751(t, dataSender, []byte("probe"), xIP, 4001, oifData)
+	}, time.Second) {
+		t.Fatal("X via data ingress arrived: the gap bare DROP is not covering newcomers")
+	}
+}
+
+// bindSockToDevice10751 pins a socket to an ingress/egress device.
+// Required on listeners for VRF-enslaved ingress: unbound sockets live
+// in the default VRF and cannot receive it (kernel VRF socket
+// isolation). Senders bind redundantly alongside Zones (belt and braces
+// against Zone-handling flakes under load).
+func bindSockToDevice10751(t *testing.T, conn *net.UDPConn, ifname string) {
 	t.Helper()
-	buf := make([]byte, 1500)
-	for i := 0; i < 10; i++ {
-		if err := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
-			t.Fatalf("SetReadDeadline: %v", err)
-		}
-		if _, _, err := conn.ReadFromUDP(buf); err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+	var opErr error
+	if err := raw.Control(func(fd uintptr) {
+		opErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, ifname)
+	}); err != nil {
+		t.Fatalf("SyscallConn.Control: %v", err)
+	}
+	if opErr != nil {
+		t.Fatalf("SO_BINDTODEVICE %s: %v", ifname, opErr)
+	}
+}
+
+// waitAddrsValid10751 blocks until every listed address is assigned and
+// past DAD (not tentative), so later verdicts observe firewall behavior
+// rather than address-configuration races. Fatal on exhaustion (honest
+// infra failure, never a silent vacuous pass).
+func waitAddrsValid10751(t *testing.T, want map[string][]string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		missing := false
+		for ifname, addrs := range want {
+			link, err := netlink.LinkByName(ifname)
+			if err != nil {
+				t.Fatalf("LinkByName %s: %v", ifname, err)
 			}
-			t.Fatalf("drain recv: %v", err)
+			got, err := netlink.AddrList(link, netlink.FAMILY_V6)
+			if err != nil {
+				t.Fatalf("AddrList %s: %v", ifname, err)
+			}
+			for _, wantAddr := range addrs {
+				ok := false
+				for _, a := range got {
+					if a.IPNet != nil && a.IPNet.IP.String() == wantAddr && a.Flags&unix.IFA_F_TENTATIVE == 0 {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					missing = true
+				}
+			}
 		}
+		if !missing {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("addresses never became valid: %v", want)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// sendUntilReady10751 repeats a throwaway send until the source path is
+// usable (peer DAD complete), so a following single-shot verdict never
+// FATALS on send errors. The throwaways carry a "warmup" payload the
+// content-checked asserts discard; on negative legs they are dropped
+// like any other probe.
+func sendUntilReady10751(t *testing.T, send func() error) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := send(); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("source path never became usable")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// dumpNetState10751 is TEMPORARY flake diagnostics (remove after).
+func dumpNetState10751(t *testing.T) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"link"},
+		{"-6", "addr", "show"},
+		{"-6", "route", "show", "table", "main"},
+		{"-6", "route", "show", "table", "1000"},
+		{"-6", "rule", "show"},
+		{"-6", "neigh", "show"},
+	} {
+		out, _ := exec.Command("/sbin/ip", args...).CombinedOutput()
+		t.Logf("ip %v:\n%s", args, out)
 	}
 }

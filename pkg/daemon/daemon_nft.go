@@ -1498,14 +1498,19 @@ func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListen
 	)...)
 	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
 	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
-	// #10751 M1: admit shared values on lifeline ingress ahead of the
-	// bare DROP (mirrors the netlink builder; parity-pinned).
+	// #10751 M1/Opus9: admit shared values on lifeline ingress ahead of
+	// the bare DROP (mirrors the netlink builder; parity-pinned). Two
+	// rules per family: iifname for unenslaved lifelines, meta sdifname
+	// for VRF-enslaved members (LOCAL_IN shows the master) — no
+	// vrf-mgmt blanket, so non-lifeline members stay denied.
 	if len(lifelineNetdevs) > 0 {
 		if len(sharedV4) > 0 {
 			rules = append(rules, "    iifname "+nftIifnameSet(lifelineNetdevs)+" ip daddr "+nftAddrSet(sharedV4)+" accept")
+			rules = append(rules, "    meta sdifname "+nftIifnameSet(lifelineNetdevs)+" ip daddr "+nftAddrSet(sharedV4)+" accept")
 		}
 		if len(sharedV6) > 0 {
 			rules = append(rules, "    iifname "+nftIifnameSet(lifelineNetdevs)+" ip6 daddr "+nftAddrSet(sharedV6)+" accept")
+			rules = append(rules, "    meta sdifname "+nftIifnameSet(lifelineNetdevs)+" ip6 daddr "+nftAddrSet(sharedV6)+" accept")
 		}
 	}
 	if len(uncoveredV4) > 0 {

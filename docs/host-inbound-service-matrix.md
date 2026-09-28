@@ -1091,6 +1091,17 @@ shared master, where an interface DROP would shadow addressed siblings
 callback instead: any non-lifeline DHCP lease forces the full recompile
 that installs destination DROPs. Accepted window: lease-install to
 debounced re-apply (~2s plus apply time), the #3698 lag class.
+FAULT residual (distinct, Opus9 round-9 — accepted): if that triggered
+apply itself FAILS (nft error), no retry owner re-drives it — the
+callback is one-shot, same-content renewals do not refire
+(commitLease change-gating), the #7181 STALE flag is report-only, the
+#9811 debt covers auto-rollback only (DHCP path explicitly out of
+scope), and the #9693/IPsec/conntrack/feed loops are scoped elsewhere
+(traced, no owner found). The lease then sits uncovered until the next
+external trigger (commit, content-changing lease event, restart) runs
+a successful apply — potentially unbounded under a held lease with
+healthy renewals. STALE surfaces it via the API; recovery is the next
+successful apply, which covers the still-held lease.
 
 Two observability surfaces consume it:
 
@@ -1253,16 +1264,19 @@ snapshot produces a zero-drop table shell:
   service-accepted or catch-all-dropped covered address keeps its main-table
   verdict) and is dropped by the gap. The uncovered lists derive from the same
   lifeline-subtracted views/unzoned sets and INCLUDE lifeline-shared address
-  VALUES in the bare DROP — with a preceding lifeline-ingress exception
-  ACCEPT (`iifname <lifelines> daddr <shared> accept`, #10751 M1
-  ingress-aware scope). A global withhold (R7-C) left shared values
-  fail-open post-handoff, when no barrier stands behind the gap; the
-  exception preserves lifeline management while data ingress stays denied.
-  The handoff baseline still excludes shared (conditionally denied), so
-  pre-handoff refusal is unchanged. A gap install failure JOINS the commit
-  error (fail-closed); the gap is torn down by the next successful real
-  install (best effort — a lingering gap fences only, never opens) and on
-  a successful teardown.
+  VALUES in the bare DROP — with preceding lifeline-ingress exception
+  ACCEPTs (#10751 M1 ingress-aware scope, Opus9 per-member design): one
+  `iifname` rule for unenslaved lifelines plus one `meta sdifname` rule
+  recovering the member behind VRF LOCAL_IN master semantics, so an
+  enslaved fxp0 is admitted while a co-enslaved non-lifeline fxp1 stays
+  denied (no vrf-mgmt blanket). A global withhold (R7-C) left shared
+  values fail-open post-handoff, when no barrier stands behind the gap;
+  the exception preserves lifeline management while data ingress stays
+  denied. The handoff baseline still excludes shared (conditionally
+  denied), so pre-handoff refusal is unchanged. A gap install failure
+  JOINS the commit error (fail-closed); the gap is torn down by the next
+  successful real install (best effort — a lingering gap fences only,
+  never opens) and on a successful teardown.
 - `installHostInboundColdBootFence` / `buildHostInboundFencePayload`
   (`daemon_nft.go`) build the fence: the same atomic-replace `xpf_hostinbound`
   table reduced to the global mandatory admits (`ct established,related`, raw

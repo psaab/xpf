@@ -1151,24 +1151,30 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 	return v4, v6
 }
 
-// HostInboundLifelineIngressNetdevs returns the sorted linux LOCAL_IN netdev
-// names whose ingress must keep management reachability to lifeline-shared
-// values (#10751 M1): the unconditional defaults (fxp0/em0/fab0/fab1 —
-// never narrowed, the withhold side does not narrow either) plus the
-// linux names of every configured unit the lifeline predicate recognizes
-// (chassis-cluster control/fabric links, fabN), plus the vrf-mgmt master
-// (VRF-enslaved lifeline members arrive showing the master, F3-C/B4).
-// This MIRRORS the withhold-side interface definition
+// HostInboundLifelineIngressNetdevs returns the sorted linux netdev names
+// of true lifelines whose ingress must keep management reachability to
+// lifeline-shared values (#10751 M1/Opus9): the unconditional defaults
+// (fxp0/em0/fab0/fab1 — never narrowed, the withhold side does not narrow
+// either) plus the linux names of every configured unit the lifeline
+// predicate recognizes (chassis-cluster control/fabric links, fabN). This
+// MIRRORS the withhold-side interface definition
 // (HostInboundLifelineInterface): an interface whose addresses get
 // withheld must have its ingress excepted in the gap, or the exception
 // under-covers and strands management. Bound: live-but-unconfigured
 // non-default lifeline names (a hand-made fab7) are missed — the same
 // verifiable-identity bound the barrier's guard accepts (the daemon only
 // ever creates fab0/fab1; configured names arrive via the stanza).
+//
+// Per-member discrimination (Opus9 round-9): the set carries NO vrf-mgmt
+// blanket. The gap renders TWO exception rules per family — iifname for
+// unenslaved lifelines plus meta sdifname for VRF-enslaved members
+// (LOCAL_IN shows the master; sdif recovers the slave, kernel 5.17+,
+// proven by the real-VRF packet test) — so a non-lifeline fxp1 member
+// stays denied while an enslaved fxp0 is admitted. sdifname is inert on
+// non-VRF traffic (unset, misses), where the iifname twin covers.
 func HostInboundLifelineIngressNetdevs(cfg *config.Config) []string {
 	set := map[string]bool{
 		"fxp0": true, "em0": true, "fab0": true, "fab1": true,
-		config.ManagementVRFDeviceName: true,
 	}
 	if cfg != nil {
 		lifelines := hostInboundLifelineSet(cfg)

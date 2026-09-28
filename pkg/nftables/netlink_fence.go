@@ -128,18 +128,25 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops (see emitUnleasedDHCPAdmitsNetlink).
 	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)
-	// #10751 M1: lifeline-shared values stay reachable on lifeline
-	// ingress (exception ACCEPT) while denied everywhere else (bare
-	// DROP below). The exception precedes the DROP; with no lifeline
-	// set it is omitted and shared stays denied on all ingress
-	// (fail-closed). Expression order (iifname, nfproto, daddr)
-	// matches the oracle text — parity-pinned.
+	// #10751 M1/Opus9: lifeline-shared values stay reachable on
+	// lifeline ingress (exception ACCEPTs) while denied everywhere
+	// else (bare DROP below). TWO rules per family: iifname covers
+	// unenslaved lifelines (name observed directly); meta sdifname
+	// covers VRF-enslaved lifelines (LOCAL_IN shows the master, sdif
+	// recovers the member) — WITHOUT admitting the whole VRF, so a
+	// non-lifeline fxp1 member stays denied. sdifname is inert on
+	// non-VRF traffic (unset, misses). Both precede the DROP; with no
+	// lifeline set both are omitted and shared stays denied on all
+	// ingress (fail-closed). Expression orders match the oracle text —
+	// parity-pinned.
 	if len(spec.LifelineNetdevs) > 0 {
 		if len(spec.SharedV4) > 0 {
 			p.rule().iifname(spec.LifelineNetdevs).daddr(famV4, spec.SharedV4, false).emit(verdictAccept()...)
+			p.rule().sdifname(spec.LifelineNetdevs).daddr(famV4, spec.SharedV4, false).emit(verdictAccept()...)
 		}
 		if len(spec.SharedV6) > 0 {
 			p.rule().iifname(spec.LifelineNetdevs).daddr(famV6, spec.SharedV6, false).emit(verdictAccept()...)
+			p.rule().sdifname(spec.LifelineNetdevs).daddr(famV6, spec.SharedV6, false).emit(verdictAccept()...)
 		}
 	}
 	if len(spec.UncoveredV4) > 0 {

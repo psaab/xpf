@@ -2895,27 +2895,37 @@ func TestGapExceptLifelineSharedDayTwo10751(t *testing.T) {
 	t.Fatalf("deleted tables = %v, want the obsolete gap torn down on heal", deleted)
 }
 
-// TestGapLifelineExceptionPlacement10751: the gap oracle renders the
-// lifeline-ingress exception ACCEPT before the bare DROP, scoped to the
-// lifeline set; empty shared/lifelines omit it (fail-closed: shared stays
-// bare-DROPped on every ingress).
+// TestGapLifelineExceptionPlacement10751: the gap oracle renders TWO
+// lifeline-ingress exception ACCEPTs before the bare DROP — iifname for
+// unenslaved lifelines plus meta sdifname for VRF-enslaved members (no
+// vrf-mgmt blanket: non-lifeline members stay denied) — both scoped to
+// the lifeline set; empty shared/lifelines omit them (fail-closed:
+// shared stays bare-DROPped on every ingress).
 func TestGapLifelineExceptionPlacement10751(t *testing.T) {
 	payload := buildHostInboundGapFencePayload(
 		[]string{"10.0.0.5", "10.0.0.9"}, nil, nil, nil, nil,
 		[]string{"10.0.0.5"}, nil, []string{"em0", "fxp0"})
 	wantExcept := `iifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
+	wantExceptSdif := `meta sdifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
 	wantDrop := `ip daddr { 10.0.0.5, 10.0.0.9 } drop`
 	if !strings.Contains(payload, wantExcept) {
 		t.Errorf("gap oracle lacks the lifeline exception %q:\n%s", wantExcept, payload)
 	}
+	if !strings.Contains(payload, wantExceptSdif) {
+		t.Errorf("gap oracle lacks the slave exception %q:\n%s", wantExceptSdif, payload)
+	}
+	if strings.Contains(payload, "vrf-mgmt") {
+		t.Errorf("gap oracle must not blanket-admit vrf-mgmt (non-lifeline members must stay deniable):\n%s", payload)
+	}
 	if !strings.Contains(payload, wantDrop) {
 		t.Fatalf("gap oracle lacks the bare DROP %q:\n%s", wantDrop, payload)
 	}
-	if strings.Index(payload, wantExcept) > strings.Index(payload, wantDrop) {
-		t.Errorf("gap oracle places the exception after the bare DROP (lifeline management would be denied):\n%s", payload)
+	if strings.Index(payload, wantExcept) > strings.Index(payload, wantDrop) ||
+		strings.Index(payload, wantExceptSdif) > strings.Index(payload, wantDrop) {
+		t.Errorf("gap oracle places an exception after the bare DROP (lifeline management would be denied):\n%s", payload)
 	}
 	plain := buildHostInboundGapFencePayload([]string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil)
-	if strings.Contains(plain, "iifname") {
-		t.Errorf("gap oracle without shared must emit no iifname rule:\n%s", plain)
+	if strings.Contains(plain, "iifname") || strings.Contains(plain, "sdifname") {
+		t.Errorf("gap oracle without shared must emit no iifname/sdifname rule:\n%s", plain)
 	}
 }
