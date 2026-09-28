@@ -303,10 +303,10 @@ type Manager struct {
 	haRGActiveMapWrite func(rgID int, active bool) error
 	// haWatchdogIPCSynced tracks, per RG, the watchdog timestamp and Active
 	// state last published to the helper via the update_ha_state socket IPC.
-	// It throttles that IPC (see UpdateHAWatchdog): the shim map write above
+	// It throttles that IPC (see UpdateHAWatchdog): the Go-owned map write above
 	// happens every tick, but the JSON socket round-trip fires only on an
 	// Active-state change (failover/failback — instant) or a periodic backstop
-	// comfortably under the helper's ~10s stale-lease window. Guarded by m.mu.
+	// comfortably under the helper's receipt-anchored 10s lease. Guarded by m.mu.
 	haWatchdogIPCSynced map[int]haWatchdogIPCSyncState
 	// haWatchdogSnapshot is a lock-free-readable copy of the HA watchdog
 	// refresh inputs (#9629, verdict item 1). It is published under m.mu by

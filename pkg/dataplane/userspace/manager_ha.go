@@ -1242,10 +1242,9 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 // unthrottled UpdateHAWatchdog would issue the full JSON IPC at 2/s per RG —
 // exactly the >1/s control-socket caller CLAUDE.md warns starves session
 // installs during bulk sync. A 3s backstop drops that to at most ~0.33/s per RG
-// (a 6x reduction) while leaving a >3x margin under the helper's ~10s stale-lease
-// window, so the helper's HA view never expires from lack of a refresh. The
-// Go-owned map write still happens every tick — only the JSON IPC is
-// throttled here.
+// (a 6x reduction), while the helper's receipt-anchored 10s lease is refreshed
+// well before expiry. Go-owned map writes still happen every tick; only the JSON
+// IPC is throttled here.
 const haWatchdogIPCBackstopSecs = 3
 
 // shouldSyncHAWatchdogIPCLocked decides whether UpdateHAWatchdog must publish the
@@ -1256,8 +1255,8 @@ const haWatchdogIPCBackstopSecs = 3
 //   - as a periodic backstop once the watchdog timestamp has advanced past
 //     haWatchdogIPCBackstopSecs since the last IPC for that RG.
 //
-// Otherwise it returns false and the tick is satisfied by the shim map write
-// alone. Caller holds m.mu.
+// Otherwise it returns false and the tick is satisfied by the Go-owned map
+// write alone. Caller holds m.mu.
 func (m *Manager) shouldSyncHAWatchdogIPCLocked(rgID int, active bool, timestamp uint64) bool {
 	if m.haWatchdogIPCSynced == nil {
 		return true

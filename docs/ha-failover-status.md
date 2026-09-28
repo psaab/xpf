@@ -628,15 +628,18 @@ Steps 1-6 above are now the actual flow. Remaining differences from target:
 The daemon runs a per-RG watchdog timestamp refresh (`pkg/daemon/daemon_ha_sync.go`)
 on a 500ms ticker. The `ha_watchdog` map is Go-owned bookkeeping: no live
 userspace-XDP shim BPF program references or reads it (#10791). If the daemon is
-SIGKILL'd, the helper stops receiving `update_ha_state` updates and its
-receipt-anchored **10s forwarding lease** expires; the peer separately takes
-over after its heartbeat timeout. The HA timestamp has two distinct write paths
+SIGKILL'd while the helper remains alive, missing `update_ha_state` receipts
+let the helper's receipt-anchored **10s forwarding lease**
+(`ActiveUntil(max(watchdog, now) + 10s)`) expire; the peer separately takes
+over after its heartbeat timeout. The lease is stored in helper memory and does
+not survive helper death; process loss/ctrl-disable and fresh-helper republish
+are separate from lease expiry. The HA timestamp has two distinct write paths
 with **different cadence requirements**, and `UpdateHAWatchdog`
 (`pkg/dataplane/userspace/manager_ha.go`) decouples them:
 
 - **Go-owned `ha_watchdog` map write — EVERY tick (500ms), never throttled.**
   This keeps Go's own map-readback refresh paths current. It is a cheap local
-  map update, not a socket round-trip and not a kernel liveness signal.
+  map update, not a socket round-trip or helper-health input.
 - **`update_ha_state` socket IPC — throttled.** The full HA-state JSON IPC over
   the shared Rust-helper control socket is the expensive part. Issuing it every
   tick is a 2/s-per-RG control-socket caller — exactly what the CLAUDE.md

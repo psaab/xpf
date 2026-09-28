@@ -226,9 +226,13 @@ The only missing piece is **~10 lines in `electRG()`** to detect dual-active in 
 - Mitigation: peer fencing (`disable-rg`). Loss of all peer links cannot be
   resolved by a local helper lease while the daemon continues running.
 
-**Daemon crash / SIGKILL:**
-- The helper's receipt-anchored 10s forwarding lease expires after the last
+**Daemon crash / SIGKILL while the helper remains alive:**
+- The helper's receipt-anchored 10s forwarding lease
+  (`ActiveUntil(max(watchdog, now) + 10s)`) expires after the last
   `update_ha_state` receipt; its per-packet check then treats the RG inactive.
+- The lease is stored in helper memory and does not survive helper death;
+  process loss/ctrl-disable and fresh-helper republish are separate from lease
+  expiry.
 - Peer heartbeat timeout → takes over all RGs
 - Same as current VRRP behavior
 

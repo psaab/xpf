@@ -76,9 +76,9 @@ import (
 // serve a test, and the seam itself would then be the unbound thing.
 
 // newWatchdogTestManager builds a map-free manager whose UpdateHAWatchdog can run
-// without a loaded BPF shim map: haWatchdogMapWrite is the production seam for
+// without a loaded BPF map: haWatchdogMapWrite is the production seam for
 // exactly that (see manager.go), so the socket half is reachable while the
-// kernel-visible write is stubbed.
+// Go-owned HA map write is stubbed.
 func newWatchdogTestManager(t *testing.T) (*Manager, *leaseControlServer) {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "control.sock")

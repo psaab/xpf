@@ -142,11 +142,11 @@ detection and per-binding state rebuild.
 A dead worker on the chassis-cluster primary does **NOT** trigger
 chassis-cluster failover. Reasons:
 
-- The chassis-cluster failover state machine follows peer/VRRP state; it does
-  not consume `ha_watchdog` for kernel liveness or watch per-worker health. The
-  Go `ha_watchdog` map is bookkeeping only (#10791); no live userspace-XDP shim
-  program reads it. The helper's per-RG forwarding backstop is the
-  receipt-anchored 10s lease refreshed by `update_ha_state`.
+- The chassis-cluster failover state machine follows peer/VRRP state; no live
+  BPF caller consumes `ha_watchdog`, and it does not watch per-worker health.
+  The Go `ha_watchdog` map is bookkeeping only (#10791). The helper's per-RG
+  forwarding backstop is the receipt-anchored 10s lease refreshed by
+  `update_ha_state`.
 - A single dead worker affects only the bindings/queues owned by
   that worker; the other workers continue to forward. Escalating
   to a node-level failover for a partial outage would be a

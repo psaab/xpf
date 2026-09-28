@@ -57,10 +57,11 @@ func (d *Daemon) resolveClusterVRFDevice(cc *config.ClusterConfig) string {
 func (d *Daemon) startHAWatchdogHeartbeat(commsCtx context.Context, cc *config.ClusterConfig) {
 	// Start the HA watchdog heartbeat: write the monotonic timestamp to the
 	// Go-owned ha_watchdog map every 500ms for each configured RG. No live
-	// userspace-XDP shim BPF program reads this map (#10791; its kernel
-	// consumer has not existed since #1476). If the daemon is SIGKILL'd, the
-	// helper stops receiving update_ha_state IPC and its receipt-anchored 10s
-	// forwarding lease expires after the last receipt; the per-packet
+	// userspace-XDP shim BPF program reads this map (#10791); no live BPF caller
+	// of check_egress_rg_active() remains since #1476, though its header
+	// definition is retained. If the daemon is SIGKILL'd while the helper lives,
+	// the helper stops receiving update_ha_state IPC and its receipt-anchored
+	// 10s forwarding lease expires after the last receipt; its per-packet
 	// is_forwarding_active check then reports the RG inactive.
 	//
 	// #3917: gate on the published dataplane only (not the startup RG count)

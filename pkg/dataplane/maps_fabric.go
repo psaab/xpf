@@ -60,11 +60,12 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 
 // UpdateHAWatchdog writes the current monotonic timestamp (seconds) for a
 // redundancy group into the Go-owned ha_watchdog array. No live userspace-XDP
-// shim BPF program reads this map — its kernel fail-closed consumer has not
-// existed since #1476 (#10791); Go reads the timestamps back for its own HA
-// refresh paths. The fail-closed backstop on daemon death is the helper's
-// receipt-anchored 10s forwarding lease: an active update_ha_state receipt
-// sets ActiveUntil(max(watchdog, now) + HA_WATCHDOG_STALE_AFTER_SECS), and
+// shim BPF program reads this map; there has been no live BPF caller of the
+// legacy check_egress_rg_active() since #1476, although its header definition
+// remains. Go reads the timestamps back for its own HA refresh paths. The
+// fail-closed backstop on daemon death is the helper's receipt-anchored 10s
+// forwarding lease: an active update_ha_state receipt sets
+// ActiveUntil(max(watchdog, now) + HA_WATCHDOG_STALE_AFTER_SECS), and
 // is_forwarding_active checks that lease per packet.
 func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	zm, present, st := m.lookupMapLocked("ha_watchdog")

@@ -1250,13 +1250,13 @@ func TestUpdateHAWatchdogThrottlesIPCButWritesMapEveryTick(t *testing.T) {
 	}
 
 	if mapWrites != ticks {
-		t.Fatalf("shim map write fired %d times over %d ticks, want every tick (Go's HA map readback must stay current)", mapWrites, ticks)
+		t.Fatalf("Go-owned map write fired %d times over %d ticks, want every tick (Go's HA map readback must stay current)", mapWrites, ticks)
 	}
 
 	ipc := drainUpdateHAStateCount(reqTypes)
 	// 3s backstop -> IPC at ts 0,3,6,9 = 4 sends over the 10s span.
 	if ipc < 2 {
-		t.Fatalf("update_ha_state IPC fired %d times over a 10s span — the periodic backstop never refreshed the helper (stale-lease would expire)", ipc)
+		t.Fatalf("update_ha_state IPC fired %d times over a 10s span — the periodic backstop never refreshed the helper (receipt-anchored lease could expire without refresh)", ipc)
 	}
 	if ipc > 6 {
 		t.Fatalf("update_ha_state IPC fired %d times over %d ticks (10s span); want throttled to ~once/%ds (<=6), not per-tick like master (=%d)", ipc, ticks, haWatchdogIPCBackstopSecs, ticks)

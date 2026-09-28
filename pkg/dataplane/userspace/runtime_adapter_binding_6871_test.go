@@ -65,7 +65,7 @@ import (
 // link_cycle_ha_watchdog_6871_test.go).
 
 // newAdapterBindingManager builds a map-free manager with a live process handle,
-// a real control socket, and the watchdog shim-map write stubbed, so the socket
+// a real control socket, and the HA map unavailable by design, so the socket
 // half of the HA path is reachable without privileges.
 func newAdapterBindingManager(t *testing.T) (*Manager, *leaseControlServer) {
 	t.Helper()
@@ -110,15 +110,16 @@ func TestHAControllerWatchdogReachesTheManager_6871(t *testing.T) {
 	}
 
 	if n := countRequests(srv.requests(), "update_ha_state"); n != 1 {
-		t.Fatalf("update_ha_state requests = %d, want 1: the receipt-anchored HA "+
-			"lease refresh never reached the helper through the production adapter. "+
-			"The daemon's 500ms heartbeat (daemon_ha_sync.go) is the ONLY refresh "+
-			"lease — Coordinator::update_ha_state -> ActiveUntil(max(watchdog, now) + "+
-			"HA_WATCHDOG_STALE_AFTER_SECS), 10s, receipt-anchored (#10791); each active "+
-			"receipt mints a full lease — and is_forwarding_active consults it on every "+
-			"packet. A severed hop here expires that lease and STOPS FORWARDING for "+
-			"the redundancy group, while every test that calls Manager.UpdateHAWatchdog "+
-			"directly stays green (#6871). Requests: %v", n, srv.requests())
+		t.Fatalf("update_ha_state requests = %d, want 1: the helper's receipt-anchored "+
+			"10s per-RG forwarding lease refresh never reached the helper through the "+
+			"production adapter. The daemon's 500ms heartbeat (daemon_ha_sync.go) is "+
+			"the ONLY refresh of that lease: Coordinator::update_ha_state -> "+
+			"ActiveUntil(max(watchdog, now) + HA_WATCHDOG_STALE_AFTER_SECS), 10s, "+
+			"receipt-anchored (#10791); each active receipt mints a full lease, and "+
+			"is_forwarding_active consults it on every packet. A severed hop here "+
+			"expires that lease and STOPS FORWARDING for the redundancy group, while "+
+			"every test that calls Manager.UpdateHAWatchdog directly stays green "+
+			"(#6871). Requests: %v", n, srv.requests())
 	}
 	m.mu.Lock()
 	got := m.haGroups[1].WatchdogTimestamp

@@ -2642,7 +2642,8 @@ Secondary fix: NAT64 source pool auto-assignment. Named pools defined in source 
   and a kernel consumer in `check_egress_rg_active()`. #1476 removed that live
   shim consumer; the Go map write remains bookkeeping only.
 - The current fail-closed forwarding backstop is the helper's receipt-anchored
-  10s `update_ha_state` lease, not a kernel freshness check.
+  10s `update_ha_state` lease `ActiveUntil(max(watchdog, now) + 10s)`, not a
+  kernel freshness check.
 - **Historical files:** `bpf/headers/xpf_maps.h`, `bpf/headers/xpf_helpers.h`,
   `pkg/dataplane/maps.go`, `pkg/daemon/daemon.go`
 
