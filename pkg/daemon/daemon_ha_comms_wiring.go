@@ -46,7 +46,7 @@ func (d *Daemon) resolveClusterVRFDevice(cc *config.ClusterConfig) string {
 	return vrfDevice
 }
 
-// startHAWatchdogHeartbeat starts the BPF watchdog heartbeat goroutine for the
+// startHAWatchdogHeartbeat starts the HA watchdog heartbeat goroutine for the
 // cluster comms epoch owned by commsCtx. Extracted verbatim from
 // startClusterComms (#6428) — pure code motion, no behaviour change.
 //
@@ -55,17 +55,22 @@ func (d *Daemon) resolveClusterVRFDevice(cc *config.ClusterConfig) string {
 // first tick lands at the same offset relative to heartbeat/session-sync start.
 // The dataplane gate is still evaluated ONCE here and re-read per tick (#3917).
 func (d *Daemon) startHAWatchdogHeartbeat(commsCtx context.Context, cc *config.ClusterConfig) {
-	// Start BPF watchdog heartbeat: write monotonic timestamp to ha_watchdog
-	// map every 500ms for each configured RG. If the daemon is SIGKILL'd,
-	// the timestamp goes stale and BPF stops forwarding within 2s.
+	// Start the HA watchdog heartbeat: write the monotonic timestamp to the
+	// Go-owned ha_watchdog map every 500ms for each configured RG. No live
+	// userspace-XDP shim BPF program reads this map (#10791); no live BPF caller
+	// of check_egress_rg_active() remains since #1476, though its header
+	// definition is retained. If the daemon is SIGKILL'd while the helper lives,
+	// the helper stops receiving update_ha_state IPC and its receipt-anchored
+	// 10s forwarding lease expires after the last receipt; its per-packet
+	// is_forwarding_active check then reports the RG inactive.
 	//
-	// #3917: gate on the published dataplane only (not the startup RG
-	// count) and re-read the
-	// CURRENT redundancy-group set each tick. Comms are only restarted on a
-	// transport-field change, so binding cc.RedundancyGroups here would
-	// starve a day-2 RG (added by a later commit) of watchdog heartbeats ->
-	// its watchdog goes stale -> the dataplane stops forwarding for it.
-	// This mirrors the live-config read the fence path now uses.
+	// #3917: gate on the published dataplane only (not the startup RG count)
+	// and re-read the CURRENT redundancy-group set each tick. Comms are only
+	// restarted on a transport-field change, so binding cc.RedundancyGroups
+	// here would starve a day-2 RG (added by a later commit) of this timestamp
+	// refresh; any missing helper update expires the helper's
+	// receipt-anchored 10s lease. This mirrors the live-config read the
+	// fence path now uses.
 	if d.dataplane() != nil {
 		go func() {
 			ticker := time.NewTicker(500 * time.Millisecond)

@@ -94,7 +94,13 @@ work in #310, #311, and #312.
   (dual-active), or drops traffic for an RG it does own (dual-inactive).
 - **Target:** Local-only (correct -- election is inherently local)
 
-### 5. HA Watchdog Timestamps (ha_watchdog BPF map)
+### 5. HA Watchdog Timestamps (ha_watchdog BPF map) — RETIRED by #1476
+> **RETIRED (#1476/#10791):** This inventory preserves historical behavior.
+> No live userspace-XDP shim calls `check_egress_rg_active()`; the Go map
+> write remains bookkeeping only. The current daemon-loss backstop is the
+> helper's receipt-anchored 10s `update_ha_state` lease. Do not treat the
+> stale implementation details below as current behavior.
+
 
 - **What:** Per-RG monotonic timestamp written every 500ms by the Go daemon.
   BPF and Rust helper check freshness; if >2s stale, treat RG as inactive

@@ -1062,11 +1062,12 @@ These bugs were discovered testing iperf3 (~4.7 Gbps reverse mode) through the c
 - **Fix:** Context-aware delay — 10s during startup (first 30s after RG creation), 2s in steady-state. Reduces real mismatch correction from 10-12s to 2-4s
 - **Files:** `pkg/daemon/rg_state.go`
 
-### HA fail-closed gap on ungraceful daemon failure (FIXED #102)
+### HA fail-closed gap on ungraceful daemon failure (FIXED #102, kernel mechanism RETIRED by #1476)
 - **Symptom:** `kill -9` or panic leaves `rg_active` set → stale forwarding until peer election catches up
 - **Root cause:** Graceful shutdown path that clears `rg_active` never runs on ungraceful exit
-- **Fix:** BPF `ha_watchdog` ARRAY map written by Go daemon every 500ms with monotonic timestamp. `check_egress_rg_active()` verifies freshness — if >2s stale, treats RG as inactive regardless of `rg_active`. Standalone mode unaffected (watchdog value 0 = skip check)
-- **Files:** `bpf/headers/xpf_maps.h`, `bpf/headers/xpf_helpers.h`, `pkg/dataplane/maps.go`, `pkg/daemon/daemon.go`
+- **Fix (historical #102):** Originally added the `ha_watchdog` BPF ARRAY map, with Go writes every 500ms and a kernel consumer in `check_egress_rg_active()`. #1476 removed that live shim consumer; the Go map write remains bookkeeping only.
+- **Current backstop (#10791):** the helper's receipt-anchored 10s `update_ha_state` lease (`ActiveUntil(max(watchdog, now) + 10s)`), checked per packet — not a kernel freshness check.
+- **Historical files:** `bpf/headers/xpf_maps.h`, `bpf/headers/xpf_helpers.h`, `pkg/dataplane/maps.go`, `pkg/daemon/daemon.go`
 
 ### HA startup premature primary takeover (FIXED #103)
 - **Symptom:** On startup/rejoin, RG election could promote to primary before interfaces/VRRP are ready → transient loss/blackhole during HA transitions
