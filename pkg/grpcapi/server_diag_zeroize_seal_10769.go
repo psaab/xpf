@@ -55,6 +55,8 @@ var (
 	zeroizeStopKeaUnits   = stopKeaUnits
 	zeroizeVerifyKeaStopped = verifyKeaUnitsStopped
 	zeroizeVarBackupsDir    = "/var/backups"
+	zeroizeNetworkdLeaseDir = "/var/lib/systemd/network"
+	zeroizeDHCPClientStateDirs = []string{"/var/lib/dhcp", "/var/lib/dhclient"}
 )
 
 var (
@@ -128,6 +130,15 @@ func zeroizeImageSealResidue() error {
 	// backups are not provably xpf-owned. This is an intentional survivor
 	// decision rather than a silent claim that these image-seal legs ran.
 	for _, dir := range []string{zeroizeAptListsDir, zeroizeAptArchiveDir} {
+		fail(zeroizeClearDir(dir))
+	}
+
+	// DHCP client identity (#10769 d05-F6): xpf's own per-interface DUIDs
+	// live in the config root (erased with it); systemd-networkd and legacy
+	// dhclient lease/identity state lives here. Acquired addresses, DNS,
+	// and client DUID/IAIDs regenerate on the next lease acquisition.
+	fail(zeroizeSweepNetworkdLeases(zeroizeNetworkdLeaseDir))
+	for _, dir := range zeroizeDHCPClientStateDirs {
 		fail(zeroizeClearDir(dir))
 	}
 
@@ -243,6 +254,30 @@ func zeroizeEraseAccountBackups() error {
 			continue
 		}
 		if err := zeroizeRemovePath(filepath.Join(zeroizeVarBackupsDir, name)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// zeroizeSweepNetworkdLeases removes systemd-networkd DHCP lease files
+// (#10769 d05-F6): per-link acquired addresses, routes, DNS, and the client
+// DUID/IAID they were acquired with. Only *.lease entries are removed;
+// anything else networkd keeps in that directory is left alone.
+func zeroizeSweepNetworkdLeases(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: read networkd lease directory %s: %w", dir, err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lease") {
+			continue
+		}
+		if err := zeroizeRemovePath(filepath.Join(dir, entry.Name())); err != nil {
 			errs = append(errs, err)
 		}
 	}

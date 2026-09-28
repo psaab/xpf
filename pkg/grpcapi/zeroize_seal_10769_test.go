@@ -24,7 +24,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
 	oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec := zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir
+	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
@@ -34,7 +34,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
 		zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath = oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups
+		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient
 	})
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
@@ -76,6 +76,8 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	zeroizeStopKeaUnits = func() error { return nil }
 	zeroizeVerifyKeaStopped = func() error { return nil }
 	zeroizeVarBackupsDir = filepath.Join(root, "var", "backups")
+	zeroizeNetworkdLeaseDir = filepath.Join(root, "var", "lib", "systemd", "network")
+	zeroizeDHCPClientStateDirs = []string{filepath.Join(root, "var", "lib", "dhcp"), filepath.Join(root, "var", "lib", "dhclient")}
 	zeroizeVarLogDir = filepath.Join(root, "var", "log")
 }
 
@@ -624,5 +626,37 @@ func TestPerformZeroizeErasesRecreatedAccountBackups10769(t *testing.T) {
 	}
 	if _, err := os.Lstat(bystander); err != nil {
 		t.Errorf("non-backup bystander %s must survive: %v", bystander, err)
+	}
+}
+
+func TestPerformZeroizeErasesDHCPClientIdentity10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	duid := filepath.Join(configDir, "dhcpv6-duid-ge-0-0-1")
+	mustWriteFile(t, duid, []byte("persistent client DUID"))
+	v4lease := filepath.Join(zeroizeNetworkdLeaseDir, "2-ens3.lease")
+	mustWriteFile(t, v4lease, []byte("ADDRESS=192.0.2.10\nDUID=duid-bytes\n"))
+	dhclientLease := filepath.Join(zeroizeDHCPClientStateDirs[0], "dhclient.leases")
+	mustWriteFile(t, dhclientLease, []byte("lease { address 192.0.2.11; }"))
+	dhclient6Lease := filepath.Join(zeroizeDHCPClientStateDirs[1], "dhclient6.leases")
+	mustWriteFile(t, dhclient6Lease, []byte("lease6 { ia-na {...} }"))
+	// Non-lease state beside networkd leases is out of scope and survives.
+	bystander := filepath.Join(zeroizeNetworkdLeaseDir, "other.state")
+	mustWriteFile(t, bystander, []byte("not a lease"))
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	for _, path := range []string{duid, v4lease, dhclientLease, dhclient6Lease} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("DHCP client identity %s survived: %v", path, err)
+		}
+	}
+	if _, err := os.Lstat(bystander); err != nil {
+		t.Errorf("non-lease networkd state must survive: %v", err)
 	}
 }

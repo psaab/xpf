@@ -97,6 +97,10 @@ const (
 //     tls/cert.pem. xpf-generated, not tenant config; generateSelfSignedCertAt
 //     (pkg/api) regenerates a fresh pair on absence at the next boot, so
 //     removing them is safe and hands no prior-tenant key to the next owner.
+//   - dhcpv6-duid-*             — the DHCP client's per-interface DUID files
+//     (#10769 d05-F6). The daemon persists DUIDs in Dir(configFile), i.e.
+//     this root; a surviving DUID lets the next tenant's DHCPv6 server
+//     correlate the box with the prior tenant's leases.
 //
 // Removal is KEY-FIRST and DURABLY ordered (#4576/#5197): master.key is deleted
 // before the encrypted DB body AND the key unlink is fsynced (.configdb) before
@@ -327,6 +331,7 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			name == configstore.Day0ConfigAppliedBase || // allow day-0 configuration after reset (#10740)
 			name == ".config.journal" ||
 			strings.HasPrefix(name, ".config.journal.") ||
+			strings.HasPrefix(name, "dhcpv6-duid-") || // DHCPv6 DUID persistence: the daemon passes Dir(configFile) as the DHCP state dir, so every per-interface DUID lives here (#10769 d05-F6)
 			isTextRollbackFile(name, configBase) || // <configBase>.<N> text slots
 			isFsatomicTemp(name) {
 			found, herr := configstore.CollectHardlinkedFiles(full, "")
