@@ -69,9 +69,8 @@ func splitVIPsByFamily(vips []string) (v4Addrs, v6Addrs []net.IP) {
 // "required VIP set" rule, where a partially-actuated VIP set is also refused
 // rather than partially claimed.
 //
-// The predicate is a pure function of the configured VIP list, which is
-// immutable for the lifetime of an instance (a VIP change rebuilds the
-// instance — see manager.go UpdateInstances), so callers may evaluate it once.
+// The predicate is pure for a given VIP list. It is evaluated at construction
+// and again when updateVIPs changes the live configuration (#10780).
 func checkAdvertCapacity(vips []string) error {
 	v4Addrs, v6Addrs := splitVIPsByFamily(vips)
 
@@ -92,12 +91,10 @@ func checkAdvertCapacity(vips []string) error {
 // instanceAdvertCapacityErr evaluates checkAdvertCapacity for a new instance's
 // configured VIP set and emits the single operator-facing Error for it (#6779).
 //
-// Evaluating ONCE, at construction, is sound because cfg.VirtualAddresses is
-// immutable for an instance's lifetime: manager.go UpdateInstances takes the
-// in-place update arm only when vipsEqual() holds, so any VIP change rebuilds
-// the instance rather than mutating this one. becomeMaster then consults the
-// stored result on every promotion attempt without re-parsing the list — and,
-// more importantly, without re-logging: that path retries every
+// VIP-set changes are applied in place, so updateVIPs re-evaluates this
+// predicate and emits the same Error for a newly invalid set. becomeMaster
+// consults the stored result on every promotion attempt without re-parsing the
+// list — and, more importantly, without re-logging: that path retries every
 // masterDownInterval (~97ms for a RETH instance), so an Error there would put
 // ~10 lines/second into the journal for as long as the bad config is loaded,
 // exactly the flooding CLAUDE.md's logging rules forbid.

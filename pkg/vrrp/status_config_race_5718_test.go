@@ -15,10 +15,9 @@ import (
 // concurrent read/write — a diagnostic-only data race the Go memory model
 // forbids and go test -race flags. The fix snapshots those fields under
 // vi.mu.RLock before formatting, mirroring advertInterval/getPriority (#6230).
-// (vi.cfg.VirtualAddresses is ALSO deep-copied there, but only defensively: it
-// is immutable per instance — a VIP change rebuilds the whole instance under
-// m.mu.Lock, see instance_addr.go vipAddrSet / instance.go vipFamilies — so it
-// was never part of this race.)
+// vi.cfg.VirtualAddresses is also copied under that lock; VIP-set commits
+// mutate the slice in place on an existing instance (#10780), so it is no
+// longer merely a defensive copy.
 //
 // This is the fail-on-revert gate. A start barrier releases the writer and
 // reader together, and the writer LOOPS mutating all three raced fields under

@@ -1133,14 +1133,14 @@ func (d *Daemon) triggerReconcile() {
 
 // reconcileVRRPInstances recomputes the desired VRRP instance set from the
 // active config and re-drives vrrp.UpdateInstances (#2156, B1). It is the
-// bounded self-recovery hook for the build-before-teardown ordering: a
-// VIP-change restart that was deferred because a member interface was
-// transiently down is retried here on the next reconcile tick once the
-// interface returns. It mirrors the desired-set computation in applyConfig
-// (collect standalone VRRP, then RETH VRRP when clustered) so the reconcile
-// path and the commit path agree on the canonical instance set. Cheap no-op
-// on a steady config. Nil-guards d.vrrpMgr / d.store so it is safe to call
-// from reconcileRGState in minimal (test) daemon constructions.
+// bounded self-recovery hook for an ifindex rebind that was deferred because a
+// member interface was transiently unavailable: the next reconcile retries
+// once the interface returns. VIP-set changes are applied in place (#10780),
+// so they do not defer a restart or drop the MASTER arm. This mirrors the
+// desired-set computation in applyConfig (collect standalone VRRP, then RETH
+// VRRP when clustered) so reconcile and commit agree on the canonical set.
+// Cheap no-op on a steady config. Nil-guards d.vrrpMgr / d.store so it is safe
+// to call from reconcileRGState in minimal (test) daemon constructions.
 func (d *Daemon) reconcileVRRPInstances() {
 	if d.vrrpMgr == nil || d.store == nil {
 		return
@@ -1215,15 +1215,12 @@ func (d *Daemon) reconcileRGState() {
 	reconcileDPUserspaceActive := d.userspaceDataplaneActiveFor(reconcileDP)
 
 	// #2156 (B1): re-drive the VRRP instance set from the active config on
-	// every reconcile pass. Combined with the build-before-teardown
-	// ordering in vrrp.UpdateInstances, this gives bounded (~2s)
-	// self-recovery: if a VIP-change restart was deferred because a member
-	// interface was transiently down (carrier flap, mid-rename), the old
-	// instance kept running and this pass re-attempts the swap once the
-	// interface returns — no operator re-commit needed. On a steady config
-	// this is a cheap no-op (UpdateInstances' no-change paths continue;
-	// priority-only deltas hit the in-place updateConfig path, never a
-	// restart, so it cannot cause a restart storm).
+	// every reconcile pass. Combined with build-before-teardown on ifindex
+	// rebinds, this gives bounded (~2s) recovery if a member interface was
+	// transiently unavailable. VIP-set changes update the existing instance in
+	// place (#10780) and do not defer a restart or disturb MASTERship. On a
+	// steady config this is a cheap no-op (UpdateInstances' no-change path
+	// continues; priority-only deltas use updateConfig).
 	d.reconcileVRRPInstances()
 
 	// Read authoritative VRRP instance states.
