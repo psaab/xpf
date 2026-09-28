@@ -800,6 +800,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// real apply still fails (we return its error). Another opportunity requires
 		// a later failed real invocation that reaches this function while state is
 		// still false.
+		// #10751 R6-A: record whether THIS apply installed the cold-boot
+		// fence: its coverage (lifeline-shared withheld) is the correct
+		// handoff baseline, not the larger real desired scope.
+		fenceInstalledThisApply := false
 		if !d.hostInboundEnforced.Load() {
 			// #6492: fence-only scope — lifeline-shared addresses withheld (the
 			// fence strips every per-service ACCEPT, so a bare `daddr <mgmt-ip>
@@ -812,6 +816,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				d.noteHostInboundApplyFailed(time.Now())
 				return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), fenceErr)
 			}
+			fenceInstalledThisApply = true
 		} else {
 			// #5789 day-2 COVERAGE gap. hostInboundEnforced is true, so the cold-boot
 			// fence is skipped on the premise that the retained (atomic-untouched)
@@ -850,24 +855,38 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// successful install or no-enforcement teardown.
 			// B1: pre-handoff, a failed lo0 in this apply also retains the
 			// barrier — the fence covers only the host-inbound scope.
-			// #10751 R5-B: handoff re-sample (see the real-install site):
-			// prove the S1 desired scope still covers every fresh
-			// desired destination.
+			// #10751 R6-A: handoff re-sample against the ACTUALLY INSTALLED
+			// coverage. A cold-boot fence installed this apply withholds
+			// lifeline-shared destinations, so its recorded set — not the
+			// larger real desired scope — is the baseline; a stable
+			// shared address the fence never drops must refuse, not
+			// hand off. The gap branch keeps desiredDrop (retained real
+			// + gap jointly cover the S1 real scope).
+			fallbackBaseline := desiredDrop
+			if fenceInstalledThisApply {
+				fallbackBaseline = d.hostInboundCoveredAddrs
+			}
 			var freshSnaps []dpuserspace.InterfaceSnapshot
 			var snapshotChanged []string
 			if !d.earlyInputHandoffDone.Load() {
 				freshSnaps = sampleHostInboundSnapshots(cfg)
-				snapshotChanged = hostInboundCoverageNewcomers(cfg, desiredDrop, freshSnaps)
+				snapshotChanged = hostInboundCoverageNewcomers(cfg, fallbackBaseline, freshSnaps)
 			}
 			if !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load() {
 				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply")
 			} else if len(snapshotChanged) > 0 {
-				slog.Warn("retaining early host-input barrier after fenced fallback: addresses changed during apply; retry",
-					"newcomers", strings.Join(snapshotChanged, ","))
-				barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
+				if fenceInstalledThisApply {
+					slog.Warn("retaining early host-input barrier after fenced fallback: destinations not covered by installed fallback; retry",
+						"newcomers", strings.Join(snapshotChanged, ","))
+					barrierHandoffErr = fmt.Errorf("host-inbound destinations not covered by installed fallback; retry: %s", strings.Join(snapshotChanged, ","))
+				} else {
+					slog.Warn("retaining early host-input barrier after fenced fallback: addresses changed during apply; retry",
+						"newcomers", strings.Join(snapshotChanged, ","))
+					barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
+				}
 			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) {
 				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet")
-			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), desiredDrop); barrierErr != nil {
+			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), fallbackBaseline); barrierErr != nil {
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)

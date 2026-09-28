@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1546,7 +1548,9 @@ func TestSnapshotNewcomerLinkLocalRetainsBarrier10751(t *testing.T) {
 
 // TestSnapshotNewcomerRetainsBarrierFallback10751: the fenced-fallback path
 // (real install failed, cold-boot fence standing) re-samples too — the
-// fence covered the install sample only.
+// fence covered the install sample only. The fence path reports uncovered
+// destinations (not "changed": a stable fence-withheld address is
+// uncovered without any change).
 func TestSnapshotNewcomerRetainsBarrierFallback10751(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
@@ -1561,8 +1565,8 @@ func TestSnapshotNewcomerRetainsBarrierFallback10751(t *testing.T) {
 	scriptSnapshotTransition10751(t, s1, s2)
 	d := &Daemon{}
 	err := d.applyHostInboundFilter(cfg)
-	if err == nil || !strings.Contains(err.Error(), "changed during apply") || !strings.Contains(err.Error(), installErr.Error()) {
-		t.Fatalf("apply err = %v, want joined real-install + newcomer errors", err)
+	if err == nil || !strings.Contains(err.Error(), "not covered by installed fallback") || !strings.Contains(err.Error(), installErr.Error()) {
+		t.Fatalf("apply err = %v, want joined real-install + fallback-coverage errors", err)
 	}
 	assertBarrierRetained10751(t, fake, d)
 }
@@ -2059,5 +2063,110 @@ func TestPostHandoffMarkerRefreshBestEffort10751(t *testing.T) {
 	}
 	if !d.earlyInputHandoffDone.Load() {
 		t.Fatal("post-handoff refresh failure must not unmark the handoff")
+	}
+}
+
+// --- #10751 R6-A: fallback proves fence coverage ---
+
+// TestFallbackRefusesStableSharedNotCoveredByFence10751: S1 has Y plus
+// W-shared (W on lifeline fxp0.0 AND data ge-0/0/0.0) in a zone admitting
+// ssh, so the REAL scope covers W but the cold-boot fence WITHHOLDS it.
+// Real install fails; the fence stands scoped via Y. S2 is STABLE (no
+// change). The handoff must REFUSE — the standing fallback never drops W,
+// so handing off would admit all services to W via policy-accept until
+// the next successful real install. Then heal real and converge. Proves
+// the fence spec omits W while the real spec keeps W.
+// RED on revert: baseline on S1 real desiredDrop reports no newcomer and
+// hands off over the uncovered W.
+func TestFallbackRefusesStableSharedNotCoveredByFence10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	installErr := errors.New("real host-inbound load failed")
+	var fenceSpecs []xnft.FenceSpec
+	var realSpecs []xnft.HostInboundSpec
+	calls := 0
+	fake := &fakeNftInstaller{
+		hostInbound: func(spec xnft.HostInboundSpec) error {
+			calls++
+			realSpecs = append(realSpecs, spec)
+			if calls == 1 {
+				return installErr
+			}
+			return nil
+		},
+		coldBootFence: func(spec xnft.FenceSpec) error {
+			fenceSpecs = append(fenceSpecs, spec)
+			return nil
+		},
+	}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	cfg.Security.Zones["trust"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"ssh"}}
+	uni := int(netlink.SCOPE_UNIVERSE)
+	y := scriptedAddr10751("inet", "10.0.0.1/24", uni)
+	w := scriptedAddr10751("inet", "10.0.0.5/24", uni)
+	s := []dpuserspace.InterfaceSnapshot{
+		scriptedSnap10751("fxp0.0", "", w),
+		scriptedSnap10751("ge-0/0/0.0", "trust", y, w),
+	}
+	if hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, s) {
+		t.Fatal("stable scoped fixture must be pending-free; else the cell cannot isolate fence coverage")
+	}
+	scriptSnapshotTransition10751(t, s, s)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "not covered by installed fallback") || !strings.Contains(err.Error(), "10.0.0.5") {
+		t.Fatalf("apply err = %v, want fence-coverage refusal naming 10.0.0.5", err)
+	}
+	assertBarrierRetained10751(t, fake, d)
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("fence must stand scoped (via Y); else the handoff attempt is vacuous")
+	}
+	if len(fenceSpecs) != 1 {
+		t.Fatalf("fence installs = %d, want 1", len(fenceSpecs))
+	}
+	for _, v := range fenceSpecs[0].Views {
+		for _, a := range v.V4Addrs {
+			if a == "10.0.0.5" {
+				t.Fatalf("fence spec covers 10.0.0.5; the fence must withhold lifeline-shared: %+v", fenceSpecs[0].Views)
+			}
+		}
+	}
+	kept := false
+	for _, v := range realSpecs[0].Views {
+		for _, a := range v.V4Addrs {
+			kept = kept || a == "10.0.0.5"
+		}
+	}
+	if !kept {
+		t.Fatalf("real spec must keep 10.0.0.5 (admitting view); got %+v", realSpecs[0].Views)
+	}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("healed apply err = %v, want nil", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("healed real install must complete the handoff")
+	}
+}
+
+// TestGateRefusalLogsInstallError10751: the known-absent reinstall refusal
+// must log the REAL install failure, not err=<nil> (carried Host6
+// diagnostic: the log sat outside the if-scoped shadow).
+func TestGateRefusalLogsInstallError10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	nftInstaller = &fakeNftInstaller{
+		earlyInputBarrierPresent:         func() (bool, error) { return false, nil },
+		earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("guard-install failed") },
+	}
+	prev := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	if ensureEarlyInputProtectionForNaming(nil) {
+		t.Fatal("gate must refuse when the barrier is absent and the guard install fails")
+	}
+	if out := logs.String(); !strings.Contains(out, "guard-install failed") {
+		t.Fatalf("refusal log = %q, want the install error, not nil", out)
 	}
 }

@@ -44,17 +44,21 @@ func ensureEarlyInputProtectionForNaming(cfg *config.Config) bool {
 	}
 	lifelines := resolveEarlyInputGuardLifelines(cfg)
 	if !present {
-		if err := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(lifelines); err == nil {
+		// Bind to a named var: the refusal log below sits outside the
+		// if/else-if chain, so an if-scoped shadow would read the outer
+		// (nil-at-this-point) err and log err=<nil> on a real failure.
+		installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(lifelines)
+		if installErr == nil {
 			slog.Warn("early host-input barrier missing before link activation; installed lifeline guard",
 				"lifelines", lifelines)
 			return true
 		} else if nftProbeAvailable() != nil {
 			slog.Warn("early host-input barrier missing and nftables is unusable; proceeding without input protection",
-				"err", tagNftInstallErr(err))
+				"err", tagNftInstallErr(installErr))
 			return true
 		}
 		slog.Error("early host-input barrier missing and guard install failed; refusing link activation",
-			"lifelines", lifelines, "err", tagNftInstallErr(err))
+			"lifelines", lifelines, "err", tagNftInstallErr(installErr))
 		return false
 	}
 	// Present (global unit form or an older guard): converge to the current
