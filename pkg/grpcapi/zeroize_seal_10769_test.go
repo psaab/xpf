@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/dhcpserver"
 )
 
 // isolateZeroizeSealPaths redirects every F6 system-path leg, including the
@@ -23,7 +24,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
 	oldHostname, oldResolv, oldIPsec := zeroizeHostnamePath, zeroizeResolvConfPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea := zeroizeKeaLeasePaths, zeroizeStopKeaUnits
+	oldKeaPaths, oldStopKea, oldVerifyKea := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
@@ -33,7 +34,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
 		zeroizeHostnamePath, zeroizeResolvConfPath, zeroizeIPsecStatePath = oldHostname, oldResolv, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits = oldKeaPaths, oldStopKea
+		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped = oldKeaPaths, oldStopKea, oldVerifyKea
 	})
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
@@ -71,6 +72,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		filepath.Join(root, "var", "lib", "kea", "kea-leases6.csv"),
 	}
 	zeroizeStopKeaUnits = func() error { return nil }
+	zeroizeVerifyKeaStopped = func() error { return nil }
 	zeroizeVarLogDir = filepath.Join(root, "var", "log")
 }
 
@@ -94,7 +96,10 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	}
 	machineID := zeroizeMachineIDPath
 	hostname, resolver := zeroizeHostnamePath, zeroizeResolvConfPath
-	keaLease4, keaLease6 := zeroizeKeaLeasePaths[0], zeroizeKeaLeasePaths[1]
+	var keaWipeSet []string
+	for _, current := range zeroizeKeaLeasePaths {
+		keaWipeSet = append(keaWipeSet, dhcpserver.KeaLeaseWipePaths(current)...)
+	}
 	ipsecState := zeroizeIPsecStatePath
 	sshHostKey := filepath.Join(zeroizeSSHHostKeyDir, "ssh_host_ed25519_key")
 	sshHostPub := sshHostKey + ".pub"
@@ -102,10 +107,9 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	rootSSHKey := filepath.Join(zeroizeRootSSHUserDir, "id_ed25519")
 	history := zeroizeRootBashHistory
 	engineID, engineBoots, randomSeed := zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed
-	for path, body := range map[string]string{
+	plant := map[string]string{
 		machineID: "machine-id-secret\n", hostname: "prior-tenant.example\n",
 		resolver: zeroizeManagedResolvConfHeader + "nameserver 192.0.2.53\n",
-		keaLease4: "prior client lease v4", keaLease6: "prior client lease v6",
 		ipsecState: `{"loaded":[],"pending_terminate":[]}`,
 		sshHostKey: "private host key", sshHostPub: "public host key",
 		foreignSSH: "unmanaged ssh config", rootSSHKey: "root private key", history: "old shell commands\n",
@@ -120,7 +124,11 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 		filepath.Join(zeroizeAptListsDir, "example_Packages"):     "package list",
 		filepath.Join(zeroizeAptArchiveDir, "old.deb"):            "package archive",
 		filepath.Join(zeroizeVarLogDir, "journal", "old.journal"): "prior tenant journal",
-	} {
+	}
+	for _, path := range keaWipeSet {
+		plant[path] = "prior client lease"
+	}
+	for path, body := range plant {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -128,14 +136,26 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	keaStopped := false
+	keaStopped, keaVerified := false, false
 	zeroizeStopKeaUnits = func() error {
-		for _, path := range []string{keaLease4, keaLease6} {
+		for _, path := range keaWipeSet {
 			if _, err := os.Lstat(path); err != nil {
 				return fmt.Errorf("Kea lease file %s missing before stop: %w", path, err)
 			}
 		}
 		keaStopped = true
+		return nil
+	}
+	zeroizeVerifyKeaStopped = func() error {
+		if !keaStopped {
+			return fmt.Errorf("Kea verified before stop")
+		}
+		for _, path := range keaWipeSet {
+			if _, err := os.Lstat(path); err != nil {
+				return fmt.Errorf("Kea lease file %s missing before unlink: %w", path, err)
+			}
+		}
+		keaVerified = true
 		return nil
 	}
 
@@ -145,15 +165,18 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	if !keaStopped {
 		t.Fatal("Kea must be stopped before its lease files are erased")
 	}
+	if !keaVerified {
+		t.Fatal("Kea must verify inactive between stop and lease unlink")
+	}
 	if body, err := os.ReadFile(machineID); err != nil || len(body) != 0 {
 		t.Fatalf("machine-id should remain present but empty for systemd regeneration; body=%q err=%v", body, err)
 	}
 	if body, err := os.ReadFile(hostname); err != nil || string(body) != "xpf\n" {
 		t.Fatalf("hostname should reset to the appliance default: body=%q err=%v", body, err)
 	}
-	for _, path := range []string{
+	absent := []string{
 		sshHostKey, sshHostPub, rootSSHKey, history, engineID, engineBoots, randomSeed,
-		keaLease4, keaLease6, ipsecState, resolver,
+		ipsecState, resolver,
 		zeroizeRunUtmpPath, zeroizeDay0RejectedPath, zeroizeRootGrownPath,
 		zeroizeManagedHostKeysPath, zeroizePasswdBackupPaths[0], zeroizePasswdBackupPaths[1],
 		zeroizePasswdBackupPaths[2], zeroizePasswdBackupPaths[3],
@@ -161,7 +184,12 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 		zeroizeManagedDropins[3], zeroizeManagedDropins[4], zeroizeManagedDropins[5],
 		filepath.Join(zeroizeAptListsDir, "example_Packages"), filepath.Join(zeroizeAptArchiveDir, "old.deb"),
 		filepath.Join(zeroizeVarLogDir, "journal", "old.journal"),
-	} {
+	}
+	// No lease-bearing generation may survive: absence of every LFC source
+	// is the stronger assertion (there is no hermetic exported lease reader
+	// to call instead — no files means no readable leases).
+	absent = append(absent, keaWipeSet...)
+	for _, path := range absent {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("sealed prior-tenant artifact %s survived: %v", path, err)
 		}
@@ -468,5 +496,46 @@ func TestPerformZeroizeRetainsMarkerOnSealSyncFailure10769(t *testing.T) {
 	}
 	if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
 		t.Fatalf("failed wipe must retain the pending marker: %v", err)
+	}
+}
+
+func TestPerformZeroizeErasesCompletedOnlyLeaseResidue10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	// A crash between LFC rotation steps can leave leases ONLY in .completed
+	// while the canonical file is fresh/empty; Kea startup prefers it.
+	completed := zeroizeKeaLeasePaths[0] + ".completed"
+	mustWriteFile(t, completed, []byte("orphaned compacted leases"))
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	if _, err := os.Lstat(completed); !os.IsNotExist(err) {
+		t.Fatalf(".completed lease residue survived: %v", err)
+	}
+}
+
+func TestPerformZeroizeAbortsWhenKeaVerifyFails10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	masterKey := filepath.Join(configDir, ".configdb", "master.key")
+	mustWriteFile(t, masterKey, []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("tenant config"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { secret tenant; }\n"))
+	lease := zeroizeKeaLeasePaths[0]
+	mustWriteFile(t, lease, []byte("prior tenant lease"))
+	zeroizeVerifyKeaStopped = func() error { return fmt.Errorf("kea-dhcp4-server still active") }
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err == nil || !strings.Contains(err.Error(), "still active") {
+		t.Fatalf("Kea verify failure must abort the wipe, got %v", err)
+	}
+	for _, path := range []string{masterKey, filepath.Join(configDir, "xpf.conf"), lease} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("Kea verify failure must preserve %s: %v", path, err)
+		}
 	}
 }

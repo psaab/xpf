@@ -50,6 +50,7 @@ var (
 	zeroizeIPsecStatePath = ipsec.DefaultConnStatePath
 	zeroizeKeaLeasePaths  = []string{dhcpserver.DefaultKeaLeaseFile4Path, dhcpserver.DefaultKeaLeaseFile6Path}
 	zeroizeStopKeaUnits   = stopKeaUnits
+	zeroizeVerifyKeaStopped = verifyKeaUnitsStopped
 )
 
 var (
@@ -72,9 +73,6 @@ func zeroizeImageSealResidue() error {
 		}
 	}
 
-	for _, path := range zeroizeKeaLeasePaths {
-		fail(zeroizeRemovePath(path))
-	}
 	// machine-id is left present but empty so systemd regenerates it.
 	fail(zeroizeTruncateFile(zeroizeMachineIDPath))
 
@@ -151,6 +149,51 @@ func zeroizeImageSealResidue() error {
 	}
 	if len(errs) != 0 {
 		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func zeroizeStopKeaAndEraseLeases() error {
+	// Stop, verify, and unlink in one critical section with no intervening
+	// wipe I/O: a Kea restart between stop and unlink would re-persist prior
+	// leases under the erasure. No mask/disable: a mask persists across the
+	// reboot into the next tenant and would break their DHCP; stop plus an
+	// inactive verification plus immediate unlink closes the re-persist
+	// window instead (a restart after the unlink creates fresh empty state,
+	// not prior leases). Each systemctl invocation is bounded 15s+5s by the
+	// shared exec helper; any stop/verify failure fails closed here, before
+	// any lease byte is unlinked.
+	if err := zeroizeStopKeaUnits(); err != nil {
+		return fmt.Errorf("%w: %w", errZeroizeKeaStop, err)
+	}
+	if err := zeroizeVerifyKeaStopped(); err != nil {
+		return fmt.Errorf("%w: %w", errZeroizeKeaStop, err)
+	}
+	var errs []error
+	for _, current := range zeroizeKeaLeasePaths {
+		// The full LFC set, not just the canonical CSV: Kea startup prefers
+		// .completed over .2/.1, so unlinking only the current file leaves
+		// prior leases loadable (and a crash can leave leases ONLY in
+		// .completed).
+		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
+			if err := zeroizeRemovePath(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	if len(errs) != 0 {
+		return errors.Join(errs...)
+	}
+	// Re-verify emptiness after the unlink: a writer racing the stop would
+	// otherwise leave fresh prior-tenant rows behind a clean receipt.
+	for _, current := range zeroizeKeaLeasePaths {
+		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
+			if _, err := os.Lstat(path); err == nil {
+				return fmt.Errorf("zeroize: Kea lease file %s reappeared during erasure", path)
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("zeroize: inspect Kea lease file %s: %w", path, err)
+			}
+		}
 	}
 	return nil
 }
@@ -361,20 +404,58 @@ func zeroizeRemoveManagedResolvConf(path string) error {
 	return zeroizeSyncDir(filepath.Dir(path))
 }
 
+// keaUnits are the Kea DHCP server units factory reset stops before erasing
+// lease state.
+var keaUnits = []string{"kea-dhcp4-server", "kea-dhcp6-server"}
+
+// keaUnitActive reports whether a Kea unit is active. Exit 3/4 (inactive /
+// unknown) is a definitive "not active"; any other query failure fails
+// closed rather than assuming the unit is down.
+func keaUnitActive(unit string) (bool, error) {
+	out, err := combinedOutputTimeoutUnlimited(context.Background(), "systemctl", "is-active", "--quiet", unit)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && (exitErr.ExitCode() == 3 || exitErr.ExitCode() == 4) {
+		return false, nil
+	}
+	return false, fmt.Errorf("query %s state: %w: %s", unit, err, strings.TrimSpace(string(out)))
+}
+
 func stopKeaUnits() error {
 	var errs []error
-	for _, unit := range []string{"kea-dhcp4-server", "kea-dhcp6-server"} {
-		out, err := combinedOutputTimeoutUnlimited(context.Background(), "systemctl", "is-active", "--quiet", unit)
-		if err == nil {
-			out, err = combinedOutputTimeoutUnlimited(context.Background(), "systemctl", "stop", unit)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("stop %s: %w: %s", unit, err, strings.TrimSpace(string(out))))
-			}
+	for _, unit := range keaUnits {
+		active, err := keaUnitActive(unit)
+		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || (exitErr.ExitCode() != 3 && exitErr.ExitCode() != 4) {
-			errs = append(errs, fmt.Errorf("query %s state: %w: %s", unit, err, strings.TrimSpace(string(out))))
+		if !active {
+			continue
+		}
+		out, err := combinedOutputTimeoutUnlimited(context.Background(), "systemctl", "stop", unit)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("stop %s: %w: %s", unit, err, strings.TrimSpace(string(out))))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// verifyKeaUnitsStopped fails closed unless every Kea unit is verifiably
+// inactive. It runs after the stop and immediately before the lease unlink
+// so a restart (or a stop that silently failed) cannot re-persist leases
+// under the erasure.
+func verifyKeaUnitsStopped() error {
+	var errs []error
+	for _, unit := range keaUnits {
+		active, err := keaUnitActive(unit)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if active {
+			errs = append(errs, fmt.Errorf("kea unit %s still active after stop", unit))
 		}
 	}
 	return errors.Join(errs...)

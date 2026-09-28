@@ -1524,11 +1524,6 @@ func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
 }
 
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
-	// Kea's lease database is live service state. Stop both servers before
-	// removing any durable reset state, then erase the lease files below.
-	if err := zeroizeStopKeaUnits(); err != nil {
-		return fmt.Errorf("%w: %w", errZeroizeKeaStop, err)
-	}
 	// DDNS ownership and IPsec teardown debt are durable external-delete
 	// authorities. Refuse the on-disk wipe unless manager withdrawal has emptied
 	// both stores; otherwise the credentials needed for cleanup would be erased.
@@ -1537,6 +1532,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	}
 	if err := zeroizeEraseIPsecState(); err != nil {
 		return err
+	}
+
+	// Kea's lease database is live service state: stop, verify inactive, and
+	// unlink the full LFC set in one critical section (zeroizeStopKeaAndEraseLeases).
+	// A stop/verify failure aborts before any later wipe surface, retaining
+	// the rendered config for a safe retry; unlink errors join the leg result.
+	keaErr := zeroizeStopKeaAndEraseLeases()
+	if errors.Is(keaErr, errZeroizeKeaStop) {
+		return keaErr
 	}
 
 	// Factory-seal state that is safe to regenerate is removed before the other
@@ -1548,6 +1552,9 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// interrupted; the config root is erased last by the shared wrapper.
 	// Every leg error is retained and joined so later diagnostics are not lost.
 	var legErrs []error
+	if keaErr != nil {
+		legErrs = append(legErrs, keaErr)
+	}
 	if sealErr != nil {
 		legErrs = append(legErrs, sealErr)
 	}

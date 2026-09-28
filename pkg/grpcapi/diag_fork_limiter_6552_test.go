@@ -169,6 +169,8 @@ var declaredUnboundedForks = []unboundedForkExemption{
 			"semaphore was busy is strictly worse than a slow one"},
 	{"server_diag_zeroize_seal_10769.go", "stopKeaUnits", "combinedOutputTimeoutUnlimited",
 		"factory reset must stop Kea before erasing tenant lease data and cannot be refused by diagnostic backpressure"},
+	{"server_diag_zeroize_seal_10769.go", "keaUnitActive", "combinedOutputTimeoutUnlimited",
+		"factory-reset Kea stop/verify queries share the stop exemption: the lease wipe cannot be refused by diagnostic backpressure"},
 }
 
 // unboundedForkCallees are the helpers that fork WITHOUT drawing a diagnostic
