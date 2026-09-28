@@ -233,20 +233,23 @@ synthesizing tuple identity locally.
 
 `clear_persistent_nat_leases` is a control-socket mutation of the helper's
 allocator, not just a clear of Go's display mirror. The helper immediately
-removes idle leases and releases their PAT occupancy. An idle key is fenced
-against peer lease imports for 60 seconds after revocation, unless a successful
-fresh local lease supersedes the tombstone earlier. While that replacement
-exists, delayed imports skip it as existing; if it later disappears, a delayed
-import can be accepted even before the original 60-second deadline. Otherwise,
-re-admission is possible once that deadline passes. Active leases
-carry a `u64::MAX` fence until their last active flow drains, then retain the
-60-second window. They are hidden from export/display. New local flows cannot
-reuse a cleared mapping, though synced live sessions can join an existing shell
-to preserve their already-live tuple. Expired tombstones are pruned on a later
-clear or same-key local allocation, not by a timer. Drained shells are
-reclaimable by normal GC. The response's `persistent_nat_lease_count` reports
-the allocator leases revoked by the operation. Go clears the SHOW mirror only
-after the helper acknowledges the clear.
+removes idle leases and releases their PAT occupancy. Incoming peer idle-lease
+records are fenced for 60 seconds after clear: per-key for known leases and
+allocator-wide for keys not yet installed on the receiver. A fresh local
+same-key lease does not remove or restart that fence, so its early expiry cannot
+re-admit a delayed pre-clear record. Once the full window ends, an old record
+may be admitted (#11486 residual).
+
+Active leases remain as revoked `u64::MAX` shells until their last active flow
+drains, then retain a per-key 60-second import fence. Revoked shells are hidden
+from export/display. New local flows cannot reuse a cleared mapping, though
+synced live sessions can join an existing shell to preserve their already-live
+tuple. Expired tombstones are pruned on a later clear, not by a timer. A drained
+shell is reclaimed by normal GC or safely retired before a same-key overwrite,
+even if a budgeted GC pass skipped it. The response's
+`persistent_nat_lease_count` reports only leases newly revoked by this
+operation; repeating clear while a revoked shell drains reports zero. Go clears
+the SHOW mirror only after the helper acknowledges the clear.
 
 ## Reconciliation
 

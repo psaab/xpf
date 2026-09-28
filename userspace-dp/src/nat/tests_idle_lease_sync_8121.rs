@@ -51,6 +51,28 @@ fn mint_persistent(
         .expect("a fresh persistent allocation must succeed")
 }
 
+fn mint_persistent_with_timeout(
+    alloc: &PortAllocator,
+    addrs: &[Ipv4Addr],
+    f: SourceNatFlowKey,
+    timeout_ns: u64,
+    now_ns: u64,
+) -> TranslatedTuple {
+    alloc
+        .allocate_translation(
+            f,
+            PoolAddressFamily::V4(addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::TargetHostPort,
+            timeout_ns,
+            now_ns,
+            NatHolder::Untracked,
+        )
+        .expect("a fresh persistent allocation must succeed")
+}
+
 fn mint_persistent_any_remote(
     alloc: &PortAllocator,
     addrs: &[Ipv4Addr],
@@ -1651,6 +1673,78 @@ fn clearing_idle_leases_revokes_allocator_and_stale_ha_import_10784() {
     assert_eq!(allocator.export_display_leases(4_000).len(), 1);
 }
 
+/// A successful fresh same-key lease must not erase the original clear fence:
+/// if that replacement expires and GC removes it before T+60s, a delayed
+/// pre-clear import is still rejected (#10784).
+#[test]
+fn clear_fence_survives_expired_same_key_replacement_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    let original = mint_persistent_with_timeout(&allocator, &addrs, client, min_timeout_ns, 1_000_000_000);
+    assert!(allocator.release_flow(client, original, 2_000_000_000, NatHolder::Untracked));
+    let stale = allocator
+        .export_idle_leases(2_500_000_000)
+        .into_iter()
+        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
+        .expect("control: pre-clear lease must be captured");
+
+    assert_eq!(allocator.clear_persistent_leases(3_000_000_000), 1);
+    let key = client.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    let replacement =
+        mint_persistent_with_timeout(&allocator, &addrs, client, min_timeout_ns, 3_100_000_000);
+    assert!(allocator.release_flow(client, replacement, 3_200_000_000, NatHolder::Untracked));
+    assert_eq!(allocator.debug_gc_expired_chunked(5_000_000_000, 8), 1);
+    let live = allocator.debug_live();
+    assert!(!live.persistent_by_source.contains_key(&key));
+    assert_eq!(
+        live.revoked_persistent.get(&key).copied(),
+        Some(63_000_000_000),
+        "a successful replacement must not delete or restart the original clear deadline"
+    );
+    drop(live);
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), min_timeout_ns, 5_100_000_000),
+        IdleLeaseImport::SkippedExisting
+    );
+    assert!(allocator.debug_live().persistent_by_source.is_empty());
+}
+
+/// A clear on an empty receiver still fences a pre-clear batch for an unknown
+/// key; per-key tombstones alone cannot cover import ordering (#10784).
+#[test]
+fn clear_fences_preclear_import_for_unknown_key_10784() {
+    let addrs = pool();
+    let source = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let translated = mint_persistent(&source, &addrs, client, 1_000_000_000);
+    assert!(source.release_flow(client, translated, 2_000_000_000, NatHolder::Untracked));
+    let stale = source
+        .export_idle_leases(2_500_000_000)
+        .into_iter()
+        .next()
+        .expect("control: source must have a pre-clear idle export");
+
+    let receiver = PortAllocator::new(1, 1024, 65535);
+    assert_eq!(receiver.clear_persistent_leases(3_000_000_000), 0);
+    assert_eq!(
+        receiver.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 3_100_000_000),
+        IdleLeaseImport::SkippedExisting
+    );
+    assert!(receiver.debug_live().persistent_by_source.is_empty());
+    assert_eq!(
+        receiver.import_idle_lease(
+            &stale,
+            &ipv4_pool(&addrs),
+            TIMEOUT_NS,
+            63_000_000_001,
+        ),
+        IdleLeaseImport::Installed,
+        "the batch-wide barrier ends at the documented replay horizon"
+    );
+}
+
 /// Active leases keep their occupied tuple until their existing flows drain;
 /// the drain expires the shell rather than rearming persistence (#10784).
 #[test]
@@ -1662,6 +1756,11 @@ fn clearing_live_lease_drains_without_reuse_or_port_leak_10784() {
     let original_index = addrs.iter().position(|ip| *ip == original.ip).unwrap();
 
     assert_eq!(allocator.clear_persistent_leases(2_000), 1);
+    assert_eq!(
+        allocator.clear_persistent_leases(2_000),
+        0,
+        "repeated clear reports only newly revoked leases"
+    );
     assert!(
         allocator.debug_is_port_occupied(original_index, original.port),
         "a live flow must keep its translated tuple occupied during clear"
@@ -1690,6 +1789,57 @@ fn clearing_live_lease_drains_without_reuse_or_port_leak_10784() {
         (original.ip, original.port),
         "the first new mapping after drain must be minted afresh"
     );
+}
+
+/// A target revoked active lease is the ninth expired entry, behind eight
+/// earlier idle expiries. Same-key allocation must retire its drained shell
+/// and free its PAT bit even when the allocation GC budget is exhausted (#10784).
+#[test]
+fn drained_clear_shell_overwrite_releases_pat_port_after_gc_budget_10784() {
+    let addrs = [pool()[0]];
+    let allocator = PortAllocator::new(1, 1024, 1043);
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+
+    // Advance the cursor without a release-triggered GC, so the same-key mint
+    // after drain cannot immediately claim the shell's old port.
+    allocator.debug_set_cursor(0, 1);
+
+    let client = flow("10.0.61.50", 40000);
+    let original =
+        mint_persistent_with_timeout(&allocator, &addrs, client, min_timeout_ns, 1_200_000_000);
+    assert_eq!(original.port, 1025, "control: cursor must skip port 1024");
+    assert_eq!(allocator.clear_persistent_leases(2_000_000_000), 1);
+
+    for i in 0..8 {
+        let src = format!("10.0.62.{}", i + 1);
+        let decoy = flow(&src, 41000 + i as u16);
+        let translated =
+            mint_persistent_with_timeout(&allocator, &addrs, decoy, min_timeout_ns, 2_100_000_000);
+        assert!(allocator.release_flow(
+            decoy,
+            translated,
+            2_200_000_000,
+            NatHolder::Untracked
+        ));
+    }
+    assert!(allocator.release_flow(client, original, 4_000_000_000, NatHolder::Untracked));
+
+    let replacement =
+        mint_persistent_with_timeout(&allocator, &addrs, client, min_timeout_ns, 4_000_000_000);
+    assert_ne!(replacement.port, original.port);
+    assert!(
+        !allocator.debug_is_port_occupied(0, original.port),
+        "overwriting the drained revoked shell must release its old PAT bit"
+    );
+    assert_eq!(
+        allocator.debug_occupied_count(),
+        1,
+        "only the fresh replacement lease may own a PAT bit"
+    );
+    let live = allocator.debug_live();
+    assert_eq!(live.persistent_by_source.len(), 1);
+    assert!(live.lease_expirations.is_empty());
+    assert!(live.lease_expirations_by_addr[0].is_empty());
 }
 
 /// Address-only leases share the same clear/tombstone contract as PAT leases,
