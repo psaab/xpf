@@ -23,7 +23,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldDDNSLease, oldDDNSSurface := zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
-	oldHostname, oldResolv, oldIPsec := zeroizeHostnamePath, zeroizeResolvConfPath, zeroizeIPsecStatePath
+	oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec := zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath
 	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
@@ -33,7 +33,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath = oldDDNSLease, oldDDNSSurface
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
-		zeroizeHostnamePath, zeroizeResolvConfPath, zeroizeIPsecStatePath = oldHostname, oldResolv, oldIPsec
+		zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath = oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec
 		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups
 	})
 
@@ -65,7 +65,9 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		filepath.Join(root, "etc", "systemd", "resolved.conf.d", "bpfrx.conf"),
 	}
 	zeroizeHostnamePath = filepath.Join(root, "etc", "hostname")
+	zeroizeHostsPath = filepath.Join(root, "etc", "hosts")
 	zeroizeResolvConfPath = filepath.Join(root, "etc", "resolv.conf")
+	zeroizeDBusMachineIDPath = filepath.Join(root, "var", "lib", "dbus", "machine-id")
 	zeroizeIPsecStatePath = filepath.Join(root, "var", "lib", "xpf", "ipsec-conn-state.json")
 	zeroizeKeaLeasePaths = []string{
 		filepath.Join(root, "var", "lib", "kea", "kea-leases4.csv"),
@@ -97,6 +99,7 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	}
 	machineID := zeroizeMachineIDPath
 	hostname, resolver := zeroizeHostnamePath, zeroizeResolvConfPath
+	hosts, dbusID := zeroizeHostsPath, zeroizeDBusMachineIDPath
 	var keaWipeSet []string
 	for _, current := range zeroizeKeaLeasePaths {
 		keaWipeSet = append(keaWipeSet, dhcpserver.KeaLeaseWipePaths(current)...)
@@ -111,6 +114,8 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	plant := map[string]string{
 		machineID: "machine-id-secret\n", hostname: "prior-tenant.example\n",
 		resolver: zeroizeManagedResolvConfHeader + "nameserver 192.0.2.53\n",
+		hosts:    "127.0.0.1 localhost\n10.9.9.9 tenant-internal.example\n",
+		dbusID:   "dbus-machine-id-secret\n",
 		ipsecState: `{"loaded":[],"pending_terminate":[]}`,
 		sshHostKey: "private host key", sshHostPub: "public host key",
 		foreignSSH: "unmanaged ssh config", rootSSHKey: "root private key", history: "old shell commands\n",
@@ -175,9 +180,15 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	if body, err := os.ReadFile(hostname); err != nil || string(body) != "xpf\n" {
 		t.Fatalf("hostname should reset to the appliance default: body=%q err=%v", body, err)
 	}
+	if body, err := os.ReadFile(resolver); err != nil || string(body) != zeroizeManagedResolvConfHeader {
+		t.Fatalf("resolver should reset to the header-only empty default: body=%q err=%v", body, err)
+	}
+	if body, err := os.ReadFile(hosts); err != nil || string(body) != zeroizeDefaultHosts {
+		t.Fatalf("hosts should reset to the factory default: body=%q err=%v", body, err)
+	}
 	absent := []string{
 		sshHostKey, sshHostPub, rootSSHKey, history, engineID, engineBoots, randomSeed,
-		ipsecState, resolver,
+		dbusID, ipsecState,
 		zeroizeRunUtmpPath, zeroizeDay0RejectedPath, zeroizeRootGrownPath,
 		zeroizeManagedHostKeysPath, zeroizePasswdBackupPaths[0], zeroizePasswdBackupPaths[1],
 		zeroizePasswdBackupPaths[2], zeroizePasswdBackupPaths[3],
@@ -200,22 +211,22 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	}
 }
 
-func TestZeroizePreservesUnownedKnownHosts10769(t *testing.T) {
+func TestZeroizeErasesForeignKnownHosts10769(t *testing.T) {
 	root := t.TempDir()
 	isolateZeroizeSealPaths(t, root)
 	if err := os.MkdirAll(filepath.Dir(zeroizeManagedHostKeysPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	want := "operator-owned known hosts\n"
-	if err := os.WriteFile(zeroizeManagedHostKeysPath, []byte(want), 0o600); err != nil {
+	// No xpfd header: a prior root could strip the header to preserve
+	// hostile trust anchors, so headerless trust is erased, not kept.
+	if err := os.WriteFile(zeroizeManagedHostKeysPath, []byte("evil.example ssh-ed25519 AAAA\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := zeroizeRemoveManagedHostKeys(zeroizeManagedHostKeysPath); err != nil {
+	if err := zeroizeEraseKnownHosts(zeroizeManagedHostKeysPath); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(zeroizeManagedHostKeysPath)
-	if err != nil || string(got) != want {
-		t.Fatalf("unowned SSH known-hosts file was not preserved: body=%q err=%v", got, err)
+	if _, err := os.Lstat(zeroizeManagedHostKeysPath); !os.IsNotExist(err) {
+		t.Fatalf("foreign SSH known-hosts file survived: %v", err)
 	}
 }
 
@@ -272,26 +283,25 @@ func TestPerformZeroizeKeepsConfigWhenDDNSWithdrawalIsUnresolved10769(t *testing
 	}
 }
 
-func TestZeroizePreservesForeignResolver10769(t *testing.T) {
+func TestZeroizeResetsForeignResolver10769(t *testing.T) {
 	root := t.TempDir()
 	isolateZeroizeSealPaths(t, root)
 	if err := os.MkdirAll(filepath.Dir(zeroizeResolvConfPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	want := "nameserver 192.0.2.1\n"
-	if err := os.WriteFile(zeroizeResolvConfPath, []byte(want), 0o600); err != nil {
+	if err := os.WriteFile(zeroizeResolvConfPath, []byte("nameserver 192.0.2.1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := zeroizeRemoveManagedResolvConf(zeroizeResolvConfPath); err != nil {
+	if err := zeroizeResetResolvConf(zeroizeResolvConfPath); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(zeroizeResolvConfPath)
-	if err != nil || string(got) != want {
-		t.Fatalf("unowned resolver file was not preserved: body=%q err=%v", got, err)
+	if err != nil || string(got) != zeroizeManagedResolvConfHeader {
+		t.Fatalf("foreign resolver was not reset to the empty default: body=%q err=%v", got, err)
 	}
 }
 
-func TestZeroizePreservesForeignResolverSymlink10769(t *testing.T) {
+func TestZeroizeResetsForeignResolverSymlink10769(t *testing.T) {
 	root := t.TempDir()
 	isolateZeroizeSealPaths(t, root)
 	if err := os.MkdirAll(filepath.Dir(zeroizeResolvConfPath), 0o700); err != nil {
@@ -302,12 +312,32 @@ func TestZeroizePreservesForeignResolverSymlink10769(t *testing.T) {
 	if err := os.Symlink(target, zeroizeResolvConfPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := zeroizeRemoveManagedResolvConf(zeroizeResolvConfPath); err != nil {
+	if err := zeroizeResetResolvConf(zeroizeResolvConfPath); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Lstat(zeroizeResolvConfPath)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("foreign resolver symlink was not preserved: info=%v err=%v", info, err)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("resolver symlink was not replaced by a regular file: info=%v err=%v", info, err)
+	}
+	got, err := os.ReadFile(zeroizeResolvConfPath)
+	if err != nil || string(got) != zeroizeManagedResolvConfHeader {
+		t.Fatalf("replaced resolver has wrong content: body=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(target); err != nil {
+		t.Fatalf("symlink target must be untouched: %v", err)
+	}
+}
+
+func TestZeroizeResetsHosts10769(t *testing.T) {
+	root := t.TempDir()
+	isolateZeroizeSealPaths(t, root)
+	mustWriteFile(t, zeroizeHostsPath, []byte("127.0.0.1 localhost\n10.9.9.9 tenant-internal.example\n"))
+	if err := zeroizeResetHosts(zeroizeHostsPath); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(zeroizeHostsPath)
+	if err != nil || string(got) != zeroizeDefaultHosts {
+		t.Fatalf("hosts was not reset to the factory default: body=%q err=%v", got, err)
 	}
 }
 
@@ -436,6 +466,8 @@ func TestPerformZeroizeSyncsEverySealParent10769(t *testing.T) {
 		zeroizeManagedDropins[3],
 		zeroizeManagedDropins[4],
 		zeroizeResolvConfPath,
+		zeroizeHostsPath,
+		zeroizeDBusMachineIDPath,
 		zeroizeKeaLeasePaths[0],
 		filepath.Join(zeroizeVarLogDir, "old.log"),
 	}
