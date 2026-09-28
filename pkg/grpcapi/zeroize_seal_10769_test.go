@@ -128,7 +128,7 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	history := zeroizeRootBashHistory
 	engineID, engineBoots, randomSeed := zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed
 	plant := map[string]string{
-		machineID: "machine-id-secret\n", hostname: "prior-tenant.example\n",
+		machineID: "0123456789abcdef0123456789abcdef\n", hostname: "prior-tenant.example\n",
 		resolver:   zeroizeManagedResolvConfHeader + "nameserver 192.0.2.53\n",
 		hosts:      "127.0.0.1 localhost\n10.9.9.9 tenant-internal.example\n",
 		dbusID:     "dbus-machine-id-secret\n",
@@ -198,8 +198,12 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	if len(liveNames) != 1 || liveNames[0] != "xpf" {
 		t.Fatalf("live kernel hostname calls = %q, want exactly [xpf]", liveNames)
 	}
-	if body, err := os.ReadFile(machineID); err != nil || len(body) != 0 {
-		t.Fatalf("machine-id should remain present but empty for systemd regeneration; body=%q err=%v", body, err)
+	if body, err := os.ReadFile(machineID); err != nil {
+		t.Fatalf("machine-id must be present after reset: %v", err)
+	} else if id := strings.TrimSpace(string(body)); len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" {
+		t.Fatalf("machine-id must be fresh 32-hex identity, got %q", body)
+	} else if id == "0123456789abcdef0123456789abcdef" || !strings.HasSuffix(string(body), "\n") {
+		t.Fatalf("machine-id must rotate away from the seeded prior identity with a trailing newline, got %q", body)
 	}
 	if body, err := os.ReadFile(hostname); err != nil || string(body) != "xpf\n" {
 		t.Fatalf("hostname should reset to the appliance default: body=%q err=%v", body, err)
@@ -1631,6 +1635,46 @@ func TestUngatedWipeErasesCustomHelperState10769(t *testing.T) {
 		}
 		if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
 			t.Fatalf("failed wipe must retain the pending marker: %v", err)
+		}
+	})
+}
+
+func TestZeroizeRotateMachineIDCreatesAndRefusesLink10769(t *testing.T) {
+	valid := func(t *testing.T, path string) string {
+		t.Helper()
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := strings.TrimSpace(string(body))
+		if len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" || !strings.HasSuffix(string(body), "\n") {
+			t.Fatalf("machine-id must be 32-hex + newline, got %q", body)
+		}
+		return id
+	}
+	t.Run("missing is created fresh", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "machine-id")
+		if err := zeroizeRotateMachineID(path); err != nil {
+			t.Fatalf("rotate missing: %v", err)
+		}
+		first := valid(t, path)
+		if err := zeroizeRotateMachineID(path); err != nil {
+			t.Fatalf("rotate again: %v", err)
+		}
+		if second := valid(t, path); second == first {
+			t.Fatal("rotation must install a differing identity")
+		}
+	})
+	t.Run("symlink refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-id")
+		mustWriteFile(t, target, []byte("0123456789abcdef0123456789abcdef\n"))
+		link := filepath.Join(dir, "machine-id")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := zeroizeRotateMachineID(link); err == nil {
+			t.Fatal("symlinked machine-id must fail closed")
 		}
 	})
 }

@@ -2,6 +2,8 @@ package grpcapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -117,9 +119,11 @@ func zeroizeImageSealResidue() error {
 		}
 	}
 
-	// machine-id is left present but empty so systemd regenerates it. The
-	// D-Bus alias copy is removed outright (D-Bus regenerates a missing one).
-	fail(zeroizeTruncateFile(zeroizeMachineIDPath))
+	// machine-id is replaced with fresh random bytes (deliberately NOT
+	// the seal's truncate: v261 regenerates an empty id from the stable
+	// SMBIOS UUID on VMs, reproducing the prior DUID-EN). The D-Bus
+	// alias copy is removed outright (D-Bus regenerates a missing one).
+	fail(zeroizeRotateMachineID(zeroizeMachineIDPath))
 	fail(zeroizeRemovePath(zeroizeDBusMachineIDPath))
 
 	// The image seals every ssh_host_* private/public/certificate file. The
@@ -194,9 +198,11 @@ func zeroizeImageSealResidue() error {
 	//   - DUID is runtime-derived, never persisted: the default vendor
 	//     DUID is EN 43793 + hashed machine-id (networkd.conf(5)
 	//     DUIDType=vendor; sd-dhcp-duid.c performs no file I/O), so the
-	//     machine-id truncation above rotates it. IAID defaults to a
-	//     siphash of the persistent ifname/MAC (dhcp_identifier_set_iaid),
-	//     i.e. hardware-derived, likewise unpersisted.
+	//     fresh machine-id installed above rotates it on every target
+	//     (truncate alone would regenerate the same firmware UUID on
+	//     VMs). IAID defaults to a siphash of the persistent ifname/MAC
+	//     (dhcp_identifier_set_iaid): stable-by-design hardware identity,
+	//     not tenant-secret residue, likewise unpersisted.
 	//   - Persistent /var/lib/systemd/network/ holds only DHCP SERVER
 	//     leases (dhcp-server-lease/<ifname>), which xpf never renders
 	//     (no [DHCPServer] in 10-xpf-*; Kea serves DHCP), plus the
@@ -783,29 +789,33 @@ func zeroizeEraseIPsecState() error {
 	return nil
 }
 
-func zeroizeTruncateFile(path string) error {
+// zeroizeRotateMachineID installs a fresh random machine-id, replacing the
+// prior-tenant identity. Truncation (the SYSPREP seal shape) is NOT enough:
+// systemd v261.2 acquire_machine_id() regenerates an empty id from the
+// stable SMBIOS firmware UUID on KVM/AMAZON/QEMU/XEN/BHYVE, which would
+// reproduce the prior default vendor DUID-EN (EN 43793 + hashed
+// machine-id). A present valid id is used as-is, so installing fresh
+// random bytes rotates the DUID on every target (VM, bare metal,
+// container). The ssh host keys do not depend on first-boot detection:
+// xpf-day0-config regenerates on key absence, gate-stamped. Format per
+// machine-id(5): 32 lowercase hex + newline, world-readable.
+func zeroizeRotateMachineID(path string) error {
 	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("zeroize: inspect %s: %w", path, err)
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("zeroize: refusing to truncate non-regular file %s", path)
+	if err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("zeroize: refusing to replace non-regular file %s", path)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
-	if err != nil {
-		return fmt.Errorf("zeroize: truncate %s: %w", path, err)
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return fmt.Errorf("zeroize: generate machine-id: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("zeroize: sync truncated %s: %w", path, err)
+	body := hex.EncodeToString(id[:]) + "\n"
+	if err := fsatomic.WriteFileDurable(path, []byte(body), 0o444); err != nil {
+		return fmt.Errorf("zeroize: install machine-id %s: %w", path, err)
 	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("zeroize: close truncated %s: %w", path, err)
-	}
-	return zeroizeSyncDir(filepath.Dir(path))
+	return nil
 }
 
 // zeroizeSyncDurable syncs dir, or the nearest existing ancestor when dir
