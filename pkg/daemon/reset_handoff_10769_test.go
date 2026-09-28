@@ -1293,6 +1293,13 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 		kernelName = string(b)
 		return nil
 	}
+	// Bootstrap input pin: the boot predicate branches on node-id
+	// presence (present forces normal via the HA guard), so pin absent
+	// for environment independence. The present shape has dedicated
+	// coverage (cluster_topology_preflight_5840_test).
+	origNodeID := hasNodeIDFileFn
+	t.Cleanup(func() { hasNodeIDFileFn = origNodeID })
+	hasNodeIDFileFn = func() bool { return false }
 	root := t.TempDir()
 	gateRoot := t.TempDir()
 	fixedRoot := t.TempDir()
