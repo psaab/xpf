@@ -42,8 +42,14 @@
 # Bootstrap boots swap this table for a lifeline-admitting variant (same
 # table, leading iifname admit): NON-lifeline data and link-local ingress
 # stay DROP-closed, but whole lifeline NICs — including their link-local
-# addresses — are open, and a default-route fallback NIC is admitted whole
-# when no verified management identity exists. The first commit converges
+# addresses — are open. Membership is em0/fab0/fab1/fxp0/vrf-mgmt by NAME
+# assumption plus the persisted lifeline record and the explicit
+# management-interface leaf; set the leaf when fxp0 is repurposed — a
+# non-fxp0 leaf narrows fxp0 OUT. A default-route fallback NIC is admitted
+# whole ONLY with zero verified identity (no leaf, no record); otherwise
+# an unlisted detected NIC is data until proven management and stays
+# closed. A static-default-via-data boot therefore opens that NIC for the
+# bootstrap window — inherent without config. The first commit converges
 # to configured policy.
 [Unit]
 DefaultDependencies=no

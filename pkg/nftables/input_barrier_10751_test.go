@@ -320,6 +320,43 @@ func TestEarlyInputBarrierLifelineAdmit10751(t *testing.T) {
 	}
 }
 
+// TestEarlyInputBarrierNarrowedLifelineSet10751 pins the recovery-scope
+// contract at the ruleset level: with a narrowed admit set (repurposed fxp0
+// and detected data NIC excluded by the resolver), the iifname set carries
+// EXACTLY the members — non-member ingress matches no accept and falls to
+// the chain DROP policy — and the base shape is unchanged.
+func TestEarlyInputBarrierNarrowedLifelineSet10751(t *testing.T) {
+	p := newBuildPlan(t, EarlyInputBarrierTableName, gnft.ChainPriority(earlyInputBarrierPriority))
+	p.chain = earlyInputBarrierChain(p.table)
+	emitEarlyInputBarrierAdmitsWithLifeline(p, []string{"em0", "hb0"})
+	if p.err != nil {
+		t.Fatalf("build narrowed guard: %v", p.err)
+	}
+	if len(p.rules) != 9 {
+		t.Fatalf("narrowed guard rule count = %d, want 9", len(p.rules))
+	}
+	if p.chain.Policy == nil || *p.chain.Policy != gnft.ChainPolicyDrop {
+		t.Fatal("narrowed guard chain must stay policy DROP (non-member fallthrough)")
+	}
+	first := p.rules[0]
+	lookup, ok := first[1].(*expr.Lookup)
+	if !ok {
+		t.Fatalf("first rule match = %#v, want an iifname set lookup", first[1])
+	}
+	elements, ok := p.sets[lookup.SetID]
+	if !ok {
+		t.Fatalf("lifeline rule references unrecorded nft set %d", lookup.SetID)
+	}
+	if len(elements) != 2 || !bytes.Equal(elements[0].Key, ifname16("em0")) || !bytes.Equal(elements[1].Key, ifname16("hb0")) {
+		t.Fatalf("lifeline set keys = %v, want exactly em0 + hb0 (no fxp0, no detected data)", elements)
+	}
+	assertInputBarrierAccepts10751(t, first)
+	second := p.rules[1]
+	if m, ok := second[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("second rule head = %#v, want base loopback iifname", second[0])
+	}
+}
+
 func scalarNFProto10751(t *testing.T, rule []expr.Any, i int) uint8 {
 	t.Helper()
 	for j, e := range rule {

@@ -69,8 +69,12 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   before networkd. It admits loopback, mandatory L3, family-split DHCP-client
   replies, and established flows; all host services remain blocked until
   host-inbound handoff. Bootstrap swaps in a lifeline-admitting variant
-  (whole lifeline NICs, including their link-locals); the first commit
-  converges to configured policy.
+  (whole lifeline NICs, including their link-locals — em0/fab0/fab1/
+  fxp0/vrf-mgmt by name assumption plus record/leaf identity, with a
+  default-route fallback NIC admitted whole only when no verified
+  identity exists; narrow a repurposed fxp0 OUT with the
+  management-interface leaf); the first commit converges to configured
+  policy.
 - `xpfd input-barrier ensure` — the boot unit's ExecStart: installs pre-handoff
   (fail closed), and is a verified no-op success post-handoff so starting the
   unit never injects a DROP chain into a live armed daemon nor fails an xpfd

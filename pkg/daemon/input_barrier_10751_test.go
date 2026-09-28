@@ -1098,6 +1098,8 @@ func TestResolveEarlyInputGuardLifelines10751(t *testing.T) {
 			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt", "ge-data"}, nil},
 		{"leaf narrows fxp0 and excludes detected data", "hb0", "", false, "ge-data", false,
 			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt"}, []string{"fxp0", "ge-data"}},
+		{"narrowed fxp0 stays out even when detected", "hb0", "", false, "fxp0", false,
+			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt"}, []string{"fxp0"}},
 		{"record identity excludes detected data", "", "r1", true, "ge-data", false,
 			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt", "r1"}, []string{"ge-data"}},
 		{"leaf plus record union", "hb0", "r1", true, "ge-data", false,
