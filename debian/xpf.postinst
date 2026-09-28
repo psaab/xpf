@@ -126,9 +126,27 @@ case "$1" in
                 # covers raw binaries invisible to systemctl). No flock(1)
                 # means liveness is unprovable: treat as stale and fall
                 # through to kernel truth (fail-closed; the R4-6 corner
-                # self-heals). Residual: a flock internal error (lock
-                # exhaustion scale) also reads live; the daemon-side probe
-                # discriminates fully, this shell gate does not need to.
+                # self-heals). Residual (bounded, Opus10 M2 — every nonzero
+                # flock result reads live here, unlike the daemon's error
+                # discrimination; reachable modes on /run (tmpfs), each
+                # evidenced, exit table verified on tmpfs: free 0, EX-held
+                # 1, SH-held 1, missing-path 0):
+                # EX contention → live → skip: CORRECT, the live-owner case
+                # (harness-pinned under sh+dash).
+                # SH-only contention → live → skip: MISREAD, negligible —
+                # no production SH holder exists (the sole LOCK_SH is the
+                # daemon's transient discriminator probe), and 0600
+                # root-only markers mean a persistent SH holder implies
+                # root, out of model.
+                # Missing path (incl. the -e/flock TOCTOU) → exit 0 → stale
+                # → proceed: SAFE — flock(1) exits 0 on a missing path, so
+                # the race cannot misread (it can only proceed).
+                # Internal/allocation errors → live → skip: MISREAD,
+                # negligible — flock(2) LOCK_NB reports contention as
+                # EWOULDBLOCK; anything else is allocation-scale on a box
+                # already dying. Fresh-install branch only (upgrades
+                # structurally excluded, harness-pinned), and the next
+                # first apply self-heals.
                 marker_live=false
                 if [ -e "$XPF_RUN_DIR/early-input-handoff.done" ]; then
                     if command -v flock >/dev/null 2>&1; then

@@ -481,12 +481,18 @@ EOF
 }
 stub_flock() {
     # FLOCK_HELD=yes simulates a live owner holding the marker (flock
-    # fails); unset simulates stale/orphaned (flock succeeds).
+    # fails, exit 1); FLOCK_ERROR=yes simulates an operational/internal
+    # flock error (exit 2 — a distinct code the shell gate maps to live
+    # like any nonzero); unset simulates stale/orphaned (flock succeeds).
+    # Every invocation is logged so scenarios prove which mode fired.
     mkdir -p "$ROOT/bin"
-    export FLOCK_HELD
+    FLOCK_LOG="$ROOT/flock.log"
+    export FLOCK_HELD FLOCK_ERROR FLOCK_LOG
     cat > "$ROOT/bin/flock" <<EOF
 #!/bin/sh
-if [ "\$FLOCK_HELD" = yes ]; then exit 1; fi
+if [ "\$FLOCK_ERROR" = yes ]; then echo "flock exit=2" >> "$FLOCK_LOG"; exit 2; fi
+if [ "\$FLOCK_HELD" = yes ]; then echo "flock exit=1" >> "$FLOCK_LOG"; exit 1; fi
+echo "flock exit=0" >> "$FLOCK_LOG"
 exit 0
 EOF
     chmod +x "$ROOT/bin/flock"
@@ -560,6 +566,56 @@ scenario_first_install_injects_barrier_with_stale_handoff_marker() {
         echo "FAIL: stale unlocked marker plus absent table did not trigger a barrier injection"; exit 1; }
 }
 
+scenario_first_install_proceeds_without_flock_binary() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    # NOTE: no stub_flock — and the system PATH is withheld so flock(1)
+    # is genuinely unresolvable; every OTHER external the fresh-install
+    # path needs is symlinked in (only flock stays absent).
+    for u in grep mkdir cp ln id cat chmod rm sed; do
+        command -v "$u" >/dev/null 2>&1 || { echo "FAIL: test host lacks $u for the no-flock sandbox"; exit 1; }
+        ln -s "$(command -v "$u")" "$ROOT/bin/$u"
+    done
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    # Preconditions (non-vacuity): flock unresolvable, grep usable — a
+    # missing grep would inject via pipeline-false for the wrong reason.
+    if PATH="$ROOT/bin" command -v flock >/dev/null 2>&1; then
+        echo "FAIL: flock resolvable in the no-flock sandbox"; exit 1
+    fi
+    PATH="$ROOT/bin" command -v grep >/dev/null 2>&1 || {
+        echo "FAIL: grep unresolvable in the no-flock sandbox (inject would be vacuous)"; exit 1; }
+    PATH="$ROOT/bin" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst skipped kernel truth with flock missing (must fail closed via kernel truth)"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: missing flock plus absent table did not trigger a barrier injection"; exit 1; }
+}
+
+scenario_first_install_skips_barrier_on_flock_error() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    stub_flock
+    FLOCK_ERROR=yes
+    export FLOCK_ERROR
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    # The stub's distinct exit proves the error path fired (not held/stale).
+    grep -Fq 'flock exit=2' "$FLOCK_LOG" || {
+        echo "FAIL: flock stub did not take the error path (fixture vacuous)"; exit 1; }
+    # Residual contract: every nonzero flock result reads live here (see
+    # the bounded-modes comment at the gate) — so an error skips.
+    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst injected despite a flock error (residual contract: errors read live)"; exit 1
+    fi
+    if [ -e "$NFT_LOG" ] && grep -Fq 'nft list table' "$NFT_LOG"; then
+        echo "FAIL: postinst probed kernel despite a flock error (marker must win first)"; exit 1
+    fi
+}
+
 scenario_upgrade_never_starts_barrier() {
     build_hardened "1.0.0"
     patched_postinst_barrier_live
@@ -581,6 +637,8 @@ run_scenario first_install_skips_barrier_when_table_live
 run_scenario first_install_injects_barrier_when_table_shell
 run_scenario first_install_skips_barrier_with_live_handoff_marker
 run_scenario first_install_injects_barrier_with_stale_handoff_marker
+run_scenario first_install_proceeds_without_flock_binary
+run_scenario first_install_skips_barrier_on_flock_error
 run_scenario upgrade_never_starts_barrier
 run_scenario recovers_cli_through_current
 run_scenario recovers_helper_through_current
