@@ -37,7 +37,7 @@
 
 use super::allocator::{NatHolder, TranslatedTuple};
 use super::destination::PROTO_TCP;
-use super::source::{SourceNatFlowKey, SourceNatRule};
+use super::source::{PersistentNatPermit, SourceNatFlowKey, SourceNatRule};
 use super::*;
 use crate::SourceNATRuleSnapshot;
 use std::net::{IpAddr, Ipv4Addr};
@@ -70,6 +70,14 @@ fn rule_ports(
         port_low,
         port_high,
         ..SourceNATRuleSnapshot::default()
+    }
+}
+fn persistent_rule(name: &str, pool: &str, source: &str, addr: &str) -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        persistent_nat: true,
+        persistent_nat_permit_any_remote_host: true,
+        persistent_nat_inactivity_timeout: 300,
+        ..rule(name, pool, source, addr)
     }
 }
 
@@ -195,6 +203,71 @@ fn overlapping_pools_do_not_both_mint_one_identity_6979() {
         Some(SourceNatFailureReason::PoolPeerAddressOverlap),
         "the colliding mint must fail CLOSED with its own reason, not translate and \
          not fall through to a different failure that would hide it"
+    );
+}
+
+/// The real source-NAT match path reserves an imported idle lease before the
+/// peer-overlap check. Its production rollback must restore peer origin and
+/// the pre-activation expiry/timeout, or the next advertisement echoes it.
+#[test]
+fn peer_overlap_rollback_restores_imported_lease_origin_10789_f4() {
+    let rules = parse_source_nat_rules(&[
+        persistent_rule("r1", "a", "10.0.0.0/24", SHARED),
+        persistent_rule("r2", "b", "10.1.0.0/24", SHARED),
+    ]);
+    let first = mint(&rules, "10.0.0.7", 1111);
+    let first_identity = identity(&first).expect("pool a must reserve the shared tuple");
+    assert_eq!(first_identity.1, Some(20000));
+
+    let local_flow = flow("10.1.0.7", 2222);
+    let imported_timeout_ns = 60_000_000_000;
+    let remaining_ns = 45_000_000_000;
+    let rec = IdleLeaseRecord {
+        protocol: local_flow.protocol,
+        src_ip: local_flow.src_ip,
+        src_port: local_flow.src_port,
+        routing_scope: local_flow.routing_scope,
+        remote: None,
+        translated_ip: first_identity.0,
+        translated_port: first_identity.1.unwrap(),
+        address_only: false,
+        remaining_ns,
+        timeout_ns: imported_timeout_ns,
+    };
+    let local_pool: Vec<IpAddr> = rules[1]
+        .pool_addresses_v4
+        .iter()
+        .copied()
+        .map(IpAddr::V4)
+        .collect();
+    let imported_at_ns = 10_000;
+    assert_eq!(
+        rules[1].pool_allocator.import_idle_lease(
+            &rec,
+            &local_pool,
+            rules[1].persistent_nat_timeout_ns,
+            imported_at_ns,
+        ),
+        IdleLeaseImport::Installed
+    );
+    let key = local_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+
+    let rejected = mint(&rules, "10.1.0.7", 2222);
+    assert_eq!(
+        failure_reason(&rejected),
+        Some(SourceNatFailureReason::PoolPeerAddressOverlap),
+        "the imported tuple is peer-owned and production admission must reject it"
+    );
+    let live = rules[1].pool_allocator.debug_live();
+    let restored = live.persistent_by_source.get(&key).expect("rollback keeps the lease");
+    assert!(restored.imported, "rollback must restore peer origin");
+    assert_eq!(restored.active_flows, 0);
+    assert_eq!(restored.timeout_ns, imported_timeout_ns);
+    assert_eq!(restored.expires_at_ns, imported_at_ns + remaining_ns);
+    drop(live);
+    assert!(
+        rules[1].pool_allocator.export_idle_leases(20_000).is_empty(),
+        "a rejected local reserve must not echo the peer lease"
     );
 }
 

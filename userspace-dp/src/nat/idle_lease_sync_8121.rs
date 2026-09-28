@@ -48,17 +48,6 @@
 //!    free a bit belonging to that other flow. So the import claims the bit and
 //!    REFUSES the lease if it cannot.
 
-// PART 1 OF #8121. This is the helper core — the two operations and every
-// invariant that makes them safe. Nothing calls it yet: the cluster transport
-// that drives it (a `syncMsgPersistentNatLease` record type in `pkg/cluster`,
-// plus the control-socket commands that reach these two methods) is part 2, and
-// #8121 stays OPEN until it lands.
-//
-// The split is deliberate rather than convenient. Every hazard in this feature
-// lives HERE — the local refcount, the two node-local quantities that must not
-// be carried, and the occupancy bit — and each one is now pinned by a
-// mutation-bound test. A transport built on an unsettled core would have to be
-// re-reviewed when the core moved.
 #![allow(dead_code)]
 
 use super::allocator::{PersistentLease, PersistentSourceKey, PortAllocator, TranslatedTuple};
@@ -138,10 +127,14 @@ pub(crate) enum IdleLeaseImport {
 }
 
 impl PortAllocator {
-    /// Every lease that is idle AND still inside its persistence timeout — the
-    /// population #7360 cannot reach. A lease with live flows is deliberately
-    /// NOT exported: the peer rebuilds it from the sessions themselves, and
-    /// sending both would race two mechanisms onto one key.
+    /// Every locally owned lease that is idle and still inside its persistence
+    /// timeout. Imported idle leases remain peer-owned through a tentative local
+    /// reserve; only ordinary local `release_flow` completion promotes them for
+    /// export. This prevents echoing the reservation between peers, refreshing
+    /// receiver-clock lifetime or resurrecting a lease after its originator
+    /// retires it. A lease with live flows is not exported either: the peer
+    /// rebuilds it from sessions, and sending both would race two mechanisms
+    /// onto one key.
     pub(crate) fn export_idle_leases(&self, now_ns: u64) -> Vec<IdleLeaseRecord> {
         let live = self.lock_live();
         live.persistent_by_source
@@ -153,6 +146,7 @@ impl PortAllocator {
                     .is_some_and(|revoked_until_ns| *revoked_until_ns > now_ns)
                     && lease.active_flows == 0
                     && lease.expires_at_ns > now_ns
+                    && !lease.imported
             })
             .map(|(key, lease)| IdleLeaseRecord {
                 protocol: key.protocol,
@@ -230,11 +224,19 @@ impl PortAllocator {
         &self,
         rec: &IdleLeaseRecord,
         pool_addresses: &[IpAddr],
+        local_timeout_ns: u64,
         now_ns: u64,
     ) -> IdleLeaseImport {
-        if rec.remaining_ns == 0 {
+        if local_timeout_ns < super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
+            || rec.remaining_ns == 0
+            || rec.timeout_ns < super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
+        {
             return IdleLeaseImport::SkippedExpired;
         }
+        let timeout_ns = super::allocator::bounded_persistent_nat_timeout_ns(
+            local_timeout_ns.min(rec.timeout_ns),
+        );
+        let remaining_ns = rec.remaining_ns.min(timeout_ns);
         let Some(addr_index) = pool_addresses.iter().position(|a| *a == rec.translated_ip) else {
             return IdleLeaseImport::SkippedUnknownAddress;
         };
@@ -264,7 +266,7 @@ impl PortAllocator {
             }
         }
         live.revoked_persistent.remove(&key);
-        let expires_at_ns = now_ns.saturating_add(rec.remaining_ns);
+        let expires_at_ns = now_ns.saturating_add(remaining_ns);
         live.persistent_by_source.insert(
             key,
             PersistentLease {
@@ -274,14 +276,19 @@ impl PortAllocator {
                 },
                 addr_index,
                 expires_at_ns,
-                timeout_ns: rec.timeout_ns,
+                timeout_ns,
                 // Module note 1: rebuilt locally, and legitimately zero here.
                 active_flows: 0,
                 completed_flows: 0,
                 activation_saw_completion: false,
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
+                activation_previous_timeout_ns: 0,
                 address_only: rec.address_only,
+                // Imported state remains non-exportable until a local flow
+                // successfully completes its marked release; reserve and
+                // rollback alone never transfer peer ownership.
+                imported: true,
             },
         );
         // Without this the lease is invisible to GC and outlives what the

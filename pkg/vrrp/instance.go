@@ -59,11 +59,13 @@ func (s VRRPState) String() string {
 
 // VRRPEvent is emitted when a VRRP instance changes state.
 type VRRPEvent struct {
-	Interface string
-	Family    string
-	GroupID   int
-	State     VRRPState
-	VIPs      []string
+	Interface         string
+	Family            string
+	GroupID           int
+	State             VRRPState
+	VIPs              []string
+	VIPDiverged       bool
+	VIPUpdateFailures uint64
 }
 
 // deafMasterDownInterval is the master-down interval used while this node is
@@ -184,14 +186,20 @@ type vrrpInstance struct {
 	localAddrSet   atomic.Pointer[[]string]
 	localAddrSetV6 atomic.Pointer[[]string]
 
-	// Per-instance raw socket and receiver.
-	conn    net.PacketConn
-	rawConn *ipv4.RawConn
+	// Per-instance raw sockets. socketMu protects runtime addition of a family
+	// socket when a day-2 VIP update introduces that family (#10780); readers
+	// snapshot the fields before use, and stop closes descriptors under the
+	// same lock. Initial construction remains single-threaded before run().
+	socketMu sync.RWMutex
+	conn     net.PacketConn
+	rawConn  *ipv4.RawConn
 
 	// IPv6 raw socket for sending VRRPv3 advertisements.
-	// nil when no IPv6 VIPs are configured.
 	ipv6Conn net.PacketConn
-	ipv6FD   int // raw fd for setsockopt (hop limit, multicast)
+	ipv6FD   int // raw fd for setsockopt operations (no dynamic rebind)
+
+	ipv4ReceiverStarted atomic.Bool
+	ipv6ReceiverStarted atomic.Bool
 
 	// ipv6Send is the seam used by sendPacketIPv6 to write an IPv6 advert
 	// with an explicit IPV6_PKTINFO control message. The control message
@@ -262,10 +270,13 @@ type vrrpInstance struct {
 
 	// GARP suppression for strict-vip-ownership mode.
 	suppressGARP     atomic.Bool   // when true, becomeMaster() skips GARP/NA
-	garpEpoch        atomic.Uint64 // incremented on each becomeMaster()/ReconcileVIPs transition
-	lastGARPEpoch    atomic.Uint64 // epoch of last completed sendGARP()
-	lastGARPTime     atomic.Int64  // Unix nanos of last GARP send
-	lastGARPOwnerGen atomic.Uint64 // owner generation in which the last GARP completed
+	garpEpoch        atomic.Uint64 // ownership tenure, MAC reconcile, or VIP membership generation
+	lastGARPEpoch    atomic.Uint64 // epoch reserved by the most recent sendGARPFor
+	lastGARPTime     atomic.Int64  // Unix nanos of the most recent synchronous burst
+	lastGARPOwnerGen atomic.Uint64 // owner generation of the last reserved burst
+	// Canonical identities of current VIPs lacking a successful synchronous
+	// first GARP/NA frame. Guarded by vipMu and pruned to current membership.
+	pendingGARPVIPs map[string]struct{}
 	// lastMasterReaffirmTime independently rate-limits winner-side refreshes
 	// triggered by repeated peer MASTER advertisements.
 	lastMasterReaffirmTime atomic.Int64 // Unix nanos of the last winner-side neighbor refresh.
@@ -305,6 +316,13 @@ type vrrpInstance struct {
 	// an async reconcile removes it). Atomic so log/test readers stay lock-free.
 	vipRemoveFailures atomic.Uint64
 	vipDiverged       atomic.Bool
+
+	// vipUpdateFailures/vipUpdateDiverged surface an in-place configuration
+	// delta that could not be fully reflected in the kernel. The manager retries
+	// desired != stored on its next reconciliation and gates RG readiness while
+	// the divergence remains.
+	vipUpdateFailures  atomic.Uint64
+	vipUpdateDiverged atomic.Bool
 
 	// vipReconcileBackoff overrides the spacing between stale-VIP remove-reconcile
 	// retries (#5482). Zero ⇒ defaultVIPReconcileBackoff. A per-instance field
@@ -348,10 +366,10 @@ type vrrpInstance struct {
 	resignAckMu sync.Mutex
 	resignAcks  []*ResignBarrier
 
-	// advertCapacityErr is non-nil when this instance's configured VIP set
-	// cannot produce a legal VRRPv3 advertisement, so becomeMaster must not
-	// claim ownership (#6779). Computed once by instanceAdvertCapacityErr
-	// (advert_capacity.go); read-only after construction.
+	// advertCapacityErr is non-nil when the current configured VIP set cannot
+	// produce a legal VRRPv3 advertisement, so becomeMaster must not claim
+	// ownership (#6779). Initialized by newInstance and recomputed under mu on
+	// each in-place VIP-set update (#10780).
 	advertCapacityErr error
 }
 
@@ -656,24 +674,14 @@ func (vi *vrrpInstance) run() {
 		"priority", startPriority,
 		"preempt", startPreempt)
 
-	// Start per-instance receiver goroutine.
-	// AF_PACKET captures at the link layer before generic XDP, ensuring
-	// reliable multicast reception on all interface types.
+	// AF_PACKET captures both families at the link layer. If unavailable, the
+	// raw family sockets are the fallback. Dynamic family additions use the
+	// same starter and per-family once flags, so run startup racing an address
+	// commit cannot launch duplicate receiver goroutines.
 	if vi.afPacketFD >= 0 {
 		go vi.receiverAfPacket()
 	} else {
-		// Start one raw receiver per configured family. A family-specific
-		// generic instance must never feed the other family's adverts into its
-		// state machine; an empty-family RETH instance has both sockets and keeps
-		// the historical dual-stack behavior.
-		if vi.rawConn != nil {
-			go vi.receiver()
-		}
-		if vi.ipv6Conn != nil {
-			slog.Warn("vrrp: af_packet unavailable, using separate IPv6 raw socket fallback",
-				"key", vi.key())
-			go vi.receiverIPv6()
-		}
+		vi.startFallbackReceivers()
 	}
 
 	// Transition to Backup state.

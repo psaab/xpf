@@ -6672,7 +6672,9 @@ fn install_expired_idle_leases(
                     activation_saw_completion: true,
                     activation_previous_expires_at_ns: 0,
                     activation_had_previous_lease: false,
+                    activation_previous_timeout_ns: 0,
                     address_only: false,
+                    imported: false,
                 },
             );
             live.lease_expirations.insert((expires_at_ns, key));
@@ -6772,7 +6774,9 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                 activation_saw_completion: false,
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
+                activation_previous_timeout_ns: 0,
                 address_only: false,
+                imported: false,
             },
         );
         // Idle but not-yet-expired lease (expiry 10_000, past now=1000).
@@ -6791,7 +6795,9 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                 activation_saw_completion: true,
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
+                activation_previous_timeout_ns: 0,
                 address_only: false,
+                imported: false,
             },
         );
         live.lease_expirations.insert((10_000, future_key));
@@ -9760,7 +9766,12 @@ fn import_an_idle_lease_8132(
     assert_eq!(
         standby[0]
             .pool_allocator
-            .import_idle_lease(&exported[0], &addresses, 3),
+            .import_idle_lease(
+                &exported[0],
+                &addresses,
+                standby[0].persistent_nat_timeout_ns,
+                3,
+            ),
         IdleLeaseImport::Installed,
         "fixture: the idle lease must actually install, or the cell measures nothing"
     );

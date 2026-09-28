@@ -107,6 +107,18 @@ pub(super) const NS_PER_SEC: u64 = 1_000_000_000;
 // so an already in-flight pre-clear record cannot immediately restore a lease.
 const PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS: u64 = 60 * 1_000_000_000;
 const ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS: u64 = u64::MAX;
+
+pub(crate) const MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS: u64 = NS_PER_SEC;
+// Persistent-NAT source config caps this at 24 hours (schema_security.go).
+// Idle-lease records cross an unauthenticated-capable peer channel, so the
+// allocator enforces the same ceiling even when a caller bypasses config.
+pub(crate) const MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS: u64 = 86_400 * NS_PER_SEC;
+
+pub(super) fn bounded_persistent_nat_timeout_ns(timeout_ns: u64) -> u64 {
+    timeout_ns
+        .max(MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS)
+        .min(MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS)
+}
 const MAX_SOURCE_NAT_POOL_TRACKED_FLOWS: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -427,6 +439,10 @@ struct LiveAllocation {
     //
     // `u128` keeps `LiveAllocation` `Copy` (both read paths use `.copied()`), so
     // no `Vec`/`HashSet` allocation enters the per-flow record.
+    // A local flow adopting an imported idle lease or joining an imported
+    // active lease is tentative until admitted. Carry its local timeout on the
+    // per-flow record; only ordinary `release_flow` completion promotes.
+    promotion_timeout_ns: Option<u64>,
     holders: u128,
 }
 
@@ -770,7 +786,7 @@ pub(crate) fn reverse_deterministic_v6(
     Some(Ipv6Addr::from(octets))
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PersistentLease {
     pub(super) translated: TranslatedTuple,
     pub(super) addr_index: usize,
@@ -784,6 +800,11 @@ pub(super) struct PersistentLease {
     pub(super) activation_saw_completion: bool,
     pub(super) activation_previous_expires_at_ns: u64,
     pub(super) activation_had_previous_lease: bool,
+    // #10789-F4/B2: the timeout snapshot restores the pre-activation idle
+    // state if no flow completed. Locally-owned 0 -> 1 reuse applies the
+    // current local timeout immediately; imported leases defer timeout changes
+    // until a local completion consumes their per-flow promotion marker.
+    pub(super) activation_previous_timeout_ns: u64,
     // #6041: an ADDRESS-ONLY persistent lease (`persistent-nat` + `port
     // no-translation` / a port-less protocol). It pins a public ADDRESS across
     // the permit scope but consumes NO pool port — `translated.port` carries the
@@ -797,7 +818,64 @@ pub(super) struct PersistentLease {
     // `address_only_owners`, minted/cleared per flow, independent of the lease.
     // `false` for every port-translating PAT lease (unchanged behaviour).
     pub(super) address_only: bool,
+    // #10789-F4: local-only origin tag. `true` when this lease was (re)built
+    // from something the PEER sent — a synced session (#7360/#8132) or an
+    // imported idle lease (#8121) — rather than minted by a local lookup.
+    // The idle-lease export skips imported leases, which is what makes the
+    // channel one-directional per lease: without it a standby re-pushes what
+    // it learned and the set echoes forever, each bounce re-deriving the
+    // remaining lifetime from the receiver's clock so a lease is refreshed
+    // indefinitely instead of expiring — and a lease the originator retired
+    // is reinstalled by the next re-push (retire-resurrection).
+    //
+    // NEVER serialized: this struct has no `Serialize` derive and neither
+    // `IdleLeaseRecord` nor `DisplayLeaseRecord` carries the bit (wire
+    // unchanged, no new record type), so a receiver always marks what it
+    // installs rather than trusting a carried value. Local reserves for
+    // imported idle (0 -> 1) or active (N -> N+1) leases keep this bit set and
+    // carry a per-flow marker. Only successful final-holder `release_flow`
+    // completion promotes the lease; `rollback_flow`, synced joins, worker
+    // retirement, and stale-tuple eviction do not. This prevents tentative
+    // reserves from echoing peer-owned state.
+    //
+    // Rolling upgrade (accepted window): a peer on an older helper has no
+    // filter and echoes our pushes back until it upgrades. The echo heals on
+    // full upgrade; inside the window an old peer can still reinstall a lease
+    // this node retired — no tombstone exists, the window closes by upgrade.
+    pub(super) imported: bool,
 }
+
+/// Incumbent reservation metadata needed to undo a rejected synced replacement.
+/// The holder mask is carried only so the caller can replay it through the
+/// worker-specific reserve path; `restore_metadata` deliberately never writes it.
+#[derive(Clone, Debug)]
+pub(crate) struct SourceNatReservationSnapshot {
+    allocator: PortAllocator,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+    persistent_key: Option<PersistentSourceKey>,
+    promotion_timeout_ns: Option<u64>,
+    holders: u128,
+    persistent_lease: Option<PersistentLease>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PersistentLeaseDebugState {
+    pub(crate) translated: TranslatedTuple,
+    pub(crate) addr_index: usize,
+    pub(crate) expires_at_ns: u64,
+    pub(crate) timeout_ns: u64,
+    pub(crate) active_flows: u32,
+    pub(crate) completed_flows: u64,
+    pub(crate) activation_saw_completion: bool,
+    pub(crate) activation_previous_expires_at_ns: u64,
+    pub(crate) activation_had_previous_lease: bool,
+    pub(crate) activation_previous_timeout_ns: u64,
+    pub(crate) address_only: bool,
+    pub(crate) imported: bool,
+}
+
 
 #[derive(Debug, Default)]
 pub(super) struct PortAllocatorLiveState {
@@ -1509,21 +1587,22 @@ pub(crate) struct PortAllocator {
     pub(crate) port_low: u16,
     pub(crate) port_high: u16,
 }
-/// A live-state guard that can atomically snapshot one flow's holder mask
-/// before a replacement reserve mutates that record.
+/// A live-state guard that atomically captures one flow's complete incumbent
+/// reservation before a replacement mutates its allocation or persistent lease.
 ///
 /// `PortAllocator::capture_and_replace` acquires `lock_live`, captures the
-/// incumbent mask, and returns this guard still holding the mutex. The caller
-/// performs eviction and installation through the same guard, so a worker
-/// release/upsert cannot land in a capture-to-reserve gap.
+/// promotion marker, holder mask, and full persistent lease record, then returns
+/// this guard still holding the mutex. The caller performs eviction and
+/// installation through the same guard, so a worker release/upsert cannot land
+/// in a capture-to-reserve gap.
 struct CapturedLiveGuard<'a> {
     live: MutexGuard<'a, PortAllocatorLiveState>,
-    previous_holders: Option<u128>,
+    previous_snapshot: Option<SourceNatReservationSnapshot>,
 }
 
 impl CapturedLiveGuard<'_> {
-    fn previous_holders(&self) -> Option<u128> {
-        self.previous_holders
+    fn previous_snapshot(&self) -> Option<SourceNatReservationSnapshot> {
+        self.previous_snapshot.clone()
     }
 }
 
@@ -1699,27 +1778,40 @@ impl PortAllocator {
             .fetch_add(1, Ordering::Relaxed);
         self.shared.live.lock().unwrap_or_else(|e| e.into_inner())
     }
-    /// Atomically capture a flow's incumbent holder mask and retain the live
-    /// guard for the caller's replacement operation.
+    /// Atomically capture a flow's complete incumbent snapshot and retain the
+    /// live guard for the caller's replacement operation.
     ///
     /// The caller must perform eviction and installation through the returned
     /// guard; releasing it and reserving separately recreates the worker
     /// upsert/release gap this operation closes. `capture_holders` keeps the
-    /// ordinary worker reserve path from doing an unused map read.
+    /// ordinary worker reserve path from doing an unused state read.
     fn capture_and_replace(
         &self,
         flow: &SourceNatFlowKey,
         capture_holders: bool,
     ) -> CapturedLiveGuard<'_> {
         let live = self.lock_live();
-        let previous_holders = capture_holders
-            .then(|| live.live_by_flow.get(flow).map(|allocation| allocation.holders))
-            .flatten();
-
-
+        let previous_snapshot = if capture_holders {
+            live.live_by_flow.get(flow).copied().map(|allocation| {
+                let persistent_lease = allocation
+                    .persistent_key
+                    .and_then(|key| live.persistent_by_source.get(&key).copied());
+                SourceNatReservationSnapshot {
+                    allocator: self.clone(),
+                    flow: *flow,
+                    translated: allocation.translated,
+                    persistent_key: allocation.persistent_key,
+                    promotion_timeout_ns: allocation.promotion_timeout_ns,
+                    holders: allocation.holders,
+                    persistent_lease,
+                }
+            })
+        } else {
+            None
+        };
         CapturedLiveGuard {
             live,
-            previous_holders,
+            previous_snapshot,
         }
     }
 
@@ -1854,6 +1946,7 @@ impl PortAllocator {
                 addr_index,
                 deterministic,
                 address_only: false,
+                promotion_timeout_ns: None,
                 holders: NatHolder::Untracked.bit(),
             },
         );
@@ -2334,6 +2427,7 @@ impl PortAllocator {
                             // forwarding — and the last sibling replica to age-reap frees a
                             // `(pool_addr, port)` still in use. Recording the owner here makes the
                             // mask complete, so the port survives until the owner itself releases.
+                            promotion_timeout_ns: None,
                             holders: holder.bit(),
                         },
                     );
@@ -2503,8 +2597,8 @@ impl PortAllocator {
                     continue 'ports;
                 }
                 if let Some(key) = persistent_key {
-                    let expires_at_ns =
-                        now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
+                    let timeout_ns = bounded_persistent_nat_timeout_ns(persistent_nat_timeout_ns);
+                    let expires_at_ns = now_ns.saturating_add(timeout_ns);
                     // A successful replacement supersedes the clear tombstone;
                     // keep it through failed allocation attempts.
                     live.revoked_persistent.remove(&key);
@@ -2514,13 +2608,16 @@ impl PortAllocator {
                             translated,
                             addr_index: abs,
                             expires_at_ns,
-                            timeout_ns: persistent_nat_timeout_ns.max(NS_PER_SEC),
+                            timeout_ns,
                             active_flows: 1,
                             completed_flows: 0,
                             activation_saw_completion: false,
                             activation_previous_expires_at_ns: 0,
                             activation_had_previous_lease: false,
+                            activation_previous_timeout_ns: 0,
                             address_only: false,
+                            // #10789-F4: minted by a local lookup — exportable.
+                            imported: false,
                         },
                     );
                 }
@@ -2540,6 +2637,7 @@ impl PortAllocator {
                         // forwarding — and the last sibling replica to age-reap frees a
                         // `(pool_addr, port)` still in use. Recording the owner here makes the
                         // mask complete, so the port survives until the owner itself releases.
+                        promotion_timeout_ns: None,
                         holders: holder.bit(),
                     },
                 );
@@ -2623,6 +2721,8 @@ impl PortAllocator {
         let mut expired = None;
         let mut remove_expiry = None;
         let mut live_mode_mismatch = false;
+        let local_timeout_ns = bounded_persistent_nat_timeout_ns(persistent_nat_timeout_ns);
+        let mut promotion_timeout_ns = None;
         if let Some(lease) = live.persistent_by_source.get_mut(&key) {
             // #8597 K10: the lease's MODE must agree with this path's, and this
             // is the port-bearing one. An ADDRESS-ONLY lease owns no occupancy
@@ -2649,11 +2749,28 @@ impl PortAllocator {
                     remove_expiry = Some((addr_index, lease.expires_at_ns));
                     lease.activation_saw_completion = false;
                     lease.activation_previous_expires_at_ns = lease.expires_at_ns;
+                    lease.activation_previous_timeout_ns = lease.timeout_ns;
                     lease.activation_had_previous_lease = true;
+                    if lease.imported {
+                        // #10789-F4 round 2 (F1): an imported idle adoption is
+                        // tentative until a local flow completes — same as N->N+1.
+                        // Clearing here leaks through a concurrent synced join:
+                        // rollback at 2->1 skips the 1->0 restore, and a synced
+                        // completion sets activation_saw_completion so the later
+                        // local rollback re-arms instead of restoring. Carry a
+                        // per-flow marker; release_flow promotes.
+                        promotion_timeout_ns = Some(local_timeout_ns);
+                    } else {
+                        lease.timeout_ns = local_timeout_ns;
+                    }
+                } else if lease.imported {
+                    // Q2: a local N -> N+1 join is not yet proof that this
+                    // packet survived downstream admission. Carry a marker to
+                    // `release_flow`; only successful local completion promotes.
+                    promotion_timeout_ns = Some(local_timeout_ns);
                 }
                 lease.active_flows = lease.active_flows.saturating_add(1);
-                let expires_at_ns =
-                    now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
+                let expires_at_ns = now_ns.saturating_add(local_timeout_ns);
                 lease.expires_at_ns = expires_at_ns;
                 reusable = Some((translated, addr_index));
             } else if lease.address_only && lease.active_flows > 0 {
@@ -2709,6 +2826,7 @@ impl PortAllocator {
                     // forwarding — and the last sibling replica to age-reap frees a
                     // `(pool_addr, port)` still in use. Recording the owner here makes the
                     // mask complete, so the port survives until the owner itself releases.
+                    promotion_timeout_ns,
                     holders: holder.bit(),
                 },
             );
@@ -2925,6 +3043,40 @@ impl PortAllocator {
     }
 
 
+
+    #[cfg(test)]
+    pub(crate) fn debug_persistent_lease_for_flow(
+        &self,
+        flow: &SourceNatFlowKey,
+        permit: super::source::PersistentNatPermit,
+    ) -> Option<PersistentLeaseDebugState> {
+        let key = flow.persistent_source_key(permit);
+        let live = self.lock_live();
+        let lease = *live.persistent_by_source.get(&key)?;
+        Some(PersistentLeaseDebugState {
+            translated: lease.translated,
+            addr_index: lease.addr_index,
+            expires_at_ns: lease.expires_at_ns,
+            timeout_ns: lease.timeout_ns,
+            active_flows: lease.active_flows,
+            completed_flows: lease.completed_flows,
+            activation_saw_completion: lease.activation_saw_completion,
+            activation_previous_expires_at_ns: lease.activation_previous_expires_at_ns,
+            activation_had_previous_lease: lease.activation_had_previous_lease,
+            activation_previous_timeout_ns: lease.activation_previous_timeout_ns,
+            address_only: lease.address_only,
+            imported: lease.imported,
+        })
+    }
+
+
+    /// Test-only: the worker-holder mask recorded for a live flow.
+    #[cfg(test)]
+    pub(crate) fn holder_mask_for_flow(&self, flow: &SourceNatFlowKey) -> Option<u128> {
+        let live = self.lock_live();
+        live.live_by_flow.get(flow).map(|allocation| allocation.holders)
+    }
+
     pub(super) fn release_flow(
         &self,
         flow: SourceNatFlowKey,
@@ -2947,6 +3099,17 @@ impl PortAllocator {
         // drift. `existing.translated == translated` was checked above, so
         // freeing `existing.translated.port` is the same port as before.
         self.unlink_live_allocation_locked(&mut live, &flow, existing);
+        // Q2 ownership transfers only on the ordinary final-holder release.
+        // Keep this out of the shared completion helper: stale-tuple eviction
+        // and worker retirement also use that helper but are not local proof.
+        if let (Some(key), Some(timeout_ns)) =
+            (existing.persistent_key, existing.promotion_timeout_ns)
+        {
+            if let Some(lease) = live.persistent_by_source.get_mut(&key) {
+                lease.imported = false;
+                lease.timeout_ns = timeout_ns;
+            }
+        }
         Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         live.gc_counter = live.gc_counter.wrapping_add(1);
         let run_gc = live.gc_counter % GC_PERIOD == 0;
@@ -3102,6 +3265,7 @@ impl PortAllocator {
                         insert_expiry = Some((lease.addr_index, expires_at_ns));
                     } else if lease.activation_had_previous_lease {
                         lease.expires_at_ns = lease.activation_previous_expires_at_ns;
+                        lease.timeout_ns = lease.activation_previous_timeout_ns;
                         insert_expiry = Some((lease.addr_index, lease.expires_at_ns));
                     } else {
                         remove_lease = true;
@@ -3299,6 +3463,7 @@ impl PortAllocator {
                     // forwarding — and the last sibling replica to age-reap frees a
                     // `(pool_addr, port)` still in use. Recording the owner here makes the
                     // mask complete, so the port survives until the owner itself releases.
+                    promotion_timeout_ns: None,
                     holders: holder.bit(),
                 },
             );
@@ -3471,6 +3636,7 @@ impl PortAllocator {
                     // forwarding — and the last sibling replica to age-reap frees a
                     // `(pool_addr, port)` still in use. Recording the owner here makes the
                     // mask complete, so the port survives until the owner itself releases.
+                    promotion_timeout_ns: None,
                     holders: holder.bit(),
                 },
             );
@@ -3763,7 +3929,7 @@ impl PortAllocator {
         holder: NatHolder,
         persistent: Option<(PersistentSourceKey, u64)>,
         capture_previous_holders: bool,
-        previous_holders: &mut Option<u128>,
+        previous_snapshot: &mut Option<SourceNatReservationSnapshot>,
     ) -> bool {
         if addr_index >= self.shared.occupancy.len() {
             return false;
@@ -3788,7 +3954,7 @@ impl PortAllocator {
                 if let Some(slot) = live.live_by_flow.get_mut(&flow) {
                     slot.holders |= holder.bit();
                 }
-                *previous_holders = live.previous_holders();
+                *previous_snapshot = live.previous_snapshot();
 
                 return true;
             }
@@ -3879,7 +4045,11 @@ impl PortAllocator {
                     if was_idle {
                         lease.activation_saw_completion = false;
                         lease.activation_previous_expires_at_ns = lease.expires_at_ns;
+                        lease.activation_previous_timeout_ns = lease.timeout_ns;
                         lease.activation_had_previous_lease = true;
+                        // #10789-F4: synced joins preserve peer origin. A local
+                        // flow joining while this lease is active carries its
+                        // own promotion marker and promotes only on completion.
                     }
                     lease.active_flows = lease.active_flows.saturating_add(1);
                 }
@@ -3903,11 +4073,12 @@ impl PortAllocator {
                         addr_index,
                         deterministic,
                         address_only: false,
+                        promotion_timeout_ns: None,
                         holders: holder.bit(),
                     },
                 );
                 live.record_pat_owner(&flow, translated);
-                *previous_holders = live.previous_holders();
+                *previous_snapshot = live.previous_snapshot();
 
                 return true;
             }
@@ -3942,20 +4113,30 @@ impl PortAllocator {
         //
         // An IDLE lease (`active_flows == 0`, still inside its timeout) has no
         // session to be rebuilt from and is out of scope here — see #8121.
+        // #10789-F4 (Q1, verified by call graph): the lease-touching branches
+        // of this function run only when `persistent` is `Some`, which
+        // production constructs solely in `reserve_synced_on_first_pool_owner`
+        // (synced.rs) — the `None` wrapper (`reserve_flow`) never touches
+        // `persistent_by_source`. So every lease minted here is peer-derived
+        // and needs no origin parameter: `imported: true`.
         let persistent_key = persistent.map(|(persistent_key, timeout_ns)| {
+            let timeout_ns = bounded_persistent_nat_timeout_ns(timeout_ns);
             live.persistent_by_source.insert(
                 persistent_key,
                 PersistentLease {
                     translated,
                     addr_index,
-                    expires_at_ns: now_ns.saturating_add(timeout_ns.max(NS_PER_SEC)),
+                    expires_at_ns: now_ns.saturating_add(timeout_ns),
                     timeout_ns,
                     active_flows: 1,
                     completed_flows: 0,
                     activation_saw_completion: false,
                     activation_previous_expires_at_ns: 0,
                     activation_had_previous_lease: false,
+                    activation_previous_timeout_ns: 0,
                     address_only: false,
+                    // #10789-F4: rebuilt from a synced session — never re-exported.
+                    imported: true,
                 },
             );
             persistent_key
@@ -3971,11 +4152,12 @@ impl PortAllocator {
                 // #6211 F2: the first holder. A stale-tuple replace lands here
                 // too, and correctly starts a FRESH mask — the previous tuple's
                 // holders were holding that tuple, not this one.
+                promotion_timeout_ns: None,
                 holders: holder.bit(),
             },
         );
         live.record_pat_owner(&flow, translated);
-        *previous_holders = live.previous_holders();
+        *previous_snapshot = live.previous_snapshot();
         true
     }
 
@@ -4050,7 +4232,7 @@ impl PortAllocator {
         holder: NatHolder,
         persistent: Option<(PersistentSourceKey, u64)>,
         capture_previous_holders: bool,
-        previous_holders: &mut Option<u128>,
+        previous_snapshot: &mut Option<SourceNatReservationSnapshot>,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let translated = TranslatedTuple {
             ip: translated_ip,
@@ -4081,7 +4263,7 @@ impl PortAllocator {
                     slot.holders |= holder.bit();
                 }
                 self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
-                *previous_holders = live.previous_holders();
+                *previous_snapshot = live.previous_snapshot();
                 return Ok(existing.translated);
             }
             // #8597 K63: the incumbent record names a DIFFERENT reverse identity
@@ -4182,7 +4364,12 @@ impl PortAllocator {
         // active the expiry is never consulted, and
         // `complete_persistent_lease_locked` re-arms it from the local clock
         // the moment the last flow releases.
+        // #10789-F4 (Q1): as on the port-bearing arm — `persistent` is `Some`
+        // only from `reserve_synced_on_first_pool_owner` (the `None` wrapper
+        // `reserve_address_only` never touches `persistent_by_source`), so a
+        // lease minted here is peer-derived: `imported: true`.
         let persistent_key = persistent.map(|(persistent_key, timeout_ns)| {
+            let timeout_ns = bounded_persistent_nat_timeout_ns(timeout_ns);
             match live.persistent_by_source.get_mut(&persistent_key) {
                 Some(lease) => {
                     // The 0 -> 1 active-flow edge re-arms the
@@ -4205,7 +4392,10 @@ impl PortAllocator {
                     if idle_lease_to_deindex.is_some() {
                         lease.activation_saw_completion = false;
                         lease.activation_previous_expires_at_ns = lease.expires_at_ns;
+                        lease.activation_previous_timeout_ns = lease.timeout_ns;
                         lease.activation_had_previous_lease = true;
+                        // Synced joins preserve peer origin; only a successful
+                        // local flow completion promotes an active lease.
                     }
                     lease.active_flows = lease.active_flows.saturating_add(1);
                 }
@@ -4215,17 +4405,20 @@ impl PortAllocator {
                         PersistentLease {
                             translated,
                             addr_index,
-                            expires_at_ns: now_ns.saturating_add(timeout_ns.max(NS_PER_SEC)),
+                            expires_at_ns: now_ns.saturating_add(timeout_ns),
                             timeout_ns,
                             active_flows: 1,
                             completed_flows: 0,
                             activation_saw_completion: false,
                             activation_previous_expires_at_ns: 0,
                             activation_had_previous_lease: false,
+                            activation_previous_timeout_ns: 0,
                             // The lease pins an ADDRESS and holds no port bit.
                             // Its teardown must not free one, and
                             // `gc_expired_locked` reads this flag to decide.
                             address_only: true,
+                            // #10789-F4: rebuilt from a synced session — never re-exported.
+                            imported: true,
                         },
                     );
                 }
@@ -4252,13 +4445,14 @@ impl PortAllocator {
                 deterministic: false,
                 address_only: true,
                 // #6211 F2: the first holder of this synced address-only token.
+                promotion_timeout_ns: None,
                 holders: holder.bit(),
             },
         );
         self.shared
             .allocations_total
             .fetch_add(1, Ordering::Relaxed);
-        *previous_holders = live.previous_holders();
+        *previous_snapshot = live.previous_snapshot();
         Ok(translated)
     }
 
@@ -4417,7 +4611,7 @@ impl PortAllocator {
         now_ns: u64,
         holder: NatHolder,
         capture_previous_holders: bool,
-        previous_holders: &mut Option<u128>,
+        previous_snapshot: &mut Option<SourceNatReservationSnapshot>,
     ) -> InterfaceDomainReserve {
         let rkey = AddressOnlyReverseKey::for_flow(&flow, translated_ip, translated_port);
         let mut live = self.capture_and_replace(&flow, capture_previous_holders);
@@ -4429,7 +4623,7 @@ impl PortAllocator {
                     slot.holders |= holder.bit();
                 }
                 self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
-                *previous_holders = live.previous_holders();
+                *previous_snapshot = live.previous_snapshot();
                 return InterfaceDomainReserve::Owned;
             }
             // A different flow may already own the NEW identity; refuse before
@@ -4460,7 +4654,7 @@ impl PortAllocator {
             translated_port,
             holder,
         );
-        *previous_holders = live.previous_holders();
+        *previous_snapshot = live.previous_snapshot();
         InterfaceDomainReserve::Owned
     }
 
@@ -4519,6 +4713,7 @@ impl PortAllocator {
                 addr_index: 0,
                 deterministic: false,
                 address_only: true,
+                promotion_timeout_ns: None,
                 holders: holder.bit(),
             },
         );
@@ -4659,6 +4854,7 @@ impl PortAllocator {
                     // forwarding — and the last sibling replica to age-reap frees a
                     // `(pool_addr, port)` still in use. Recording the owner here makes the
                     // mask complete, so the port survives until the owner itself releases.
+                    promotion_timeout_ns: None,
                     holders: holder.bit(),
                 },
             );
@@ -4732,7 +4928,7 @@ impl PortAllocator {
             return Err(super::source::SourceNatFailureReason::WrongAddressFamily);
         }
         let key = flow.persistent_source_key(persistent_nat_permit);
-        let timeout_ns = persistent_nat_timeout_ns.max(NS_PER_SEC);
+        let timeout_ns = bounded_persistent_nat_timeout_ns(persistent_nat_timeout_ns);
 
         let mut live = self.lock_live();
         self.gc_expired_locked(&mut live, now_ns, ALLOCATION_GC_BUDGET);
@@ -4959,6 +5155,7 @@ impl PortAllocator {
         // Commit this flow's reverse-identity token (freed per flow on teardown).
         live.address_only_owners.insert(rkey, flow);
 
+        let mut promotion_timeout_ns = None;
         if reusing {
             // Bump the existing lease. On the 0->1 active-flow edge re-arm the
             // activation-rollback bookkeeping and drop the stale idle expiry-index
@@ -4970,7 +5167,20 @@ impl PortAllocator {
                     remove_expiry = Some((lease.addr_index, lease.expires_at_ns));
                     lease.activation_saw_completion = false;
                     lease.activation_previous_expires_at_ns = lease.expires_at_ns;
+                    lease.activation_previous_timeout_ns = lease.timeout_ns;
                     lease.activation_had_previous_lease = true;
+                    if lease.imported {
+                        // As in PAT, defer imported-idle ownership transfer
+                        // until this local flow completes; rollback simply
+                        // removes the marker, even if synced flows joined.
+                        promotion_timeout_ns = Some(timeout_ns);
+                    } else {
+                        lease.timeout_ns = timeout_ns;
+                    }
+                } else if lease.imported {
+                    // As in PAT, reserve is tentative until the local flow
+                    // completes; rollback drops this marker without promotion.
+                    promotion_timeout_ns = Some(timeout_ns);
                 }
                 lease.active_flows = lease.active_flows.saturating_add(1);
                 lease.expires_at_ns = expires_at_ns;
@@ -5005,7 +5215,10 @@ impl PortAllocator {
                     activation_saw_completion: false,
                     activation_previous_expires_at_ns: 0,
                     activation_had_previous_lease: false,
+                    activation_previous_timeout_ns: 0,
                     address_only: true,
+                    // #10789-F4: minted by a local lookup — exportable.
+                    imported: false,
                 },
             );
             self.shared
@@ -5036,6 +5249,7 @@ impl PortAllocator {
                 // forwarding — and the last sibling replica to age-reap frees a
                 // `(pool_addr, port)` still in use. Recording the owner here makes the
                 // mask complete, so the port survives until the owner itself releases.
+                promotion_timeout_ns,
                 holders: holder.bit(),
             },
         );
@@ -5361,6 +5575,85 @@ impl PortAllocator {
     }
 }
 
+impl SourceNatReservationSnapshot {
+    /// The holder mask is replayed by calling the worker-specific reserve path;
+    /// metadata restoration never writes this mask directly.
+    pub(crate) fn holder_mask(&self) -> u128 {
+        self.holders
+    }
+
+    /// Restore the incumbent's promotion marker and, when this transaction
+    /// displaced exactly one live persistent flow, its complete lease snapshot.
+    /// A concurrent allocator change is left untouched and reported to the
+    /// caller rather than overwritten.
+    pub(crate) fn restore_metadata(&self) -> bool {
+        let mut live = self.allocator.lock_live();
+        let Some(current) = live.live_by_flow.get(&self.flow).copied() else {
+            return false;
+        };
+        if current.translated != self.translated || current.persistent_key != self.persistent_key {
+            return false;
+        }
+
+        let restore_lease = match (self.persistent_key, self.persistent_lease) {
+            (None, None) => None,
+            (Some(key), Some(previous)) => {
+                let Some(current) = live.persistent_by_source.get(&key).copied() else {
+                    return false;
+                };
+                if current == previous {
+                    None
+                } else {
+                    let completion_preserved_activation = current.activation_saw_completion
+                        && current.expires_at_ns == previous.expires_at_ns
+                        && current.activation_previous_expires_at_ns
+                            == previous.activation_previous_expires_at_ns
+                        && current.activation_had_previous_lease
+                            == previous.activation_had_previous_lease
+                        && current.activation_previous_timeout_ns
+                            == previous.activation_previous_timeout_ns;
+                    // Displacing the last active flow refreshes the idle expiry;
+                    // the replay reserve then re-arms the 0 -> 1 activation and
+                    // clears `activation_saw_completion`. Recognize that exact
+                    // completed-then-reactivated shape as well.
+                    let reactivated_after_completion = !current.activation_saw_completion
+                        && current.activation_had_previous_lease
+                        && current.activation_previous_expires_at_ns == current.expires_at_ns
+                        && current.activation_previous_timeout_ns == previous.timeout_ns;
+                    if previous.active_flows > 0
+                        && current.active_flows == previous.active_flows
+                        && current.completed_flows == previous.completed_flows.saturating_add(1)
+                        && current.translated == previous.translated
+                        && current.addr_index == previous.addr_index
+                        && current.timeout_ns == previous.timeout_ns
+                        && current.imported == previous.imported
+                        && current.address_only == previous.address_only
+                        && (completion_preserved_activation || reactivated_after_completion)
+                    {
+                        Some((key, previous))
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
+        };
+
+        if let Some((key, previous)) = restore_lease {
+            // Both records are active here, so neither the displaced lease nor
+            // its saved snapshot belongs in the idle-expiry index.
+            let Some(lease) = live.persistent_by_source.get_mut(&key) else {
+                return false;
+            };
+            *lease = previous;
+        }
+        let Some(current) = live.live_by_flow.get_mut(&self.flow) else {
+            return false;
+        };
+        current.promotion_timeout_ns = self.promotion_timeout_ns;
+        true
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PortAllocatorSnapshot {
     /// #9902 F-026: the snapshotted allocator's instance id: two snapshots

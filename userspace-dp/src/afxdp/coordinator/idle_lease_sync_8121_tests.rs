@@ -24,7 +24,6 @@ fn pool_rule(name: &str, pool: &str, addrs: &[&str]) -> SourceNATRuleSnapshot {
         ..SourceNATRuleSnapshot::default()
     }
 }
-
 /// Seed an idle lease through the IMPORT path. `allocate_translation` is
 /// private to `nat`, and these cells are about ROUTING rather than minting —
 /// part 1's cells already bind the allocator behaviour.
@@ -46,6 +45,78 @@ fn record(pool: &str, src: &str, translated: &str, port: u16) -> PoolIdleLease {
     }
 }
 
+/// Create a locally-owned idle lease through the coordinator's real SNAT path.
+fn mint_local_idle_lease(coord: &Coordinator, pool: &str) -> PoolIdleLease {
+    let src_ip: std::net::IpAddr = "10.0.61.50".parse().unwrap();
+    let dst_ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
+    let nat = match coord.test_match_source_nat_result_for_tuple(
+        "lan",
+        "wan",
+        src_ip,
+        dst_ip,
+        6,
+        40000,
+        443,
+        None,
+        None,
+        1_000,
+    ) {
+        crate::nat::SourceNatLookup::Matched(nat) => nat,
+        other => panic!("fixture: local source NAT must match, got {other:?}"),
+    };
+    let key = crate::session::SessionKey {
+        addr_family: 4,
+        protocol: 6,
+        src_ip,
+        dst_ip,
+        src_port: 40000,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::default(),
+        routing_domain: 0,
+    };
+    coord.test_release_source_nat_allocation(&key, nat, 2_000);
+    coord
+        .export_idle_persistent_leases(3_000)
+        .into_iter()
+        .find(|lease| lease.pool_name == pool)
+        .expect("fixture: coordinator must export its locally-minted idle lease")
+}
+
+/// Two coordinators exercise both directions of the real route: A advertises
+/// its local lease, B imports it, then B's next export is empty and A receives
+/// no record to install. Imported state remains visible in SHOW elsewhere; this
+/// test pins only the coordinator's HA sync routing.
+#[test]
+fn two_coordinators_do_not_echo_imported_idle_leases_10789_f4() {
+    let mut active = Coordinator::new();
+    active.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let mut standby = Coordinator::new();
+    standby.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+
+    let _local = mint_local_idle_lease(&active, "P");
+    let advertised = active.export_idle_persistent_leases(3_000);
+    assert_eq!(advertised.len(), 1, "A must advertise its local idle lease");
+    assert_eq!(
+        standby
+            .import_idle_persistent_leases(&advertised, 10_000)
+            .installed,
+        1
+    );
+    let returned = standby.export_idle_persistent_leases(11_000);
+    assert!(
+        returned.is_empty(),
+        "B must not advertise the imported copy: {returned:?}"
+    );
+    assert_eq!(
+        active.import_idle_persistent_leases(&returned, 12_000).installed,
+        0,
+        "the additive channel has no record to reinstall on A"
+    );
+    assert_eq!(active.export_idle_persistent_leases(12_000).len(), 1);
+}
+
 /// Two rules, ONE pool. The lease must be exported ONCE — exporting per rule
 /// would send it as many times as there are rules pointing at that pool, and
 /// the receiver would then import a duplicate of a lease it already holds.
@@ -61,15 +132,13 @@ fn a_shared_pool_exports_its_lease_once_8121() {
         2,
         "control: both rules must be present, or the dedup is untested"
     );
-    let seeded = coord
-        .import_idle_persistent_leases(&[record("P", "10.0.61.50", "203.0.113.1", 1024)], 3_000);
-    assert_eq!(seeded.installed, 1, "setup: the lease must install");
-
+    let local = mint_local_idle_lease(&coord, "P");
+    assert_eq!(local.pool_name, "P");
     let exported = coord.export_idle_persistent_leases(4_000);
     assert_eq!(
         exported.len(),
         1,
-        "a pool shared by two rules exports its lease once, got {exported:?}"
+        "a pool shared by two rules exports its local lease once, got {exported:?}"
     );
     assert_eq!(exported[0].pool_name, "P");
 }
@@ -82,11 +151,9 @@ fn an_import_routes_by_pool_name_and_counts_an_unknown_pool_8121() {
     let mut active = Coordinator::new();
     active.forwarding.source_nat_rules =
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
-    let seeded = active
-        .import_idle_persistent_leases(&[record("P", "10.0.61.50", "203.0.113.1", 1024)], 3_000);
-    assert_eq!(seeded.installed, 1, "setup");
+    let _local = mint_local_idle_lease(&active, "P");
     let exported = active.export_idle_persistent_leases(4_000);
-    assert_eq!(exported.len(), 1, "setup");
+    assert_eq!(exported.len(), 1, "setup: A must have a local idle lease");
 
     // A standby that has the SAME pool installs it.
     let mut standby = Coordinator::new();

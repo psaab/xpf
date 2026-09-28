@@ -76,9 +76,10 @@ func validateDisplayLeaseScopes(leases []DisplayLeaseWire) error {
 // fence may issue one status probe when no observed helper version is cached;
 // subsequent calls use that observation.
 
-// ExportIdleLeases returns every persistent-NAT lease this node holds that has
-// NO live flows but is still inside its persistence timeout — the population
-// session sync cannot observe, because a lease is learned from a session.
+// ExportIdleLeases returns locally-exportable persistent-NAT leases that have
+// no live flows but remain inside their persistence timeout. Session sync
+// cannot observe this idle population; peer-imported leases are filtered by the
+// allocator so they are not echoed back.
 func (m *Manager) ExportIdleLeases() ([]IdleLeaseWire, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -102,10 +103,10 @@ func (m *Manager) ExportIdleLeases() ([]IdleLeaseWire, error) {
 	return resp.IdleLeases, nil
 }
 
-// ImportIdleLeases installs a peer's idle leases. A nil/empty batch is a no-op
-// rather than a round trip: on a healthy pair most pushes carry nothing, and
-// spending a socket turn to say so is the contention this file's header is
-// about.
+// ImportIdleLeases additively installs peer idle leases. Records absent from a
+// later batch do not remove local state, and a nil/empty batch is a no-op rather
+// than a round trip: on a healthy pair most pushes carry nothing, and spending
+// a socket turn to say so is the contention this file's header is about.
 func (m *Manager) ImportIdleLeases(leases []IdleLeaseWire) error {
 	if len(leases) == 0 {
 		return nil
