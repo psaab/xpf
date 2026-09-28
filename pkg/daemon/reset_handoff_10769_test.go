@@ -1007,13 +1007,14 @@ func TestEraseKeaLeasesForResetRefusesHardlinkedLease10769(t *testing.T) {
 	}
 }
 
-// Pathless flags are unproducible by any in-tree writer (the flag file is
-// new in this PR and every writer records a path), so a missing path means
-// hand-crafted or corrupt input. Boot repair must fail closed — never
-// infer from the default path or the new-tenant config — keeping the gate
-// shut with recovery instructions. Production ordering throughout
-// (reconcile before load): the new medium carries the custom path the
-// residue sits at, and neither clearing nor promotion may happen.
+// Pathless flags come only from the concurrent-shutdown race (a
+// shutdown-branch mark landing before completion records PENDING) or
+// from hand-crafted/corrupt input: every normal-path writer records a
+// path (the flag file is new in this PR). Boot repair must fail closed
+// — never infer from the default path or the new-tenant config —
+// keeping the gate shut with recovery instructions. Production ordering
+// throughout (reconcile before load): the new medium carries the custom
+// path the residue sits at, and neither clearing nor promotion may happen.
 func TestReconcileRefusesPathlessFlag10769(t *testing.T) {
 	setup := func(t *testing.T, dirty string) (*Daemon, string, handoffResiduePaths) {
 		t.Helper()
@@ -1068,4 +1069,90 @@ func TestReconcileRefusesPathlessFlag10769(t *testing.T) {
 			t.Fatalf("gate = %v, want incomplete", err)
 		}
 	})
+}
+
+// Race-transition pin (round-7): the shutdown branch can persist a
+// PATHLESS dirty flag when a wipe is in flight but has not recorded
+// PENDING yet. Trigger chain: factoryReset marks resetting before the
+// wipe, the wipe holds applySem, a concurrent shutdown times out its 5s
+// apply drain (applyCloseoutDrainTimeout) and proceeds anyway, the
+// isResetting gate takes the shutdown sweep branch, and a helper-sweep
+// failure marks the handoff dirty while no flag exists yet -
+// MarkResetHandoffDirty preserves the recorded path, which is empty
+// then. The drain timeout is a const (no seam for a real 5s hold), so
+// this pins the production consequence instead: the shutdown-branch
+// mark with an absent flag through the real functions, then the
+// fail-closed aftermath (gated, reconcile never clears, manual
+// recovery only) and the competing-overwrite convergence (a later
+// PENDING completion overwrites pathless-dirty with pending+path,
+// still gated).
+func TestShutdownRacePathlessFlagStaysGated10769(t *testing.T) {
+	isolateHandoffFlag(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-state.json")
+	if err := os.WriteFile(target, []byte(`{"flows":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "state-link.json")
+	store := handoffTestStore(t)
+	commitUserspaceStateFile(t, store, link)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
+	d.enterResetGeneration()
+	if !d.isResetting() {
+		t.Fatal("reset generation must be marked: the shutdown sweep branch is gated on it")
+	}
+	// No flag present: the wipe is in flight but pre-completion.
+	d.removeResetHelperStateAfterStop(store.ActiveConfig())
+	_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present || dirty == "" || gotPath != "" {
+		t.Fatalf("shutdown-branch mark with no flag must persist pathless dirty: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+	}
+	if !strings.Contains(dirty, "helper state sweep failed") {
+		t.Fatalf("pathless reason must name the sweep failure, got %q", dirty)
+	}
+	for _, path := range []string{link, target} {
+		if _, serr := os.Lstat(path); serr != nil {
+			t.Fatalf("symlink refusal must remove nothing, %s stat err=%v", path, serr)
+		}
+	}
+	if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+		t.Fatalf("gate = %v, want incomplete", err)
+	}
+	d.reconcileResetHandoffAtBoot()
+	if _, dirty, gotPath, present, err := configstore.ReadResetHandoff(); err != nil || !present || dirty == "" || gotPath != "" {
+		t.Fatalf("reconcile must never clear the pathless flag: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+	}
+	if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+		t.Fatalf("gate after reconcile = %v, want incomplete", err)
+	}
+	// Documented manual recovery is the only way out.
+	if err := configstore.ClearResetHandoff(); err != nil {
+		t.Fatal(err)
+	}
+	if err := configstore.CheckResetHandoff(); err != nil {
+		t.Fatalf("gate after manual flag deletion = %v, want open", err)
+	}
+	// Competing overwrite converges fail-closed: a completion landing
+	// after the shutdown mark replaces pathless-dirty with pending+path.
+	boot, err := configstore.CurrentBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperPath := filepath.Join(dir, "userspace-dp.json")
+	if err := configstore.WriteResetHandoff(boot, "helper state sweep failed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, helperPath); err != nil {
+		t.Fatal(err)
+	}
+	_, dirty, gotPath, present, err = configstore.ReadResetHandoff()
+	if err != nil || !present || dirty != configstore.ResetHandoffPending || gotPath != helperPath {
+		t.Fatalf("completion must overwrite with pending+path: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+	}
+	if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+		t.Fatalf("gate after overwrite = %v, want incomplete", err)
+	}
 }

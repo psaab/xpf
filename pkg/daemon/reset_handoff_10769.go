@@ -100,14 +100,17 @@ func sweepHelperStateVerified(path string) error {
 }
 
 // legacyHelperPathRecovery tells the operator how to recover from a
-// pathless handoff flag: no in-tree writer produces one (the flag file
-// itself is new in this PR and every writer records a path), so a
-// missing path means hand-crafted or corrupt input. Boot repair never
-// infers from the default path or the new-tenant config; the operator
-// verifies residue manually (default plus any formerly-custom helper
-// state paths), removes it, then deletes the flag to reopen
-// provisioning.
-const legacyHelperPathRecovery = "reset handoff flag records no helper path (all reset writers record one): " +
+// pathless handoff flag. Every NORMAL-path writer records a path (the
+// flag file itself is new in this PR); only the concurrent-shutdown
+// race can persist a pathless flag - a shutdown drain timeout while a
+// wipe holds applySem, with a helper-sweep failure landing before
+// completion records PENDING, takes the shutdown branch's mark-if-absent
+// with no flag to preserve a path from. Anything else pathless is
+// hand-crafted or corrupt input. Boot repair never infers from the
+// default path or the new-tenant config; the operator verifies residue
+// manually (default plus any formerly-custom helper state paths),
+// removes it, then deletes the flag to reopen provisioning.
+const legacyHelperPathRecovery = "reset handoff flag records no helper path (normal reset writers record one; only a concurrent-shutdown mark records none): " +
 	"manually verify no helper state remains at the default or any formerly-custom state-file path, " +
 	"remove any residue found, then delete the flag file to reopen provisioning"
 
@@ -228,8 +231,9 @@ func handoffFailureReason(helperErr, keaErr, tempsErr error) string {
 // downgrade (verified repair downgrades to the plain reboot requirement,
 // or clears outright post-reboot). Unrepaired residue re-marks the flag
 // dirty, never clears. A flag with no recorded helper path is
-// unverifiable (no in-tree writer produces one) and fails closed with
-// recovery instructions rather than inferring a path. Never fails boot:
+// unverifiable (only the concurrent-shutdown race or hand-crafted input
+// produces one) and fails closed with recovery instructions rather than
+// inferring a path. Never fails boot:
 // enforcement happens at provisioning time, and bricking boot on a flag
 // read would strand remote boxes.
 func (d *Daemon) reconcileResetHandoffAtBoot() {
@@ -242,9 +246,10 @@ func (d *Daemon) reconcileResetHandoffAtBoot() {
 		return
 	}
 	if helperPath == "" {
-		// Pathless flags are unproducible by any in-tree writer (the
-		// flag file itself is new in this PR and every writer records
-		// a path), so this means hand-crafted or corrupt input. Never
+		// Pathless flags come only from the concurrent-shutdown race
+		// (shutdown-branch mark landing before completion records
+		// PENDING) or from hand-crafted/corrupt input: every
+		// normal-path writer records a path. Never
 		// infer from the default path or the new-tenant config: the
 		// gate stays shut with recovery instructions.
 		slog.Error("reset handoff: pathless flag cannot be verified; provisioning stays refused", "reason", dirty)
