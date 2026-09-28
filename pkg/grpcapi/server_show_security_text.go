@@ -996,23 +996,117 @@ func (s *Server) showDynamicAddress(cfg *config.Config, buf *strings.Builder) {
 			}
 			if feed.HoldInterval > 0 {
 				fmt.Fprintf(buf, "  Hold interval: %ds\n", feed.HoldInterval)
+			} else {
+				fmt.Fprintf(buf, "  Hold interval: none (last-good set retained indefinitely)\n")
 			}
-			if fi, ok := runtimeFeeds[name]; ok {
-				fmt.Fprintf(buf, "  Prefixes: %d\n", fi.Prefixes)
-				if !fi.LastFetch.IsZero() {
-					age := time.Since(fi.LastFetch).Truncate(time.Second)
-					fmt.Fprintf(buf, "  Last fetch: %s (%s ago)\n", fi.LastFetch.Format("2006-01-02 15:04:05"), age)
-				} else {
-					fmt.Fprintf(buf, "  Last fetch: never\n")
-				}
-				if fi.Degraded {
-					fmt.Fprintf(buf, "  DEGRADED: %d invalid line(s) skipped (partial set installed)\n", fi.InvalidLines)
-					if len(fi.InvalidSample) > 0 {
-						fmt.Fprintf(buf, "    Sample: %s\n", strings.Join(fi.InvalidSample, ", "))
+			runtimeNames := dynamicAddressRuntimeNames(name, feed)
+			minOld := feed.ShrinkGuardMinOldCount
+			minRetain := feed.ShrinkGuardMinRetainPercent
+			minDrop := feed.ShrinkGuardMinDrop
+			if len(runtimeNames) > 0 {
+				if fi, ok := runtimeFeeds[runtimeNames[0]]; ok {
+					if fi.ShrinkGuardMinOldCount > 0 {
+						minOld = fi.ShrinkGuardMinOldCount
+					}
+					if fi.ShrinkGuardMinRetainPercent > 0 {
+						minRetain = fi.ShrinkGuardMinRetainPercent
+					}
+					if fi.ShrinkGuardMinDrop > 0 {
+						minDrop = fi.ShrinkGuardMinDrop
 					}
 				}
 			}
+			if minOld < 1 || minOld > config.MaxDynamicAddressFeedPrefixes {
+				minOld = config.DefaultDynamicAddressShrinkGuardMinOldCount
+			}
+			if minRetain < 1 || minRetain > 100 {
+				minRetain = config.DefaultDynamicAddressShrinkGuardRetainPct
+			}
+			if minDrop < 1 || minDrop >= config.MaxDynamicAddressFeedPrefixes {
+				minDrop = config.DefaultDynamicAddressShrinkGuardMinDrop
+			}
+			fmt.Fprintf(buf, "  Shrink guard: old >= %d prefixes; refuse below %d%% retained with a drop of at least %d\n",
+				minOld, minRetain, minDrop)
+			for _, runtimeName := range runtimeNames {
+				fi, ok := runtimeFeeds[runtimeName]
+				if !ok {
+					continue
+				}
+				indent := "  "
+				if runtimeName != name || len(runtimeNames) > 1 {
+					fmt.Fprintf(buf, "  Feed: %s\n", runtimeName)
+					indent = "    "
+				}
+				renderDynamicAddressFeedStatusText(buf, indent, fi)
+			}
 			buf.WriteString("\n")
+		}
+	}
+}
+
+func dynamicAddressRuntimeNames(server string, feed *config.FeedServer) []string {
+	if feed == nil {
+		return []string{server}
+	}
+	if len(feed.FeedEntries) > 0 {
+		names := make([]string, 0, len(feed.FeedEntries))
+		seen := make(map[string]struct{}, len(feed.FeedEntries))
+		for _, entry := range feed.FeedEntries {
+			if entry.Name == "" {
+				continue
+			}
+			if _, ok := seen[entry.Name]; ok {
+				continue
+			}
+			seen[entry.Name] = struct{}{}
+			names = append(names, entry.Name)
+		}
+		if len(names) > 0 {
+			return names
+		}
+	}
+	if feed.FeedName != "" {
+		return []string{feed.FeedName}
+	}
+	return []string{server}
+}
+
+func renderDynamicAddressFeedStatusText(buf *strings.Builder, indent string, fi feeds.FeedInfo) {
+	fmt.Fprintf(buf, "%sPrefixes: %d\n", indent, fi.Prefixes)
+	if !fi.LastFetch.IsZero() {
+		age := time.Since(fi.LastFetch).Truncate(time.Second)
+		fmt.Fprintf(buf, "%sLast fetch: %s (%s ago)\n", indent, fi.LastFetch.Format("2006-01-02 15:04:05"), age)
+	} else {
+		fmt.Fprintf(buf, "%sLast fetch: never\n", indent)
+	}
+	switch {
+	case fi.HoldDropped:
+		fmt.Fprintf(buf, "%sHOLD-DROPPED: fetches failed past the hold interval; the last-good set was dropped\n", indent)
+	case !fi.StaleSince.IsZero():
+		fmt.Fprintf(buf, "%sSTALE since %s: fetches failing; last-good set retained\n", indent, fi.StaleSince.Format("2006-01-02 15:04:05"))
+	}
+	if fi.ShrinkRefusalCount > 0 {
+		fmt.Fprintf(buf, "%sShrink refusals: %d\n", indent, fi.ShrinkRefusalCount)
+	}
+	if fi.ShrinkRefused {
+		if fi.Hash != "" {
+			fmt.Fprintf(buf, "%sInstalled snapshot sha256=%s\n", indent, fi.Hash)
+		}
+		fmt.Fprintf(buf, "%sSHRINK-HELD: candidate %d/%d prefixes; refusal #%d; candidate_sha256=%s baseline_sha256=%s\n",
+			indent, fi.ShrinkCandidateNewCount, fi.ShrinkCandidateOldCount,
+			fi.ShrinkRefusalID, fi.ShrinkCandidateHash, fi.ShrinkBaselineHash)
+		if fi.ShrinkAckPending {
+			fmt.Fprintf(buf, "%sSHRINK-ACKED: exact candidate #%d awaiting next fetch\n", indent, fi.ShrinkRefusalID)
+			fmt.Fprintf(buf, "%s  Acked candidate_sha256=%s baseline_sha256=%s by %s; reason: %q\n",
+				indent, fi.ShrinkAckHash, fi.ShrinkAckBaselineHash, fi.ShrinkAckActor, fi.ShrinkAckReason)
+		} else {
+			fmt.Fprintf(buf, "%sSHRINK-HELD: requires authorized acknowledgement with a reason\n", indent)
+		}
+	}
+	if fi.Degraded {
+		fmt.Fprintf(buf, "%sDEGRADED: %d invalid line(s) skipped (partial set installed)\n", indent, fi.InvalidLines)
+		if len(fi.InvalidSample) > 0 {
+			fmt.Fprintf(buf, "%s  Sample: %s\n", indent, strings.Join(fi.InvalidSample, ", "))
 		}
 	}
 }

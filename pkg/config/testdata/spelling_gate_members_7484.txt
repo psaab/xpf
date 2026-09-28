@@ -766,6 +766,9 @@ COMPARED	security dynamic-address address-name <*> profile feed-name
 COMPARED	security dynamic-address feed-server <*> feed-name <*> path
 COMPARED	security dynamic-address feed-server <*> hold-interval
 COMPARED	security dynamic-address feed-server <*> hostname
+COMPARED	security dynamic-address feed-server <*> shrink-guard-min-drop
+COMPARED	security dynamic-address feed-server <*> shrink-guard-min-old-count
+COMPARED	security dynamic-address feed-server <*> shrink-guard-min-retain-percent
 COMPARED	security dynamic-address feed-server <*> update-interval
 COMPARED	security dynamic-address feed-server <*> url
 flag (read, but value-less)	security flow allow-dns-reply

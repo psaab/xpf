@@ -48,12 +48,13 @@ var SystemActionVerbCommand = map[string]string{
 	"clear-persistent-nat":        "clear security nat source persistent-nat-table",
 
 	// The non-maintenance `request ...` family.
-	"ospf-clear":         "request protocols ospf clear",
-	"bgp-clear":          "request protocols bgp clear",
-	"ipsec-sa-clear":     "request security ipsec sa clear",
-	"dhcp-renew":         "request dhcp renew",
-	"dynamic-dns-update": "request system dynamic-dns update",
-	"dynamic-dns-check":  "request system dynamic-dns check",
-	"rescue-save":        "request system configuration rescue save",
-	"rescue-delete":      "request system configuration rescue delete",
+	"ospf-clear":                 "request protocols ospf clear",
+	"bgp-clear":                  "request protocols bgp clear",
+	"ipsec-sa-clear":             "request security ipsec sa clear",
+	"dhcp-renew":                 "request dhcp renew",
+	"dynamic-dns-update":         "request system dynamic-dns update",
+	"dynamic-dns-check":          "request system dynamic-dns check",
+	"dynamic-address-shrink-ack": "request security dynamic-address acknowledge-shrink",
+	"rescue-save":                "request system configuration rescue save",
+	"rescue-delete":              "request system configuration rescue delete",
 }

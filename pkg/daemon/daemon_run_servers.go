@@ -147,6 +147,10 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 	if live, ok := d.liveDataplane(); ok {
 		grpcDP = live
 	}
+	var feedsAckFn func(name string, refusalID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error
+	if d.feeds != nil {
+		feedsAckFn = d.feeds.AcknowledgeFeedShrink
+	}
 	grpcSrv := grpcapi.NewServer(d.opts.GRPCAddr, grpcapi.Config{
 		Store: d.store,
 		DP:    grpcDP,
@@ -223,6 +227,7 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 			}
 			return nil
 		},
+		FeedsAckFn: feedsAckFn,
 		// #3042: live feed-prefix overlay so the gRPC MatchPolicies
 		// simulator resolves feed-backed address-names to their live
 		// CIDRs, matching what the AF_XDP helper enforces.

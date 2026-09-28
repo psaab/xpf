@@ -63,8 +63,9 @@ func (d *Daemon) onFeedUpdate() error {
 // (feedSnapshotsForConfig), not the producer goroutines, so a binding-only
 // change must not trigger a producer swap/restart of the fetchers. FeedServers is a
 // Go map (nondeterministic iteration), so it is serialized in sorted key order
-// with each server's URL/hostname, intervals, single feed-name, and feed
-// entries (also sorted) — matching every input feeds.Apply's plan builder reads.
+// with each server's URL/hostname, intervals, shrink-guard thresholds, single
+// feed-name, and feed entries (also sorted) — matching every input feeds.Apply's
+// plan builder reads.
 func feedsConfigHash(da *config.DynamicAddressConfig) [32]byte {
 	if da == nil {
 		return sha256.Sum256(nil)
@@ -81,8 +82,9 @@ func feedsConfigHash(da *config.DynamicAddressConfig) [32]byte {
 		if fs == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "S|%s|%s|%s|%d|%d|%s\n",
-			name, fs.URL, fs.Hostname, fs.UpdateInterval, fs.HoldInterval, fs.FeedName)
+		fmt.Fprintf(&b, "S|%s|%s|%s|%d|%d|%s|%d|%d|%d\n",
+			name, fs.URL, fs.Hostname, fs.UpdateInterval, fs.HoldInterval, fs.FeedName,
+			fs.ShrinkGuardMinOldCount, fs.ShrinkGuardMinRetainPercent, fs.ShrinkGuardMinDrop)
 		entries := append([]config.FeedEntry(nil), fs.FeedEntries...)
 		sort.Slice(entries, func(i, j int) bool {
 			if entries[i].Name != entries[j].Name {

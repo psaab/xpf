@@ -801,18 +801,28 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// `packedBodyChildren` hands that compiler, so the gate and the compiler
 	// cannot disagree about what the tokens mean.
 	//
-	// Default-off is deliberate and is the compiler-faithful contract above:
-	// for every other container the tail is not compiled, so validating it
-	// would reject a configuration that behaves identically either way.
+	// Default-off is deliberate: validating a tail that no compiler reads would
+	// reject configuration that behaves identically either way. The feed-server
+	// shrink-guard exception below validates only the three newly consumed
+	// leaves, without widening the legacy tail contract.
 	walkChildren := node.Children
 	if childSchema.packedTail && len(node.Keys) > consumed {
 		// The packed body is authored on the container line.
 		walkChildren = packedBodyChildren(node, childSchema)
-	} else if childSchema.packedFlatRun && len(node.Children) > 0 {
-		// `stream s1 port 5514 category policy` as a child chain
-		// (`port` -> `category`). Use the same expansion as compileLog
-		// before walking under the inherited closed-world arm.
-		walkChildren = expandFlatRun(node.Children, childSchema)
+	} else {
+		if childSchema.packedFlatRun && len(node.Children) > 0 {
+			// `stream s1 port 5514 category policy` as a child chain
+			// (`port` -> `category`). Use the same expansion as compileLog
+			// before walking under the inherited closed-world arm.
+			walkChildren = expandFlatRun(node.Children, childSchema)
+		}
+		// #11059: compileDynamicAddress reads only these three fields from a
+		// compact feed-server tail. Validate exactly that consumed subset, not
+		// the unrelated legacy tail that remains intentionally uncompiled.
+		if childSchema == feedServerSchema9792() && len(node.Keys) > consumed {
+			inlineProps := dynamicAddressShrinkGuardCompactProps(node.Keys[consumed:])
+			walkChildren = append(inlineProps, walkChildren...)
+		}
 	}
 	return walkSchemaChildren(walkChildren, descendSchema, newPath, vc, childClosed)
 }
@@ -823,7 +833,9 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 // + per-instance child walk: the instance name comes from the node's leading
 // Keys; the leaves are the node's CHILDREN. Any extra tokens packed into the
 // instance node's Keys beyond the name are ignored (the compiler does not
-// compile them; see walkSchemaNode's container comment, Codex r7).
+// compile them; see walkSchemaNode's container comment, Codex r7), except for
+// the narrow #11059 feed-server shrink-guard subset the compiler DOES consume
+// via instanceValueTail in both flat and nested shapes.
 func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, baseArgIdx int, path []string, vc *walkContext, closed bool) error {
 	if node == nil || len(node.Keys) == 0 {
 		return nil
@@ -871,8 +883,14 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 		return nil
 	}
 	// Name fully consumed. The instance's leaves are its block children;
-	// any leftover Keys past the name are not compiled and are ignored.
-	return walkSchemaChildren(node.Children, containerSchema, newPath, vc, closed)
+	// any leftover Keys past the name are not compiled and are ignored,
+	// except the consumed #11059 shrink-guard tail on a feed-server instance.
+	walkChildren := node.Children
+	if containerSchema == feedServerSchema9792() && len(node.Keys) > consume {
+		inlineProps := dynamicAddressShrinkGuardCompactProps(node.Keys[consume:])
+		walkChildren = append(inlineProps, walkChildren...)
+	}
+	return walkSchemaChildren(walkChildren, containerSchema, newPath, vc, closed)
 }
 
 // validateKeySlot runs a named-instance container's identity-arg
