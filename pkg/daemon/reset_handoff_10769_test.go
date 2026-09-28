@@ -1423,7 +1423,15 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	}
 	// Production-shaped apply fixture (applyMarkerDaemon9175's seams):
 	// the authoring commit must drive a REAL successful apply, so a
-	// green run cannot mean promotion over a failed apply.
+	// green run cannot mean promotion over a failed apply. The test
+	// drives phase-1 startup directly while operator commits arrive
+	// post-phase-3 in production, so phase-3 wiring is done by hand:
+	// vrrpMgr is constructed eagerly at bringup before any apply can
+	// run (daemon_run_bringup.go) — the only production nil window is
+	// the phase-1-armed rollback timer firing before phase 3 (#6739),
+	// which serves the rollback executor, never operator commits. A
+	// bare daemon without vrrpMgr therefore cannot arise on this
+	// path; removing the fixture fails with the VRRP apply error.
 	installFakeNetworkctl(t)
 	installSSHDSeam(t, &sshdSeamRecorder{})
 	d2 := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: dbPath, NoDataplane: true}, vrrpMgr: vrrp.NewManager()}
