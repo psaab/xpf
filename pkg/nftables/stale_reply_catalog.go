@@ -58,7 +58,9 @@ package nftables
 // the catalogued TCP/UDP tuples while keeping the normal ephemeral-source
 // reply path intact. Non-catalog box-oriented entries were kept identically
 // by the pre-PR DstIP-only predicate, so this is status-quo-ante bounded by
-// conntrack expiry, not a revocation-timeliness regression.
+// conntrack idle-expiry — active traffic refreshes entries indefinitely, so
+// the matrix procedures (delete + verify), not the timeout, are the durable
+// close. Not a revocation-timeliness regression.
 
 import (
 	"net/netip"

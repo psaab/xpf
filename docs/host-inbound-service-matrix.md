@@ -668,22 +668,26 @@ Properties:
   `any-service`) can never enter the discrete-port catalog; after tightening,
   a box-oriented `ORIG box:2222→peer` entry is kept by the flush (catalog
   miss) and has no guard DROP, riding the broad reply accept until close or
-  the ~5d TCP established timeout. Pre-PR/post-PR comparison: the pre-PR
-  predicate was DstIP-only with no box-oriented branch, so it kept these
-  entries identically (peer DstIP never in the admit map); peer-oriented 2222
-  flushes in BOTH generations via the unchanged destination branch. The only
-  behavior delta is the intended catalogued revocation. `loose=0` stops NEW
-  box-oriented pickup, so only upgrade-time entries linger. Same holds for the
-  TCP client-role exempts excluded by tuple ambiguity with box-originated
+  idle-expiry — the ~5d TCP established timeout is an IDLE timeout, not a
+  maximum: active traffic refreshes conntrack indefinitely, exactly as a
+  persistent peer sustains the UDP residual above. Pre-PR/post-PR comparison:
+  the pre-PR predicate was DstIP-only with no box-oriented branch, so it kept
+  these entries identically (peer DstIP never in the admit map); peer-oriented
+  2222 flushes in BOTH generations via the unchanged destination branch. The
+  only behavior delta is the intended catalogued revocation. `loose=0` stops
+  NEW box-oriented pickup, so only upgrade-time entries linger. Same holds for
+  the TCP client-role exempts excluded by tuple ambiguity with box-originated
   control-plane/client traffic: FTP-data 20, BGP 179, rexec/rlogin/rsh
-  512/513/514, MSDP 639, LDP-TCP 646. Operator advisory: when decommissioning
-  a custom-port service or an exempt control-plane listener, stop the listener
-  (`ss -ltn` shows nothing on the port), delete the tuple
-  (`conntrack -D -p tcp -s <box-ip> --sport <port>`), verify `conntrack -L`
-  shows no box-oriented entry, then commit the removal; without the delete, a
-  lingering entry survives until close/timeout. Matcher pins: peer-oriented
-  2222 flushes, box-oriented 2222 and TCP/179 are kept; neither appears in any
-  guard DROP.
+  512/513/514, MSDP 639, LDP-TCP 646. Removal requires stopping/disable the
+  ORIGINATOR — not just the listener: established children and client sockets
+  originate without listening (FTP-data 20 never listens at all), so verify NO
+  socket (`ss -ltn` AND any-state `ss -tn`), then delete + filtered-verify +
+  commit per the procedure below. Tightening while the service keeps running
+  has its own procedure below (restrict, not decommission). Matcher pins:
+  peer-oriented 2222 flushes, box-oriented 2222 and TCP/179 are kept; neither
+  appears in any guard DROP. The any-service breadth advisory names this
+  consequence while the stanza is open, and the daemon warns in the journal
+  (count + samples) on any apply that actually keeps such flows.
 - **Race bound: guard-first closes the catalogued Install→flush window; the
   peer-oriented uncovered window is bounded by sweep duration, not packets.**
   The guard installs atomically with the table, before the conntrack sweep, so
@@ -790,6 +794,22 @@ stopping the daemon leaves its groups (verify `ip maddr show dev <if>` shows
 no group), and the kernel drops unjoined-group packets for lack of a socket.
 IS-IS needs no procedure (L2-only, never in IP conntrack); ICMP
 router-discovery is globally accepted/short-lived.
+
+Tightening with the service still running (restrict, not decommission):
+peer-oriented and NEW flows are handled automatically — peer-oriented stale
+flushes via the destination branch, and NEW attempts meet the
+destination/ingress deny (unicast), so no action is needed there — but any
+pre-existing box-oriented entry for a non-catalogued/exempt tuple survives
+the flush and, with active traffic, rides the reply accept indefinitely to
+the still-listening service. Per affected (box, proto, port): list
+box-oriented entries (`conntrack -L -p <tcp|udp> -s <box-ip> --sport <port>
+-f <fam>`), delete them (`conntrack -D` with the same filters), verify empty,
+then commit. TCP cannot reform afterwards (`loose=0` blocks mid-stream
+pickup); UDP/bare WILL reform on the next box-originated datagram, so for
+those either stop the originator too or keep the host-inbound. The
+any-service breadth advisory names this consequence while the stanza is open,
+and the daemon warns in the journal (count + samples) on any apply that
+actually keeps such flows.
 
 
 ### Revocation failure is retried, counted, and published (#6802)
