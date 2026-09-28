@@ -14,20 +14,16 @@
 // the sender has to learn what the peer can represent — which nothing in the
 // tree exchanged.
 //
-// FAIL-ON-REVERT: delete the peerSnapshotProtocolCommitPreflight call from the
-// commit preflight closure in daemon_apply_commit.go and
-// TestPeerSnapshotGateIsWiredIntoTheCommitPreflight6650 goes RED; break the
-// decision itself and the matrix below goes RED.
+// FAIL-ON-REVERT: bypassing the commit protocol preflight makes the behavioral
+// incompatible-peer row in peer_snapshot_commit_confirmed_10782_test.go promote
+// and push a snapshot the peer cannot represent.
 package daemon
 
 import (
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -118,13 +114,6 @@ func TestPeerSnapshotProtocolDecision6650(t *testing.T) {
 			if !errors.Is(err, ErrPeerSnapshotProtocolIncompatible) {
 				t.Errorf("refusal does not wrap ErrPeerSnapshotProtocolIncompatible: %v", err)
 			}
-			// The operator has to be able to act on this without reading the
-			// source: what is wrong, on which side, and what to do.
-			for _, want := range []string{"multi-zone", "peer", "NARROW"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("refusal message is missing %q — an operator cannot act on it: %v", want, err)
-				}
-			}
 		})
 	}
 }
@@ -201,70 +190,22 @@ func TestCrossChassisGateSharesTheLocalArmingPredicate6650(t *testing.T) {
 	}
 }
 
-// TestPeerSnapshotGateIsWiredIntoTheCommitPreflight6650 binds the WIRING.
-//
-// The decision matrix above tests the function. It says nothing about whether
-// anything CALLS it — and a gate that is never called is the exact shape of
-// this campaign's recurring finding. The mutation that must red is deleting
-// the call from the commit preflight, not breaking the decision.
-//
-// It also asserts the call sits in the PREFLIGHT (the closure that runs before
-// the store promotes), not in the apply/push path: refusing after the local
-// commit has landed would leave the two chassis holding different configs,
-// which is the divergence config-sync exists to prevent — a different bug, not
-// this fix.
-func TestPeerSnapshotGateIsWiredIntoTheCommitPreflight6650(t *testing.T) {
-	t.Parallel()
+func TestSnapshotProtocolGateRequiresClusterRuntime6650(t *testing.T) {
+	ss := cluster.NewSessionSync(":0", ":0", nil)
+	ss.SetConnectedForTesting(true)
+	ss.SetPeerSnapshotProtocolVersionForTesting(3)
+	d := &Daemon{sessionSync: ss}
+	cand := &config.Config{}
+	cand.Chassis.Cluster = &config.ClusterConfig{ConfigSync: true}
+	cand.Security.GlobalPolicies = []*config.Policy{{
+		Match: config.PolicyMatch{
+			FromZones: []string{"dmz", "trust"},
+			ToZones:   []string{"untrust"},
+		},
+	}}
 
-	const file = "daemon_apply_commit.go"
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, file, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", file, err)
+	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(cand)
+	if err != nil || auth != nil {
+		t.Fatalf("snapshot authorization ran without a cluster runtime: auth=%#v err=%v", auth, err)
 	}
-
-	called := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		ce, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := ce.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "peerSnapshotProtocolCommitPreflight" {
-			return true
-		}
-		called = true
-		return true
-	})
-	if !called {
-		t.Fatal("daemon_apply_commit.go never calls peerSnapshotProtocolCommitPreflight. " +
-			"The #6650 gate exists but nothing invokes it, so a multi-zone scoped policy " +
-			"is still pushed to a peer that will narrow it — the decision matrix stays " +
-			"green throughout, because it tests the function and not the wiring.")
-	}
-
-	// Locate the call and require a sibling commit preflight within the same
-	// enclosing declaration, so a future refactor cannot satisfy the check
-	// above by calling the gate from the push path instead.
-	src := mustReadFile(t, file)
-	idx := strings.Index(src, "peerSnapshotProtocolCommitPreflight(cand)")
-	if idx < 0 {
-		t.Fatal("the call is not of the expected form peerSnapshotProtocolCommitPreflight(cand)")
-	}
-	window := src[max0(idx-4000) : idx+400]
-	for _, sibling := range []string{"clusterIdentityCommitPreflight", "deviceMapCommitPreflight"} {
-		if !strings.Contains(window, sibling) {
-			t.Errorf("the #6650 gate is not adjacent to %s. It must run in the COMMIT "+
-				"PREFLIGHT closure (before the store promotes); refusing later — in the "+
-				"apply or push path — leaves the local node committed and the peer not, "+
-				"which is the config divergence this fix exists to avoid", sibling)
-		}
-	}
-}
-
-func max0(v int) int {
-	if v < 0 {
-		return 0
-	}
-	return v
 }

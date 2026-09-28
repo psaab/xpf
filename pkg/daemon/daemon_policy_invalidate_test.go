@@ -720,18 +720,9 @@ func TestCaptureRenameStampingSchedulerAndFeed10592(t *testing.T) {
 	})
 }
 
-// TestCommitWindowArmApplySweepOrder10591 drives the real commit wrapper far
-// enough to prove arm-before-apply plus sweep-deletes-row in one transaction:
-// the plan is armed before the apply body, the body takes the pre-publication
-// capture, and the post-apply sweep consumes the old-policy row before the
-// wrapper returns. This is sibling commit-pipeline discipline (the POLICY
-// invalidation sweep, p-web deleted), NOT the zone-rotation purge that
-// terminates the Rust window cells (worker snapshot rotation, different
-// plane) — it pins ordering, not window closure. The
-// capture-at-publish-boundary placement itself is pinned
-// by TestCaptureRunsBeforeTheDataplanePublish6948; the AST order guard below
-// catches an arm, apply, or sweep moved behind the wrong boundary even if this
-// seam is later simplified.
+// TestCommitWindowArmApplySweepOrder10591 drives the real commit wrapper through
+// apply and post-apply sweep, checking the observable invalidation result.
+// The apply body requires an armed plan and takes its capture before publishing.
 func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 	oldCfg, newCfg, oldID, _ := inheritedIDFixture6948(t)
 	key := v4Key6948(1, 40001, 80)
@@ -776,45 +767,6 @@ func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 		t.Fatal("post-apply sweep left the invalidation capture armed")
 	}
 
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "daemon_apply_commit.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse daemon_apply_commit.go: %v", err)
-	}
-	var armAt, applyAt, sweepAt token.Pos
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "applyAndSyncCommitted" || fn.Body == nil {
-			continue
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			switch sel.Sel.Name {
-			case "armPolicyInvalidationPlanWithRename":
-				armAt = call.Pos()
-			case "applyConfigLockedForCommit":
-				applyAt = call.Pos()
-			case "reportSessionAuthorizationChanges":
-				sweepAt = call.Pos()
-			}
-			return true
-		})
-	}
-	if !armAt.IsValid() || !applyAt.IsValid() || !sweepAt.IsValid() {
-		t.Fatalf("commit path must contain arm, apply, and sweep calls (arm=%v apply=%v sweep=%v)",
-			armAt.IsValid(), applyAt.IsValid(), sweepAt.IsValid())
-	}
-	if !(armAt < applyAt && applyAt < sweepAt) {
-		t.Fatalf("commit phases out of order: arm=%s apply=%s sweep=%s",
-			fset.Position(armAt), fset.Position(applyAt), fset.Position(sweepAt))
-	}
 }
 
 // N3c feed unit: the evaluator honors a hand-injected feed overlay

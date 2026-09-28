@@ -2029,6 +2029,61 @@ func TestProcessStatusUnsurfacedCounterTrioRoundTrip7398(t *testing.T) {
 	}
 }
 
+func TestProcessStatusMirrorRollbackCountersRoundTrip10788(t *testing.T) {
+	in := ProcessStatus{
+		SyncedImportMirrorRefused: 41,
+		MirrorRestoreRepublished:  42,
+		MirrorRestoreDeleted:      43,
+		MirrorRestoreFailed:       44,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("unmarshal fields: %v", err)
+	}
+	for _, key := range []string{
+		"synced_import_mirror_refused",
+		"mirror_restore_republished",
+		"mirror_restore_deleted",
+		"mirror_restore_failed",
+	} {
+		if _, ok := fields[key]; !ok {
+			t.Fatalf("wire key %q missing from ProcessStatus JSON: %s", key, raw)
+		}
+	}
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if back.SyncedImportMirrorRefused != 41 ||
+		back.MirrorRestoreRepublished != 42 ||
+		back.MirrorRestoreDeleted != 43 ||
+		back.MirrorRestoreFailed != 44 {
+		t.Fatalf("counter round trip got %d/%d/%d/%d, want 41/42/43/44",
+			back.SyncedImportMirrorRefused,
+			back.MirrorRestoreRepublished,
+			back.MirrorRestoreDeleted,
+			back.MirrorRestoreFailed)
+	}
+	var legacy ProcessStatus
+	if err := json.Unmarshal([]byte(`{}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy status: %v", err)
+	}
+	if legacy.SyncedImportMirrorRefused != 0 ||
+		legacy.MirrorRestoreRepublished != 0 ||
+		legacy.MirrorRestoreDeleted != 0 ||
+		legacy.MirrorRestoreFailed != 0 {
+		t.Fatalf("legacy status must default F1 counters to zero, got %d/%d/%d/%d",
+			legacy.SyncedImportMirrorRefused,
+			legacy.MirrorRestoreRepublished,
+			legacy.MirrorRestoreDeleted,
+			legacy.MirrorRestoreFailed)
+	}
+}
+
 func TestProcessStatusSyncedImportIncompleteKeyRoundTrip10720(t *testing.T) {
 	in := ProcessStatus{SyncedImportIncompleteKey: 37}
 	raw, err := json.Marshal(&in)

@@ -1189,6 +1189,16 @@ type SessionSync struct {
 	// different, older process.
 	peerSnapshotProtocol atomic.Uint32
 
+	// peerSnapshotProtocolWriteMu serializes capability-incarnation changes
+	// with the final write of a gated config snapshot. Lock order is mu then
+	// this mutex; the writer releases mu while holding this mutex over write.
+	peerSnapshotProtocolWriteMu sync.Mutex
+
+	// peerSnapshotProtocolGeneration advances when this incarnation's
+	// advertised snapshot version changes or is cleared, binding an outgoing
+	// config push to the observation that authorized it; guarded by mu.
+	peerSnapshotProtocolGeneration uint64
+
 	// peerCapabilityFlags holds the peer's advertised capability bits (#7147),
 	// carried in the trailing byte of syncMsgPeerCapabilities on top of #6650's
 	// version field. 0 means "advertises nothing", which for every bit means
@@ -1764,6 +1774,9 @@ type SessionSync struct {
 	// would be written, exercising the watermark failure path without
 	// disconnecting the active connection in production.
 	testBeforeQueuedWrite func()
+	// testBeforePeerSnapshotConfigWrite changes the learned protocol after
+	// queue preparation but immediately before the final guarded socket write.
+	testBeforePeerSnapshotConfigWrite func()
 	// testBeforeScopedJournalTake runs in flushScopedDeleteJournal after
 	// the capability re-check and before the journal take, then nils
 	// itself (testBeforeQueuedWrite shape). Test-only; pins the

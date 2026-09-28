@@ -245,6 +245,20 @@ pub(in crate::afxdp) struct SessionManager {
     /// overlapping pools, an active-active RG pair sharing one SNAT pool, or
     /// genuine NAT config drift between the nodes.
     pub(in crate::afxdp) import_reserve_refused: AtomicU64,
+    /// #10788-F1: strict-mirror imports refused because the conntrack mirror
+    /// could not be written. This is separate from allocator admission refusal:
+    /// the coordinator releases the import's untracked reservation and returns
+    /// a bare `mirror-write-failed` token so Go latches mirror health.
+    pub(in crate::afxdp) synced_import_mirror_refused: AtomicU64,
+    /// #10788-F1: refused imports whose survivor forward mirror was republished.
+    pub(in crate::afxdp) mirror_restore_republished: AtomicU64,
+    /// #10788-F1: refused imports whose overwritten forward mirror was deleted
+    /// because no previous authoritative survivor existed.
+    pub(in crate::afxdp) mirror_restore_deleted: AtomicU64,
+    /// #10788-F1: best-effort mirror rollback actions that failed. One refused
+    /// import can increment this more than once when multiple restoration legs
+    /// (SNAT, NAT64, or conntrack) independently fail.
+    pub(in crate::afxdp) mirror_restore_failed: AtomicU64,
 }
 
 impl SessionManager {
@@ -272,6 +286,10 @@ impl SessionManager {
             import_unknown_routing_domain: AtomicU64::new(0),
             import_incomplete_key: AtomicU64::new(0),
             import_reserve_refused: AtomicU64::new(0),
+            synced_import_mirror_refused: AtomicU64::new(0),
+            mirror_restore_republished: AtomicU64::new(0),
+            mirror_restore_deleted: AtomicU64::new(0),
+            mirror_restore_failed: AtomicU64::new(0),
         }
     }
     /// #9856: BUSY check for a fresh kick. `Some(open_seq)` when a non-idle

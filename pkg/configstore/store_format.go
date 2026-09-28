@@ -59,6 +59,22 @@ func (s *Store) ActiveConfig() *config.Config {
 	return s.compiled
 }
 
+// ActiveConfigAndText returns the compiled active config, its hierarchical
+// text, and its publication generation under one read lock. The three values
+// therefore describe the same active promotion.
+func (s *Store) ActiveConfigAndText() (*config.Config, string, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var gen uint64
+	if snap := s.activeSnap.Load(); snap != nil {
+		gen = snap.gen
+	}
+	if s.compiled == nil {
+		return nil, "", gen
+	}
+	return s.compiled, s.active.Format(), gen
+}
+
 // CompileCandidate strictly compiles the current candidate WITHOUT mutating
 // any store state (no promote, no persist, no confirm-timer). It is the
 // read-only pre-commit hook the daemon's #1956 device-map commit pre-flight
