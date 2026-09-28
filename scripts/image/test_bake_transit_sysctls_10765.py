@@ -32,6 +32,7 @@ class ApplianceTransitSysctlTests(unittest.TestCase):
         self.assertIn("net.core.bpf_jit_enable=1\n", sysctl_conf)
         self.assertIn("net.ipv6.conf.all.accept_ra=0\n", sysctl_conf)
         self.assertIn("net.ipv6.conf.default.accept_ra=0\n", sysctl_conf)
+        self.assertIn("net.netfilter.nf_conntrack_tcp_loose=0\n", sysctl_conf)
         self.assertNotIn("net.ipv4.ip_forward=", sysctl_conf)
         self.assertNotIn("net.ipv6.conf.all.forwarding=", sysctl_conf)
 

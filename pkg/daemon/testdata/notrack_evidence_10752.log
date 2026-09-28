@@ -1,0 +1,23 @@
+# NOTRACK no-conntrack evidence (#10752 Opus4 F3).
+# Captured verbose child run: XPF_HOSTINBOUND_STALE_REPLY_NETNS_CHILD=1 unshare -Urn daemon.test -test.run '^TestHostInboundStaleReplyPacketPath10752And10764$' -test.v
+# Captured from the working tree committed alongside this log; ephemeral ports
+# vary per run. The live test (assertNotrackRulesHit + assertNoConntrackForUDPTuples)
+# re-proves per-(tuple,chain,direction) hits and tuple absence on every run.
+# Lines below are the run's evidence excerpt (subtests + NOTRACK counters + dump check).
+---
+=== RUN   TestHostInboundStaleReplyPacketPath10752And10764
+    host_inbound_stale_reply_10752_test.go:562: loose posture in packet netns: value="0" err=<nil> (guard verdicts independent)
+=== RUN   TestHostInboundStaleReplyPacketPath10752And10764/udp
+=== RUN   TestHostInboundStaleReplyPacketPath10752And10764/tcp
+=== RUN   TestHostInboundStaleReplyPacketPath10752And10764/availability-no-conntrack
+    host_inbound_stale_reply_10752_test.go:638: NOTRACK pre rule 0: addrOff=16 portOff=2 port=161 packets=1
+    host_inbound_stale_reply_10752_test.go:638: NOTRACK pre rule 1: addrOff=16 portOff=2 port=58026 packets=1
+    host_inbound_stale_reply_10752_test.go:638: NOTRACK out rule 0: addrOff=12 portOff=0 port=161 packets=0
+    host_inbound_stale_reply_10752_test.go:638: NOTRACK out rule 1: addrOff=16 portOff=2 port=161 packets=1
+    host_inbound_stale_reply_10752_test.go:638: NOTRACK out rule 2: addrOff=12 portOff=0 port=58026 packets=0
+    host_inbound_stale_reply_10752_test.go:638: NOTRACK out rule 3: addrOff=16 portOff=2 port=58026 packets=1
+    host_inbound_stale_reply_10752_test.go:638: conntrack dump: 5 v4 flows, none reference box 192.0.2.10 UDP ports [161 58026]
+--- PASS: TestHostInboundStaleReplyPacketPath10752And10764 (4.04s)
+    --- PASS: TestHostInboundStaleReplyPacketPath10752And10764/udp (2.00s)
+    --- PASS: TestHostInboundStaleReplyPacketPath10752And10764/tcp (1.00s)
+    --- PASS: TestHostInboundStaleReplyPacketPath10752And10764/availability-no-conntrack (1.02s)

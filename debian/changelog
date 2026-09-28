@@ -79,6 +79,12 @@ xpf (0.0.0) unstable; urgency=medium
     capability changes, and clear superseded alarms only after current active
     config succeeds; preserve local convergence after peer-only push failures
     (#10782).
+  * Flush box-oriented host-inbound conntrack entries and guard denied TCP/UDP
+    replies before established accepts; disable TCP loose pickup at boot/runtime
+    (#10752/#10764).
+  * Scope stale host-input guards by ingress zone with trusted-reinject
+    fallback, reassert verified TCP loose pickup disablement, and harden
+    packet proof with HIGH exempt-UDP residual (#10752/#10764).
   * Resolve routing-instance ownership by Linux device identity, reject
     alias/tunnel dual claims, and quarantine ambiguous memberships on tolerant
     loads with an apply alarm and alertable metric (#11060).

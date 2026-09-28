@@ -268,6 +268,8 @@ type xpfCollector struct {
 	// the monotonic count of those failures.
 	hostInboundConntrackRevocationPending  *prometheus.Desc
 	hostInboundConntrackRevocationFailures *prometheus.Desc
+	hostInboundTCPlooseDisabled            *prometheus.Desc
+	hostInboundTCPloosePostureFailures     *prometheus.Desc
 
 	// #6800: the xpf-managed service configuration files (rsyslog drop-ins,
 	// chrony sources/threshold) converge on disk and then gate a RUNTIME reload
@@ -1047,6 +1049,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.schedulerRepublishFailOpenStale
 	ch <- c.hostInboundConntrackRevocationPending
 	ch <- c.hostInboundConntrackRevocationFailures
+	ch <- c.hostInboundTCPlooseDisabled
+	ch <- c.hostInboundTCPloosePostureFailures
 	ch <- c.managedServiceReloadPending
 	ch <- c.managedServiceReloadFailures
 	ch <- c.raDeadSenderPending
@@ -1587,6 +1591,19 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.hostInboundConntrackRevocationFailures,
 			prometheus.CounterValue,
 			float64(c.srv.hostInboundConntrackFlushFailuresFn()))
+	}
+	if c.srv.hostInboundTCPlooseDisabledFn != nil {
+		v := 0.0
+		if c.srv.hostInboundTCPlooseDisabledFn() {
+			v = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.hostInboundTCPlooseDisabled,
+			prometheus.GaugeValue, v)
+	}
+	if c.srv.hostInboundTCPloosePostureFailuresFn != nil {
+		ch <- prometheus.MustNewConstMetric(c.hostInboundTCPloosePostureFailures,
+			prometheus.CounterValue,
+			float64(c.srv.hostInboundTCPloosePostureFailuresFn()))
 	}
 
 	// #6800: managed-service reload debt. Emitted BEFORE the dataplane gate for

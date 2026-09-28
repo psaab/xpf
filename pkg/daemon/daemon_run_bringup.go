@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -706,6 +707,10 @@ func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
 var hostForwardingPostureSysctls = map[string]string{
 	"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
 	"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
+	// Disable loose mid-stream TCP pickup. Otherwise a firewall-originated
+	// packet can recreate a revoked host-inbound conntrack entry box-oriented,
+	// whose peer packets would bypass zone judgement via the reply accept.
+	"/proc/sys/net/netfilter/nf_conntrack_tcp_loose": "0",
 	// Allow management sockets to be accepted from a VRF context.
 	"/proc/sys/net/ipv4/tcp_l3mdev_accept": "1",
 	"/proc/sys/net/ipv4/udp_l3mdev_accept": "1",
@@ -720,4 +725,52 @@ func applyHostForwardingPosture() {
 		}
 	}
 	slog.Info("host forwarding posture applied; kernel transit remains with the XDP gate")
+}
+
+// looseTCPSysctlPath is the nf_conntrack TCP loose-pickup knob (#10752). A
+// var (with write/read seams below) so the fault-injected lifecycle test can
+// model a modular kernel where conntrack is initially unloaded (path absent)
+// and appears after the first nft install triggers the module load.
+var looseTCPSysctlPath = "/proc/sys/net/netfilter/nf_conntrack_tcp_loose"
+
+var hostPostureWriteFile = os.WriteFile
+var hostPostureReadFile = os.ReadFile
+
+// reassertTCPloosePosture re-establishes nf_conntrack_tcp_loose=0 after a
+// successful host-inbound install, which guarantees conntrack is loaded (the
+// early boot write may have raced an unloaded module and failed silently).
+// It verifies the value after writing: a mismatch counts as a failure and
+// clears the disabled latch so the operator-visible gauge reflects reality.
+// Self-healing: every successful host-inbound apply re-drives it, so a manual
+// revert or transient failure converges on the next commit. The early-boot
+// window (kernel default 1 until first posture) is benign: conntrack is empty
+// at boot, so no stale entry exists to be picked up before the first install.
+func (d *Daemon) reassertTCPloosePosture() {
+	if err := hostPostureWriteFile(looseTCPSysctlPath, []byte("0"), 0644); err != nil {
+		d.tcpLoosePostureFailures.Add(1)
+		d.tcpLooseDisabled.Store(false)
+		slog.Warn("failed to disable TCP loose conntrack pickup; stale TCP replies rely on the catalog guard alone", "path", looseTCPSysctlPath, "err", err)
+		return
+	}
+	raw, err := hostPostureReadFile(looseTCPSysctlPath)
+	if err != nil || strings.TrimSpace(string(raw)) != "0" {
+		d.tcpLoosePostureFailures.Add(1)
+		d.tcpLooseDisabled.Store(false)
+		slog.Warn("TCP loose conntrack pickup did not verify as disabled", "path", looseTCPSysctlPath, "value", strings.TrimSpace(string(raw)), "err", err)
+		return
+	}
+	d.tcpLooseDisabled.Store(true)
+}
+
+// TCPloosePostureFailures reports monotonic loose-posture failures for metrics.
+func (d *Daemon) TCPloosePostureFailures() uint64 {
+	if d == nil {
+		return 0
+	}
+	return d.tcpLoosePostureFailures.Load()
+}
+
+// TCPlooseDisabled reports whether loose pickup last verified as disabled.
+func (d *Daemon) TCPlooseDisabled() bool {
+	return d != nil && d.tcpLooseDisabled.Load()
 }

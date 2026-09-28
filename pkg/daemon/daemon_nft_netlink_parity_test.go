@@ -557,6 +557,12 @@ var braceSetRe = regexp.MustCompile(`\{[^{}]*,[^{}]*\}`)
 // asserted byte-for-byte via assertNetlinkIifnameSet instead.
 var iifnameSetRe = regexp.MustCompile(`iifname \{[^{}]*\}`)
 
+// iifnameNeSetRe is the negated counterpart (`iifname != { ... }`, the
+// uncovered-ingress fallback scope): same empty-element rendering caveat, so
+// canonicalize contents but PRESERVE the `!=` marker — a negation flip is a
+// fail-open/closed verdict change and must stay visible to the text diff.
+var iifnameNeSetRe = regexp.MustCompile(`iifname != \{[^{}]*\}`)
+
 // normalizeNftDump canonicalizes an `nft list table` dump for comparison: it
 // strips rule handles, collapses whitespace, and SORTS the elements inside each
 // inline `{ a, b }` set (the kernel may reorder set elements) — but it NEVER
@@ -571,6 +577,7 @@ func normalizeNftDump(s string) string {
 		if ln == "" {
 			continue
 		}
+		ln = iifnameNeSetRe.ReplaceAllString(ln, "iifname != { IFSET }")
 		ln = iifnameSetRe.ReplaceAllString(ln, "iifname { IFSET }")
 		ln = braceSetRe.ReplaceAllStringFunc(ln, sortBraceSet)
 		out = append(out, ln)
@@ -636,8 +643,12 @@ func iifnameScopeByRule(t *testing.T, table string) []string {
 
 // ruleIifnameScope decodes one rule's iifname scope: the name(s) compared right
 // after a `meta iifname` load, whether a single Cmp or an anonymous set Lookup.
+// Negation is part of the scope: `iifname != ...` (CmpOpNeq or Lookup Invert)
+// returns "!"+names so a negation flip between oracle and netlink is a per-rule
+// diff, not a silent match.
 func ruleIifnameScope(r *gnft.Rule, setNames map[string][]string) string {
 	var names []string
+	negated := false
 	pending := false
 	var reg uint32
 	for _, e := range r.Exprs {
@@ -651,11 +662,17 @@ func ruleIifnameScope(r *gnft.Rule, setNames map[string][]string) string {
 		case *expr.Cmp:
 			if pending && x.Register == reg {
 				names = append(names, string(bytesTrimRightZero(x.Data)))
+				if x.Op == expr.CmpOpNeq {
+					negated = true
+				}
 			}
 			pending = false
 		case *expr.Lookup:
 			if pending && x.SourceRegister == reg {
 				names = append(names, setNames[x.SetName]...)
+				if x.Invert {
+					negated = true
+				}
 			}
 			pending = false
 		default:
@@ -663,7 +680,11 @@ func ruleIifnameScope(r *gnft.Rule, setNames map[string][]string) string {
 		}
 	}
 	sort.Strings(names)
-	return strings.Join(names, ",")
+	scope := strings.Join(names, ",")
+	if negated && scope != "" {
+		scope = "!" + scope
+	}
+	return scope
 }
 
 // iifScopesEqual compares two per-rule iifname-scope lists index-by-index (NOT
