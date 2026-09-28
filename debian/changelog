@@ -55,6 +55,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
+  * Update same-key MASTER VIP changes in place; normalize address spelling,
+    fence GARP/NA follow-ups before withdrawal, retain unannounced survivors,
+    and bound send-lock scope to one VIP at a time (#10780).
   * Bind multi-zone snapshot authorization to the selected peer connection;
     keep stale-auth reports from re-arming after capable-peer convergence,
     make deferral reports and clears attempt-fresh across peer epochs and

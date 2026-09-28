@@ -177,22 +177,25 @@ func (vi *vrrpInstance) nlAddrDel(link netlink.Link, addr *netlink.Addr) error {
 	return netlink.AddrDel(link, addr)
 }
 
-// addVIPsLocked adds the instance's configured virtual IP set to the interface
+// addVIPsLocked adds the instance's current configured VIP set to the interface
 // and returns which VIPs actuated and which failed. The caller MUST hold vipMu.
-// It replaces the old void addVIPs: a swallowed LinkByName/AddrAdd failure used
-// to let becomeMaster publish an owner that could not receive VIP traffic
-// (#5082). EEXIST counts as applied (the address is present regardless).
 func (vi *vrrpInstance) addVIPsLocked() vipActuationResult {
+	return vi.addVIPsListLocked(vi.vipsSnapshot())
+}
+
+// addVIPsListLocked adds a specific VIP subset. The caller MUST hold vipMu.
+// EEXIST counts as applied (the address is present regardless).
+func (vi *vrrpInstance) addVIPsListLocked(vips []string) vipActuationResult {
 	var res vipActuationResult
 	link, err := vi.nlLinkByName(vi.cfg.Interface)
 	if err != nil {
 		slog.Warn("vrrp: failed to find interface for VIP add",
 			"key", vi.key(), "err", err)
 		res.linkErr = err
-		res.failed = append(res.failed, vi.cfg.VirtualAddresses...)
+		res.failed = append(res.failed, vips...)
 		return res
 	}
-	for _, vip := range vi.cfg.VirtualAddresses {
+	for _, vip := range vips {
 		addr, err := netlink.ParseAddr(vip)
 		if err != nil {
 			slog.Warn("vrrp: failed to parse VIP",
@@ -237,8 +240,8 @@ func (vi *vrrpInstance) removeVIPs() error {
 	return vi.removeVIPsLocked(nil)
 }
 
-// removeVIPsLocked removes the given VIPs (nil ⇒ all configured VirtualAddresses)
-// from the interface via netlink. The caller MUST hold vipMu. Passing a subset
+// removeVIPsLocked removes the given VIPs (nil ⇒ all configured VIPs) from the
+// interface via netlink. The caller MUST hold vipMu. Passing a subset
 // (res.applied) lets a failed/superseded actuation roll back exactly the
 // addresses it added.
 //
@@ -252,20 +255,30 @@ func (vi *vrrpInstance) removeVIPs() error {
 // divergence. Only an AddrDel that fails for another reason against a resolvable
 // interface is a real divergence.
 func (vi *vrrpInstance) removeVIPsLocked(vips []string) error {
+	_, err := vi.removeVIPsResultLocked(vips)
+	return err
+}
+
+// removeVIPsResultLocked is the subset-removal counterpart to addVIPsListLocked.
+// It returns every VIP whose removal failed, plus the first error. The in-place
+// config update keeps a failed removal in its published snapshot so subsequent
+// advertisement and reconcile reflect the address still present in the kernel.
+func (vi *vrrpInstance) removeVIPsResultLocked(vips []string) ([]string, error) {
 	if vips == nil {
-		vips = vi.cfg.VirtualAddresses
+		vips = vi.vipsSnapshot()
 	}
 	if len(vips) == 0 {
-		return nil
+		return nil, nil
 	}
 	link, err := vi.nlLinkByName(vi.cfg.Interface)
 	if err != nil {
 		// Interface gone/mid-rename → no live address to strand; best-effort.
 		slog.Debug("vrrp: failed to find interface for VIP remove",
 			"key", vi.key(), "err", err)
-		return nil
+		return nil, nil
 	}
 	var firstErr error
+	var failed []string
 	for _, vip := range vips {
 		addr, err := netlink.ParseAddr(vip)
 		if err != nil {
@@ -297,13 +310,15 @@ func (vi *vrrpInstance) removeVIPsLocked(vips []string) error {
 			}
 			slog.Debug("vrrp: failed to remove VIP",
 				"key", vi.key(), "vip", vip, "err", err)
+			failed = append(failed, vip)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("del vip %q: %w", vip, err)
 			}
 		}
 	}
-	return firstErr
+	return failed, firstErr
 }
+
 
 // reconcileVIP re-adds this instance's VIPs if it is currently MASTER, then
 // forces a GARP burst — but only if the instance is STILL the current-generation
