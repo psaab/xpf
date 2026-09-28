@@ -1,6 +1,6 @@
 # Kernel allowlist member review: 7.0.0-30-generic (#9506 P-MECH receive proof)
 
-Review base: research/9506-delta at v13 (plan `docs/pr/9506-delta/plan.md`; recipes `docs/pr/9506-delta/f0f9-recipes.md`).
+Review base: research/9506-delta at v14 (plan `docs/pr/9506-delta/plan.md`; recipes `docs/pr/9506-delta/f0f9-recipes.md`).
 Purpose: this record is the completed per-member evidence the M1
 ENFORCED RECEIVE MODE invariant requires. It binds the exact guest
 kernel identity to its source revision, Kconfig posture, and the
@@ -8,10 +8,10 @@ per-branch receive-path findings — each finding closed by member-tree
 text at the pinned tag plus a machine-checked gate.
 STATUS LEGEND: REVIEWED = read in the member tree at the pinned tag
 (file:line quoted, §7 transcript); ESTABLISHED = repo code or recorded
-Tier-2+ evidence; RECIPE-EXECUTED = the specified gate predicate
-executed as a probe this revision (§7) with gap-vs-verdict outputs,
-pending P2 landing at the named site; LANDED = P2-executed gate
-(FALSE for all gates — the P2-entry bar).
+Tier-2+ evidence; RECIPE-EXECUTED = the named F0–F9 truth-table
+predicate was run as a research probe (output retained in the recipe
+matrix / §7), not as LANDED implementation evidence; LANDED = P2-executed
+gate (FALSE for all gates — the P2-entry bar).
 
 ## 0. Member tuple (PINNED — the normative membership predicate)
 
@@ -101,9 +101,10 @@ canonical serialization into required manifest key
 `kernel-source-revision`; the gate asserts the rows EQUAL the §0 pins
 byte-for-byte (a bake recording any other revision FAILS — first
 recording is confirmation, never blank enrollment).
-Status: INSTANTIATED + RECIPE-EXECUTED (v12 `f0f9-recipes.md`
-matrix: member A + coherent `-31`/same-uname B + independent
-per-package skews, ALL-HERE-OK).
+Status: INSTANTIATED + RECIPE-EXECUTED (retained recipe matrix: member
+A + coherent `-31`/same-uname B + independent per-package skews,
+ALL-HERE-OK; v14 separately requires every LANDED boundary to execute
+the complete matrix and pin-agreement test).
 
 ## 3. Kconfig posture (CAPTURED from the member build)
 
@@ -279,10 +280,10 @@ timing bar).
 
 ## 5. Boundary enforcement (MEMBERSHIP at every boundary)
 
-Rule (v12 — full-tuple, no partial coverage): every boundary consumes
-+ compares EVERY tuple field observable at its site vs the REPO-PINNED
-expected values (never leg-vs-leg agreement alone). Genuinely
-unobservable fields are named per boundary below with the
+Rule (v14 — full-tuple and full-matrix, no partial coverage): every
+boundary consumes and compares EVERY tuple field observable at its site
+vs the REPO-PINNED expected values (never leg-vs-leg agreement alone).
+Genuinely unobservable fields are named per boundary below with the
 already-enforced dependency covering them; global non-observables:
 git tag/commit (no boundary reads git — enforced transitively via
 binary==source convention §2 + F9 linkage) and deb archive SHA256s
@@ -291,10 +292,16 @@ identity at bake/download, §1/§8; runtime compares name=ver rows).
 Matrix (retained `f0f9-recipes.md`, ALL-HERE-OK): member A +
 coherent `-31` B + coherent same-uname B + INDEPENDENT
 image/modules/headers/config/allowlist/base mismatches per boundary.
-Current-code gaps DEMONSTRATED executed alongside (specified verdict
-vs current verdict per case). P-MECH does not open permits until the
-LANDED gates (F0–F9) execute at P2 entry; statuses below are honest
-per gate.
+Current-code gaps are demonstrated by specified-verdict vs current-
+verdict outputs. The recipe scripts define truth tables; every LANDED
+boundary test MUST execute/assert this entire matrix, including missing
+and malformed config and the exact tuple pinned at that boundary. The
+repo-level LANDED `pins_consistency` agreement test (distinct from the
+recipe-only helper) MUST compare `bake.py` `PINNED_BASE_*`, Go pin
+constants, and the recipe pin tuple. Any matrix subset or pin
+disagreement is not a PASS. P-MECH does not open permits until the
+LANDED gates (F0–F9) execute at P2 entry; statuses below distinguish
+specified/recipe evidence from implementation tests.
 
 - Bake output: virt-customize run-command beside `:645-646` /
   `:670-671` / `:676` asserts `ls /lib/modules` equals exactly
@@ -356,26 +363,34 @@ per gate.
   Status: RECIPE-EXECUTED.
 - LANE-1: Arm compares the FULL candidate tuple (candidate
   `uname -r` + 3 rows from the candidate inventory vs pins) after
-  `ValidateKernelSegment` (charset/path only, `version.go:124`);
-  Kconfig unobservable at Arm ONLY (candidate not booted;
-  dependency: exact-version pins + bake F8 — same bits ⇒ same
-  config). Gate 2 (`kernel_run.go:551-558`) compares running
-  `uname -r` + running dpkg rows + RUNNING Kconfig
-  (`/boot/config-$(uname -r)`, `_CONFIG_ASSERT` shape) vs
-  candidate rows vs pins (`running==candidate` on full rows,
-  then `running ∈ reviewed tuple` + Kconfig), checked on the
-  verifyAndPromote path so it covers BOTH the normal Gate-2
-  entry AND the BootCurrent-unreadable recovery entry
-  (`:524-531`)
-  (current: candidate-equality only — gap by code read);
-  `xpf-kernel-promote` outer gate refuses no-infer AND non-member;
-  `promotionMarkerPath`/`lastRollPath`/`ReadChannelStatus`
-  (`kernel_status.go:84`, reporting — not enforcement) become
-  EVIDENCE INPUTS to the membership check, never the check
-  itself. (Current no-infer authenticates the xpfd binary path,
-  `kernel_arm_record.go:39` — gap by code read.) Fixtures F6/F7
-  (non-member candidate → Arm refuses; non-member running at
-  Gate 2 → revert path, never promote). Status: RECIPE-EXECUTED.
+  `ValidateKernelSegment` (charset/path only, `version.go:124`).
+  Kconfig is unobservable at Arm ONLY because the candidate is not
+  booted; the bake-time F8 capture defines the approved member config.
+  Same-version/different-kernel-binary integrity is explicitly OUT OF
+  MODEL: `uname -r` and dpkg rows do not prove byte-identical runtime
+  kernel content. This plan assumes trusted package/operator/kernel-write
+  authority; it makes no runtime same-bits claim. If that trust boundary
+  is not accepted, admission remains deny-only until content verification
+  is separately designed and approved. Gate 2 (`kernel_run.go:551-558`)
+  compares running `uname -r` + running dpkg rows + RUNNING Kconfig
+  (`/boot/config-$(uname -r)`, `_CONFIG_ASSERT` shape) vs candidate rows
+  vs pins (`running==candidate` on full rows, then `running ∈ reviewed
+  tuple` + Kconfig). Both normal Gate-2 entry and BootCurrent-unreadable
+  recovery (`kernel_run.go:524-531`) must call `verifyAndPromote`.
+  A LANDED wiring test injects unreadable `BootCurrent` while the candidate
+  is running (`running==candidate`) but its live Kconfig is invalid (e.g.
+  `CONFIG_4KSTACKS=y`); the shared `verifyAndPromote` gate must REVERT and
+  never call promote. Also test bad running package rows. The standalone
+  recipe truth-table run is not wiring evidence. Current
+  candidate-equality-only behavior is a code-read gap; `xpf-kernel-promote`
+  outer gate refuses no-infer AND non-member. `promotionMarkerPath`/
+  `lastRollPath`/`ReadChannelStatus` (`kernel_status.go:84`, reporting —
+  not enforcement) are EVIDENCE INPUTS, never the membership check.
+  Current no-infer authenticates xpfd binary path (`kernel_arm_record.go:39`,
+  not kernel identity). Fixtures F6/F7: non-member candidate → Arm refuses;
+  non-member running at Gate 2 → REVERT, never promote. Status:
+  RECIPE-EXECUTED (truth table); recovery wiring remains a LANDED P2-entry
+  test.
 - Kconfig: `CONFIG_4KSTACKS` third predicate in both offline (bake)
   and live (validate) snippets. Fixture F8 (set/present → FATAL in
   both; member-absent → PASS — executed against the §3 capture).
@@ -393,19 +408,25 @@ per gate.
 + sparse checkout, §7).
   Review scope is exactly the receive-path branches cited in §4
   (RPS/RFS dispatch, TUN write/dispatch/batching/coalesce/timestamp, v4/v6
-  receive→forward chains) — not a whole-tree audit; whole-tree
-  behavior is bounded by exact-version pinning (same bits ⇒ same
-  branches) + the runtime predicates, not by broader reading.
+  receive→forward chains) — not a whole-tree audit. The receive-path
+  claim is bounded by the approved exact version/config tuple and trusted
+  kernel execution, not by broader reading. Same-version/different-binary
+  runtime content integrity is OUT OF MODEL; exact version and package rows
+  do not prove identical running kernel bytes. If that trust boundary fails,
+  P-MECH stays deny-only; no same-bits claim or runtime content-binding
+  test is made here.
 - The member config WAS captured: Canonical-signed
   `linux-buildinfo` deb (SHA-verified, §7), not a local guess.
   `/boot/config-$(uname -r)` on the appliance is re-asserted by
   the F8 snippets at bake and boot (config-substitution between
   capture and gate would fail F8).
 - P2 still executes on the member kernel: LANDED boundary gates
-  (F0–F9 as code), per-tick readbacks (RPS/RFS/GRO/XDP/TC/
-  coalesce), the kprobe sync-proof (B8), and IPv6-parity cells.
-  Until then every gate above is RECIPE-EXECUTED, honestly
-  labeled — never LANDED.
+  (F0–F9 as code, each executing the full recipe matrix with pin
+  agreement), per-tick readbacks (RPS/RFS/GRO/XDP/TC/coalesce), the
+  member-kernel kprobe sync-proof (B8), and IPv6-parity cells. F0–F9
+  truth-table recipes have run; B8's member-kernel probes are SPECIFIED /
+  NOT EXECUTED (the separate host ENOTSOCK probe does not replace them).
+  None of these P2 gates is LANDED yet; until then permits stay closed.
 - Adding a member repeats this entire record (new identity +
   source pin + tree review + config capture + boundary fixtures)
   via reviewed commit; non-members deny by default at every
@@ -524,7 +545,7 @@ Scope honesty: this transcript is archive/tree/code evidence +
  execution (P2) and NOT member-kernel execution (kprobe/readbacks) —
  those remain the P2-entry bar, now with exact expected values.
 
- ## 8. Artifact retention ledger (v13 — answers the gate artifact question)
+## 8. Artifact retention ledger (v14 — evidence state and gate artifact question)
 
  Lane rule permits only `docs/pr/9506-delta/*.md` writes, so durable
  retention is git-pinned .md + content hashes; `/tmp` bytes are
@@ -605,6 +626,7 @@ Scope honesty: this transcript is archive/tree/code evidence +
   rule is the machine form of this contract: `ENOTSOCK-STATUS:
   COMPLETE` + `MATRIX: ALL-HERE-OK` iff the bound-fd leg with
   controls + cleanup succeeded; any SKIPPED leg forces
-  `INCOMPLETE` (exit 4), never ALL-HERE-OK. The B8 gates above
-  are RECIPE-EXECUTED (i–iv specified + retained); LANDED is
-  P2's entry bar.
+  `INCOMPLETE` (exit 4), never ALL-HERE-OK. The B8 gates above are
+  SPECIFIED / NOT EXECUTED (i–iv specified + retained); only the host
+  ENOTSOCK probe ran, which is not member-kernel evidence. LANDED is P2's
+  entry bar.

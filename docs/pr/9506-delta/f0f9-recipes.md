@@ -1,22 +1,28 @@
-# P-MECH kernel-member boundary recipes F0–F9 + B8 probes (v12 retained)
+# P-MECH kernel-member boundary recipes F0–F9 + B8 probes (v14 contract)
 
 Pinned recipe store for `kernel-allowlist-7.0.0-30.md` §5. Lane rule
-allows only `docs/pr/9506-delta/*.md` writes, so the runnable scripts
-live here as verbatim fenced blocks (extraction below) — each block is
-the recipe, byte-identical to what P2 lands at the named site (adapted
-from probe-shape to gate-shape). Per-boundary outputs were produced by
-extracting + running THESE blocks (matrix at the end); content hashes
-follow the matrix.
+allows only `docs/pr/9506-delta/*.md` writes, so runnable truth-table
+fixtures live here as fenced blocks. These blocks specify the complete
+behavioral matrix; they are NOT claimed to be byte-identical to eventual
+Go/bake/kernel-site implementation. Any adaptation at a LANDED boundary
+must preserve and execute the same full matrix, with the adapted test
+assertions reviewed against these fixtures. Per-boundary outputs recorded
+below come from extracting and running the scripts named in the ledger.
 
-v12 contract (gate Fix-1): EVERY recipe consumes + compares EACH tuple
-field observable at its boundary (member A + coherent `-31` B +
-coherent same-uname B + INDEPENDENT per-field mismatches). Fields
-genuinely unobservable at a boundary are named in that recipe's
-docstring with the already-enforced dependency that covers them
-(record §5 observability table is normative).
+v14 contract: EVERY boundary's LANDED test consumes and compares EACH
+observable tuple field (member A + coherent `-31` B + coherent same-Uname
+B + INDEPENDENT per-field mismatches), across every supplied kernel row;
+it covers missing/malformed config and the exact boundary-pinned tuple.
+The repo-level LANDED `pins_consistency` agreement test (distinct from
+the recipe-only helper at the bottom of this file) MUST compare
+`bake.py` `PINNED_BASE_*`, Go pin constants, and the recipe pin tuple.
+A subset matrix, stale artifact, or pin disagreement is not a PASS.
+Fields genuinely unobservable at a boundary are named in that recipe's
+docstring with the already-enforced dependency that covers them (record
+§5 observability table is normative).
 
-Member pins (identical in every script; `pins_consistency.sh` enforces
-the per-script pin map):
+Member pins are identical in every recipe script; the bottom
+`pins_consistency.sh` checks only that per-script pin map.
 
 - `UNAME = 7.0.0-30-generic`, `VER = 7.0.0-30.30`
 - `TAG = Ubuntu-7.0.0-30.30`, `COMMIT = d974a4063f5c03c13b4f241a9ab511750e0b9f12`
@@ -441,20 +447,27 @@ sys.exit(rc)
 ## F6/F7 LANE-1 Arm + Gate 2
 
 P2 sites: Arm after `ValidateKernelSegment` (`version.go:124` —
-charset/path only, not membership); Gate 2
-(`kernel_run.go:551-558`); promote outer gate. Arm observes the
-candidate (`uname -r` + dpkg rows from the candidate inventory +
-journal fields); Kconfig of the NON-BOOTED candidate is genuinely
-unobservable at Arm (dependency: exact-version pins + bake F8 —
-same bits ⇒ same config). Gate 2 runs AFTER boot and observes
-running `uname -r` + running dpkg rows + RUNNING Kconfig
-(`/boot/config-$(uname -r)`, `_CONFIG_ASSERT` shape) + journal
-candidate — Kconfig is IN the Gate-2 predicate (v13 Fix-1b),
-checked on the verifyAndPromote path so it covers BOTH the normal
-Gate-2 entry (`:551-558`) AND the BootCurrent-unreadable recovery
-entry (`:524-531`). Base digest unobservable at both (publish-chain
-dependency). Current behavior cited from code reads (gap noted);
-Go LANDED test at P2 executes the same truth table.
+charset/path only, not membership); Gate 2 (`kernel_run.go:551-558`);
+promote outer gate. Arm observes the candidate (`uname -r` + dpkg rows
+from the candidate inventory + journal fields); Kconfig of the
+NON-BOOTED candidate is unobservable at Arm. Exact version/package rows
+and bake F8 pin the approved member config, but SAME-VERSION/DIFFERENT-
+BINARY runtime content integrity is explicitly OUT OF MODEL (see
+`kernel-allowlist-7.0.0-30.md` §6); no same-bits claim is made.
+Gate 2 runs AFTER boot and observes running `uname -r`, running dpkg rows,
+RUNNING Kconfig (`/boot/config-$(uname -r)`, `_CONFIG_ASSERT` shape), and
+journal candidate; its predicate requires `running==candidate` on full
+rows, reviewed-member membership, and the running Kconfig.
+The required `verifyAndPromote` call path covers normal Gate-2 entry
+(`kernel_run.go:551-558`) and BootCurrent-unreadable recovery
+(`kernel_run.go:524-531`).
+A LANDED wiring test injects unreadable `BootCurrent` with
+`running==candidate` and invalid live Kconfig (e.g. `CONFIG_4KSTACKS=y`);
+the shared gate must REVERT and never promote. Also test bad running
+package rows. The recipe below proves only the predicate, not that call
+path. Base digest is unobservable at both (publish-chain dependency).
+Current code is cited from the gap review; the Go LANDED predicate and
+wiring tests remain P2 entry gates.
 
 ```python f6f7_lane1.py
 #!/usr/bin/env python3
@@ -580,7 +593,12 @@ else echo "F9 negative-control: -31-substituted copy lacks member strings → VO
 exit $grade
 ```
 
-## pins consistency (per-script pin map; drift fails loudly)
+## Recipe-script pin-map consistency (recipe fixture only)
+
+This extracted helper verifies only that the F0–F9 scripts share their
+own pinned values; it does not compare repository `bake.py` or Go
+constants. The separate repo-level LANDED agreement test above owns that
+cross-source assertion.
 
 ```sh pins_consistency.sh
 #!/bin/sh
