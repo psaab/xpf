@@ -94,11 +94,11 @@ func TestFabricAllowlistUnary_DeniesDestructiveAndUnknownMethods(t *testing.T) {
 }
 
 // TestFabricAllowlistUnary_SystemActionNestedGate verifies the nested-action
-// decision: SystemAction is admitted on the fabric ONLY for the two proxied
-// cross-node cluster-failover forms; every destructive / local-only action is
-// denied. On revert (SystemAction added to the plain allowlist, or the nested
-// gate removed) the zeroize case goes RED — a factory-reset wipe becomes
-// reachable unauth on the fabric IP.
+// decision: SystemAction is admitted on the fabric only for the two proxied
+// cross-node failover forms and the exact persistent-NAT clear action;
+// destructive / local-only actions and near-misses remain denied. On revert
+// (the nested gate removed) the zeroize case goes RED — a factory-reset wipe
+// becomes reachable unauth on the fabric IP.
 func TestFabricAllowlistUnary_SystemActionNestedGate(t *testing.T) {
 	s := &Server{}
 	info := &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_SystemAction_FullMethodName}
@@ -109,6 +109,15 @@ func TestFabricAllowlistUnary_SystemActionNestedGate(t *testing.T) {
 		"halt",
 		"power-off",
 		"clear-config-lock",
+		// Exact clear exception must not admit near-misses if a future edit
+		// widens equality to a prefix/contains or normalizing predicate.
+		"clear-persistent-nat:extra", // suffixed
+		"xclear-persistent-nat",      // prefixed
+		"Clear-persistent-nat",       // case variant
+		" clear-persistent-nat",      // leading whitespace
+		"clear-persistent-nat ",      // trailing whitespace
+		"clear-arp",                  // sibling clear-* action
+		"clear-nat-counters",         // sibling clear-* action
 		"cluster-failover-reset:1", // local-only, never proxied
 		"cluster-failover:1",       // no node suffix -> local-only, never proxied
 		// Malformed / out-of-range failover suffixes must be denied AT THE
