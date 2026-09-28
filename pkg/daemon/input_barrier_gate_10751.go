@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
 // ensureEarlyInputProtectionForNaming verifies the #10751 pre-networkd input
@@ -222,17 +223,51 @@ func hostInboundHasPendingEnforcingIntentFromSnapshots(cfg *config.Config, snaps
 //     concurrent flush plus broken list would otherwise record a handoff
 //     over wiped tables. Retry the entire apply before any removal.
 //
+// expectedTables names the enforcement tables this handoff installed and now
+// relies on (main table, plus the gap table when one stands). After a
+// successful removal the helper re-reads their presence (#10751 R4-5): a
+// flush interleaved between the install and the removal wipes enforcement
+// while absent-removal still succeeds, so presence must be re-proven AFTER
+// the removal, not just before. A missing table (or an unreadable readback)
+// reinstalls the guard and refuses WITHOUT recording handoff-done. The
+// teardown path passes nil — intended-empty needs no readback. A flush AFTER
+// this readback is an accepted residual (no kernel-side transaction couples
+// the two syscalls; the window is one list round-trip).
+//
 // Post-handoff calls remove idempotently (barrier expected absent — e.g.
 // ExecReload residue cleanup); no attestation there. Install success implies
 // exact shape: the installer flushes one atomic nf_tables batch, so success
 // leaves no partial table to verify.
-func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config) error {
+func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTables []string) error {
 	if d.earlyInputHandoffDone.Load() {
 		return nftInstaller.RemoveEarlyInputBarrier()
 	}
 	present, err := nftInstaller.EarlyInputBarrierPresent()
 	if err == nil && present {
-		return nftInstaller.RemoveEarlyInputBarrier()
+		if removeErr := nftInstaller.RemoveEarlyInputBarrier(); removeErr != nil {
+			return removeErr
+		}
+		for _, table := range expectedTables {
+			ok, readErr := nftInstaller.TablePresent(table)
+			if readErr == nil && ok {
+				continue
+			}
+			if readErr != nil {
+				slog.Warn("cannot re-verify enforcement after barrier removal; reinstalling guard and refusing handoff",
+					"table", table, "err", tagNftInstallErr(readErr))
+			} else {
+				slog.Warn("enforcement table missing after barrier removal (concurrent flush?); guard reinstalled, handoff refused",
+					"table", table)
+			}
+			if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
+				return fmt.Errorf("reinstall early guard at handoff: %w", tagNftInstallErr(installErr))
+			}
+			if readErr != nil {
+				return fmt.Errorf("enforcement table %s unreadable after barrier removal; guard reinstalled, handoff refused", table)
+			}
+			return fmt.Errorf("enforcement table %s missing after barrier removal; guard reinstalled, handoff refused", table)
+		}
+		return nil
 	}
 	if err != nil {
 		slog.Warn("cannot re-attest early barrier at handoff; reinstalling guard and refusing handoff",
@@ -247,6 +282,16 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config) error {
 		return errors.New("early barrier state unreadable at handoff; guard reinstalled, handoff refused")
 	}
 	return errors.New("early barrier missing at handoff; guard reinstalled, handoff refused")
+}
+
+// hostInboundHandoffExpectedTables names the enforcement tables a fallback
+// handoff relies on: the main table, plus the gap table when one stands
+// beside it.
+func hostInboundHandoffExpectedTables(gapActive bool) []string {
+	if gapActive {
+		return []string{xnft.HostInboundTableName, xnft.HostInboundGapTableName}
+	}
+	return []string{xnft.HostInboundTableName}
 }
 
 // errEarlyInputProtectionRefused marks an activation refusal: the early

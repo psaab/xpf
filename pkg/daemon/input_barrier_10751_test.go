@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -1614,5 +1615,134 @@ func TestSnapshotRemovalStillHandsOff10751(t *testing.T) {
 	}
 	if !d.earlyInputHandoffDone.Load() {
 		t.Fatal("a vanished address must not block the handoff")
+	}
+}
+
+// --- #10751 R4-5: post-remove enforcement readback ---
+//
+// After a successful barrier removal the handoff re-reads the presence of
+// the enforcement tables it relies on: a flush interleaved between the
+// install and the removal wipes enforcement while absent-removal still
+// succeeds.
+
+// TestHandoffRefusesWhenEnforcementMissingAfterRemove10751: barrier present
+// at attestation, removal succeeds, but the just-installed table is gone at
+// re-read — reinstall the guard and refuse WITHOUT recording handoff-done.
+// RED on revert: drop the post-remove loop and the handoff succeeds.
+func TestHandoffRefusesWhenEnforcementMissingAfterRemove10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{
+		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
+		tablePresent: func(name string) (bool, error) {
+			if name == xnft.HostInboundTableName {
+				return false, nil // wiped between install and removal
+			}
+			return true, nil
+		},
+	}
+	nftInstaller = fake
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(hostInboundTestConfig())
+	if err == nil || !strings.Contains(err.Error(), "missing after barrier removal") {
+		t.Fatalf("apply err = %v, want post-remove enforcement refusal", err)
+	}
+	var removes, reinstalls int
+	for _, ev := range fake.earlyInputBarrierCalls {
+		switch ev {
+		case "remove":
+			removes++
+		case "install-lifeline":
+			reinstalls++
+		}
+	}
+	if removes != 1 {
+		t.Fatalf("barrier calls = %v, want exactly the attested removal to have run", fake.earlyInputBarrierCalls)
+	}
+	if reinstalls != 2 {
+		t.Fatalf("barrier calls = %v, want pre-apply converge + post-verify reinstall", fake.earlyInputBarrierCalls)
+	}
+	if d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff marked done over wiped enforcement")
+	}
+	if !d.hostInboundLastApplyFailed.Load() {
+		t.Fatal("post-remove refusal must record STALE")
+	}
+}
+
+// TestHandoffRefusesOnUnreadableEnforcement10751: an unreadable post-remove
+// readback refuses too — it cannot prove the enforcement survived.
+func TestHandoffRefusesOnUnreadableEnforcement10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	readErr := errors.New("nftables list denied")
+	fake := &fakeNftInstaller{
+		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
+		tablePresent:             func(string) (bool, error) { return false, readErr },
+	}
+	nftInstaller = fake
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(hostInboundTestConfig())
+	if err == nil || !strings.Contains(err.Error(), "unreadable after barrier removal") {
+		t.Fatalf("apply err = %v, want unreadable-readback refusal", err)
+	}
+	if d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff marked done over unverifiable enforcement")
+	}
+}
+
+// TestHandoffVerifiesGapTableWhenStanding10751: a fallback handoff with a
+// standing gap fence expects BOTH tables; a missing gap table refuses even
+// when the main table reads present.
+func TestHandoffVerifiesGapTableWhenStanding10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	installErr := errors.New("real host-inbound load failed")
+	fake := &fakeNftInstaller{
+		hostInbound:              func(xnft.HostInboundSpec) error { return installErr },
+		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
+		tablePresent: func(name string) (bool, error) {
+			return name != xnft.HostInboundGapTableName, nil
+		},
+	}
+	nftInstaller = fake
+	d := &Daemon{}
+	d.hostInboundEnforced.Store(true) // retained generation; empty coverage forces a gap
+	d.hostInboundCoveredAddrs = map[string]struct{}{}
+	err := d.applyHostInboundFilter(hostInboundTestConfig())
+	if err == nil || !strings.Contains(err.Error(), xnft.HostInboundGapTableName) || !strings.Contains(err.Error(), "missing after barrier removal") {
+		t.Fatalf("apply err = %v, want gap-table post-remove refusal", err)
+	}
+	if !d.hostInboundGapFenceActive.Load() {
+		t.Fatal("fixture must have installed a gap fence; else the cell is vacuous")
+	}
+	if got, want := fake.tablePresentCalls, []string{xnft.HostInboundTableName, xnft.HostInboundGapTableName}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tablePresent calls = %v, want %v", got, want)
+	}
+	if d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff marked done with the gap table missing")
+	}
+}
+
+// TestHandoffSkipsVerifyOnTeardown10751: the no-enforcement teardown passes
+// no expected tables — intended-empty needs no readback, so even a
+// report-everything-absent kernel still hands off, consulting nothing.
+func TestHandoffSkipsVerifyOnTeardown10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{
+		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
+		tablePresent:             func(string) (bool, error) { return false, nil },
+	}
+	nftInstaller = fake
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(&config.Config{}); err != nil {
+		t.Fatalf("teardown apply err = %v, want nil", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("teardown must hand off without consulting table presence")
+	}
+	if len(fake.tablePresentCalls) != 0 {
+		t.Fatalf("tablePresent calls = %v, want none on the teardown path", fake.tablePresentCalls)
 	}
 }

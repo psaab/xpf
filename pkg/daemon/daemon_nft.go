@@ -710,7 +710,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				return nil
 			}
 		}
-		if err := d.removeEarlyInputBarrierAtHandoff(cfg); err != nil {
+		if err := d.removeEarlyInputBarrierAtHandoff(cfg, nil); err != nil {
 			err = tagNftInstallErr(err)
 			slog.Warn("failed to remove early host-input barrier after no-enforcement teardown", "err", err)
 			// The tables are gone but the handoff is incomplete: record the
@@ -859,7 +859,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
 			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) {
 				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet")
-			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg); barrierErr != nil {
+			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load())); barrierErr != nil {
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
@@ -938,7 +938,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
 	} else if pendingRetainsBarrier {
 		slog.Warn("retaining early host-input barrier after real install: enforcing scopes have no address yet")
-	} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg); barrierErr != nil {
+	} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, []string{xnft.HostInboundTableName}); barrierErr != nil {
 		barrierErr = tagNftInstallErr(barrierErr)
 		slog.Warn("failed to remove early host-input barrier after real install", "err", barrierErr)
 		barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound install: %w", barrierErr)

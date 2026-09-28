@@ -84,6 +84,11 @@ type Installer interface {
 	// kernel/permission failure -> error, preserving the fail-closed teardown
 	// contract #5790).
 	DeleteTable(name string) error
+	// TablePresent reports whether the named inet-family table is currently
+	// installed (kernel readback). The daemon's handoff re-verifies its
+	// just-installed enforcement through it after removing the early
+	// barrier (#10751 R4-5 micro-TOCTOU close).
+	TablePresent(name string) (bool, error)
 	// InstallIpsecDivert installs the S3 fence+divert capture table in both
 	// inet and bridge families. Queue rules are fail-closed (no bypass).
 	InstallIpsecDivert(spec IpsecDivertSpec) error
@@ -346,6 +351,16 @@ func (in *netlinkInstaller) DeleteTable(name string) error {
 		return fmt.Errorf("nftables delete table %s: %w", name, err)
 	}
 	return nil
+}
+
+// TablePresent reports whether the named inet-family table is currently
+// installed.
+func (in *netlinkInstaller) TablePresent(name string) (bool, error) {
+	c, err := in.newConn()
+	if err != nil {
+		return false, fmt.Errorf("nftables conn: %w", err)
+	}
+	return tableExists(c, name)
 }
 
 // tableExists reports whether an inet table of the given name is installed.

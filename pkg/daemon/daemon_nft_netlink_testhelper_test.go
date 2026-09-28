@@ -51,6 +51,7 @@ func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error          
 func (noopNftInstaller) RemoveIpsecDivert() error                                  { return nil }
 func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)              { return fakeLo0Rules(s), nil }
 func (noopNftInstaller) DeleteTable(string) error                                  { return nil }
+func (noopNftInstaller) TablePresent(string) (bool, error)                         { return true, nil }
 
 // fakeNftInstaller is the per-test failure-injection seam. A nil hook succeeds
 // (returns nil); a set hook decides the result and can capture the spec/name for
@@ -92,9 +93,19 @@ type fakeNftInstaller struct {
 	// #9506 F1 ambiguity fallback: this hook succeeds only after the fake has
 	// observed the guard candidate, mirroring the production installer’s
 	// install+readback contract.
-	quarantineGuard func(xnft.IpsecDivertSpec) error
-	quarantineCalls []string
-	overlayReadback func(xnft.HostInputFenceOverlay) error
+	quarantineGuard   func(xnft.IpsecDivertSpec) error
+	quarantineCalls   []string
+	overlayReadback   func(xnft.HostInputFenceOverlay) error
+	tablePresent      func(string) (bool, error)
+	tablePresentCalls []string
+}
+
+func (f *fakeNftInstaller) TablePresent(name string) (bool, error) {
+	f.tablePresentCalls = append(f.tablePresentCalls, name)
+	if f.tablePresent != nil {
+		return f.tablePresent(name)
+	}
+	return true, nil
 }
 
 func (f *fakeNftInstaller) InstallEarlyInputBarrier() error {
@@ -222,7 +233,8 @@ func (c countingNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error) {
 	*c.calls++
 	return fakeLo0Rules(s), nil
 }
-func (c countingNftInstaller) DeleteTable(string) error { *c.calls++; return nil }
+func (c countingNftInstaller) DeleteTable(string) error          { *c.calls++; return nil }
+func (c countingNftInstaller) TablePresent(string) (bool, error) { return true, nil }
 
 // hostInboundViewAddrs reports whether a HostInboundSpec view/unzoned set scopes
 // the given bare address in the requested family. Used by fence/real spec
