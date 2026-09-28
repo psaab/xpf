@@ -729,18 +729,16 @@ func hostInboundVRFMasterNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) 
 		}
 		master := config.LinuxIfName("vrf-" + snap.RoutingInstance)
 		if previous, exists := out[snap.LinuxName]; exists && previous != master {
-			// A collapsed netdev (base + unit 0 share one Linux device,
-			// #5699) split across two routing instances — e.g. a bare
-			// member in one and an explicit unit in another, where
-			// explicit-beats-bare (#10173) assigns the two rows to
-			// different VRFs — has no single LOCAL_IN identity: the
-			// kernel device can be enslaved to only one VRF master, so
-			// either candidate is a guess. Scoping to one risks judging
-			// the wrong VRF's members, and denying both candidates would
-			// drop all host traffic on two VRFs for one ambiguous
-			// device. Leave it to destination-only judgment (pre-#10431
-			// behavior): the claims stage skips the empty target, so no
-			// ingress scope is emitted for it.
+			// A malformed or hand-built snapshot can still carry one collapsed
+			// netdev under two VRF names. Strict config rejects that ownership
+			// conflict and tolerant compilation removes both memberships before
+			// snapshot build; retain this fail-closed guard for callers that
+			// bypass that compiler boundary. The kernel device can be enslaved
+			// to one master only, so either candidate is a guess. Scoping to one
+			// risks judging the wrong VRF, and denying both candidates would drop
+			// all host traffic on two VRFs for one ambiguous device.
+			// The claims stage skips the empty target, so no ingress scope is
+			// emitted for it.
 			out[snap.LinuxName] = ""
 			continue
 		}

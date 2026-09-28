@@ -56,6 +56,7 @@ func (f *fakeVRFLinks9819) LinkDel(l netlink.Link) error {
 
 func (f *fakeVRFLinks9819) LinkSetUp(netlink.Link) error                   { return nil }
 func (f *fakeVRFLinks9819) LinkSetMaster(netlink.Link, netlink.Link) error { return nil }
+func (f *fakeVRFLinks9819) LinkSetNoMaster(netlink.Link) error         { return nil }
 
 func (f *fakeVRFLinks9819) LinkList() ([]netlink.Link, error) {
 	out := make([]netlink.Link, 0, len(f.links))

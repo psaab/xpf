@@ -399,6 +399,21 @@ func (c *xpfCollector) collectVRFOverlapPBRAdmitted(ch chan<- prometheus.Metric)
 	}
 }
 
+// collectRIMemberDeviceConflicts emits an explicit zero/nonzero count for the
+// tolerant-load #11060 quarantine. The metadata is captured at compile time so
+// sanitizing RoutingInstances does not erase the incident from monitoring.
+func (c *xpfCollector) collectRIMemberDeviceConflicts(ch chan<- prometheus.Metric) {
+	if c.srv == nil || c.srv.store == nil {
+		return
+	}
+	cfg := c.srv.store.ActiveConfig()
+	if cfg == nil {
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(c.riMemberDeviceConflicts,
+		prometheus.GaugeValue, float64(len(cfg.QuarantinedRIMemberDeviceConflicts)))
+}
+
 func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
 	// #3345: on a counter-read failure, SKIP emitting the sample instead of
 	// reporting a misleading 0, and bump xpf_counter_read_errors_total. A

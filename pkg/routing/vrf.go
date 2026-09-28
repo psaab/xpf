@@ -25,6 +25,10 @@ type vrfOps interface {
 	LinkDel(netlink.Link) error
 	LinkSetUp(netlink.Link) error
 	LinkSetMaster(netlink.Link, netlink.Link) error
+	// #11060: detach a quarantined member back to the default routing
+	// context (UnbindInterfaceFromVRF). *netlink.Handle already provides
+	// this; fakes add a no-op or recording stub.
+	LinkSetNoMaster(netlink.Link) error
 	// #847: enumerate kernel devices to find orphan VRFs (left
 	// over from a routing-instance rename across a daemon restart).
 	LinkList() ([]netlink.Link, error)
@@ -227,6 +231,56 @@ func (v *vrfManager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	}
 	slog.Info("interface bound to VRF", "interface", ifaceName, "vrf", vrfName)
 	return nil
+}
+
+// UnbindInterfaceFromVRFs detaches ifaceName only when its current master is
+// one of the named VRF devices. It deliberately leaves unrelated masters
+// untouched so a stale quarantine cannot detach a link owned by another
+// subsystem. It takes no manager lock and returns whether it detached a link.
+func (v *vrfManager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []string) (bool, error) {
+	if v == nil || v.ops == nil || ifaceName == "" {
+		return false, nil
+	}
+	iface, err := v.ops.LinkByName(ifaceName)
+	if err != nil {
+		if isLinkNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("interface %s lookup: %w", ifaceName, err)
+	}
+	if iface == nil || iface.Attrs() == nil || iface.Attrs().MasterIndex == 0 {
+		return false, nil
+	}
+	// The observed master index and subsequent LinkSetNoMaster are not atomic
+	// against arbitrary netlink writers. Daemon apply and periodic reassert
+	// serialize callers through applySem; concurrent out-of-band `ip link` or
+	// network-manager master changes are outside this guarantee.
+	masterIndex := iface.Attrs().MasterIndex
+	var lookupErrs []error
+	for _, instanceName := range instanceNames {
+		if instanceName == "" {
+			continue
+		}
+		vrf, err := v.ops.LinkByName("vrf-" + instanceName)
+		if err != nil {
+			if !isLinkNotFound(err) {
+				lookupErrs = append(lookupErrs, fmt.Errorf("VRF %s lookup: %w", instanceName, err))
+			}
+			continue
+		}
+		masterVRF, ok := vrf.(*netlink.Vrf)
+		if !ok || masterVRF.Attrs() == nil || masterVRF.Attrs().Index != masterIndex {
+			continue
+		}
+		if err := v.ops.LinkSetNoMaster(iface); err != nil {
+			return false, fmt.Errorf("unbind %s from VRF %s: %w", ifaceName, instanceName, err)
+		}
+		return true, nil
+	}
+	if len(lookupErrs) > 0 {
+		return false, errors.Join(lookupErrs...)
+	}
+	return false, nil
 }
 
 // errLinkNotFound is an internal sentinel wrapper used when the
