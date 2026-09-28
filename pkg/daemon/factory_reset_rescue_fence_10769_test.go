@@ -20,6 +20,7 @@ import (
 func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 	t.Run("successful wipe remains fenced", func(t *testing.T) {
 		isolateFactoryResetOwnershipPaths(t)
+		isolateFactoryResetIdentityPaths(t)
 		dir := t.TempDir()
 		store, err := configstore.New(filepath.Join(dir, "xpf.conf"))
 		if err != nil {
@@ -72,6 +73,7 @@ func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 
 	t.Run("failed wipe resumes saves", func(t *testing.T) {
 		isolateFactoryResetOwnershipPaths(t)
+		isolateFactoryResetIdentityPaths(t)
 		store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 		if err != nil {
 			t.Fatalf("configstore.New: %v", err)

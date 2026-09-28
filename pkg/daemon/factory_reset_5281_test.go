@@ -29,11 +29,37 @@ func isolateFactoryResetOwnershipPaths(t *testing.T) {
 	})
 }
 
+// isolateFactoryResetIdentityPaths redirects the identity snapshot/restore
+// files and the post-wipe lease verification into a disposable tree. Every
+// factoryReset test must call it: without isolation a failed-wipe test would
+// restore into the REAL /etc/hostname, /etc/hosts, /etc/resolv.conf and
+// /etc/ssh/ssh_known_hosts, and a success test would verify the REAL Kea
+// lease paths.
+func isolateFactoryResetIdentityPaths(t *testing.T) {
+	t.Helper()
+	oldHostname, oldHosts, oldResolv, oldKnown := hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath
+	oldKea := resetKeaLeaseCurrents
+	root := t.TempDir()
+	hostnamePath = filepath.Join(root, "etc", "hostname")
+	resetHostsPath = filepath.Join(root, "etc", "hosts")
+	resetResolvConfPath = filepath.Join(root, "etc", "resolv.conf")
+	resetKnownHostsPath = filepath.Join(root, "etc", "ssh", "ssh_known_hosts")
+	resetKeaLeaseCurrents = []string{
+		filepath.Join(root, "var", "lib", "kea", "kea-leases4.csv"),
+		filepath.Join(root, "var", "lib", "kea", "kea-leases6.csv"),
+	}
+	t.Cleanup(func() {
+		hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath = oldHostname, oldHosts, oldResolv, oldKnown
+		resetKeaLeaseCurrents = oldKea
+	})
+}
+
 // factoryReset must Acquire applySem BEFORE wiping, enter the terminal reset
 // generation on success, release the gate afterward, and thereafter REJECT new
 // config work (commit / HA-sync).
 func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	// (1) Gate-first: hold applySem externally with a tight deadline. factoryReset
@@ -103,6 +129,7 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 // NOT stop the daemon).
 func TestFactoryResetFailClosedClearsResetGeneration(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	wantErr := errors.New("wipe boom")

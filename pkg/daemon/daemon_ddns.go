@@ -96,7 +96,7 @@ func (d *Daemon) runDDNSReconcileTick(ctx context.Context) {
 func (d *Daemon) runGuardedDDNSReconcile(ctx context.Context) {
 	d.ddnsResetMu.Lock()
 	defer d.ddnsResetMu.Unlock()
-	if d.isResetting() {
+	if d.ddns == nil || d.isResetting() {
 		return
 	}
 	if !d.ddnsReconcileInFlight.CompareAndSwap(false, true) {

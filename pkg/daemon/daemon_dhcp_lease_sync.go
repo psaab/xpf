@@ -405,7 +405,19 @@ func (d *Daemon) nudgeDHCPLeaseSync() {
 // peer-only replacement.
 //
 // Called from the MASTER-takeover path BEFORE dhcpServer.ApplyAsync(start).
+// The VRRP event loop holds no applySem, so factory reset cannot block this
+// direct memfile writer by gate alone: it observes the reset generation AND
+// crosses ddnsResetMu, which factoryReset holds across the wipe and its
+// post-wipe lease verification. A resetting check alone cannot close the
+// race — a pre-seed already inside its write could land after the wipe's
+// final stat — but mutual exclusion with the wipe can: a pre-seed ordered
+// before the wipe has its output erased by it, and one ordered after aborts
+// on the still-set reset bit (success path) or correctly re-seeds for the
+// retained config (failed-reset path, bit cleared).
 func (d *Daemon) preSeedDHCPLeaseMemfile(stillMastering bool) {
+	if d.isResetting() {
+		return
+	}
 	ss := d.getSessionSync()
 	if ss == nil || d.dhcpServer == nil {
 		return
@@ -418,7 +430,12 @@ func (d *Daemon) preSeedDHCPLeaseMemfile(stillMastering bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), dhcpLeaseReadTimeout)
 	defer cancel()
 	now := time.Now()
+	d.ddnsResetMu.Lock()
+	defer d.ddnsResetMu.Unlock()
 	for _, family := range []int{4, 6} {
+		if d.isResetting() {
+			return
+		}
 		var snapshot dhcpserver.LeaseSyncSnapshot
 		if family == 4 {
 			snapshot = ss.PeerDHCPLeaseSnapshot4()
@@ -464,6 +481,9 @@ func (d *Daemon) preSeedDHCPLeaseMemfile(stillMastering bool) {
 // filter as memfile pre-seeding, so an unproven or mismatched scope remains
 // conservative while a proven peer snapshot cannot seed another RG.
 func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
+	if d.isResetting() {
+		return
+	}
 	ss := d.getSessionSync()
 	if ss == nil || d.dhcpServer == nil {
 		return
@@ -484,7 +504,12 @@ func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 	want4 := cfg != nil && cfg.System.DHCPServer.DHCPLocalServer != nil && len(leases4) > 0
 	want6 := cfg != nil && cfg.System.DHCPServer.DHCPv6LocalServer != nil && len(leases6) > 0
 
-	if want4 {
+	if want4 && !d.isResetting() {
+		// No ddnsResetMu here (unlike the memfile pre-seed): this writer only
+		// reaches the lease files through a LIVE Kea, which the reset stops
+		// before erasure, and holding the mutex across the bounded socket
+		// wait would wedge factoryReset's wipe-hold on a socket that never
+		// appears. The per-family generation recheck is the fence.
 		if d.dhcpServer.WaitControlSocket4(ctx, dhcpLeaseSeedSocketWait) {
 			n, err := d.dhcpServer.SeedSyncLeases4(ctx, leases4, now)
 			ss.RecordDHCPLeasesSeeded(n)
@@ -497,7 +522,7 @@ func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 			slog.Warn("cluster: DHCP v4 control socket not ready; relying on memfile pre-seed")
 		}
 	}
-	if want6 {
+	if want6 && !d.isResetting() {
 		if d.dhcpServer.WaitControlSocket6(ctx, dhcpLeaseSeedSocketWait) {
 			n, err := d.dhcpServer.SeedSyncLeases6(ctx, leases6, now)
 			ss.RecordDHCPLeasesSeeded(n)
