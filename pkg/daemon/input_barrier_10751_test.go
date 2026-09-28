@@ -20,6 +20,7 @@ import (
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/psaab/xpf/pkg/vrrp"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
@@ -2264,6 +2265,7 @@ func TestMarkerOwnershipLifecycle10751(t *testing.T) {
 	if !EarlyInputHandoffLive() {
 		t.Fatal("handoff marker not live after set: the daemon must hold its markers (stale ownership would install)")
 	}
+	assertMarkerMode060010751(t, EarlyInputHandoffMarkerPath)
 	clearEarlyInputHandoffMarker()
 	if EarlyInputHandoffLive() {
 		t.Fatal("handoff marker still live after clear")
@@ -2272,12 +2274,141 @@ func TestMarkerOwnershipLifecycle10751(t *testing.T) {
 	if !HostInboundFirstApplyLive() {
 		t.Fatal("first-apply marker not live after note: the daemon must hold its markers")
 	}
+	assertMarkerMode060010751(t, HostInboundFirstApplyMarkerPath)
 	clearHostInboundFirstApplyMarker()
 	if HostInboundFirstApplyLive() {
 		t.Fatal("first-apply marker still live after clear")
 	}
 	if EarlyInputHandoffMarked() || HostInboundFirstApplyMarked() {
 		t.Fatal("cleared markers must report absent by existence too")
+	}
+}
+
+// assertMarkerMode060010751 pins the Sec9 separation: ownership markers
+// are root-only (0600), so an unprivileged UID cannot open (and therefore
+// cannot flock) them to forge liveness. Deterministic under any umask
+// (0600 carries no group/other bits to mask).
+func assertMarkerMode060010751(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("marker %s mode = %o, want 600 (unprivileged flock forgery must fail at open)", path, fi.Mode().Perm())
+	}
+}
+
+// TestMarkerLivenessErrorDiscrimination10751 pins the Sec9 probe logic:
+// only steady EXCLUSIVE contention reads live. An unexpected flock error
+// fails closed; a transient denial clears on retry; shared-only
+// contention (the SH forgery shape) reads NOT live.
+func TestMarkerLivenessErrorDiscrimination10751(t *testing.T) {
+	origFlock := flockFn
+	origPath := EarlyInputHandoffMarkerPath
+	t.Cleanup(func() { flockFn = origFlock; EarlyInputHandoffMarkerPath = origPath })
+	EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	if err := os.WriteFile(EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0600); err != nil {
+		t.Fatalf("stage marker: %v", err)
+	}
+	t.Run("unexpected error fails closed", func(t *testing.T) {
+		flockFn = func(fd int, how int) error { return unix.ENOLCK }
+		if EarlyInputHandoffLive() {
+			t.Fatal("ENOLCK must read not-live (fail closed), never live-owner")
+		}
+	})
+	t.Run("transient contention clears on retry", func(t *testing.T) {
+		calls := 0
+		flockFn = func(fd int, how int) error {
+			calls++
+			if calls <= 2 {
+				return unix.EWOULDBLOCK // attempt 1: EX denied, SH denied
+			}
+			return nil // attempt 2: EX succeeds (transient gone)
+		}
+		if EarlyInputHandoffLive() {
+			t.Fatal("transient contention must clear on retry (not-live)")
+		}
+		if calls != 3 {
+			t.Fatalf("flock calls = %d, want 3 (EX, SH, EX-clear)", calls)
+		}
+	})
+	t.Run("steady exclusive reads live", func(t *testing.T) {
+		flockFn = func(fd int, how int) error { return unix.EWOULDBLOCK }
+		if !EarlyInputHandoffLive() {
+			t.Fatal("steady EX contention must read live-owner")
+		}
+	})
+	t.Run("shared-only reads not-live", func(t *testing.T) {
+		flockFn = func(fd int, how int) error {
+			if how == unix.LOCK_SH|unix.LOCK_NB {
+				return nil // no EX owner: SH succeeds
+			}
+			return unix.EWOULDBLOCK
+		}
+		if EarlyInputHandoffLive() {
+			t.Fatal("SH-only contention must read not-live (LOCK_SH forgery must fail)")
+		}
+	})
+}
+
+// TestMarkerLockContentionBlocksHandoff10751: a persistently contended
+// handoff marker (another live EX holder) fails set loudly (R5-C: no
+// provable ownership, no silent memory-true) instead of proceeding
+// unlocked. Transient contention is absorbed by the in-function retry.
+func TestMarkerLockContentionBlocksHandoff10751(t *testing.T) {
+	origPath := EarlyInputHandoffMarkerPath
+	t.Cleanup(func() { EarlyInputHandoffMarkerPath = origPath })
+	EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	if err := os.WriteFile(EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0600); err != nil {
+		t.Fatalf("stage marker: %v", err)
+	}
+	holder, err := os.OpenFile(EarlyInputHandoffMarkerPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open staged marker: %v", err)
+	}
+	defer holder.Close()
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("stage EX holder: %v", err)
+	}
+	d := &Daemon{}
+	if err := d.setEarlyInputHandoffDone(); err == nil {
+		t.Fatal("set with contended marker err = nil, want the lock failure (loud, no silent memory-true)")
+	}
+	if d.earlyInputHandoffDone.Load() {
+		t.Fatal("memory marked done despite failing to prove ownership")
+	}
+}
+
+// TestMarkerWriteLockBeforePublish10751 pins the Sec9 publish discipline:
+// a contended write publishes NOTHING (no unlocked marker file is ever
+// observable, so a polling SH loop cannot pre-position on a
+// write-then-lock gap). Publish-first code leaves the file behind.
+func TestMarkerWriteLockBeforePublish10751(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "early-input-handoff.done")
+	holder, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		t.Fatalf("stage marker: %v", err)
+	}
+	defer holder.Close()
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("stage EX holder: %v", err)
+	}
+	var slot *os.File
+	if err := writeMarkerLocked(path, "handed-off\n", &slot); err == nil {
+		t.Fatal("contended write err = nil, want the lock failure")
+	}
+	if slot != nil {
+		t.Fatal("contended write left a slot set")
+	}
+	// The file exists (staged by us) but must carry NO published
+	// content: the writer locked nothing and wrote nothing.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read staged marker: %v", err)
+	}
+	if len(raw) != 0 {
+		t.Fatalf("contended write published %q without holding the lock", raw)
 	}
 }
 

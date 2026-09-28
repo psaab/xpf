@@ -9,12 +9,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
+	"golang.org/x/sys/unix"
 )
 
 // ensureEarlyInputProtectionForNaming verifies the #10751 pre-networkd input
@@ -380,7 +380,7 @@ func (d *Daemon) setEarlyInputHandoffDone() error {
 		}
 		return fmt.Errorf("record early-input handoff marker: %w", err)
 	}
-	if err := os.WriteFile(EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
+	if err := writeMarkerLocked(EarlyInputHandoffMarkerPath, "handed-off\n", &earlyInputHandoffLockFile); err != nil {
 		slog.Warn("cannot record early-input handoff marker", "err", err)
 		if !first {
 			return nil
@@ -389,7 +389,6 @@ func (d *Daemon) setEarlyInputHandoffDone() error {
 	}
 	d.earlyInputHandoffDone.Store(true)
 	d.earlyInputGuardSwapFailed.Store(false)
-	takeMarkerLock(EarlyInputHandoffMarkerPath, &earlyInputHandoffLockFile)
 	return nil
 }
 
@@ -409,40 +408,100 @@ func clearEarlyInputHandoffMarker() {
 	_ = os.Remove(EarlyInputHandoffMarkerPath)
 }
 
-// Marker ownership locks (#10751 M2): a marker file proves nothing by
+// Marker ownership locks (#10751 M2/Sec9): a marker file proves nothing by
 // itself — a prior process's markers can survive a failed best-effort
 // cleanup, and root can plant one. The daemon therefore holds an
 // exclusive flock on each marker from its write until death; `ensure`
-// treats a marker as live ownership only while a live process holds the
-// lock (lockable = stale/orphaned = install fail-closed).
+// treats a marker as live ownership only while a live EXCLUSIVE holder
+// exists (lockable, shared-only-held, or unreadable = stale/orphaned =
+// install fail-closed).
+//
+// Separation: markers are 0600 root-only. flock requires opening the
+// file, so an unprivileged UID cannot even attempt a lock (open fails),
+// which closes LOCK_SH liveness forgery outright — error discrimination
+// alone could not, since SH contention yields the same EWOULDBLOCK as
+// EX. The directory stays 0755: traversal without write lets the control
+// socket and upgrade-lock consumers work while still denying non-root
+// marker open/replace/delete (any remaining interference is fail-closed
+// DoS at worst, never fail-open forgery). Pre-existing 0644 files are
+// tightened to 0600 on the next write.
+//
+// Publish discipline (the #1875 lesson, cf. pkg/upgrade/lock): the lock
+// is acquired BEFORE the content is published (open O_CREAT|O_RDWR,
+// flock, ftruncate, write, fsync on the held fd), so no unlocked marker
+// file is ever observable — a polling SH loop cannot pre-position on the
+// write-then-lock gap. Truncate precedes the write so a shorter rewrite
+// cannot leave a stale tail.
 var (
 	markerLockMu                  sync.Mutex
 	earlyInputHandoffLockFile     *os.File
 	hostInboundFirstApplyLockFile *os.File
 )
 
-// takeMarkerLock holds an exclusive non-blocking flock on an
-// already-written marker for the process lifetime. Idempotent (one fd per
-// marker — a second same-process flock would self-deny). Best-effort: a
-// failure only makes a later `ensure` conservatively install, which the
-// next apply hands off.
-func takeMarkerLock(path string, slot **os.File) {
+// flockFn performs a BSD advisory lock operation. A package var so tests
+// inject flock errors (ENOLCK) the kernel never produces for tmpfs.
+var flockFn = func(fd int, how int) error { return unix.Flock(fd, how) }
+
+// writeMarkerLocked publishes content to path under a process-lifetime
+// exclusive lock, acquiring before writing (see above). If this process
+// already holds the path (same inode), the write is a no-op success —
+// content is constant per marker. A held-but-diverged slot (path deleted
+// or replaced under us) is dropped and re-acquired. Lock contention
+// retries briefly (a concurrent `ensure` probe holds microseconds);
+// persistent contention returns an error for the caller to handle per
+// its durability contract (handoff blocks, first-apply warns).
+func writeMarkerLocked(path, content string, slot **os.File) error {
 	markerLockMu.Lock()
 	defer markerLockMu.Unlock()
 	if *slot != nil {
-		return
+		if fi, err := (*slot).Stat(); err == nil {
+			if pi, perr := os.Stat(path); perr == nil && os.SameFile(fi, pi) {
+				return nil
+			}
+		}
+		_ = (*slot).Close()
+		*slot = nil
 	}
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
-		slog.Warn("cannot lock enforcement-ownership marker; ensure stays conservative", "path", path, "err", err)
-		return
+		return err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		slog.Warn("cannot lock enforcement-ownership marker; ensure stays conservative", "path", path, "err", err)
+	var lerr error
+	for i := range 3 {
+		if i > 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if lerr = flockFn(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); lerr == nil {
+			break
+		}
+		if !isFlockContended(lerr) {
+			break
+		}
+	}
+	if lerr != nil {
 		_ = f.Close()
-		return
+		return lerr
+	}
+	// Tighten pre-existing group/other bits (a 0644 file from before the
+	// 0600 discipline); best-effort — a failure here must not wedge the
+	// commit, and the narrow leftover is logged loudly.
+	if err := f.Chmod(0600); err != nil {
+		slog.Warn("cannot tighten enforcement-ownership marker to 0600", "path", path, "err", err)
+	}
+	if err := f.Truncate(0); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
 	}
 	*slot = f
+	return nil
 }
 
 // releaseMarkerLock drops a held ownership lock (if any) before removing
@@ -457,9 +516,18 @@ func releaseMarkerLock(slot **os.File) {
 	}
 }
 
+// isFlockContended reports whether a flock error is lock contention
+// (another holder) as opposed to a real failure. Only contention may
+// ever read as live ownership — and then only after the SH discriminator
+// below rules out a shared-only holder.
+func isFlockContended(err error) bool {
+	return errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)
+}
+
 // markerLockedByLiveProcess reports whether some process currently holds
-// an exclusive flock on path. Absent, unopenable, or lockable reads
-// false (not live-owned — `ensure` installs fail-closed). A denied
+// an EXCLUSIVE flock on path. Absent, unopenable, lockable, or
+// shared-only-held reads false (not live-owned — `ensure` installs
+// fail-closed); so does any unexpected flock error. A denied EXCLUSIVE
 // try-lock retries once: a racing transient holder (another concurrent
 // `ensure` probe, microseconds) must not read as a steady owner.
 func markerLockedByLiveProcess(path string) bool {
@@ -468,9 +536,24 @@ func markerLockedByLiveProcess(path string) bool {
 		if err != nil {
 			return false
 		}
-		lerr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		exErr := flockFn(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if exErr == nil {
+			_ = f.Close()
+			return false
+		}
+		if !isFlockContended(exErr) {
+			_ = f.Close()
+			return false
+		}
+		// Contended: is the holder EXCLUSIVE (live daemon) or SHARED
+		// (forgery attempt or stale SH)? A shared try-lock succeeds
+		// iff NO exclusive owner exists.
+		shErr := flockFn(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
 		_ = f.Close()
-		if lerr == nil {
+		if shErr == nil {
+			return false
+		}
+		if !isFlockContended(shErr) {
 			return false
 		}
 		if i >= 1 {
@@ -525,11 +608,10 @@ func noteHostInboundInstalled() {
 		slog.Warn("cannot record host-inbound first-apply marker", "err", err)
 		return
 	}
-	if err := os.WriteFile(HostInboundFirstApplyMarkerPath, []byte("applied\n"), 0644); err != nil {
+	if err := writeMarkerLocked(HostInboundFirstApplyMarkerPath, "applied\n", &hostInboundFirstApplyLockFile); err != nil {
 		slog.Warn("cannot record host-inbound first-apply marker", "err", err)
 		return
 	}
-	takeMarkerLock(HostInboundFirstApplyMarkerPath, &hostInboundFirstApplyLockFile)
 }
 
 // EarlyInputGuardSwapFailed reports whether the latest bootstrap

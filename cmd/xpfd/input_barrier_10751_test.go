@@ -28,6 +28,22 @@ func holdMarkerLock10751(t *testing.T, path string) {
 	t.Cleanup(func() { _ = f.Close() })
 }
 
+// holdMarkerSharedLock10751 simulates a LOCK_SH forgery attempt: it opens
+// path and holds a shared flock until the test ends. The liveness probe
+// must NOT read shared-only contention as a live exclusive owner.
+func holdMarkerSharedLock10751(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		t.Fatalf("shared flock %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+}
+
 func TestInputBarrierCommand10751(t *testing.T) {
 	if got := classifyCommand([]string{"xpfd", "input-barrier"}); got != cmdInputBarrier {
 		t.Fatalf("classifyCommand input-barrier = %d, want %d", got, cmdInputBarrier)
@@ -472,6 +488,16 @@ func TestInputBarrierEnsureRejectsStaleOwnership10751(t *testing.T) {
 		code, out := run(t)
 		if code != 0 || installs-before != 0 || !strings.Contains(out, "enforcement is live") {
 			t.Fatalf("mixed ownership: code=%d installs-delta=%d out=%q, want the live-enforcement no-op", code, installs-before, out)
+		}
+	})
+	t.Run("shared-lock forgery installs", func(t *testing.T) {
+		stage(t)
+		holdMarkerSharedLock10751(t, daemon.EarlyInputHandoffMarkerPath)
+		holdMarkerSharedLock10751(t, daemon.HostInboundFirstApplyMarkerPath)
+		before := installs
+		code, out := run(t)
+		if code != 0 || installs-before != 1 || !strings.Contains(out, "early input barrier installed") {
+			t.Fatalf("SH forgery: code=%d installs-delta=%d out=%q, want a fail-closed install (shared-only is not ownership)", code, installs-before, out)
 		}
 	})
 }
