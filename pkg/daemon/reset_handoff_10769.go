@@ -283,6 +283,11 @@ func (d *Daemon) reconcileResetHandoffAtBoot() {
 			slog.Error("reset handoff: clean flag with unrepaired residue; re-marking dirty, provisioning refused",
 				"repair", reason)
 			if merr := configstore.MarkResetHandoffDirty(reason); merr != nil {
+				// Accepted double-fault residual: a TRANSIENT write failure
+				// here leaves the clean flag clearable post-reboot. Requires
+				// clean+residue (itself crash/hand-craft/plant) AND a timed
+				// I/O blip; persistent failure stays fail-closed (the later
+				// Clear fails too). Same class as bind-mount/#9013.
 				slog.Warn("reset handoff: cannot re-mark failed repair", "err", merr)
 			}
 			return

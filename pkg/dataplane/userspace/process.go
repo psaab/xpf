@@ -115,7 +115,10 @@ func preflightHelperPaths(cfg config.UserspaceConfig) error {
 // of the spawn funnel for first bring-up) rather than at config
 // resolution: the reset sweeps must still resolve the smuggled path to
 // sweep the temps beside it. Empty means "default beside the control
-// socket", which is never reserved.
+// socket", which is never reserved. Accepted residual (config-only
+// model): an intermediate-symlink swap between this check and the
+// Rust helper's pathname-based saves defeats it; that needs filesystem
+// write, same class as bind-mount/#9013.
 func refuseReservedHelperStateFile(stateFile string) error {
 	if stateFile == "" || !config.HelperStatePathTouchesReserved(stateFile) {
 		return nil
