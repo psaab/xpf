@@ -88,7 +88,8 @@ func WriteResetHandoff(bootID, dirty, helperPath string) error {
 
 // ReadResetHandoff parses the handoff flag. present is false when no flag
 // exists. A corrupt flag is returned as an error (fail closed). helperPath
-// is "" when the flag predates path recording.
+// is "" only on hand-crafted or corrupt flags: every in-tree writer
+// records a path, and boot repair treats an empty path as unverifiable.
 func ReadResetHandoff() (bootID, dirty, helperPath string, present bool, err error) {
 	data, rerr := ReadBoundedFile(ResetHandoffPath, maxResetHandoffBytes)
 	if errors.Is(rerr, os.ErrNotExist) {

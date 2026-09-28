@@ -123,7 +123,8 @@ func TestReconcileHandoffAtBoot10769(t *testing.T) {
 	})
 	t.Run("clean post-reboot clears", func(t *testing.T) {
 		isolateHandoffFlag(t)
-		if err := configstore.WriteResetHandoff("other-boot", "", ""); err != nil {
+		custom := filepath.Join(t.TempDir(), "custom", "userspace-dp.json")
+		if err := configstore.WriteResetHandoff("other-boot", "", custom); err != nil {
 			t.Fatal(err)
 		}
 		d := &Daemon{store: handoffTestStore(t)}
@@ -138,7 +139,8 @@ func TestReconcileHandoffAtBoot10769(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := configstore.WriteResetHandoff(boot, "", ""); err != nil {
+		custom := filepath.Join(t.TempDir(), "custom", "userspace-dp.json")
+		if err := configstore.WriteResetHandoff(boot, "", custom); err != nil {
 			t.Fatal(err)
 		}
 		d := &Daemon{store: handoffTestStore(t)}
@@ -160,7 +162,7 @@ func TestReconcileHandoffAtBoot10769(t *testing.T) {
 		}
 		store := handoffTestStore(t)
 		commitUserspaceStateFile(t, store, stateFile)
-		if err := configstore.WriteResetHandoff("other-boot", "helper sweep failed", ""); err != nil {
+		if err := configstore.WriteResetHandoff("other-boot", "helper sweep failed", stateFile); err != nil {
 			t.Fatal(err)
 		}
 		d := &Daemon{store: store}
@@ -182,7 +184,7 @@ func TestReconcileHandoffAtBoot10769(t *testing.T) {
 		}
 		store := handoffTestStore(t)
 		commitUserspaceStateFile(t, store, filepath.Join(blocker, "userspace-dp.json"))
-		if err := configstore.WriteResetHandoff("other-boot", "helper sweep failed", ""); err != nil {
+		if err := configstore.WriteResetHandoff("other-boot", "helper sweep failed", filepath.Join(blocker, "userspace-dp.json")); err != nil {
 			t.Fatal(err)
 		}
 		d := &Daemon{store: store}
@@ -912,4 +914,67 @@ func TestEraseKeaLeasesForResetRefusesHardlinkedLease10769(t *testing.T) {
 			t.Fatalf("refusal must remove nothing, %s stat err=%v", path, serr)
 		}
 	}
+}
+
+// Pathless flags are unproducible by any in-tree writer (the flag file is
+// new in this PR and every writer records a path), so a missing path means
+// hand-crafted or corrupt input. Boot repair must fail closed — never
+// infer from the default path or the new-tenant config — keeping the gate
+// shut with recovery instructions. Production ordering throughout
+// (reconcile before load): the new medium carries the custom path the
+// residue sits at, and neither clearing nor promotion may happen.
+func TestReconcileRefusesPathlessFlag10769(t *testing.T) {
+	setup := func(t *testing.T, dirty string) (*Daemon, string, handoffResiduePaths) {
+		t.Helper()
+		custom, rp := isolateHandoffRepairPaths(t)
+		seedHandoffHelper(t, rp)
+		if err := configstore.WriteResetHandoff("other-boot", dirty, ""); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		medium := filepath.Join(dir, "xpf.conf")
+		conf := "system {\n    host-name n-plus-one;\n    dataplane-type userspace;\n" +
+			"    dataplane {\n        state-file " + custom + ";\n    }\n}\n"
+		if err := os.WriteFile(medium, []byte(conf), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store, err := configstore.New(filepath.Join(dir, "config.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &Daemon{store: store, opts: Options{ConfigFile: medium}}, custom, rp
+	}
+	t.Run("dirty pathless stays shut", func(t *testing.T) {
+		d, _, rp := setup(t, configstore.ResetHandoffReasonHelper+": residue")
+		d.reconcileResetHandoffAtBoot()
+		_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+		if err != nil || !present || dirty == "" || gotPath != "" {
+			t.Fatalf("pathless flag must stay dirty and pathless: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+		}
+		for _, p := range []string{rp.customHelper, rp.customTemp} {
+			if _, serr := os.Lstat(p); serr != nil {
+				t.Fatalf("unverifiable residue must not be swept or cleared over: %s stat err=%v", p, serr)
+			}
+		}
+		if _, err := d.loadAndBootstrapConfig(); err != nil {
+			t.Fatalf("load must not fail fatally on a gated bootstrap: %v", err)
+		}
+		if d.store.ActiveConfig() != nil {
+			t.Fatal("bootstrap must NOT promote N+1 over an unverifiable handoff")
+		}
+		if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+			t.Fatalf("gate = %v, want incomplete", err)
+		}
+	})
+	t.Run("clean pathless re-marks dirty", func(t *testing.T) {
+		d, _, _ := setup(t, "")
+		d.reconcileResetHandoffAtBoot()
+		_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+		if err != nil || !present || dirty == "" || gotPath != "" {
+			t.Fatalf("pathless clean flag must re-mark dirty: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+		}
+		if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+			t.Fatalf("gate = %v, want incomplete", err)
+		}
+	})
 }

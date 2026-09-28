@@ -89,17 +89,17 @@ func sweepHelperStateVerified(path string) error {
 	return errors.Join(errs...)
 }
 
-// effectiveHelperStatePath resolves the helper state file boot repair must
-// sweep: the pre-wipe path recorded in the flag. Re-deriving from the
-// current config is wrong post-wipe — the config is erased, so derivation
-// yields the default while the residue sits at the prior custom path. The
-// derived path is only a fallback for flags that predate path recording.
-func effectiveHelperStatePath(recorded string, cfg *config.Config) string {
-	if recorded != "" {
-		return recorded
-	}
-	return dpuserspace.StateFilePathForConfig(cfg)
-}
+// legacyHelperPathRecovery tells the operator how to recover from a
+// pathless handoff flag: no in-tree writer produces one (the flag file
+// itself is new in this PR and every writer records a path), so a
+// missing path means hand-crafted or corrupt input. Boot repair never
+// infers from the default path or the new-tenant config; the operator
+// verifies residue manually (default plus any formerly-custom helper
+// state paths), removes it, then deletes the flag to reopen
+// provisioning.
+const legacyHelperPathRecovery = "reset handoff flag records no helper path (all reset writers record one): " +
+	"manually verify no helper state remains at the default or any formerly-custom state-file path, " +
+	"remove any residue found, then delete the flag file to reopen provisioning"
 
 // verifyHelperStateErased checks the helper residue class without removing
 // anything: the state file plus dead/live temp siblings (legacy included).
@@ -214,9 +214,11 @@ func handoffFailureReason(helperErr, keaErr, tempsErr error) string {
 // writer exists yet, then verifies EVERY class before the flag may
 // downgrade (verified repair downgrades to the plain reboot requirement,
 // or clears outright post-reboot). Unrepaired residue re-marks the flag
-// dirty, never clears. Never fails boot: enforcement happens at
-// provisioning time, and bricking boot on a flag read would strand
-// remote boxes.
+// dirty, never clears. A flag with no recorded helper path is
+// unverifiable (no in-tree writer produces one) and fails closed with
+// recovery instructions rather than inferring a path. Never fails boot:
+// enforcement happens at provisioning time, and bricking boot on a flag
+// read would strand remote boxes.
 func (d *Daemon) reconcileResetHandoffAtBoot() {
 	bootID, dirty, helperPath, present, err := configstore.ReadResetHandoff()
 	if err != nil {
@@ -226,16 +228,24 @@ func (d *Daemon) reconcileResetHandoffAtBoot() {
 	if !present {
 		return
 	}
+	if helperPath == "" {
+		// Pathless flags are unproducible by any in-tree writer (the
+		// flag file itself is new in this PR and every writer records
+		// a path), so this means hand-crafted or corrupt input. Never
+		// infer from the default path or the new-tenant config: the
+		// gate stays shut with recovery instructions.
+		slog.Error("reset handoff: pathless flag cannot be verified; provisioning stays refused", "reason", dirty)
+		if merr := configstore.MarkResetHandoffDirty(legacyHelperPathRecovery); merr != nil {
+			slog.Warn("reset handoff: cannot mark pathless flag dirty", "err", merr)
+		}
+		return
+	}
 	current, cerr := configstore.CurrentBootID()
 	if cerr != nil {
 		slog.Warn("reset handoff: cannot read boot id; leaving flag for the provisioning gate", "err", cerr)
 		return
 	}
-	var cfg *config.Config
-	if d.store != nil {
-		cfg = d.store.ActiveConfig()
-	}
-	helperFile := effectiveHelperStatePath(helperPath, cfg)
+	helperFile := helperPath
 	if dirty == "" {
 		helperErr, keaErr, tempsErr := verifyAllResetResidue(helperFile)
 		if helperErr != nil || keaErr != nil || tempsErr != nil {
