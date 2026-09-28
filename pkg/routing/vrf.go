@@ -263,7 +263,8 @@ func (v *vrfManager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []s
 			}
 			continue
 		}
-		if vrf == nil || vrf.Attrs() == nil || vrf.Attrs().Index != masterIndex {
+		masterVRF, ok := vrf.(*netlink.Vrf)
+		if !ok || masterVRF.Attrs() == nil || masterVRF.Attrs().Index != masterIndex {
 			continue
 		}
 		if err := v.ops.LinkSetNoMaster(iface); err != nil {
