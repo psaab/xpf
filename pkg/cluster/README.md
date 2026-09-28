@@ -607,16 +607,17 @@ correct runtime resolution; the only remedy is correcting
 
 - **Authenticated identity beacon (`dupaddr_watch_10745.go`, #10745).**
   Each keyed heartbeat tenure also sends a compact HMAC-authenticated
-  identity beacon (cluster-id, node-id, timestamp, random sender-instance
+  identity beacon (cluster-id, node-id, timestamp, stable sender-instance
   id, nonce) to the control-link subnet broadcast address on UDP 4786, and
   listens for it. Broadcast is designed to cross the shared-shape gap that
   unicast cannot: the duplicate peer's beacons should arrive even though
   its heartbeats never can. The receiver verifies the HMAC (against every
   accepted control-link key, so rotation stays interoperable) and freshness
   BEFORE comparing node IDs or warning, so an arbitrary L2/UDP sender
-  cannot forge the operator-facing `slog.Error`; a random per-process
-  sender id excludes the socket's own looped-back broadcast, and a
-  manager-lifetime nonce cache (4096 entries, evict-expired-then-random,
+  cannot forge the operator-facing `slog.Error`; a stable per-process
+  sender id excludes the socket's own looped-back broadcast (including
+  beacons sent just before a heartbeat restart), and a manager-lifetime
+  nonce cache (4096 entries, evict-expired-then-random,
   5s sweep) suppresses exact replays across watcher restarts. A verified
   same-cluster/same-node-id beacon from another sender calls
   `NoteDuplicateNodeIDBeacon`, which shares the 30s duplicate-node-id

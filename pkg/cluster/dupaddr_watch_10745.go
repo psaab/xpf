@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -38,9 +39,10 @@ import (
 // sender or a forged UDP packet cannot produce the operator-facing ERROR.
 // Beacons never update peer liveness, replay state, or election — they only
 // surface the duplicate identity. The HMAC uses the same accepted control-link
-// key set as heartbeats, so key rotation remains interoperable. A random,
+// key set as heartbeats, so key rotation remains interoperable. A stable,
 // authenticated per-process sender ID prevents a node from warning on its own
-// locally looped-back broadcast.
+// locally looped-back broadcast, including beacons sent just before a
+// heartbeat restart replaced the watcher.
 //
 // SCOPE. This is a small, authenticated day-0 identity signal, not another
 // heartbeat transport: it carries only cluster/node identity and a fresh
@@ -50,9 +52,9 @@ import (
 // existing heartbeat behavior. IPv4 directed broadcast is used because the
 // shipped control link is IPv4; IPv6-only control links skip this detector.
 // Freshness is a ±30s wall-clock window, so the pair must hold wall-clock
-// within 30s (NTP/Chrony) or genuine duplicates are missed. Replay memory is
-// process-lifetime (manager cache), so only a full process restart reopens a
-// bounded capture-replay window — never a heartbeat restart.
+// within 30s (NTP/Chrony) or genuine duplicates are missed. Replay memory and
+// the sender ID are process-lifetime (manager cache), so only a full process
+// restart reopens a bounded capture-replay window — never a heartbeat restart.
 
 const (
 	duplicateIdentityBeaconPort    = 4786
@@ -329,15 +331,10 @@ func prepareDuplicateIdentityWatcher(mgr *Manager, iface, localAddr, vrfDevice s
 			"iface", iface, "err", err)
 		return nil
 	}
-	var instance [16]byte
-	if _, err := rand.Read(instance[:]); err != nil {
-		listen.Close()
-		send.Close()
-		slog.Debug("cluster: authenticated duplicate-identity instance ID unavailable",
-			"iface", iface, "err", err)
-		return nil
-	}
-	return newDuplicateIdentityWatcher(mgr, iface, listen, send, broadcast, interval, instance)
+	// The sender ID is the manager's stable per-process identity, not a fresh
+	// random per watcher: a replacement watcher must still recognise this
+	// node's own in-flight beacons (sent just before the restart) as self.
+	return newDuplicateIdentityWatcher(mgr, iface, listen, send, broadcast, interval, mgr.beaconSenderID())
 }
 
 // duplicateIdentityReplaySweepInterval paces the watcher's replay-cache sweep
@@ -511,4 +508,33 @@ func (m *Manager) NoteDuplicateNodeIDBeacon(iface string) {
 	if m.history != nil {
 		m.history.Record(EventRG, -1, "duplicate node-id: authenticated control-link beacon")
 	}
+}
+
+// beaconSenderIDFallback distinguishes fallback sender IDs when crypto/rand
+// is unavailable (essentially never on Linux; getrandom failure).
+var beaconSenderIDFallback atomic.Uint64
+
+// beaconSenderID returns this node's stable beacon sender ID, minting it on
+// first use. Every watcher preparation takes the same ID, so a replacement
+// watcher recognises this node's own in-flight beacons as self rather than
+// as a foreign duplicate. Safe for struct-literal Managers. Takes m.mu —
+// callers must not hold it (prepare runs pre-lock for exactly this reason).
+func (m *Manager) beaconSenderID() [16]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.beaconSenderIDSet {
+		return m.beaconSenderIDValue
+	}
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		// Uniqueness here only needs self-consistency within this process:
+		// nanotime plus a process-wide counter cannot collide with a live
+		// peer's random ID except by chance, and the consequence of even
+		// that is one missed warn on a warn-only path.
+		binary.LittleEndian.PutUint64(id[:8], uint64(time.Now().UnixNano()))
+		binary.LittleEndian.PutUint64(id[8:], beaconSenderIDFallback.Add(1))
+	}
+	m.beaconSenderIDValue = id
+	m.beaconSenderIDSet = true
+	return id
 }

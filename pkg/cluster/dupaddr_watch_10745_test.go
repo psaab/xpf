@@ -350,21 +350,25 @@ func TestDuplicateIdentityReplayDoesNotSurviveWatcherReplacement_10745(t *testin
 	mgr := keyedBeaconManager(t, beaconTestPSK, "")
 	now := time.Now()
 	foreign := beaconTestInstance(t)
+	if foreign == mgr.beaconSenderID() {
+		t.Fatal("fixture collision: foreign instance equals the manager's stable ID")
+	}
 	frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
 		[]byte(beaconTestPSK), foreign, now)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
 
-	first := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+	// Production shape: every watcher carries the manager's stable sender ID.
+	first := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, mgr.beaconSenderID())
 	first.handleBeacon(frame, now)
 	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
 		t.Fatalf("first-tenure delivery produced %d warnings, want 1", got)
 	}
 
-	// Simulate a heartbeat restart: same manager and key, fresh watcher with
-	// a fresh instance ID and (under the old design) an empty cache.
-	second := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+	// Simulate a heartbeat restart: same manager, key and stable sender ID;
+	// only the watcher (and, under the old design, its cache) is replaced.
+	second := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, mgr.beaconSenderID())
 	second.handleBeacon(frame, now.Add(time.Second))
 	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
 		t.Fatalf("replay into the replacement watcher produced %d warnings, want 1 — "+
@@ -526,5 +530,54 @@ func TestDuplicateIdentityFreshnessBoundaries_10745(t *testing.T) {
 		if _, _, _, _, _, ok := verifyDuplicateIdentityBeacon(signAt(t, at), mgr, now); ok {
 			t.Fatalf("beacon stamped %v from now was accepted, want rejected", at.Sub(now))
 		}
+	}
+}
+
+// TestDuplicateIdentityOwnBeaconSurvivesWatcherReplacement_10745 pins the
+// stable sender ID: a beacon this node signed but never received (sent just
+// before a heartbeat restart) must still read as self in the replacement
+// watcher — never as a foreign duplicate. A per-watcher random ID reds this:
+// the replacement carries a fresh ID and the old own-beacon looks foreign.
+func TestDuplicateIdentityOwnBeaconSurvivesWatcherReplacement_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	now := time.Now()
+	own := mgr.beaconSenderID()
+	if mgr.beaconSenderID() != own {
+		t.Fatal("manager sender ID is not stable across calls")
+	}
+	// Signed with our own ID but NEVER delivered to the first watcher: the
+	// send-then-restart-before-loopback shape.
+	frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+		[]byte(beaconTestPSK), own, now)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	replacement := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, mgr.beaconSenderID())
+	replacement.handleBeacon(frame, now.Add(time.Second))
+	if beaconManagerWarned(mgr) {
+		t.Fatal("the replacement watcher warned on this node's own in-flight beacon")
+	}
+	if got := mgr.beaconReplay.len(); got != 0 {
+		t.Fatalf("own beacon recorded %d replay entries, want 0 (self is excluded before the cache)", got)
+	}
+}
+
+// TestPrepareAssignsStableSenderID_10745 pins that production preparation
+// hands every watcher the manager's stable ID rather than minting per-watcher
+// randoms.
+func TestPrepareAssignsStableSenderID_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	first := prepareDuplicateIdentityWatcher(mgr, "lo", "127.0.0.1", "", time.Second)
+	if first == nil {
+		t.Skip("lo/127.0.0.1 cannot prepare a watcher in this environment")
+	}
+	t.Cleanup(first.stop)
+	second := prepareDuplicateIdentityWatcher(mgr, "lo", "127.0.0.1", "", time.Second)
+	if second == nil {
+		t.Fatal("second preparation failed while the first succeeded")
+	}
+	t.Cleanup(second.stop)
+	if first.instance != mgr.beaconSenderID() || second.instance != mgr.beaconSenderID() {
+		t.Fatal("prepared watchers do not carry the manager's stable sender ID")
 	}
 }
