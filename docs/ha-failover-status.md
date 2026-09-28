@@ -467,8 +467,11 @@ payload, daemon hook — with the wire pinned across the two languages
 The receiver admits each idle lease into the same bounded
 `persistent_by_source` table used by local persistent-NAT mints. If the table
 is still at `max_tracked_flows` after one bounded expiry-GC pressure pass, the
-record is skipped as capacity (reported separately from a busy identity), so
-HA import cannot crowd local mints out. Imports in either lease mode also check
+record is skipped as capacity (reported separately from a busy identity). The
+cap bounds total table growth, not each side separately: imports and local
+mints share the table first-come-first-served, so a full table refuses both —
+whoever filled it first holds the entries until they expire. Imports in
+either lease mode also check
 both live ownership domains for overlaps at their remote scope: exact endpoint,
 target-host (`host, 0`) wildcard, or any-remote.
 
