@@ -890,8 +890,9 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 					// only the double failure waits unboundedly: while nft is
 					// down no retry could install anyway, and once it heals
 					// convergence still waits for the next trigger. Widening
-					// #9811 to latch here would bound it at 30s and is left
-					// as an explicit follow-up for reviewer acceptance.
+					// #9811 to latch here would bound it at 30s: filed as
+					// #11497 (retry/convergence owner) and ACCEPTED at the
+					// round-10 tally — the residual stands until then.
 					d.noteHostInboundApplyFailed(time.Now())
 					return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), gapErr)
 				}

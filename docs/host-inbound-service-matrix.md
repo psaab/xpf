@@ -1276,10 +1276,13 @@ snapshot produces a zero-drop table shell:
   enslaved fxp0 is admitted while a co-enslaved non-lifeline fxp1 stays
   denied (no vrf-mgmt blanket). The `meta sdifname` rules are emitted
   unguarded: they rely on the platform kernel floor (≥ 6.18 per
-  README/bake — below it xpfd cannot run at all, so no fallback exists
-  by design). Mechanism note: a hypothetical rejection would abort the
-  whole atomic gap batch, leaving day-2 newcomers uncovered (fail-open)
-  — not lockout. A global withhold (R7-C) left shared
+  README/bake); kernels below the floor are UNSUPPORTED, so no
+  fallback exists by design (a support statement, not an enforced
+  runtime impossibility — no xpfd/daemon version gate exists, and
+  `--no-dataplane` config-only mode runs anywhere). Mechanism note: a
+  hypothetical rejection would abort the whole atomic gap batch,
+  leaving day-2 newcomers uncovered (fail-open) — not lockout.
+  A global withhold (R7-C) left shared
   values fail-open post-handoff, when no barrier stands behind the gap;
   the exception preserves lifeline management while data ingress stays
   denied. The handoff baseline still excludes shared (conditionally
